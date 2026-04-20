@@ -27,9 +27,10 @@ transparent, and reproducible. It builds on decades of pioneering work in
 the field and aims to provide a shared foundation for comparing models, 
 validating results, running experiments, and developing new ideas.
 
-This project began as an AI-assisted (Claude sonnet 4.5) initiative to 
-reduce early development time, but going forward it will be maintained 
-manually by its author—without autonomous AI-driven modifications.
+This project began as an AI-assisted (Claude Code with Sonnet 4.5, Opus 4.6 
+and 4.7) initiative to reduce early development time, but going forward it 
+will be maintained manually by its author—without autonomous AI-driven 
+modifications.
 
 Community feedback, verification, and contributions are warmly 
 encouraged. The project’s success depends on collective effort; the 
