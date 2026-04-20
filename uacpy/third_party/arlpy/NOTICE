@@ -1,0 +1,31 @@
+arlpy --- ARL Python Tools
+Mandar Chitre (Acoustic Research Laboratory, National University of Singapore)
+Upstream: https://github.com/org-arl/arlpy
+
+UACPY does not vendor the full arlpy source tree. Instead, a small number
+of domain-utility functions have been adapted from arlpy into UACPY's own
+modules. The BSD-3-Clause license text for those adapted portions is
+reproduced in LICENSE (next to this file).
+
+Files in UACPY containing arlpy-adapted code:
+
+    uacpy/core/acoustics.py
+        Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
+          - soundspeed          (Mackenzie 1981)
+          - absorption          (Francois-Garrison)
+          - absorption_filter
+          - density             (Fofonoff IES-80)
+          - reflection_coeff
+          - doppler
+          - bubble_resonance
+
+    uacpy/acoustic_signal/advanced.py
+        Functions adapted from arlpy.signal (BSD-3-Clause, (c) 2016 Mandar Chitre):
+          - time, nextpow2, pow2, padded_shape (utilities)
+          - lfilter0                           (zero-phase filtering)
+          - and other signal-processing helpers
+
+All adapted functions preserve their original scientific formulas;
+UACPY-side changes are limited to Python-level formatting (type hints,
+docstrings, PEP 8 spacing). See the header of each adapted file for
+per-file attribution.

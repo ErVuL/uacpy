@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uacpy"
+version = "0.0.1"
+description = "Unified Python interface for underwater acoustic propagation models"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.8"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "ErVuL", email = "ervul.github@gmail.com" },
+]
+keywords = [
+    "underwater acoustics",
+    "ocean acoustics",
+    "propagation",
+    "bellhop",
+    "kraken",
+    "ram",
+    "oases",
+    "scooter",
+    "sparc",
+    "bounce",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+]
+
+[project.urls]
+Source = "https://github.com/ErVuL/uacpy"
+Issues = "https://github.com/ErVuL/uacpy/issues"
+Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
+
+[tool.setuptools.packages.find]
+exclude = ["uacpy.tests", "uacpy.tests.*"]
+
+[tool.setuptools.package-data]
+uacpy = [
+    "bin/oalib/*",
+    "bin/bellhopcuda/*",
+    "bin/mpirams/*",
+    "bin/oases/*",
+]

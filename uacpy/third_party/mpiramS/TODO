@@ -1,0 +1,4 @@
+(1) Set up the parallelization to send out the frequencies to available
+processors, rather than the node-weighting procedure.  This will provide
+for automatic load balancing.
+

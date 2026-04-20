@@ -1,0 +1,22 @@
+#!/bin/sh
+##export LD_LIBRARY_PATH=/home/dushaw/lib:/opt/sun/sunstudioceres/rtlibs/amd64:/opt/sun/sunstudioceres/lib/amd64/
+
+# A variety of ways of running mpiram using several processors.
+
+export HYDRA_HOST_FILE=/home/dushaw/mpiramS/nodes
+
+time mpiexec mpiram
+
+time mpiexec -n 24 time mpiram
+
+time mpiexec -hosts skipjack,marlin ./mpiram -n 4 mpiram/mpiram -n 8 
+
+time mpiexec -f nodes -n 8 mpiram
+
+time mpirun -hosts skipjack -n 4 mpiram
+
+time mpirun -f nodes -n 12 mpiram
+
+# For Openmpi:
+time mpirun -hostfile nodes -np 12 mpiram
+

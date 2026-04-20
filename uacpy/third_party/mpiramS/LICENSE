@@ -1,0 +1,41 @@
+mpiramS --- MPI-parallel broadband Fortran implementation of RAM
+Copyright Brian D. Dushaw
+Upstream: https://zenodo.org/records/10818570
+
+This work is licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0).
+
+To view a copy of this license, visit:
+
+    https://creativecommons.org/licenses/by/4.0/legalcode
+
+or send a letter to:
+
+    Creative Commons
+    PO Box 1866
+    Mountain View, CA 94042
+    USA
+
+-------------------------------------------------------------------------------
+Attribution notice for this redistribution
+-------------------------------------------------------------------------------
+
+UACPY redistributes a modified copy of mpiramS. In accordance with
+CC BY 4.0 §3(a):
+
+  * Creator:     Brian D. Dushaw
+  * Source:      https://zenodo.org/records/10818570
+  * License:     Creative Commons Attribution 4.0 International
+                 (https://creativecommons.org/licenses/by/4.0/legalcode)
+  * Changes:     The sources in this directory have been modified by the
+                 UACPY maintainers. A complete list of modifications, with
+                 diffs, is provided in:
+                 ../MODIFICATIONS.md  (relative to this file:
+                 uacpy/third_party/MODIFICATIONS.md)
+
+The RAM parabolic-equation algorithm that mpiramS implements is credited
+to Michael D. Collins (Naval Research Laboratory):
+
+  Collins, M. D. (1993). "A split-step Padé solution for the parabolic
+  equation method." Journal of the Acoustical Society of America, 93(4),
+  1736-1742.

@@ -1,0 +1,21 @@
+//New failures:
+//19 seconds, only a few errors
+DoubleSeamount3DHat
+//
+//
+//Old failures
+//
+//1.5 minutes
+Taiwan3D
+//3.5 minutes
+Weymouth3D
+//14 minutes
+PerfectWedge3dHat
+//23 minutes; only one error
+KermitRooseveltwedge3d
+//40 minutes
+PerfectWedge3dGaussian
+//112 or 136 minutes; few dozen wrong
+PerfectWedge3dGaussianRayCen
+//157 or 166 minutes; lots wrong
+PerfectWedge3dHatRayCen

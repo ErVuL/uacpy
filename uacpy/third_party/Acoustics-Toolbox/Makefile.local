@@ -1,0 +1,8 @@
+# Auto-generated configuration for gfortran
+export FC=gfortran
+export FFLAGS=-march=native -O2 -Waliasing -Wampersand -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -std=gnu -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
+export RM=rm
+export CC=gcc
+export CFLAGS=-g
+export FFLAGS+= -I../misc -I../tslib
+export LAPACK_LIBS=-llapack
