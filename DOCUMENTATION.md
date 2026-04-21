@@ -935,7 +935,7 @@ Class-based API — each estimator is instantiated with reference level and
 is called, and finally `.plot(...)` renders the result.
 
 ```python
-from uacpy.signal.analysis import PSD, ppsd, Spectrogram, SEL, FRF, FKTransform
+from uacpy.signal.analysis import PSD, PPSD, Spectrogram, SEL, FRF, FKTransform
 
 # --- Power Spectral Density (Welch) ---
 psd = PSD(ref=1e-6, nperseg=8192, noverlap=4096, window="hann")
@@ -943,11 +943,11 @@ freqs, Pxx = psd.compute(data, fs)          # Pxx in Pa^2/Hz (linear)
 fig, ax = psd.plot(title="Site A", ymin=40, ymax=120)
 psd.add_to_plot(ax, label="Site B")         # overlay another curve
 
-# --- PSD probability density (percentile PSD / "ppsd") ---
-# Segments the signal, computes a Welch PSD per segment, builds a 2-D
-# histogram of spectral levels across time — useful for characterising
-# ambient noise statistics over long recordings.
-p = ppsd(ref=1e-6, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+# --- Probabilistic Power Spectral Density (PPSD) ---
+# Segments the signal, computes a Welch PSD per segment, then builds a 2-D
+# histogram (PDF) of spectral levels at each frequency bin — useful for
+# characterising ambient noise statistics over long recording
+p = PPSD(ref=1e-6, seg_duration=1.0, overlap_pct=50, ddB=1.0,
          lvlmin=0, lvlmax=150, nperseg=8192)
 p.compute(data, fs)                          # accepts 1-D, 2-D, or list of signals
 fig, ax = p.plot(title="PPSD", ymin=0, ymax=200, vmin=0, vmax=None)
