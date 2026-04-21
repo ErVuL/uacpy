@@ -17,7 +17,7 @@ from matplotlib.gridspec import GridSpec
 
 
 
-class PPDF:
+class PPSD:
     """Compute the probability density function of PSD levels.
 
     Segments input signals, computes Welch PSD for each segment, and
