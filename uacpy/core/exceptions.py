@@ -37,8 +37,8 @@ class ExecutableNotFoundError(ModelError):
 
         remediation = (
             f"1. Run installation script:\n"
-            f"   ./install_oalib.sh\n\n"
-            f"2. Or compile {model_name} manually (see CLAUDE.md)\n\n"
+            f"   ./install.sh\n\n"
+            f"2. Or compile {model_name} manually\n\n"
             f"3. Or add {executable} to your PATH{search_info}"
         )
         super().__init__(message, remediation)

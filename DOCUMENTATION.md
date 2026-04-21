@@ -883,6 +883,10 @@ s = sig.psk_signal(symbols, fs, symbol_rate, fc, M=2)
 # Noise-like and composite signals
 s = sig.noise_signal(fs, duration, bandwidth=None)
 s = sig.composite_signal([...])
+
+# Spectral Synthesis of Random Processes — generate a time series realising
+# a target PSD (useful for feeding noise models into time-domain simulators).
+t, x, fs = sig.ssrp(Pxx, Fxx, duration=1.0, scale=1.0)
 ```
 
 ### Processing (`uacpy.signal.processing`)
@@ -923,6 +927,63 @@ sig.goertzel(x, fc, fs); sig.nco(...); sig.nco_gen(...); sig.lfilter_gen(...)
 sig.mseq(n)
 sig.resample(x, p, q)
 ```
+
+### Spectral analysis (`uacpy.signal.analysis`)
+
+Class-based API — each estimator is instantiated with reference level and
+(for Welch-based tools) spectral-estimation parameters, then `.compute(data, fs)`
+is called, and finally `.plot(...)` renders the result.
+
+```python
+from uacpy.signal.analysis import PSD, ppsd, Spectrogram, SEL, FRF, FKTransform
+
+# --- Power Spectral Density (Welch) ---
+psd = PSD(ref=1e-6, nperseg=8192, noverlap=4096, window="hann")
+freqs, Pxx = psd.compute(data, fs)          # Pxx in Pa^2/Hz (linear)
+fig, ax = psd.plot(title="Site A", ymin=40, ymax=120)
+psd.add_to_plot(ax, label="Site B")         # overlay another curve
+
+# --- PSD probability density (percentile PSD / "ppsd") ---
+# Segments the signal, computes a Welch PSD per segment, builds a 2-D
+# histogram of spectral levels across time — useful for characterising
+# ambient noise statistics over long recordings.
+p = ppsd(ref=1e-6, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+         lvlmin=0, lvlmax=150, nperseg=8192)
+p.compute(data, fs)                          # accepts 1-D, 2-D, or list of signals
+fig, ax = p.plot(title="PPSD", ymin=0, ymax=200, vmin=0, vmax=None)
+
+# --- Spectrogram ---
+sg = Spectrogram(ref=1e-6, nperseg=2048, noverlap=1024, window="hann")
+sg.compute(data, fs)
+fig, ax = sg.plot(title="Event", ymin=1, ymax=None, vmin=0, vmax=200)
+
+# --- Sound Exposure Level (SEL) per band ---
+sel = SEL(fmin=8.9125, fmax=22387, band_type="third_octave",
+          num_bands=30, ref=1e-6, integration_time=None)
+sel.compute(data, fs, chunk_size=262144, nfft=None)
+fig, ax = sel.plot(title="Pile driving", ylim=(0, 200))
+
+# --- Frequency Response Function (FRF) ---
+# Estimate a transfer function x -> y via Welch H1/H2/Hv, ETFE, periodic
+# ETFE, or least-squares FIR; with impulse response and coherence.
+frf = FRF(method="welch", estimator="H1", m=512, nperseg=4096)
+frf.compute(x, y, fs)                         # 1-D or 2-D (multi-measurement)
+fig, ax = frf.plot(title="Channel", ymin=-60, ymax=60)
+frf.plot_coh(title="Coherence")
+frf.plot_impulse_info(title="LSFIR diagnostics")  # for method="lsfir"
+
+# --- f-k transform (array data) ---
+fk = FKTransform(ref=1e-6)
+fk.compute(data, fs, dx)                      # data shape (n_sensors, n_samples)
+fig, ax = fk.plot(title="f-k", vmin=-60, vmax=20)
+x_back = fk.inverse()                         # round-trip to time domain
+```
+
+Conventions: all `plot()` methods return `(fig, ax)` so you can overlay
+additional content. Reference pressure defaults to **1 µPa** (water); pass
+`ref=2e-5` for air. dB scales in plots are dB re `ref²/Hz` for PSD-like
+quantities and dB re `ref²·s` for SEL. PSDs are stored in linear units
+(`Pa²/Hz`) on the object — conversion to dB happens in `.plot()`.
 
 Scientific content in `advanced.py` and `uacpy.core.acoustics` is adapted
 from arlpy (BSD-3-Clause) — see `uacpy/third_party/arlpy/LICENSE` and

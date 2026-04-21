@@ -361,7 +361,7 @@ class Bellhop(PropagationModel):
 
         raise FileNotFoundError(
             "Could not find bellhop executable.\n"
-            "Please run install_oalib.sh (Linux/Mac) or install_oalib.bat (Windows) to install."
+            "Please run install.sh (Linux/Mac) or install.bat (Windows) to install."
         )
 
     def run(
@@ -1060,7 +1060,7 @@ class BellhopCUDA(PropagationModel):
 
         raise FileNotFoundError(
             f"Could not find {name}.\n"
-            "Please run install_oalib.sh (Linux/Mac) or install_oalib.bat (Windows) with CUDA option."
+            "Please run install.sh --bellhop cuda (Linux/Mac) or install.bat (Windows) with CUDA option."
         )
 
     def run(

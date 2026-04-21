@@ -16,7 +16,7 @@ from scipy import fft as _fft
 from matplotlib.gridspec import GridSpec
 
 
-class PSD_PDF:
+class ppsd:
     """Compute the probability density function of PSD levels.
 
     Segments input signals, computes Welch PSD for each segment, and

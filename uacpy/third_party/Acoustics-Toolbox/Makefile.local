@@ -1,8 +1,8 @@
-# Auto-generated configuration for gfortran
+# Auto-generated Makefile.local for OALIB (Acoustics-Toolbox)
 export FC=gfortran
-export FFLAGS=-march=native -O2 -Waliasing -Wampersand -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -std=gnu -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
+# OpenMP enabled and single-export FFLAGS
+export FFLAGS="-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib -fopenmp"
 export RM=rm
 export CC=gcc
-export CFLAGS=-g
-export FFLAGS+= -I../misc -I../tslib
+export CFLAGS=-g -fopenmp
 export LAPACK_LIBS=-llapack

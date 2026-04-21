@@ -4,7 +4,7 @@ REM
 REM Compiles the following acoustic propagation models:
 REM   - OALIB (Acoustics-Toolbox): Kraken, KrakenField, Scooter, SPARC, Bellhop, Bounce (Fortran)
 REM   - BellhopCUDA: C++/CUDA Bellhop (optional, for GPU acceleration)
-REM   - OASES: Ocean Acoustics and Seismics (best-effort)
+REM   - OASES: Ocean Acoustics and Seismics (optional, downloaded from MIT)
 REM   - mpiramS: Parabolic Equation model (broadband PE)
 REM
 REM Layout produced:
@@ -40,6 +40,7 @@ REM Default behavior: interactive
 set "AUTO_YES=0"
 set "FORCE=0"
 set "BELLHOP_VERSION="
+set "INSTALL_OASES="
 set "ENABLE_OPENMP=1"
 
 REM -------------------------
@@ -72,6 +73,16 @@ if "%~1"=="--bellhop" (
     shift
     goto :parse_args
 )
+if "%~1"=="--oases" (
+    shift
+    if "%~1"=="" (
+        echo [31m--oases requires an argument: yes^|no[0m
+        exit /b 1
+    )
+    set "INSTALL_OASES=%~1"
+    shift
+    goto :parse_args
+)
 if "%~1"=="-h" goto :print_help
 if "%~1"=="--help" goto :print_help
 echo [33mWarning: Unknown argument: %~1[0m
@@ -92,12 +103,16 @@ echo                        Pre-select Bellhop variant:
 echo                          fortran - Original Fortran Bellhop (part of OALIB)
 echo                          cxx     - C++ Bellhop (CPU, requires CMake)
 echo                          cuda    - CUDA Bellhop (GPU, requires nvcc + CMake)
+echo   --oases [yes^|no]     Download and build OASES (MIT, distributed separately):
+echo                          yes - Download from MIT and build OAST/OASN/OASR/OASP
+echo                          no  - Skip OASES entirely
 echo   -h, --help           Show this help
 echo.
 echo Examples:
 echo   install.bat                     # Interactive: prompts for choices
 echo   install.bat -y                  # Auto-detect everything, no prompts
 echo   install.bat --bellhop cuda      # Use CUDA Bellhop, prompt for rest
+echo   install.bat --oases no          # Skip OASES, prompt for rest
 exit /b 0
 
 :done_args
@@ -161,6 +176,55 @@ if "%BELLHOP_VERSION%"=="" (
 
 :bellhop_chosen
 echo Selected Bellhop variant: [32m%BELLHOP_VERSION%[0m
+echo.
+
+REM -------------------------
+REM Choose whether to install OASES
+REM -------------------------
+REM OASES is not redistributable with UACPY and must be downloaded from MIT.
+REM We ask up-front so the user can opt out before any network traffic or
+REM build time is spent.
+
+REM Validate --oases argument if provided
+if not "%INSTALL_OASES%"=="" (
+    if /i "%INSTALL_OASES%"=="yes" (
+        set "INSTALL_OASES=yes"
+        goto :oases_chosen
+    )
+    if /i "%INSTALL_OASES%"=="no" (
+        set "INSTALL_OASES=no"
+        goto :oases_chosen
+    )
+    echo [33mInvalid --oases argument: %INSTALL_OASES%. Ignoring.[0m
+    set "INSTALL_OASES="
+)
+
+REM Non-interactive: default to yes (preserve previous behavior)
+if "%AUTO_YES%"=="1" (
+    set "INSTALL_OASES=yes"
+    goto :oases_chosen
+)
+
+REM Interactive: prompt user
+echo [34mInstall OASES (OAST, OASN, OASR, OASP)?[0m
+echo   OASES is distributed separately by MIT and is not bundled with UACPY.
+echo   Saying yes will download the source from acoustics.mit.edu and build it.
+echo.
+set /p "OASES_ANSWER=Download and install OASES? [y/N]: "
+if /i "!OASES_ANSWER!"=="y" (
+    set "INSTALL_OASES=yes"
+) else if /i "!OASES_ANSWER!"=="yes" (
+    set "INSTALL_OASES=yes"
+) else (
+    set "INSTALL_OASES=no"
+)
+
+:oases_chosen
+if "%INSTALL_OASES%"=="yes" (
+    echo OASES: [32mwill be installed[0m
+) else (
+    echo OASES: [33mskipped[0m
+)
 echo.
 
 REM -------------------------
@@ -247,20 +311,61 @@ if "%BELLHOP_VERSION%"=="cuda" (
     )
 )
 
-REM Check for glm submodule
-if not exist "%BHC_DIR%\glm\glm\glm.hpp" (
-    echo [33mGLM library not found. Initializing git submodules...[0m
-    cd /d "%SCRIPT_DIR%"
-    git submodule update --init --recursive
-    if not exist "%BHC_DIR%\glm\glm\glm.hpp" (
-        echo [31mFailed to initialize glm submodule[0m
-        if "%AUTO_YES%"=="0" pause
-        exit /b 1
-    )
-    echo [32m+ GLM submodule initialized[0m
-) else (
-    echo [32m+ GLM library found[0m
+REM Check for GLM (OpenGL Mathematics - header-only C++ math library from
+REM https://github.com/g-truc/glm). bellhopcuda includes it directly via
+REM "${CMAKE_SOURCE_DIR}/glm", so the headers must live at %BHC_DIR%\glm\glm\*.hpp.
+REM Upstream ships it as a git submodule, but the vendored third_party copy may
+REM lack submodule metadata, so we fall back to a plain git clone.
+set "GLM_REPO_URL=https://github.com/g-truc/glm.git"
+
+if exist "%BHC_DIR%\glm\glm\glm.hpp" (
+    echo [32m+ GLM headers found at %BHC_DIR%\glm[0m
+    goto :glm_ok
 )
+
+echo [33mGLM not found at %BHC_DIR%\glm[0m
+echo   GLM = OpenGL Mathematics, a header-only C++ math library
+echo   (https://github.com/g-truc/glm) that bellhopcuda includes directly.
+
+where git >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [31mgit is required to fetch GLM[0m
+    if "%AUTO_YES%"=="0" pause
+    exit /b 1
+)
+
+REM 1) Try submodule init if this looks like a proper git checkout
+if exist "%SCRIPT_DIR%.gitmodules" goto :try_glm_submodule
+if exist "%BHC_DIR%\.gitmodules" goto :try_glm_submodule
+goto :clone_glm
+
+:try_glm_submodule
+echo [34mAttempting git submodule update...[0m
+pushd "%SCRIPT_DIR%"
+git submodule update --init --recursive >nul 2>&1
+popd
+if exist "%BHC_DIR%\glm\glm\glm.hpp" (
+    echo [32m+ GLM submodule initialized[0m
+    goto :glm_ok
+)
+
+:clone_glm
+REM Remove empty placeholder dir so clone can proceed
+if exist "%BHC_DIR%\glm" (
+    dir /b "%BHC_DIR%\glm" 2>nul | findstr "^" >nul
+    if !errorlevel! neq 0 rmdir "%BHC_DIR%\glm" 2>nul
+)
+echo [34mCloning GLM from %GLM_REPO_URL% ...[0m
+git clone --depth 1 "%GLM_REPO_URL%" "%BHC_DIR%\glm"
+if not exist "%BHC_DIR%\glm\glm\glm.hpp" (
+    echo [31mFailed to install GLM. Install manually with:[0m
+    echo   git clone %GLM_REPO_URL% %BHC_DIR%\glm
+    if "%AUTO_YES%"=="0" pause
+    exit /b 1
+)
+echo [32m+ GLM headers installed at %BHC_DIR%\glm[0m
+
+:glm_ok
 
 goto :check_directories
 
@@ -337,11 +442,13 @@ echo [32m+ Found bellhopcuda: %BHC_DIR%[0m
 :create_bin_dirs
 echo.
 
-REM Create all bin directories
-if not exist "%BIN_DIR_OALIB%" mkdir "%BIN_DIR_OALIB%"
-if not exist "%BIN_DIR_BELLHOP%" mkdir "%BIN_DIR_BELLHOP%"
-if not exist "%BIN_DIR_OASES%" mkdir "%BIN_DIR_OASES%"
-if not exist "%BIN_DIR_MPIRAMS%" mkdir "%BIN_DIR_MPIRAMS%"
+REM Create all bin directories. If the path already exists but isn't a real
+REM directory (e.g. leftover file or broken mklink symlink), remove it first
+REM so mkdir doesn't fail with "already exists".
+call :ensure_dir "%BIN_DIR_OALIB%"
+call :ensure_dir "%BIN_DIR_BELLHOP%"
+call :ensure_dir "%BIN_DIR_OASES%"
+call :ensure_dir "%BIN_DIR_MPIRAMS%"
 
 REM -------------------------
 REM Build bellhopcxx / bellhopcuda (if selected)
@@ -360,11 +467,34 @@ set "BUILD_DIR=%BHC_DIR%\build"
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%BUILD_DIR%"
 
-set "CMAKE_OPTIONS=-DCMAKE_BUILD_TYPE=Release -DBHC_ENABLE_TESTS=OFF"
+REM BHC_BUILD_EXAMPLES=OFF skips bellhopcuda/examples/*.cpp — uacpy doesn't
+REM use them, and at least examples\background.cpp is missing an explicit
+REM #include <cstring> that newer compilers no longer transitively provide.
+set "CMAKE_OPTIONS=-DCMAKE_BUILD_TYPE=Release -DBHC_ENABLE_TESTS=OFF -DBHC_BUILD_EXAMPLES=OFF"
 
 if "%BELLHOP_VERSION%"=="cuda" (
     set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DBHC_ENABLE_CUDA=ON"
     echo   - CUDA support: ON
+    REM bellhopcuda's SetupCUDA.cmake looks up the GPU name in a hardcoded
+    REM table to pick a compute capability. The table misses laptop variants
+    REM and newer cards, aborting the build. Query nvidia-smi directly and
+    REM pass the compute cap as an override when available.
+    set "CUDA_ARCH="
+    where nvidia-smi >nul 2>&1
+    if !errorlevel! equ 0 (
+        for /f "tokens=*" %%c in ('nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul') do (
+            if not defined CUDA_ARCH set "CUDA_ARCH=%%c"
+        )
+        if defined CUDA_ARCH set "CUDA_ARCH=!CUDA_ARCH:.=!"
+        if defined CUDA_ARCH set "CUDA_ARCH=!CUDA_ARCH: =!"
+    )
+    if defined CUDA_ARCH (
+        set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DCUDA_ARCH_OVERRIDE=!CUDA_ARCH!"
+        echo   - GPU compute capability: [32m!CUDA_ARCH![0m ^(auto-detected^)
+    ) else (
+        echo   - [33mCould not auto-detect GPU compute capability[0m
+        echo     If configure fails, rerun with: [33m-DCUDA_ARCH_OVERRIDE=^<XX^>[0m
+    )
 ) else (
     set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DBHC_ENABLE_CUDA=OFF"
     echo   - CUDA support: OFF (CPU build)
@@ -395,102 +525,67 @@ echo [32m+ Bellhop build finished[0m
 echo.
 
 REM -------------------------
-REM Configure and build OALIB (Fortran)
+REM Build OALIB (Acoustics-Toolbox) Fortran models
 REM -------------------------
+REM Always build via `make all` from the root of the toolbox. Running
+REM `make -C <subdir>` directly bypasses the root Makefile's `export FC=gfortran`
+REM so $(FC) falls back to GNU make's default (f77) and subdir libs like
+REM misc/libmisc.a are never built.
+REM
+REM OALIB is built serially — the subdir Makefiles declare Fortran .mod
+REM dependencies incompletely (e.g. AttenMod.o's rule doesn't list attenmod.mod
+REM as a target), so -j races and fails with "No rule to make target
+REM 'attenmod.mod'". Serial build is fast enough.
 :build_fortran
-echo === Configuring OALIB (Acoustics-Toolbox) ===
+echo === Building OALIB (Acoustics-Toolbox) ===
 echo.
-
-REM Backup original Makefile
-if not exist "%OALIB_DIR%\Makefile.orig" (
-    copy "%OALIB_DIR%\Makefile" "%OALIB_DIR%\Makefile.orig" >nul 2>&1
-)
-
-REM Write Makefile.local with OpenMP support
-> "%OALIB_DIR%\Makefile.local" (
-    echo # Auto-generated Makefile.local for OALIB (Acoustics-Toolbox)
-    echo export FC=gfortran
-    echo # OpenMP enabled and single-export FFLAGS
-    echo export FFLAGS=-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib -fopenmp
-    echo export RM=rm
-    echo export CC=gcc
-    echo export CFLAGS=-g -fopenmp
-    echo export LAPACK_LIBS=-llapack
-)
-
-echo + Wrote %OALIB_DIR%\Makefile.local
-echo.
-
-echo === Building OALIB (Fortran models) ===
 
 cd /d "%OALIB_DIR%"
+
+set "OALIB_FFLAGS=-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib"
+if "%ENABLE_OPENMP%"=="1" (
+    set "OALIB_FFLAGS=%OALIB_FFLAGS% -fopenmp"
+    set "OALIB_CFLAGS=-g -fopenmp"
+) else (
+    set "OALIB_CFLAGS=-g"
+)
 
 echo Cleaning previous builds...
 %MAKE_CMD% clean >nul 2>&1
 
-set "CORES=%NUMBER_OF_PROCESSORS%"
-if not defined CORES set "CORES=2"
+echo   - Compiler: gfortran
+echo   - FFLAGS:   %OALIB_FFLAGS%
+echo   - Parallelism: serial (upstream Makefiles race under -j)
 
-if "%BELLHOP_VERSION%"=="fortran" (
-    echo   - Building OALIB including Fortran Bellhop...
-    %MAKE_CMD% all -j%CORES%
+%MAKE_CMD% -k all FC=gfortran FFLAGS="%OALIB_FFLAGS%" CC=gcc CFLAGS="%OALIB_CFLAGS%" LAPACK_LIBS=-llapack
+set "OALIB_STATUS=%errorlevel%"
+
+if %OALIB_STATUS% equ 0 (
+    echo [32m+ OALIB build finished[0m
 ) else (
-    echo   - Building OALIB core components (Kraken, KrakenField, Scooter, SPARC)...
-    %MAKE_CMD% -C Kraken -j%CORES%
-    if !errorlevel! neq 0 (
-        echo [31mKraken build failed![0m
-        if "%AUTO_YES%"=="0" pause
-        exit /b 1
-    )
-    %MAKE_CMD% -C KrakenField -j%CORES%
-    if !errorlevel! neq 0 (
-        echo [31mKrakenField build failed![0m
-        if "%AUTO_YES%"=="0" pause
-        exit /b 1
-    )
-    %MAKE_CMD% -C Scooter -j%CORES%
-    if !errorlevel! neq 0 (
-        echo [31mScooter build failed![0m
-        if "%AUTO_YES%"=="0" pause
-        exit /b 1
-    )
-)
-
-if %errorlevel% neq 0 (
-    echo [31mOALIB Fortran build failed![0m
-    echo.
+    echo [33m! OALIB build had issues (exit %OALIB_STATUS%). Continuing —[0m
+    echo [33m  any binaries that built will still be installed.[0m
     echo Common issues:
     echo - LAPACK library not found: Install with 'pacman -S mingw-w64-x86_64-lapack' (MSYS2)
     echo - Fortran syntax errors: Try updating gfortran
-    echo.
-    if "%AUTO_YES%"=="0" pause
-    exit /b 1
 )
-
-echo [32m+ OALIB build finished[0m
 echo.
 
 REM -------------------------
-REM Build OASES (best-effort)
+REM Build OASES
 REM -------------------------
 set "OASES_URL=http://acoustics.mit.edu/faculty/henrik/LAMSS/pub/Oases/oases.tar.gz"
 
-echo === Building OASES (best-effort) ===
+if not "%INSTALL_OASES%"=="yes" (
+    echo [33m=== Skipping OASES (not selected) ===[0m
+    echo.
+    goto :build_mpirams
+)
+
+echo === Building OASES ===
 
 if not exist "%OASES_DIR%" (
-    echo [33mOASES source not found at: %OASES_DIR%[0m
-    echo [34mOASES is distributed separately by MIT and is not bundled with UACPY.[0m
-
-    if "%AUTO_YES%"=="1" (
-        goto :download_oases
-    )
-
-    set /p "OASES_CHOICE=Would you like to download OASES from %OASES_URL%? [y/N]: "
-    if /i "!OASES_CHOICE!"=="y" goto :download_oases
-    if /i "!OASES_CHOICE!"=="yes" goto :download_oases
-
-    echo [33mSkipping OASES installation.[0m
-    goto :build_mpirams
+    goto :download_oases
 )
 goto :build_oases
 
@@ -565,11 +660,27 @@ if not exist "%OASES_BIN%" mkdir "%OASES_BIN%"
 if not exist "%OASES_LIB%" mkdir "%OASES_LIB%"
 if not exist "%OASES_DIR%\src\%OASES_HOSTTYPE%-%OASES_OSTYPE%" mkdir "%OASES_DIR%\src\%OASES_HOSTTYPE%-%OASES_OSTYPE%"
 
-echo Starting OASES build...
-set "FC_STM=gfortran"
-set "FFLGS=-O2 -std=legacy -fallow-argument-mismatch"
+REM The OASES Makefile looks up per-platform compiler/flags via a key
+REM "${HOSTTYPE}-${OSTYPE}". Even when that key exists, the Linux entry
+REM hardcodes "FC=g77" and "-m486" flags from 1996, both unusable on modern
+REM toolchains. We override FC_STMNT/CC_STMNT/FFLAGS/CFLAGS on the CLI so
+REM they beat the in-Makefile platform-keyed assignments.
+REM
+REM Flags must be embedded in FC_STMNT (not FFLAGS): a handful of rules in
+REM src/makefile invoke "$(FC)" without "$(FFLGS)", so FFLAGS never reaches
+REM those files. Flags inside FC_STMNT ride along with every compile.
+REM   -fallow-argument-mismatch  — demote type-mismatch errors (F77 code relies on these)
+REM   -std=legacy                — re-enable F77 extensions (Hollerith, etc.)
+REM   -fno-automatic             — SAVE locals by default (F77 semantics)
+set "OASES_FC=gfortran -fallow-argument-mismatch -std=legacy -fno-automatic"
+set "OASES_FFLAGS=-O2"
+set "OASES_CFLAGS=-O2"
 
-%MAKE_CMD% OASES_ROOT="%OASES_DIR%" oases 2>&1
+echo Starting OASES build...
+echo   - HOSTTYPE=%OASES_HOSTTYPE%  OSTYPE=%OASES_OSTYPE%
+echo   - FC_STMNT='%OASES_FC%'  FFLAGS=%OASES_FFLAGS%
+
+%MAKE_CMD% HOSTTYPE="%OASES_HOSTTYPE%" OSTYPE="%OASES_OSTYPE%" OASES_ROOT="%OASES_DIR%" FC_STMNT="%OASES_FC%" CC_STMNT=gcc FFLAGS="%OASES_FFLAGS%" CFLAGS="%OASES_CFLAGS%" LFLAGS="" oases 2>&1
 set "OASES_STATUS=%errorlevel%"
 
 if %OASES_STATUS% equ 0 (
@@ -663,20 +774,35 @@ if "%BELLHOP_VERSION%"=="cuda" goto :install_bhc_bins
 goto :install_oalib_bins
 
 :install_bhc_bins
+REM SetupCommon.cmake sets CMAKE_RUNTIME_OUTPUT_DIRECTORY = %BHC_DIR%\bin,
+REM so the primary binaries land there rather than inside the build tree.
+REM Search both locations for robustness.
 set "BUILD_DIR=%BHC_DIR%\build"
+set "BHC_OUT_DIR=%BHC_DIR%\bin"
 
-for %%e in (bellhopcxx.exe bellhopcxx2d.exe bellhopcxx3d.exe bellhopcuda.exe bellhopcuda2d.exe bellhopcuda3d.exe) do (
-    for /f "delims=" %%f in ('dir /s /b "%BUILD_DIR%\%%e" 2^>nul') do (
-        copy "%%f" "%BIN_DIR_BELLHOP%\%%e" >nul 2>&1
-        if exist "%BIN_DIR_BELLHOP%\%%e" (
-            echo   [32m+ Installed bellhop binary: %%e[0m
-            set /a INSTALLED_COUNT+=1
+for %%e in (bellhopcxx.exe bellhopcxx2d.exe bellhopcxx3d.exe bellhopcxxnx2d.exe bellhopcuda.exe bellhopcuda2d.exe bellhopcuda3d.exe bellhopcudanx2d.exe) do (
+    if not exist "%BIN_DIR_BELLHOP%\%%e" (
+        for /f "delims=" %%f in ('dir /s /b "%BHC_OUT_DIR%\%%e" 2^>nul') do (
+            copy "%%f" "%BIN_DIR_BELLHOP%\%%e" >nul 2>&1
+            if exist "%BIN_DIR_BELLHOP%\%%e" (
+                echo   [32m+ Installed bellhop binary: %%e[0m
+                set /a INSTALLED_COUNT+=1
+            )
+        )
+    )
+    if not exist "%BIN_DIR_BELLHOP%\%%e" (
+        for /f "delims=" %%f in ('dir /s /b "%BUILD_DIR%\%%e" 2^>nul') do (
+            copy "%%f" "%BIN_DIR_BELLHOP%\%%e" >nul 2>&1
+            if exist "%BIN_DIR_BELLHOP%\%%e" (
+                echo   [32m+ Installed bellhop binary: %%e[0m
+                set /a INSTALLED_COUNT+=1
+            )
         )
     )
 )
 
 if %INSTALLED_COUNT% equ 0 (
-    echo   [33mNo bellhop (%BELLHOP_VERSION%) executables found in build tree.[0m
+    echo   [33mNo bellhop (%BELLHOP_VERSION%) executables found in %BHC_OUT_DIR% or %BUILD_DIR%.[0m
 )
 echo.
 
@@ -787,6 +913,24 @@ echo   python uacpy\examples\example_01_basic_shallow_water.py
 echo.
 
 if "%AUTO_YES%"=="0" pause
+goto :eof
+
+REM ============================================
+REM Function: ensure_dir  —  make a directory, cleaning up any non-directory
+REM entry at that path first (e.g. leftover file or broken symlink).
+REM ============================================
+:ensure_dir
+set "_ED_PATH=%~1"
+if exist "%_ED_PATH%\" (
+    REM Already a real directory — nothing to do.
+    goto :eof
+)
+if exist "%_ED_PATH%" (
+    echo [33mRemoving non-directory entry at: %_ED_PATH%[0m
+    del /f /q "%_ED_PATH%" 2>nul
+    rmdir "%_ED_PATH%" 2>nul
+)
+mkdir "%_ED_PATH%"
 goto :eof
 
 REM ============================================

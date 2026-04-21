@@ -40,6 +40,41 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
 
 ---
 
+## bellhopcuda (C++/CUDA port of Bellhop)
+
+### `config/cuda/SetupCUDA.cmake` -- CUDA arch detection for modern/laptop GPUs
+
+bellhopcuda picks the CUDA compute capability by looking up the GPU name
+(from `nvidia-smi -L`) in a hardcoded table.  Two issues made the default
+configure fail on current hardware:
+
+1. The table is missing most laptop variants (e.g. `RTX 3060 Laptop GPU`,
+   `RTX 4070 Laptop GPU`) and Ada-Lovelace desktop cards (`RTX 4060`,
+   `RTX 4070`, `RTX 4070 Ti`).  When the name is not found the configure
+   errors out with `CUDA compute capability of GPU <name> unknown!`.
+2. The validation in `get_gencode_args` rejected any `CUDA_ARCH_OVERRIDE`
+   greater than 75 -- even though the table itself already contained
+   entries for compute 86 and 89.  This made the documented
+   `-DCUDA_ARCH_OVERRIDE=86` escape hatch unusable.
+
+**Fix:** widen the override validation range (75 -> 120 to cover Ampere,
+Ada-Lovelace, Hopper, and Blackwell) and extend the GPU table with the
+laptop + modern desktop variants as a safety net.  `install.sh` /
+`install.bat` now auto-detect the compute capability via
+`nvidia-smi --query-gpu=compute_cap` and pass it as
+`-DCUDA_ARCH_OVERRIDE=<XX>`, so the name table is only a fallback.
+
+```diff
+@@ -61 +61 @@
+-	set(GPU_DATABASE "30:GTX 770,GTX 760,...;86:RTX A5500 Laptop GPU,RTX 3090 Ti,RTX 3090,RTX 3080 Ti,RTX 3080,RTX 3070 Ti,RTX 3070,RTX 3060 Ti,RTX 3060,RTX 3050 Ti,RTX 3050;89:RTX A6000,RTX 4090,RTX 4080,RTX 4070 Ti,RTX 4060 Laptop GPU")
++	set(GPU_DATABASE "30:GTX 770,GTX 760,...;86:RTX A5500 Laptop GPU,RTX 3090 Ti,RTX 3090,RTX 3080 Ti,RTX 3080 Ti Laptop GPU,RTX 3080,RTX 3080 Laptop GPU,RTX 3070 Ti,RTX 3070 Ti Laptop GPU,RTX 3070,RTX 3070 Laptop GPU,RTX 3060 Ti,RTX 3060,RTX 3060 Laptop GPU,RTX 3050 Ti,RTX 3050 Ti Laptop GPU,RTX 3050,RTX 3050 Laptop GPU;89:RTX A6000,RTX 4090,RTX 4090 Laptop GPU,RTX 4080,RTX 4080 Laptop GPU,RTX 4070 Ti,RTX 4070 Ti Laptop GPU,RTX 4070,RTX 4070 Laptop GPU,RTX 4060 Ti,RTX 4060,RTX 4060 Laptop GPU,RTX 4050 Laptop GPU")
+@@ -80 +80 @@
+-            if(ARCH MATCHES "^[0-9]+$" AND ARCH GREATER_EQUAL 30 AND ARCH LESS_EQUAL 75)
++            if(ARCH MATCHES "^[0-9]+$" AND ARCH GREATER_EQUAL 30 AND ARCH LESS_EQUAL 120)
+```
+
+---
+
 ## mpiramS (RAM parabolic-equation model)
 
 ### `Makefile` -- portability
