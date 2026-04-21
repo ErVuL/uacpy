@@ -123,7 +123,7 @@ pip uninstall uacpy
 rm -rf uacpy
 ```
 
-## Simplest example
+## ▶ Simplest example
 
 A minimal "hello world": transmission loss in a 100 m Pekeris waveguide with
 Bellhop, at 100 Hz, out to 10 km.
