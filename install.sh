@@ -127,10 +127,12 @@ Options:
   -y, --yes            Non-interactive mode - assume yes and auto-detect
   --force              Force rebuild even if binaries exist
   --bellhop [fortran|cxx|cuda]
-                       Pre-select Bellhop variant:
-                         fortran — Original Fortran Bellhop (part of OALIB)
-                         cxx     — C++ Bellhop (CPU, requires CMake)
-                         cuda    — CUDA Bellhop (GPU, requires nvcc + CMake)
+                       Pre-select which Bellhop variant to build *in addition
+                       to* Fortran Bellhop. Fortran Bellhop is always built as
+                       the reference implementation.
+                         fortran — Fortran only (no C++/CUDA build)
+                         cxx     — Fortran + C++ Bellhop (CPU, requires CMake)
+                         cuda    — Fortran + CUDA Bellhop (GPU, needs nvcc + CMake)
   --oases [yes|no]     Download and build OASES (MIT, distributed separately):
                          yes — Download from MIT and build OAST/OASN/OASR/OASP
                          no  — Skip OASES entirely
@@ -248,14 +250,17 @@ choose_bellhop() {
     fi
 
     # interactive selection
-    echo -e "${BLUE}Choose Bellhop variant to install:${NC}"
+    # Fortran Bellhop is always built as the reference implementation; this
+    # prompt only controls whether to *also* build a C++/CUDA variant.
+    echo -e "${BLUE}Fortran Bellhop will be built.${NC}"
+    echo "Additionally build a C++/CUDA variant?"
     echo ""
-    echo "  1) Fortran    — Original Bellhop (reliable, no extra dependencies)"
-    echo "  2) C++ (CPU)  — Faster than Fortran (requires CMake + C++ compiler)"
+    echo "  1) No           — Fortran only"
+    echo "  2) Yes, C++ CPU — Also build bellhopcxx (requires CMake + C++ compiler)"
     if command_exists nvcc; then
-        echo -e "  3) CUDA (GPU) — Fastest, runs on NVIDIA GPU ${GREEN}(nvcc detected)${NC}"
+        echo -e "  3) Yes, CUDA    — Also build bellhopcuda (GPU) ${GREEN}(nvcc detected)${NC}"
     else
-        echo -e "  3) CUDA (GPU) — Fastest, runs on NVIDIA GPU ${YELLOW}(nvcc not found)${NC}"
+        echo -e "  3) Yes, CUDA    — Also build bellhopcuda (GPU) ${YELLOW}(nvcc not found)${NC}"
     fi
     echo ""
     read -r -p "Enter choice [1]: " ch
@@ -264,7 +269,7 @@ choose_bellhop() {
         1) BELLHOP_VERSION="fortran" ;;
         2) BELLHOP_VERSION="cxx" ;;
         3) BELLHOP_VERSION="cuda" ;;
-        *) echo -e "${YELLOW}Invalid choice; defaulting to Fortran${NC}"; BELLHOP_VERSION="fortran" ;;
+        *) echo -e "${YELLOW}Invalid choice; defaulting to Fortran only${NC}"; BELLHOP_VERSION="fortran" ;;
     esac
 }
 
@@ -906,9 +911,9 @@ OALIB_EXECUTABLES=(
     "Scooter/scooter.exe"
     "Scooter/sparc.exe"
 )
-if [[ "$BELLHOP_VERSION" == "fortran" ]]; then
-    OALIB_EXECUTABLES+=("Bellhop/bellhop.exe" "Bellhop/bellhop3d.exe")
-fi
+# Fortran Bellhop is always built and installed as the reference implementation,
+# regardless of whether a C++/CUDA variant was also selected.
+OALIB_EXECUTABLES+=("Bellhop/bellhop.exe" "Bellhop/bellhop3d.exe")
 
 for path in "${OALIB_EXECUTABLES[@]}"; do
     if [ -f "$OALIB_DIR/$path" ]; then
@@ -982,9 +987,8 @@ echo -e "${GREEN}============================================${NC}"
 echo ""
 echo "Installed models:"
 echo "  Kraken/Scooter/SPARC:  $BIN_DIR_OALIB"
-if [[ "$BELLHOP_VERSION" == "fortran" ]]; then
-    echo "  Bellhop (Fortran):     $BIN_DIR_OALIB"
-else
+echo "  Bellhop (Fortran):     $BIN_DIR_OALIB"
+if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     echo "  Bellhop (${BELLHOP_VERSION}):       $BIN_DIR_BELLHOP"
 fi
 if [ -f "$BIN_DIR_MPIRAMS/s_mpiram" ]; then

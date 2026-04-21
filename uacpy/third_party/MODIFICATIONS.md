@@ -73,6 +73,149 @@ laptop + modern desktop variants as a safety net.  `install.sh` /
 +            if(ARCH MATCHES "^[0-9]+$" AND ARCH GREATER_EQUAL 30 AND ARCH LESS_EQUAL 120)
 ```
 
+### `src/mode/tl.cpp` -- SHDFIL field widths match Fortran spec
+
+`WriteHeader` / `ReadOutTL` in `src/mode/tl.cpp` write several fields of
+the `.shd` binary at the wrong width compared to the Fortran
+Acoustics-Toolbox format bellhopcuda claims to be a drop-in replacement
+for.  The Fortran layout (declared in
+`Acoustics-Toolbox/misc/SourceReceiverPositions.f90` and
+`misc/RWSHDFile.f90`) is:
+
+| field              | Fortran type     | bytes |
+| ------------------ | ---------------- | ----- |
+| `Sx, Sy`           | `REAL(KIND=8)`   | 8     |
+| `Sz, Rz`           | `REAL(KIND=4)`   | 4     |
+| `Rr, theta`        | `REAL(KIND=8)`   | 8     |
+| `freqVec, freq0`   | `REAL(KIND=8)`   | 8     |
+| `atten`            | `REAL(KIND=8)`   | 8     |
+
+Upstream bellhopcuda stores `Pos->Sx, Sy, Rr, theta` as `float*` and
+down-casts `freq0, atten` to `float` on write, emitting 4-byte values
+for all of them.  Tools that follow the Fortran spec (uacpy's
+`read_shd_bin` / `read_shd_file`, the Matlab `read_shd_bin.m` shipped
+with the Acoustics Toolbox) then read garbage bytes from record 10
+(receiver ranges) and fail to plot the field with pcolormesh
+monotonicity violations (e.g. `ranges[:3] ≈ [1.5e+15, 1.1e+17, …]`).
+
+**Fix:** convert these arrays to `double` on write (and read them back
+as `double`, down-casting to the existing `float*` storage on read).
+`Sz, Rz` stay `float` because the Fortran spec also declares them
+`REAL(KIND=4)`.  `LRecl` is adjusted for the new 8-byte widths.
+
+```diff
+@@ -36,22 +36,25 @@
+ template<bool O3D> inline void WriteHeader(
+-    const bhcParams<O3D> &params, DirectOFile &SHDFile, float atten,
++    const bhcParams<O3D> &params, DirectOFile &SHDFile, double atten,
+     const std::string &PlotType)
+ {
++    // SHDFIL format: freq0, atten, Sx, Sy, Rr, theta, freqVec are REAL*8 (double);
++    // Sz, Rz are REAL*4 (float). Matches Acoustics-Toolbox/misc/SourceReceiverPositions.f90.
+     const Position *Pos      = params.Pos;
+     ...
+     int32_t LRecl = 84; // 4 for LRecl, 80 for Title
+-    LRecl = bhc::max(LRecl, 2 * freqinfo->Nfreq * (int32_t)sizeof(freqinfo->freqVec[0]));
+-    LRecl = bhc::max(LRecl, Pos->Ntheta * (int32_t)sizeof(Pos->theta[0]));
++    LRecl = bhc::max(LRecl, freqinfo->Nfreq * (int32_t)sizeof(double));
++    LRecl = bhc::max(LRecl, Pos->Ntheta * (int32_t)sizeof(double));
+     if(!isTL) {
+-        LRecl = bhc::max(LRecl, Pos->NSx * (int32_t)sizeof(Pos->Sx[0]));
+-        LRecl = bhc::max(LRecl, Pos->NSy * (int32_t)sizeof(Pos->Sy[0]));
++        LRecl = bhc::max(LRecl, Pos->NSx * (int32_t)sizeof(double));
++        LRecl = bhc::max(LRecl, Pos->NSy * (int32_t)sizeof(double));
+     }
+     LRecl = bhc::max(LRecl, Pos->NSz * (int32_t)sizeof(Pos->Sz[0]));
+     LRecl = bhc::max(LRecl, Pos->NRz * (int32_t)sizeof(Pos->Rz[0]));
++    LRecl = bhc::max(LRecl, Pos->NRr * (int32_t)sizeof(double));
+     LRecl = bhc::max(LRecl, Pos->NRr * (int32_t)sizeof(cpxf));
+     ...
+-    DOFWRITEV(SHDFile, (float)freqinfo->freq0);
+-    DOFWRITEV(SHDFile, atten);
++    DOFWRITEV(SHDFile, (double)freqinfo->freq0);
++    DOFWRITEV(SHDFile, (double)atten);
+     SHDFile.rec(3);
+-    DOFWRITE(SHDFile, freqinfo->freqVec, freqinfo->Nfreq * sizeof(freqinfo->freqVec[0]));
++    for(int32_t i = 0; i < freqinfo->Nfreq; ++i)
++        DOFWRITEV(SHDFile, (double)freqinfo->freqVec[i]);
+     SHDFile.rec(4);
+-    DOFWRITE(SHDFile, Pos->theta, Pos->Ntheta * sizeof(Pos->theta[0]));
++    for(int32_t i = 0; i < Pos->Ntheta; ++i)
++        DOFWRITEV(SHDFile, (double)Pos->theta[i]);
+
+     if(!isTL) {
+         SHDFile.rec(5);
+-        DOFWRITE(SHDFile, Pos->Sx, Pos->NSx * sizeof(Pos->Sx[0]));
++        for(int32_t i = 0; i < Pos->NSx; ++i)
++            DOFWRITEV(SHDFile, (double)Pos->Sx[i]);
+         SHDFile.rec(6);
+-        DOFWRITE(SHDFile, Pos->Sy, Pos->NSy * sizeof(Pos->Sy[0]));
++        for(int32_t i = 0; i < Pos->NSy; ++i)
++            DOFWRITEV(SHDFile, (double)Pos->Sy[i]);
+     } else {
+         SHDFile.rec(5);
+-        DOFWRITEV(SHDFile, Pos->Sx[0]);
+-        DOFWRITEV(SHDFile, Pos->Sx[Pos->NSx - 1]);
++        DOFWRITEV(SHDFile, (double)Pos->Sx[0]);
++        DOFWRITEV(SHDFile, (double)Pos->Sx[Pos->NSx - 1]);
+         SHDFile.rec(6);
+-        DOFWRITEV(SHDFile, Pos->Sy[0]);
+-        DOFWRITEV(SHDFile, Pos->Sy[Pos->NSy - 1]);
++        DOFWRITEV(SHDFile, (double)Pos->Sy[0]);
++        DOFWRITEV(SHDFile, (double)Pos->Sy[Pos->NSy - 1]);
+     }
+     ...
+     SHDFile.rec(9);
+-    DOFWRITE(SHDFile, Pos->Rr, Pos->NRr * sizeof(Pos->Rr[0]));
++    for(int32_t i = 0; i < Pos->NRr; ++i)
++        DOFWRITEV(SHDFile, (double)Pos->Rr[i]);
+ }
+```
+
+`WriteOutTL`'s local `atten` must match the new parameter type:
+
+```diff
+-    real atten = FL(0.0);
++    double atten = 0.0;
+```
+
+And `ReadOutTL` mirrors the widths -- read as `double`, down-cast to
+the existing `float*` storage on store:
+
+```diff
+-    float temp;
++    double temp;
+     DIFREADV(SHDFile, temp);
+-    freqinfo->freq0 = temp;
+-    float atten;
++    freqinfo->freq0 = (real)temp;
++    double atten;
+     DIFREADV(SHDFile, atten);
+     ...
+-    DIFREAD(SHDFile, freqinfo->freqVec, freqinfo->Nfreq * sizeof(freqinfo->freqVec[0]));
++    for(int32_t i = 0; i < freqinfo->Nfreq; ++i) {
++        double v; DIFREADV(SHDFile, v); freqinfo->freqVec[i] = (real)v;
++    }
+     ...
+-    DIFREAD(SHDFile, Pos->theta, Pos->Ntheta * sizeof(Pos->theta[0]));
++    for(int32_t i = 0; i < Pos->Ntheta; ++i) {
++        double v; DIFREADV(SHDFile, v); Pos->theta[i] = (float)v;
++    }
+     ...
+-    DIFREAD(SHDFile, Pos->Sx, Pos->NSx * sizeof(Pos->Sx[0]));
++    for(int32_t i = 0; i < Pos->NSx; ++i) {
++        double v; DIFREADV(SHDFile, v); Pos->Sx[i] = (float)v;
++    }
+     ...
+-    DIFREAD(SHDFile, Pos->Rr, Pos->NRr * sizeof(Pos->Rr[0]));
++    for(int32_t i = 0; i < Pos->NRr; ++i) {
++        double v; DIFREADV(SHDFile, v); Pos->Rr[i] = (float)v;
++    }
+```
+
+(Same pattern for `Sy` in both rectilinear and `TL` branches, omitted
+above for brevity.)
+
 ---
 
 ## mpiramS (RAM parabolic-equation model)

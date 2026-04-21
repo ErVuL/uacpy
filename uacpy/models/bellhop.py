@@ -977,7 +977,7 @@ class BellhopCUDA(PropagationModel):
         self,
         use_gpu: bool = True,
         executable: Optional[Path] = None,
-        beam_type: str = 'R',
+        beam_type: str = 'B',
         n_beams: int = 0,
         alpha: tuple = (-80, 80),
         step: float = 0.0,

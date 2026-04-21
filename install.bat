@@ -99,10 +99,12 @@ echo Options:
 echo   -y, --yes            Non-interactive mode - assume yes and auto-detect
 echo   --force              Force rebuild even if binaries exist
 echo   --bellhop [fortran^|cxx^|cuda]
-echo                        Pre-select Bellhop variant:
-echo                          fortran - Original Fortran Bellhop (part of OALIB)
-echo                          cxx     - C++ Bellhop (CPU, requires CMake)
-echo                          cuda    - CUDA Bellhop (GPU, requires nvcc + CMake)
+echo                        Pre-select which Bellhop variant to build *in
+echo                        addition to* Fortran Bellhop. Fortran Bellhop is
+echo                        always built as the reference implementation.
+echo                          fortran - Fortran only (no C++/CUDA build)
+echo                          cxx     - Fortran + C++ Bellhop (CPU)
+echo                          cuda    - Fortran + CUDA Bellhop (GPU)
 echo   --oases [yes^|no]     Download and build OASES (MIT, distributed separately):
 echo                          yes - Download from MIT and build OAST/OASN/OASR/OASP
 echo                          no  - Skip OASES entirely
@@ -821,17 +823,16 @@ for %%e in (KrakenField\field.exe Kraken\kraken.exe Kraken\krakenc.exe Kraken\bo
     )
 )
 
-REM Install Bellhop Fortran binaries only if fortran variant selected
-if "%BELLHOP_VERSION%"=="fortran" (
-    for %%e in (Bellhop\bellhop.exe Bellhop\bellhop3d.exe) do (
-        if exist "%OALIB_DIR%\%%e" (
-            for %%f in ("%%e") do set "EXE_NAME=%%~nxf"
-            copy "%OALIB_DIR%\%%e" "%BIN_DIR_OALIB%\!EXE_NAME!" >nul
-            echo   [32m+ Installed: !EXE_NAME![0m
-            set /a INSTALLED_COUNT+=1
-        ) else (
-            echo   [33m  Not found: %%e[0m
-        )
+REM Fortran Bellhop is always built and installed as the reference
+REM implementation, regardless of whether a C++/CUDA variant was also selected.
+for %%e in (Bellhop\bellhop.exe Bellhop\bellhop3d.exe) do (
+    if exist "%OALIB_DIR%\%%e" (
+        for %%f in ("%%e") do set "EXE_NAME=%%~nxf"
+        copy "%OALIB_DIR%\%%e" "%BIN_DIR_OALIB%\!EXE_NAME!" >nul
+        echo   [32m+ Installed: !EXE_NAME![0m
+        set /a INSTALLED_COUNT+=1
+    ) else (
+        echo   [33m  Not found: %%e[0m
     )
 )
 
@@ -854,19 +855,17 @@ if exist "%BIN_DIR_OALIB%\kraken.exe" (
     echo   [32m+ Runnable: kraken.exe[0m
 )
 
-if "%BELLHOP_VERSION%"=="fortran" (
-    if exist "%BIN_DIR_OALIB%\bellhop.exe" (
-        "%BIN_DIR_OALIB%\bellhop.exe" < nul >nul 2>&1
-        echo   [32m+ Runnable: bellhop.exe[0m
-    )
-) else (
-    if exist "%BIN_DIR_BELLHOP%\bellhopcxx.exe" (
-        "%BIN_DIR_BELLHOP%\bellhopcxx.exe" --help >nul 2>&1
-        echo   [32m+ Runnable: bellhopcxx.exe[0m
-    ) else if exist "%BIN_DIR_BELLHOP%\bellhopcuda.exe" (
-        "%BIN_DIR_BELLHOP%\bellhopcuda.exe" --help >nul 2>&1
-        echo   [32m+ Runnable: bellhopcuda.exe[0m
-    )
+if exist "%BIN_DIR_OALIB%\bellhop.exe" (
+    "%BIN_DIR_OALIB%\bellhop.exe" < nul >nul 2>&1
+    echo   [32m+ Runnable: bellhop.exe[0m
+)
+if exist "%BIN_DIR_BELLHOP%\bellhopcxx.exe" (
+    "%BIN_DIR_BELLHOP%\bellhopcxx.exe" --help >nul 2>&1
+    echo   [32m+ Runnable: bellhopcxx.exe[0m
+)
+if exist "%BIN_DIR_BELLHOP%\bellhopcuda.exe" (
+    "%BIN_DIR_BELLHOP%\bellhopcuda.exe" --help >nul 2>&1
+    echo   [32m+ Runnable: bellhopcuda.exe[0m
 )
 
 if exist "%BIN_DIR_MPIRAMS%\s_mpiram.exe" (
@@ -893,11 +892,9 @@ echo.
 echo Installed models:
 echo   Kraken/Scooter/SPARC/Bounce:  %BIN_DIR_OALIB%
 
-if "%BELLHOP_VERSION%"=="fortran" (
-    echo   Bellhop (Fortran):            %BIN_DIR_OALIB%
-) else (
-    echo   Bellhop (%BELLHOP_VERSION%):              %BIN_DIR_BELLHOP%
-)
+echo   Bellhop (Fortran):            %BIN_DIR_OALIB%
+if "%BELLHOP_VERSION%"=="cxx"  echo   Bellhop (cxx):                %BIN_DIR_BELLHOP%
+if "%BELLHOP_VERSION%"=="cuda" echo   Bellhop (cuda):               %BIN_DIR_BELLHOP%
 
 if exist "%BIN_DIR_MPIRAMS%\s_mpiram.exe" echo   RAM (mpiramS PE):             %BIN_DIR_MPIRAMS%
 if exist "%BIN_DIR_MPIRAMS%\s_mpiram" echo   RAM (mpiramS PE):             %BIN_DIR_MPIRAMS%
@@ -937,16 +934,19 @@ REM ============================================
 REM Function: prompt_bellhop_version
 REM ============================================
 :prompt_bellhop_version
-echo Choose Bellhop variant to install:
+REM Fortran Bellhop is always built as the reference implementation; this
+REM prompt only controls whether to *also* build a C++/CUDA variant.
+echo [34mFortran Bellhop will be built.[0m
+echo Additionally build a C++/CUDA variant?
 echo.
-echo   1^) Fortran    - Original Bellhop (reliable, no extra dependencies)
-echo   2^) C++ (CPU)  - Faster than Fortran (requires CMake + C++ compiler)
+echo   1^) No           - Fortran only
+echo   2^) Yes, C++ CPU - Also build bellhopcxx (requires CMake + C++ compiler)
 
 where nvcc >nul 2>&1
 if %errorlevel% equ 0 (
-    echo   3^) CUDA (GPU) - Fastest, runs on NVIDIA GPU [32m(nvcc detected)[0m
+    echo   3^) Yes, CUDA    - Also build bellhopcuda (GPU) [32m(nvcc detected)[0m
 ) else (
-    echo   3^) CUDA (GPU) - Fastest, runs on NVIDIA GPU [33m(nvcc not found)[0m
+    echo   3^) Yes, CUDA    - Also build bellhopcuda (GPU) [33m(nvcc not found)[0m
 )
 
 echo.

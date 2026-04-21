@@ -36,22 +36,25 @@ namespace bhc { namespace mode {
  * "TL" in BELLHOP]
  */
 template<bool O3D> inline void WriteHeader(
-    const bhcParams<O3D> &params, DirectOFile &SHDFile, float atten,
+    const bhcParams<O3D> &params, DirectOFile &SHDFile, double atten,
     const std::string &PlotType)
 {
+    // SHDFIL format: freq0, atten, Sx, Sy, Rr, theta, freqVec are REAL*8 (double);
+    // Sz, Rz are REAL*4 (float). Matches Acoustics-Toolbox/misc/SourceReceiverPositions.f90.
     const Position *Pos      = params.Pos;
     const FreqInfo *freqinfo = params.freqinfo;
     bool isTL                = (PlotType[0] == 'T' && PlotType[1] == 'L');
 
     int32_t LRecl = 84; // 4 for LRecl, 80 for Title
-    LRecl = bhc::max(LRecl, 2 * freqinfo->Nfreq * (int32_t)sizeof(freqinfo->freqVec[0]));
-    LRecl = bhc::max(LRecl, Pos->Ntheta * (int32_t)sizeof(Pos->theta[0]));
+    LRecl = bhc::max(LRecl, freqinfo->Nfreq * (int32_t)sizeof(double));
+    LRecl = bhc::max(LRecl, Pos->Ntheta * (int32_t)sizeof(double));
     if(!isTL) {
-        LRecl = bhc::max(LRecl, Pos->NSx * (int32_t)sizeof(Pos->Sx[0]));
-        LRecl = bhc::max(LRecl, Pos->NSy * (int32_t)sizeof(Pos->Sy[0]));
+        LRecl = bhc::max(LRecl, Pos->NSx * (int32_t)sizeof(double));
+        LRecl = bhc::max(LRecl, Pos->NSy * (int32_t)sizeof(double));
     }
     LRecl = bhc::max(LRecl, Pos->NSz * (int32_t)sizeof(Pos->Sz[0]));
     LRecl = bhc::max(LRecl, Pos->NRz * (int32_t)sizeof(Pos->Rz[0]));
+    LRecl = bhc::max(LRecl, Pos->NRr * (int32_t)sizeof(double));
     LRecl = bhc::max(LRecl, Pos->NRr * (int32_t)sizeof(cpxf));
 
     std::string FileName = GetInternal(params)->FileRoot + ".shd";
@@ -71,25 +74,29 @@ template<bool O3D> inline void WriteHeader(
     DOFWRITEV(SHDFile, Pos->NSz);
     DOFWRITEV(SHDFile, Pos->NRz);
     DOFWRITEV(SHDFile, Pos->NRr);
-    DOFWRITEV(SHDFile, (float)freqinfo->freq0);
-    DOFWRITEV(SHDFile, atten);
+    DOFWRITEV(SHDFile, (double)freqinfo->freq0);
+    DOFWRITEV(SHDFile, (double)atten);
     SHDFile.rec(3);
-    DOFWRITE(SHDFile, freqinfo->freqVec, freqinfo->Nfreq * sizeof(freqinfo->freqVec[0]));
+    for(int32_t i = 0; i < freqinfo->Nfreq; ++i)
+        DOFWRITEV(SHDFile, (double)freqinfo->freqVec[i]);
     SHDFile.rec(4);
-    DOFWRITE(SHDFile, Pos->theta, Pos->Ntheta * sizeof(Pos->theta[0]));
+    for(int32_t i = 0; i < Pos->Ntheta; ++i)
+        DOFWRITEV(SHDFile, (double)Pos->theta[i]);
 
     if(!isTL) {
         SHDFile.rec(5);
-        DOFWRITE(SHDFile, Pos->Sx, Pos->NSx * sizeof(Pos->Sx[0]));
+        for(int32_t i = 0; i < Pos->NSx; ++i)
+            DOFWRITEV(SHDFile, (double)Pos->Sx[i]);
         SHDFile.rec(6);
-        DOFWRITE(SHDFile, Pos->Sy, Pos->NSy * sizeof(Pos->Sy[0]));
+        for(int32_t i = 0; i < Pos->NSy; ++i)
+            DOFWRITEV(SHDFile, (double)Pos->Sy[i]);
     } else {
         SHDFile.rec(5);
-        DOFWRITEV(SHDFile, Pos->Sx[0]);
-        DOFWRITEV(SHDFile, Pos->Sx[Pos->NSx - 1]);
+        DOFWRITEV(SHDFile, (double)Pos->Sx[0]);
+        DOFWRITEV(SHDFile, (double)Pos->Sx[Pos->NSx - 1]);
         SHDFile.rec(6);
-        DOFWRITEV(SHDFile, Pos->Sy[0]);
-        DOFWRITEV(SHDFile, Pos->Sy[Pos->NSy - 1]);
+        DOFWRITEV(SHDFile, (double)Pos->Sy[0]);
+        DOFWRITEV(SHDFile, (double)Pos->Sy[Pos->NSy - 1]);
     }
     SHDFile.rec(7);
     DOFWRITE(SHDFile, Pos->Sz, Pos->NSz * sizeof(Pos->Sz[0]));
@@ -97,7 +104,8 @@ template<bool O3D> inline void WriteHeader(
     SHDFile.rec(8);
     DOFWRITE(SHDFile, Pos->Rz, Pos->NRz * sizeof(Pos->Rz[0]));
     SHDFile.rec(9);
-    DOFWRITE(SHDFile, Pos->Rr, Pos->NRr * sizeof(Pos->Rr[0]));
+    for(int32_t i = 0; i < Pos->NRr; ++i)
+        DOFWRITEV(SHDFile, (double)Pos->Rr[i]);
 }
 
 /**
@@ -211,7 +219,7 @@ template<bool O3D> inline size_t GetRecNum(
 template<bool O3D, bool R3D> void WriteOutTL(
     const bhcParams<O3D> &params, const bhcOutputs<O3D, R3D> &outputs)
 {
-    real atten = FL(0.0);
+    double atten = 0.0;
     std::string PlotType;
     DirectOFile SHDFile(GetInternal(params));
 
@@ -290,10 +298,10 @@ template<bool O3D, bool R3D> void ReadOutTL(
     DIFREADV(SHDFile, Pos->NSz);
     DIFREADV(SHDFile, Pos->NRz);
     DIFREADV(SHDFile, Pos->NRr);
-    float temp;
+    double temp;
     DIFREADV(SHDFile, temp);
-    freqinfo->freq0 = temp;
-    float atten;
+    freqinfo->freq0 = (real)temp;
+    double atten;
     DIFREADV(SHDFile, atten);
 
     if(freqinfo->Nfreq != 1) { EXTERR("Nfreq in SHDFile being loaded is not 1"); }
@@ -313,29 +321,40 @@ template<bool O3D, bool R3D> void ReadOutTL(
     trackallocate(params, "receiver r-coordinates", Pos->Rr, Pos->NRr);
 
     DIFREC(SHDFile, 3);
-    DIFREAD(SHDFile, freqinfo->freqVec, freqinfo->Nfreq * sizeof(freqinfo->freqVec[0]));
+    for(int32_t i = 0; i < freqinfo->Nfreq; ++i) {
+        double v; DIFREADV(SHDFile, v); freqinfo->freqVec[i] = (real)v;
+    }
     DIFREC(SHDFile, 4);
-    DIFREAD(SHDFile, Pos->theta, Pos->Ntheta * sizeof(Pos->theta[0]));
+    for(int32_t i = 0; i < Pos->Ntheta; ++i) {
+        double v; DIFREADV(SHDFile, v); Pos->theta[i] = (float)v;
+    }
 
     if(!isTL) {
         DIFREC(SHDFile, 5);
-        DIFREAD(SHDFile, Pos->Sx, Pos->NSx * sizeof(Pos->Sx[0]));
+        for(int32_t i = 0; i < Pos->NSx; ++i) {
+            double v; DIFREADV(SHDFile, v); Pos->Sx[i] = (float)v;
+        }
         DIFREC(SHDFile, 6);
-        DIFREAD(SHDFile, Pos->Sy, Pos->NSy * sizeof(Pos->Sy[0]));
+        for(int32_t i = 0; i < Pos->NSy; ++i) {
+            double v; DIFREADV(SHDFile, v); Pos->Sy[i] = (float)v;
+        }
     } else {
         DIFREC(SHDFile, 5);
-        DIFREADV(SHDFile, Pos->Sx[0]);
-        DIFREADV(SHDFile, Pos->Sx[Pos->NSx - 1]);
+        double v;
+        DIFREADV(SHDFile, v); Pos->Sx[0] = (float)v;
+        DIFREADV(SHDFile, v); Pos->Sx[Pos->NSx - 1] = (float)v;
         DIFREC(SHDFile, 6);
-        DIFREADV(SHDFile, Pos->Sy[0]);
-        DIFREADV(SHDFile, Pos->Sy[Pos->NSy - 1]);
+        DIFREADV(SHDFile, v); Pos->Sy[0] = (float)v;
+        DIFREADV(SHDFile, v); Pos->Sy[Pos->NSy - 1] = (float)v;
     }
     DIFREC(SHDFile, 7);
     DIFREAD(SHDFile, Pos->Sz, Pos->NSz * sizeof(Pos->Sz[0]));
     DIFREC(SHDFile, 8);
     DIFREAD(SHDFile, Pos->Rz, Pos->NRz * sizeof(Pos->Rz[0]));
     DIFREC(SHDFile, 9);
-    DIFREAD(SHDFile, Pos->Rr, Pos->NRr * sizeof(Pos->Rr[0]));
+    for(int32_t i = 0; i < Pos->NRr; ++i) {
+        double v; DIFREADV(SHDFile, v); Pos->Rr[i] = (float)v;
+    }
 
     module::SzRz<O3D> szrz;
     szrz.Preprocess(params); // sets NRz_per_range
