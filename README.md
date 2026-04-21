@@ -209,11 +209,20 @@ check.
     the outputs.
 -   **KrakenField:** out‑of‑bounds sentinel fix in `field.f90` — confirm
     it doesn’t alter mode amplitudes in regimes that previously worked.
--   **bellhopcuda:** CUDA arch-detection tweaks in
-    `config/cuda/SetupCUDA.cmake` (widened override range, extended GPU
-    name table). Build-only change — does not affect numerical output,
-    but new hardware targets (Ada-Lovelace, laptop variants) should be
-    smoke-tested against a known-good CPU Bellhop run.
+-   **bellhopcuda:** two changes.
+    (1) CUDA arch-detection tweaks in `config/cuda/SetupCUDA.cmake`
+    (widened override range, extended GPU name table) — build-only,
+    does not affect numerical output, but new hardware targets
+    (Ada-Lovelace, laptop variants) should be smoke-tested against a
+    known-good CPU Bellhop run.
+    (2) SHDFIL field widths in `src/mode/tl.cpp` brought back in line
+    with the Fortran Acoustics-Toolbox spec (upstream wrote 4-byte
+    values for `Sx`, `Sy`, `Rr`, `theta`, `freqVec`, `freq0`, `atten`
+    where the spec declares them `REAL*8`). Confirm `.shd` files
+    round-trip through uacpy's `read_shd_bin` and the Matlab
+    `read_shd_bin.m` shipped with the Acoustics Toolbox, and that TL
+    plots no longer show monotonicity violations in the receiver-range
+    axis.
 -   **UACPY RAM TL formula**
     (`TL = -20·log10(|psif|·4π) + 10·log10(r)`): validate against
     reference TL curves for at least one shallow‑water and one
@@ -481,10 +490,13 @@ C. S. Schmid, D. F. Schmidt, A. E. Hodgson --- https://github.com/A-New-BellHope
 A C++/CUDA port of BELLHOP. UACPY ships the sources and compiles them
 in-tree for GPU-accelerated ray tracing.
 
-**Modifications:** CUDA arch detection in `config/cuda/SetupCUDA.cmake`
-(widened `CUDA_ARCH_OVERRIDE` validation range and extended the hardcoded
-GPU-name table to cover laptop variants and modern desktop cards).
-See MODIFICATIONS.md.
+**Modifications:** (1) CUDA arch detection in
+`config/cuda/SetupCUDA.cmake` (widened `CUDA_ARCH_OVERRIDE` validation
+range and extended the hardcoded GPU-name table to cover laptop variants
+and modern desktop cards); (2) SHDFIL field widths in `src/mode/tl.cpp`
+corrected to match the Fortran Acoustics-Toolbox spec (`Sx`, `Sy`, `Rr`,
+`theta`, `freqVec`, `freq0`, `atten` written and read as `REAL*8` instead
+of upstream's 4-byte values). See MODIFICATIONS.md.
 
 ### RAM
 
