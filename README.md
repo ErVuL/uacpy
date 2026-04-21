@@ -81,6 +81,96 @@ UACPY provides:
 -   **OASES** --- Full suite: OAST (TL), OASN (modes), OASR (reflection), OASP (PE)
 -   **Bounce** --- Reflection coefficients
 
+## 📦 Installation
+
+Linux is currently the primary supported platform.\
+Windows and macOS should work with similar steps, though compilation
+requires toolchain adjustments.
+
+### 1. Install dependencies
+
+-   Fortran compiler
+-   C/C++ compiler
+-   (Optional) CUDA toolkit
+-   (Windows) MSYS2 or WSL
+
+### 2. Create a virtual environment
+
+``` bash
+python -m venv uacpy_venv
+source uacpy_venv/bin/activate
+```
+
+### 3. Clone and install
+
+``` bash
+git clone https://github.com/ErVuL/uacpy.git
+cd uacpy
+pip install -e .
+./install.sh        # Linux / macOS
+# or
+install.bat         # Windows
+```
+
+The installer compiles OALIB, OASES, BellhopCUDA, and other required
+binaries, then places them inside UACPY's internal directory for API
+access.
+
+### Uninstall
+
+``` bash
+pip uninstall uacpy
+rm -rf uacpy
+```
+
+## Simplest example
+
+A minimal "hello world": transmission loss in a 100 m Pekeris waveguide with
+Bellhop, at 100 Hz, out to 10 km.
+
+``` python
+import numpy as np
+import matplotlib.pyplot as plt
+
+import uacpy
+from uacpy.models import Bellhop
+from uacpy.core.environment import BoundaryProperties
+from uacpy.visualization.plots import plot_transmission_loss
+
+# 1. Environment — isovelocity water over a fluid half-space bottom
+env = uacpy.Environment(
+    name="Pekeris Waveguide",
+    depth=100.0,
+    sound_speed=1500.0,
+    ssp_type='isovelocity',
+    bottom=BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1600.0,
+        density=1.5,
+        attenuation=0.5,
+    ),
+)
+
+# 2. Source — 100 Hz, mid water column
+source = uacpy.Source(depth=50.0, frequency=100.0)
+
+# 3. Receiver grid — 50 depths × 100 ranges out to 10 km
+receiver = uacpy.Receiver(
+    depths=np.linspace(5, 95, 50),
+    ranges=np.linspace(100, 10_000, 100),
+)
+
+# 4. Run Bellhop in coherent-TL mode
+result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
+    env, source, receiver, run_type='C',
+)
+
+# 5. Plot the TL field
+fig, ax = plt.subplots(figsize=(8, 4))
+plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
+plt.tight_layout()
+plt.show()
+```
 
 ## 🛠️ Hardening Roadmap
 
