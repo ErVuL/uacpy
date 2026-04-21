@@ -364,48 +364,6 @@ been independently verified for the model and regime you care about.**
 -   Interactive dashboards for TL/modes visualization
 
 
-## 📦 Installation
-
-Linux is currently the primary supported platform.\
-Windows and macOS should work with similar steps, though compilation
-requires toolchain adjustments.
-
-### 1. Install dependencies
-
--   Fortran compiler
--   C/C++ compiler
--   (Optional) CUDA toolkit
--   (Windows) MSYS2 or WSL
-
-### 2. Create a virtual environment
-
-``` bash
-python -m venv uacpy_venv
-source uacpy_venv/bin/activate
-```
-
-### 3. Clone and install
-
-``` bash
-git clone https://github.com/ErVuL/uacpy.git
-cd uacpy
-pip install -e .
-./install.sh        # Linux / macOS
-# or
-install.bat         # Windows
-```
-
-The installer compiles OALIB, OASES, BellhopCUDA, and other required
-binaries, then places them inside UACPY's internal directory for API
-access.
-
-### Uninstall
-
-``` bash
-pip uninstall uacpy
-rm -rf uacpy
-```
-
 ## 📚 Documentation & Examples
 
 The full API reference lives in a single file:
