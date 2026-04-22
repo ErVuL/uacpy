@@ -78,7 +78,7 @@ UACPY provides:
 -   **Scooter** --- Fast‑field / normal modes
 -   **SPARC** --- PE fast field
 -   **RAM** (mpiramS) --- Parabolic equation (broadband + TL)
--   **OASES** --- Full suite: OAST (TL), OASN (modes), OASR (reflection), OASP (PE)
+-   **OASES** --- Full suite: OAST (TL), OASN (noise), OASR (reflection), OASP (transfer function)
 -   **Bounce** --- Reflection coefficients
 
 ## 📦 Installation
