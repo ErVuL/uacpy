@@ -48,7 +48,7 @@ community-driven.
 UACPY provides:
 
 -   A unified Python API for major underwater acoustic propagation
-    models
+    models 
 -   High‑level tools for configuring environments, sources, receivers,
     media, bathymetry, and boundaries
 -   Propagation modeling outputs (TL grids, eigenrays, mode fields, PE
@@ -183,22 +183,7 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 25+ example scripts covering:
-
--   Transmission loss (TL) computations
--   Ray tracing & eigenray extraction
--   Normal‑mode fields
--   Parabolic‑equation comparisons
--   BellhopCUDA demos
--   Reflection coefficients (Bounce)
--   OASES suite examples
--   Time-domain propagation (SPARC)
--   Signal processing (waveform generation, chirps, filtering)
--   Ambient noise modeling (Wenz curves, wind, shipping)
--   Visualization tools
-
-More examples and tutorials are planned.
-
+Inside `uacpy/examples/` you will find 25+ example scripts.
 
 ## 🧪 Testing
 
@@ -240,25 +225,15 @@ Tests use custom markers to allow selective execution:
 ``` bash
 
 # Skip slow tests
-
 pytest uacpy/tests/ -m "not slow"
 
-
-
 # Run only integration tests
-
 pytest uacpy/tests/ -m "integration"
 
-
-
 # Run only tests that don't need compiled binaries
-
 pytest uacpy/tests/ -m "not requires_binary"
 
-
-
 # Skip OASES tests (if OASES is not installed)
-
 pytest uacpy/tests/ -m "not requires_oases"
 
 ```
