@@ -172,6 +172,10 @@ plt.tight_layout()
 plt.show()
 ```
 
+<p align="center">
+  <img src="./docs/bellhop_tl_example.png" alt="Bellhop TL field — Pekeris waveguide, 1 kHz" width="720">
+</p>
+
 ## 📚 Documentation & Examples
 
 The full API reference lives in a single file:
