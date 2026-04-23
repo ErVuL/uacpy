@@ -1,6 +1,4 @@
-"""
-Field class for storing and manipulating acoustic field results
-"""
+"""Field class for storing and manipulating acoustic field results."""
 
 import numpy as np
 from typing import Optional, Dict, Any, Tuple
@@ -10,51 +8,53 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
 
 class Field:
     """
-    Acoustic field results
+    Acoustic field results.
 
-    Stores results from acoustic propagation models including transmission loss,
-    complex pressure, ray paths, arrivals, etc.
+    Stores results from acoustic propagation models: transmission loss,
+    complex pressure, ray paths, arrivals, modes, transfer functions, and
+    time series.
 
     Parameters
     ----------
     field_type : str
         Type of field: 'tl' (transmission loss), 'pressure', 'rays',
-        'arrivals', 'modes'
+        'arrivals', 'modes', 'eigenrays', 'reflection_coefficients',
+        'transfer_function', or 'time_series'.
     data : ndarray
-        Main field data array
+        Main field data array.
     ranges : ndarray, optional
-        Range coordinates in meters
+        Range coordinates in meters.
     depths : ndarray, optional
-        Depth coordinates in meters
+        Depth coordinates in meters.
     frequencies : ndarray, optional
-        Frequency coordinates in Hz
+        Frequency coordinates in Hz.
     metadata : dict, optional
-        Additional metadata about the simulation
+        Additional metadata about the simulation.
 
     Attributes
     ----------
     field_type : str
-        Field type
+        Field type.
     data : ndarray
-        Field data
+        Field data.
     ranges : ndarray
-        Range grid
+        Range grid.
     depths : ndarray
-        Depth grid
+        Depth grid.
     frequencies : ndarray
-        Frequencies
+        Frequencies.
     metadata : dict
-        Metadata dictionary
+        Metadata dictionary.
 
     Examples
     --------
-    Access transmission loss field:
+    Access a transmission-loss field:
 
     >>> tl = field.data  # Shape: (n_depths, n_ranges) for 2D,
     ...                  # (n_depths, n_freqs, n_ranges) for broadband
     >>> tl_at_1km = field.get_at_range(1000)
 
-    Get field at specific location:
+    Get field at a specific location:
 
     >>> value = field.get_value(range=5000, depth=50)
     """
@@ -75,64 +75,62 @@ class Field:
         self.frequencies = frequencies if frequencies is not None else np.array([0.0])
         self.metadata = metadata if metadata is not None else {}
 
-        # Validate field type
         valid_types = ['tl', 'pressure', 'rays', 'arrivals', 'modes', 'eigenrays', 'reflection_coefficients', 'transfer_function', 'time_series']
         if self.field_type not in valid_types:
             raise ValueError(f"field_type must be one of {valid_types}")
 
     @property
     def shape(self) -> Tuple:
-        """Shape of data array"""
+        """Shape of the data array."""
         return self.data.shape
 
     @property
     def n_ranges(self) -> int:
-        """Number of range points"""
+        """Number of range points."""
         return len(self.ranges)
 
     @property
     def n_depths(self) -> int:
-        """Number of depth points"""
+        """Number of depth points."""
         return len(self.depths)
 
     @property
     def n_frequencies(self) -> int:
-        """Number of frequencies"""
+        """Number of frequencies."""
         return len(self.frequencies)
 
     @property
     def ray_data(self):
-        """Convenience property to access ray data from metadata"""
+        """Ray data from metadata, or ``None`` if absent."""
         return self.metadata.get('rays', None)
 
     @property
     def arrivals_data(self):
-        """Convenience property to access arrivals data from metadata"""
+        """Arrivals data from metadata, or ``None`` if absent."""
         return self.metadata.get('arrivals', None)
 
     def get_value(self, range_m: float, depth: float,
                   frequency: Optional[float] = None) -> float:
         """
-        Get field value at specified location
+        Get the field value at a specified location.
 
         Parameters
         ----------
         range_m : float
-            Range in meters
+            Range in meters.
         depth : float
-            Depth in meters
+            Depth in meters.
         frequency : float, optional
-            Frequency in Hz (for multi-frequency fields)
+            Frequency in Hz (for multi-frequency fields).
 
         Returns
         -------
         value : float
-            Interpolated field value
+            Field value at the nearest grid point.
         """
         if self.field_type in ['rays', 'arrivals', 'eigenrays', 'time_series']:
             raise ValueError(f"get_value not supported for field_type='{self.field_type}'")
 
-        # Find nearest indices
         r_idx = np.argmin(np.abs(self.ranges - range_m))
         d_idx = np.argmin(np.abs(self.depths - depth))
 
@@ -140,85 +138,78 @@ class Field:
             return self.data[d_idx, r_idx]
         elif len(self.data.shape) == 3 and frequency is not None:
             f_idx = np.argmin(np.abs(self.frequencies - frequency))
-            # data shape is (n_depths, n_freqs, n_ranges) per class docstring
             return self.data[d_idx, f_idx, r_idx]
         else:
             raise ValueError("Frequency required for multi-frequency field")
 
     def get_at_range(self, range_m: float) -> np.ndarray:
         """
-        Get field values at specified range
+        Get field values at a specified range.
 
         Parameters
         ----------
         range_m : float
-            Range in meters
+            Range in meters.
 
         Returns
         -------
         values : ndarray
             Field values at all depths at this range.
-            Shape: (n_depths,) for 2D fields; (n_depths, n_freqs) for 3D
-            broadband fields.
+            Shape ``(n_depths,)`` for 2D fields; ``(n_depths, n_freqs)``
+            for 3D broadband fields.
         """
         r_idx = np.argmin(np.abs(self.ranges - range_m))
 
         if len(self.data.shape) == 2:
             return self.data[:, r_idx]
         elif len(self.data.shape) == 3:
-            # data shape is (n_depths, n_freqs, n_ranges)
             return self.data[:, :, r_idx]
         else:
             raise ValueError("Unsupported data shape")
 
     def get_at_depth(self, depth: float) -> np.ndarray:
         """
-        Get field values at specified depth
+        Get field values at a specified depth.
 
         Parameters
         ----------
         depth : float
-            Depth in meters
+            Depth in meters.
 
         Returns
         -------
         values : ndarray
             Field values at all ranges at this depth.
-            Shape: (n_ranges,) for 2D fields; (n_freqs, n_ranges) for 3D
-            broadband fields.
+            Shape ``(n_ranges,)`` for 2D fields; ``(n_freqs, n_ranges)``
+            for 3D broadband fields.
         """
         d_idx = np.argmin(np.abs(self.depths - depth))
 
         if len(self.data.shape) == 2:
             return self.data[d_idx, :]
         elif len(self.data.shape) == 3:
-            # data shape is (n_depths, n_freqs, n_ranges)
             return self.data[d_idx, :, :]
         else:
             raise ValueError("Unsupported data shape")
 
     def to_db(self) -> 'Field':
         """
-        Convert to dB scale (if not already)
+        Convert the field to a dB scale.
 
         Returns
         -------
         field_db : Field
-            New field with data in dB
+            New field with data in dB. TL fields are returned as-is since
+            they are already in dB.
         """
         if self.field_type == 'tl':
-            # Already in dB typically
             return self
 
         if self.field_type == 'pressure':
-            # Convert complex pressure to dB with proper handling of shadow zones
             p_abs = np.abs(self.data)
-            # Set floor to prevent extreme TL values in shadow zones
+            # Floor prevents extreme values in shadow zones where |p| ≈ 0.
             p_abs = np.maximum(p_abs, PRESSURE_FLOOR)
             data_db = 20 * np.log10(p_abs)
-            # Note: This is pressure level in dB, not TL
-            # For TL (transmission loss), use negative: TL = -data_db
-            # But this method is to_db() for general pressure-to-dB conversion
             return Field(
                 field_type='tl',
                 data=data_db,
@@ -477,16 +468,16 @@ class Field:
 
     def get_max(self) -> Tuple[float, float, float]:
         """
-        Get location and value of maximum field
+        Get the location and value of the field maximum.
 
         Returns
         -------
         max_value : float
-            Maximum field value
+            Maximum field value.
         max_range : float
-            Range of maximum
+            Range of the maximum.
         max_depth : float
-            Depth of maximum
+            Depth of the maximum.
         """
         if self.field_type in ['rays', 'arrivals', 'eigenrays', 'time_series']:
             raise ValueError(f"get_max not supported for field_type='{self.field_type}'")
@@ -499,12 +490,12 @@ class Field:
 
     def extract_rays(self) -> Dict[str, np.ndarray]:
         """
-        Extract ray path data (for ray-type fields)
+        Extract ray path data from a ``rays`` or ``eigenrays`` field.
 
         Returns
         -------
         rays : dict
-            Dictionary with ray data. Keys depend on model output.
+            Dictionary with ray data. Keys depend on the model output.
         """
         if self.field_type not in ['rays', 'eigenrays']:
             raise ValueError(f"extract_rays only for ray-type fields")
@@ -513,12 +504,12 @@ class Field:
 
     def extract_arrivals(self) -> Dict[str, np.ndarray]:
         """
-        Extract arrival data (for arrivals-type fields)
+        Extract arrival data from an ``arrivals`` field.
 
         Returns
         -------
         arrivals : dict
-            Dictionary with arrival data (times, amplitudes, angles, etc.)
+            Dictionary with arrival data (times, amplitudes, angles, ...).
         """
         if self.field_type != 'arrivals':
             raise ValueError("extract_arrivals only for arrivals-type fields")
@@ -531,7 +522,7 @@ class Field:
                 f"{self.n_ranges} ranges, {self.n_depths} depths)")
 
     def copy(self):
-        """Create a deep copy of the field"""
+        """Return a deep copy of the field."""
         return Field(
             field_type=self.field_type,
             data=self.data.copy(),
@@ -543,10 +534,10 @@ class Field:
 
     def plot(self, env=None, **kwargs):
         """
-        Plot the field (automatically detects type and calls appropriate function)
+        Plot the field, dispatching on ``field_type``.
 
-        This is the simple, unified plotting interface. The method automatically
-        detects the field type and calls the appropriate plotting function.
+        Simple unified interface that forwards to the appropriate function
+        in ``uacpy.visualization.plots``.
 
         Parameters
         ----------
@@ -609,7 +600,7 @@ class Field:
         control, you can still use the dedicated plotting functions from
         uacpy.visualization.plots directly.
         """
-        # Import here to avoid circular dependency
+        # Local import: breaks the visualization -> core circular dependency.
         from uacpy.visualization import plots
 
         if self.field_type == 'tl':
@@ -623,11 +614,9 @@ class Field:
             return plots.plot_arrivals(self, **kwargs)
 
         elif self.field_type == 'modes':
-            # plot_modes() now accepts Field objects directly
             return plots.plot_modes(self, **kwargs)
 
         elif self.field_type == 'pressure':
-            # Convert to TL first
             field_tl = self.to_db()
             return plots.plot_transmission_loss(field_tl, env=env, **kwargs)
 
@@ -643,7 +632,7 @@ class Field:
     @staticmethod
     def plot_comparison(results, env=None, **kwargs):
         """
-        Compare multiple model results in a single plot
+        Compare multiple model results in a single plot.
 
         Parameters
         ----------
@@ -694,13 +683,9 @@ class Field:
         uacpy.visualization.plots directly (compare_models, compare_range_cuts,
         plot_model_statistics, etc.)
         """
-        # Import here to avoid circular dependency
         from uacpy.visualization import plots
 
-        # Use the appropriate comparison function
         if 'depth' in kwargs:
-            # Range cut comparison at specific depth
             return plots.compare_range_cuts(results, **kwargs)
         else:
-            # Full field comparison
             return plots.compare_models(results, env=env, **kwargs)

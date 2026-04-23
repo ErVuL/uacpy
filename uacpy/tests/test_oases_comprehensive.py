@@ -24,11 +24,11 @@ from uacpy.core.exceptions import ExecutableNotFoundError
 
 
 class TestOAST:
-    """Tests for OAST (transmission loss via wavenumber integration)"""
+    """Tests for OAST (transmission loss via wavenumber integration)."""
 
     @pytest.fixture
     def oast_env(self):
-        """Create simple environment for OAST"""
+        """Create simple environment for OAST."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -55,13 +55,13 @@ class TestOAST:
 
     @pytest.mark.requires_binary
     def test_oast_instantiation(self):
-        """Test creating OAST instance"""
+        """Test creating OAST instance."""
         oast = OAST(verbose=False)
         assert oast.model_name == 'OAST'
 
     @pytest.mark.requires_binary
     def test_oast_compute_tl(self, oast_env, source, receiver):
-        """Test OAST transmission loss computation"""
+        """Test OAST transmission loss computation."""
         try:
             oast = OAST(verbose=False)
             result = oast.compute_tl(
@@ -82,7 +82,7 @@ class TestOAST:
 
     @pytest.mark.requires_binary
     def test_oast_elastic_bottom(self, source, receiver):
-        """Test OAST with elastic bottom (shear waves)"""
+        """Test OAST with elastic bottom (shear waves)."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0,
@@ -108,11 +108,11 @@ class TestOAST:
 
 
 class TestOASN:
-    """Tests for OASN (normal modes)"""
+    """Tests for OASN (normal modes)."""
 
     @pytest.fixture
     def oasn_env(self):
-        """Create environment for OASN"""
+        """Create environment for OASN."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -136,7 +136,7 @@ class TestOASN:
 
     @pytest.mark.requires_binary
     def test_oasn_instantiation(self):
-        """Test creating OASN instance"""
+        """Test creating OASN instance."""
         oasn = OASN(verbose=False)
         assert oasn.model_name == 'OASN'
 
@@ -169,7 +169,7 @@ class TestOASN:
     @pytest.mark.requires_binary
     @pytest.mark.xfail(reason="OASN binary crashes on elastic input (inenvi_ error)")
     def test_oasn_elastic_modes(self, source, receiver):
-        """Test OASN with elastic bottom"""
+        """Test OASN with elastic bottom."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0,
@@ -194,11 +194,11 @@ class TestOASN:
 
 
 class TestOASR:
-    """Tests for OASR (reflection coefficients)"""
+    """Tests for OASR (reflection coefficients)."""
 
     @pytest.fixture
     def oasr_env(self):
-        """Create environment for OASR"""
+        """Create environment for OASR."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -224,13 +224,13 @@ class TestOASR:
 
     @pytest.mark.requires_binary
     def test_oasr_instantiation(self):
-        """Test creating OASR instance"""
+        """Test creating OASR instance."""
         oasr = OASR(verbose=False)
         assert oasr.model_name == 'OASR'
 
     @pytest.mark.requires_binary
     def test_oasr_reflection_coefficients(self, oasr_env, source, receiver):
-        """Test OASR reflection coefficient computation"""
+        """Test OASR reflection coefficient computation."""
         try:
             oasr = OASR(verbose=False)
 
@@ -257,7 +257,7 @@ class TestOASR:
 
     @pytest.mark.requires_binary
     def test_oasr_angle_resolution(self, oasr_env, source, receiver):
-        """Test OASR with different angle resolutions"""
+        """Test OASR with different angle resolutions."""
         try:
             oasr = OASR(verbose=False)
 
@@ -277,11 +277,11 @@ class TestOASR:
 
 
 class TestOASP:
-    """Tests for OASP (parabolic equation)"""
+    """Tests for OASP (parabolic equation)."""
 
     @pytest.fixture
     def oasp_env(self):
-        """Create environment for OASP"""
+        """Create environment for OASP."""
         # OASP handles range-dependent scenarios well
         bathymetry = np.column_stack([
             np.linspace(0, 10000, 21),
@@ -316,14 +316,14 @@ class TestOASP:
 
     @pytest.mark.requires_binary
     def test_oasp_instantiation(self):
-        """Test creating OASP instance"""
+        """Test creating OASP instance."""
         oasp = OASP(verbose=False)
         assert oasp.model_name == 'OASP'
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oasp_range_dependent(self, oasp_env, source, receiver):
-        """Test OASP range-dependent propagation"""
+        """Test OASP range-dependent propagation."""
         try:
             oasp = OASP(verbose=False)
             result = oasp.compute_tl(
@@ -342,7 +342,7 @@ class TestOASP:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oasp_broadband(self, oasp_env, receiver):
-        """Test OASP broadband output"""
+        """Test OASP broadband output."""
         # Multiple frequencies for broadband
         source = Source(
             depth=50.0,
@@ -365,17 +365,17 @@ class TestOASP:
 
 
 class TestOASESUnified:
-    """Tests for unified OASES interface"""
+    """Tests for unified OASES interface."""
 
     @pytest.mark.requires_binary
     def test_oases_instantiation(self):
-        """Test unified OASES interface"""
+        """Test unified OASES interface."""
         oases = OASES(verbose=False)
         assert oases.model_name == 'OASES'
 
     @pytest.mark.requires_binary
     def test_oases_auto_select_model(self):
-        """Test that OASES automatically selects appropriate sub-model"""
+        """Test that OASES automatically selects appropriate sub-model."""
         env = Environment(
             name="oases_test",
             depth=100.0,
@@ -399,12 +399,12 @@ class TestOASESUnified:
 
 
 class TestOASESComparison:
-    """Compare OASES models with other models"""
+    """Compare OASES models with other models."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oast_vs_bellhop(self):
-        """Compare OAST and Bellhop for simple case"""
+        """Compare OAST and Bellhop for simple case."""
         from uacpy.models import Bellhop
 
         env = Environment(
@@ -445,7 +445,7 @@ class TestOASESComparison:
     @pytest.mark.slow
     @pytest.mark.xfail(reason="OASN binary crashes on elastic input (inenvi_ error)")
     def test_oasn_vs_kraken(self):
-        """Compare OASN and Kraken for mode computation"""
+        """Compare OASN and Kraken for mode computation."""
         from uacpy.models import Kraken
 
         env = Environment(
@@ -477,7 +477,7 @@ class TestOASESComparison:
 # Integration test to verify all OASES models can be imported and instantiated
 @pytest.mark.requires_binary
 def test_all_oases_models_importable():
-    """Verify all OASES models can be imported and instantiated"""
+    """Verify all OASES models can be imported and instantiated."""
     models = {
         'OAST': OAST,
         'OASN': OASN,

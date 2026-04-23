@@ -417,7 +417,7 @@ class ATEnvWriter:
 
     @staticmethod
     def write_source_depths(f: TextIO, source: Source) -> None:
-        """Write source depth section"""
+        """Write the source-depth section of an Acoustics Toolbox ``.env`` file."""
         n_sources = len(source.depth)
         f.write(f"{n_sources}\n")
         depths_str = " ".join([f"{d:.6f}" for d in source.depth])
@@ -425,7 +425,7 @@ class ATEnvWriter:
 
     @staticmethod
     def write_receiver_depths(f: TextIO, receiver: Receiver) -> None:
-        """Write receiver depth section"""
+        """Write the receiver-depth section of an Acoustics Toolbox ``.env`` file."""
         n_rd = len(receiver.depths)
         f.write(f"{n_rd}\n")
         depths_str = " ".join([f"{d:.6f}" for d in receiver.depths])
@@ -433,10 +433,9 @@ class ATEnvWriter:
 
     @staticmethod
     def write_receiver_ranges(f: TextIO, receiver: Receiver) -> None:
-        """Write receiver range section"""
+        """Write the receiver-range section (ranges converted from m to km)."""
         n_rr = len(receiver.ranges)
         f.write(f"{n_rr}\n")
-        # Convert to km
         ranges_str = " ".join([f"{r/1000.0:.6f}" for r in receiver.ranges])
         f.write(f"{ranges_str} /\n")
 

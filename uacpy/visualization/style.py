@@ -50,7 +50,7 @@ COLORMAPS = {
 
 def apply_professional_style(dpi: int = 150):
     """
-    Apply professional matplotlib styling globally
+    Apply professional matplotlib styling globally.
 
     Parameters
     ----------
@@ -58,57 +58,48 @@ def apply_professional_style(dpi: int = 150):
         Dots per inch for figure resolution. Default is 150 (high quality).
         Use 300 for publication-quality figures.
     """
-    # Reset to defaults first
     mpl.rcdefaults()
 
-    # Professional style configuration
     style_dict = {
-        # Figure settings
         'figure.dpi': dpi,
         'figure.figsize': (10, 6),
         'figure.facecolor': 'white',
         'figure.edgecolor': 'white',
-        'figure.autolayout': False,  # Use tight_layout instead
+        'figure.autolayout': False,
 
-        # Axes settings
         'axes.facecolor': 'white',
         'axes.edgecolor': COLORS['dark'],
         'axes.linewidth': 1.2,
         'axes.grid': True,
-        'axes.axisbelow': True,  # Grid behind data
+        'axes.axisbelow': True,
         'axes.labelsize': 12,
         'axes.titlesize': 14,
         'axes.titleweight': 'bold',
         'axes.labelweight': 'normal',
-        'axes.spines.top': False,     # Remove top spine
-        'axes.spines.right': False,   # Remove right spine
+        'axes.spines.top': False,
+        'axes.spines.right': False,
         'axes.prop_cycle': mpl.cycler(color=[
             COLORS['primary'], COLORS['success'], COLORS['secondary'],
             COLORS['warning'], COLORS['danger']
         ]),
 
-        # Grid settings
         'grid.color': COLORS['grid'],
         'grid.linestyle': '-',
         'grid.linewidth': 0.5,
         'grid.alpha': 0.6,
 
-        # Line settings
         'lines.linewidth': 2.0,
         'lines.markersize': 6,
         'lines.markeredgewidth': 0.0,
 
-        # Font settings
         'font.family': 'sans-serif',
         'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif'],
         'font.size': 11,
         'font.weight': 'normal',
 
-        # Text settings
         'text.color': COLORS['dark'],
         'text.antialiased': True,
 
-        # Legend settings
         'legend.fontsize': 10,
         'legend.frameon': True,
         'legend.framealpha': 0.9,
@@ -117,7 +108,6 @@ def apply_professional_style(dpi: int = 150):
         'legend.shadow': False,
         'legend.fancybox': False,
 
-        # Tick settings
         'xtick.labelsize': 10,
         'ytick.labelsize': 10,
         'xtick.direction': 'out',
@@ -131,7 +121,6 @@ def apply_professional_style(dpi: int = 150):
         'xtick.color': COLORS['dark'],
         'ytick.color': COLORS['dark'],
 
-        # Saving settings
         'savefig.dpi': dpi,
         'savefig.facecolor': 'white',
         'savefig.edgecolor': 'white',
@@ -139,53 +128,51 @@ def apply_professional_style(dpi: int = 150):
         'savefig.pad_inches': 0.1,
         'savefig.transparent': False,
 
-        # Image settings
-        'image.cmap': 'RdYlBu_r',      # Default colormap
+        'image.cmap': 'RdYlBu_r',
         'image.interpolation': 'bilinear',
         'image.origin': 'upper',
 
-        # PDF settings (for vector output)
-        'pdf.fonttype': 42,            # TrueType fonts in PDF
+        # TrueType fonts in PDF/PS (avoids Type 3 embedding for ACM/IEEE).
+        'pdf.fonttype': 42,
         'ps.fonttype': 42,
 
-        # SVG settings
-        'svg.fonttype': 'none',        # Embed fonts in SVG
+        # Embed fonts in SVG.
+        'svg.fonttype': 'none',
     }
 
-    # Apply settings
     mpl.rcParams.update(style_dict)
 
 
 def get_model_color(model_name: str) -> str:
     """
-    Get professional color for a model
+    Return the professional color assigned to a model.
 
     Parameters
     ----------
     model_name : str
-        Model name
+        Model name.
 
     Returns
     -------
     color : str
-        Hex color code
+        Hex color code (falls back to the primary color for unknown models).
     """
     return MODEL_COLORS.get(model_name, COLORS['primary'])
 
 
 def get_cmap_for_field(field_type: str) -> str:
     """
-    Get appropriate colormap for field type
+    Return the colormap name associated with a field type.
 
     Parameters
     ----------
     field_type : str
-        Field type ('tl', 'pressure', 'ssp', etc.)
+        Field type ('tl', 'pressure', 'ssp', ...).
 
     Returns
     -------
     cmap : str
-        Colormap name
+        Colormap name (falls back to ``'viridis'`` for unknown types).
     """
     return COLORMAPS.get(field_type, 'viridis')
 
@@ -194,18 +181,18 @@ def format_axes_professional(ax, title: Optional[str] = None,
                             xlabel: Optional[str] = None,
                             ylabel: Optional[str] = None):
     """
-    Apply professional formatting to axes
+    Apply professional formatting to a single axes.
 
     Parameters
     ----------
     ax : matplotlib.axes.Axes
-        Axes to format
+        Axes to format.
     title : str, optional
-        Axes title
+        Axes title.
     xlabel : str, optional
-        X-axis label
+        X-axis label.
     ylabel : str, optional
-        Y-axis label
+        Y-axis label.
     """
     if title:
         ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
@@ -216,42 +203,38 @@ def format_axes_professional(ax, title: Optional[str] = None,
     if ylabel:
         ax.set_ylabel(ylabel, fontsize=12, fontweight='normal')
 
-    # Add grid
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
     ax.set_axisbelow(True)
 
-    # Remove top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Thicken remaining spines
     ax.spines['bottom'].set_linewidth(1.2)
     ax.spines['left'].set_linewidth(1.2)
 
-    # Tick parameters
     ax.tick_params(axis='both', which='major', labelsize=10,
                    length=5, width=1.0, direction='out')
 
 
 def create_professional_colorbar(fig, im, ax, label: str = ''):
     """
-    Create a professional-looking colorbar
+    Create a professional-looking colorbar.
 
     Parameters
     ----------
     fig : matplotlib.figure.Figure
-        Figure object
+        Figure object.
     im : matplotlib.image.AxesImage
-        Image to create colorbar for
+        Image to create a colorbar for.
     ax : matplotlib.axes.Axes
-        Axes the image is on
+        Axes the image is on.
     label : str, optional
-        Colorbar label
+        Colorbar label.
 
     Returns
     -------
     cbar : matplotlib.colorbar.Colorbar
-        Colorbar object
+        Colorbar object.
     """
     cbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.046)
     cbar.set_label(label, fontsize=11, fontweight='normal')

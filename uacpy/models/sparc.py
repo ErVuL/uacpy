@@ -318,11 +318,8 @@ class SPARC(PropagationModel):
             return self._run_impl(env, source, receiver, run_mode, **kwargs)
 
     def _run_impl(self, env, source, receiver, run_mode, **kwargs):
-        """Internal run implementation (called within override context)"""
-        # Handle range-dependent environments
+        """Internal run implementation (called within the override context)."""
         env = self._handle_range_dependent_environment(env, alternatives='Bellhop or RAM')
-
-        # Clip receiver depths to environment depth (with safety margin)
         receiver = self._clip_receiver_depths(receiver, env.depth)
 
         # SPARC limitation: horizontal array mode requires one run per depth

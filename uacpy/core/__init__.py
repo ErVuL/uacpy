@@ -10,7 +10,6 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.field import Field
 
-# Import acoustics utilities
 try:
     from uacpy.core import acoustics
 except ImportError:

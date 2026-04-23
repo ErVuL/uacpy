@@ -25,11 +25,11 @@ from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureErr
 
 
 class TestBellhopRunModes:
-    """Test all Bellhop run modes systematically"""
+    """Test all Bellhop run modes systematically."""
 
     @pytest.fixture
     def setup_env(self):
-        """Create environment for run mode tests"""
+        """Create environment for run mode tests."""
         return Environment(
             name="run_mode_test",
             depth=100.0,
@@ -50,7 +50,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_coherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop coherent TL (run_mode=RunMode.COHERENT_TL)"""
+        """Test Bellhop coherent TL (run_mode=RunMode.COHERENT_TL)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
@@ -66,7 +66,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_incoherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop incoherent TL (run_mode=RunMode.INCOHERENT_TL)"""
+        """Test Bellhop incoherent TL (run_mode=RunMode.INCOHERENT_TL)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
@@ -81,7 +81,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_semicoherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)"""
+        """Test Bellhop semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
@@ -96,7 +96,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_rays(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop ray tracing (run_mode=RunMode.RAYS)"""
+        """Test Bellhop ray tracing (run_mode=RunMode.RAYS)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
@@ -118,7 +118,7 @@ class TestBellhopRunModes:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_bellhop_eigenrays(self, setup_env, setup_source):
-        """Test Bellhop eigenrays (run_mode=RunMode.EIGENRAYS)"""
+        """Test Bellhop eigenrays (run_mode=RunMode.EIGENRAYS)."""
         bellhop = Bellhop(verbose=False)
 
         # Eigenrays need a specific receiver point
@@ -140,7 +140,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_arrivals(self, setup_env, setup_source):
-        """Test Bellhop arrivals (run_mode=RunMode.ARRIVALS)"""
+        """Test Bellhop arrivals (run_mode=RunMode.ARRIVALS)."""
         bellhop = Bellhop(verbose=False)
 
         # Arrivals at specific points
@@ -160,7 +160,7 @@ class TestBellhopRunModes:
 
 @pytest.mark.requires_binary
 class TestRAMAdvancedParameters:
-    """Test RAM Pade orders and stability parameters"""
+    """Test RAM Pade orders and stability parameters."""
 
     @pytest.fixture
     def ram_env(self):
@@ -183,7 +183,7 @@ class TestRAMAdvancedParameters:
         )
 
     def test_ram_pade_order_2(self, ram_env, ram_source, ram_receiver):
-        """Test RAM with Pade order 2"""
+        """Test RAM with Pade order 2."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(
@@ -198,7 +198,7 @@ class TestRAMAdvancedParameters:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_pade_order_6(self, ram_env, ram_source, ram_receiver):
-        """Test RAM with Pade order 6"""
+        """Test RAM with Pade order 6."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(
@@ -213,7 +213,7 @@ class TestRAMAdvancedParameters:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_pade_order_8(self, ram_env, ram_source, ram_receiver):
-        """Test RAM with Pade order 8"""
+        """Test RAM with Pade order 8."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(
@@ -228,7 +228,7 @@ class TestRAMAdvancedParameters:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
-        """Test RAM stability parameter"""
+        """Test RAM stability parameter."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(
@@ -243,7 +243,7 @@ class TestRAMAdvancedParameters:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
-        """Test RAM with custom range and depth steps"""
+        """Test RAM with custom range and depth steps."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(
@@ -260,7 +260,7 @@ class TestRAMAdvancedParameters:
 
 
 class TestSSPInterpolationMethods:
-    """Test different SSP interpolation types"""
+    """Test different SSP interpolation types."""
 
     @pytest.fixture
     def source(self):
@@ -275,7 +275,7 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_isovelocity(self, source, receiver):
-        """Test isovelocity SSP"""
+        """Test isovelocity SSP."""
         env = Environment(
             name="iso_test",
             depth=100.0,
@@ -289,7 +289,7 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_linear(self, source, receiver):
-        """Test linear SSP interpolation"""
+        """Test linear SSP interpolation."""
         depths = np.array([0, 50, 100])
         speeds = np.array([1500, 1490, 1480])
 
@@ -306,7 +306,7 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_c_linear(self, source, receiver):
-        """Test c-linear SSP interpolation (maps to 'linear' in UACPY)"""
+        """Test c-linear SSP interpolation (maps to 'linear' in UACPY)."""
         # Note: UACPY uses 'linear' for what Acoustics Toolbox calls 'C' (c-linear)
         depths = np.array([0, 50, 100])
         speeds = np.array([1500, 1490, 1480])
@@ -324,7 +324,7 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_cubic(self, source, receiver):
-        """Test cubic spline SSP interpolation"""
+        """Test cubic spline SSP interpolation."""
         depths = np.array([0, 25, 50, 75, 100])
         speeds = np.array([1500, 1495, 1490, 1485, 1480])
 
@@ -341,7 +341,7 @@ class TestSSPInterpolationMethods:
 
 
 class TestBoundaryTypes:
-    """Test different boundary condition types"""
+    """Test different boundary condition types."""
 
     @pytest.fixture
     def source(self):
@@ -356,7 +356,7 @@ class TestBoundaryTypes:
 
     @pytest.mark.requires_binary
     def test_boundary_vacuum(self, source, receiver):
-        """Test vacuum boundary condition"""
+        """Test vacuum boundary condition."""
         bottom = BoundaryProperties(acoustic_type='vacuum')
         env = Environment(
             name="vacuum_test",
@@ -371,7 +371,7 @@ class TestBoundaryTypes:
 
     @pytest.mark.requires_binary
     def test_boundary_rigid(self, source, receiver):
-        """Test rigid boundary condition"""
+        """Test rigid boundary condition."""
         bottom = BoundaryProperties(acoustic_type='rigid')
         env = Environment(
             name="rigid_test",
@@ -386,7 +386,7 @@ class TestBoundaryTypes:
 
     @pytest.mark.requires_binary
     def test_boundary_halfspace(self, source, receiver):
-        """Test half-space boundary condition"""
+        """Test half-space boundary condition."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -406,7 +406,7 @@ class TestBoundaryTypes:
 
     @pytest.mark.requires_binary
     def test_boundary_elastic(self, source, receiver):
-        """Test elastic boundary with shear waves"""
+        """Test elastic boundary with shear waves."""
         bottom = BoundaryProperties(
             acoustic_type='elastic',
             sound_speed=1700.0,
@@ -428,11 +428,11 @@ class TestBoundaryTypes:
 
 
 class TestKrakenCComplexModes:
-    """Test KrakenC for complex modes with elastic bottom"""
+    """Test KrakenC for complex modes with elastic bottom."""
 
     @pytest.fixture
     def elastic_env(self):
-        """Create environment with elastic bottom"""
+        """Create environment with elastic bottom."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -458,7 +458,7 @@ class TestKrakenCComplexModes:
 
     @pytest.mark.requires_binary
     def test_krakenc_complex_modes(self, elastic_env, source, receiver):
-        """Test KrakenC complex mode computation"""
+        """Test KrakenC complex mode computation."""
         krakenc = KrakenC(verbose=False)
 
         modes = krakenc.run(
@@ -478,11 +478,11 @@ class TestKrakenCComplexModes:
 
 
 class TestScooterBasic:
-    """Basic tests for Scooter model (wavenumber integration)"""
+    """Basic tests for Scooter model (wavenumber integration)."""
 
     @pytest.mark.requires_binary
     def test_scooter_basic_tl(self):
-        """Test basic Scooter TL computation"""
+        """Test basic Scooter TL computation."""
         env = Environment(
             name="scooter_test",
             depth=100.0,
@@ -503,12 +503,12 @@ class TestScooterBasic:
 
 
 class TestSPARCBasic:
-    """Basic tests for SPARC model (seismo-acoustic PE)"""
+    """Basic tests for SPARC model (seismo-acoustic PE)."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_sparc_basic_tl(self):
-        """Test basic SPARC TL computation"""
+        """Test basic SPARC TL computation."""
         env = Environment(
             name="sparc_test",
             depth=100.0,
@@ -528,11 +528,11 @@ class TestSPARCBasic:
 
 
 class TestVolumeAttenuation:
-    """Tests for volume attenuation models (Priority 1 gap)"""
+    """Tests for volume attenuation models (Priority 1 gap)."""
 
     @pytest.fixture
     def shallow_env(self):
-        """Shallow water environment for attenuation tests"""
+        """Shallow water environment for attenuation tests."""
         return Environment(
             name="atten_test",
             depth=100.0,
@@ -541,12 +541,12 @@ class TestVolumeAttenuation:
 
     @pytest.fixture
     def high_freq_source(self):
-        """High frequency source where attenuation is significant"""
+        """High frequency source where attenuation is significant."""
         return Source(depth=50.0, frequency=10000.0)  # 10 kHz
 
     @pytest.fixture
     def low_freq_source(self):
-        """Low frequency source where attenuation is minimal"""
+        """Low frequency source where attenuation is minimal."""
         return Source(depth=50.0, frequency=100.0)  # 100 Hz
 
     @pytest.fixture
@@ -555,7 +555,7 @@ class TestVolumeAttenuation:
 
     @pytest.mark.requires_binary
     def test_bellhop_thorp_attenuation(self, shallow_env, high_freq_source, receiver):
-        """Test Bellhop with Thorp attenuation formula"""
+        """Test Bellhop with Thorp attenuation formula."""
         bellhop_no_atten = Bellhop(verbose=False)
         bellhop_thorp = Bellhop(verbose=False, volume_attenuation='T')
 
@@ -581,7 +581,7 @@ class TestVolumeAttenuation:
 
     @pytest.mark.requires_binary
     def test_kraken_thorp_attenuation(self, shallow_env, high_freq_source, receiver):
-        """Test Kraken with Thorp attenuation formula"""
+        """Test Kraken with Thorp attenuation formula."""
         kraken = Kraken(verbose=False, volume_attenuation='T')
 
         # Compute modes with attenuation
@@ -596,7 +596,7 @@ class TestVolumeAttenuation:
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env, low_freq_source, high_freq_source, receiver):
-        """Test that attenuation increases with frequency"""
+        """Test that attenuation increases with frequency."""
         bellhop = Bellhop(verbose=False, volume_attenuation='T')
 
         # Low frequency with Thorp
@@ -623,7 +623,7 @@ class TestVolumeAttenuation:
 
     @pytest.mark.requires_binary
     def test_attenuation_with_scooter(self, shallow_env, high_freq_source, receiver):
-        """Test Scooter with volume attenuation"""
+        """Test Scooter with volume attenuation."""
         scooter = Scooter(verbose=False, volume_attenuation='T')
 
         result = scooter.run(
@@ -637,7 +637,7 @@ class TestVolumeAttenuation:
 
 
 class TestAdvancedBeamTypes:
-    """Tests for advanced Bellhop beam types (Priority 1 gap)"""
+    """Tests for advanced Bellhop beam types (Priority 1 gap)."""
 
     @pytest.fixture
     def env(self):
@@ -657,7 +657,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_gaussian_beam(self, env, source, receiver):
-        """Test Gaussian beam (type 'B' - default)"""
+        """Test Gaussian beam (type 'B' - default)."""
         bellhop = Bellhop(verbose=False, beam_type='B')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
@@ -665,7 +665,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_geometric_beam_hat(self, env, source, receiver):
-        """Test geometric hat beam (type 'G')"""
+        """Test geometric hat beam (type 'G')."""
         bellhop = Bellhop(verbose=False, beam_type='G')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
@@ -673,7 +673,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_simple_gaussian_beam(self, env, source, receiver):
-        """Test simple Gaussian beam (type 'S')"""
+        """Test simple Gaussian beam (type 'S')."""
         bellhop = Bellhop(verbose=False, beam_type='S')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
@@ -681,7 +681,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_cartesian_beam(self, env, source, receiver):
-        """Test Cartesian beam (type 'C')"""
+        """Test Cartesian beam (type 'C')."""
         bellhop = Bellhop(verbose=False, beam_type='C')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
@@ -689,7 +689,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_ray_centered_beam(self, env, source, receiver):
-        """Test ray-centered beam (type 'R')"""
+        """Test ray-centered beam (type 'R')."""
         bellhop = Bellhop(verbose=False, beam_type='R')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'

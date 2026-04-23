@@ -33,20 +33,20 @@ def sparc_simple_env():
 
 @pytest.fixture
 def source_50hz():
-    """50 Hz source at 50m depth"""
+    """50 Hz source at 50m depth."""
     return Source(depth=50.0, frequency=50.0)
 
 
 @pytest.fixture
 def receiver_grid():
-    """Standard receiver grid"""
+    """Standard receiver grid."""
     depths = np.array([30.0, 50.0, 70.0])
     ranges = np.linspace(100, 1000, 10)
     return Receiver(depths=depths, ranges=ranges)
 
 
 class TestSPARCOutputModes:
-    """Test SPARC output modes"""
+    """Test SPARC output modes."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -142,7 +142,7 @@ class TestSPARCOutputModes:
 
 
 class TestSPARCModeComparison:
-    """Compare results from different SPARC modes"""
+    """Compare results from different SPARC modes."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -187,16 +187,16 @@ class TestSPARCModeComparison:
 
 
 class TestSPARCErrorHandling:
-    """Test SPARC error handling for output modes"""
+    """Test SPARC error handling for output modes."""
 
     def test_sparc_invalid_output_mode(self, sparc_simple_env, source_50hz, receiver_grid):
-        """Test error handling for invalid output mode"""
+        """Test error handling for invalid output mode."""
         with pytest.raises(ValueError, match="Invalid output mode"):
             SPARC(output_mode='X')  # Invalid mode
 
     @pytest.mark.requires_binary
     def test_sparc_halfspace_warning(self, source_50hz, receiver_grid):
-        """Test that halfspace bottom generates warning"""
+        """Test that halfspace bottom generates warning."""
         try:
             env = Environment(name="Test", depth=100, sound_speed=1500)
             env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
@@ -214,7 +214,7 @@ class TestSPARCErrorHandling:
 
 
 class TestSPARCPerformance:
-    """Test SPARC performance characteristics"""
+    """Test SPARC performance characteristics."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow

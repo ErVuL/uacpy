@@ -1,6 +1,4 @@
-"""
-I/O utilities for acoustic model file handling
-"""
+"""I/O utilities for acoustic model file handling."""
 
 from uacpy.io.file_manager import FileManager
 from uacpy.io.env_writer import (

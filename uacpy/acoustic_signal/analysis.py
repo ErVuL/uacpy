@@ -133,6 +133,7 @@ class PPSD:
         return freqs, levels, pdf_matrix
 
     def plot(self, title="", ymin=0, ymax=200, vmin=0, vmax=None):
+        """Plot the computed PSD PDF as a 2-D histogram over frequency/level."""
         if vmax is None:
             vmax = 1 / self.binwidth_dB
 
@@ -171,6 +172,8 @@ class PPSD:
 
 
 class Spectrogram:
+    """Spectrogram computation and visualization."""
+
     def __init__(self, ref=1e-6, **kwargs):
         """
         Spectrogram computation and visualization class.
@@ -283,6 +286,8 @@ class Spectrogram:
 
 
 class SEL:
+    """Sound Exposure Level (SEL) computation in configurable frequency bands."""
+
     def __init__(
         self,
         fmin=8.9125,
@@ -656,6 +661,7 @@ class PSD:
         return fig, ax
 
     def add_to_plot(self, ax, Fxx=None, Pxx=None, ref=None, label="", **kwargs):
+        """Overlay a PSD curve on an existing axes (defaults to this instance's data)."""
         if Fxx is None and Pxx is None:
             Fxx = self.freqs
             Pxx = self.psd
@@ -671,6 +677,8 @@ class PSD:
 
 
 class FRF:
+    """Frequency Response Function (FRF) computation and visualization."""
+
     def __init__(self, method="welch", estimator="H1", m=512, **kwargs):
         """
         Transfer Function (Frequency Response Function, FRF) computation and visualization class.
@@ -1292,6 +1300,7 @@ class FRF:
         return fig, ax
 
     def add_coherence_to_plot(self, axes, title="", label="", **kwargs):
+        """Overlay this instance's coherence curve on an existing axes."""
         ax = axes
 
         if label != "":
@@ -1459,7 +1468,8 @@ class FRF:
         return axes
 
 class FKTransform:
-    
+    """Frequency-Wavenumber (f-k) transform computation and visualization."""
+
     def __init__(self, ref=1e-6, **kwargs):
         """
         Frequency-Wavenumber (f-k) transform computation and visualization class.

@@ -1,6 +1,4 @@
-"""
-Utilities for working with SHD (shade) files
-"""
+"""Utilities for working with SHD (shade) files."""
 
 import numpy as np
 from pathlib import Path

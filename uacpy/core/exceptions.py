@@ -6,7 +6,7 @@ Provides structured error handling with helpful remediation messages.
 
 
 class UACPYError(Exception):
-    """Base exception for all UACPY errors"""
+    """Base exception for all UACPY errors."""
 
     def __init__(self, message: str, remediation: str = None):
         self.message = message
@@ -21,12 +21,12 @@ class UACPYError(Exception):
 
 
 class ModelError(UACPYError):
-    """Base class for model-specific errors"""
+    """Base class for model-specific errors."""
     pass
 
 
 class ExecutableNotFoundError(ModelError):
-    """Model executable not found"""
+    """Raised when a compiled model executable cannot be located."""
 
     def __init__(self, model_name: str, executable: str, search_paths: list = None):
         message = f"{model_name} executable not found: {executable}"
@@ -47,7 +47,7 @@ class ExecutableNotFoundError(ModelError):
 
 
 class ModelExecutionError(ModelError):
-    """Model execution failed"""
+    """Raised when a model subprocess exits with a non-zero code."""
 
     def __init__(self, model_name: str, return_code: int, stdout: str = None, stderr: str = None):
         message = f"{model_name} execution failed (exit code: {return_code})"
@@ -75,12 +75,12 @@ class ModelExecutionError(ModelError):
 
 
 class EnvironmentError(UACPYError):
-    """Environment configuration errors"""
+    """Base class for environment-configuration errors."""
     pass
 
 
 class InvalidDepthError(EnvironmentError):
-    """Depth validation error"""
+    """Raised when a source or receiver depth exceeds the environment depth."""
 
     def __init__(self, depth: float, max_depth: float, context: str):
         message = f"{context} depth ({depth:.1f}m) exceeds environment depth ({max_depth:.1f}m)"
@@ -92,7 +92,7 @@ class InvalidDepthError(EnvironmentError):
 
 
 class UnsupportedFeatureError(UACPYError):
-    """Model doesn't support requested feature"""
+    """Raised when a model cannot satisfy the requested feature."""
 
     def __init__(self, model_name: str, feature: str, alternatives: list = None):
         message = f"{model_name} does not support: {feature}"
@@ -108,5 +108,5 @@ class UnsupportedFeatureError(UACPYError):
 
 
 class ConfigurationError(UACPYError):
-    """Configuration file errors"""
+    """Raised for invalid or unreadable configuration files."""
     pass

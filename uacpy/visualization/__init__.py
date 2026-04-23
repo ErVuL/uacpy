@@ -15,7 +15,6 @@ own ``mpl.rcParams`` tweaks to reset to the uacpy defaults, or call
 from uacpy.visualization import style
 style.apply_professional_style()
 
-# Full-featured plotting functions
 from uacpy.visualization.plots import (
     plot_transmission_loss,
     plot_transmission_loss_polar,
@@ -46,11 +45,9 @@ from uacpy.visualization.plots import (
     plot_transfer_function,
 )
 
-# Quick plotting functions (import submodule for ultra-simple plotting)
 from uacpy.visualization import quickplot
 
 __all__ = [
-    # Full plotting functions
     'plot_transmission_loss',
     'plot_transmission_loss_polar',
     'plot_rays',
@@ -78,6 +75,5 @@ __all__ = [
     'plot_mode_wavenumbers',
     'plot_dispersion_curves',
     'plot_transfer_function',
-    # Quick plot module
     'quickplot',
 ]

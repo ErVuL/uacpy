@@ -11,15 +11,19 @@ and reduce code duplication.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from typing import Dict, Optional
 
-# Import from main visualization module
 from uacpy.visualization import (
     plot_transmission_loss,
     plot_environment_advanced,
     plot_comparison_curves,
     plot_model_comparison_matrix
 )
+
+# Resolve relative to this file so outputs always land next to the examples,
+# regardless of the caller's current working directory.
+OUTPUT_DIR = Path(__file__).parent / 'output'
 
 
 def create_example_report(
@@ -97,19 +101,18 @@ def create_example_report(
     # Generate plots
     print(f"\nGenerating plots...")
 
-    # Ensure output directory exists
-    import os
-    os.makedirs('output', exist_ok=True)
+    OUTPUT_DIR.mkdir(exist_ok=True)
 
     # Plot 1: Environment overview
     result = plot_environment_advanced(env, source, receiver)
     if isinstance(result, tuple):
-        fig, _ = result  # Unpack if it returns (fig, axes)
+        fig, _ = result
     else:
         fig = result
-    fig.savefig(f'output/{output_prefix}_environment.png', dpi=150, bbox_inches='tight')
+    env_path = OUTPUT_DIR / f'{output_prefix}_environment.png'
+    fig.savefig(env_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ output/{output_prefix}_environment.png")
+    print(f"  ✓ {env_path}")
 
     # Plot 2: TL fields
     if len(results) > 0:
@@ -127,28 +130,30 @@ def create_example_report(
                 plot_transmission_loss(field, env, ax=axes[idx], vmin=40, vmax=100)
                 axes[idx].set_title(f'{name} - Transmission Loss', fontweight='bold')
 
-        # Hide unused subplots
         for idx in range(len(results), len(axes)):
             axes[idx].axis('off')
 
         plt.tight_layout()
-        fig.savefig(f'output/{output_prefix}_fields.png', dpi=150, bbox_inches='tight')
+        fields_path = OUTPUT_DIR / f'{output_prefix}_fields.png'
+        fig.savefig(fields_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"  ✓ output/{output_prefix}_fields.png")
+        print(f"  ✓ {fields_path}")
 
     # Plot 3: Comparison curves (if multiple models)
     if len(results) >= 2:
         fig, axes = plot_comparison_curves(results, source_depth=source.depth[0])
-        fig.savefig(f'output/{output_prefix}_curves.png', dpi=150, bbox_inches='tight')
+        curves_path = OUTPUT_DIR / f'{output_prefix}_curves.png'
+        fig.savefig(curves_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"  ✓ output/{output_prefix}_curves.png")
+        print(f"  ✓ {curves_path}")
 
     # Plot 4: Comparison matrix (if multiple models)
     if len(results) >= 2:
         fig, ax = plot_model_comparison_matrix(results, comparison_metric='rms', source_depth=source.depth[0])
-        fig.savefig(f'output/{output_prefix}_matrix.png', dpi=150, bbox_inches='tight')
+        matrix_path = OUTPUT_DIR / f'{output_prefix}_matrix.png'
+        fig.savefig(matrix_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"  ✓ output/{output_prefix}_matrix.png")
+        print(f"  ✓ {matrix_path}")
 
     print(f"\nExample {example_num} complete!")
     print("=" * 80 + "\n")

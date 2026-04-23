@@ -1,6 +1,4 @@
-"""
-File manager for handling acoustic model I/O with optional RAM disk support
-"""
+"""File manager for acoustic model I/O with optional RAM-disk support."""
 
 import os
 import tempfile
@@ -12,31 +10,32 @@ from contextlib import contextmanager
 
 class FileManager:
     """
-    Manages temporary files for acoustic models with optional tmpfs support
+    Manage temporary files for acoustic models, optionally on tmpfs.
 
-    This class provides automatic cleanup of temporary files and optional
-    placement in RAM-based filesystem for improved I/O performance.
+    Provides automatic cleanup of temporary files and optional placement in
+    a RAM-based filesystem for improved I/O performance.
 
     Parameters
     ----------
     use_tmpfs : bool, optional
-        Use RAM-based tmpfs filesystem. Default is False.
-        On Linux, uses /dev/shm if available.
+        Use RAM-based tmpfs filesystem. Default is False. On Linux, uses
+        ``/dev/shm`` if available.
     base_dir : str or Path, optional
-        Base directory for file operations. If None, uses system temp.
+        Base directory for file operations. If ``None``, uses the system
+        temp directory.
     prefix : str, optional
-        Prefix for temporary directory names. Default is 'uacpy_'.
+        Prefix for temporary directory names. Default is ``'uacpy_'``.
     cleanup : bool, optional
         Automatically cleanup files on exit. Default is True.
 
     Attributes
     ----------
     work_dir : Path
-        Current working directory for model files
+        Current working directory for model files.
     use_tmpfs : bool
-        Whether tmpfs is being used
+        Whether tmpfs is being used.
     cleanup : bool
-        Whether automatic cleanup is enabled
+        Whether automatic cleanup is enabled.
 
     Examples
     --------
@@ -44,8 +43,7 @@ class FileManager:
 
     >>> with FileManager(use_tmpfs=True) as fm:
     ...     env_file = fm.get_path('env.env')
-    ...     # Write files, run model
-    ...     # Files automatically cleaned up on exit
+    ...     # Write files, run model. Files cleaned up on exit.
 
     Manual management:
 
@@ -68,17 +66,13 @@ class FileManager:
         self.work_dir = None
         self._temp_dir = None
 
-        # Determine base directory
         if base_dir is not None:
             self.base_dir = Path(base_dir)
         elif use_tmpfs and self._tmpfs_available():
-            # Use /dev/shm on Linux for tmpfs
             self.base_dir = Path('/dev/shm')
         else:
-            # Use system temp directory
             self.base_dir = Path(tempfile.gettempdir())
 
-        # Ensure base directory exists and is writable
         if not self.base_dir.exists():
             raise ValueError(f"Base directory does not exist: {self.base_dir}")
         if not os.access(self.base_dir, os.W_OK):
@@ -86,23 +80,23 @@ class FileManager:
 
     @staticmethod
     def _tmpfs_available() -> bool:
-        """Check if tmpfs (/dev/shm) is available"""
+        """Return True if tmpfs (``/dev/shm``) is available and writable."""
         shm_path = Path('/dev/shm')
         return shm_path.exists() and os.access(shm_path, os.W_OK)
 
     def create_work_dir(self, name: Optional[str] = None) -> Path:
         """
-        Create a working directory for model files
+        Create a working directory for model files.
 
         Parameters
         ----------
         name : str, optional
-            Directory name. If None, generates unique name.
+            Directory name. If ``None``, a unique name is generated.
 
         Returns
         -------
         work_dir : Path
-            Path to working directory
+            Path to the working directory.
         """
         if name is not None:
             self.work_dir = self.base_dir / name
@@ -118,17 +112,17 @@ class FileManager:
 
     def get_path(self, filename: str) -> Path:
         """
-        Get full path for a file in the working directory
+        Return the full path for a file in the working directory.
 
         Parameters
         ----------
         filename : str
-            Filename
+            Filename.
 
         Returns
         -------
         path : Path
-            Full path to file
+            Full path to the file (working directory is created on demand).
         """
         if self.work_dir is None:
             self.create_work_dir()
@@ -136,7 +130,7 @@ class FileManager:
         return self.work_dir / filename
 
     def cleanup_work_dir(self):
-        """Remove working directory and all contents"""
+        """Remove the working directory and all of its contents."""
         if self.work_dir is not None and self.work_dir.exists():
             shutil.rmtree(self.work_dir)
             self.work_dir = None
@@ -144,17 +138,17 @@ class FileManager:
 
     def list_files(self, pattern: str = '*') -> list:
         """
-        List files in working directory
+        List files in the working directory.
 
         Parameters
         ----------
         pattern : str, optional
-            Glob pattern for filtering. Default is '*' (all files).
+            Glob pattern for filtering. Default is ``'*'`` (all files).
 
         Returns
         -------
-        files : list
-            List of matching file paths
+        files : list of Path
+            List of matching file paths.
         """
         if self.work_dir is None or not self.work_dir.exists():
             return []
@@ -163,19 +157,19 @@ class FileManager:
 
     def copy_file(self, src: Union[str, Path], dst_name: Optional[str] = None) -> Path:
         """
-        Copy a file into the working directory
+        Copy a file into the working directory.
 
         Parameters
         ----------
         src : str or Path
-            Source file path
+            Source file path.
         dst_name : str, optional
-            Destination filename. If None, uses source filename.
+            Destination filename. If ``None``, uses the source filename.
 
         Returns
         -------
         dst_path : Path
-            Path to copied file in working directory
+            Path to the copied file in the working directory.
         """
         src = Path(src)
         if dst_name is None:
@@ -186,22 +180,19 @@ class FileManager:
         return dst
 
     def __enter__(self):
-        """Context manager entry"""
         self.create_work_dir()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit with automatic cleanup"""
         if self.cleanup:
             self.cleanup_work_dir()
 
     def __del__(self):
-        """Cleanup on deletion"""
         if self.cleanup and hasattr(self, 'work_dir'):
             try:
                 self.cleanup_work_dir()
             except Exception:
-                pass  # Ignore errors during cleanup
+                pass
 
     def __repr__(self) -> str:
         tmpfs_str = "tmpfs" if self.use_tmpfs else "disk"
@@ -212,19 +203,19 @@ class FileManager:
 @contextmanager
 def temporary_directory(use_tmpfs: bool = False, prefix: str = 'uacpy_'):
     """
-    Context manager for temporary directory
+    Yield a temporary directory that is cleaned up on exit.
 
     Parameters
     ----------
     use_tmpfs : bool, optional
         Use RAM-based filesystem. Default is False.
     prefix : str, optional
-        Directory name prefix
+        Directory name prefix.
 
     Yields
     ------
     path : Path
-        Path to temporary directory
+        Path to the temporary directory.
 
     Examples
     --------

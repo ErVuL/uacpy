@@ -7,7 +7,6 @@ A comprehensive library for underwater acoustics propagation modeling.
 __version__ = '0.0.1'
 __author__ = 'ErVuL'
 
-# Core classes
 from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
@@ -17,22 +16,15 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.field import Field
 
-# Models
 from uacpy import models
-
-# Visualization
 from uacpy.visualization import plots as plot
-
-# I/O utilities
 from uacpy import io
 
-# Signal processing (renamed from 'signal' to 'acoustic_signal' to avoid conflict with Python's built-in signal module)
+# Exposed as `uacpy.signal`; the package is named `acoustic_signal` to avoid
+# colliding with Python's stdlib `signal` module.
 from uacpy import acoustic_signal as signal
 
-# Ambient noise modeling
 from uacpy import noise
-
-# Core utilities (acoustics module)
 from uacpy.core import acoustics
 
 __all__ = [

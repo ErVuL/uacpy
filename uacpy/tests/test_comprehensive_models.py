@@ -34,17 +34,13 @@ from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ExecutableNotFoundError
 
 
-# ============================================================================
-# FIXTURES: Test Environments
-# ============================================================================
-
 @pytest.fixture
 def pekeris_env():
     """
-    Pekeris waveguide: canonical test case for underwater acoustics
-    - Isovelocity water column
-    - Flat bottom with half-space
-    - Known analytical solution
+    Pekeris waveguide: canonical test case for underwater acoustics.
+
+    Isovelocity water column over a flat fluid half-space, with a known
+    analytical solution.
     """
     bottom = BoundaryProperties(
         acoustic_type='half-space',
@@ -63,7 +59,7 @@ def pekeris_env():
 
 @pytest.fixture
 def shallow_water_env():
-    """Shallow water environment (continental shelf, 50m)"""
+    """Shallow water environment (continental shelf, 50m)."""
     bottom = BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1650.0,
@@ -81,7 +77,7 @@ def shallow_water_env():
 
 @pytest.fixture
 def deep_water_env():
-    """Deep water with Munk profile (sound channel)"""
+    """Deep water with Munk profile (sound channel)."""
     return uacpy.Environment(
         name='Deep Water Munk',
         depth=5000.0,
@@ -97,7 +93,7 @@ def deep_water_env():
 
 @pytest.fixture
 def sloping_env():
-    """Range-dependent environment with sloping bottom"""
+    """Range-dependent environment with sloping bottom."""
     ranges = np.linspace(0, 10000, 21)
     depths = np.linspace(100, 200, 21)
     bathymetry = np.column_stack([ranges, depths])
@@ -119,19 +115,19 @@ def sloping_env():
 
 @pytest.fixture
 def low_freq_source():
-    """Low frequency source (50 Hz - whale calls, sonar)"""
+    """Low frequency source (50 Hz - whale calls, sonar)."""
     return uacpy.Source(depth=50.0, frequency=50.0)
 
 
 @pytest.fixture
 def mid_freq_source():
-    """Mid frequency source (1000 Hz - typical sonar)"""
+    """Mid frequency source (1000 Hz - typical sonar)."""
     return uacpy.Source(depth=50.0, frequency=1000.0)
 
 
 @pytest.fixture
 def high_freq_source():
-    """High frequency source (10 kHz - imaging sonar)"""
+    """High frequency source (10 kHz - imaging sonar)."""
     return uacpy.Source(depth=50.0, frequency=10000.0)
 
 
@@ -150,23 +146,19 @@ def receiver_grid_dense():
 
 @pytest.fixture
 def receiver_small():
-    """Small receiver grid for quick tests"""
+    """Small receiver grid for quick tests."""
     return uacpy.Receiver(
         depths=np.array([25.0, 50.0, 75.0]),
         ranges=np.array([500.0, 1000.0, 2000.0, 5000.0])
     )
 
 
-# ============================================================================
-# TEST CLASS: Bellhop
-# ============================================================================
-
 class TestBellhopPhysics:
-    """Test Bellhop physical validity and accuracy"""
+    """Test Bellhop physical validity and accuracy."""
 
     @pytest.mark.requires_binary
     def test_bellhop_tl_increases_with_range(self, pekeris_env, mid_freq_source, receiver_grid_dense):
-        """TL should increase with range (energy conservation)"""
+        """TL should increase with range (energy conservation)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
@@ -183,7 +175,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_no_nan_inf(self, pekeris_env, mid_freq_source, receiver_grid_dense):
-        """Bellhop should not produce NaN or inf values"""
+        """Bellhop should not produce NaN or inf values."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
@@ -193,7 +185,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_positive_tl(self, pekeris_env, mid_freq_source, receiver_grid_dense):
-        """TL values should be positive (physical constraint)"""
+        """TL values should be positive (physical constraint)."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
@@ -202,7 +194,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_frequency_dependence(self, pekeris_env, receiver_small):
-        """Higher frequency should have higher TL due to absorption"""
+        """Higher frequency should have higher TL due to absorption."""
         bellhop = Bellhop(verbose=False)
 
         # Low frequency (50 Hz)
@@ -222,7 +214,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_shallow_water(self, shallow_water_env, mid_freq_source):
-        """Bellhop should handle shallow water (50m)"""
+        """Bellhop should handle shallow water (50m)."""
         # Adjust receiver depths for shallow water (50m environment)
         receiver = uacpy.Receiver(
             depths=np.array([10.0, 25.0, 40.0]),  # All within 50m
@@ -239,7 +231,7 @@ class TestBellhopPhysics:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_bellhop_deep_water(self, deep_water_env, mid_freq_source):
-        """Bellhop should handle deep water with sound channel"""
+        """Bellhop should handle deep water with sound channel."""
         bellhop = Bellhop(verbose=False)
 
         # Create receiver grid appropriate for deep water
@@ -255,7 +247,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_range_dependent(self, sloping_env, mid_freq_source, receiver_small):
-        """Bellhop should handle range-dependent bathymetry"""
+        """Bellhop should handle range-dependent bathymetry."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(sloping_env, mid_freq_source, receiver_small)
 
@@ -264,7 +256,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_run_types(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test different Bellhop run types (C, I, S)"""
+        """Test different Bellhop run types (C, I, S)."""
         bellhop = Bellhop(verbose=False)
 
         # Coherent TL
@@ -285,7 +277,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_beam_types(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test different beam types (B, R, G)"""
+        """Test different beam types (B, R, G)."""
         # Gaussian beams (most stable)
         bellhop_b = Bellhop(verbose=False, beam_type='B')
         result_b = bellhop_b.run(pekeris_env, mid_freq_source, receiver_small)
@@ -298,7 +290,7 @@ class TestBellhopPhysics:
 
     @pytest.mark.requires_binary
     def test_bellhop_rays_output(self, pekeris_env, mid_freq_source):
-        """Test ray tracing output"""
+        """Test ray tracing output."""
         bellhop = Bellhop(verbose=False)
 
         # Simple receiver for ray tracing
@@ -315,16 +307,12 @@ class TestBellhopPhysics:
             pytest.skip(f"Ray tracing test skipped: {e}")
 
 
-# ============================================================================
-# TEST CLASS: Kraken Normal Modes
-# ============================================================================
-
 class TestKrakenPhysics:
-    """Test Kraken normal mode computation"""
+    """Test Kraken normal mode computation."""
 
     @pytest.mark.requires_binary
     def test_kraken_mode_wavenumbers_positive(self, pekeris_env, mid_freq_source):
-        """Mode wavenumbers should be real and positive"""
+        """Mode wavenumbers should be real and positive."""
         kraken = Kraken(verbose=False)
 
         # Adjust receiver depths for mode computation
@@ -344,7 +332,7 @@ class TestKrakenPhysics:
 
     @pytest.mark.requires_binary
     def test_kraken_mode_count_frequency_scaling(self, pekeris_env):
-        """Number of modes should scale with frequency * depth"""
+        """Number of modes should scale with frequency * depth."""
         kraken = Kraken(verbose=False)
 
         receiver = uacpy.Receiver(
@@ -367,7 +355,7 @@ class TestKrakenPhysics:
 
     @pytest.mark.requires_binary
     def test_kraken_mode_shapes_non_zero(self, pekeris_env, mid_freq_source):
-        """Mode shapes should have non-zero amplitude"""
+        """Mode shapes should have non-zero amplitude."""
         kraken = Kraken(verbose=False)
 
         receiver = uacpy.Receiver(
@@ -386,7 +374,7 @@ class TestKrakenPhysics:
 
     @pytest.mark.requires_binary
     def test_kraken_rejects_range_dependent(self, sloping_env, mid_freq_source):
-        """Kraken should reject range-dependent environments"""
+        """Kraken should reject range-dependent environments."""
         kraken = Kraken(verbose=False)
 
         receiver = uacpy.Receiver(
@@ -398,16 +386,12 @@ class TestKrakenPhysics:
             kraken.run(sloping_env, mid_freq_source, receiver)
 
 
-# ============================================================================
-# TEST CLASS: KrakenField
-# ============================================================================
-
 class TestKrakenFieldPhysics:
-    """Test KrakenField TL computation from modes"""
+    """Test KrakenField TL computation from modes."""
 
     @pytest.mark.requires_binary
     def test_krakenfield_tl_output(self, pekeris_env, mid_freq_source, receiver_grid_dense):
-        """KrakenField should produce valid TL field"""
+        """KrakenField should produce valid TL field."""
         kf = KrakenField(verbose=False)
         result = kf.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
@@ -417,7 +401,7 @@ class TestKrakenFieldPhysics:
 
     @pytest.mark.requires_binary
     def test_krakenfield_mode_resolution(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test different mode depth resolutions"""
+        """Test different mode depth resolutions."""
         # Default resolution (1.5 pts/m)
         kf_default = KrakenField(mode_points_per_meter=1.5, verbose=False)
         result_default = kf_default.compute_tl(pekeris_env, mid_freq_source, receiver_small)
@@ -437,7 +421,7 @@ class TestKrakenFieldPhysics:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_krakenfield_range_dependent(self, sloping_env, mid_freq_source, receiver_small):
-        """KrakenField should handle range-dependent via adiabatic modes"""
+        """KrakenField should handle range-dependent via adiabatic modes."""
         kf = KrakenField(verbose=False, mode_coupling='adiabatic', n_segments=10)
         result = kf.compute_tl(sloping_env, mid_freq_source, receiver_small)
 
@@ -445,15 +429,11 @@ class TestKrakenFieldPhysics:
         assert np.all(np.isfinite(result.data))
 
 
-# ============================================================================
-# TEST CLASS: RAM Parabolic Equation
-# ============================================================================
-
 class TestRAMPhysics:
-    """Test RAM parabolic equation model"""
+    """Test RAM parabolic equation model."""
 
     def test_ram_basic_run(self, pekeris_env, mid_freq_source, receiver_small):
-        """RAM should produce valid TL output"""
+        """RAM should produce valid TL output."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(pekeris_env, mid_freq_source, receiver_small)
@@ -465,7 +445,7 @@ class TestRAMPhysics:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_range_dependent(self, sloping_env, mid_freq_source, receiver_small):
-        """RAM should handle range-dependent bathymetry"""
+        """RAM should handle range-dependent bathymetry."""
         try:
             ram = RAM(verbose=False)
             result = ram.compute_tl(sloping_env, mid_freq_source, receiver_small)
@@ -476,7 +456,7 @@ class TestRAMPhysics:
             pytest.skip("mpiramS binary not found")
 
     def test_ram_accuracy_parameters(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test RAM accuracy parameters (dr, dz, np_pade)"""
+        """Test RAM accuracy parameters (dr, dz, np_pade)."""
         try:
             # Default accuracy
             ram_default = RAM(verbose=False)
@@ -493,12 +473,8 @@ class TestRAMPhysics:
             pytest.skip("mpiramS binary not found")
 
 
-# ============================================================================
-# TEST CLASS: SPARC Time-Domain FFP
-# ============================================================================
-
 class TestSPARCPhysics:
-    """Test SPARC time-domain model"""
+    """Test SPARC time-domain model."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -566,16 +542,12 @@ class TestSPARCPhysics:
             sparc.run(sloping_env, mid_freq_source, receiver)
 
 
-# ============================================================================
-# TEST CLASS: Scooter FFP
-# ============================================================================
-
 class TestScooterPhysics:
-    """Test Scooter frequency-domain FFP model"""
+    """Test Scooter frequency-domain FFP model."""
 
     @pytest.mark.requires_binary
     def test_scooter_basic_run(self, pekeris_env, mid_freq_source, receiver_small):
-        """Scooter should produce valid TL output"""
+        """Scooter should produce valid TL output."""
         scooter = Scooter(verbose=False)
 
         try:
@@ -588,7 +560,7 @@ class TestScooterPhysics:
 
     @pytest.mark.requires_binary
     def test_scooter_rmax_multiplier(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test Scooter rmax_multiplier parameter"""
+        """Test Scooter rmax_multiplier parameter."""
         scooter = Scooter(verbose=False)
 
         try:
@@ -607,17 +579,13 @@ class TestScooterPhysics:
             pytest.skip(f"Scooter multiplier test skipped: {e}")
 
 
-# ============================================================================
-# TEST CLASS: OASES Models
-# ============================================================================
-
 @pytest.mark.requires_oases
 class TestOASESPhysics:
-    """Test OASES suite models"""
+    """Test OASES suite models."""
 
     @pytest.mark.requires_binary
     def test_oast_basic_run(self, pekeris_env, mid_freq_source, receiver_small):
-        """OAST should produce valid TL output"""
+        """OAST should produce valid TL output."""
         try:
             oast = OAST(verbose=False)
             result = oast.run(pekeris_env, mid_freq_source, receiver_small)
@@ -629,7 +597,7 @@ class TestOASESPhysics:
 
     @pytest.mark.requires_binary
     def test_oasn_mode_computation(self, pekeris_env, mid_freq_source):
-        """OASN should compute modes"""
+        """OASN should compute modes."""
         try:
             oasn = OASN(verbose=False)
 
@@ -646,17 +614,13 @@ class TestOASESPhysics:
             pytest.skip("OASN executable not found")
 
 
-# ============================================================================
-# TEST CLASS: Model Intercomparison
-# ============================================================================
-
 class TestModelAgreement:
-    """Test that different models agree on simple cases"""
+    """Test that different models agree on simple cases."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_bellhop_krakenfield_agreement(self, pekeris_env, mid_freq_source, receiver_small):
-        """Bellhop and KrakenField should agree on Pekeris waveguide"""
+        """Bellhop and KrakenField should agree on Pekeris waveguide."""
         bellhop = Bellhop(verbose=False)
         krakenfield = KrakenField(verbose=False)
 
@@ -672,7 +636,7 @@ class TestModelAgreement:
 
     @pytest.mark.slow
     def test_bellhop_ram_agreement(self, pekeris_env, mid_freq_source, receiver_small):
-        """Bellhop and RAM should agree on range-independent case"""
+        """Bellhop and RAM should agree on range-independent case."""
         try:
             bellhop = Bellhop(verbose=False)
             ram = RAM(verbose=False)
@@ -690,16 +654,12 @@ class TestModelAgreement:
             pytest.skip("Models not available")
 
 
-# ============================================================================
-# TEST CLASS: Edge Cases and Numerical Stability
-# ============================================================================
-
 class TestEdgeCases:
-    """Test edge cases that might break models"""
+    """Test edge cases that might break models."""
 
     @pytest.mark.requires_binary
     def test_very_shallow_water_10m(self):
-        """Models should handle very shallow water (10m)"""
+        """Models should handle very shallow water (10m)."""
         env = uacpy.Environment(
             name='Very Shallow',
             depth=10.0,
@@ -726,7 +686,7 @@ class TestEdgeCases:
 
     @pytest.mark.requires_binary
     def test_very_deep_water_6000m(self, mid_freq_source):
-        """Models should handle very deep water (6000m)"""
+        """Models should handle very deep water (6000m)."""
         env = uacpy.Environment(
             name='Very Deep',
             depth=6000.0,
@@ -752,7 +712,7 @@ class TestEdgeCases:
 
     @pytest.mark.requires_binary
     def test_very_high_frequency_50khz(self, pekeris_env, receiver_small):
-        """Models should handle very high frequency (50 kHz)"""
+        """Models should handle very high frequency (50 kHz)."""
         source = uacpy.Source(depth=50.0, frequency=50000.0)
 
         bellhop = Bellhop(verbose=False)
@@ -764,7 +724,7 @@ class TestEdgeCases:
 
     @pytest.mark.requires_binary
     def test_very_low_frequency_10hz(self, pekeris_env, receiver_small):
-        """Models should handle very low frequency (10 Hz)"""
+        """Models should handle very low frequency (10 Hz)."""
         source = uacpy.Source(depth=50.0, frequency=10.0)
 
         bellhop = Bellhop(verbose=False)
@@ -773,7 +733,7 @@ class TestEdgeCases:
         assert np.all(np.isfinite(result.data))
 
     def test_source_near_surface(self, pekeris_env, mid_freq_source, receiver_small):
-        """Models should handle source very close to surface"""
+        """Models should handle source very close to surface."""
         source = uacpy.Source(depth=1.0, frequency=1000.0)
 
         try:
@@ -784,7 +744,7 @@ class TestEdgeCases:
             pytest.skip("Model may not support source at 1m depth")
 
     def test_source_near_bottom(self, pekeris_env, receiver_small):
-        """Models should handle source very close to bottom"""
+        """Models should handle source very close to bottom."""
         source = uacpy.Source(depth=99.0, frequency=1000.0)
 
         try:
@@ -795,16 +755,12 @@ class TestEdgeCases:
             pytest.skip("Model may not support source at 99m depth")
 
 
-# ============================================================================
-# TEST CLASS: Absorption Models
-# ============================================================================
-
 class TestAbsorptionModels:
-    """Test volume attenuation models (Thorp, Francois-Garrison)"""
+    """Test volume attenuation models (Thorp, Francois-Garrison)."""
 
     @pytest.mark.requires_binary
     def test_bellhop_with_thorp_absorption(self, pekeris_env, mid_freq_source, receiver_small):
-        """Test Bellhop with Thorp absorption"""
+        """Test Bellhop with Thorp absorption."""
         bellhop_no_atten = Bellhop(verbose=False)
         bellhop_thorp = Bellhop(verbose=False, volume_attenuation='T')
 
@@ -820,10 +776,6 @@ class TestAbsorptionModels:
 
         assert mean_thorp > mean_no_atten, "Thorp absorption should increase TL"
 
-
-# ============================================================================
-# MAIN: Run tests
-# ============================================================================
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])

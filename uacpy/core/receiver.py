@@ -63,7 +63,6 @@ class Receiver:
     ):
         self.receiver_type = receiver_type
 
-        # Use depths and ranges
         if depths is None:
             depths = 0.0
         if ranges is None:
@@ -72,11 +71,9 @@ class Receiver:
         self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
         self.ranges = np.atleast_1d(np.array(ranges, dtype=np.float64))
 
-        # Validate depths
         if np.any(self.depths < 0):
             raise ValueError("Receiver depths must be positive (down from surface)")
 
-        # For line type, ensure depths and ranges can be paired.
         if receiver_type == 'line':
             if len(self.depths) != len(self.ranges):
                 if len(self.ranges) == 1:
@@ -91,32 +88,32 @@ class Receiver:
 
     @property
     def n_depths(self) -> int:
-        """Number of unique depth levels"""
+        """Number of unique depth levels."""
         return len(self.depths)
 
     @property
     def n_ranges(self) -> int:
-        """Number of unique ranges"""
+        """Number of unique ranges."""
         return len(self.ranges)
 
     @property
     def depth_min(self) -> float:
-        """Minimum receiver depth"""
+        """Minimum receiver depth."""
         return float(np.min(self.depths))
 
     @property
     def depth_max(self) -> float:
-        """Maximum receiver depth"""
+        """Maximum receiver depth."""
         return float(np.max(self.depths))
 
     @property
     def range_min(self) -> float:
-        """Minimum receiver range"""
+        """Minimum receiver range."""
         return float(np.min(self.ranges))
 
     @property
     def range_max(self) -> float:
-        """Maximum receiver range"""
+        """Maximum receiver range."""
         return float(np.max(self.ranges))
 
     def __repr__(self) -> str:
@@ -126,7 +123,7 @@ class Receiver:
                 f"type='{self.receiver_type}')")
 
     def copy(self):
-        """Create a deep copy of the receiver"""
+        """Return a deep copy of the receiver."""
         return Receiver(
             depths=self.depths.copy(),
             ranges=self.ranges.copy(),

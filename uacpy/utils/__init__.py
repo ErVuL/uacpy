@@ -1,59 +1,57 @@
-"""
-Utility functions for uacpy
-"""
+"""Utility functions for uacpy."""
 
 import numpy as np
 
 
 def db_to_linear(db: np.ndarray) -> np.ndarray:
     """
-    Convert dB to linear scale
+    Convert dB to linear scale.
 
     Parameters
     ----------
     db : ndarray
-        Values in dB
+        Values in dB.
 
     Returns
     -------
     linear : ndarray
-        Values in linear scale
+        Values in linear scale.
     """
     return 10 ** (db / 20)
 
 
 def linear_to_db(linear: np.ndarray) -> np.ndarray:
     """
-    Convert linear scale to dB
+    Convert linear scale to dB.
 
     Parameters
     ----------
     linear : ndarray
-        Values in linear scale
+        Values in linear scale.
 
     Returns
     -------
     db : ndarray
-        Values in dB
+        Values in dB.
     """
     return 20 * np.log10(np.abs(linear) + 1e-20)
 
 
 def wavelength(frequency: float, sound_speed: float = 1500.0) -> float:
     """
-    Calculate acoustic wavelength
+    Compute acoustic wavelength.
 
     Parameters
     ----------
     frequency : float
-        Frequency in Hz
+        Frequency in Hz.
     sound_speed : float, optional
         Sound speed in m/s. Default is 1500 m/s.
 
     Returns
     -------
     wavelength : float
-        Wavelength in meters
+        Wavelength in meters.
     """
     return sound_speed / frequency
 
@@ -63,48 +61,45 @@ def range_dependent_grid(
     depths: np.ndarray
 ) -> tuple:
     """
-    Create 2D meshgrid for range-dependent environments
+    Build a 2-D meshgrid for range-dependent environments.
 
     Parameters
     ----------
     ranges : ndarray
-        Range vector
+        Range vector.
     depths : ndarray
-        Depth vector
+        Depth vector.
 
     Returns
     -------
     R : ndarray
-        Range meshgrid
+        Range meshgrid.
     Z : ndarray
-        Depth meshgrid
+        Depth meshgrid.
     """
     return np.meshgrid(ranges, depths)
 
 
 def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
     """
-    Test if vector elements are equally spaced
+    Test whether the elements of ``x`` are equally spaced.
 
     Parameters
     ----------
     x : ndarray
-        Vector to test
+        Vector to test.
     tol : float, optional
         Tolerance for equality. Default is 1e-9.
 
     Returns
     -------
     is_equal : bool
-        True if equally spaced, False otherwise
+        True if equally spaced, False otherwise.
 
     Notes
     -----
-    Checks if all differences between consecutive elements are equal
-    within the specified tolerance.
-
-    Used by file writers to determine if vectors can be written as
-    "min max" pairs instead of listing all values.
+    Used by file writers to decide whether a vector can be written as a
+    ``"min max"`` pair instead of listing all values.
 
     Examples
     --------
@@ -125,36 +120,36 @@ def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
 
 def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
     """
-    Compute Pekeris branch of square root for halfspace wavenumbers
+    Return the Pekeris branch of the complex square root.
 
-    The Pekeris root selects the appropriate branch of sqrt(gamma2) to
-    ensure outgoing waves in the halfspace (proper radiation condition).
+    Selects the branch of sqrt(gamma2) that enforces the radiation
+    condition in a halfspace (outgoing waves for propagating modes,
+    exponential decay for evanescent modes).
 
     Parameters
     ----------
-    gamma2 : ndarray (complex)
-        Squared vertical wavenumber: gamma^2 = k^2 - k_halfspace^2
+    gamma2 : ndarray, complex
+        Squared vertical wavenumber, ``gamma^2 = k^2 - k_halfspace^2``.
     tol : float, optional
-        Tolerance for branch cut detection (default: 1e-10)
-        Used to avoid numerical instabilities near critical angle
+        Tolerance for branch-cut detection (default: 1e-10). Avoids
+        numerical instabilities near the critical angle.
 
     Returns
     -------
-    gamma : ndarray (complex)
-        Vertical wavenumber with correct branch selection
+    gamma : ndarray, complex
+        Vertical wavenumber on the correct branch.
 
     Notes
     -----
     Branch selection rule (Pekeris, 1948):
-    - If Re(gamma2) > tol: propagating in halfspace, choose Re(gamma) > 0 (outgoing wave)
-    - If Re(gamma2) < -tol: evanescent in halfspace, choose Im(gamma) < 0 (exponential decay)
-    - If |Re(gamma2)| <= tol: critical angle region, use Im(gamma2) to determine branch
 
-    This ensures exponential decay into the halfspace for trapped modes
-    and outgoing radiation for leaky modes.
+    - ``Re(gamma2) > tol``: propagating, choose ``Re(gamma) > 0``.
+    - ``Re(gamma2) < -tol``: evanescent, choose ``Im(gamma) < 0``.
+    - ``|Re(gamma2)| <= tol``: critical angle; use ``Im(gamma2)`` to pick
+      the branch.
 
-    The tolerance parameter prevents numerical instabilities near the branch cut
-    (critical angle) where floating-point errors can cause incorrect branch selection.
+    This guarantees exponential decay into the halfspace for trapped
+    modes and outgoing radiation for leaky modes.
 
     References
     ----------
@@ -165,48 +160,28 @@ def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
     --------
     >>> gamma2 = np.array([1.0 + 0j, -1.0 + 0j, 1e-15 + 0j])
     >>> gamma = pekeris_root(gamma2)
-    >>> # For gamma2 = 1: Re(gamma) > 0 (propagating)
-    >>> # For gamma2 = -1: Im(gamma) < 0 (evanescent)
-    >>> # For gamma2 ≈ 0: handled as critical angle case
     """
-    # Ensure input is complex
     gamma2 = np.asarray(gamma2, dtype=complex)
-
-    # Compute principal square root
     gamma = np.sqrt(gamma2)
 
-    # Extract real and imaginary parts of gamma2 for branch selection
     re_gamma2 = np.real(gamma2)
     im_gamma2 = np.imag(gamma2)
 
-    # Initialize mask for values that need sign flip
     needs_flip = np.zeros(gamma2.shape, dtype=bool)
 
-    # Region 1: Re(gamma2) > tol (propagating in halfspace)
-    # Physics: outgoing wave, choose Re(gamma) > 0
+    # Propagating: outgoing wave, choose Re(gamma) > 0.
     mask_propagating = re_gamma2 > tol
-    needs_flip_prop = mask_propagating & (np.real(gamma) < 0)
-    needs_flip |= needs_flip_prop
+    needs_flip |= mask_propagating & (np.real(gamma) < 0)
 
-    # Region 2: Re(gamma2) < -tol (evanescent in halfspace)
-    # Physics: exponentially decaying wave, choose Im(gamma) < 0
+    # Evanescent: exponential decay, choose Im(gamma) < 0.
     mask_evanescent = re_gamma2 < -tol
-    needs_flip_evan = mask_evanescent & (np.imag(gamma) > 0)
-    needs_flip |= needs_flip_evan
+    needs_flip |= mask_evanescent & (np.imag(gamma) > 0)
 
-    # Region 3: |Re(gamma2)| <= tol (critical angle region)
-    # Near branch cut - use Im(gamma2) to determine branch
+    # Near the branch cut: fall back to the sign of Im(gamma2).
     mask_critical = np.abs(re_gamma2) <= tol
+    needs_flip |= mask_critical & (im_gamma2 >= 0) & (np.imag(gamma) > 0)
+    needs_flip |= mask_critical & (im_gamma2 < 0) & (np.imag(gamma) < 0)
 
-    # Standard convention: choose Im(gamma) < 0 for energy flowing upward (Im(gamma2) >= 0)
-    needs_flip_crit = mask_critical & (im_gamma2 >= 0) & (np.imag(gamma) > 0)
-    needs_flip |= needs_flip_crit
-
-    # Also flip if Im(gamma2) < 0 (energy downward) and Im(gamma) < 0
-    needs_flip_crit2 = mask_critical & (im_gamma2 < 0) & (np.imag(gamma) < 0)
-    needs_flip |= needs_flip_crit2
-
-    # Apply sign flip where needed
     gamma[needs_flip] = -gamma[needs_flip]
 
     return gamma

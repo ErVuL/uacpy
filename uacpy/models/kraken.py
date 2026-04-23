@@ -385,15 +385,14 @@ class _KrakenBase(PropagationModel):
         )
 
     def _read_modes_file(self, filepath: Path) -> Dict:
-        """Read Kraken .mod file using proper binary reader"""
+        """Read a Kraken ``.mod`` file using the binary reader."""
         from uacpy.io.output_reader import read_modes_bin
 
-        # Kraken outputs .mod files (binary format)
-        # read_modes_bin expects filename WITHOUT extension (adds .moA internally)
-        # But Kraken uses .mod, so we strip the extension
+        # read_modes_bin expects the filename without extension and appends
+        # its own ('.moA'); strip '.mod' before handing it over.
         filepath_str = str(filepath)
         if filepath_str.endswith('.mod'):
-            basename = filepath_str[:-4]  # Remove .mod extension
+            basename = filepath_str[:-4]
         else:
             basename = filepath_str
 

@@ -66,7 +66,7 @@ def main():
         receiver=receiver,
         results=results,
         output_prefix="example_18_boundary_conditions",
-        output_dir="output"
+        output_dir=OUTPUT_DIR,
     )
 
     # Additional plot: TL difference from rigid bottom

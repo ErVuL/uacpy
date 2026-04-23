@@ -1,6 +1,4 @@
-"""
-Base class for acoustic propagation models
-"""
+"""Base class for acoustic propagation models."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -56,58 +54,55 @@ def _resolve_overrides(obj, **overrides):
 
 class RunMode(Enum):
     """
-    Standard run modes for acoustic propagation models
+    Standard run modes for acoustic propagation models.
 
     Models may support a subset of these modes.
     """
-    # Field computation modes
     COHERENT_TL = 'coherent_tl'          # Coherent transmission loss
     INCOHERENT_TL = 'incoherent_tl'      # Incoherent (averaged) TL
-    SEMICOHERENT_TL = 'semicoherent_tl'  # Semi-coherent TL
+    SEMICOHERENT_TL = 'semicoherent_tl'
 
-    # Ray-based modes (mainly Bellhop)
     RAYS = 'rays'                        # Ray paths only
     EIGENRAYS = 'eigenrays'              # Eigenrays (specific paths)
     ARRIVALS = 'arrivals'                # Arrival structure
 
-    # Mode-based (mainly Kraken)
     MODES = 'modes'                      # Normal modes only
 
-    # Time-domain (mainly SPARC, OASES/OASP)
-    TIME_SERIES = 'time_series'          # Time-domain response
+    TIME_SERIES = 'time_series'          # Time-domain response (SPARC, OASP)
 
-    # Broadband transfer function (Scooter, KrakenField multi-freq)
     TRANSFER_FUNCTION = 'transfer_function'
 
-    # Boundary-reflection computations (Bounce, OASR)
-    REFLECTION = 'reflection'            # Plane-wave reflection coefficient(s)
+    REFLECTION = 'reflection'            # Plane-wave reflection coefficients (Bounce, OASR)
 
 
 class PropagationModel(ABC):
     """
-    Abstract base class for acoustic propagation models
+    Abstract base class for acoustic propagation models.
 
-    Provides common interface and utilities for all propagation models.
+    Provides the common interface and shared utilities (subprocess runner,
+    executable lookup, input validation, range-dependent handling) for all
+    propagation models.
 
     Parameters
     ----------
     use_tmpfs : bool, optional
-        Use RAM-based filesystem for I/O. Default is False.
+        Use a RAM-backed filesystem for I/O. Default is False.
     verbose : bool, optional
         Print verbose output. Default is False.
     work_dir : str or Path, optional
-        Working directory for files. If None, creates temporary.
+        Working directory for files. If ``None``, a temporary directory is
+        created per run.
 
     Attributes
     ----------
     model_name : str
-        Name of the model
+        Name of the model (class name).
     use_tmpfs : bool
-        Whether tmpfs is used
+        Whether tmpfs is used.
     verbose : bool
-        Verbose output flag
+        Verbose output flag.
     file_manager : FileManager
-        File manager instance
+        File manager instance (populated during ``run``).
     """
 
     def __init__(
@@ -122,18 +117,18 @@ class PropagationModel(ABC):
         self.work_dir = work_dir
         self.file_manager = None
 
-        # Models should override this to declare supported modes
+        # Subclasses override to declare the run modes they support.
         self._supported_modes: List[RunMode] = [RunMode.COHERENT_TL]
-        # Models that support sea surface altimetry should set this to True
+        # Subclasses set True if they honour env.altimetry.
         self._supports_altimetry: bool = False
 
     @property
     def supported_modes(self) -> List[RunMode]:
-        """List of run modes supported by this model"""
+        """List of run modes supported by this model."""
         return self._supported_modes
 
     def supports_mode(self, mode: RunMode) -> bool:
-        """Check if model supports a specific run mode"""
+        """Return True if the model supports ``mode``."""
         return mode in self._supported_modes
 
     @abstractmethod
@@ -145,39 +140,36 @@ class PropagationModel(ABC):
         **kwargs
     ) -> Field:
         """
-        Run the propagation model
+        Run the propagation model.
 
         Parameters
         ----------
         env : Environment
-            Environment definition
+            Environment definition.
         source : Source
-            Source definition
+            Source definition.
         receiver : Receiver
-            Receiver definition
+            Receiver definition.
         **kwargs
-            Model-specific parameters
+            Model-specific parameters.
 
         Returns
         -------
         field : Field
-            Simulation results
+            Simulation results.
         """
         pass
 
     def _setup_file_manager(self) -> FileManager:
         """
-        Create and setup file manager
+        Create and configure the FileManager for this run.
 
         Returns
         -------
         fm : FileManager
-            Configured file manager
+            Configured file manager (auto-cleanup when ``work_dir`` is None).
         """
-        if self.work_dir is not None:
-            cleanup = False
-        else:
-            cleanup = True
+        cleanup = self.work_dir is None
 
         fm = FileManager(
             use_tmpfs=self.use_tmpfs,
@@ -191,14 +183,15 @@ class PropagationModel(ABC):
 
     def _log(self, message: str, level: str = "info"):
         """
-        Log message with timestamp and level
+        Forward ``message`` to the model logger at ``level``.
 
         Parameters
         ----------
         message : str
-            Message to log
+            Message to log.
         level : str, optional
-            Log level: 'info', 'warn', 'error', 'debug'. Default is 'info'.
+            Log level: 'info', 'warn', 'error', or 'debug'. Default is
+            'info'. Unknown levels fall back to info.
         """
         if not hasattr(self, '_logger'):
             from uacpy.core.logger import Logger
@@ -214,7 +207,7 @@ class PropagationModel(ABC):
         elif level == 'debug':
             self._logger.debug(message)
         else:
-            self._logger.info(message)  # Default to info
+            self._logger.info(message)
 
     def validate_inputs(
         self,
@@ -223,46 +216,43 @@ class PropagationModel(ABC):
         receiver: Receiver
     ):
         """
-        Validate input parameters
+        Validate inputs against the environment's maximum depth.
 
         Parameters
         ----------
         env : Environment
-            Environment to validate
+            Environment to validate against.
         source : Source
-            Source to validate
+            Source to validate.
         receiver : Receiver
-            Receiver to validate
+            Receiver to validate.
 
         Raises
         ------
         ValueError
-            If inputs are invalid
+            If source/receiver depths are negative or exceed the
+            environment's maximum depth.
         """
-        # Determine maximum depth (consider range-dependent bathymetry).
-        # For flat environments, env.depth may mismatch env.bathymetry[0, 1]
-        # (e.g. Environment(depth=100, bathymetry=[(0, 80)]) reports 100m
-        # but the seafloor is at 80m).  Use the deeper of the two to avoid
-        # false-negative depth-violation errors on the shallower side.
+        # For flat environments, env.depth may differ from env.bathymetry[0, 1]
+        # (e.g. Environment(depth=100, bathymetry=[(0, 80)]) reports 100m but
+        # the seafloor is at 80m). Use the deeper of the two to avoid false
+        # depth-violation errors on the shallower side.
         if env.is_range_dependent and env.bathymetry is not None:
             max_depth = float(np.max(env.bathymetry[:, 1]))
         else:
             bathy_depth = float(env.bathymetry[0, 1]) if env.bathymetry is not None and len(env.bathymetry) > 0 else env.depth
             max_depth = max(env.depth, bathy_depth)
 
-        # Check source depth within environment
         if np.any(source.depth > max_depth):
             error_msg = f"Source depth ({source.depth.max():.1f}m) exceeds maximum environment depth ({max_depth:.1f}m)"
             self._log(error_msg, level='error')
             raise ValueError(error_msg)
 
-        # Check receiver depth within environment
         if receiver.depth_max > max_depth:
             error_msg = f"Receiver depth ({receiver.depth_max:.1f}m) exceeds maximum environment depth ({max_depth:.1f}m)"
             self._log(error_msg, level='error')
             raise ValueError(error_msg)
 
-        # Check positive depths
         if np.any(source.depth < 0):
             self._log("Source depths must be positive", level='error')
             raise ValueError("Source depths must be positive")
@@ -271,7 +261,6 @@ class PropagationModel(ABC):
             self._log("Receiver depths must be positive", level='error')
             raise ValueError("Receiver depths must be positive")
 
-        # Warn if altimetry provided but model doesn't support it
         if getattr(env, 'altimetry', None) is not None and not self._supports_altimetry:
             warnings.warn(
                 f"{self.model_name} does not support sea surface altimetry. "
@@ -289,44 +278,40 @@ class PropagationModel(ABC):
         **kwargs
     ) -> Field:
         """
-        Compute transmission loss (convenience method)
-
-        This is a user-friendly wrapper around run() that automatically
-        configures the model for TL computation.
+        Compute transmission loss (convenience wrapper around ``run``).
 
         Parameters
         ----------
         env : Environment
-            Ocean environment
+            Ocean environment.
         source : Source
-            Acoustic source
+            Acoustic source.
         receiver : Receiver, optional
-            Receiver array. If None, creates automatic grid.
+            Receiver array. If ``None``, an automatic grid is built using
+            ``ReceiverGridBuilder.build_tl_grid`` and ``max_range``
+            (default 10 000 m) from ``kwargs``.
         **kwargs
-            Additional model-specific parameters
+            Additional model-specific parameters.
 
         Returns
         -------
         field : Field
-            Transmission loss field
+            Transmission loss field.
 
         Examples
         --------
         >>> bellhop = Bellhop()
         >>> result = bellhop.compute_tl(env, source, receiver)
-        >>> # Much simpler than: bellhop.run(env, source, receiver, run_type='C')
 
         >>> # Auto-generate receiver grid
         >>> result = bellhop.compute_tl(env, source, max_range=10000)
         """
-        # Auto-generate receiver if not provided
         if receiver is None:
             from uacpy.core.model_utils import ReceiverGridBuilder
             max_range = kwargs.pop('max_range', 10000.0)
             depths, ranges = ReceiverGridBuilder.build_tl_grid(env.depth, max_range)
             receiver = Receiver(depths=depths, ranges=ranges)
 
-        # Call model-specific implementation
         return self._compute_tl_impl(env, source, receiver, **kwargs)
 
     def _compute_tl_impl(self, env, source, receiver, **kwargs):
@@ -356,34 +341,33 @@ class PropagationModel(ABC):
         **kwargs
     ) -> Field:
         """
-        Compute ray paths (convenience method)
+        Compute ray paths (convenience wrapper around ``run``).
 
         Parameters
         ----------
         env : Environment
-            Ocean environment
+            Ocean environment.
         source : Source
-            Acoustic source
+            Acoustic source.
         receiver : Receiver, optional
-            Receiver array. If None, creates automatic grid.
+            Receiver array. If ``None``, an automatic grid is built.
         **kwargs
-            Additional model-specific parameters
+            Additional model-specific parameters.
 
         Returns
         -------
         field : Field
-            Ray path data
+            Ray path data.
+
+        Raises
+        ------
+        UnsupportedFeatureError
+            If the model does not support ray computation.
 
         Examples
         --------
         >>> bellhop = Bellhop()
         >>> rays = bellhop.compute_rays(env, source)
-        >>> # Much simpler than: bellhop.run(env, source, receiver, run_type='R')
-
-        Raises
-        ------
-        UnsupportedFeatureError
-            If model doesn't support ray computation
         """
         from uacpy.core.exceptions import UnsupportedFeatureError
 
@@ -394,7 +378,6 @@ class PropagationModel(ABC):
                 alternatives=['Bellhop']
             )
 
-        # Auto-generate receiver if not provided
         if receiver is None:
             from uacpy.core.model_utils import ReceiverGridBuilder
             max_range = kwargs.pop('max_range', 10000.0)
@@ -411,33 +394,33 @@ class PropagationModel(ABC):
         **kwargs
     ) -> Field:
         """
-        Compute arrival structure (convenience method)
+        Compute the arrival structure (convenience wrapper around ``run``).
 
         Parameters
         ----------
         env : Environment
-            Ocean environment
+            Ocean environment.
         source : Source
-            Acoustic source
+            Acoustic source.
         receiver : Receiver
-            Receiver array
+            Receiver array.
         **kwargs
-            Additional model-specific parameters
+            Additional model-specific parameters.
 
         Returns
         -------
         field : Field
-            Arrival data
+            Arrival data.
+
+        Raises
+        ------
+        UnsupportedFeatureError
+            If the model does not support arrival computation.
 
         Examples
         --------
         >>> bellhop = Bellhop()
         >>> arrivals = bellhop.compute_arrivals(env, source, receiver)
-
-        Raises
-        ------
-        UnsupportedFeatureError
-            If model doesn't support arrival computation
         """
         from uacpy.core.exceptions import UnsupportedFeatureError
 
@@ -458,47 +441,39 @@ class PropagationModel(ABC):
         **kwargs
     ) -> Field:
         """
-        Compute normal modes (convenience method)
+        Compute normal modes (convenience wrapper around ``run``).
 
         Parameters
         ----------
         env : Environment
-            Ocean environment (must be range-independent for most models)
+            Ocean environment. Must be range-independent for most models;
+            only ``KrakenField`` handles range-dependent mode computation.
         source : Source
-            Acoustic source (for frequency specification)
+            Acoustic source (used for frequency).
         n_modes : int, optional
-            Number of modes to compute. If None, computes all modes.
+            Number of modes to compute. If ``None``, all modes are computed.
         **kwargs
-            Additional model-specific parameters
+            Additional model-specific parameters.
 
         Returns
         -------
         field : Field
-            Mode data (field_type='modes')
-
-        Examples
-        --------
-        >>> # Kraken normal modes
-        >>> kraken = Kraken()
-        >>> modes = kraken.compute_modes(env, source, n_modes=50)
-        >>> print(f"Computed {len(modes.metadata['k'])} modes")
-        >>> print(f"Field type: {modes.field_type}")  # 'modes'
-        >>> print(f"Mode shapes shape: {modes.data.shape}")
-
-        >>> # OASN also supports mode computation
-        >>> oasn = OASN()
-        >>> modes = oasn.compute_modes(env, source, n_modes=30)
-
-        >>> # Access mode data from Field object
-        >>> wavenumbers = modes.metadata['k']
-        >>> mode_shapes = modes.metadata['phi']  # or modes.data
+            Mode data (``field_type='modes'``).
 
         Raises
         ------
         UnsupportedFeatureError
-            If model doesn't support mode computation
+            If the model does not support mode computation.
         EnvironmentError
-            If environment is range-dependent and model doesn't support it
+            If the environment is range-dependent and the model does not
+            support it.
+
+        Examples
+        --------
+        >>> kraken = Kraken()
+        >>> modes = kraken.compute_modes(env, source, n_modes=50)
+        >>> wavenumbers = modes.metadata['k']
+        >>> mode_shapes = modes.metadata['phi']
         """
         from uacpy.core.exceptions import UnsupportedFeatureError, EnvironmentError
 
@@ -509,10 +484,9 @@ class PropagationModel(ABC):
                 alternatives=['Kraken', 'OASN']
             )
 
-        # Check for range-dependent environment
         if env.is_range_dependent:
-            # Only certain models can handle range-dependent modes
-            if self.model_name not in ['KrakenField']:  # KrakenField has coupled mode theory
+            # Only KrakenField handles range-dependent modes (coupled mode theory).
+            if self.model_name not in ['KrakenField']:
                 raise EnvironmentError(
                     f"{self.model_name} does not support range-dependent environments for mode computation. "
                     f"Environment has bathymetry ranging from {env.bathymetry[:, 1].min():.1f}m to "
@@ -520,7 +494,6 @@ class PropagationModel(ABC):
                     "Use a range-independent environment or try KrakenField with adiabatic coupling"
                 )
 
-        # Call model-specific implementation
         return self._compute_modes_impl(env, source, n_modes, **kwargs)
 
     def _compute_modes_impl(self, env, source, n_modes, **kwargs):
@@ -653,6 +626,8 @@ class PropagationModel(ABC):
         self._log(f"Running: {cmd_str}", level='debug')
 
         def _raise_stack_limit():
+            # Best-effort: raise the child's stack to the hard limit. If this
+            # fails the child will segfault loudly on the first large alloc.
             try:
                 import resource
                 _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
@@ -662,7 +637,7 @@ class PropagationModel(ABC):
                 )
                 resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
             except Exception:
-                pass  # Best-effort; child will segfault loudly if it matters.
+                pass
 
         try:
             result = subprocess.run(

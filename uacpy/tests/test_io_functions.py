@@ -12,15 +12,15 @@ from uacpy.io.file_manager import FileManager
 
 
 class TestFileManager:
-    """Tests for FileManager class"""
+    """Tests for FileManager class."""
 
     def test_file_manager_creation(self):
-        """Test creating FileManager"""
+        """Test creating FileManager."""
         fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
         assert fm is not None
 
     def test_file_manager_work_dir_creation(self):
-        """Test creating work directory"""
+        """Test creating work directory."""
         fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
         fm.create_work_dir()
 
@@ -32,7 +32,7 @@ class TestFileManager:
         fm.cleanup_work_dir()
 
     def test_file_manager_get_path(self):
-        """Test getting file path"""
+        """Test getting file path."""
         fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
         fm.create_work_dir()
 
@@ -44,7 +44,7 @@ class TestFileManager:
         fm.cleanup_work_dir()
 
     def test_file_manager_custom_base_dir(self):
-        """Test FileManager with custom base directory"""
+        """Test FileManager with custom base directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
             fm = FileManager(use_tmpfs=False, base_dir=Path(tmpdir), cleanup=False)
             fm.create_work_dir()
@@ -53,7 +53,7 @@ class TestFileManager:
             assert fm.work_dir.exists()
 
     def test_file_manager_cleanup(self):
-        """Test FileManager cleanup"""
+        """Test FileManager cleanup."""
         fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
         fm.create_work_dir()
 
@@ -65,10 +65,10 @@ class TestFileManager:
 
 
 class TestEnvironmentIO:
-    """Tests for Environment I/O"""
+    """Tests for Environment I/O."""
 
     def test_environment_with_bathymetry_file(self):
-        """Test loading environment with bathymetry from file"""
+        """Test loading environment with bathymetry from file."""
         # Create temporary bathymetry file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             f.write("# Range(m) Depth(m)\n")
@@ -98,7 +98,7 @@ class TestEnvironmentIO:
             Path(bathy_file).unlink()
 
     def test_environment_ssp_from_array(self):
-        """Test creating environment with SSP from array"""
+        """Test creating environment with SSP from array."""
         depths = np.linspace(0, 100, 11)
         sound_speeds = 1500 + depths * 0.1  # Linear gradient
 
@@ -116,10 +116,10 @@ class TestEnvironmentIO:
 
 
 class TestFieldIO:
-    """Tests for Field I/O operations"""
+    """Tests for Field I/O operations."""
 
     def test_field_metadata_preservation(self):
-        """Test that Field preserves metadata"""
+        """Test that Field preserves metadata."""
         from uacpy.core.field import Field
 
         metadata = {
@@ -142,7 +142,7 @@ class TestFieldIO:
         assert field.metadata['custom_param'] == 'test_value'
 
     def test_field_copy_preserves_metadata(self):
-        """Test that Field.copy() preserves metadata"""
+        """Test that Field.copy() preserves metadata."""
         from uacpy.core.field import Field
 
         metadata = {'test_key': 'test_value'}
@@ -162,15 +162,15 @@ class TestFieldIO:
 
 
 class TestDataValidation:
-    """Tests for data validation"""
+    """Tests for data validation."""
 
     def test_environment_depth_validation(self):
-        """Test environment depth validation"""
+        """Test environment depth validation."""
         with pytest.raises(ValueError):
             uacpy.Environment(name="Test", depth=-10, sound_speed=1500, ssp_type='isovelocity')
 
     def test_source_receiver_depth_validation(self, simple_env):
-        """Test source/receiver depth validation"""
+        """Test source/receiver depth validation."""
         from uacpy.models.base import PropagationModel
 
         model = type('TestModel', (PropagationModel,), {
@@ -192,7 +192,7 @@ class TestDataValidation:
             model.validate_inputs(simple_env, source, receiver_deep)
 
     def test_negative_depth_validation(self, simple_env):
-        """Test negative depth validation"""
+        """Test negative depth validation."""
         # Negative source depth - should raise during construction
         with pytest.raises(ValueError, match="Source depths must be positive"):
             source_neg = uacpy.Source(depth=-10, frequency=100)

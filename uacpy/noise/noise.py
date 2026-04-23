@@ -549,6 +549,7 @@ class AmbientNoiseSimulator:
         parameters: Optional[Dict[str, Any]] = None,
         label: Optional[str] = None,
     ):
+        """Register a noise model by ``model_type`` and ``name`` with its parameters."""
         if parameters is None:
             parameters = {}
         if model_type not in MODEL_REGISTRY:
@@ -565,6 +566,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a wind-noise model."""
         self.add_model("wind", name, parameters, label)
 
     def add_shipping(
@@ -573,6 +575,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a shipping-noise model."""
         self.add_model("shipping", name, parameters, label)
 
     def add_rain(
@@ -581,6 +584,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a rain-noise model."""
         self.add_model("rain", name, parameters, label)
 
     def add_turbulence(
@@ -589,6 +593,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a turbulence-noise model."""
         self.add_model("turbulence", name, parameters, label)
 
     def add_thermal(
@@ -597,6 +602,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a thermal-noise model."""
         self.add_model("thermal", name, parameters, label)
 
     def add_biological(
@@ -605,6 +611,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a biological-noise model."""
         self.add_model("biological", name, parameters, label)
 
     def add_seismic(
@@ -613,6 +620,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register a seismic-noise model."""
         self.add_model("seismic", name, parameters, label)
 
     def add_explosion(
@@ -621,6 +629,7 @@ class AmbientNoiseSimulator:
         label: Optional[str] = None,
         **parameters,
     ):
+        """Register an explosion-noise model."""
         self.add_model("explosion", name, parameters, label)
 
     def set_global_params(self, **params):

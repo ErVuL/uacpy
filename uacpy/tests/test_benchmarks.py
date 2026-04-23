@@ -35,7 +35,7 @@ class TestPekerisWaveguide:
 
     @pytest.fixture
     def pekeris_env(self):
-        """Standard Pekeris waveguide environment"""
+        """Standard Pekeris waveguide environment."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,  # Slightly faster sediment
@@ -54,12 +54,12 @@ class TestPekerisWaveguide:
 
     @pytest.fixture
     def pekeris_source(self):
-        """Source at mid-depth"""
+        """Source at mid-depth."""
         return uacpy.Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def pekeris_receiver(self):
-        """Receiver grid"""
+        """Receiver grid."""
         return uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.linspace(1000, 5000, 9)
@@ -202,7 +202,7 @@ class TestRangeDependentEnvironment:
 
     @pytest.fixture
     def slope_env(self):
-        """Environment with sloping bottom (100m to 200m over 10km)"""
+        """Environment with sloping bottom (100m to 200m over 10km)."""
         # Bathymetry: linear slope
         ranges = np.linspace(0, 10000, 21)  # 0 to 10 km
         depths = np.linspace(100, 200, 21)  # 100 to 200 m
@@ -238,7 +238,7 @@ class TestRangeDependentEnvironment:
 
     @pytest.mark.requires_binary
     def test_bellhop_handles_slope(self, slope_env, slope_source, slope_receiver):
-        """Bellhop should handle sloping bathymetry without crashing"""
+        """Bellhop should handle sloping bathymetry without crashing."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(slope_env, slope_source, slope_receiver)
 
@@ -283,7 +283,7 @@ class TestMunkProfile:
 
     @pytest.fixture
     def munk_env(self):
-        """Deep water environment with Munk profile"""
+        """Deep water environment with Munk profile."""
         env = uacpy.Environment(
             name='Munk Profile',
             depth=5000.0,
@@ -299,12 +299,12 @@ class TestMunkProfile:
 
     @pytest.fixture
     def munk_source(self):
-        """Source at depth (in sound channel)"""
+        """Source at depth (in sound channel)."""
         return uacpy.Source(depth=1000.0, frequency=100.0)
 
     @pytest.fixture
     def munk_receiver(self):
-        """Receiver grid covering sound channel"""
+        """Receiver grid covering sound channel."""
         return uacpy.Receiver(
             depths=np.linspace(0, 5000, 51),
             ranges=np.linspace(1000, 50000, 11)
@@ -346,7 +346,7 @@ class TestInterpolationAccuracy:
     """
 
     def test_environment_ssp_at_exact_points(self):
-        """SSP interpolation at exact data points should return exact values"""
+        """SSP interpolation at exact data points should return exact values."""
         depths = np.array([0, 50, 100])
         speeds = np.array([1520, 1500, 1480])
         ssp_data = np.column_stack([depths, speeds])
@@ -364,7 +364,7 @@ class TestInterpolationAccuracy:
             assert np.abs(c_interp - c) < 1e-6, f"At depth {d}, expected {c}, got {c_interp}"
 
     def test_environment_ssp_interpolation_bounds(self):
-        """Interpolated SSP values should stay within bounds"""
+        """Interpolated SSP values should stay within bounds."""
         depths = np.array([0, 50, 100])
         speeds = np.array([1520, 1500, 1480])
         ssp_data = np.column_stack([depths, speeds])
@@ -393,7 +393,7 @@ class TestNumericalStability:
     """
 
     def test_very_shallow_water(self):
-        """Models should handle very shallow water (10m depth)"""
+        """Models should handle very shallow water (10m depth)."""
         env = uacpy.Environment(
             name='Very Shallow',
             depth=10.0,
@@ -422,7 +422,7 @@ class TestNumericalStability:
             pytest.skip("Bellhop may not be available")
 
     def test_very_high_frequency(self):
-        """Models should handle high frequency (10 kHz)"""
+        """Models should handle high frequency (10 kHz)."""
         env = uacpy.Environment(
             name='High Frequency',
             depth=100.0,

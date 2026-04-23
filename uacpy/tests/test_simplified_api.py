@@ -19,7 +19,7 @@ class TestComputeAPI:
 
     @pytest.mark.requires_binary
     def test_compute_tl_with_auto_receiver(self, simple_env, source):
-        """Test compute_tl with automatic receiver grid"""
+        """Test compute_tl with automatic receiver grid."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, max_range=5000)
 
@@ -29,7 +29,7 @@ class TestComputeAPI:
 
     @pytest.mark.requires_binary
     def test_compute_tl_with_explicit_receiver(self, simple_env, source, receiver_small):
-        """Test compute_tl with explicit receiver"""
+        """Test compute_tl with explicit receiver."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
@@ -39,7 +39,7 @@ class TestComputeAPI:
 
     @pytest.mark.requires_binary
     def test_compute_modes_returns_field(self, simple_env, source):
-        """Test that compute_modes returns Field object"""
+        """Test that compute_modes returns Field object."""
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
@@ -50,7 +50,7 @@ class TestComputeAPI:
 
     @pytest.mark.requires_binary
     def test_multiple_models_same_api(self, simple_env, source):
-        """Test that multiple models use same API"""
+        """Test that multiple models use same API."""
         bellhop = Bellhop(verbose=False)
         krakenfield = KrakenField(verbose=False)
 
@@ -66,11 +66,11 @@ class TestComputeAPI:
 
 
 class TestPlottingAPI:
-    """Tests for result.plot() and plotting functions"""
+    """Tests for result.plot() and plotting functions."""
 
     @pytest.mark.requires_binary
     def test_field_plot_method_exists(self, simple_env, source):
-        """Test that Field has plot() method"""
+        """Test that Field has plot() method."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
 
@@ -79,7 +79,7 @@ class TestPlottingAPI:
 
     @pytest.mark.requires_binary
     def test_plot_tl_field(self, simple_env, source):
-        """Test plotting TL field"""
+        """Test plotting TL field."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
 
@@ -91,7 +91,7 @@ class TestPlottingAPI:
 
     @pytest.mark.requires_binary
     def test_plot_modes(self, simple_env, source):
-        """Test plotting modes"""
+        """Test plotting modes."""
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
@@ -104,7 +104,7 @@ class TestPlottingAPI:
 
     @pytest.mark.requires_binary
     def test_plot_with_custom_parameters(self, simple_env, source):
-        """Test plotting with custom parameters"""
+        """Test plotting with custom parameters."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
 
@@ -115,7 +115,7 @@ class TestPlottingAPI:
 
     @pytest.mark.requires_binary
     def test_plot_comparison(self, simple_env, source):
-        """Test Field.plot_comparison() static method"""
+        """Test Field.plot_comparison() static method."""
         bellhop = Bellhop(verbose=False)
         krakenfield = KrakenField(verbose=False)
 
@@ -132,11 +132,11 @@ class TestPlottingAPI:
 
 
 class TestFieldMethods:
-    """Tests for Field convenience methods"""
+    """Tests for Field convenience methods."""
 
     @pytest.mark.requires_binary
     def test_field_get_methods(self, simple_env, source, receiver_small):
-        """Test Field get_value, get_at_range, get_at_depth"""
+        """Test Field get_value, get_at_range, get_at_depth."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
@@ -154,7 +154,7 @@ class TestFieldMethods:
 
     @pytest.mark.requires_binary
     def test_field_properties(self, simple_env, source, receiver_small):
-        """Test Field properties"""
+        """Test Field properties."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 

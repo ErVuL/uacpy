@@ -1,17 +1,17 @@
 """
-Attenuation models for underwater acoustics
+Attenuation models for underwater acoustics.
 
-Implements various attenuation formulas including Thorp, Francois-Garrison,
-and custom models.
+Implements Thorp, Francois-Garrison, Fisher-Simmons, Ainslie-McColm, and
+custom attenuation formulas.
 
-Note
-----
-This module is a **user/example helper**.  The core uacpy library wires
+Notes
+-----
+This module is a user/example helper. The core uacpy library wires
 frequency-dependent volume attenuation inside the individual model writers
-(see ``uacpy.io.at_env_writer`` and model ``volume_attenuation`` kwargs).
-Nothing in ``uacpy.core`` or ``uacpy.models`` imports from this module;
-it exists primarily for example_17_attenuation_models.py and for users
-who want to compute attenuation curves directly.
+(see ``uacpy.io.at_env_writer`` and each model's ``volume_attenuation``
+kwarg). Nothing in ``uacpy.core`` or ``uacpy.models`` imports from here;
+it is used by ``example_17_attenuation_models.py`` and by users who need
+to compute attenuation curves directly.
 """
 
 import numpy as np
@@ -42,17 +42,17 @@ class AttenuationParameters:
 
 def thorp_attenuation(frequency: Union[float, np.ndarray]) -> np.ndarray:
     """
-    Thorp attenuation formula
+    Thorp attenuation formula.
 
     Parameters
     ----------
     frequency : float or array
-        Frequency in Hz
+        Frequency in Hz.
 
     Returns
     -------
     alpha : float or array
-        Attenuation in dB/km
+        Attenuation in dB/km.
 
     References
     ----------
@@ -64,9 +64,7 @@ def thorp_attenuation(frequency: Union[float, np.ndarray]) -> np.ndarray:
     >>> alpha = thorp_attenuation(1000.0)  # 1 kHz
     >>> print(f"Attenuation: {alpha:.4f} dB/km")
     """
-    f = np.atleast_1d(frequency) / 1000.0  # Convert to kHz
-
-    # Thorp formula
+    f = np.atleast_1d(frequency) / 1000.0
     f2 = f**2
     alpha = 0.1 * f2 / (1 + f2) + 40 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003
 

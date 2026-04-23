@@ -1,57 +1,40 @@
 """
-Constants, enums, and configuration values for UACPY
+Constants and enums shared across UACPY.
 
-Centralizes magic strings and numbers used throughout the codebase.
+Centralizes magic numbers, boundary/SSP codes, and the string/enum
+conversions used by writers and model wrappers.
 """
 
 from enum import Enum
 from typing import Dict
 
 
-# ==============================================================================
-# MAGIC NUMBERS - Physical and Computational Constants
-# ==============================================================================
+DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
+TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 
-# Sound speed
-DEFAULT_SOUND_SPEED = 1500.0  # m/s - typical ocean sound speed
+# Phase-speed search bounds (fractions of c_min / c_max for mode finding).
+C_LOW_FACTOR = 0.95
+C_HIGH_FACTOR = 1.05
 
-# Transmission loss
-TL_MAX_DB = 200.0  # dB - Maximum TL (deep shadow zone clamp)
+DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
+DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
-# Phase speed search bounds (fraction of c_min / c_max for mode finding)
-C_LOW_FACTOR = 0.95   # c_low = c_min * C_LOW_FACTOR
-C_HIGH_FACTOR = 1.05  # c_high = c_max * C_HIGH_FACTOR
-
-# Default phase speed bounds for reflection coefficient computations
-DEFAULT_C_MIN = 1400.0  # m/s - below slowest expected water column speed
-DEFAULT_C_MAX = 10000.0  # m/s - above fastest expected compressional speed
-
-
-# ==============================================================================
-# PRESSURE FLOOR
-# ==============================================================================
-
-# Single floor used whenever we take 20*log10(|p|).
+# Floor applied whenever we take 20*log10(|p|).
 PRESSURE_FLOOR = 1e-30
 
 
-# ==============================================================================
-# SOUND SPEED PROFILE ENUMS
-# ==============================================================================
-
 class SSPType(Enum):
     """
-    Sound speed profile types and interpolation methods
+    Sound speed profile types and interpolation methods.
 
-    Maps user-facing names to internal representations.
+    Maps user-facing names to internal representations used by environment
+    writers.
     """
-    # Profile types
     ISOVELOCITY = 'isovelocity'
     LINEAR = 'linear'
     BILINEAR = 'bilinear'
     MUNK = 'munk'
 
-    # Interpolation methods
     N2LINEAR = 'n2linear'       # N²-linear approximation
     C_LINEAR = 'c-linear'       # C-linear approximation
     CLIN = 'clin'               # C-linear (alias)
@@ -63,13 +46,24 @@ class SSPType(Enum):
 
     @classmethod
     def from_string(cls, value: str) -> 'SSPType':
-        """Convert string to SSPType enum"""
+        """
+        Parse a string (or existing ``SSPType``) into an ``SSPType``.
+
+        Parameters
+        ----------
+        value : str or SSPType
+            Case-insensitive type name or enum value.
+
+        Returns
+        -------
+        SSPType
+            Parsed enum value.
+        """
         if isinstance(value, SSPType):
             return value
         try:
             return cls[value.upper().replace('-', '_')]
         except KeyError:
-            # Try value match
             for ssp in cls:
                 if ssp.value == value.lower():
                     return ssp
@@ -80,24 +74,22 @@ class SSPType(Enum):
 
     def to_acoustics_toolbox_code(self) -> str:
         """
-        Convert to Acoustics Toolbox SSP interpolation code
+        Return the single-character Acoustics Toolbox SSP code.
 
         Returns
         -------
         str
-            Single character code: 'N', 'C', 'P', 'S', 'Q', or 'A'
+            One of 'N', 'C', 'P', 'S', 'Q', or 'A'.
         """
         return AT_SSP_CODE_MAP[self]
 
 
-# Acoustics Toolbox SSP interpolation codes
+# Profile types default to C-linear; interpolation methods map to their AT code.
 AT_SSP_CODE_MAP: Dict[SSPType, str] = {
-    # Profile types default to C-Linear
     SSPType.ISOVELOCITY: 'C',
     SSPType.LINEAR: 'C',
     SSPType.BILINEAR: 'C',
     SSPType.MUNK: 'C',
-    # Interpolation methods map to AT codes
     SSPType.N2LINEAR: 'N',
     SSPType.C_LINEAR: 'C',
     SSPType.CLIN: 'C',
@@ -109,33 +101,41 @@ AT_SSP_CODE_MAP: Dict[SSPType, str] = {
 }
 
 
-# ==============================================================================
-# BOUNDARY CONDITION ENUMS
-# ==============================================================================
-
 class BoundaryType(Enum):
-    """Acoustic boundary types"""
-    VACUUM = 'vacuum'           # Pressure-release (free surface)
-    RIGID = 'rigid'             # Rigid boundary
-    HALF_SPACE = 'half-space'   # Acousto-elastic half-space
-    GRAIN_SIZE = 'grain-size'   # Sediment parameters derived from grain size (phi)
-    FILE = 'file'               # Reflection coefficients from file
-    PRECALC = 'precalc'         # Pre-calculated reflection data
+    """Acoustic boundary types."""
+    VACUUM = 'vacuum'           # pressure-release (free surface)
+    RIGID = 'rigid'
+    HALF_SPACE = 'half-space'   # acousto-elastic half-space
+    GRAIN_SIZE = 'grain-size'   # sediment derived from grain size (phi)
+    FILE = 'file'               # reflection coefficients from file
+    PRECALC = 'precalc'         # pre-calculated reflection data
 
     @classmethod
     def from_string(cls, value: str) -> 'BoundaryType':
-        """Convert string to BoundaryType enum, handling aliases"""
+        """
+        Parse a string (or existing ``BoundaryType``) into a ``BoundaryType``.
+
+        Resolves common aliases such as 'halfspace', 'elastic', and 'grainsize'.
+
+        Parameters
+        ----------
+        value : str or BoundaryType
+            Case-insensitive boundary type name, alias, or enum value.
+
+        Returns
+        -------
+        BoundaryType
+            Parsed enum value.
+        """
         if isinstance(value, BoundaryType):
             return value
 
-        # Normalize aliases to canonical forms
         value_lower = value.lower()
         if value_lower in ['halfspace', 'elastic', 'half-space', 'a']:
             return cls.HALF_SPACE
         if value_lower in ['grain-size', 'grainsize', 'grain_size', 'g']:
             return cls.GRAIN_SIZE
 
-        # Try standard conversion
         try:
             return cls[value.upper().replace('-', '_')]
         except KeyError:
@@ -146,12 +146,12 @@ class BoundaryType(Enum):
 
     def to_acoustics_toolbox_code(self) -> str:
         """
-        Convert to Acoustics Toolbox boundary code
+        Return the single-character Acoustics Toolbox boundary code.
 
         Returns
         -------
         str
-            Single character: 'V', 'R', 'A', 'G', 'F', or 'P'
+            One of 'V', 'R', 'A', 'G', 'F', or 'P'.
         """
         mapping = {
             BoundaryType.VACUUM: 'V',
@@ -164,22 +164,30 @@ class BoundaryType(Enum):
         return mapping[self]
 
 
-# ==============================================================================
-# ATTENUATION UNITS ENUM
-# ==============================================================================
-
 class AttenuationUnits(Enum):
-    """Attenuation units for Acoustics Toolbox"""
+    """Attenuation units understood by the Acoustics Toolbox."""
     DB_PER_WAVELENGTH = 'W'     # dB/wavelength (default)
     NEPERS_PER_M = 'N'          # Nepers/m
-    DB_PER_M_KHZ = 'F'          # dB/(m*kHz)
+    DB_PER_M_KHZ = 'F'          # dB/(m·kHz)
     DB_PER_M = 'M'              # dB/m
     Q_FACTOR = 'Q'              # Q factor
     LOSS_PARAMETER = 'L'        # Loss parameter
 
     @classmethod
     def from_string(cls, value: str) -> 'AttenuationUnits':
-        """Convert string to AttenuationUnits enum"""
+        """
+        Parse a string (or existing enum) into an ``AttenuationUnits``.
+
+        Parameters
+        ----------
+        value : str or AttenuationUnits
+            Case-insensitive unit name or single-character code.
+
+        Returns
+        -------
+        AttenuationUnits
+            Parsed enum value.
+        """
         if isinstance(value, AttenuationUnits):
             return value
         for au in cls:
@@ -191,11 +199,12 @@ class AttenuationUnits(Enum):
             raise ValueError(f"Invalid attenuation unit: {value}")
 
     def to_char(self) -> str:
+        """Return the single-character Acoustics Toolbox code."""
         return self.value
 
 
 class VolumeAttenuation(Enum):
-    """Volume attenuation formulas"""
+    """Volume attenuation formulas."""
     NONE = ''                   # No volume attenuation
     THORP = 'T'                 # Thorp formula
     FRANCOIS_GARRISON = 'F'     # Francois-Garrison formula
@@ -203,7 +212,20 @@ class VolumeAttenuation(Enum):
 
     @classmethod
     def from_string(cls, value: str) -> 'VolumeAttenuation':
-        """Convert string to VolumeAttenuation enum"""
+        """
+        Parse a string (or existing enum) into a ``VolumeAttenuation``.
+
+        Parameters
+        ----------
+        value : str, VolumeAttenuation, or None
+            Case-insensitive formula name or single-character code.
+            ``None`` or empty string maps to ``NONE``.
+
+        Returns
+        -------
+        VolumeAttenuation
+            Parsed enum value.
+        """
         if value is None or value == '':
             return cls.NONE
         if isinstance(value, VolumeAttenuation):
@@ -217,25 +239,24 @@ class VolumeAttenuation(Enum):
             raise ValueError(f"Invalid volume attenuation: {value}")
 
     def to_char(self) -> str:
+        """Return the single-character Acoustics Toolbox code."""
         return self.value
 
 
-# ==============================================================================
-# HELPER FUNCTIONS
-# ==============================================================================
-
 def parse_ssp_type(value) -> SSPType:
-    """Parse SSP interpolation type string, defaulting to ISOVELOCITY if None.
+    """
+    Parse an SSP interpolation type string.
 
     Parameters
     ----------
     value : str or None
-        SSP type string (e.g., 'c_linear', 'n2_linear') or None for default.
+        SSP type string (e.g., 'c_linear', 'n2_linear') or ``None`` for
+        the default.
 
     Returns
     -------
     SSPType
-        Parsed SSP type enum value.
+        Parsed enum value; ``None`` maps to ``ISOVELOCITY``.
     """
     if value is None:
         return SSPType.ISOVELOCITY
@@ -243,18 +264,19 @@ def parse_ssp_type(value) -> SSPType:
 
 
 def parse_boundary_type(value) -> BoundaryType:
-    """Parse boundary type string, defaulting to VACUUM if None.
+    """
+    Parse a boundary type string.
 
     Parameters
     ----------
     value : str or None
-        Boundary type string (e.g., 'vacuum', 'rigid', 'halfspace') or None
-        for default.
+        Boundary type string (e.g., 'vacuum', 'rigid', 'halfspace') or
+        ``None`` for the default.
 
     Returns
     -------
     BoundaryType
-        Parsed boundary type enum value.
+        Parsed enum value; ``None`` maps to ``VACUUM``.
     """
     if value is None:
         return BoundaryType.VACUUM

@@ -56,7 +56,7 @@ from uacpy.io.oases_reader import (
 
 
 class _OASESBase(PropagationModel):
-    """Base class for all OASES models with shared functionality"""
+    """Base class for all OASES model wrappers with shared functionality."""
 
     def _find_executable(self, name: str) -> Path:
         """Find an OASES executable using the base-class helper.

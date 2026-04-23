@@ -44,26 +44,32 @@ def _not_implemented(name: str):
 
 
 def readsxsy(f):
+    """Stub for the MATLAB ``readsxsy`` helper (not ported)."""
     _not_implemented("readsxsy")
 
 
 def readszrz(f):
+    """Stub for the MATLAB ``readszrz`` helper (not ported)."""
     _not_implemented("readszrz")
 
 
 def readr(f):
+    """Stub for the MATLAB ``readr`` helper (not ported)."""
     _not_implemented("readr")
 
 
 def readtheta(f):
+    """Stub for the MATLAB ``readtheta`` helper (not ported)."""
     _not_implemented("readtheta")
 
 
 def read_bell(f, Bdry, freq, bot_depth, top_depth, rmax):
+    """Stub for the MATLAB ``read_bell`` helper (not ported)."""
     _not_implemented("read_bell")
 
 
 def topbot(f, freq, bc, atten_unit):
+    """Stub for the MATLAB ``topbot`` helper (not ported)."""
     _not_implemented("topbot")
 
 

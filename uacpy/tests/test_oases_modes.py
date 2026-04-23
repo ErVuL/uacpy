@@ -15,7 +15,7 @@ from uacpy.models.oases import OASN
 
 @pytest.fixture
 def simple_env():
-    """Simple isovelocity environment for testing"""
+    """Simple isovelocity environment for testing."""
     return Environment(
         name="Test Environment",
         depth=100.0,
@@ -25,23 +25,23 @@ def simple_env():
 
 @pytest.fixture
 def source_100hz():
-    """100 Hz source at 50m depth"""
+    """100 Hz source at 50m depth."""
     return Source(depth=50.0, frequency=100.0)
 
 
 @pytest.fixture
 def receiver_array():
-    """Receiver array for covariance computation"""
+    """Receiver array for covariance computation."""
     depths = np.array([30.0, 50.0, 70.0])
     ranges = np.array([0.0])  # Not used for mode computation
     return Receiver(depths=depths, ranges=ranges)
 
 
 class TestOASNInitialization:
-    """Test OASN model initialization"""
+    """Test OASN model initialization."""
 
     def test_oasn_instantiation(self):
-        """Test that OASN can be instantiated"""
+        """Test that OASN can be instantiated."""
         try:
             oasn = OASN()
             assert oasn is not None
@@ -50,7 +50,7 @@ class TestOASNInitialization:
             pytest.skip("OASN executable not found")
 
     def test_oasn_executable_detection(self):
-        """Test OASN executable detection"""
+        """Test OASN executable detection."""
         try:
             oasn = OASN()
             # Check if oasn2_bin was found
@@ -62,16 +62,11 @@ class TestOASNInitialization:
             pytest.skip("OASES executables not found")
 
 
-# Class removed: OASN computes covariance matrices (.xsm) for matched field processing,
-# NOT mode shapes. These tests were fundamentally wrong - OASN is not a mode solver.
-# Use Kraken for normal mode computation.
-
-
 class TestOASNErrorHandling:
-    """Test OASN error handling"""
+    """Test OASN error handling."""
 
     def test_oasn_missing_executable(self):
-        """Test error when OASN executable not found"""
+        """Test error when OASN executable not found."""
         # Force executable path to non-existent file
         try:
             from pathlib import Path
@@ -81,7 +76,7 @@ class TestOASNErrorHandling:
 
     @pytest.mark.requires_binary
     def test_oasn_requires_executable(self, simple_env, source_100hz):
-        """Test that OASN requires oasn2_bin executable"""
+        """Test that OASN requires oasn2_bin executable."""
         # OASN now directly requires oasn2_bin in __init__
         # If it doesn't exist, __init__ will raise FileNotFoundError
         try:
@@ -91,11 +86,6 @@ class TestOASNErrorHandling:
         except FileNotFoundError as e:
             assert "oasn2_bin" in str(e) or "OASN" in str(e)
             pytest.skip("OASN executable not available")
-
-
-# Class removed: OASN integration tests for mode computation were nonsense.
-# OASN outputs covariance matrices for matched field processing, not modes.
-# Use OAST for transmission loss or Kraken for modes.
 
 
 if __name__ == '__main__':

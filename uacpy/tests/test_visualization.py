@@ -19,7 +19,7 @@ pytestmark = pytest.mark.requires_binary
 
 @pytest.fixture
 def basic_setup():
-    """Create basic environment, source, and result for testing"""
+    """Create basic environment, source, and result for testing."""
     env = uacpy.Environment(
         name='test',
         depth=100,
@@ -35,10 +35,10 @@ def basic_setup():
 
 
 class TestPlotTransmissionLoss:
-    """Tests for plot_transmission_loss function"""
+    """Tests for plot_transmission_loss function."""
 
     def test_plot_transmission_loss_basic(self, basic_setup):
-        """Test basic TL plotting"""
+        """Test basic TL plotting."""
         env, source, result = basic_setup
 
         fig, ax, _ = plots.plot_transmission_loss(result, env)
@@ -47,7 +47,7 @@ class TestPlotTransmissionLoss:
         plt.close(fig)
 
     def test_plot_transmission_loss_custom_params(self, basic_setup):
-        """Test TL plotting with custom parameters"""
+        """Test TL plotting with custom parameters."""
         env, source, result = basic_setup
 
         fig, ax, _ = plots.plot_transmission_loss(
@@ -61,7 +61,7 @@ class TestPlotTransmissionLoss:
         plt.close(fig)
 
     def test_plot_transmission_loss_custom_ax(self, basic_setup):
-        """Test TL plotting on custom axes"""
+        """Test TL plotting on custom axes."""
         env, source, result = basic_setup
 
         fig, ax = plt.subplots()
@@ -71,7 +71,7 @@ class TestPlotTransmissionLoss:
         plt.close(fig)
 
     def test_plot_transmission_loss_no_bathymetry(self, basic_setup):
-        """Test TL plotting without bathymetry overlay"""
+        """Test TL plotting without bathymetry overlay."""
         env, source, result = basic_setup
 
         fig, ax, _ = plots.plot_transmission_loss(result, env, show_bathymetry=False)
@@ -80,10 +80,10 @@ class TestPlotTransmissionLoss:
 
 
 class TestPlotRays:
-    """Tests for plot_rays function"""
+    """Tests for plot_rays function."""
 
     def test_plot_rays_basic(self, basic_setup):
-        """Test basic ray plotting"""
+        """Test basic ray plotting."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -95,7 +95,7 @@ class TestPlotRays:
         plt.close(fig)
 
     def test_plot_rays_max_rays(self, basic_setup):
-        """Test ray plotting with max_rays limit"""
+        """Test ray plotting with max_rays limit."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -107,10 +107,10 @@ class TestPlotRays:
 
 
 class TestPlotEnvironment:
-    """Tests for environment plotting functions"""
+    """Tests for environment plotting functions."""
 
     def test_plot_ssp(self, basic_setup):
-        """Test SSP plotting"""
+        """Test SSP plotting."""
         env, source, _ = basic_setup
 
         fig, ax = plots.plot_ssp(env)
@@ -119,7 +119,7 @@ class TestPlotEnvironment:
         plt.close(fig)
 
     def test_plot_bathymetry(self, basic_setup):
-        """Test bathymetry plotting"""
+        """Test bathymetry plotting."""
         env, source, _ = basic_setup
 
         fig, ax = plots.plot_bathymetry(env)
@@ -127,7 +127,7 @@ class TestPlotEnvironment:
         plt.close(fig)
 
     def test_plot_environment(self, basic_setup):
-        """Test complete environment plotting"""
+        """Test complete environment plotting."""
         env, source, _ = basic_setup
 
         fig, axes = plots.plot_environment(env, source)
@@ -137,10 +137,10 @@ class TestPlotEnvironment:
 
 
 class TestCompareModels:
-    """Tests for model comparison functions"""
+    """Tests for model comparison functions."""
 
     def test_compare_models_single(self, basic_setup):
-        """Test comparing single model"""
+        """Test comparing single model."""
         env, source, result = basic_setup
 
         results = {'Bellhop': result}
@@ -149,7 +149,7 @@ class TestCompareModels:
         plt.close(fig)
 
     def test_compare_models_multiple(self, basic_setup):
-        """Test comparing multiple models"""
+        """Test comparing multiple models."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -167,10 +167,10 @@ class TestCompareModels:
 
 
 class TestRangeDepthCuts:
-    """Tests for range and depth cut plotting"""
+    """Tests for range and depth cut plotting."""
 
     def test_plot_range_cut(self, basic_setup):
-        """Test range cut plotting"""
+        """Test range cut plotting."""
         env, source, result = basic_setup
 
         fig, ax = plots.plot_range_cut(result, depth=50)
@@ -179,7 +179,7 @@ class TestRangeDepthCuts:
         plt.close(fig)
 
     def test_plot_depth_cut(self, basic_setup):
-        """Test depth cut plotting"""
+        """Test depth cut plotting."""
         env, source, result = basic_setup
 
         fig, ax = plots.plot_depth_cut(result, range_m=2500)
@@ -187,7 +187,7 @@ class TestRangeDepthCuts:
         plt.close(fig)
 
     def test_compare_range_cuts(self, basic_setup):
-        """Test comparing range cuts"""
+        """Test comparing range cuts."""
         env, source, result = basic_setup
 
         results = {'Bellhop': result}
@@ -197,10 +197,10 @@ class TestRangeDepthCuts:
 
 
 class TestFieldPlotMethod:
-    """Tests for Field.plot() method"""
+    """Tests for Field.plot() method."""
 
     def test_field_plot_tl(self, basic_setup):
-        """Test Field.plot() for TL field"""
+        """Test Field.plot() for TL field."""
         env, source, result = basic_setup
 
         fig, ax = result.plot(env=env)
@@ -209,7 +209,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_rays(self, basic_setup):
-        """Test Field.plot() for ray field"""
+        """Test Field.plot() for ray field."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -220,7 +220,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_modes(self, basic_setup):
-        """Test Field.plot() for mode field"""
+        """Test Field.plot() for mode field."""
         env, source, _ = basic_setup
 
         kraken = Kraken(verbose=False)
@@ -231,7 +231,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_custom_params(self, basic_setup):
-        """Test Field.plot() with custom parameters"""
+        """Test Field.plot() with custom parameters."""
         env, source, result = basic_setup
 
         fig, ax = result.plot(env=env, vmin=30, vmax=90, cmap='jet')
@@ -240,10 +240,10 @@ class TestFieldPlotMethod:
 
 
 class TestFieldPlotComparison:
-    """Tests for Field.plot_comparison() static method"""
+    """Tests for Field.plot_comparison() static method."""
 
     def test_plot_comparison_single(self, basic_setup):
-        """Test plot_comparison with single model"""
+        """Test plot_comparison with single model."""
         env, source, result = basic_setup
 
         results = {'Bellhop': result}
@@ -252,7 +252,7 @@ class TestFieldPlotComparison:
         plt.close(fig)
 
     def test_plot_comparison_multiple(self, basic_setup):
-        """Test plot_comparison with multiple models"""
+        """Test plot_comparison with multiple models."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -270,10 +270,10 @@ class TestFieldPlotComparison:
 
 
 class TestQuickplot:
-    """Tests for quickplot convenience functions"""
+    """Tests for quickplot convenience functions."""
 
     def test_quick_tl(self, basic_setup, tmp_path):
-        """Test quick_tl function"""
+        """Test quick_tl function."""
         env, source, result = basic_setup
 
         save_path = tmp_path / "test_tl.png"
@@ -283,7 +283,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quick_compare(self, basic_setup, tmp_path):
-        """Test quick_compare function"""
+        """Test quick_compare function."""
         env, source, result = basic_setup
 
         results = {'Bellhop': result}
@@ -294,7 +294,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quick_env(self, basic_setup, tmp_path):
-        """Test quick_env function"""
+        """Test quick_env function."""
         env, source, _ = basic_setup
 
         save_path = tmp_path / "test_env.png"
@@ -304,7 +304,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quick_cut(self, basic_setup, tmp_path):
-        """Test quick_cut function"""
+        """Test quick_cut function."""
         env, source, result = basic_setup
 
         save_path = tmp_path / "test_cut.png"
@@ -314,7 +314,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quick_analysis(self, basic_setup, tmp_path):
-        """Test quick_analysis function"""
+        """Test quick_analysis function."""
         env, source, result = basic_setup
 
         save_prefix = str(tmp_path / "test")
@@ -324,7 +324,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quick_report(self, basic_setup, tmp_path):
-        """Test quick_report function"""
+        """Test quick_report function."""
         env, source, result = basic_setup
 
         results = {'Bellhop': result}
@@ -335,7 +335,7 @@ class TestQuickplot:
         plt.close(fig)
 
     def test_quickplot_aliases(self, basic_setup, tmp_path):
-        """Test quickplot short aliases"""
+        """Test quickplot short aliases."""
         env, source, result = basic_setup
 
         # Test quick_tl
@@ -355,17 +355,17 @@ class TestQuickplot:
 
 
 class TestPlottingEdgeCases:
-    """Tests for edge cases and error handling"""
+    """Tests for edge cases and error handling."""
 
     def test_plot_empty_results(self):
-        """Test plotting with empty results dict"""
+        """Test plotting with empty results dict."""
         env = uacpy.Environment(name='test', depth=100, sound_speed=1500, ssp_type='isovelocity')
 
         with pytest.raises((ValueError, KeyError, IndexError)):
             plots.compare_models({}, env)
 
     def test_plot_invalid_field_type(self, basic_setup):
-        """Test Field.plot() with unsupported field type"""
+        """Test Field.plot() with unsupported field type."""
         env, source, _ = basic_setup
 
         # Create a field with unsupported type
@@ -380,7 +380,7 @@ class TestPlottingEdgeCases:
             field.plot(env=env)
 
     def test_plot_with_nan_data(self, basic_setup):
-        """Test plotting with NaN values in data"""
+        """Test plotting with NaN values in data."""
         env, source, result = basic_setup
 
         # Add some NaN values
@@ -392,10 +392,10 @@ class TestPlottingEdgeCases:
 
 
 class TestPlottingIntegration:
-    """Integration tests for plotting workflows"""
+    """Integration tests for plotting workflows."""
 
     def test_complete_workflow(self, basic_setup, tmp_path):
-        """Test complete plotting workflow"""
+        """Test complete plotting workflow."""
         env, source, _ = basic_setup
 
         # Run multiple models

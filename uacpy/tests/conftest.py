@@ -1,6 +1,4 @@
-"""
-Pytest configuration and fixtures for UACPY tests
-"""
+"""Pytest configuration and fixtures for UACPY tests."""
 
 import pytest
 import numpy as np
@@ -11,7 +9,7 @@ from uacpy.models import Bellhop, Kraken, KrakenField
 
 @pytest.fixture
 def simple_env():
-    """Simple isovelocity environment"""
+    """Simple isovelocity environment."""
     return uacpy.Environment(
         name="Test Environment",
         depth=100.0,
@@ -22,7 +20,7 @@ def simple_env():
 
 @pytest.fixture
 def munk_env():
-    """Munk profile environment"""
+    """Munk profile environment."""
     depths = np.linspace(0, 100, 21)
     # Simple Munk-like profile
     axis_depth = 50
@@ -39,7 +37,7 @@ def munk_env():
 
 @pytest.fixture
 def range_dependent_env():
-    """Range-dependent environment with bathymetry"""
+    """Range-dependent environment with bathymetry."""
     # Create bathymetry: slope from 80m to 120m over 10km
     ranges = np.linspace(0, 10000, 11)
     depths = np.linspace(80, 120, 11)
@@ -56,13 +54,13 @@ def range_dependent_env():
 
 @pytest.fixture
 def source():
-    """Standard acoustic source"""
+    """Standard acoustic source."""
     return uacpy.Source(depth=50.0, frequency=100.0)
 
 
 @pytest.fixture
 def receiver_grid():
-    """Standard receiver grid"""
+    """Standard receiver grid."""
     return uacpy.Receiver(
         depths=np.linspace(10, 90, 9),
         ranges=np.linspace(100, 5000, 11)
@@ -71,7 +69,7 @@ def receiver_grid():
 
 @pytest.fixture
 def receiver_small():
-    """Small receiver grid for fast tests"""
+    """Small receiver grid for fast tests."""
     return uacpy.Receiver(
         depths=np.array([25.0, 50.0, 75.0]),
         ranges=np.array([1000.0, 3000.0, 5000.0])
@@ -80,25 +78,25 @@ def receiver_small():
 
 @pytest.fixture
 def bellhop_model():
-    """Bellhop model instance"""
+    """Bellhop model instance."""
     return Bellhop(verbose=False)
 
 
 @pytest.fixture
 def kraken_model():
-    """Kraken model instance"""
+    """Kraken model instance."""
     return Kraken(verbose=False)
 
 
 @pytest.fixture
 def krakenfield_model():
-    """KrakenField model instance"""
+    """KrakenField model instance."""
     return KrakenField(verbose=False)
 
 
 # Pytest configuration
 def pytest_configure(config):
-    """Configure pytest with custom markers"""
+    """Configure pytest with custom markers."""
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )

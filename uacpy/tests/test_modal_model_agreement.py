@@ -16,11 +16,11 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestModalModelAgreement:
-    """Test agreement between different modal models"""
+    """Test agreement between different modal models."""
 
     @pytest.fixture
     def simple_environment(self):
-        """Create a simple Pekeris waveguide for testing"""
+        """Create a simple Pekeris waveguide for testing."""
         ssp_data = np.array([[0, 1500], [100, 1480]])
         env = uacpy.Environment(
             name='Pekeris',
@@ -33,12 +33,12 @@ class TestModalModelAgreement:
 
     @pytest.fixture
     def simple_source(self):
-        """Create a simple source"""
+        """Create a simple source."""
         return uacpy.Source(depth=[50], frequency=[100])
 
     @pytest.fixture
     def single_receiver(self):
-        """Create a single receiver at 50m depth, 5km range"""
+        """Create a single receiver at 50m depth, 5km range."""
         return uacpy.Receiver(
             depths=np.array([50]),
             ranges=np.array([5000])
@@ -46,14 +46,14 @@ class TestModalModelAgreement:
 
     @pytest.fixture
     def multi_range_receiver(self):
-        """Create receivers at multiple ranges"""
+        """Create receivers at multiple ranges."""
         return uacpy.Receiver(
             depths=np.array([50]),
             ranges=np.array([1000, 2000, 3000, 5000, 7000, 10000])
         )
 
     def test_kraken_modes_valid(self, simple_environment, simple_source):
-        """Test that Kraken computes valid modes (wavenumbers non-zero)"""
+        """Test that Kraken computes valid modes (wavenumbers non-zero)."""
         # Create receiver grid for mode computation
         mode_depths = np.linspace(0, simple_environment.depth * 0.999, 150)
         receiver = uacpy.Receiver(depths=mode_depths, ranges=np.array([5000]))
@@ -80,7 +80,7 @@ class TestModalModelAgreement:
     def test_krakenfield_vs_scooter_single_point(
         self, simple_environment, simple_source, single_receiver
     ):
-        """Test KrakenField vs Scooter at a single point"""
+        """Test KrakenField vs Scooter at a single point."""
         # KrakenField
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
@@ -103,7 +103,7 @@ class TestModalModelAgreement:
     def test_krakenfield_vs_scooter_multiple_ranges(
         self, simple_environment, simple_source, multi_range_receiver
     ):
-        """Test KrakenField vs Scooter across multiple ranges"""
+        """Test KrakenField vs Scooter across multiple ranges."""
         # KrakenField
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, multi_range_receiver)
@@ -133,7 +133,7 @@ class TestModalModelAgreement:
     def test_krakenfield_vs_oast_single_point(
         self, simple_environment, simple_source, single_receiver
     ):
-        """Test KrakenField vs OAST at a single point"""
+        """Test KrakenField vs OAST at a single point."""
         # KrakenField
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
@@ -158,7 +158,7 @@ class TestModalModelAgreement:
     def test_scooter_vs_oast_single_point(
         self, simple_environment, simple_source, single_receiver
     ):
-        """Test Scooter vs OAST at a single point"""
+        """Test Scooter vs OAST at a single point."""
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
@@ -182,7 +182,7 @@ class TestModalModelAgreement:
     def test_all_modal_models_agreement(
         self, simple_environment, simple_source, single_receiver
     ):
-        """Test that all modal models (Kraken, Scooter, OAST) agree"""
+        """Test that all modal models (Kraken, Scooter, OAST) agree."""
         # Run all models
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
@@ -214,7 +214,7 @@ class TestModalModelAgreement:
         )
 
     def test_mode_count_consistency(self, simple_environment, simple_source):
-        """Test that mode count is consistent for the environment"""
+        """Test that mode count is consistent for the environment."""
         mode_depths = np.linspace(0, simple_environment.depth * 0.999, 150)
         receiver = uacpy.Receiver(depths=mode_depths, ranges=np.array([5000]))
 

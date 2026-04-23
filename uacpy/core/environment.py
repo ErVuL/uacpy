@@ -181,32 +181,30 @@ class RangeDependentBottom:
     acoustic_type: str = 'vacuum'
 
     def __post_init__(self):
-        """Validate and set defaults"""
+        """Validate array lengths and set defaults."""
         n = len(self.ranges_km)
 
-        # Validate all arrays have same length
         for attr_name in ['depths', 'sound_speed', 'density', 'attenuation']:
             attr = getattr(self, attr_name)
             if len(attr) != n:
                 raise ValueError(f"{attr_name} must have same length as ranges_km ({n})")
 
-        # Set defaults for optional arrays
         if self.shear_speed is None:
             self.shear_speed = np.zeros(n)
 
     def get_at_range(self, range_m: float) -> BoundaryProperties:
         """
-        Get bottom properties at specified range via interpolation
+        Get bottom properties at a specified range by interpolation.
 
         Parameters
         ----------
         range_m : float
-            Range in meters
+            Range in meters.
 
         Returns
         -------
         properties : BoundaryProperties
-            Interpolated bottom properties at this range
+            Interpolated bottom properties at this range.
         """
         range_km = range_m / 1000.0
         ranges = self.ranges_km
@@ -922,19 +920,19 @@ class Environment:
         return self.bottom
 
     def has_range_dependent_ssp(self) -> bool:
-        """Check if environment has range-dependent SSP"""
+        """Return True if the environment has a range-dependent SSP."""
         return self.ssp_2d_matrix is not None
 
     def has_range_dependent_bottom(self) -> bool:
-        """Check if environment has range-dependent bottom properties"""
+        """Return True if bottom properties vary with range."""
         return self.bottom_rd is not None
 
     def has_layered_bottom(self) -> bool:
-        """Check if environment has a layered (depth-dependent) bottom"""
+        """Return True if the environment has a layered (depth-dependent) bottom."""
         return self.bottom_layered is not None
 
     def has_range_dependent_layered_bottom(self) -> bool:
-        """Check if environment has range-dependent layered bottom"""
+        """Return True if the environment has a range-dependent layered bottom."""
         return self.bottom_rd_layered is not None
 
     @property

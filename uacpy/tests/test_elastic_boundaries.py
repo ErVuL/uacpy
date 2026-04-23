@@ -24,11 +24,11 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestElasticBoundaryAutoDetection:
-    """Test automatic elastic boundary detection in KrakenField"""
+    """Test automatic elastic boundary detection in KrakenField."""
 
     @pytest.fixture
     def elastic_env(self):
-        """Create environment with elastic bottom (shear speed > 0)"""
+        """Create environment with elastic bottom (shear speed > 0)."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -47,7 +47,7 @@ class TestElasticBoundaryAutoDetection:
 
     @pytest.fixture
     def fluid_env(self):
-        """Create environment with fluid bottom (no shear)"""
+        """Create environment with fluid bottom (no shear)."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -75,7 +75,7 @@ class TestElasticBoundaryAutoDetection:
         )
 
     def test_krakenfield_detects_elastic_bottom(self, elastic_env, source, receiver_small):
-        """Test that KrakenField detects elastic bottom and uses KrakenC"""
+        """Test that KrakenField detects elastic bottom and uses KrakenC."""
         krakenfield = KrakenField(verbose=True)
 
         # This should automatically detect elastic boundary and use KrakenC
@@ -91,7 +91,7 @@ class TestElasticBoundaryAutoDetection:
         assert np.all(result.data < 200)  # Reasonable TL range
 
     def test_krakenfield_fluid_bottom(self, fluid_env, source, receiver_small):
-        """Test that KrakenField works with fluid bottom (uses regular Kraken)"""
+        """Test that KrakenField works with fluid bottom (uses regular Kraken)."""
         krakenfield = KrakenField(verbose=False)
 
         result = krakenfield.compute_tl(fluid_env, source, receiver_small)
@@ -101,7 +101,7 @@ class TestElasticBoundaryAutoDetection:
         assert np.all(np.isfinite(result.data))
 
     def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_small):
-        """Test that elastic and fluid bottoms produce different results"""
+        """Test that elastic and fluid bottoms produce different results."""
         krakenfield = KrakenField(verbose=False)
 
         result_elastic = krakenfield.compute_tl(elastic_env, source, receiver_small)
@@ -116,11 +116,11 @@ class TestElasticBoundaryAutoDetection:
 
 
 class TestBounceReflectionCoefficients:
-    """Test BOUNCE reflection coefficient computation"""
+    """Test BOUNCE reflection coefficient computation."""
 
     @pytest.fixture
     def elastic_env(self):
-        """Create environment with elastic bottom for BOUNCE"""
+        """Create environment with elastic bottom for BOUNCE."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,
@@ -147,7 +147,7 @@ class TestBounceReflectionCoefficients:
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
     def test_bounce_basic(self, elastic_env, source, receiver_bounce, tmp_path):
-        """Test basic BOUNCE execution"""
+        """Test basic BOUNCE execution."""
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
 
         result = bounce.run(
@@ -162,7 +162,7 @@ class TestBounceReflectionCoefficients:
         assert Path(result.metadata['brc_file']).exists()
 
     def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
-        """Test that BOUNCE creates both .brc and .irc files"""
+        """Test that BOUNCE creates both .brc and .irc files."""
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
 
         result = bounce.run(
@@ -185,7 +185,7 @@ class TestBounceReflectionCoefficients:
         assert irc_file.suffix == '.irc'
 
     def test_bounce_reflection_coefficient_data(self, elastic_env, source, receiver_bounce):
-        """Test that BOUNCE returns valid reflection coefficient data"""
+        """Test that BOUNCE returns valid reflection coefficient data."""
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
 
         result = bounce.run(
@@ -217,7 +217,7 @@ class TestBounceReflectionCoefficients:
 
 
 class TestBounceToScooterWorkflow:
-    """Test BOUNCE → SCOOTER workflow using .brc files"""
+    """Test BOUNCE → SCOOTER workflow using .brc files."""
 
     @pytest.fixture
     def elastic_env(self):
@@ -253,7 +253,7 @@ class TestBounceToScooterWorkflow:
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
     def test_bounce_to_scooter(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
-        """Test complete BOUNCE → SCOOTER workflow"""
+        """Test complete BOUNCE → SCOOTER workflow."""
         # Step 1: Run BOUNCE to generate .brc file
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
         bounce_result = bounce.run(
@@ -297,7 +297,7 @@ class TestBounceToScooterWorkflow:
         assert np.any(result.data > 0)
 
     def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
-        """Test that BOUNCE→SCOOTER gives similar results to direct elastic"""
+        """Test that BOUNCE→SCOOTER gives similar results to direct elastic."""
         # Workflow 1: BOUNCE → SCOOTER
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
         bounce_result = bounce.run(
@@ -344,7 +344,7 @@ class TestBounceToScooterWorkflow:
 
 
 class TestWorkflowComparison:
-    """Compare KrakenField auto-detection vs BOUNCE→SCOOTER workflows"""
+    """Compare KrakenField auto-detection vs BOUNCE→SCOOTER workflows."""
 
     @pytest.fixture
     def elastic_env(self):
@@ -376,7 +376,7 @@ class TestWorkflowComparison:
         )
 
     def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
-        """Compare results from both elastic boundary workflows"""
+        """Compare results from both elastic boundary workflows."""
         # Approach 1: KrakenField auto-detection
         krakenfield = KrakenField(verbose=False)
         result_krakenfield = krakenfield.compute_tl(elastic_env, source, receiver_small)

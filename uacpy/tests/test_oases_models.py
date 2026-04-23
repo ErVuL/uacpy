@@ -18,7 +18,7 @@ class TestOAST:
     """Lightweight OAST smoke test covering the basic run path."""
 
     def test_oast_basic_run(self, simple_env, source, receiver_small):
-        """Test basic OAST transmission loss computation"""
+        """Test basic OAST transmission loss computation."""
         try:
             oast = OAST(verbose=False)
             result = oast.run(simple_env, source, receiver_small)
@@ -44,7 +44,7 @@ class TestOAST:
 
     @pytest.mark.requires_binary
     def test_oast_range_dependent_warning(self, range_dependent_env, source, receiver_small):
-        """Test that OAST warns about range-dependent environments"""
+        """Test that OAST warns about range-dependent environments."""
         try:
             oast = OAST(verbose=False)
 

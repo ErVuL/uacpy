@@ -14,10 +14,10 @@ from uacpy.core.environment import (
 
 
 class TestRangeDependentEnvironment:
-    """Tests for range-dependent environments"""
+    """Tests for range-dependent environments."""
 
     def test_range_dependent_bathymetry(self):
-        """Test environment with range-dependent bathymetry"""
+        """Test environment with range-dependent bathymetry."""
         # Create sloping bathymetry
         ranges = np.linspace(0, 10000, 21)
         depths = np.linspace(80, 120, 21)
@@ -37,7 +37,7 @@ class TestRangeDependentEnvironment:
         assert env.bathymetry[-1, 1] == 120.0
 
     def test_range_dependent_bottom_properties(self):
-        """Test range-dependent bottom properties"""
+        """Test range-dependent bottom properties."""
         ranges_km = np.array([0, 5, 10])
         depths = np.array([100, 110, 120])
         sound_speeds = np.array([1600, 1650, 1700])
@@ -69,7 +69,7 @@ class TestRangeDependentEnvironment:
         assert bottom_at_2km.sound_speed < 1650
 
     def test_range_dependent_ssp(self):
-        """Test range-dependent sound speed profile"""
+        """Test range-dependent sound speed profile."""
         # Create 2D SSP matrix: depth x range
         depths = np.linspace(0, 100, 21)
         ranges_km = np.array([0, 5, 10])
@@ -93,7 +93,7 @@ class TestRangeDependentEnvironment:
         assert env.ssp_2d_matrix.shape == (21, 3)
 
     def test_combined_range_dependencies(self):
-        """Test environment with both RD bathymetry and RD SSP"""
+        """Test environment with both RD bathymetry and RD SSP."""
         # Bathymetry
         ranges = np.linspace(0, 10000, 11)
         depths_bathy = np.linspace(90, 110, 11)
@@ -119,10 +119,10 @@ class TestRangeDependentEnvironment:
 
 
 class TestDepthDependentSSP:
-    """Tests for depth-dependent sound speed profiles"""
+    """Tests for depth-dependent sound speed profiles."""
 
     def test_isovelocity_profile(self):
-        """Test isovelocity (constant) profile"""
+        """Test isovelocity (constant) profile."""
         env = uacpy.Environment(
             name="Isovelocity",
             depth=100.0,
@@ -134,7 +134,7 @@ class TestDepthDependentSSP:
         assert np.all(env.ssp_data[:, 1] == 1500.0)
 
     def test_linear_gradient(self):
-        """Test linear sound speed gradient"""
+        """Test linear sound speed gradient."""
         depths = np.linspace(0, 100, 11)
         sound_speeds = 1480 + depths * 0.4  # 0.4 m/s per meter
 
@@ -149,7 +149,7 @@ class TestDepthDependentSSP:
         assert env.ssp_data[-1, 1] == 1520.0
 
     def test_munk_profile(self):
-        """Test Munk sound speed profile"""
+        """Test Munk sound speed profile."""
         depths = np.linspace(0, 100, 51)
         axis_depth = 50.0
         c_axis = 1485.0
@@ -172,7 +172,7 @@ class TestDepthDependentSSP:
         assert abs(min_depth - axis_depth) < 5.0  # Within 5m of axis
 
     def test_negative_gradient(self):
-        """Test negative sound speed gradient (sound channel)"""
+        """Test negative sound speed gradient (sound channel)."""
         depths = np.linspace(0, 100, 11)
         sound_speeds = 1520 - depths * 0.4  # Decreasing with depth
 
@@ -187,11 +187,11 @@ class TestDepthDependentSSP:
 
 
 class TestModelWithRangeDependence:
-    """Test models with range-dependent environments"""
+    """Test models with range-dependent environments."""
 
     @pytest.mark.requires_binary
     def test_bellhop_range_dependent_bathymetry(self):
-        """Test Bellhop with range-dependent bathymetry"""
+        """Test Bellhop with range-dependent bathymetry."""
         # Create sloping bottom
         ranges = np.linspace(0, 5000, 11)
         depths = np.linspace(80, 100, 11)
@@ -218,7 +218,7 @@ class TestModelWithRangeDependence:
         assert result.shape == (3, 3)
 
     def test_ram_range_dependent_ssp(self):
-        """Test RAM with range-dependent SSP"""
+        """Test RAM with range-dependent SSP."""
         try:
             # Create range-dependent SSP
             depths = np.linspace(0, 100, 21)
@@ -258,7 +258,7 @@ class TestModelWithRangeDependence:
 
     @pytest.mark.requires_binary
     def test_bellhop_range_dependent_bottom(self):
-        """Test Bellhop with range-dependent bottom properties"""
+        """Test Bellhop with range-dependent bottom properties."""
         # Create range-dependent bottom
         ranges_km = np.array([0, 2.5, 5])
         depths = np.array([100, 105, 110])
@@ -295,10 +295,10 @@ class TestModelWithRangeDependence:
 
 
 class TestRangeDependentConsistency:
-    """Test consistency of range-dependent handling"""
+    """Test consistency of range-dependent handling."""
 
     def test_bathymetry_interpolation(self):
-        """Test that bathymetry is correctly interpolated"""
+        """Test that bathymetry is correctly interpolated."""
         ranges = np.array([0, 5000, 10000])
         depths = np.array([80, 100, 120])
         bathymetry = np.column_stack([ranges, depths])
@@ -320,7 +320,7 @@ class TestRangeDependentConsistency:
         assert 85 < depth_at_2500 < 95  # Should be around 90m
 
     def test_bottom_properties_at_range(self):
-        """Test getting bottom properties at specific range"""
+        """Test getting bottom properties at specific range."""
         ranges_km = np.array([0, 5, 10])
         depths = np.array([100, 110, 120])
         sound_speeds = np.array([1600, 1650, 1700])
@@ -348,7 +348,7 @@ class TestRangeDependentConsistency:
         assert 100 < bottom_at_2_5km.depth < 110
 
     def test_ssp_2d_matrix_shape(self):
-        """Test that 2D SSP matrix has correct shape"""
+        """Test that 2D SSP matrix has correct shape."""
         depths = np.linspace(0, 100, 21)
         ranges_km = np.array([0, 5, 10])
 
@@ -367,15 +367,11 @@ class TestRangeDependentConsistency:
         assert len(env.ssp_2d_ranges) == 3
 
 
-# ============================================================================
-# NEW: Tests for SedimentLayer & LayeredBottom
-# ============================================================================
-
 class TestSedimentLayer:
-    """Tests for the SedimentLayer dataclass"""
+    """Tests for the SedimentLayer dataclass."""
 
     def test_basic_creation(self):
-        """Test basic SedimentLayer creation"""
+        """Test basic SedimentLayer creation."""
         layer = SedimentLayer(thickness=10, sound_speed=1650, density=1.9)
         assert layer.thickness == 10
         assert layer.sound_speed == 1650
@@ -384,17 +380,17 @@ class TestSedimentLayer:
         assert layer.shear_speed == 0.0  # default
 
     def test_validation_negative_thickness(self):
-        """Negative thickness should raise ValueError"""
+        """Negative thickness should raise ValueError."""
         with pytest.raises(ValueError, match="thickness"):
             SedimentLayer(thickness=-5, sound_speed=1650, density=1.9)
 
     def test_validation_negative_sound_speed(self):
-        """Negative sound speed should raise ValueError"""
+        """Negative sound speed should raise ValueError."""
         with pytest.raises(ValueError, match="sound_speed"):
             SedimentLayer(thickness=10, sound_speed=-100, density=1.9)
 
     def test_elastic_layer(self):
-        """Test layer with shear properties"""
+        """Test layer with shear properties."""
         layer = SedimentLayer(
             thickness=20, sound_speed=1700, density=2.0,
             shear_speed=400, shear_attenuation=1.0
@@ -404,10 +400,10 @@ class TestSedimentLayer:
 
 
 class TestLayeredBottom:
-    """Tests for the LayeredBottom class"""
+    """Tests for the LayeredBottom class."""
 
     def test_basic_creation(self):
-        """Test basic LayeredBottom creation"""
+        """Test basic LayeredBottom creation."""
         lb = LayeredBottom(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
@@ -422,7 +418,7 @@ class TestLayeredBottom:
         assert lb.total_thickness() == 60
 
     def test_layer_depths(self):
-        """Test layer depth computation"""
+        """Test layer depth computation."""
         lb = LayeredBottom(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
@@ -435,7 +431,7 @@ class TestLayeredBottom:
         assert depths[1] == (210, 260)
 
     def test_empty_layers_raises(self):
-        """Empty layers list should raise ValueError"""
+        """Empty layers list should raise ValueError."""
         with pytest.raises(ValueError, match="at least one"):
             LayeredBottom(
                 layers=[],
@@ -443,7 +439,7 @@ class TestLayeredBottom:
             )
 
     def test_environment_with_layered_bottom(self):
-        """Test Environment accepts LayeredBottom"""
+        """Test Environment accepts LayeredBottom."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -464,7 +460,7 @@ class TestLayeredBottom:
 
 
 class TestRangeDependentLayeredBottom:
-    """Tests for the RangeDependentLayeredBottom class"""
+    """Tests for the RangeDependentLayeredBottom class."""
 
     def _make_rdl(self):
         near = LayeredBottom(
@@ -499,7 +495,7 @@ class TestRangeDependentLayeredBottom:
         assert rho[0] == 1.2
 
     def test_sample_at_depths_halfspace(self):
-        """Samples below all layers should return halfspace properties"""
+        """Samples below all layers should return halfspace properties."""
         rdl = self._make_rdl()
         # Profile 1 has total thickness 13m, max is 20m
         # So sample at depth 20m is below its layers → halfspace
@@ -535,7 +531,7 @@ class TestRangeDependentLayeredBottom:
 
     @pytest.mark.requires_binary
     def test_ram_with_rdl(self):
-        """RAM should handle RangeDependentLayeredBottom"""
+        """RAM should handle RangeDependentLayeredBottom."""
         rdl = self._make_rdl()
         env = uacpy.Environment(name='rdl_test', depth=300,
                                 ssp_type='isovelocity', sound_speed=1500.0,
@@ -553,10 +549,10 @@ class TestRangeDependentLayeredBottom:
 
 @pytest.mark.requires_binary
 class TestWarnings:
-    """Test that models warn for unsupported features"""
+    """Test that models warn for unsupported features."""
 
     def test_bellhop_warns_bottom_rd(self):
-        """Bellhop should warn about range-dependent bottom"""
+        """Bellhop should warn about range-dependent bottom."""
         rd_bottom = RangeDependentBottom(
             ranges_km=np.array([0, 10]),
             depths=np.array([100, 100]),
@@ -576,7 +572,7 @@ class TestWarnings:
                 pass  # Binary may not be available
 
     def test_bellhop_warns_layered_bottom(self):
-        """Bellhop should warn about layered bottom"""
+        """Bellhop should warn about layered bottom."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -593,7 +589,7 @@ class TestWarnings:
                 pass
 
     def test_ram_accepts_layered_bottom(self):
-        """RAM should accept layered bottom without warnings"""
+        """RAM should accept layered bottom without warnings."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -610,7 +606,7 @@ class TestWarnings:
 
 
 class TestIntegrationLayeredBottom:
-    """Integration tests: run models with layered bottom"""
+    """Integration tests: run models with layered bottom."""
 
     @pytest.fixture
     def layered_env(self):
@@ -639,7 +635,7 @@ class TestIntegrationLayeredBottom:
 
     @pytest.mark.requires_binary
     def test_krakenfield_layered(self, layered_env, source, receiver):
-        """KrakenField should produce valid TL with layered bottom"""
+        """KrakenField should produce valid TL with layered bottom."""
         from uacpy.models import KrakenField
         kf = KrakenField(verbose=False)
         result = kf.compute_tl(layered_env, source, receiver)
@@ -649,7 +645,7 @@ class TestIntegrationLayeredBottom:
 
     @pytest.mark.requires_binary
     def test_scooter_layered(self, layered_env, source, receiver):
-        """Scooter should produce valid TL with layered bottom"""
+        """Scooter should produce valid TL with layered bottom."""
         from uacpy.models import Scooter
         scooter = Scooter(verbose=False)
         result = scooter.compute_tl(layered_env, source, receiver)
@@ -658,7 +654,7 @@ class TestIntegrationLayeredBottom:
 
     @pytest.mark.requires_binary
     def test_kraken_layered_modes(self, layered_env, source, receiver):
-        """Kraken should produce valid modes with layered bottom"""
+        """Kraken should produce valid modes with layered bottom."""
         from uacpy.models import Kraken
         kraken = Kraken(verbose=False)
         result = kraken.run(layered_env, source, receiver)
@@ -668,7 +664,7 @@ class TestIntegrationLayeredBottom:
 
 
 class TestIntegrationRunWithBounce:
-    """Integration test for Bellhop.run_with_bounce()"""
+    """Integration test for Bellhop.run_with_bounce()."""
 
     @pytest.mark.requires_binary
     def test_run_with_bounce_produces_tl(self):
@@ -695,11 +691,11 @@ class TestIntegrationRunWithBounce:
 
 
 class TestIntegrationRAMRangeDependent:
-    """Integration test for RAM with range-dependent bottom"""
+    """Integration test for RAM with range-dependent bottom."""
 
     @pytest.mark.requires_binary
     def test_ram_rd_bottom_produces_tl(self):
-        """RAM with RD bottom should produce valid TL"""
+        """RAM with RD bottom should produce valid TL."""
         bottom_rd = RangeDependentBottom(
             ranges_km=np.array([0, 5, 10]),
             depths=np.array([100, 100, 100]),
@@ -723,10 +719,10 @@ class TestIntegrationRAMRangeDependent:
 
 
 class TestATEnvWriterLayered:
-    """Test AT env writer with layered bottom"""
+    """Test AT env writer with layered bottom."""
 
     def test_nmedia_with_layers(self):
-        """AT env writer should set NMEDIA > 1 for layered bottom"""
+        """AT env writer should set NMEDIA > 1 for layered bottom."""
         import io
         from uacpy.io.at_env_writer import ATEnvWriter
         from uacpy.core.constants import SSPType, BoundaryType
@@ -753,7 +749,7 @@ class TestATEnvWriterLayered:
         assert nmedia_line.strip() == '3'
 
     def test_layer_sections_written(self):
-        """Layer sections should be written between SSP and bottom"""
+        """Layer sections should be written between SSP and bottom."""
         import io
         from uacpy.io.at_env_writer import ATEnvWriter
 
@@ -771,7 +767,7 @@ class TestATEnvWriterLayered:
         assert '1550' in content  # Layer sound speed present
 
     def test_halfspace_depth_below_layers(self):
-        """Halfspace depth should be below all layers"""
+        """Halfspace depth should be below all layers."""
         import io
         from uacpy.io.at_env_writer import ATEnvWriter
         from uacpy.core.constants import BoundaryType

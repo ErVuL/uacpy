@@ -10,7 +10,7 @@ from enum import Enum
 
 
 class LogLevel(Enum):
-    """Log levels for UACPY"""
+    """Log severity levels."""
     INFO = "INFO"
     WARN = "WARN"
     ERROR = "ERROR"
@@ -56,7 +56,6 @@ class Logger:
         self.verbose = verbose
         self.min_level = min_level
 
-        # Level ordering for filtering
         self._level_order = {
             LogLevel.DEBUG: 0,
             LogLevel.INFO: 1,
@@ -65,54 +64,54 @@ class Logger:
         }
 
     def _get_timestamp(self) -> str:
-        """Get current UTC timestamp in required format"""
+        """Return the current UTC timestamp in the logger's display format."""
         now = datetime.now(timezone.utc)
         return now.strftime("%Y/%m/%d %H:%M:%S UTC")
 
     def _should_log(self, level: LogLevel) -> bool:
-        """Check if message should be logged based on level"""
+        """Return True if a message at ``level`` should be emitted."""
         if not self.verbose:
             return False
         return self._level_order[level] >= self._level_order[self.min_level]
 
     def _log(self, level: LogLevel, message: str):
-        """Internal logging method"""
+        """Emit ``message`` at ``level`` if it passes the level filter."""
         if self._should_log(level):
             timestamp = self._get_timestamp()
             print(f"[{timestamp}] [{level.value}] [{self.name}] {message}")
 
     def info(self, message: str):
-        """Log info message"""
+        """Log an info-level message."""
         self._log(LogLevel.INFO, message)
 
     def warn(self, message: str):
-        """Log warning message"""
+        """Log a warning-level message."""
         self._log(LogLevel.WARN, message)
 
     def error(self, message: str):
-        """Log error message"""
+        """Log an error-level message."""
         self._log(LogLevel.ERROR, message)
 
     def debug(self, message: str):
-        """Log debug message (only if min_level=DEBUG)"""
+        """Log a debug-level message (only shown when ``min_level=DEBUG``)."""
         self._log(LogLevel.DEBUG, message)
 
 
 def create_logger(name: str, verbose: bool = False) -> Logger:
     """
-    Create a logger for a model
+    Create a logger for a model.
 
     Parameters
     ----------
     name : str
-        Model name
-    verbose : bool
-        Enable verbose output
+        Model name.
+    verbose : bool, optional
+        Enable verbose output. Default is False.
 
     Returns
     -------
     logger : Logger
-        Configured logger instance
+        Configured logger instance.
 
     Examples
     --------

@@ -60,22 +60,18 @@ class Source:
         angles: Optional[Union[List[float], np.ndarray]] = None,
         source_type: str = 'point',
     ):
-        # Convert to numpy arrays
         self.depth = np.atleast_1d(np.array(depth, dtype=np.float64))
         self.frequency = np.atleast_1d(np.array(frequency, dtype=np.float64))
 
-        # Validate depths are positive
         if np.any(self.depth < 0):
             raise ValueError("Source depths must be positive (down from surface)")
 
-        # Set launch angles for ray tracing
         if angles is None:
-            # Default: -80 to 80 degrees, 361 angles
             self.angles = np.linspace(-80, 80, 361)
         else:
             self.angles = np.array(angles, dtype=np.float64)
 
-        # Validate source type — only 'point' and 'line' are consumed by writers.
+        # Only 'point' and 'line' are consumed by writers.
         valid_types = ['point', 'line']
         if source_type not in valid_types:
             raise ValueError(f"source_type must be one of {valid_types}")
@@ -83,17 +79,17 @@ class Source:
 
     @property
     def n_sources(self) -> int:
-        """Number of sources"""
+        """Number of sources."""
         return len(self.depth)
 
     @property
     def n_frequencies(self) -> int:
-        """Number of frequencies"""
+        """Number of frequencies."""
         return len(self.frequency)
 
     @property
     def n_angles(self) -> int:
-        """Number of launch angles"""
+        """Number of launch angles."""
         return len(self.angles)
 
     def __repr__(self) -> str:
@@ -111,7 +107,7 @@ class Source:
                 f"{self.n_angles} angles, type='{self.source_type}')")
 
     def copy(self):
-        """Create a deep copy of the source"""
+        """Return a deep copy of the source."""
         return Source(
             depth=self.depth.copy(),
             frequency=self.frequency.copy(),

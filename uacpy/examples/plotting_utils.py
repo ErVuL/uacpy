@@ -6,8 +6,13 @@ Provides consistent, professional visualization across all examples.
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import uacpy
+
+# Default output directory: next to this file, so examples drop plots under
+# uacpy/uacpy/examples/output/ regardless of the caller's cwd.
+DEFAULT_OUTPUT_DIR = Path(__file__).parent / 'output'
 
 # Professional color scheme for all models
 COLORS = {
@@ -421,7 +426,7 @@ def plot_model_statistics(results: Dict, source_depth: float):
 
 def create_example_report(example_num: int, title: str, description: str,
                          env, source, receiver, results: Dict,
-                         output_prefix: str, output_dir: str = "output"):
+                         output_prefix: str, output_dir=None):
     """
     Create complete report for an example with all plots.
 
@@ -431,10 +436,10 @@ def create_example_report(example_num: int, title: str, description: str,
     - TL curve comparison
     - Statistics and RMS errors
 
-    All plots saved to output_dir (default: "output/")
+    All plots saved to ``output_dir`` (default: ``<examples>/output/``).
     """
-    import os
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     apply_plot_style()
 
@@ -476,27 +481,31 @@ def create_example_report(example_num: int, title: str, description: str,
 
     # Plot 1: Configuration
     fig = plot_source_receiver_config(env, source, receiver)
-    fig.savefig(f'{output_dir}/{output_prefix}_config.png', dpi=150, bbox_inches='tight')
+    config_path = output_dir / f'{output_prefix}_config.png'
+    fig.savefig(config_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ {output_dir}/{output_prefix}_config.png")
+    print(f"  ✓ {config_path}")
 
     # Plot 2: TL fields
     fig = plot_tl_field_comparison(results, env, source)
-    fig.savefig(f'{output_dir}/{output_prefix}_fields.png', dpi=150, bbox_inches='tight')
+    fields_path = output_dir / f'{output_prefix}_fields.png'
+    fig.savefig(fields_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ {output_dir}/{output_prefix}_fields.png")
+    print(f"  ✓ {fields_path}")
 
     # Plot 3: TL curves
     fig = plot_tl_comparison_curves(results, source.depth[0])
-    fig.savefig(f'{output_dir}/{output_prefix}_curves.png', dpi=150, bbox_inches='tight')
+    curves_path = output_dir / f'{output_prefix}_curves.png'
+    fig.savefig(curves_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ {output_dir}/{output_prefix}_curves.png")
+    print(f"  ✓ {curves_path}")
 
     # Plot 4: Statistics
     fig = plot_model_statistics(results, source.depth[0])
-    fig.savefig(f'{output_dir}/{output_prefix}_stats.png', dpi=150, bbox_inches='tight')
+    stats_path = output_dir / f'{output_prefix}_stats.png'
+    fig.savefig(stats_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ {output_dir}/{output_prefix}_stats.png")
+    print(f"  ✓ {stats_path}")
 
     print(f"\nExample {example_num} complete!")
     print("=" * 80 + "\n")

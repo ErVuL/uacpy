@@ -1,5 +1,5 @@
 """
-Shared utilities for propagation models
+Shared utilities for propagation models.
 
 Eliminates code duplication across model implementations.
 """
@@ -13,12 +13,11 @@ from uacpy.models.base import RunMode
 
 class ParameterMapper:
     """
-    Maps user-friendly parameters to model-specific formats
+    Map user-friendly parameters to model-specific formats.
 
     Provides consistent parameter naming across models.
     """
 
-    # Volume attenuation mappings
     VOLUME_ATTEN_MAP = {
         'thorp': 'T',
         't': 'T',
@@ -35,24 +34,17 @@ class ParameterMapper:
     @classmethod
     def map_volume_attenuation(cls, value: Optional[str]) -> Optional[str]:
         """
-        Standardize volume attenuation parameter
+        Standardize volume attenuation parameter.
 
         Parameters
         ----------
         value : str or None
-            User-friendly name ('thorp', 'francois', 'biological', etc.)
+            User-friendly name ('thorp', 'francois', 'biological', ...).
 
         Returns
         -------
         mapped : str or None
-            Acoustics Toolbox format ('T', 'F', 'B', or None)
-
-        Examples
-        --------
-        >>> ParameterMapper.map_volume_attenuation('thorp')
-        'T'
-        >>> ParameterMapper.map_volume_attenuation('francois-garrison')
-        'F'
+            Acoustics Toolbox format ('T', 'F', 'B', or None).
         """
         if value is None:
             return None
@@ -63,12 +55,12 @@ class ParameterMapper:
     @classmethod
     def map_run_mode_to_bellhop(cls, run_mode: RunMode) -> str:
         """
-        Map RunMode enum to Bellhop run_type letter.
+        Map a ``RunMode`` enum to the Bellhop ``run_type`` letter.
 
         Returns
         -------
         run_type : str
-            Bellhop run_type ('C', 'I', 'S', 'R', 'E', 'A').
+            Bellhop ``run_type`` ('C', 'I', 'S', 'R', 'E', 'A').
         """
         mapping = {
             RunMode.COHERENT_TL: 'C',
@@ -77,16 +69,17 @@ class ParameterMapper:
             RunMode.RAYS: 'R',
             RunMode.EIGENRAYS: 'E',
             RunMode.ARRIVALS: 'A',
-            RunMode.TIME_SERIES: 'A',  # arrivals are the input for time-series synthesis
+            # Time-series synthesis is built from arrival data.
+            RunMode.TIME_SERIES: 'A',
         }
         return mapping[run_mode]
 
 
 class ReceiverGridBuilder:
     """
-    Builds standard receiver grids for common scenarios
+    Build standard receiver grids for common scenarios.
 
-    Eliminates need for users to manually create receiver grids.
+    Eliminates the need for users to manually construct receiver grids.
     """
 
     @staticmethod
@@ -98,27 +91,27 @@ class ReceiverGridBuilder:
         depth_margin: float = 5.0
     ):
         """
-        Build standard TL computation grid
+        Build a standard TL computation grid.
 
         Parameters
         ----------
         env_depth : float
-            Environment depth in meters
+            Environment depth in meters.
         max_range : float
-            Maximum range in meters
+            Maximum range in meters.
         n_depths : int
-            Number of depth points
+            Number of depth points.
         n_ranges : int
-            Number of range points
+            Number of range points.
         depth_margin : float
-            Margin from surface/bottom in meters
+            Margin from surface/bottom in meters.
 
         Returns
         -------
         depths : ndarray
-            Depth grid
+            Depth grid.
         ranges : ndarray
-            Range grid
+            Range grid (starts at max(1% of max_range, 10m) to avoid r=0).
         """
         depths = np.linspace(
             depth_margin,
@@ -126,9 +119,8 @@ class ReceiverGridBuilder:
             n_depths
         )
 
-        # Start at 1% of max range (avoid zero range issues)
         ranges = np.linspace(
-            max(max_range * 0.01, 10.0),  # At least 10m
+            max(max_range * 0.01, 10.0),
             max_range,
             n_ranges
         )
@@ -138,7 +130,7 @@ class ReceiverGridBuilder:
     @staticmethod
     def build_ray_grid(env_depth: float, max_range: float):
         """
-        Build grid suitable for ray visualization.
+        Build a 200×200 grid suitable for ray visualization.
 
         Parameters
         ----------
@@ -150,9 +142,9 @@ class ReceiverGridBuilder:
         Returns
         -------
         depths : ndarray
-            Depth grid (200 points, high resolution).
+            Depth grid (200 points).
         ranges : ndarray
-            Range grid (200 points, high resolution).
+            Range grid (200 points).
         """
         depths = np.linspace(0, env_depth, 200)
         ranges = np.linspace(0, max_range, 200)
@@ -161,21 +153,21 @@ class ReceiverGridBuilder:
 
 def validate_source_depth(source_depth: float, env_depth: float, margin: float = 1.0):
     """
-    Validate source depth against environment
+    Validate source depth against the environment.
 
     Parameters
     ----------
     source_depth : float
-        Source depth in meters
+        Source depth in meters.
     env_depth : float
-        Environment depth in meters
+        Environment depth in meters.
     margin : float
-        Safety margin in meters
+        Safety margin in meters.
 
     Raises
     ------
     InvalidDepthError
-        If source depth is invalid
+        If the source depth is negative or within ``margin`` of the bottom.
     """
     if source_depth < 0:
         raise InvalidDepthError(source_depth, env_depth, "Source")
@@ -186,21 +178,21 @@ def validate_source_depth(source_depth: float, env_depth: float, margin: float =
 
 def validate_receiver_depths(receiver_depths: np.ndarray, env_depth: float, margin: float = 1.0):
     """
-    Validate receiver depths against environment
+    Validate receiver depths against the environment.
 
     Parameters
     ----------
     receiver_depths : ndarray
-        Receiver depths in meters
+        Receiver depths in meters.
     env_depth : float
-        Environment depth in meters
+        Environment depth in meters.
     margin : float
-        Safety margin in meters
+        Safety margin in meters.
 
     Raises
     ------
     InvalidDepthError
-        If any receiver depth is invalid
+        If any receiver depth is negative or within ``margin`` of the bottom.
     """
     if np.any(receiver_depths < 0):
         bad_depth = receiver_depths[receiver_depths < 0][0]
