@@ -28,9 +28,9 @@ the field and aims to provide a shared foundation for comparing models,
 validating results, running experiments, and developing new ideas.
 
 This project began as an AI-assisted (Claude Code with Sonnet 4.5, Opus 4.6 
-and 4.7) initiative to reduce early development time, but going forward it 
-will be maintained manually by its author—without autonomous AI-driven 
-modifications.
+and 4.7) initiative to reduce early development time, but starting with the 
+first release, it will be maintained manually by its author—without autonomous 
+AI-driven modifications.
 
 Community feedback, verification, and contributions are warmly 
 encouraged. The project’s success depends on collective effort; the 
@@ -126,7 +126,7 @@ rm -rf uacpy
 ## ▶ Simplest example
 
 A minimal "hello world": transmission loss in a 100 m Pekeris waveguide with
-Bellhop, at 100 Hz, out to 10 km.
+Bellhop, at 1000 Hz, out to 5 km.
 
 ``` python
 import numpy as np
@@ -151,13 +151,13 @@ env = uacpy.Environment(
     ),
 )
 
-# 2. Source — 100 Hz, mid water column
-source = uacpy.Source(depth=50.0, frequency=100.0)
+# 2. Source — 1000 Hz, mid water column
+source = uacpy.Source(depth=50.0, frequency=1000.0)
 
-# 3. Receiver grid — 50 depths × 100 ranges out to 10 km
+# 3. Receiver grid — 200 depths × 5000 ranges out to 5 km
 receiver = uacpy.Receiver(
-    depths=np.linspace(5, 95, 50),
-    ranges=np.linspace(100, 10_000, 100),
+    depths=np.linspace(0, 100, 200),
+    ranges=np.linspace(0, 5000, 5000),
 )
 
 # 4. Run Bellhop in coherent-TL mode
@@ -171,228 +171,6 @@ plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
 plt.tight_layout()
 plt.show()
 ```
-
-## 🛠️ Hardening Roadmap
-
-Because the initial codebase was bootstrapped with an LLM, the highest‑value
-next steps are *auditing* rather than new features. The items below are
-meant as a checklist for contributors who want to help make UACPY
-trustworthy for research use. Each one is a legitimate open question —
-please open an issue or PR for anything you investigate.
-
-> **Status — 2026-04-23 audit pass:** A comprehensive cross-model audit
-> addressed dozens of silent-wrong-result bugs (Bellhop run_type casing,
-> ray-file range units, Field 3-D indexing, OASN env-var / SSP encoding,
-> OASP IC2 truncation, SPARC range downsampling, RAM multi-source), wired
-> several missing kwargs (`beam_shift`, non-uniform OASES receiver depths,
-> Kraken `rmax_km`, KrakenField dense mode-depth grid, Bounce `n_angles`,
-> SPARC `rmax_multiplier`, Scooter `stabilizing_attenuation_off` / `field_interp`),
-> removed 11 API-breaking dead paths (unused `Source`/`Receiver`/`Environment`
-> attrs, legacy `use_pe` / `compute_pe` names, `TL_FLOOR_PRESSURE` alias,
-> backcompat shims in env_reader and output_reader), and added a stub
-> `Bellhop3D` class. Tests 312/312 pass, 29/29 examples pass. The roadmap
-> below remains for further deepening.
-
-### 🧱 Architecture & API audit
-
--   Review the `PropagationModel` base class and the per‑model overrides
-    for consistency (method signatures, return types, `_UNSET` sentinel
-    usage, `run()` vs `compute_tl()` contracts).
--   Confirm that every model actually honors the shared `Environment`
-    contract (bathymetry, altimetry, layered bottoms, range‑dependent
-    SSP). The capability matrix in `DOCUMENTATION.md` is a claim, not a
-    proof — it needs spot‑checking.
--   Sanity‑check naming across `core/`, `models/`, `io/`,
-    `visualization/` for duplicated concepts, inconsistent units
-    (km vs. m), and drifted conventions.
--   Identify over‑engineered abstractions (class hierarchies that exist
-    “just in case”) and under‑engineered gaps (real edge cases left
-    unhandled).
-
-### 🔬 Native model re‑validation
-
-Several vendored models were modified in‑tree. Every modification is a
-potential source of silent numerical drift and needs an independent
-check.
-
--   **mpiramS (RAM):** OpenMP race‑condition fix, NaN‑safe complex init,
-    double‑precision promotion, range‑dependent sediment, I/O rewrite.
-    See `uacpy/third_party/MODIFICATIONS.md`. Rerun the original
-    published test cases against an unmodified mpiramS build and diff
-    the outputs.
--   **KrakenField:** out‑of‑bounds sentinel fix in `field.f90` — confirm
-    it doesn’t alter mode amplitudes in regimes that previously worked.
--   **bellhopcuda:** two changes.
-    (1) CUDA arch-detection tweaks in `config/cuda/SetupCUDA.cmake`
-    (widened override range, extended GPU name table) — build-only,
-    does not affect numerical output, but new hardware targets
-    (Ada-Lovelace, laptop variants) should be smoke-tested against a
-    known-good CPU Bellhop run.
-    (2) SHDFIL field widths in `src/mode/tl.cpp` brought back in line
-    with the Fortran Acoustics-Toolbox spec (upstream wrote 4-byte
-    values for `Sx`, `Sy`, `Rr`, `theta`, `freqVec`, `freq0`, `atten`
-    where the spec declares them `REAL*8`). Confirm `.shd` files
-    round-trip through uacpy's `read_shd_bin` and the Matlab
-    `read_shd_bin.m` shipped with the Acoustics Toolbox, and that TL
-    plots no longer show monotonicity violations in the receiver-range
-    axis.
--   **UACPY RAM TL formula**
-    (`TL = -20·log10(|psif|·4π) + 10·log10(r)`): validate against
-    reference TL curves for at least one shallow‑water and one
-    deep‑water benchmark (e.g. ASA 1990 benchmark problems).
--   Cross‑model regression: the same environment driven through Bellhop,
-    Kraken (field), Scooter, RAM, and OASES should agree within expected
-    tolerances. Build a small benchmark suite that enforces this and
-    fails loudly when a model drifts.
-
-### 🐍 Python‑side code review
-
--   **Dead code / hallucinated features.** LLMs frequently generate
-    plausible‑looking code paths that are never reached or keywords that
-    the native binary silently ignores. Grep for unused functions,
-    unreachable branches, and parameters that never make it into the
-    generated `.env` / `.flp` / OASES input files.
--   **Doc ↔ code drift.** `DOCUMENTATION.md` was written partly from
-    source inspection, but parameter defaults and behavior may have
-    drifted. Every signature and default in the doc should match the
-    code.
--   **Error handling.** Check that failures (missing executable, failed
-    subprocess, malformed output file, NaN TL) raise clean, documented
-    exceptions rather than bare `RuntimeError` with unhelpful messages.
--   **Security of file I/O and `subprocess` calls.** The model wrappers
-    launch native binaries with user‑provided paths and parameters —
-    audit for command injection, path traversal, unbounded memory reads
-    on large output files, and unchecked temp‑file cleanup.
--   **Magic numbers.** Defaults for `cmin`, `cmax`, `n_mesh`, absorbing
-    layer widths, etc. were often chosen by heuristic. Trace each one to
-    a reference (paper, manual) or mark it as a tunable heuristic.
-
-### 📊 Visualization / plot utility review
-
-The `uacpy/visualization/` module (`plots.py`, `quickplot.py`, `style.py`)
-was largely LLM‑generated and is one of the most error‑prone surfaces:
-plotting code is easy to write plausibly but hard to get *correct*.
-
--   **Axes, units, and orientation.** Verify every plot uses the right
-    axis units (m vs km, Hz vs kHz, degrees vs radians), that depth
-    increases downward on TL/ray plots, and that colorbars label TL in
-    dB with a meaningful range.
--   **Colormaps and dynamic range.** Confirm `jet_r` / chosen defaults
-    don’t hide low‑TL structure; check that `tl_min`/`tl_max` clipping
-    matches the physical regime (shallow water vs long‑range deep
-    water).
--   **Overlays.** Bathymetry, SSP, source/receiver markers, layered
-    bottoms, and altimetry must be drawn in the same coordinate frame as
-    the field they overlay — off‑by‑one conversions between range arrays
-    and grid centers are a common LLM bug.
--   **Ray coloring.** The `color_by_bounces` logic classifies direct /
-    surface‑only / bottom‑only / both‑bounced paths — spot‑check against
-    the underlying arrivals data for a scenario where each class is
-    expected.
--   **Mode plots.** Normalization, sign convention, and mode‑number
-    ordering should match what `Kraken`/`OASN` actually return; plot
-    labels should match the wavenumber in metadata.
--   **Comparison helpers.** `compare_models`, `compare_range_cuts`, and
-    the statistics plots interpolate across potentially different
-    grids — confirm the interpolation is honest and that disagreements
-    aren’t hidden by resampling.
--   **Dead / unreachable plot functions.** The visualization API surface
-    is large; some functions may never be called by any example or test.
-    Prune or document them.
--   **Style / reproducibility.** `style.py` applies its rcParams at
-    import time (consistent look across plots). If a downstream user
-    tweaks `mpl.rcParams` and wants the uacpy defaults back, they call
-    `apply_professional_style()`; `mpl.rcdefaults()` reverts to
-    matplotlib's stock settings. Further work: document the rcParams
-    contract and audit per-plot overrides that may leak.
-
-### 🧪 Test suite audit
-
--   Distinguish *smoke tests* (does it run?) from *validation tests*
-    (does it give the right answer?). Many current tests are closer to
-    the former.
--   Add reference‑case regression tests with fixed seeds and tolerances:
-    ASA 1990 benchmarks, Pekeris waveguide, Munk deep‑channel,
-    Jensen & Kuperman textbook problems.
--   Confirm the `slow`, `requires_binary`, `requires_oases`,
-    `integration` markers are applied correctly; a test that silently
-    skips when a binary is missing is worse than a test that fails.
--   Check that every example script in `uacpy/examples/` runs to
-    completion and produces a sensible plot — LLM‑generated examples
-    often drift out of sync with the API.
-
-### 📦 Build, install, and packaging
-
--   Reproduce the install on a clean Linux VM, macOS, and WSL. Fortran
-    toolchain differences (gfortran versions, flag incompatibilities)
-    are a common cause of silent miscompilation.
--   Verify that `install.sh` and `install.bat` agree on output binary
-    names and locations.
--   Make sure OASES download URLs still work and the downloaded archive
-    hash matches what the install script expects.
--   Pin a known‑good Python dependency set (numpy / scipy / matplotlib
-    version combinations that have been exercised together).
-
-
-### 🔁 CI / CD
-
-UACPY currently has no automated pipeline — every check is manual. Before
-tagging a release this has to change:
-
--   **Lint + type check on every push**: `flake8`, optionally `mypy`,
-    on the Python source. Cheap, catches drift fast.
--   **Non‑binary test suite on every push**: `pytest -m "not requires_binary"`
-    across Python 3.8 → 3.13. Runs in seconds and validates the pure‑Python
-    layer (I/O, units, signal, noise).
--   **Full test suite on a nightly / release schedule**: builds the Fortran
-    and C/C++ binaries via `install.sh` on a clean runner, runs the full
-    `pytest` including `requires_binary` and `requires_oases` markers.
-    Fortran toolchain drift (gfortran versions, MPI, CUDA) is where
-    silent miscompilation usually hides.
--   **Matrix build check**: Ubuntu, macOS, Windows (WSL at minimum).
-    `install.sh` vs `install.bat` must not diverge.
--   **Release automation**: on tag push, run the full suite, build an
-    sdist (binaries not included — users still run `install.sh` or the
-    future per‑platform wheel job), and publish to PyPI.
--   **Benchmark regression job**: a small set of canonical scenarios
-    whose expected TL / arrival times are checked against tolerances.
-    Any PR that moves a TL value by more than the tolerance must fail
-    loudly. Without this, any silent numerical regression in a native
-    model or wrapper goes unnoticed.
-
-### 🌍 Community & process
-
--   Start an issue template for benchmark deviations (model, scenario,
-    expected vs observed, reproducer).
--   Solicit targeted reviews from domain experts on specific models
-    (ray tracing, modes, PE) rather than a single full‑project review —
-    underwater acoustics expertise is rarely breadth‑first.
-
-**If you are evaluating UACPY for a project: do not trust any specific
-number produced by it until at least the re‑validation bullets above have
-been independently verified for the model and regime you care about.**
-
-## 🔮 Ideas for Future Work
-
-### ➕ Model‑Level Improvements
-
--   Support for *all* features of each native model
--   GPU acceleration for more models
--   Full 3D propagation support (multiple approaches)
-
-### ➕ Environmental Data Integration
-
--   Global bathymetry (GEBCO, SRTM)
--   NOAA/IOOS/CMEMS oceanographic fields (temperature, salinity, sound
-    speed)
--   On‑the‑fly extraction, caching, and mesh generation
-
-### ➕ Framework & Tools
-
--   Scenario‑based batch simulations
--   Reproducible experiment containers
--   Interactive dashboards for TL/modes visualization
-
 
 ## 📚 Documentation & Examples
 
@@ -425,20 +203,25 @@ UACPY uses **pytest** with custom markers for categorizing tests.
 ### Run all tests
 
 ``` bash
+
 cd uacpy
 pytest uacpy/tests/
+
 ```
 
 ### Run a specific test file
 
 ``` bash
+
 pytest uacpy/tests/test_models.py
+
 ```
 
 ### Run a single test
 
 ``` bash
 pytest uacpy/tests/test_models.py::TestClassName::test_method -v
+
 ```
 
 ### Test markers
@@ -451,26 +234,162 @@ Tests use custom markers to allow selective execution:
 - `integration` -- End-to-end integration tests
 
 ``` bash
+
 # Skip slow tests
+
 pytest uacpy/tests/ -m "not slow"
 
+
+
 # Run only integration tests
+
 pytest uacpy/tests/ -m "integration"
 
+
+
 # Run only tests that don't need compiled binaries
+
 pytest uacpy/tests/ -m "not requires_binary"
 
+
+
 # Skip OASES tests (if OASES is not installed)
+
 pytest uacpy/tests/ -m "not requires_oases"
+
 ```
 
-### Run examples as a smoke test
+## 🗺️ Roadmap
 
-All example scripts can be run directly:
+Because the initial codebase was bootstrapped with an LLM, *auditing* comes
+before new features. The lists below are contributor checklists — please
+open an issue or PR for anything you investigate.
 
-``` bash
-python uacpy/examples/example_01_basic_shallow_water.py
-```
+### 🛠️ Hardening & validation (priority)
+
+**🧱 Architecture & API audit**
+-   Review `PropagationModel` and per‑model overrides for consistency
+    (signatures, return types, `_UNSET` usage, `run()` vs `compute_tl()`).
+-   Spot‑check the capability matrix in `DOCUMENTATION.md` — it’s a
+    claim, not a proof.
+-   Audit naming across `core/`, `models/`, `io/`, `visualization/` for
+    drifted conventions and inconsistent units (km vs m).
+-   Identify over‑engineered abstractions and under‑engineered gaps.
+
+**🔬 Native model re‑validation** — every in‑tree modification is a
+potential source of silent numerical drift.
+-   **mpiramS (RAM):** rerun the original published test cases against
+    an unmodified upstream build and diff the outputs. See
+    `uacpy/third_party/MODIFICATIONS.md` for the list of changes
+    (OpenMP fix, NaN‑safe init, double‑precision promotion,
+    range‑dependent sediment, I/O rewrite).
+-   **KrakenField:** confirm the `field.f90` out‑of‑bounds sentinel fix
+    doesn’t alter mode amplitudes in previously‑working regimes.
+-   **bellhopcuda:** smoke‑test the widened CUDA arch detection
+    (`SetupCUDA.cmake`) against a CPU Bellhop run; verify the `tl.cpp`
+    SHDFIL field‑width fix round‑trips `.shd` files through both uacpy’s
+    `read_shd_bin` and the Matlab `read_shd_bin.m`.
+-   **UACPY RAM TL formula**
+    (`TL = -20·log10(|psif|·4π) + 10·log10(r)`): validate against
+    shallow‑ and deep‑water benchmarks (e.g. ASA 1990).
+-   Cross‑model regression: the same environment through Bellhop,
+    Kraken (field), Scooter, RAM, and OASES should agree within
+    tolerance — build a benchmark suite that fails loudly on drift.
+
+**🐍 Python‑side code review**
+-   **Dead code / hallucinated features:** grep for unused functions,
+    unreachable branches, and parameters that never make it into the
+    generated `.env` / `.flp` / OASES input files.
+-   **Doc ↔ code drift:** every signature and default in
+    `DOCUMENTATION.md` should match the code.
+-   **Error handling:** missing executable, failed subprocess, malformed
+    output, NaN TL should raise clean documented exceptions — not bare
+    `RuntimeError`.
+-   **Security of `subprocess` + file I/O:** audit for command
+    injection, path traversal, unbounded reads on large outputs, and
+    temp‑file cleanup.
+-   **Magic numbers:** trace `cmin`, `cmax`, `n_mesh`, absorbing‑layer
+    widths, etc. to a reference or mark as tunable heuristics.
+
+**📊 Visualization review** — `plots.py` / `quickplot.py` / `style.py`
+are easy to write plausibly but hard to get correct.
+-   Axes, units, orientation: m vs km, Hz vs kHz, depth increasing
+    downward on TL/ray plots, colorbars labelled in dB.
+-   Colormaps and `tl_min`/`tl_max` clipping: confirm defaults don’t
+    hide low‑TL structure across shallow vs deep regimes.
+-   Overlays (bathymetry, SSP, markers, layered bottoms, altimetry)
+    must share the field’s coordinate frame — off‑by‑one on range
+    grids is a classic LLM bug.
+-   Ray coloring (`color_by_bounces`) and mode plots: normalization,
+    sign convention, and ordering should match what `Kraken` / `OASN`
+    return and the metadata wavenumbers.
+-   `compare_models`, `compare_range_cuts`, and statistics helpers
+    interpolate across grids — confirm disagreements aren’t hidden by
+    resampling.
+-   Prune unused plot functions; document the `style.py` rcParams
+    contract and audit per‑plot overrides that may leak.
+
+**🧪 Test suite audit**
+-   Distinguish smoke tests (“does it run?”) from validation tests
+    (“does it give the right answer?”) — many are closer to the former.
+-   Add reference‑case regressions with fixed tolerances: ASA 1990,
+    Pekeris, Munk, Jensen & Kuperman.
+-   Audit the `slow` / `requires_binary` / `requires_oases` /
+    `integration` markers — a silently skipped test is worse than a
+    failing one.
+-   Verify every script in `uacpy/examples/` runs end‑to‑end and
+    produces a sensible plot.
+
+**📦 Build, install, packaging**
+-   Reproduce install on a clean Linux VM, macOS, and WSL — gfortran
+    version drift is a common silent‑miscompilation source.
+-   Verify `install.sh` and `install.bat` agree on binary names and
+    locations.
+-   Confirm the OASES download URL and archive hash are still current.
+-   Pin a known‑good numpy / scipy / matplotlib combination.
+
+**🔁 CI / CD** — currently none; has to change before tagging a release.
+-   Lint (+ optional `mypy`) on every push.
+-   Non‑binary tests (`pytest -m "not requires_binary"`) on every push,
+    Python 3.8 → 3.13.
+-   Full suite nightly / on release: build binaries via `install.sh`
+    on a clean runner; this is where Fortran / MPI / CUDA drift hides.
+-   Matrix build: Ubuntu, macOS, Windows (WSL at minimum) — `install.sh`
+    vs `install.bat` must not diverge.
+-   Release automation: on tag, run the full suite → build sdist →
+    publish to PyPI.
+-   Benchmark regression job: canonical scenarios with TL / arrival
+    tolerances; any PR that moves a value beyond tolerance fails loudly.
+
+**🌍 Community & process**
+-   Issue template for benchmark deviations (model, scenario, expected
+    vs observed, reproducer).
+-   Solicit targeted reviews from domain experts per model (rays,
+    modes, PE) rather than a single full‑project review — underwater
+    acoustics expertise is rarely breadth‑first.
+
+> **If you are evaluating UACPY for a project: do not trust any specific
+> number produced by it until at least the re‑validation bullets above
+> have been independently verified for the model and regime you care
+> about.**
+
+### 🔮 Future scope
+
+**➕ Model‑level improvements**
+-   Support for *all* features of each native model
+-   GPU acceleration for more models
+-   Full 3‑D propagation support (multiple approaches)
+
+**➕ Environmental data integration**
+-   Global bathymetry (GEBCO, SRTM)
+-   NOAA / IOOS / CMEMS oceanographic fields (temperature, salinity,
+    sound speed)
+-   On‑the‑fly extraction, caching, and mesh generation
+
+**➕ Framework & tools**
+-   Scenario‑based batch simulations
+-   Reproducible experiment containers
+-   Interactive dashboards for TL / modes visualization
 
 
 ## 🙏 Acknowledgments
