@@ -43,43 +43,29 @@ community-driven.
 > inconsistencies, and the need for validation.
 
 
-## 🔍 What Is UACPY?
+## 🔍 What's in UACPY?
 
-UACPY provides:
+A unified Python API over classical underwater‑acoustic propagation
+models, plus the supporting pieces needed to actually use them:
+high‑level `Environment` / `Source` / `Receiver` construction, signal
+processing, ambient noise, and visualization.
 
--   A unified Python API for major underwater acoustic propagation
-    models 
--   High‑level tools for configuring environments, sources, receivers,
-    media, bathymetry, and boundaries
--   Propagation modeling outputs (TL grids, eigenrays, mode fields, PE
-    fields, arrivals, reflection coefficients)
--   Signal processing toolbox (waveform generation, matched filtering,
-    beamforming, spectral analysis, correlation)
--   Ambient noise modeling (Wenz curves, wind, shipping, thermal noise)
--   Visualization helpers for rays, TL maps, modes, fields, and
-    comparisons
--   Modular architecture that allows adding new models or backends
+**Propagation models**
 
-### Current Goals
+| Model             | Kind                                                       |
+|-------------------|------------------------------------------------------------|
+| **Bellhop**       | Ray / beam tracing                                         |
+| **Kraken**        | Normal modes                                               |
+| **Scooter**       | Fast‑field / normal modes                                  |
+| **SPARC**         | PE fast field                                              |
+| **RAM** (mpiramS) | Parabolic equation (broadband + TL)                        |
+| **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)   |
+| **Bounce**        | Reflection coefficients                                    |
 
--   Provide clean, high‑level Python access to classical models
--   Standardize I/O, parameter structures, and environmental
-    descriptions
--   Lower the barrier for experimentation, benchmarking & teaching
--   Promote transparent, repeatable acoustic modeling workflows
-
-
-## 🧭 Supported Propagation Models
-
-### ✔️ Implemented or In Progress
-
--   **Bellhop** --- Ray/beam tracing
--   **Kraken** --- Normal modes
--   **Scooter** --- Fast‑field / normal modes
--   **SPARC** --- PE fast field
--   **RAM** (mpiramS) --- Parabolic equation (broadband + TL)
--   **OASES** --- Full suite: OAST (TL), OASN (noise), OASR (reflection), OASP (transfer function)
--   **Bounce** --- Reflection coefficients
+**Beyond propagation** — signal processing (waveforms, matched filtering,
+beamforming, spectra), ambient noise (Wenz curves, wind, shipping,
+thermal), and visualization helpers for TL maps, rays, modes, fields,
+and cross‑model comparisons.
 
 ## 📦 Installation
 
