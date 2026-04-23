@@ -3,6 +3,15 @@ Attenuation models for underwater acoustics
 
 Implements various attenuation formulas including Thorp, Francois-Garrison,
 and custom models.
+
+Note
+----
+This module is a **user/example helper**.  The core uacpy library wires
+frequency-dependent volume attenuation inside the individual model writers
+(see ``uacpy.io.at_env_writer`` and model ``volume_attenuation`` kwargs).
+Nothing in ``uacpy.core`` or ``uacpy.models`` imports from this module;
+it exists primarily for example_17_attenuation_models.py and for users
+who want to compute attenuation curves directly.
 """
 
 import numpy as np

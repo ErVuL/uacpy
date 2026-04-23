@@ -7,8 +7,9 @@ propagation models. Supports both range-independent and range-dependent
 configurations.
 """
 
+import copy as _copy
 import numpy as np
-from typing import Union, List, Tuple, Optional, Callable
+from typing import Union, List, Tuple, Optional
 from dataclasses import dataclass
 
 
@@ -61,7 +62,7 @@ class BoundaryProperties:
     Attributes
     ----------
     acoustic_type : str
-        Boundary type: 'vacuum', 'rigid', 'half-space', 'grain-size', 'file', 'precalc'
+        Boundary type: 'vacuum', 'rigid', 'half-space', 'grain-size', 'file'
     depth : float
         Depth of boundary (m)
     density : float
@@ -147,12 +148,9 @@ class RangeDependentBottom:
         Attenuation at each range (dB/wavelength), shape (N,)
     shear_speed : ndarray, optional
         Shear wave speed at each range (m/s), shape (N,). Default is 0 (fluid).
-    shear_attenuation : ndarray, optional
-        Shear attenuation at each range (dB/wavelength), shape (N,). Default is 0.
-    roughness : ndarray, optional
-        RMS roughness at each range (m), shape (N,). Default is 0.
     acoustic_type : str
-        Boundary type (same at all ranges): 'half-space', 'vacuum', 'rigid', etc.
+        Boundary type (same at all ranges): 'vacuum', 'rigid', 'half-space', etc.
+        Default is 'vacuum' for consistency with BoundaryProperties.
 
     Examples
     --------
@@ -180,9 +178,7 @@ class RangeDependentBottom:
     density: np.ndarray
     attenuation: np.ndarray
     shear_speed: np.ndarray = None
-    shear_attenuation: np.ndarray = None
-    roughness: np.ndarray = None
-    acoustic_type: str = 'half-space'
+    acoustic_type: str = 'vacuum'
 
     def __post_init__(self):
         """Validate and set defaults"""
@@ -197,10 +193,6 @@ class RangeDependentBottom:
         # Set defaults for optional arrays
         if self.shear_speed is None:
             self.shear_speed = np.zeros(n)
-        if self.shear_attenuation is None:
-            self.shear_attenuation = np.zeros(n)
-        if self.roughness is None:
-            self.roughness = np.zeros(n)
 
     def get_at_range(self, range_m: float) -> BoundaryProperties:
         """
@@ -225,8 +217,6 @@ class RangeDependentBottom:
         rho = float(np.interp(range_km, ranges, self.density))
         alpha = float(np.interp(range_km, ranges, self.attenuation))
         c_s = float(np.interp(range_km, ranges, self.shear_speed))
-        alpha_s = float(np.interp(range_km, ranges, self.shear_attenuation))
-        rough = float(np.interp(range_km, ranges, self.roughness))
 
         return BoundaryProperties(
             acoustic_type=self.acoustic_type,
@@ -235,8 +225,6 @@ class RangeDependentBottom:
             density=rho,
             attenuation=alpha,
             shear_speed=c_s,
-            shear_attenuation=alpha_s,
-            roughness=rough
         )
 
 
@@ -521,11 +509,19 @@ class Environment:
     depth : float
         Maximum water depth in meters
     ssp_type : str, optional
-        Sound speed profile type: 'isovelocity', 'linear', 'bilinear',
-        'munk', 'pchip', 'cubic', 'analytic'. Default is 'isovelocity'.
+        Sound speed profile *shape* or *interpolation* hint:
+        'isovelocity', 'linear', 'bilinear', 'munk' (shapes),
+        'pchip', 'cubic', 'analytic', 'n2linear', 'quad' (interpolation).
+        Default is 'isovelocity'.
+
+        Note: shape names ('munk', 'isovelocity') and interpolation
+        names ('pchip', 'n2linear') are currently conflated in this
+        single field. Writers treat shape names as the default
+        interpolation (C-Linear).
     ssp_data : array-like, optional
         SSP data as [(depth, sound_speed), ...] pairs for 1D (range-independent).
         Required for most ssp_types except 'isovelocity'.
+        Also required alongside ``ssp_2d_matrix`` to specify the depth axis.
     ssp_2d_ranges : array-like, optional
         Range points (km) for 2D range-dependent SSP. If provided, requires ssp_2d_matrix.
     ssp_2d_matrix : array-like, optional
@@ -648,14 +644,17 @@ class Environment:
                     f"must match ssp_2d_ranges length ({len(self.ssp_2d_ranges)})"
                 )
 
-            # For 2D SSP, also need 1D reference (use first range profile or provide ssp_data)
-            if ssp_data is not None:
-                self.ssp_data = np.array(ssp_data, dtype=np.float64)
-            else:
-                # Use first range profile as reference 1D SSP
-                depths_2d = np.arange(self.ssp_2d_matrix.shape[0])  # Implicit depth indices
-                c_first = self.ssp_2d_matrix[:, 0]
-                self.ssp_data = np.column_stack([depths_2d, c_first])
+            # For 2D SSP we MUST have a real depth axis; fabricating
+            # np.arange(n_depth) silently puts the ocean at z=[0..n_depth-1]
+            # which corrupts every model that reads env.ssp_data[:, 0].
+            if ssp_data is None:
+                raise ValueError(
+                    "ssp_2d_matrix requires either ssp_data (1D reference "
+                    "with depth column) or an explicit depth axis. "
+                    "Provide ssp_data=[(z0, c0), (z1, c1), ...] so the "
+                    "depth axis for the 2D matrix is defined."
+                )
+            self.ssp_data = np.array(ssp_data, dtype=np.float64)
         else:
             # 1D SSP (range-independent)
             self.ssp_2d_ranges = None
@@ -735,18 +734,19 @@ class Environment:
         elif isinstance(bottom, RangeDependentBottom):
             # Range-dependent bottom
             self.bottom_rd = bottom
-            # Set self.bottom to median-range properties for backward
-            # compatibility.  Using range=0 would pick one extreme of the
-            # transition (e.g., soft mud) and feed that single value to
-            # every model that reads env.bottom, causing large TL errors.
+            # Set self.bottom to median-range properties so range-independent
+            # models that read env.bottom pick a representative profile. Using
+            # range=0 would pick one extreme (e.g., soft mud) and skew TL.
             median_range_m = float(np.median(bottom.ranges_km)) * 1000.0
             self.bottom = bottom.get_at_range(median_range_m)
         elif isinstance(bottom, RangeDependentLayeredBottom):
             # Range-AND-depth-dependent bottom
             self.bottom_rd_layered = bottom
-            # Use median-range profile's halfspace for backward compat
+            # Use median-range profile's halfspace as the representative
+            # env.bottom. Deep-copy so we don't mutate the caller's halfspace
+            # object when we overwrite its depth field below.
             mid_idx = len(bottom.profiles) // 2
-            self.bottom = bottom.profiles[mid_idx].halfspace
+            self.bottom = _copy.deepcopy(bottom.profiles[mid_idx].halfspace)
             self.bottom.depth = depth
             # No scalar bottom_rd (models must handle rd_layered directly)
             self.bottom_rd = None
@@ -759,13 +759,14 @@ class Environment:
         elif isinstance(bottom, LayeredBottom):
             # Layered (depth-dependent) bottom
             self.bottom_layered = bottom
-            # Set self.bottom to halfspace for backward compatibility
-            self.bottom = bottom.halfspace
+            # Deep-copy halfspace so we don't mutate caller's object.
+            self.bottom = _copy.deepcopy(bottom.halfspace)
             self.bottom.depth = depth
             self.bottom_rd = None
         else:
-            # Single BoundaryProperties
-            self.bottom = bottom
+            # Single BoundaryProperties — deep-copy so setting .depth
+            # doesn't leak back into the caller's object.
+            self.bottom = _copy.deepcopy(bottom)
             if not isinstance(self.bottom, RangeDependentBottom):
                 self.bottom.depth = depth
             self.bottom_rd = None
@@ -936,96 +937,30 @@ class Environment:
         """Check if environment has range-dependent layered bottom"""
         return self.bottom_rd_layered is not None
 
-    def get_wavelength(self, frequency: float, depth: float = 0.0) -> float:
-        """
-        Get acoustic wavelength at specified frequency and depth
-
-        Parameters
-        ----------
-        frequency : float
-            Frequency in Hz
-        depth : float, optional
-            Depth in meters. Default is surface (0m).
-
-        Returns
-        -------
-        wavelength : float
-            Wavelength in meters
-        """
-        c = self.get_sound_speed(depth)
-        return c / frequency
-
     @property
     def is_range_dependent(self) -> bool:
         """
         Check if environment has range-dependent properties
 
         Returns True if any of the following vary with range:
-        - Bathymetry (more than 1 range point)
+        - Bathymetry (more than 1 range point AND depths actually differ)
         - SSP (2D matrix provided)
         - Bottom properties (range-dependent bottom object)
+
+        A bathymetry array of two identical-depth points [(0, d), (rmax, d)]
+        is treated as range-independent (it is just a range extent marker).
         """
-        has_rd_bathy = len(self.bathymetry) > 1
+        # Bathymetry is only range-dependent if the depths actually differ.
+        has_rd_bathy = False
+        if len(self.bathymetry) > 1:
+            depths = self.bathymetry[:, 1]
+            if not np.allclose(depths, depths[0]):
+                has_rd_bathy = True
         has_rd_ssp = hasattr(self, 'ssp_2d_matrix') and self.ssp_2d_matrix is not None
         has_rd_bottom = hasattr(self, 'bottom_rd') and self.bottom_rd is not None
         has_rdl_bottom = hasattr(self, 'bottom_rd_layered') and self.bottom_rd_layered is not None
 
         return has_rd_bathy or has_rd_ssp or has_rd_bottom or has_rdl_bottom
-
-    @property
-    def max_range(self) -> float:
-        """Maximum range of bathymetry definition"""
-        if len(self.bathymetry) > 1:
-            return self.bathymetry[-1, 0]
-        return np.inf
-
-    @classmethod
-    def from_function(
-        cls,
-        name: str,
-        depth: float,
-        ssp_function: Callable[[np.ndarray], np.ndarray],
-        n_points: int = 101,
-        **kwargs
-    ):
-        """
-        Create environment from a sound speed function
-
-        Parameters
-        ----------
-        name : str
-            Environment name
-        depth : float
-            Maximum depth
-        ssp_function : callable
-            Function that takes depth array and returns sound speeds
-        n_points : int
-            Number of SSP sample points
-        **kwargs
-            Additional arguments passed to Environment()
-
-        Returns
-        -------
-        env : Environment
-            New environment instance
-
-        Examples
-        --------
-        >>> def my_ssp(z):
-        ...     return 1500 + 0.016 * z  # Linear gradient
-        >>> env = Environment.from_function('test', 1000, my_ssp)
-        """
-        depths = np.linspace(0, depth, n_points)
-        sound_speeds = ssp_function(depths)
-        ssp_data = np.column_stack([depths, sound_speeds])
-
-        return cls(
-            name=name,
-            depth=depth,
-            ssp_type='pchip',
-            ssp_data=ssp_data,
-            **kwargs
-        )
 
     def __repr__(self) -> str:
         range_dep = "range-dep" if self.is_range_dependent else "range-indep"
@@ -1159,15 +1094,11 @@ class Environment:
         )
 
     def copy(self):
-        """Create a deep copy of the environment"""
-        return Environment(
-            name=self.name,
-            depth=self.depth,
-            ssp_type=self.ssp_type,
-            ssp_data=self.ssp_data.copy() if self.ssp_data is not None else None,
-            sound_speed=self.sound_speed,
-            bathymetry=self.bathymetry.copy() if self.bathymetry is not None else None,
-            bottom=self.bottom,
-            surface=self.surface,
-            attenuation=self.attenuation,
-        )
+        """Create a deep copy of the environment.
+
+        Uses copy.deepcopy so every field — including ssp_2d_ranges,
+        ssp_2d_matrix, altimetry, bottom_layered, bottom_rd_layered, and
+        bottom_rd — is duplicated without aliasing back to the original
+        instance.
+        """
+        return _copy.deepcopy(self)

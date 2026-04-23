@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Optional, Any
 
 from uacpy.core.field import Field
-from uacpy.core.constants import TL_FLOOR_PRESSURE, TL_MAX_DB
+from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
 
 
 def read_shd_file(filepath: Union[str, Path]) -> Field:
@@ -114,7 +114,7 @@ def read_shd_file(filepath: Union[str, Path]) -> Field:
 
         # Convert to transmission loss with proper handling of shadow zones
         p_abs = np.abs(p)
-        p_abs = np.maximum(p_abs, TL_FLOOR_PRESSURE)
+        p_abs = np.maximum(p_abs, PRESSURE_FLOOR)
         tl_data = -20 * np.log10(p_abs)
         tl_data = np.clip(tl_data, None, TL_MAX_DB)
 
@@ -148,7 +148,6 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
     -------
     field : Field
         Field object with arrivals data. The metadata contains:
-        - 'arrivals': flat dict with all arrivals (legacy, for backward compat)
         - 'arrivals_by_receiver': nested list [isd][ird][irr] of per-receiver
           arrival dicts, each with keys: amplitudes, phases, delays,
           delay_imag, src_angles, rcv_angles, n_top_bounces, n_bot_bounces
@@ -159,31 +158,46 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
     """
     filepath = Path(filepath)
 
-    # Flat arrivals (backward compatible)
-    arrivals = {
-        "delays": [],
-        "amplitudes": [],
-        "phases": [],
-        "src_angles": [],
-        "rcv_angles": [],
-        "n_top_bounces": [],
-        "n_bot_bounces": [],
-    }
-
     # Fortran record marker length (in 4-byte words)
     # Most FORTRAN compilers use 1, some use 2
     marker_len = 1
 
     with open(filepath, "rb") as f:
-        # Check if binary or ASCII format
-        first_bytes = f.read(4)
+        # Check if binary or ASCII format. The ASCII arrivals file always
+        # begins with a quoted "'2D'" or "'3D'" tag at the very start of the
+        # first line. The binary format is a Fortran unformatted stream whose
+        # first bytes are a 4-byte record marker (typically \x04\x00\x00\x00
+        # for a 4-byte record, but compilers may emit other marker lengths).
+        # Prefer the positive ASCII test and fall back to binary otherwise.
+        head = f.read(16)
         f.seek(0)
-
-        # Check for binary format marker
-        is_binary = (first_bytes == b'\x04\x00\x00\x00')
+        try:
+            head_text = head.decode('ascii')
+        except UnicodeDecodeError:
+            head_text = ''
+        if head_text.lstrip().startswith(("'2D'", "'3D'")):
+            is_binary = False
+        else:
+            is_binary = True
 
         if is_binary:
-            # Binary format
+            # Binary arrivals format: each arrival is written as its own
+            # Fortran unformatted sequential record (ArrMod.f90:164), so
+            # each read requires bracketing-marker handling — the existing
+            # implementation below treated arrivals as a single contiguous
+            # block, producing wrong offsets and values.  Rather than ship
+            # a half-verified rewrite, fail loudly and point users to the
+            # ASCII path which is well-tested.
+            from uacpy.core.exceptions import ConfigurationError
+            raise ConfigurationError(
+                "Binary arrivals format (.arr written by RunType 'a') is "
+                "not fully supported yet. Re-run Bellhop with "
+                "arrivals_format='ascii' (RunType 'A'). See "
+                "ArrMod.f90:WriteArrivalsBinary for the authoritative "
+                "record layout if you wish to contribute a reader."
+            )
+            # Unreachable — left as documentation of the historical code
+            # path until a verified implementation lands.
             # Check if 2D or 3D format
             f.seek(4 * marker_len, 0)  # Skip first record marker
             flag = f.read(4).decode('ascii', errors='ignore')
@@ -291,15 +305,6 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
                                     "n_arrivals": narr,
                                 }
 
-                                # Also store in flat structure
-                                arrivals["amplitudes"].extend(amp)
-                                arrivals["phases"].extend(phase)
-                                arrivals["delays"].extend(delay_real)
-                                arrivals["src_angles"].extend(src_angle)
-                                arrivals["rcv_angles"].extend(rcv_angle)
-                                arrivals["n_top_bounces"].extend(n_top)
-                                arrivals["n_bot_bounces"].extend(n_bot)
-
                             rd_list.append(rcv_arrivals)
                         sd_list.append(rd_list)
                     arrivals_by_receiver.append(sd_list)
@@ -400,26 +405,12 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
                                         "n_arrivals": narr,
                                     }
 
-                                    # Also store in flat structure
-                                    arrivals["amplitudes"].extend(amps)
-                                    arrivals["phases"].extend(phases)
-                                    arrivals["delays"].extend(delays_r)
-                                    arrivals["src_angles"].extend(src_angs)
-                                    arrivals["rcv_angles"].extend(rcv_angs)
-                                    arrivals["n_top_bounces"].extend(n_tops)
-                                    arrivals["n_bot_bounces"].extend(n_bots)
-
                                 rd_list.append(rcv_arrivals)
                             sd_list.append(rd_list)
                         arrivals_by_receiver.append(sd_list)
         else:
             # 3D format - similar structure but with more dimensions
             raise NotImplementedError("3D arrivals format not yet implemented")
-
-    # Convert flat lists to arrays
-    for key in arrivals:
-        if len(arrivals[key]) > 0:
-            arrivals[key] = np.array(arrivals[key])
 
     return Field(
         field_type="arrivals",
@@ -428,7 +419,6 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
         depths=rz,
         frequencies=np.array([freq]),
         metadata={
-            "arrivals": arrivals,
             "arrivals_by_receiver": arrivals_by_receiver,
             "frequency": freq,
             "source_depths": sz,
@@ -514,8 +504,6 @@ def read_ray_file(filepath: Union[str, Path]) -> Field:
 
                 ray_r = []
                 ray_z = []
-                ray_amp = []
-                ray_phase = []
 
                 for _ in range(n_points):
                     line = f.readline().strip()
@@ -523,20 +511,18 @@ def read_ray_file(filepath: Union[str, Path]) -> Field:
                         break
                     parts = line.split()
                     if len(parts) >= 2:
-                        # Bellhop outputs range in km - store in km for now (will convert in plot)
+                        # Bellhop's WriteRay2D (WriteRay.f90:45) writes
+                        # ray2D(is)%x directly in meters (the MATLAB
+                        # plotray.m only divides by 1000 when the user
+                        # requests km output). No unit conversion here.
                         ray_r.append(float(parts[0]))
                         ray_z.append(float(parts[1]))
-                        if len(parts) >= 4:
-                            ray_amp.append(float(parts[2]))
-                            ray_phase.append(float(parts[3]))
 
                 if len(ray_r) > 0:
                     rays.append(
                         {
                             "r": np.array(ray_r),
                             "z": np.array(ray_z),
-                            "amp": np.array(ray_amp) if ray_amp else None,
-                            "phase": np.array(ray_phase) if ray_phase else None,
                             "alpha": alpha,
                             "num_top_bounces": n_top_bounces,
                             "num_bottom_bounces": n_bot_bounces,
@@ -588,7 +574,9 @@ def _read_ray_file_binary(filepath: Path) -> list:
                 ray_z = []
 
                 for _ in range(n_points):
-                    r = struct.unpack("f", f.read(4))[0] * 1000  # km to m
+                    # WriteRay2D writes ray2D%x directly in meters
+                    # (WriteRay.f90:45); no km conversion needed.
+                    r = struct.unpack("f", f.read(4))[0]
                     z = struct.unpack("f", f.read(4))[0]
                     ray_r.append(r)
                     ray_z.append(z)

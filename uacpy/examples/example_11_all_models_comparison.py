@@ -32,7 +32,10 @@ FEATURES DEMONSTRATED:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -215,49 +218,45 @@ def main():
     print("GENERATING VISUALIZATIONS")
     print("=" * 70)
 
-    # Ensure output directory exists
-    import os
-    os.makedirs('output', exist_ok=True)
-
     # Plot 1: Advanced environment overview
     print("\n[1/5] Environment overview...")
     fig1, axes1 = plot_environment_advanced(env, source, receiver)
-    plt.savefig('output/example_11_environment.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_11_environment.png")
+    plt.savefig(OUTPUT_DIR / 'example_11_environment.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_11_environment.png'}")
 
     # Plot 2: 2D SSP heatmap
     print("[2/5] 2D SSP heatmap...")
     fig2, ax2 = plot_ssp_2d(env, cmap='RdYlBu_r')
     ax2.set_title('Thermal Front: 2D Range-Dependent SSP')
-    plt.savefig('output/example_11_ssp_2d.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_11_ssp_2d.png")
+    plt.savefig(OUTPUT_DIR / 'example_11_ssp_2d.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_11_ssp_2d.png'}")
 
     # Plot 3: Bottom properties
     print("[3/5] Bottom properties...")
     fig3, axes3 = plot_bottom_properties(env)
-    plt.savefig('output/example_11_bottom.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_11_bottom.png")
+    plt.savefig(OUTPUT_DIR / 'example_11_bottom.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_11_bottom.png'}")
 
     # Plot 4: Model comparison
     if len(results) >= 2:
         print("[4/5] Model comparison...")
         fig4, axes4 = compare_models(results, env)
-        plt.savefig('output/example_11_comparison.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: output/example_11_comparison.png")
+        plt.savefig(OUTPUT_DIR / 'example_11_comparison.png', dpi=150, bbox_inches='tight')
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_11_comparison.png'}")
 
-    # Plot 5: Individual TL fields with NEW shared colorbar feature
+    # Plot 5: Individual TL fields with shared colorbar
     if len(results) > 0:
-        print("[5/5] Individual TL fields with NEW shared colorbar...")
+        print("[5/5] Individual TL fields with shared colorbar...")
         n_models = len(results)
         fig5, axes5 = plt.subplots(2, 3, figsize=(18, 10))
         axes5 = axes5.flatten()
 
-        # NEW: Use show_colorbar=False for cleaner subplots
+        # Use show_colorbar=False for cleaner subplots; add a single shared colorbar below
         for idx, (model_name, result) in enumerate(results.items()):
             if idx < 6:
                 _, _, _ = plot_transmission_loss(result, env, ax=axes5[idx],
-                                                 show_colorbar=False,  # NEW: Disable individual colorbars
-                                                 contours=[70, 90])    # NEW: Add contours
+                                                 show_colorbar=False,  # Disable individual colorbars
+                                                 contours=[70, 90])    # Overlay TL contours
                 if result is not None:
                     axes5[idx].set_title(f'{model_name}\n({result.metadata.get("model", "")})')
                 else:
@@ -267,7 +266,7 @@ def main():
         for idx in range(len(results), 6):
             axes5[idx].axis('off')
 
-        # NEW: Add single shared colorbar
+        # Add single shared colorbar
         import matplotlib as mpl
         cbar_ax = fig5.add_axes([0.92, 0.15, 0.015, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
@@ -275,12 +274,11 @@ def main():
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('All Models Comparison - Advanced Features\n' +
-                    '(NEW: Shared colorbar + auto TL limits + contours)',
+        plt.suptitle('All Models Comparison (shared colorbar + auto TL limits + contours)',
                      fontsize=16, fontweight='bold')
         plt.tight_layout()
-        plt.savefig('output/example_11_models.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: output/example_11_models.png (NEW: shared colorbar)")
+        plt.savefig(OUTPUT_DIR / 'example_11_models.png', dpi=150, bbox_inches='tight')
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_11_models.png'} (shared colorbar)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # STATISTICS
@@ -311,7 +309,7 @@ def main():
     print("  ✓ Continental margin scenario")
     print("  ✓ Model comparison and statistics")
     print("  ✓ Advanced visualization suite")
-    print("\nNEW Plotting features demonstrated:")
+    print("\nPlotting features demonstrated:")
     print("  ✓ Shared colorbar for multi-panel comparisons (show_colorbar=False)")
     print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
     print("  ✓ Contour overlays at 70, 90 dB")

@@ -154,56 +154,6 @@ def create_example_report(
     print("=" * 80 + "\n")
 
 
-def print_model_statistics(results: Dict, source_depth: float):
-    """
-    Print statistical comparison of models
-
-    Parameters
-    ----------
-    results : dict
-        Dictionary of {model_name: Field} results
-    source_depth : float
-        Depth for comparison (meters)
-    """
-    print("\n" + "=" * 80)
-    print("MODEL STATISTICS")
-    print("=" * 80)
-
-    for name, field in results.items():
-        # Find closest depth
-        depth_idx = np.argmin(np.abs(field.depths - source_depth))
-        tl_at_depth = field.data[depth_idx, :]
-
-        print(f"\n{name}:")
-        print(f"  Mean TL: {np.mean(tl_at_depth):.2f} dB")
-        print(f"  Std TL:  {np.std(tl_at_depth):.2f} dB")
-        print(f"  Min TL:  {np.min(tl_at_depth):.2f} dB")
-        print(f"  Max TL:  {np.max(tl_at_depth):.2f} dB")
-
-    # Pairwise RMS errors
-    if len(results) >= 2:
-        print("\nPairwise RMS Errors (dB):")
-        model_names = list(results.keys())
-        for i, name_i in enumerate(model_names):
-            for j, name_j in enumerate(model_names[i+1:], start=i+1):
-                field_i = results[name_i]
-                field_j = results[name_j]
-
-                depth_idx_i = np.argmin(np.abs(field_i.depths - source_depth))
-                depth_idx_j = np.argmin(np.abs(field_j.depths - source_depth))
-
-                tl_i = field_i.data[depth_idx_i, :]
-                tl_j = field_j.data[depth_idx_j, :]
-
-                # Interpolate if needed
-                if not np.array_equal(field_i.ranges, field_j.ranges):
-                    tl_j = np.interp(field_i.ranges, field_j.ranges, tl_j)
-
-                rms = np.sqrt(np.mean((tl_i - tl_j)**2))
-                print(f"  {name_i} vs {name_j}: {rms:.2f} dB")
-
-
 __all__ = [
     'create_example_report',
-    'print_model_statistics',
 ]

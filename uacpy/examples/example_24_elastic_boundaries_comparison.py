@@ -43,6 +43,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
@@ -59,8 +62,6 @@ def main():
     print("\nCompares two approaches for modeling elastic boundaries:")
     print("  1. KrakenField Auto-Detection (→ KrakenC)")
     print("  2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN")
-
-    os.makedirs('output', exist_ok=True)
 
     # ═══════════════════════════════════════════════════════════════════════
     # SETUP: Define Environment with Elastic Bottom
@@ -448,7 +449,7 @@ def main():
                 fontsize=14, fontweight='bold', y=0.995)
 
     # Save
-    output_file = 'output/example_24_elastic_boundaries_comparison.png'
+    output_file = OUTPUT_DIR / 'example_24_elastic_boundaries_comparison.png'
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"  ✓ Figure saved: {output_file}")
 

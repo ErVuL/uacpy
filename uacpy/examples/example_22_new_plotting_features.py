@@ -1,9 +1,9 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 22: NEW Plotting Features Demonstration
+EXAMPLE 22: Plotting Features — Time Series and Mode Heatmaps
 ═══════════════════════════════════════════════════════════════════════════════
 
-OBJECTIVE: Demonstrate three NEW plotting functions added to uacpy:
+OBJECTIVE: Demonstrate three plotting functions in uacpy:
     1. plot_time_series() - Time-domain waveforms
     2. plot_modes_heatmap() - Mode shape heatmaps
 
@@ -13,7 +13,10 @@ FEATURES: ✓ Time-series analysis ✓ Mode heatmap overview
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -65,17 +68,17 @@ def demo_time_series():
     print(f"  Time series: {result.metadata['time_series']['nt']} samples, " +
           f"{result.metadata['time_series']['time'][-1]*1000:.1f} ms duration")
 
-    # NEW: plot_time_series() - Stacked version
+    #plot_time_series() - Stacked version
     print("\n  Creating stacked time series plot...", end=" ", flush=True)
     fig1, ax1 = plot_time_series(result, stacked=True)
-    fig1.savefig('output/example_22_time_series_stacked.png', dpi=150, bbox_inches='tight')
+    fig1.savefig(OUTPUT_DIR / 'example_22_time_series_stacked.png', dpi=150, bbox_inches='tight')
     plt.close(fig1)
     print("✓")
 
-    # NEW: plot_time_series() - Overlaid version
+    #plot_time_series() - Overlaid version
     print("  Creating overlaid time series plot...", end=" ", flush=True)
     fig2, ax2 = plot_time_series(result, stacked=False)
-    fig2.savefig('output/example_22_time_series_overlaid.png', dpi=150, bbox_inches='tight')
+    fig2.savefig(OUTPUT_DIR / 'example_22_time_series_overlaid.png', dpi=150, bbox_inches='tight')
     plt.close(fig2)
     print("✓")
 
@@ -123,7 +126,7 @@ def demo_modes_heatmap():
     M = len(modes.metadata.get('k', []))
     print(f"✓ ({M} modes)")
 
-    # NEW: plot_modes_heatmap() - All modes
+    #plot_modes_heatmap() - All modes
     print("\n  Creating mode heatmap (all modes)...", end=" ", flush=True)
     fig1, ax1, cbar1 = plot_modes_heatmap(
         modes,
@@ -133,11 +136,11 @@ def demo_modes_heatmap():
     )
     fig1.suptitle('Mode Shape Heatmap - All Modes (Normalized)',
                   fontsize=14, fontweight='bold')
-    fig1.savefig('output/example_22_modes_heatmap_all.png', dpi=150, bbox_inches='tight')
+    fig1.savefig(OUTPUT_DIR / 'example_22_modes_heatmap_all.png', dpi=150, bbox_inches='tight')
     plt.close(fig1)
     print("✓")
 
-    # NEW: plot_modes_heatmap() - Subset of modes
+    #plot_modes_heatmap() - Subset of modes
     print("  Creating mode heatmap (first 20 modes)...", end=" ", flush=True)
     fig2, ax2, cbar2 = plot_modes_heatmap(
         modes,
@@ -147,11 +150,11 @@ def demo_modes_heatmap():
     )
     fig2.suptitle('Mode Shape Heatmap - First 20 Modes',
                   fontsize=14, fontweight='bold')
-    fig2.savefig('output/example_22_modes_heatmap_subset.png', dpi=150, bbox_inches='tight')
+    fig2.savefig(OUTPUT_DIR / 'example_22_modes_heatmap_subset.png', dpi=150, bbox_inches='tight')
     plt.close(fig2)
     print("✓")
 
-    # NEW: plot_modes_heatmap() - Without normalization
+    #plot_modes_heatmap() - Without normalization
     print("  Creating mode heatmap (unnormalized)...", end=" ", flush=True)
     fig3, ax3, cbar3 = plot_modes_heatmap(
         modes,
@@ -161,7 +164,7 @@ def demo_modes_heatmap():
     )
     fig3.suptitle('Mode Shape Heatmap - Relative Amplitudes (Unnormalized)',
                   fontsize=14, fontweight='bold')
-    fig3.savefig('output/example_22_modes_heatmap_unnorm.png', dpi=150, bbox_inches='tight')
+    fig3.savefig(OUTPUT_DIR / 'example_22_modes_heatmap_unnorm.png', dpi=150, bbox_inches='tight')
     plt.close(fig3)
     print("✓")
 
@@ -173,16 +176,14 @@ def demo_modes_heatmap():
 
 def main():
     print("\n" + "═"*70)
-    print("EXAMPLE 22: NEW Plotting Features Demonstration")
+    print("EXAMPLE 22: Plotting Features — Time Series and Mode Heatmaps")
     print("═"*70)
-    print("\nThree NEW plotting functions demonstrated:")
+    print("\nTwo plotting functions demonstrated:")
     print("  1. plot_time_series() - Time-domain waveforms")
     print("  2. plot_modes_heatmap() - Mode shape heatmaps")
     print("\nThese functions match Acoustics Toolbox MATLAB capabilities:")
     print("  • plotts.m → plot_time_series()")
     print("  • plotmode.m (pcolor) → plot_modes_heatmap()")
-
-    os.makedirs('output', exist_ok=True)
 
     # Run demonstrations
     demo_time_series()

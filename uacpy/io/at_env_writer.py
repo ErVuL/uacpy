@@ -51,7 +51,8 @@ class ATEnvWriter:
         attenuation_unit: AttenuationUnits = AttenuationUnits.DB_PER_WAVELENGTH,
         volume_attenuation: Optional[VolumeAttenuation] = None,
         frequencies: Optional[np.ndarray] = None,
-        n_media_override: Optional[int] = None
+        n_media_override: Optional[int] = None,
+        topopt_extra: str = '',
     ) -> None:
         """
         Write header section (title, frequency, TopOpt)
@@ -78,6 +79,10 @@ class ATEnvWriter:
         n_media_override : int, optional
             Override NMedia value. Used by multi-profile writer to ensure
             all profiles have the same NMedia.
+        topopt_extra : str, optional
+            Extra characters appended to TopOpt beyond position 6 (e.g.
+            Scooter's TopOpt(7:7)='0' to zero out stabilising attenuation —
+            see ``scooter.f90:81``). Default: empty.
         """
         # Title
         f.write(f"'{env.name}'\n")
@@ -94,7 +99,8 @@ class ATEnvWriter:
                 n_media += len(env.bottom_layered.layers)
         f.write(f"{n_media}\n")
 
-        # TopOpt string (6 characters): '<ssp_code><surface_code><atten_unit><vol_atten> <broadband>'
+        # TopOpt string (>=6 characters): '<ssp_code><surface_code><atten_unit><vol_atten> <broadband>'
+        # plus any model-specific ``topopt_extra`` (e.g. Scooter TopOpt(7)).
         ssp_code = ssp_type.to_acoustics_toolbox_code()
         surface_code = surface_type.to_acoustics_toolbox_code()
         atten_code = attenuation_unit.to_char()
@@ -102,12 +108,63 @@ class ATEnvWriter:
 
         broadband_code = 'B' if frequencies is not None and len(frequencies) > 1 else ' '
 
-        topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code} {broadband_code}"
+        topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code} {broadband_code}{topopt_extra}"
         f.write(f"'{topopt}'\n")
 
         # Write surface halfspace properties when top BC is 'A'
         from uacpy.io.env_writer import write_surface_halfspace
         write_surface_halfspace(f, env)
+
+    @staticmethod
+    def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> None:
+        """
+        Write Francois-Garrison volume attenuation parameters.
+
+        The AT Fortran ``ReadTopOpt`` routine reads one record of
+        ``T, Salinity, pH, z_bar`` immediately after the TopOpt line when
+        ``TopOpt(4)='F'``.
+
+        Parameters
+        ----------
+        f : TextIO
+            Open file handle
+        params : tuple of 4 floats
+            (T, S, pH, z_bar): temperature (degC), salinity (psu), pH,
+            mean depth (m).
+        """
+        if params is None or len(params) != 4:
+            raise ValueError(
+                "francois_garrison_params must be a 4-tuple (T, S, pH, z_bar)"
+            )
+        T, S, pH, z_bar = params
+        f.write(f"{T:.4f} {S:.4f} {pH:.4f} {z_bar:.4f}\n")
+
+    @staticmethod
+    def write_bio_layers(f: TextIO, bio_layers) -> None:
+        """
+        Write biological attenuation layers.
+
+        The AT Fortran ``ReadTopOpt`` routine reads one count line followed
+        by ``NBioLayers`` records of ``Z1, Z2, f0, Q, a0`` when
+        ``TopOpt(4)='B'``.
+
+        Parameters
+        ----------
+        f : TextIO
+            Open file handle
+        bio_layers : list of 5-tuples
+            [(Z1, Z2, f0, Q, a0), ...] per layer.
+        """
+        if not bio_layers:
+            raise ValueError("bio_layers must be a non-empty list of 5-tuples")
+        f.write(f"{len(bio_layers)}\n")
+        for layer in bio_layers:
+            if len(layer) != 5:
+                raise ValueError(
+                    "Each bio layer must be a 5-tuple (Z1, Z2, f0, Q, a0)"
+                )
+            Z1, Z2, f0, Q, a0 = layer
+            f.write(f"{Z1:.4f} {Z2:.4f} {f0:.4f} {Q:.4f} {a0:.6f}\n")
 
     @staticmethod
     def write_broadband_freqs(f: TextIO, frequencies: np.ndarray) -> None:
@@ -384,90 +441,6 @@ class ATEnvWriter:
         f.write(f"{ranges_str} /\n")
 
     @staticmethod
-    def write_complete_env(
-        filepath: Path,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        ssp_type: Optional[SSPType] = None,
-        surface_type: Optional[BoundaryType] = None,
-        bottom_type: Optional[BoundaryType] = None,
-        volume_attenuation: Optional[VolumeAttenuation] = None,
-        **kwargs
-    ) -> None:
-        """
-        Write complete Acoustics Toolbox environment file
-
-        Convenience method that writes a complete ENV file with all sections.
-        Suitable for Kraken, Scooter, SPARC when using standard format.
-
-        Parameters
-        ----------
-        filepath : Path
-            Output file path
-        env : Environment
-            Environment configuration
-        source : Source
-            Source configuration
-        receiver : Receiver
-            Receiver configuration
-        ssp_type : SSPType, optional
-            SSP interpolation type (uses env.ssp_type if None)
-        surface_type : BoundaryType, optional
-            Surface boundary (default: VACUUM)
-        bottom_type : BoundaryType, optional
-            Bottom boundary (uses env.bottom.acoustic_type if None)
-        volume_attenuation : VolumeAttenuation, optional
-            Volume attenuation formula
-        **kwargs
-            Additional parameters:
-            - n_mesh : int - Number of mesh points
-            - roughness : float - Interface roughness
-        """
-        # Parse types
-        if ssp_type is None:
-            ssp_type = parse_ssp_type(env.ssp_type)
-        if surface_type is None:
-            surface_type = BoundaryType.VACUUM
-        if bottom_type is None:
-            bottom_type = parse_boundary_type(env.bottom.acoustic_type)
-
-        # Get optional parameters
-        n_mesh = kwargs.get('n_mesh', 0)
-        roughness = kwargs.get('roughness', 0.0)
-
-        with open(filepath, 'w') as f:
-            # Header
-            ATEnvWriter.write_header(
-                f, env, source,
-                ssp_type=ssp_type,
-                surface_type=surface_type,
-                volume_attenuation=volume_attenuation
-            )
-
-            # SSP
-            ATEnvWriter.write_ssp_section(
-                f, env, env.depth,
-                n_mesh=n_mesh,
-                roughness=roughness
-            )
-
-            # Bottom
-            ATEnvWriter.write_bottom_section(
-                f, env, bottom_type=bottom_type,
-                filepath=filepath, verbose=kwargs.get('verbose', False)
-            )
-
-            # Source depths
-            ATEnvWriter.write_source_depths(f, source)
-
-            # Receiver depths
-            ATEnvWriter.write_receiver_depths(f, receiver)
-
-            # Receiver ranges
-            ATEnvWriter.write_receiver_ranges(f, receiver)
-
-    @staticmethod
     def write_multi_profile_env(
         filepath: Path,
         segments: List[Tuple[float, 'Environment']],
@@ -575,7 +548,18 @@ class ATEnvWriter:
         with open(filepath, 'w') as f:
             for i, (_range_km, env_seg) in enumerate(segments):
                 ssp_type = parse_ssp_type(env_seg.ssp_type)
-                surface_type = BoundaryType.VACUUM
+                # Respect the user's surface BC rather than silently
+                # forcing every profile to VACUUM. segment_environment_by_range
+                # copies env.surface onto each segment (see coupled_modes.py),
+                # so env_seg.surface is always populated. Fall back to VACUUM
+                # if a caller ever built a segment without one.
+                surface_obj = getattr(env_seg, 'surface', None)
+                if surface_obj is not None:
+                    surface_type = parse_boundary_type(
+                        surface_obj.acoustic_type
+                    )
+                else:
+                    surface_type = BoundaryType.VACUUM
                 bottom_type = parse_boundary_type(env_seg.bottom.acoustic_type)
 
                 n_media_this = _n_media(env_seg)

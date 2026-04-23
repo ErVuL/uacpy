@@ -16,11 +16,11 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 from uacpy.core import Environment, Source, Receiver, BoundaryProperties
-from uacpy.models import KrakenField, Bounce, Scooter, Bellhop, Kraken, KrakenC
+from uacpy.models import KrakenField, Bounce, Scooter
+
+# Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
+pytestmark = pytest.mark.requires_binary
 
 
 class TestElasticBoundaryAutoDetection:
@@ -146,7 +146,7 @@ class TestBounceReflectionCoefficients:
         # BOUNCE doesn't need spatial receivers, just placeholder
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
-    def test_bounce_basic(self, elastic_env, source, receiver_bounce):
+    def test_bounce_basic(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test basic BOUNCE execution"""
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
 
@@ -154,13 +154,14 @@ class TestBounceReflectionCoefficients:
             env=elastic_env,
             source=source,
             receiver=receiver_bounce,
+            output_dir=tmp_path,
         )
 
         assert result is not None
         assert 'brc_file' in result.metadata
         assert Path(result.metadata['brc_file']).exists()
 
-    def test_bounce_output_files(self, elastic_env, source, receiver_bounce):
+    def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test that BOUNCE creates both .brc and .irc files"""
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
 
@@ -168,6 +169,7 @@ class TestBounceReflectionCoefficients:
             env=elastic_env,
             source=source,
             receiver=receiver_bounce,
+            output_dir=tmp_path,
         )
 
         # Check .brc file exists
@@ -250,7 +252,7 @@ class TestBounceToScooterWorkflow:
     def receiver_bounce(self):
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
-    def test_bounce_to_scooter(self, elastic_env, source, receiver_small, receiver_bounce):
+    def test_bounce_to_scooter(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
         """Test complete BOUNCE → SCOOTER workflow"""
         # Step 1: Run BOUNCE to generate .brc file
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
@@ -258,6 +260,7 @@ class TestBounceToScooterWorkflow:
             env=elastic_env,
             source=source,
             receiver=receiver_bounce,
+            output_dir=tmp_path,
         )
 
         brc_file = bounce_result.metadata['brc_file']
@@ -293,7 +296,7 @@ class TestBounceToScooterWorkflow:
         assert np.all(np.isfinite(result.data))
         assert np.any(result.data > 0)
 
-    def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce):
+    def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
         """Test that BOUNCE→SCOOTER gives similar results to direct elastic"""
         # Workflow 1: BOUNCE → SCOOTER
         bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
@@ -301,6 +304,7 @@ class TestBounceToScooterWorkflow:
             env=elastic_env,
             source=source,
             receiver=receiver_bounce,
+            output_dir=tmp_path,
         )
 
         bottom_with_file = BoundaryProperties(
@@ -371,7 +375,7 @@ class TestWorkflowComparison:
             ranges=np.linspace(1000, 5000, 10)
         )
 
-    def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small):
+    def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
         """Compare results from both elastic boundary workflows"""
         # Approach 1: KrakenField auto-detection
         krakenfield = KrakenField(verbose=False)
@@ -385,6 +389,7 @@ class TestWorkflowComparison:
             env=elastic_env,
             source=source,
             receiver=receiver_bounce,
+            output_dir=tmp_path,
         )
 
         bottom_with_file = BoundaryProperties(

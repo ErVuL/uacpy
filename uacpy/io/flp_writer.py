@@ -29,11 +29,19 @@ def write_fieldflp(
     filepath : str or Path
         Output file path (extension .flp added if missing)
     option : str
-        Option string (4 chars max):
-        - Pos 1: 'R' (point source, cylindrical), 'X' (line source, Cartesian)
-        - Pos 2: 'C' (coupled modes), 'A' (adiabatic) — for NProf > 1
-        - Pos 3: '*' (beam pattern) or ' ' (omnidirectional)
-        - Pos 4: 'C' (coherent) or 'I' (incoherent)
+        4-character option string for field.exe. Column semantics per AT
+        ``field.f90:70-99`` and ``ReadModes.f90:315-324``:
+
+        - Pos 1 (source type):
+          'R' = cylindrical point source, 'X' = line source (Cartesian),
+          'S' = scaled-cylindrical point source.
+        - Pos 2 (coupling, for NProf > 1):
+          'C' = coupled modes, 'A' = adiabatic.
+        - Pos 3 (shared column): either
+          '*' to apply a ``.sbp`` source beam pattern, OR
+          an elastic component selector 'P'/'H'/'V'/'T'/'N'
+          ('P' = acoustic pressure).
+        - Pos 4 (summation): 'C' = coherent, 'I' = incoherent.
     pos : dict
         Position dictionary with:
         - 's': dict with 'z' (source depths in m)
@@ -86,7 +94,7 @@ def write_fieldflp(
                 f"profile_ranges_km length ({len(profile_ranges_km)}) "
                 f"must equal n_profiles ({n_profiles})"
             )
-        if profile_ranges_km[0] != 0.0:
+        if abs(profile_ranges_km[0]) > 1e-9:
             raise ValueError("First profile range must be 0.0 km")
 
     with open(filepath, "w") as f:

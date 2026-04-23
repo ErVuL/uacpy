@@ -5,10 +5,15 @@ Available modules:
 - plots: Full-featured plotting functions with extensive customization
 - quickplot: Ultra-simple plotting functions for rapid visualization
 - style: Professional matplotlib styling configuration
+
+The uacpy rcParams are applied automatically on import. Call
+``uacpy.visualization.style.apply_professional_style()`` again after your
+own ``mpl.rcParams`` tweaks to reset to the uacpy defaults, or call
+``matplotlib.rcdefaults()`` to revert to matplotlib's defaults.
 """
 
-# Apply professional styling automatically
 from uacpy.visualization import style
+style.apply_professional_style()
 
 # Full-featured plotting functions
 from uacpy.visualization.plots import (

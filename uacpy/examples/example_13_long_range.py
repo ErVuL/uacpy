@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 12: Deep Water Long Range - 100+ km Propagation
+EXAMPLE 13: Deep Water Long Range - 100+ km Propagation
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -68,7 +68,7 @@ def main():
     # ENVIRONMENT SETUP - Deep ocean Munk profile
     # ═══════════════════════════════════════════════════════════════════════
     bottom_props = uacpy.BoundaryProperties(
-        acoustic_type='acoustic',
+        acoustic_type='half-space',
         sound_speed=3000.0,
         density=2.2,
         attenuation=0.05

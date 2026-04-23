@@ -12,12 +12,10 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField, RAM
 from uacpy.core.environment import BoundaryProperties
+from uacpy.core.exceptions import ExecutableNotFoundError
 
 # Test data directory
 BENCHMARK_DIR = Path(__file__).parent / 'benchmark_data'
@@ -420,7 +418,7 @@ class TestNumericalStability:
             bellhop = Bellhop(verbose=False)
             result = bellhop.compute_tl(env, source, receiver)
             assert np.all(np.isfinite(result.data))
-        except Exception:
+        except (FileNotFoundError, ExecutableNotFoundError):
             pytest.skip("Bellhop may not be available")
 
     def test_very_high_frequency(self):
@@ -451,7 +449,7 @@ class TestNumericalStability:
             assert np.all(np.isfinite(result.data))
             # High frequency should have higher TL due to absorption
             assert np.all(result.data > 20)  # Expect significant loss
-        except Exception:
+        except (FileNotFoundError, ExecutableNotFoundError):
             pytest.skip("Bellhop may not be available")
 
 

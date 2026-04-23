@@ -47,12 +47,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bounce, Scooter
 from uacpy.core import BoundaryProperties
-import os
 
 
 def main():
@@ -65,7 +67,7 @@ def main():
     # STEP 1: Define Environment with Elastic Bottom
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 1/5] Defining elastic bottom environment...")
+    print("\n[Step 1/6] Defining elastic bottom environment...")
 
     # Elastic bottom with shear wave properties
     bottom_elastic = BoundaryProperties(
@@ -97,7 +99,7 @@ def main():
     # STEP 2: Run BOUNCE to Compute Reflection Coefficients
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 2/5] Running BOUNCE reflection coefficient computation...")
+    print("\n[Step 2/6] Running BOUNCE reflection coefficient computation...")
 
     source = uacpy.Source(depth=50.0, frequency=100.0)
     receiver_bounce = uacpy.Receiver(
@@ -236,8 +238,6 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\n[Step 6/6] Creating visualizations...")
-
-    os.makedirs('output', exist_ok=True)
 
     # Create figure with 4 subplots
     fig = plt.figure(figsize=(16, 10))
@@ -397,7 +397,7 @@ def main():
                 fontsize=14, fontweight='bold', y=0.995)
 
     # Save
-    output_file = 'output/example_23_bounce_reflection_coefficients.png'
+    output_file = OUTPUT_DIR / 'example_23_bounce_reflection_coefficients.png'
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"  ✓ Figure saved: {output_file}")
 

@@ -13,6 +13,9 @@ from uacpy.models import Bellhop, RAM, Kraken, KrakenField
 from uacpy.visualization import plots, quickplot
 from uacpy.core.field import Field
 
+# Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
+pytestmark = pytest.mark.requires_binary
+
 
 @pytest.fixture
 def basic_setup():

@@ -13,11 +13,13 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.field import Field
+from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.visualization.style import (
     get_cmap_for_field,
     format_axes_professional,
     create_professional_colorbar,
     get_model_color,
+    COLORMAPS,
 )
 
 # Z-order constants for consistent layering (Acoustic Toolbox standard)
@@ -30,6 +32,43 @@ ZORDER_SURFACE = 4
 ZORDER_RECEIVERS = 5
 ZORDER_SOURCE = 6
 ZORDER_ANNOTATIONS = 7
+
+
+def _select_2d_slice(field: Field, frequency: Optional[float] = None) -> np.ndarray:
+    """Return a 2-D (n_depths, n_ranges) view of a Field.
+
+    For 2-D data (``ndim == 2``) the array is returned unchanged.
+    For 3-D broadband data with shape ``(n_depths, n_freqs, n_ranges)``
+    (per Field class contract), a frequency slice is picked:
+
+    * if ``frequency`` is None, the nearest-to-mid-band frequency is used;
+    * otherwise the nearest frequency in ``field.frequencies``.
+
+    Parameters
+    ----------
+    field : Field
+        Field whose ``data`` attribute is inspected.
+    frequency : float, optional
+        Target frequency in Hz.
+
+    Returns
+    -------
+    np.ndarray
+        A 2-D view of the field's data at the chosen frequency.
+    """
+    if field.data.ndim == 2:
+        return field.data
+    if field.data.ndim == 3:
+        freqs = np.asarray(field.frequencies)
+        if frequency is None:
+            # Default: middle of the frequency axis
+            f_idx = len(freqs) // 2 if len(freqs) else 0
+        else:
+            f_idx = int(np.argmin(np.abs(freqs - frequency))) if len(freqs) else 0
+        return field.data[:, f_idx, :]
+    raise ValueError(
+        f"Unsupported Field.data ndim={field.data.ndim}; expected 2 or 3."
+    )
 
 
 def plot_transmission_loss(
@@ -46,6 +85,7 @@ def plot_transmission_loss(
     tl_span: float = 50.0,
     tl_round: int = 10,
     seafloor_alpha: float = 1.0,
+    frequency: Optional[float] = None,
 ):
     """
     Plot transmission loss field
@@ -81,6 +121,10 @@ def plot_transmission_loss(
     seafloor_alpha : float, optional
         Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
         Default is 1.0 (no transparency).
+    frequency : float, optional
+        For broadband fields (``field.data.ndim == 3`` with shape
+        ``(n_depths, n_freqs, n_ranges)``), the frequency at which to
+        slice. Defaults to the nearest-to-mid-band frequency.
 
     Returns
     -------
@@ -132,12 +176,15 @@ def plot_transmission_loss(
     ranges_km = field.ranges / 1000.0
     depths = field.depths
 
+    # Select 2-D slice (handles broadband 3-D arrays)
+    data2d = _select_2d_slice(field, frequency=frequency)
+
     # Create meshgrid
     R, Z = np.meshgrid(ranges_km, depths)
 
     # Auto-scale using Acoustic Toolbox method (median + 0.75*std, rounded)
     if vmin is None or vmax is None:
-        valid_data = field.data[np.isfinite(field.data)]
+        valid_data = data2d[np.isfinite(data2d)]
 
         if len(valid_data) > 0:
             # Acoustic Toolbox standard: median + 0.75 * std
@@ -161,7 +208,7 @@ def plot_transmission_loss(
         vmin = vmax - tl_span
 
     im = ax.pcolormesh(
-        R, Z, field.data,
+        R, Z, data2d,
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
@@ -193,8 +240,8 @@ def plot_transmission_loss(
     cbar = None
     if show_colorbar:
         # Check if data exceeds colorbar limits (for extend parameter)
-        data_min = np.nanmin(field.data)
-        data_max = np.nanmax(field.data)
+        data_min = np.nanmin(data2d)
+        data_max = np.nanmax(data2d)
         extend = 'neither'
         if data_min < vmin and data_max > vmax:
             extend = 'both'
@@ -236,7 +283,7 @@ def plot_transmission_loss(
     if contours is not None and len(contours) > 0:
         # Create contour lines
         CS = ax.contour(
-            R, Z, field.data,
+            R, Z, data2d,
             levels=contours,
             colors='black',
             linewidths=1.5,
@@ -427,7 +474,12 @@ def plot_rays(
         if hasattr(ax, 'lines'):  # Check if surface/bottom lines were plotted
             ax.legend(handles=legend_elements, loc='best', fontsize=9)
     else:
-        ax.legend()
+        # Only call ax.legend() if at least one artist has a label,
+        # otherwise matplotlib emits a "No artists with labels found"
+        # UserWarning.
+        handles, labels = ax.get_legend_handles_labels()
+        if labels:
+            ax.legend()
 
     return fig, ax
 
@@ -607,8 +659,8 @@ def plot_arrivals(
         delays = arrivals['delays']
         amplitudes = arrivals['amplitudes']
 
-        # Plot as stem plot
-        ax.stem(delays, amplitudes, basefmt=' ', use_line_collection=True)
+        # Plot as stem plot (use_line_collection removed from mpl>=3.9)
+        ax.stem(delays, amplitudes, basefmt=' ')
 
         ax.set_xlabel('Travel Time (s)', fontsize=12)
         ax.set_ylabel('Amplitude', fontsize=12)
@@ -686,9 +738,9 @@ def plot_environment(
             color='sienna', alpha=seafloor_alpha, zorder=1, edgecolor='none'
         )
     else:
-        ax_env.axhline(env.depth, color='k', linewidth=2.5, zorder=3)
-        # Get xlim after plotting (will be set by source/receiver)
-        # We'll set fill after other elements
+        # Flat bottom: draw a horizontal line across the full axes
+        ax_env.axhline(env.depth, color='k', linewidth=2.5, zorder=3, label='Bottom')
+        # Fill is applied below, after xlim is established by source/receiver.
 
     # Plot source
     if source is not None:
@@ -785,8 +837,20 @@ def plot_modes(
     # Plot mode shapes
     for i in range(n_modes):
         # Normalize mode shape for visualization
-        phi_norm = phi[:, i].real / np.max(np.abs(phi[:, i].real))
+        phi_real = phi[:, i].real
+        peak = np.max(np.abs(phi_real))
+        if peak == 0:
+            peak = 1.0
+        phi_norm = phi_real / peak
         ax1.plot(phi_norm, z, linewidth=2, label=f'Mode {i+1}')
+
+        # Overlay imaginary part when requested and non-trivial
+        if show_imaginary:
+            phi_imag = phi[:, i].imag
+            if np.any(np.abs(phi_imag) > 1e-10 * peak):
+                phi_imag_norm = phi_imag / peak
+                ax1.plot(phi_imag_norm, z, linewidth=1.2, linestyle='--',
+                         alpha=0.7, label=f'Mode {i+1} (imag)')
 
     ax1.set_xlabel('Normalized Amplitude', fontsize=12)
     ax1.set_ylabel('Depth (m)', fontsize=12)
@@ -1074,9 +1138,11 @@ def compare_models(
         depths = field.depths
         R, Z = np.meshgrid(ranges_km, depths)
 
+        # Centralized TL colormap (style.COLORMAPS['tl'])
+        data2d = _select_2d_slice(field)
         im = ax.pcolormesh(
-            R, Z, field.data,
-            cmap='viridis',
+            R, Z, data2d,
+            cmap=get_cmap_for_field('tl'),
             vmin=vmin,
             vmax=vmax,
             shading='auto',
@@ -1207,6 +1273,7 @@ def plot_range_cut(
     depth: float,
     figsize: Tuple[float, float] = (10, 5),
     ax: Optional[Axes] = None,
+    frequency: Optional[float] = None,
 ) -> Tuple[Figure, Axes]:
     """
     Plot transmission loss vs range at a specific depth
@@ -1221,6 +1288,9 @@ def plot_range_cut(
         Figure size. Default is (10, 5).
     ax : Axes, optional
         Matplotlib axes
+    frequency : float, optional
+        For broadband 3-D fields, frequency (Hz) to slice. Defaults to
+        the middle frequency.
 
     Returns
     -------
@@ -1243,8 +1313,9 @@ def plot_range_cut(
     depth_idx = np.argmin(np.abs(field.depths - depth))
     actual_depth = field.depths[depth_idx]
 
-    # Extract TL at this depth
-    tl_vs_range = field.data[depth_idx, :]
+    # Extract TL at this depth (handle 3-D broadband data)
+    data2d = _select_2d_slice(field, frequency=frequency)
+    tl_vs_range = data2d[depth_idx, :]
     ranges_km = field.ranges / 1000.0
 
     ax.plot(ranges_km, tl_vs_range, 'b-', linewidth=2)
@@ -1264,6 +1335,7 @@ def plot_depth_cut(
     range_m: float,
     figsize: Tuple[float, float] = (6, 8),
     ax: Optional[Axes] = None,
+    frequency: Optional[float] = None,
 ) -> Tuple[Figure, Axes]:
     """
     Plot transmission loss vs depth at a specific range
@@ -1278,6 +1350,9 @@ def plot_depth_cut(
         Figure size. Default is (6, 8).
     ax : Axes, optional
         Matplotlib axes
+    frequency : float, optional
+        For broadband 3-D fields, frequency (Hz) to slice. Defaults to
+        the middle frequency.
 
     Returns
     -------
@@ -1300,8 +1375,9 @@ def plot_depth_cut(
     range_idx = np.argmin(np.abs(field.ranges - range_m))
     actual_range = field.ranges[range_idx]
 
-    # Extract TL at this range
-    tl_vs_depth = field.data[:, range_idx]
+    # Extract TL at this range (handle 3-D broadband data)
+    data2d = _select_2d_slice(field, frequency=frequency)
+    tl_vs_depth = data2d[:, range_idx]
 
     ax.plot(tl_vs_depth, field.depths, 'b-', linewidth=2)
 
@@ -1319,6 +1395,7 @@ def compare_range_cuts(
     results: dict,
     depth: float,
     figsize: Tuple[float, float] = (12, 6),
+    frequency: Optional[float] = None,
 ) -> Tuple[Figure, Axes]:
     """
     Compare transmission loss vs range from multiple models at specific depth
@@ -1331,6 +1408,9 @@ def compare_range_cuts(
         Depth at which to extract range cuts (m)
     figsize : tuple, optional
         Figure size. Default is (12, 6).
+    frequency : float, optional
+        For broadband 3-D fields, frequency (Hz) to slice. Defaults to
+        the middle frequency of each field.
 
     Returns
     -------
@@ -1348,14 +1428,15 @@ def compare_range_cuts(
     fig, ax = plt.subplots(figsize=figsize)
 
     for model_name, field in results.items():
-        # Use professional model colors
+        # Use professional model colors (centralized in style.MODEL_COLORS)
         color = get_model_color(model_name)
 
         # Find closest depth index
         depth_idx = np.argmin(np.abs(field.depths - depth))
 
-        # Extract TL at this depth
-        tl = field.data[depth_idx, :]
+        # Extract TL at this depth (handle 3-D broadband)
+        data2d = _select_2d_slice(field, frequency=frequency)
+        tl = data2d[depth_idx, :]
         ranges_km = field.ranges / 1000.0
 
         ax.plot(ranges_km, tl, linewidth=2.5, label=model_name,
@@ -1428,9 +1509,10 @@ def plot_model_statistics(
                 f'{time:.3f}s', ha='left', va='center', fontsize=10,
                 fontweight='bold')
 
-    # 2. TL range comparison
-    tl_mins = [np.min(field.data[np.isfinite(field.data)]) for field in results.values()]
-    tl_maxs = [np.max(field.data[np.isfinite(field.data)]) for field in results.values()]
+    # 2. TL range comparison (collapse broadband 3-D to a 2-D slice first)
+    slices_2d = [_select_2d_slice(field) for field in results.values()]
+    tl_mins = [np.min(s[np.isfinite(s)]) for s in slices_2d]
+    tl_maxs = [np.max(s[np.isfinite(s)]) for s in slices_2d]
 
     x = np.arange(len(model_names))
     width = 0.35
@@ -1445,10 +1527,9 @@ def plot_model_statistics(
     ax2.legend()
     ax2.grid(True, alpha=0.3, axis='y')
 
-    # 3. Grid size comparison
-    grid_sizes = [f"{field.data.shape[0]}×{field.data.shape[1]}"
-                 for field in results.values()]
-    n_points = [field.data.size for field in results.values()]
+    # 3. Grid size comparison (use 2-D slice so labels stay readable)
+    grid_sizes = [f"{s.shape[0]}×{s.shape[1]}" for s in slices_2d]
+    n_points = [s.size for s in slices_2d]
 
     bars = ax3.bar(model_names, n_points, color=colors, alpha=0.7, edgecolor='black')
     ax3.set_ylabel('Number of Grid Points', fontsize=12)
@@ -1466,7 +1547,8 @@ def plot_model_statistics(
     # 4. Range cut comparison at mid-depth
     for idx, (model_name, field) in enumerate(results.items()):
         mid_depth_idx = len(field.depths) // 2
-        tl = field.data[mid_depth_idx, :]
+        data2d = slices_2d[idx]
+        tl = data2d[mid_depth_idx, :]
         ranges_km = field.ranges / 1000.0
         ax4.plot(ranges_km, tl, linewidth=2, label=model_name,
                 color=colors[idx], alpha=0.8)
@@ -1567,13 +1649,16 @@ def plot_model_comparison_matrix(
                     comparison_matrix[i, j] = np.nan
                     continue
 
-                # Extract data for comparison
+                # Extract data for comparison (collapse 3-D to 2-D first)
+                slice_i = _select_2d_slice(field_i)
+                slice_j = _select_2d_slice(field_j)
+
                 if source_depth is not None:
                     # Compare at specific depth
                     depth_idx_i = np.argmin(np.abs(field_i.depths - source_depth))
                     depth_idx_j = np.argmin(np.abs(field_j.depths - source_depth))
-                    data_i = field_i.data[depth_idx_i, :]
-                    data_j = field_j.data[depth_idx_j, :]
+                    data_i = slice_i[depth_idx_i, :]
+                    data_j = slice_j[depth_idx_j, :]
 
                     # Interpolate to common range grid if needed
                     if not np.array_equal(field_i.ranges, field_j.ranges):
@@ -1582,8 +1667,8 @@ def plot_model_comparison_matrix(
                         data_j = np.interp(ranges_common, field_j.ranges, data_j)
                 else:
                     # Full field comparison - flatten to 1D
-                    data_i = field_i.data.flatten()
-                    data_j = field_j.data.flatten()
+                    data_i = slice_i.flatten()
+                    data_j = slice_j.flatten()
 
                     # Handle different grid sizes by interpolation
                     if data_i.size != data_j.size:
@@ -1689,6 +1774,7 @@ def plot_comparison_curves(
     source_depth: float,
     mid_range_km: Optional[float] = None,
     figsize: Tuple[float, float] = (14, 6),
+    frequency: Optional[float] = None,
 ) -> Tuple[Figure, np.ndarray]:
     """
     Plot TL comparison curves: TL vs range and TL vs depth
@@ -1730,20 +1816,6 @@ def plot_comparison_curves(
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     ax_range, ax_depth = axes
 
-    # Professional color scheme
-    colors = {
-        'Bellhop': '#1f77b4',      # Blue
-        'RAM': '#ff7f0e',           # Orange
-        'mpiramS': '#ff7f0e',        # Orange (alias)
-        'KrakenField': '#2ca02c',   # Green
-        'Kraken': '#2ca02c',        # Green (alias)
-        'Scooter': '#d62728',       # Red
-        'SPARC': '#9467bd',         # Purple
-        'OASN': '#8c564b',          # Brown
-        'OASR': '#e377c2',          # Pink
-        'OASP': '#7f7f7f',          # Gray
-    }
-
     # Plot 1: TL vs Range at source depth
     for name, field in results.items():
         # Skip None fields (models that couldn't run)
@@ -1753,11 +1825,12 @@ def plot_comparison_curves(
         depth_idx = np.argmin(np.abs(field.depths - source_depth))
         actual_depth = field.depths[depth_idx]
 
-        tl_vs_range = field.data[depth_idx, :]
+        data2d = _select_2d_slice(field, frequency=frequency)
+        tl_vs_range = data2d[depth_idx, :]
         ranges_km = field.ranges / 1000.0
 
-        # Get color (with fallback)
-        color = colors.get(name, None)
+        # Centralized model palette (style.MODEL_COLORS via get_model_color).
+        color = get_model_color(name)
 
         ax_range.plot(ranges_km, tl_vs_range, linewidth=2.5,
                      label=f'{name} ({actual_depth:.1f}m)',
@@ -1784,11 +1857,11 @@ def plot_comparison_curves(
         range_idx = np.argmin(np.abs(field.ranges/1000.0 - mid_range_km))
         actual_range_km = field.ranges[range_idx] / 1000.0
 
-        tl_vs_depth = field.data[:, range_idx]
+        data2d = _select_2d_slice(field, frequency=frequency)
+        tl_vs_depth = data2d[:, range_idx]
         depths = field.depths
 
-        # Get color (with fallback)
-        color = colors.get(name, None)
+        color = get_model_color(name)
 
         ax_depth.plot(tl_vs_depth, depths, linewidth=2.5,
                      label=f'{name} ({actual_range_km:.1f}km)',
@@ -1810,7 +1883,7 @@ def plot_comparison_curves(
 def plot_ssp_2d(
     env: Environment,
     figsize: Tuple[float, float] = (12, 8),
-    cmap: str = 'RdYlBu_r',
+    cmap: Optional[str] = None,
     ax: Optional[Axes] = None,
     seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
@@ -1853,6 +1926,10 @@ def plot_ssp_2d(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.get_figure()
+
+    # Centralized SSP colormap
+    if cmap is None:
+        cmap = get_cmap_for_field('ssp')
 
     # Get data
     ranges_km = env.ssp_2d_ranges
@@ -2447,7 +2524,7 @@ def plot_transmission_loss_polar(
 
     # Convert to TL
     tl = np.abs(p_slice)
-    tl[tl < 1e-37] = 1e-37
+    tl[tl < PRESSURE_FLOOR] = PRESSURE_FLOOR
     tl = -20.0 * np.log10(tl)
 
     # Handle full circle by duplicating first bearing
@@ -2462,8 +2539,8 @@ def plot_transmission_loss_polar(
     # Convert theta to radians
     theta_rad = np.deg2rad(theta)
 
-    # Get range grid
-    ranges = field.ranges
+    # Get range grid (convert to km to match other TL plots)
+    ranges = field.ranges / 1000.0
 
     # Create meshgrid for polar plot
     Theta, R = np.meshgrid(theta_rad, ranges, indexing='ij')
@@ -2499,7 +2576,7 @@ def plot_transmission_loss_polar(
     # Configure polar axes
     ax.set_theta_zero_location('N')  # 0 degrees at top
     ax.set_theta_direction(-1)  # Clockwise
-    ax.set_xlabel('Range (m)', fontsize=11)
+    ax.set_xlabel('Range (km)', fontsize=11)
     ax.set_title(f'Transmission Loss (Polar)\nDepth = {receiver_depth:.1f} m',
                 fontsize=12, fontweight='bold', pad=20)
 
@@ -2555,7 +2632,7 @@ def plot_transfer_function(
 
     # Extract spectrum at chosen depth and range
     spectrum = data[depth_idx, :, range_idx]
-    mag_db = 20 * np.log10(np.abs(spectrum) + 1e-30)
+    mag_db = 20 * np.log10(np.abs(spectrum) + PRESSURE_FLOOR)
 
     depth = field.depths[depth_idx] if len(field.depths) > depth_idx else depth_idx
     rng = field.ranges[range_idx] if len(field.ranges) > range_idx else range_idx
@@ -2841,7 +2918,7 @@ def plot_modes_heatmap(
     modes: Field,
     mode_range: Optional[Tuple[int, int]] = None,
     figsize: Tuple[float, float] = (12, 8),
-    cmap: str = 'RdBu_r',
+    cmap: Optional[str] = None,
     normalize: bool = True,
     ax: Optional[Axes] = None,
 ):
@@ -2901,6 +2978,11 @@ def plot_modes_heatmap(
     if modes.field_type != 'modes':
         raise ValueError(f"Expected modes field, got {modes.field_type}")
 
+    # Centralized mode colormap via style.COLORMAPS['modes'].  We keep
+    # 'RdBu_r' as a fallback only if user didn't opt into the style map.
+    if cmap is None:
+        cmap = COLORMAPS.get('modes', 'RdBu_r')
+
     # Extract mode data from Field
     phi = modes.metadata.get('phi', modes.data)
     z = modes.metadata.get('z', modes.depths)
@@ -2955,7 +3037,10 @@ def plot_modes_heatmap(
     ax.set_ylabel('Depth (m)', fontsize=12)
     ax.set_title(f'Mode Shapes Heatmap\nf = {freq:.1f} Hz, {n_modes_plot} modes',
                 fontsize=13, fontweight='bold')
-    ax.invert_yaxis()
+    # Ensure depth increases downward.  Matplotlib's default ordering for
+    # pcolormesh is already "y increases upward"; we invert exactly once.
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
     ax.set_aspect('auto')
 
     # Colorbar

@@ -12,8 +12,6 @@ This is a key advantage of ray/beam models: broadband results from a
 single run, since ray travel times are frequency-independent (geometric).
 """
 
-import os
-import subprocess
 import warnings
 import numpy as np
 from pathlib import Path
@@ -21,7 +19,7 @@ from typing import Optional, Tuple
 
 from scipy.signal import hilbert
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET
+from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment, BoundaryProperties
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -148,42 +146,6 @@ def delayandsum(
     return rts, time_vector
 
 
-def compute_channel_tf(
-    arrivals: dict,
-    freq_vec: np.ndarray,
-    fc: float,
-) -> np.ndarray:
-    """
-    Compute channel transfer function from Bellhop arrival data.
-
-    Builds frequency-domain transfer function H(f) from ray arrivals.
-    Each arrival contributes a complex exponential weighted by its
-    amplitude and geometric phase.
-
-    Parameters
-    ----------
-    arrivals : dict
-        Per-receiver arrival data (from ``read_arr_file``'s
-        ``metadata['arrivals_by_receiver'][isd][ird][irr]``) with keys:
-        amplitudes, phases, delays, delay_imag, n_arrivals.
-    freq_vec : ndarray
-        Frequency vector in Hz.
-    fc : float
-        Center frequency in Hz (for attenuation scaling).
-
-    Returns
-    -------
-    H : ndarray
-        Complex channel transfer function, shape ``(n_freq,)``.
-
-    References
-    ----------
-    Bellhop User Guide, Section 9
-    Original MATLAB code: stackarr.m by mbp, 8/96
-    """
-    return Bellhop._arrivals_to_tf(arrivals, freq_vec, fc)
-
-
 class Bellhop(PropagationModel):
     """
     Bellhop Gaussian beam/ray tracing model
@@ -213,7 +175,7 @@ class Bellhop(PropagationModel):
     Run transmission loss calculation:
 
     >>> bellhop = Bellhop()
-    >>> result = bellhop.run(env, source, receiver, run_type='C')
+    >>> result = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
     Force Fortran version:
 
@@ -232,8 +194,13 @@ class Bellhop(PropagationModel):
         r_box: Optional[float] = None,
         source_type: str = 'R',
         grid_type: str = 'R',
-        beam_shift: bool = False,
         volume_attenuation: Optional[str] = None,
+        attenuation_unit: str = 'W',
+        francois_garrison_params: Optional[tuple] = None,
+        bio_layers: Optional[list] = None,
+        bty_interp_type: str = 'L',
+        source_beam_pattern_file: Optional[Path] = None,
+        arrivals_format: str = 'ascii',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -250,7 +217,10 @@ class Bellhop(PropagationModel):
             'b' (geometric Gaussian), 'g' (geometric hat), 'G' (geometric hat Cartesian),
             'S' (simple Gaussian). Default: 'B'.
         n_beams : int
-            Number of beams. 0 = use source.n_angles. Default: 0.
+            Number of beams. Passing 0 defers to Bellhop's conservative
+            auto-selection (NBEAMS<=0 in the Fortran reader); uacpy
+            writes the value through as-is rather than substituting
+            ``source.n_angles``. Default: 0.
         alpha : tuple
             Launch angle limits (min, max) in degrees. Default: (-80, 80).
         step : float
@@ -263,10 +233,33 @@ class Bellhop(PropagationModel):
             Source type: 'R' (point, cylindrical), 'X' (line, Cartesian). Default: 'R'.
         grid_type : str
             Receiver grid: 'R' (rectilinear), 'I' (irregular). Default: 'R'.
-        beam_shift : bool
-            Enable beam shift on boundary reflection. Default: False.
         volume_attenuation : str, optional
             'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
+        attenuation_unit : str, optional
+            Attenuation unit code (TopOpt pos. 3). 'W' dB/wavelength (default),
+            'N' nepers/m, 'F' dB/kmHz, 'M' dB/m, 'Q' Q-factor, 'L' loss
+            tangent, 'm' dB/m with per-SSP BETA/fT pair.
+        francois_garrison_params : tuple, optional
+            Defaults used for ``volume_attenuation='F'``: (T, S, pH, z_bar).
+        bio_layers : list, optional
+            Defaults used for ``volume_attenuation='B'``: list of
+            (Z1, Z2, f0, Q, a0).
+        bty_interp_type : str, optional
+            Interpolation type used for BOTH ``.bty`` (bathymetry) and
+            ``.ati`` (altimetry) files. 'L' (linear, default) or 'C'
+            (curvilinear).
+        source_beam_pattern_file : Path or ndarray, optional
+            Source beam pattern. Either a path to an existing ``.sbp`` file
+            (copied to ``<work_dir>/<base>.sbp``) or a 2-column array of
+            ``(angle_deg, level_dB)`` pairs (written via
+            ``write_source_beam_pattern``; Bellhop converts dB -> linear
+            internally, bellhop.f90:132). When set, RunType position 3 is
+            set to ``'*'`` so Bellhop reads the file. Default: None
+            (omnidirectional).
+        arrivals_format : str, optional
+            Format for ``RunMode.ARRIVALS`` output. ``'ascii'`` (default) maps
+            to RunType 'A'; ``'binary'`` maps to 'a' (Fortran unformatted).
+            The arrivals reader auto-detects format on read.
         """
         super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
 
@@ -291,12 +284,26 @@ class Bellhop(PropagationModel):
         self.r_box = r_box
         self.source_type = source_type
         self.grid_type = grid_type
-        self.beam_shift = beam_shift
         self.volume_attenuation = volume_attenuation
+        self.attenuation_unit = attenuation_unit
+        self.francois_garrison_params = francois_garrison_params
+        self.bio_layers = bio_layers
+        self.bty_interp_type = bty_interp_type
+        self.source_beam_pattern_file = (
+            Path(source_beam_pattern_file)
+            if isinstance(source_beam_pattern_file, (str, Path))
+            else source_beam_pattern_file
+        )
+        if arrivals_format not in ('ascii', 'binary'):
+            raise ValueError(
+                f"arrivals_format must be 'ascii' or 'binary', got "
+                f"{arrivals_format!r}"
+            )
+        self.arrivals_format = arrivals_format
         self.version = "unknown"
 
         if executable is None:
-            self.executable = self._find_executable()
+            self.executable = self._find_bellhop_executable()
         else:
             self.executable = Path(executable)
             self.version = "custom"
@@ -308,68 +315,37 @@ class Bellhop(PropagationModel):
         if verbose and self.version != "custom":
             self._log(f"Using Bellhop {self.version}: {self.executable}", level='info')
 
-    def _find_executable(self) -> Path:
-        """
-        Find executable in PATH or uacpy/bin
+    def _find_bellhop_executable(self) -> Path:
+        """Locate the Bellhop binary using the base class helper.
 
-        Search order (if prefer_cuda=True):
-        1. bellhopcuda in bin/bellhopcuda/
-        2. bellhopcxx in bin/bellhopcuda/
-        3. bellhop.exe in bin/oalib/
-        4. PATH
+        Preference order honors ``prefer_cuda``: CUDA > C++ > Fortran.
+        ``self.version`` is inferred from the name of the returned path.
         """
-        base_dir = Path(__file__).parent.parent
-
-        # Search order based on preference
         if self.prefer_cuda:
-            # Try CUDA/C++ versions first
-            cuda_paths = [
-                (base_dir / 'bin' / 'bellhopcuda' / 'bellhopcuda.exe', 'cuda'),
-                (base_dir / 'bin' / 'bellhopcuda' / 'bellhopcuda', 'cuda'),
-                (base_dir / 'bin' / 'bellhopcuda' / 'bellhopcxx.exe', 'cxx'),
-                (base_dir / 'bin' / 'bellhopcuda' / 'bellhopcxx', 'cxx'),
-            ]
+            names = ['bellhopcuda', 'bellhopcxx', 'bellhop']
+        else:
+            names = ['bellhop']
 
-            for path, version in cuda_paths:
-                if path.exists():
-                    self.version = version
-                    return path
-
-        # Try Fortran version
-        fortran_paths = [
-            (base_dir / 'bin' / 'oalib' / 'bellhop.exe', 'fortran'),
-            (base_dir / 'bin' / 'bellhop' / 'bellhop.exe', 'fortran'),
-        ]
-
-        for path, version in fortran_paths:
-            if path.exists():
-                self.version = version
-                return path
-
-        # Check PATH for any bellhop variant (cross-platform)
-        import shutil
-        for name in ['bellhopcuda', 'bellhopcxx', 'bellhop', 'bellhop.exe']:
-            result = shutil.which(name)
-            if result:
-                if 'cuda' in name:
-                    self.version = 'cuda'
-                elif 'cxx' in name:
-                    self.version = 'cxx'
-                else:
-                    self.version = 'fortran'
-                return Path(result)
-
-        raise FileNotFoundError(
-            "Could not find bellhop executable.\n"
-            "Please run install.sh (Linux/Mac) or install.bat (Windows) to install."
+        path = self._find_executable_in_paths(
+            names,
+            bin_subdirs=['bellhopcuda', 'oalib', 'bellhop'],
+            dev_subdir='Acoustics-Toolbox/Bellhop',
         )
+        lower = path.name.lower()
+        if 'cuda' in lower:
+            self.version = 'cuda'
+        elif 'cxx' in lower:
+            self.version = 'cxx'
+        else:
+            self.version = 'fortran'
+        return path
 
     def run(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        run_type: str = 'C',
+        run_mode=_UNSET,
         beam_type=_UNSET,
         n_beams=_UNSET,
         alpha=_UNSET,
@@ -378,8 +354,13 @@ class Bellhop(PropagationModel):
         r_box=_UNSET,
         source_type=_UNSET,
         grid_type=_UNSET,
-        beam_shift=_UNSET,
         volume_attenuation=_UNSET,
+        attenuation_unit=_UNSET,
+        francois_garrison_params=_UNSET,
+        bio_layers=_UNSET,
+        bty_interp_type=_UNSET,
+        source_beam_pattern_file=_UNSET,
+        arrivals_format=_UNSET,
         **kwargs
     ) -> Field:
         """
@@ -387,72 +368,73 @@ class Bellhop(PropagationModel):
 
         Parameters
         ----------
-        env : Environment
-            Ocean environment
-        source : Source
-            Acoustic source
-        receiver : Receiver
-            Receiver array
-        run_type : str, optional
-            Run type: 'C' (coherent TL), 'I' (incoherent TL), 'S' (semi-coherent),
-            'A' (arrivals), 'E' (eigenrays), 'R' (ray trace).
-            Default is 'C'.
-        beam_type : str, optional
-            Override constructor beam_type for this run.
-        n_beams : int, optional
-            Override constructor n_beams for this run.
-        alpha : tuple, optional
-            Override constructor alpha for this run.
-        step : float, optional
-            Override constructor step for this run.
-        z_box : float, optional
-            Override constructor z_box for this run.
-        r_box : float, optional
-            Override constructor r_box for this run.
-        source_type : str, optional
-            Override constructor source_type for this run.
-        grid_type : str, optional
-            Override constructor grid_type for this run.
-        beam_shift : bool, optional
-            Override constructor beam_shift for this run.
-        volume_attenuation : str, optional
-            Override constructor volume_attenuation for this run.
+        env, source, receiver : see ``PropagationModel.run``.
+        run_mode : RunMode, optional
+            Which Bellhop mode to run. One of ``RunMode.COHERENT_TL``,
+            ``INCOHERENT_TL``, ``SEMICOHERENT_TL``, ``RAYS``, ``EIGENRAYS``,
+            ``ARRIVALS``, ``TIME_SERIES``. Defaults to ``COHERENT_TL``.
+        beam_type, n_beams, alpha, step, z_box, r_box, source_type,
+        grid_type, volume_attenuation : optional
+            Per-call overrides for the constructor defaults.
+        attenuation_unit : str, optional
+            Top-option position 3. 'N'/'F'/'M'/'W' (default)/'Q'/'L'/'m'.
+        francois_garrison_params : tuple, optional
+            Required when ``volume_attenuation='F'``:
+            ``(T_C, salinity_ppt, pH, z_bar_m)``.
+        bio_layers : list of tuples, optional
+            Required when ``volume_attenuation='B'``. Each entry is
+            ``(Z1, Z2, f0, Q, a0)``.
+        bty_interp_type : str, optional
+            '.bty'/'.ati' interpolation: 'L' (linear, default) or 'C'
+            (curvilinear).
+        source_beam_pattern_file : Path or ndarray, optional
+            Per-call override of the constructor default. See
+            :meth:`__init__`. Supply ``None`` to explicitly disable for this
+            call.
+        arrivals_format : str, optional
+            Per-call override: ``'ascii'`` or ``'binary'``. Only takes effect
+            for ``run_mode=RunMode.ARRIVALS``.
         **kwargs
-            Advanced Cerveny beam parameters (for beam_type 'C' or 'R'):
-            - beam_width_type (str): 'F' (filling), 'M' (minimum), 'W' (WKB)
-            - beam_curvature (str): 'D' (double), 'S' (single), 'Z' (zero)
-            - eps_multiplier (float): Epsilon multiplier for beam width
-            - r_loop (float): Range for beam width selection (km)
-            - n_image (int): Number of surface/bottom images
-            - ib_win (int): Beam windowing parameter
-            - component (str): 'P' for pressure (default), 'D' for displacement
+            Advanced Cerveny/Simple-Gaussian beam parameters (used when
+            ``beam_type`` is 'C', 'R' or 'S'):
+            beam_width_type ('F'/'M'/'W'), beam_curvature ('D'/'S'/'Z'),
+            eps_multiplier, r_loop, n_image, ib_win, component.
 
         Returns
         -------
         field : Field
             Simulation results
         """
-        # Resolve per-call overrides
-        beam_type = beam_type if beam_type is not _UNSET else self.beam_type
-        n_beams = n_beams if n_beams is not _UNSET else self.n_beams
-        alpha = alpha if alpha is not _UNSET else self.alpha
-        step = step if step is not _UNSET else self.step
-        z_box = z_box if z_box is not _UNSET else self.z_box
-        r_box = r_box if r_box is not _UNSET else self.r_box
-        source_type = source_type if source_type is not _UNSET else self.source_type
-        grid_type = grid_type if grid_type is not _UNSET else self.grid_type
-        beam_shift = beam_shift if beam_shift is not _UNSET else self.beam_shift
-        volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
+        # ── Resolve run_mode → internal single-char Bellhop code ────────
+        from uacpy.core.model_utils import ParameterMapper
+        if run_mode is _UNSET:
+            run_mode = RunMode.COHERENT_TL
+        if run_mode == RunMode.TIME_SERIES:
+            # Delegate to broadband pipeline (arrivals + synthesis)
+            return self._run_broadband(env, source, receiver, **kwargs)
+        run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
 
-        # Handle run_mode if provided (for compute_*() methods)
-        run_mode_enum = None
-        if 'run_mode' in kwargs:
-            from uacpy.core.model_utils import ParameterMapper
-            run_mode_enum = kwargs.pop('run_mode')
-            if run_mode_enum == RunMode.TIME_SERIES:
-                # Delegate to broadband pipeline
-                return self._run_broadband(env, source, receiver, **kwargs)
-            run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode_enum)
+        # ── arrivals_format: 'A' (ASCII) vs 'a' (binary) ────────────────
+        # ParameterMapper returns 'A' for RunMode.ARRIVALS; swap to 'a'
+        # when the user requests binary output.
+        arr_fmt = (
+            arrivals_format if arrivals_format is not _UNSET
+            else self.arrivals_format
+        )
+        if arr_fmt not in ('ascii', 'binary'):
+            raise ValueError(
+                f"arrivals_format must be 'ascii' or 'binary', got {arr_fmt!r}"
+            )
+        if run_mode == RunMode.ARRIVALS and arr_fmt == 'binary':
+            run_type = 'a'
+
+        # ── Per-call overrides (shared primitive) ───────────────────────
+        override_kwargs = dict(
+            beam_type=beam_type, n_beams=n_beams, alpha=alpha,
+            step=step, z_box=z_box, r_box=r_box,
+            source_type=source_type, grid_type=grid_type,
+            volume_attenuation=volume_attenuation,
+        )
 
         # Warn about unsupported range/depth-dependent bottom features
         if env.has_range_dependent_bottom():
@@ -493,97 +475,170 @@ class Bellhop(PropagationModel):
 
         self.validate_inputs(env, source, receiver)
 
+        # Irregular receiver grid ('I' in RunType position 5) requires the
+        # receiver.depths and receiver.ranges arrays to have the same
+        # length (they are paired point-by-point).  Rectilinear ('R')
+        # takes the Cartesian product.  Catch the mismatch here so users
+        # see a clear error instead of a confusing Bellhop .prt message.
+        eff_grid_type = (
+            grid_type if grid_type is not _UNSET else self.grid_type
+        )
+        if (
+            eff_grid_type is not None
+            and str(eff_grid_type).upper() == 'I'
+            and len(receiver.depths) != len(receiver.ranges)
+        ):
+            from uacpy.core.exceptions import ConfigurationError
+            raise ConfigurationError(
+                f"Bellhop grid_type='I' (irregular) requires "
+                f"len(receiver.depths) == len(receiver.ranges); got "
+                f"{len(receiver.depths)} depths and "
+                f"{len(receiver.ranges)} ranges. Use grid_type='R' for "
+                f"a rectilinear (Cartesian-product) grid, or rebuild the "
+                f"Receiver with matched arrays."
+            )
+
         # Setup file manager
         fm = self._setup_file_manager()
         self.file_manager = fm
 
-        try:
-            # Generate base filename
-            base_name = 'model'
+        # Writer kwargs that are not tied to the overrides context. Each is
+        # pulled from the per-call override when supplied, otherwise from the
+        # constructor default on self.
+        extra_writer_kwargs = {
+            'attenuation_unit': (
+                attenuation_unit if attenuation_unit is not _UNSET
+                else self.attenuation_unit
+            ),
+            'francois_garrison_params': (
+                francois_garrison_params if francois_garrison_params is not _UNSET
+                else self.francois_garrison_params
+            ),
+            'bio_layers': (
+                bio_layers if bio_layers is not _UNSET
+                else self.bio_layers
+            ),
+            'bty_interp_type': (
+                bty_interp_type if bty_interp_type is not _UNSET
+                else self.bty_interp_type
+            ),
+        }
 
-            # Write environment file using shared writer
-            env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}", level='info')
+        # Resolve source beam pattern (file path or (angle, level_dB) array).
+        sbp_spec = (
+            source_beam_pattern_file if source_beam_pattern_file is not _UNSET
+            else self.source_beam_pattern_file
+        )
 
-            BellhopEnvWriter.write_env_file(
-                filepath=env_file,
-                env=env,
-                source=source,
-                receiver=receiver,
-                run_type=run_type,
-                beam_type=beam_type,
-                source_type=source_type,
-                grid_type=grid_type,
-                beam_shift=beam_shift,
-                volume_attenuation=volume_attenuation,
-                verbose=self.verbose,
-                n_beams=n_beams,
-                alpha=alpha,
-                step=step,
-                z_box=z_box,
-                r_box=r_box,
-                **kwargs
-            )
+        with _resolve_overrides(self, **override_kwargs):
+            try:
+                base_name = 'model'
+                env_file = fm.get_path(f'{base_name}.env')
+                self._log(f"Writing environment file: {env_file}", level='info')
 
-            # Run Bellhop
-            self._log(f"Running Bellhop...", level='info')
-            self._run_bellhop(base_name, fm.work_dir)
+                # Stage source beam pattern file. Bellhop reads by base name
+                # (<base>.sbp) when RunType position 3 is '*'.
+                use_sbp = False
+                if sbp_spec is not None:
+                    import shutil
+                    sbp_dest = env_file.with_suffix('.sbp')
+                    if isinstance(sbp_spec, (str, Path)):
+                        src = Path(sbp_spec)
+                        if not src.exists():
+                            raise FileNotFoundError(
+                                f"Source beam pattern file not found: {src}"
+                            )
+                        shutil.copy(src, sbp_dest)
+                    else:
+                        # Array-like: expect shape (N, 2) [angle_deg, level_dB]
+                        from uacpy.io.env_writer import write_source_beam_pattern
+                        arr = np.asarray(sbp_spec, dtype=float)
+                        if arr.ndim != 2 or arr.shape[1] != 2:
+                            raise ValueError(
+                                "source_beam_pattern_file array must be shape "
+                                "(N, 2): [angle_deg, level_dB]."
+                            )
+                        write_source_beam_pattern(
+                            sbp_dest, arr[:, 0], arr[:, 1]
+                        )
+                    use_sbp = True
+                    if self.verbose:
+                        self._log(f"Wrote source beam pattern: {sbp_dest}",
+                                  level='info')
 
-            # Read output based on run type
-            if run_type.upper() in ['C', 'I', 'S']:
-                # TL output
-                output_file = fm.get_path(f'{base_name}.shd')
-                if output_file.exists():
-                    result = read_shd_file(output_file)
+                BellhopEnvWriter.write_env_file(
+                    filepath=env_file,
+                    env=env,
+                    source=source,
+                    receiver=receiver,
+                    run_type=run_type,
+                    beam_type=self.beam_type,
+                    source_type=self.source_type,
+                    grid_type=self.grid_type,
+                    volume_attenuation=self.volume_attenuation,
+                    verbose=self.verbose,
+                    n_beams=self.n_beams,
+                    alpha=self.alpha,
+                    step=self.step,
+                    z_box=self.z_box,
+                    r_box=self.r_box,
+                    source_beam_pattern=use_sbp,
+                    **extra_writer_kwargs,
+                    **kwargs,
+                )
+
+                # Run Bellhop
+                self._log("Running Bellhop...", level='info')
+                self._run_bellhop(base_name, fm.work_dir)
+
+                # Read output based on run type. Uppercase covers 'A'
+                # (ASCII arrivals) and 'a' (binary arrivals) identically
+                # since the arrivals reader auto-detects the format.
+                rt = run_type.upper()
+                if rt in ('C', 'I', 'S'):
+                    output_file = fm.get_path(f'{base_name}.shd')
+                    reader = read_shd_file
+                elif rt == 'A':
+                    output_file = fm.get_path(f'{base_name}.arr')
+                    reader = read_arr_file
+                elif rt in ('R', 'E'):
+                    output_file = fm.get_path(f'{base_name}.ray')
+                    reader = read_ray_file
                 else:
+                    self._log(f"Unknown run_type: {run_type}", level='error')
+                    raise ValueError(f"Unknown run_type: {run_type}")
+
+                if not output_file.exists():
                     self._log(f"Output file not found: {output_file}", level='error')
                     raise FileNotFoundError(f"Output file not found: {output_file}")
+                result = reader(output_file)
 
-            elif run_type.upper() == 'A':
-                # Arrivals output
-                output_file = fm.get_path(f'{base_name}.arr')
-                if output_file.exists():
-                    result = read_arr_file(output_file)
-                else:
-                    self._log(f"Output file not found: {output_file}", level='error')
-                    raise FileNotFoundError(f"Output file not found: {output_file}")
+                self._log("Simulation complete", level='info')
+                return result
 
-            elif run_type.upper() in ['R', 'E']:
-                # Ray trace output
-                output_file = fm.get_path(f'{base_name}.ray')
-                if output_file.exists():
-                    result = read_ray_file(output_file)
-                else:
-                    self._log(f"Output file not found: {output_file}", level='error')
-                    raise FileNotFoundError(f"Output file not found: {output_file}")
-            else:
-                self._log(f"Unknown run_type: {run_type}", level='error')
-                raise ValueError(f"Unknown run_type: {run_type}")
-
-            self._log("Simulation complete", level='info')
-            return result
-
-        finally:
-            # Cleanup if configured
-            if fm.cleanup:
-                fm.cleanup_work_dir()
+            finally:
+                if fm.cleanup:
+                    fm.cleanup_work_dir()
 
     def _compute_tl_impl(self, env, source, receiver, **kwargs):
-        """Bellhop-specific TL computation"""
-        # Map RunMode if provided, otherwise default to coherent
-        from uacpy.core.model_utils import ParameterMapper
-        run_mode = kwargs.pop('run_mode', 'C')
+        """Bellhop-specific TL computation.
 
-        if hasattr(run_mode, 'value'):  # Is RunMode enum
-            run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
-        else:
-            run_type = run_mode
-
-        # Ensure we're computing TL (C, I, or S)
-        if run_type not in ['C', 'I', 'S']:
-            run_type = 'C'
-
-        return self.run(env, source, receiver, run_type=run_type, **kwargs)
+        ``run_mode`` must be a :class:`RunMode` member. If absent defaults to
+        :attr:`RunMode.COHERENT_TL`; any non-TL mode is rejected.
+        """
+        run_mode = kwargs.pop('run_mode', RunMode.COHERENT_TL)
+        if not isinstance(run_mode, RunMode):
+            raise TypeError(
+                f"run_mode must be a RunMode enum member, got "
+                f"{type(run_mode).__name__}: {run_mode!r}"
+            )
+        if run_mode not in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+                            RunMode.SEMICOHERENT_TL):
+            raise ValueError(
+                f"compute_tl requires a TL RunMode "
+                f"(COHERENT_TL/INCOHERENT_TL/SEMICOHERENT_TL); got {run_mode}."
+            )
+        return self.run(env, source, receiver, run_mode=run_mode, **kwargs)
 
     def run_with_bounce(
         self,
@@ -665,6 +720,7 @@ class Bellhop(PropagationModel):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         time_window: Optional[float] = None,
+        t_start: Optional[float] = None,
         n_freqs: int = 128,
         bandwidth_factor: float = 1.0,
         **kwargs
@@ -711,6 +767,10 @@ class Bellhop(PropagationModel):
         time_window : float, optional
             Duration of the output time window in seconds. If None,
             estimated automatically from arrival delays.
+        t_start : float, optional
+            Start time (s) of the delay-and-sum output window. Forwarded to
+            :func:`delayandsum`. If None, set to just before the earliest
+            arrival. Only used when ``source_waveform`` is provided.
         n_freqs : int, optional
             Number of frequency points for transfer function mode.
             Default: 128. Ignored when source_waveform is provided.
@@ -733,7 +793,7 @@ class Bellhop(PropagationModel):
 
         # Step 1: Run Bellhop in arrivals mode
         self._log("Broadband mode: running Bellhop in arrivals mode...", level='info')
-        arr_field = self.run(env, source, receiver, run_type='A', **kwargs)
+        arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
 
         arrivals_by_rcv = arr_field.metadata['arrivals_by_receiver']
         sz = arr_field.metadata['source_depths']
@@ -779,6 +839,7 @@ class Bellhop(PropagationModel):
                 sample_rate=sample_rate,
                 fc=fc,
                 time_window=time_window,
+                t_start=t_start,
             )
 
             dt = 1.0 / sample_rate
@@ -912,426 +973,127 @@ class Bellhop(PropagationModel):
 
         return H
 
+    def _build_command(self, base_name: str) -> list:
+        """Build the argv used to launch the binary.
+
+        Subclasses (BellhopCUDA) may override this to add flags.
+        """
+        if self.version in ('cuda', 'cxx'):
+            # bellhopcxx/cuda require a dimensionality flag
+            return [str(self.executable), '--2D', base_name]
+        return [str(self.executable), base_name]
+
     def _run_bellhop(self, base_name: str, work_dir: Path):
+        """Execute the Bellhop binary via the shared subprocess runner.
+
+        Bellhop reports most fatal errors in ``<base>.prt`` rather than on
+        stderr. If the child exits non-zero, we append the tail of the .prt
+        file (up to 2000 chars) to the raised ``ModelExecutionError`` so the
+        diagnostic surface to the user instead of a blank stderr.
         """
-        Execute bellhop
+        from uacpy.core.exceptions import ModelExecutionError
 
-        Parameters
-        ----------
-        base_name : str
-            Base filename (without extension)
-        work_dir : Path
-            Working directory
-        """
-        # Build command based on version
-        if self.version in ['cuda', 'cxx']:
-            # bellhopcxx/cuda need dimensionality flag
-            cmd = [str(self.executable), '--2D', base_name]
-        else:
-            # Fortran version
-            cmd = [str(self.executable), base_name]
+        cmd = self._build_command(base_name)
+        try:
+            result = self._run_subprocess(cmd, cwd=work_dir)
+        except ModelExecutionError as exc:
+            prt_file = Path(work_dir) / f"{base_name}.prt"
+            if prt_file.exists():
+                try:
+                    tail = prt_file.read_text()[-2000:]
+                    exc.args = (
+                        f"{exc.args[0] if exc.args else exc}\n\n"
+                        f".prt tail:\n{tail}",
+                    ) + exc.args[1:]
+                except Exception:
+                    pass
+            raise
 
-        result = subprocess.run(
-            cmd,
-            cwd=str(work_dir),
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            error_msg = f"Bellhop ({self.version}) failed with return code {result.returncode}\n"
-            error_msg += f"stdout: {result.stdout}\n"
-            error_msg += f"stderr: {result.stderr}"
-            self._log(error_msg, level='error')
-            raise RuntimeError(error_msg)
-
-        # Log detailed output at debug level
         if self.verbose and result.stdout:
             self._log(f"Bellhop output:\n{result.stdout}", level='debug')
 
 
-class BellhopCUDA(PropagationModel):
+class BellhopCUDA(Bellhop):
     """
-    BellhopCUDA - GPU-accelerated ray tracing model
+    BellhopCUDA - C++/CUDA ray tracing model (thin ``Bellhop`` subclass).
 
-    C++/CUDA port of Bellhop with massive speedups on NVIDIA GPUs.
+    Shares all Environment/Source/Receiver plumbing, per-call overrides,
+    broadband synthesis, and output parsing with the parent. Only the
+    executable selection and the ``--<dim>`` invocation flag differ.
 
     Parameters
     ----------
     use_gpu : bool, optional
-        Use GPU if available. Default is True.
+        Select ``bellhopcuda`` (True) vs ``bellhopcxx`` (False). Default True.
     executable : str or Path, optional
-        Path to bellhopcuda executable. If None, searches automatically.
-    use_tmpfs : bool, optional
-        Use RAM filesystem. Default is False.
-    verbose : bool, optional
-        Verbose output. Default is False.
+        Override path to the chosen binary. Auto-detected if None.
+    dimensionality : str, optional
+        Either '2D' or '3D'. Default '2D' (matches the CLI flag '--2D').
+    **kwargs
+        All other kwargs are forwarded to ``Bellhop.__init__`` unchanged.
 
     Examples
     --------
     >>> bhc = BellhopCUDA(use_gpu=True)
-    >>> result = bhc.run(env, source, receiver, run_type='C')
+    >>> result = bhc.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
     """
 
     def __init__(
         self,
         use_gpu: bool = True,
         executable: Optional[Path] = None,
-        beam_type: str = 'B',
-        n_beams: int = 0,
-        alpha: tuple = (-80, 80),
-        step: float = 0.0,
-        z_box: Optional[float] = None,
-        r_box: Optional[float] = None,
-        source_type: str = 'R',
-        grid_type: str = 'R',
-        beam_shift: bool = False,
-        volume_attenuation: Optional[str] = None,
         dimensionality: str = '2D',
-        use_tmpfs: bool = False,
-        verbose: bool = False,
+        **kwargs,
     ):
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose)
-
-        # Declare supported modes for BellhopCUDA (same as Bellhop)
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.INCOHERENT_TL,
-            RunMode.SEMICOHERENT_TL,
-            RunMode.RAYS,
-            RunMode.EIGENRAYS,
-            RunMode.ARRIVALS,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = True
-
+        # Stash CUDA-specific knobs before super() uses them in executable
+        # discovery.
         self.use_gpu = use_gpu
-        self.beam_type = beam_type
-        self.n_beams = n_beams
-        self.alpha = alpha
-        self.step = step
-        self.z_box = z_box
-        self.r_box = r_box
-        self.source_type = source_type
-        self.grid_type = grid_type
-        self.beam_shift = beam_shift
-        self.volume_attenuation = volume_attenuation
         self.dimensionality = dimensionality
-
-        if executable is None:
-            if use_gpu:
-                self.executable = self._find_executable('bellhopcuda')
-            else:
-                self.executable = self._find_executable('bellhopcxx')
-        else:
-            self.executable = Path(executable)
-
-        if not self.executable.exists():
-            raise FileNotFoundError(
-                f"BellhopCUDA executable not found: {self.executable}\n"
-                "Please run install.sh to build BellhopCUDA."
-            )
-
-    def _find_executable(self, name: str) -> Path:
-        """Find BellhopCUDA executable"""
-        base_dir = Path(__file__).parent.parent
-
-        # Check uacpy/bin/bellhopcuda (new location)
-        bin_paths = [
-            base_dir / 'bin' / 'bellhopcuda' / f'{name}.exe',
-            base_dir / 'bin' / 'bellhopcuda' / name,
-            base_dir / 'bin' / 'bellhop' / name,
-        ]
-
-        for bin_path in bin_paths:
-            if bin_path.exists():
-                return bin_path
-
-        # Check PATH (cross-platform)
-        import shutil
-        result = shutil.which(name)
-        if result:
-            return Path(result)
-
-        # Try reference_code build
-        ref_path = Path('reference_code') / 'bellhopcuda' / 'build' / name
-        if ref_path.exists():
-            return ref_path
-
-        raise FileNotFoundError(
-            f"Could not find {name}.\n"
-            "Please run install.sh --bellhop cuda (Linux/Mac) or install.bat (Windows) with CUDA option."
+        super().__init__(
+            executable=executable,
+            prefer_cuda=True,  # always prefer GPU/CXX before Fortran
+            **kwargs,
         )
 
-    def run(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        run_type: str = 'C',
-        beam_type=_UNSET,
-        n_beams=_UNSET,
-        alpha=_UNSET,
-        step=_UNSET,
-        z_box=_UNSET,
-        r_box=_UNSET,
-        source_type=_UNSET,
-        grid_type=_UNSET,
-        beam_shift=_UNSET,
-        volume_attenuation=_UNSET,
-        **kwargs
-    ) -> Field:
-        """
-        Run BellhopCUDA simulation
-
-        Parameters
-        ----------
-        env : Environment
-            Ocean environment
-        source : Source
-            Acoustic source
-        receiver : Receiver
-            Receiver array
-        run_type : str, optional
-            Run type: 'C'/'I'/'S'/'A'/'E'/'R'. Default is 'C'.
-        beam_type, n_beams, alpha, step, z_box, r_box, source_type, grid_type,
-        beam_shift, volume_attenuation : optional
-            Per-call overrides for constructor defaults.
-        **kwargs
-            Additional parameters (same as Bellhop class)
-
-        Returns
-        -------
-        field : Field
-            Simulation results
-        """
-        # Resolve per-call overrides
-        beam_type = beam_type if beam_type is not _UNSET else self.beam_type
-        n_beams = n_beams if n_beams is not _UNSET else self.n_beams
-        alpha = alpha if alpha is not _UNSET else self.alpha
-        step = step if step is not _UNSET else self.step
-        z_box = z_box if z_box is not _UNSET else self.z_box
-        r_box = r_box if r_box is not _UNSET else self.r_box
-        source_type = source_type if source_type is not _UNSET else self.source_type
-        grid_type = grid_type if grid_type is not _UNSET else self.grid_type
-        beam_shift = beam_shift if beam_shift is not _UNSET else self.beam_shift
-        volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
-
-        # Handle run_mode if provided (for compute_*() methods)
-        if 'run_mode' in kwargs:
-            from uacpy.core.model_utils import ParameterMapper
-            run_mode = kwargs.pop('run_mode')
-            if run_mode == RunMode.TIME_SERIES:
-                return self._run_broadband(env, source, receiver, **kwargs)
-            run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
-
-        self.validate_inputs(env, source, receiver)
-
-        # Setup file manager
-        fm = self._setup_file_manager()
-        self.file_manager = fm
-
-        try:
-            base_name = 'model'
-
-            # Write environment file using shared writer
-            env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}", level='info')
-
-            BellhopEnvWriter.write_env_file(
-                filepath=env_file,
-                env=env,
-                source=source,
-                receiver=receiver,
-                run_type=run_type,
-                beam_type=beam_type,
-                source_type=source_type,
-                grid_type=grid_type,
-                beam_shift=beam_shift,
-                volume_attenuation=volume_attenuation,
-                verbose=self.verbose,
-                n_beams=n_beams,
-                alpha=alpha,
-                step=step,
-                z_box=z_box,
-                r_box=r_box,
-                **kwargs
-            )
-
-            # Run BellhopCUDA
-            self._log(f"Running BellhopCUDA ({self.dimensionality})...", level='info')
-            self._run_bellhopcuda(base_name, fm.work_dir, self.dimensionality)
-
-            # Read output (same format as Bellhop)
-            if run_type.upper() in ['C', 'I', 'S']:
-                output_file = fm.get_path(f'{base_name}.shd')
-                result = read_shd_file(output_file)
-            elif run_type.upper() == 'A':
-                output_file = fm.get_path(f'{base_name}.arr')
-                result = read_arr_file(output_file)
-            elif run_type.upper() in ['R', 'E']:
-                output_file = fm.get_path(f'{base_name}.ray')
-                result = read_ray_file(output_file)
-            else:
-                raise ValueError(f"Unknown run_type: {run_type}")
-
-            self._log("Simulation complete", level='info')
-            return result
-
-        finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
-
-    def _run_broadband(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        frequencies: Optional[np.ndarray] = None,
-        source_waveform: Optional[np.ndarray] = None,
-        sample_rate: Optional[float] = None,
-        time_window: Optional[float] = None,
-        n_freqs: int = 128,
-        bandwidth_factor: float = 1.0,
-        dimensionality: str = '2D',
-        **kwargs
-    ) -> Field:
-        """
-        Run BellhopCUDA in broadband mode. See Bellhop._run_broadband for details.
-
-        Uses BellhopCUDA for the arrivals computation, then delegates to
-        Bellhop's broadband synthesis (transfer function or delay-and-sum).
-        """
-        fc = float(np.atleast_1d(source.frequency)[0])
-
-        self._log("Broadband mode: running BellhopCUDA in arrivals mode...",
-                  level='info')
-        arr_field = self.run(env, source, receiver, run_type='A',
-                            dimensionality=dimensionality, **kwargs)
-
-        arrivals_by_rcv = arr_field.metadata['arrivals_by_receiver']
-        sz = arr_field.metadata['source_depths']
-        rz = arr_field.metadata['receiver_depths']
-        rr = arr_field.metadata['receiver_ranges']
-
-        nrd = len(rz)
-        nrr = len(rr)
-
-        # ── Path A: time-domain delay-and-sum ──
-        if source_waveform is not None:
-
-            if sample_rate is None:
-                raise ValueError(
-                    "sample_rate is required when source_waveform is provided"
-                )
-
-            rcv_depth = kwargs.pop('depth', None)
-            rcv_range = kwargs.pop('range_m', None)
-
-            if rcv_depth is None:
-                ird = 0
-                rcv_depth = float(rz[0])
-            else:
-                ird = int(np.argmin(np.abs(rz - rcv_depth)))
-                rcv_depth = float(rz[ird])
-
-            if rcv_range is None:
-                irr = 0
-                rcv_range = float(rr[0])
-            else:
-                irr = int(np.argmin(np.abs(rr - rcv_range)))
-                rcv_range = float(rr[irr])
-
-            self._log(f"Broadband: delay-and-sum at depth={rcv_depth:.1f} m, "
-                      f"range={rcv_range:.1f} m", level='info')
-
-            rcv_arr = arrivals_by_rcv[0][ird][irr]
-            rts, t_vec = delayandsum(
-                rcv_arrivals=rcv_arr,
-                source_timeseries=source_waveform,
-                sample_rate=sample_rate,
-                fc=fc,
-                time_window=time_window,
-            )
-
-            dt = 1.0 / sample_rate
-
-            return Field(
-                field_type='time_series',
-                data=rts,
-                ranges=np.array([rcv_range]),
-                depths=np.array([rcv_depth]),
-                frequencies=np.array([fc]),
-                metadata={
-                    'model': 'bellhopcuda',
-                    'time': t_vec,
-                    'dt': dt,
-                    'fs': sample_rate,
-                    'nt': len(rts),
-                    't_start': float(t_vec[0]),
-                    'depth': rcv_depth,
-                    'range': rcv_range,
-                    'center_frequency': fc,
-                    'source_depths': sz,
-                },
-            )
-
-        # ── Path B: frequency-domain transfer function ──
-        if frequencies is None:
-            f_min = max(1.0, fc * (1.0 - bandwidth_factor))
-            f_max = fc * (1.0 + bandwidth_factor)
-            frequencies = np.linspace(f_min, f_max, n_freqs)
-
-        frequencies = np.asarray(frequencies, dtype=float)
-        n_freq = len(frequencies)
-
-        H = np.zeros((nrd, n_freq, nrr), dtype=complex)
-        for ird in range(nrd):
-            for irr in range(nrr):
-                rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, :, irr] = Bellhop._arrivals_to_tf(
-                    rcv_arr, frequencies, fc
-                )
-
-        self._log(f"Broadband: built transfer function "
-                  f"({nrd} depths x {n_freq} freqs x {nrr} ranges)",
-                  level='info')
-
-        c0 = float(env.ssp_data[0, 1]) if hasattr(env, 'ssp_data') and env.ssp_data is not None else DEFAULT_SOUND_SPEED
-
-        return Field(
-            field_type='transfer_function',
-            data=H,
-            ranges=rr,
-            depths=rz,
-            frequencies=frequencies,
-            metadata={
-                'model': 'bellhopcuda',
-                'center_frequency': fc,
-                'source_depths': sz,
-                'arrivals_field': arr_field,
-                'c0': c0,
-            },
+    def _find_bellhop_executable(self) -> Path:
+        """Override parent: pick only CUDA or CXX flavor, never Fortran."""
+        names = ['bellhopcuda'] if self.use_gpu else ['bellhopcxx']
+        path = self._find_executable_in_paths(
+            names,
+            bin_subdirs=['bellhopcuda'],
+            dev_subdir='bellhopcuda',
         )
+        self.version = 'cuda' if 'cuda' in path.name.lower() else 'cxx'
+        return path
 
-    def _run_bellhopcuda(self, base_name: str, work_dir: Path, dimensionality: str):
-        """Execute BellhopCUDA"""
-        cmd = [str(self.executable), f'--{dimensionality}', base_name]
+    def _build_command(self, base_name: str) -> list:
+        """Always emit the ``--<dim>`` flag required by the CUDA/CXX CLI."""
+        return [str(self.executable), f'--{self.dimensionality}', base_name]
 
-        result = subprocess.run(
-            cmd,
-            cwd=str(work_dir),
-            capture_output=True,
-            text=True
+
+class Bellhop3D(Bellhop):
+    """
+    Placeholder wrapper for BELLHOP3D (3D ray tracing).
+
+    Full 3D support requires a separate env-file layout (NSx/NSy source
+    grid, Ntheta/Nbeta bearing fan, 3D bathymetry via .bty3d, 3D SSP via
+    .ssp hexahedral format, etc.) and a 3D-aware output reader path.
+    See ``third_party/Acoustics-Toolbox/doc/bellhop3d.htm`` for the
+    authoritative file format.
+
+    This stub exists so users can discover the gap via ``from
+    uacpy.models import Bellhop3D`` rather than silently falling back to
+    2D. Constructing the class raises :class:`NotImplementedError`.
+
+    Contributions welcome.
+    """
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Bellhop3D wrapper is pending — the uacpy writer currently "
+            "emits 2D env blocks only (BellhopEnvWriter hardcodes "
+            "position 6 to '2'). Contributions welcome; see "
+            "third_party/Acoustics-Toolbox/doc/bellhop3d.htm for the 3D "
+            "env-file specification and bellhop3D.f90 for the Fortran "
+            "reference."
         )
-
-        if result.returncode != 0:
-            error_msg = f"BellhopCUDA failed with return code {result.returncode}\n"
-            error_msg += f"stdout: {result.stdout}\n"
-            error_msg += f"stderr: {result.stderr}"
-            self._log(error_msg, level='error')
-            raise RuntimeError(error_msg)
-
-        # Log detailed output at debug level
-        if self.verbose and result.stdout:
-            self._log(f"BellhopCUDA output:\n{result.stdout}", level='debug')

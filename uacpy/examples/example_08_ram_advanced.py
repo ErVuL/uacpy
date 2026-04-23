@@ -32,7 +32,10 @@ FEATURES DEMONSTRATED:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -246,17 +249,17 @@ def main():
 
     # Plot 1: Advanced environment overview
     fig1, axes1 = plot_environment_advanced(env, source, receiver)
-    plt.savefig('output/example_08_environment.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_08_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_08_environment.png")
 
     # Plot 2: 2D SSP detail
     fig2, ax2 = plot_ssp_2d(env)
-    plt.savefig('output/example_08_ssp_2d.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_08_ssp_2d.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_08_ssp_2d.png")
 
     # Plot 3: Bottom properties detail
     fig3, axes3 = plot_bottom_properties(env)
-    plt.savefig('output/example_08_bottom.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_08_bottom.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_08_bottom.png")
 
     # Plot 4: TL field result with NEW features
@@ -280,7 +283,7 @@ def main():
         ax4.annotate('Hard Sand', xy=(16, 280), fontsize=10, color='white',
                     bbox=dict(boxstyle='round', facecolor='gray', alpha=0.7))
 
-        plt.savefig('output/example_08_result.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_08_result.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_08_result.png")
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, KrakenField)
@@ -352,7 +355,7 @@ def main():
                     'RAM & Bellhop capture range dependence | KrakenField uses median SSP',
                     fontsize=14, fontweight='bold')
         plt.tight_layout()
-        plt.savefig('output/example_08_comparison.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_08_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_08_comparison.png")
 
     print("\n" + "=" * 70)

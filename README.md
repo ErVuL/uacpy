@@ -133,7 +133,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import uacpy
-from uacpy.models import Bellhop
+from uacpy.models import Bellhop, RunMode
 from uacpy.core.environment import BoundaryProperties
 from uacpy.visualization.plots import plot_transmission_loss
 
@@ -162,7 +162,7 @@ receiver = uacpy.Receiver(
 
 # 4. Run Bellhop in coherent-TL mode
 result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
-    env, source, receiver, run_type='C',
+    env, source, receiver, run_mode=RunMode.COHERENT_TL,
 )
 
 # 5. Plot the TL field
@@ -179,6 +179,19 @@ next steps are *auditing* rather than new features. The items below are
 meant as a checklist for contributors who want to help make UACPY
 trustworthy for research use. Each one is a legitimate open question —
 please open an issue or PR for anything you investigate.
+
+> **Status — 2026-04-23 audit pass:** A comprehensive cross-model audit
+> addressed dozens of silent-wrong-result bugs (Bellhop run_type casing,
+> ray-file range units, Field 3-D indexing, OASN env-var / SSP encoding,
+> OASP IC2 truncation, SPARC range downsampling, RAM multi-source), wired
+> several missing kwargs (`beam_shift`, non-uniform OASES receiver depths,
+> Kraken `rmax_km`, KrakenField dense mode-depth grid, Bounce `n_angles`,
+> SPARC `rmax_multiplier`, Scooter `stabilizing_attenuation_off` / `field_interp`),
+> removed 11 API-breaking dead paths (unused `Source`/`Receiver`/`Environment`
+> attrs, legacy `use_pe` / `compute_pe` names, `TL_FLOOR_PRESSURE` alias,
+> backcompat shims in env_reader and output_reader), and added a stub
+> `Bellhop3D` class. Tests 312/312 pass, 29/29 examples pass. The roadmap
+> below remains for further deepening.
 
 ### 🧱 Architecture & API audit
 
@@ -286,9 +299,12 @@ plotting code is easy to write plausibly but hard to get *correct*.
 -   **Dead / unreachable plot functions.** The visualization API surface
     is large; some functions may never be called by any example or test.
     Prune or document them.
--   **Style / reproducibility.** `style.py` mutates global matplotlib
-    state on import. Verify this doesn’t silently break downstream users
-    who want their own rcParams.
+-   **Style / reproducibility.** `style.py` applies its rcParams at
+    import time (consistent look across plots). If a downstream user
+    tweaks `mpl.rcParams` and wants the uacpy defaults back, they call
+    `apply_professional_style()`; `mpl.rcdefaults()` reverts to
+    matplotlib's stock settings. Further work: document the rcParams
+    contract and audit per-plot overrides that may leak.
 
 ### 🧪 Test suite audit
 

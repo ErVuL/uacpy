@@ -30,7 +30,6 @@ def write_inpe(
     ihorz: int,
     ibot: int,
     bth_filename: str,
-    ranges_filename: str,
     sedlayer: float = 300.0,
     nzs: int = 50,
     cs: Optional[np.ndarray] = None,
@@ -78,8 +77,6 @@ def write_inpe(
         Ocean bottom flag (0=no bottom file, 1=read bathymetry)
     bth_filename : str
         Bathymetry filename (used only if ibot=1)
-    ranges_filename : str
-        Output ranges filename
     sedlayer : float, optional
         Sediment layer thickness (m). Default: 300.0
     nzs : int, optional
@@ -120,7 +117,10 @@ def write_inpe(
         f.write(f"{ihorz}\n")
         f.write(f"{ibot}\n")
         f.write(f"{bth_filename}\n")
-        f.write(f"{ranges_filename}\n")
+        # Output ranges filename is fixed — mpiramS always reads 'ranges.dat'
+        # from the peramx.f90 caller. Keep this in sync with
+        # :func:`write_ranges_file`.
+        f.write("ranges.dat\n")
         # Bottom properties
         f.write(f"{sedlayer}\n")
         f.write(f"{nzs}\n")

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Union, Dict, Any
 
 from uacpy.core.field import Field
-from uacpy.core.constants import TL_FLOOR_PRESSURE
+from uacpy.core.constants import PRESSURE_FLOOR
 
 
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -216,7 +216,7 @@ def grn_to_field(grn_data: Dict[str, Any], ranges: np.ndarray, method: str = "ff
 
     p_out = _hankel_transform(G_src, k, ranges)
 
-    tl = -20 * np.log10(np.abs(p_out) + TL_FLOOR_PRESSURE)
+    tl = -20 * np.log10(np.abs(p_out) + PRESSURE_FLOOR)
 
     return Field(
         field_type="tl",
@@ -283,5 +283,9 @@ def grn_to_transfer_function(grn_data: Dict[str, Any], ranges: np.ndarray) -> Fi
             'model': 'Scooter',
             'nfreq': nfreq,
             'center_frequency': freqVec[len(freqVec) // 2],
+            # Populate 'frequency' for consistency with other readers; when
+            # multi-frequency, the centre frequency is the natural single
+            # scalar to expose.
+            'frequency': freqVec[len(freqVec) // 2],
         },
     )

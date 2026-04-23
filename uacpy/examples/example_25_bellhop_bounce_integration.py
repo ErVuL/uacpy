@@ -33,7 +33,7 @@ from uacpy import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, BoundaryProperties,
 )
-from uacpy.models import Bellhop, RAM
+from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.visualization.plots import (
     plot_transmission_loss,
     plot_layered_bottom,
@@ -81,13 +81,13 @@ def demo_bellhop_bounce():
 
     # Method 1: Standard half-space (ignores shear)
     print("\n--- Standard Bellhop (half-space, no shear) ---")
-    result_hs = bellhop.run(env, source, receiver, run_type='C')
+    result_hs = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
     # Method 2: With BOUNCE (accounts for shear)
     print("\n--- Bellhop with BOUNCE reflection coefficients ---")
     result_bounce = bellhop.run_with_bounce(
         env, source, receiver,
-        run_type='C',
+        run_mode=RunMode.COHERENT_TL,
         cmin=1400.0, cmax=10000.0, rmax_km=10.0,
     )
 

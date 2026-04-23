@@ -6,7 +6,7 @@ import pytest
 import warnings
 import numpy as np
 import uacpy
-from uacpy.models import Bellhop, RAM
+from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, BoundaryProperties,
@@ -453,11 +453,11 @@ class TestLayeredBottom:
         assert env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
         assert env.bottom_layered is lb
-        # env.bottom should be the halfspace for backward compat
+        # env.bottom exposes the halfspace for range-independent model consumers
         assert env.bottom.sound_speed == 1800
 
-    def test_environment_backward_compat(self):
-        """Existing BoundaryProperties usage should be unaffected"""
+    def test_environment_plain_boundary_properties(self):
+        """Plain BoundaryProperties bottom has no layered/RD bottom attached."""
         env = uacpy.Environment(name='test', depth=100)
         assert not env.has_layered_bottom()
         assert env.bottom_layered is None
@@ -551,6 +551,7 @@ class TestRangeDependentLayeredBottom:
         assert 30 < np.nanmin(result.data) < 100
 
 
+@pytest.mark.requires_binary
 class TestWarnings:
     """Test that models warn for unsupported features"""
 
@@ -686,7 +687,7 @@ class TestIntegrationRunWithBounce:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.run_with_bounce(env, source, receiver, run_type='C')
+        result = bellhop.run_with_bounce(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
         assert result.data.shape == (10, 10)
         assert 30 < np.nanmin(result.data) < 100

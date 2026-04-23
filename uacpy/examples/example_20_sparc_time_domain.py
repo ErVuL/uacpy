@@ -11,7 +11,10 @@ FEATURES: ✓ Time-domain pressure response  ✓ SPARC parabolic equation
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -58,12 +61,12 @@ def main():
         from uacpy.visualization import plot_time_series
         print("  Plotting time series...", end=" ", flush=True)
         fig_ts, ax_ts = plot_time_series(result, stacked=True)
-        fig_ts.savefig('output/example_20_time_series_stacked.png', dpi=150, bbox_inches='tight')
+        fig_ts.savefig(OUTPUT_DIR / 'example_20_time_series_stacked.png', dpi=150, bbox_inches='tight')
         plt.close(fig_ts)
 
         # Also plot overlaid version
         fig_ts_overlay, ax_ts_overlay = plot_time_series(result, stacked=False)
-        fig_ts_overlay.savefig('output/example_20_time_series_overlaid.png', dpi=150, bbox_inches='tight')
+        fig_ts_overlay.savefig(OUTPUT_DIR / 'example_20_time_series_overlaid.png', dpi=150, bbox_inches='tight')
         plt.close(fig_ts_overlay)
         print("✓")
 
@@ -244,11 +247,10 @@ def main():
 
     plt.suptitle('SPARC Time-Domain Seismo-Acoustic Propagation Model',
                 fontsize=16, fontweight='bold', y=0.995)
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_20_sparc_time_domain.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_20_sparc_time_domain.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("\n✓ Generated: output/example_20_sparc_time_domain.png")
+    print(f"\n✓ Generated: {OUTPUT_DIR / 'example_20_sparc_time_domain.png'}")
     if has_time_series:
         print("✓ Generated: output/example_20_time_series_stacked.png (NEW)")
         print("✓ Generated: output/example_20_time_series_overlaid.png (NEW)")

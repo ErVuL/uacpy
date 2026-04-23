@@ -8,6 +8,13 @@ This module provides various underwater acoustics functions including:
 - Absorption calculations
 - Acoustic pressure utilities
 
+Note
+----
+This module is a **user helper**.  The uacpy model wrappers do not
+import from ``uacpy.core.acoustics``; it is provided for downstream
+notebooks/examples that need direct access to sound-speed / absorption
+formulas (e.g. example_17_attenuation_models.py).
+
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
 Copyright (c) 2016-2020, Acoustic Research Laboratory

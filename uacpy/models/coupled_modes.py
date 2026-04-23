@@ -26,7 +26,7 @@ def segment_environment_by_range(
     n_segments : int, optional
         Number of segments. If None, automatically determined.
     max_segment_length_km : float
-        Maximum segment length in km (default 25km)
+        Maximum segment length in km (default 2.0 km)
 
     Returns
     -------

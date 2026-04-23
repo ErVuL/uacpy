@@ -80,6 +80,9 @@ import matplotlib.pyplot as plt
 example_dir = Path(__file__).parent
 sys.path.insert(0, str(example_dir.parent))
 
+OUTPUT_DIR = example_dir / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import uacpy
 from uacpy import RangeDependentBottom
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
@@ -474,19 +477,19 @@ def main():
     ax_ssp.fill_between(bathy_r, bathy_d, ax_ssp.get_ylim()[1],
                         color='saddlebrown', alpha=0.4, label='Sediment', zorder=10)
     ax_ssp.legend(loc='upper left')
-    plt.savefig('output/example_12_ssp_2d.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_12_ssp_2d.png', dpi=150, bbox_inches='tight')
     plt.close(fig_ssp)
     print("  ✓ Saved: example_24_ssp_2d.png")
 
     # Plot 2: Bottom properties
     fig_bottom, axes_bottom = plot_bottom_properties(env)
-    plt.savefig('output/example_12_bottom.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_12_bottom.png', dpi=150, bbox_inches='tight')
     plt.close(fig_bottom)
     print("  ✓ Saved: example_24_bottom.png")
 
     # Plot 3: Advanced environment overview
     fig_env, axes_env = plot_environment_advanced(env, source, receiver)
-    plt.savefig('output/example_12_environment.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_12_environment.png', dpi=150, bbox_inches='tight')
     plt.close(fig_env)
     print("  ✓ Saved: example_24_environment.png")
 

@@ -31,7 +31,7 @@ FEATURES DEMONSTRATED:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -39,6 +39,10 @@ import uacpy
 from uacpy import RangeDependentBottom
 from uacpy.models import Bellhop
 from uacpy.visualization.plots import plot_transmission_loss, plot_environment_advanced, plot_rays
+from uacpy.models import RunMode
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 def main():
     print("=" * 70)
@@ -102,7 +106,7 @@ def main():
     try:
         result_thorp = bellhop.run(
             env, source, receiver,
-            run_type='C',            # Coherent TL
+            run_mode=RunMode.COHERENT_TL,            # Coherent TL
             beam_type='B',           # Gaussian beams
             source_type='R',         # Point source (cylindrical)
             grid_type='R',           # Rectilinear grid
@@ -124,7 +128,7 @@ def main():
     try:
         result_cerveny = bellhop.run(
             env, source, receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
             beam_type='C',           # Cerveny Cartesian beams
             source_type='R',
             grid_type='R',
@@ -154,7 +158,7 @@ def main():
     try:
         result_line = bellhop.run(
             env, source, receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
             beam_type='B',
             source_type='X',         # Line source (Cartesian)
             grid_type='R',
@@ -175,7 +179,7 @@ def main():
     try:
         result_rays = bellhop.run(
             env, source, receiver,
-            run_type='R',            # Ray trace
+            run_mode=RunMode.RAYS,            # Ray trace
             beam_type='g',           # Geometric hat beams
             source_type='R',
             grid_type='R',
@@ -196,15 +200,15 @@ def main():
 
     # Plot 1: Environment setup with range-dependent bottom
     fig1, axes1 = plot_environment_advanced(env, source, receiver)
-    plt.savefig('output/example_07_environment.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_07_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_07_environment.png")
 
     # Plot 2: Compare standard vs Cerveny beams
-    # NEW: Using show_colorbar=False for subplots with shared colorbar
+    #Using show_colorbar=False for subplots with shared colorbar
     if result_thorp is not None and result_cerveny is not None:
         fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-        # NEW: Disable individual colorbars, add contours at 70, 85, 100 dB
+        #Disable individual colorbars, add contours at 70, 85, 100 dB
         _, _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
                                          show_colorbar=False,
                                          contours=[70, 85, 100])
@@ -215,7 +219,7 @@ def main():
                                          contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
 
-        # NEW: Add single shared colorbar
+        #Add single shared colorbar
         import matplotlib as mpl
         cbar_ax = fig2.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
@@ -223,13 +227,13 @@ def main():
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Gaussian vs Cerveny Beams\n(NEW: Contour overlays + shared colorbar)',
+        plt.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays + shared colorbar)',
                     fontsize=16, fontweight='bold')
-        plt.savefig('output/example_07_beam_comparison.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_07_beam_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_07_beam_comparison.png")
 
     # Plot 3: Point source vs Line source
-    # NEW: Using auto TL limits (median + 0.75σ, rounded)
+    #Using auto TL limits (median + 0.75σ, rounded)
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -241,7 +245,7 @@ def main():
                                          show_colorbar=False)
         ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
 
-        # NEW: Shared colorbar
+        #Shared colorbar
         import matplotlib as mpl
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
@@ -249,19 +253,19 @@ def main():
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Point vs Line Source\n(NEW: Auto TL limits - AT standard)',
+        plt.suptitle('Bellhop: Point vs Line Source (auto TL limits — AT standard)',
                     fontsize=16, fontweight='bold')
-        plt.savefig('output/example_07_source_comparison.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_07_source_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_07_source_comparison.png")
 
     # Plot 4: Ray trace
-    # NEW: Using color_by_bounces=True for ray color-coding
+    #Using color_by_bounces=True for ray color-coding
     if result_rays is not None:
         fig4, ax4 = plot_rays(result_rays, env,
-                             color_by_bounces=True)  # NEW: Color-code rays by bounce type
+                             color_by_bounces=True)  #Color-code rays by bounce type
         ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
-                     '(NEW: Rays colored by bounce type - R/G/B/K)')
-        plt.savefig('output/example_07_rays.png', dpi=150, bbox_inches='tight')
+                     '(rays colored by bounce type - R/G/B/K)')
+        plt.savefig(OUTPUT_DIR / 'example_07_rays.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_07_rays.png")
 
     print("\n" + "=" * 70)
@@ -275,7 +279,7 @@ def main():
     print("  ✓ Beam shift on reflection")
     print("  ✓ Range-dependent bottom properties")
     print("  ✓ Continental shelf scenario")
-    print("\nNEW Plotting features demonstrated:")
+    print("\nPlotting features demonstrated:")
     print("  ✓ Ray color-coding by bounce type (red/green/blue/black)")
     print("  ✓ Contour overlays on TL plots (labeled contours)")
     print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")

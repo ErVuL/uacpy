@@ -50,13 +50,13 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_coherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop coherent TL (run_type='C')"""
+        """Test Bellhop coherent TL (run_mode=RunMode.COHERENT_TL)"""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
             source=setup_source,
             receiver=setup_receiver,
-            run_type='C'
+            run_mode=RunMode.COHERENT_TL
         )
 
         assert result.field_type == 'tl'
@@ -66,13 +66,13 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_incoherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop incoherent TL (run_type='I')"""
+        """Test Bellhop incoherent TL (run_mode=RunMode.INCOHERENT_TL)"""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
             source=setup_source,
             receiver=setup_receiver,
-            run_type='I'
+            run_mode=RunMode.INCOHERENT_TL
         )
 
         assert result.field_type == 'tl'
@@ -81,13 +81,13 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_semicoherent_tl(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop semi-coherent TL (run_type='S')"""
+        """Test Bellhop semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)"""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
             source=setup_source,
             receiver=setup_receiver,
-            run_type='S'
+            run_mode=RunMode.SEMICOHERENT_TL
         )
 
         assert result.field_type == 'tl'
@@ -96,13 +96,13 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_rays(self, setup_env, setup_source, setup_receiver):
-        """Test Bellhop ray tracing (run_type='R')"""
+        """Test Bellhop ray tracing (run_mode=RunMode.RAYS)"""
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(
             env=setup_env,
             source=setup_source,
             receiver=setup_receiver,
-            run_type='R'
+            run_mode=RunMode.RAYS
         )
 
         assert result.field_type == 'rays'
@@ -118,7 +118,7 @@ class TestBellhopRunModes:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_bellhop_eigenrays(self, setup_env, setup_source):
-        """Test Bellhop eigenrays (run_type='E')"""
+        """Test Bellhop eigenrays (run_mode=RunMode.EIGENRAYS)"""
         bellhop = Bellhop(verbose=False)
 
         # Eigenrays need a specific receiver point
@@ -128,7 +128,7 @@ class TestBellhopRunModes:
             env=setup_env,
             source=setup_source,
             receiver=receiver,
-            run_type='E'
+            run_mode=RunMode.EIGENRAYS
         )
 
         # Bellhop returns eigenrays with field_type='rays' (same as regular rays)
@@ -140,7 +140,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_bellhop_arrivals(self, setup_env, setup_source):
-        """Test Bellhop arrivals (run_type='A')"""
+        """Test Bellhop arrivals (run_mode=RunMode.ARRIVALS)"""
         bellhop = Bellhop(verbose=False)
 
         # Arrivals at specific points
@@ -150,14 +150,15 @@ class TestBellhopRunModes:
             env=setup_env,
             source=setup_source,
             receiver=receiver,
-            run_type='A'
+            run_mode=RunMode.ARRIVALS
         )
 
         assert result.field_type == 'arrivals'
-        # Check for arrival structure in metadata
-        assert 'arrivals' in result.metadata
+        # Check for arrival structure in metadata (nested per-receiver format)
+        assert 'arrivals_by_receiver' in result.metadata
 
 
+@pytest.mark.requires_binary
 class TestRAMAdvancedParameters:
     """Test RAM Pade orders and stability parameters"""
 
@@ -563,7 +564,7 @@ class TestVolumeAttenuation:
             env=shallow_env,
             source=high_freq_source,
             receiver=receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
         )
 
         # Run with Thorp attenuation
@@ -571,7 +572,7 @@ class TestVolumeAttenuation:
             env=shallow_env,
             source=high_freq_source,
             receiver=receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
         )
 
         assert result_thorp.field_type == 'tl'
@@ -603,7 +604,7 @@ class TestVolumeAttenuation:
             env=shallow_env,
             source=low_freq_source,
             receiver=receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
         )
 
         # High frequency with Thorp
@@ -611,7 +612,7 @@ class TestVolumeAttenuation:
             env=shallow_env,
             source=high_freq_source,
             receiver=receiver,
-            run_type='C',
+            run_mode=RunMode.COHERENT_TL,
         )
 
         # Both should complete successfully

@@ -13,11 +13,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bellhop
-import os
 
 def main():
     print("\n" + "═"*80)
@@ -34,7 +36,7 @@ def main():
         'Rigid': uacpy.BoundaryProperties(acoustic_type='rigid'),
         'Half-space': uacpy.BoundaryProperties(acoustic_type='half-space',
                                                 sound_speed=1600, density=1.5, attenuation=0.5),
-        'Elastic': uacpy.BoundaryProperties(acoustic_type='elastic',
+        'Elastic': uacpy.BoundaryProperties(acoustic_type='half-space',
                                             sound_speed=1700, shear_speed=400,
                                             density=1.8, attenuation=0.5)
     }
@@ -48,8 +50,6 @@ def main():
 
     # Use standardized plotting for comprehensive comparison
     from plotting_utils import create_example_report
-
-    os.makedirs('output', exist_ok=True)
 
     # Use last environment for reporting
     env_last = uacpy.Environment(**env_base, bottom=boundaries['Elastic'])
@@ -170,7 +170,7 @@ def main():
                 fontsize=14, fontweight='bold')
     plt.tight_layout()
 
-    plt.savefig('output/example_18_boundary_effects.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_18_boundary_effects.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Generated: output/example_18_boundary_conditions_*.png (5 files)")

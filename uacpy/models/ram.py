@@ -1,10 +1,12 @@
 """
 RAM - Range-dependent Acoustic Model wrapper
 
-Uses mpiramS (Fortran 90/95 PE binary) as the backend.
-mpiramS is a broadband parabolic equation model for deep-water,
-long-range, low-frequency acoustic propagation. Based on Mike Collins'
-RAM, adapted to Fortran 95 by B. Dushaw.
+Uses mpiramS (Fortran 90/95 PE binary) as the backend. mpiramS is
+Dushaw's Fortran 95 rewrite derived from Dzieciuch's MATLAB port of
+Collins' original RAM. It is a broadband parabolic-equation model for
+deep-water, long-range, low-frequency acoustic propagation. Note that
+mpiramS's input format differs from Collins' ``ram.in`` — the uacpy
+writer in :mod:`uacpy.io.mpirams_writer` targets mpiramS.
 
 Supports two run modes:
 - COHERENT_TL: Narrowband transmission loss over range-depth grid
@@ -12,8 +14,8 @@ Supports two run modes:
 """
 
 import numpy as np
-import subprocess
 import os
+import warnings
 from pathlib import Path
 from typing import Optional
 import scipy.interpolate
@@ -23,7 +25,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.field import Field
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_FLOOR_PRESSURE, TL_MAX_DB
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, TL_MAX_DB
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
 
@@ -37,6 +39,12 @@ class RAM(PropagationModel):
 
     Supports range-dependent sound speed profiles and bathymetry.
     Bottom properties are configurable (sediment speed, density, attenuation).
+
+    Limitations
+    -----------
+    Water-column volume attenuation (Thorp / Francois-Garrison / biological)
+    is not exposed by the mpiramS backend. Callers needing explicit
+    water-column absorption should use Bellhop or Kraken instead.
 
     Run modes
     ---------
@@ -97,6 +105,8 @@ class RAM(PropagationModel):
         absorbing_layer_width: float = 20.0,
         absorbing_layer_attn: float = 10.0,
         n_sed_points: int = 50,
+        c0: float = DEFAULT_SOUND_SPEED,
+        timeout: float = 600.0,
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -140,6 +150,19 @@ class RAM(PropagationModel):
             Number of sediment depth control points for the mpiramS
             sediment profile.  More points give finer resolution of
             layered bottoms.  Default: 50.
+        c0 : float, optional
+            Reference sound speed (m/s) used (a) to size the absorbing
+            layer (wavelength calculation) and (b) to compute the adaptive
+            range step ``dr``. Default: DEFAULT_SOUND_SPEED.
+
+            .. note::
+                ``c0`` is **not** propagated to the PE reference speed
+                inside mpiramS. mpiramS recomputes ``c0`` internally as
+                ``mean(cw)`` of the water column (see Dushaw's peramx.f90).
+                This kwarg only controls absorbing-layer sizing and the
+                adaptive ``dr`` on the uacpy side.
+        timeout : float, optional
+            Subprocess timeout (s) for each mpiramS run. Default: 600.0.
         """
         super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
 
@@ -148,7 +171,15 @@ class RAM(PropagationModel):
         if executable is not None:
             self.executable = Path(executable)
         else:
-            self.executable = self._find_executable('s_mpiram')
+            self.executable = self._find_executable_in_paths(
+                's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS'
+            )
+
+        if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
+            raise ValueError(
+                f"np_pade must be an integer in [2, 8] (mpiramS limit); "
+                f"got {np_pade!r}."
+            )
 
         self.dr = dr
         self.dz = dz
@@ -163,12 +194,23 @@ class RAM(PropagationModel):
         self.absorbing_layer_width = absorbing_layer_width
         self.absorbing_layer_attn = absorbing_layer_attn
         self.n_sed_points = n_sed_points
+        self.c0 = c0
+        self.timeout = timeout
 
-    def _find_executable(self, name: str) -> Path:
-        """Find mpiramS executable."""
-        return self._find_executable_in_paths(name, 'mpirams')
+        # Warn on low absorbing-layer attenuation: values < 1 dB/wavelength
+        # let bottom reflections leak back into the PE domain and contaminate
+        # the field (see Collins, JASA 1996 and mpiramS doc).
+        if self.absorbing_layer_attn < 1.0:
+            warnings.warn(
+                f"RAM absorbing_layer_attn={self.absorbing_layer_attn} "
+                "dB/wavelength is low; spurious reflections from the PE "
+                "domain bottom may contaminate the field. Typical values "
+                "are 5-10 dB/wavelength.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-    def _compute_zmax(self, env: Environment, freq: float, c0: float = DEFAULT_SOUND_SPEED) -> float:
+    def _compute_zmax(self, env: Environment, freq: float, c0: Optional[float] = None) -> float:
         """
         Compute PE domain depth (zmax) that extends below the seafloor.
 
@@ -187,6 +229,8 @@ class RAM(PropagationModel):
         """
         if self.zmax is not None:
             return self.zmax
+        if c0 is None:
+            c0 = self.c0
         # Maximum seafloor depth across all ranges
         if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
             max_depth = float(np.max(env.bathymetry[:, 1]))
@@ -225,38 +269,42 @@ class RAM(PropagationModel):
 
         ssp_filename = 'ssp.dat'
 
-        if env.has_range_dependent_ssp():
-            if hasattr(env, 'ssp_2d_matrix') and env.ssp_2d_matrix is not None:
-                self._log("Using 2D SSP matrix", level='info')
-                ranges_km = env.ssp_2d_ranges.copy()
-                ssp_depths = env.ssp_data[:, 0]
+        if env.has_range_dependent_ssp() and \
+                getattr(env, 'ssp_2d_matrix', None) is not None:
+            self._log("Using 2D SSP matrix", level='info')
+            ranges_km = env.ssp_2d_ranges.copy()
 
-                speeds_2d = np.zeros((len(depths), len(ranges_km)))
-                for i in range(len(ranges_km)):
-                    profile = env.ssp_2d_matrix[:, i]
-                    interp_func = scipy.interpolate.interp1d(
-                        ssp_depths, profile, kind='linear',
-                        bounds_error=False,
-                        fill_value=(profile[0], profile[-1])
-                    )
-                    speeds_2d[:, i] = interp_func(depths)
-
-                write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_km)
-
-            elif hasattr(env, 'ssp_profiles') and env.ssp_profiles is not None:
-                self._log(f"Using {len(env.ssp_ranges)} SSP profiles", level='info')
-                ranges_km = np.array(env.ssp_ranges)
-                speeds_2d = np.zeros((len(depths), len(ranges_km)))
-                for i, profile in enumerate(env.ssp_profiles):
-                    interp_func = scipy.interpolate.interp1d(
-                        profile[:, 0], profile[:, 1], kind='linear',
-                        bounds_error=False,
-                        fill_value=(profile[0, 1], profile[-1, 1])
-                    )
-                    speeds_2d[:, i] = interp_func(depths)
-                write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_km)
+            # Depth axis for the 2D matrix. Prefer a dedicated
+            # ``ssp_2d_depths`` attribute; fall back to ``ssp_data[:, 0]``
+            # only when its length matches the matrix rows. Environment
+            # synthesises dummy ``np.arange(n_depth)`` depths when the user
+            # omits ``ssp_data`` (see environment.py:656-658), which would
+            # silently mis-index the 2D profiles — refuse that case.
+            ssp_2d_depths = getattr(env, 'ssp_2d_depths', None)
+            if ssp_2d_depths is not None:
+                ssp_depths = np.asarray(ssp_2d_depths, dtype=np.float64)
             else:
-                write_ssp_file(work_dir / ssp_filename, depths, base_speeds)
+                ssp_depths = env.ssp_data[:, 0]
+            if len(ssp_depths) != env.ssp_2d_matrix.shape[0]:
+                from uacpy.core.exceptions import ConfigurationError
+                raise ConfigurationError(
+                    f"2D SSP depth axis length ({len(ssp_depths)}) does not "
+                    f"match ssp_2d_matrix rows ({env.ssp_2d_matrix.shape[0]}). "
+                    f"Provide ssp_data with the matching depth column, or set "
+                    f"env.ssp_2d_depths explicitly."
+                )
+
+            speeds_2d = np.zeros((len(depths), len(ranges_km)))
+            for i in range(len(ranges_km)):
+                profile = env.ssp_2d_matrix[:, i]
+                interp_func = scipy.interpolate.interp1d(
+                    ssp_depths, profile, kind='linear',
+                    bounds_error=False,
+                    fill_value=(profile[0], profile[-1])
+                )
+                speeds_2d[:, i] = interp_func(depths)
+
+            write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_km)
         else:
             write_ssp_file(work_dir / ssp_filename, depths, base_speeds)
 
@@ -270,6 +318,9 @@ class RAM(PropagationModel):
 
         if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
             bathy = env.bathymetry.copy()
+            # Anchor at r=0 if first sample is at r>0
+            if bathy[0, 0] > 0.0:
+                bathy = np.vstack([[0.0, bathy[0, 1]], bathy])
             # Extend to rmax if needed
             if bathy[-1, 0] < rmax:
                 bathy = np.vstack([bathy, [rmax, bathy[-1, 1]]])
@@ -281,16 +332,29 @@ class RAM(PropagationModel):
             write_bth_file(work_dir / bth_filename, np.array([0.0, rmax]), np.array([depth, depth]))
             return bth_filename, 1
 
-    def _get_water_speed_at_bottom(self, env: Environment) -> float:
+    def _get_water_speed_at_bottom(
+        self, env: Environment, range_m: Optional[float] = None,
+    ) -> float:
         """
-        Get the water column sound speed at the nominal seafloor depth.
+        Get the water-column sound speed at the nominal seafloor depth.
 
-        This is what mpiramS's ``cwg`` will be at the water-sediment
-        interface.  Used to convert an absolute bottom sound speed into the
-        perturbation that mpiramS expects (``cs = cb - cwg``).
+        This is what mpiramS's ``cwg`` is at the water-sediment interface.
+        Used to convert an absolute bottom sound speed into the perturbation
+        that mpiramS expects (``cs = cb - cwg``).
+
+        Range-aware: when ``env`` has a range-dependent SSP and ``range_m``
+        is provided, the profile at that range is used. With no ``range_m``
+        but RD SSP, the profile at range 0 is used (first column). This
+        keeps the range-independent callers consistent with the RD-aware
+        branches in :meth:`_prepare_bottom_properties`.
         """
-        ssp = env.ssp_data  # (depth, speed)
         depth = env.depth
+        if env.has_range_dependent_ssp():
+            if range_m is None:
+                range_m = 0.0
+            ssp = env.get_ssp_at_range(range_m)
+        else:
+            ssp = env.ssp_data  # (depth, speed)
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
 
     def _prepare_bottom_properties(self, env: Environment, work_dir=None):
@@ -495,6 +559,19 @@ class RAM(PropagationModel):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         zmax=_UNSET,
+        dr=_UNSET,
+        dz=_UNSET,
+        np_pade=_UNSET,
+        ns_stability=_UNSET,
+        rs_stability=_UNSET,
+        Q=_UNSET,
+        T=_UNSET,
+        depth_decimation=_UNSET,
+        n_sed_points=_UNSET,
+        absorbing_layer_width=_UNSET,
+        absorbing_layer_attn=_UNSET,
+        c0=_UNSET,
+        timeout=_UNSET,
         **kwargs
     ) -> Field:
         """
@@ -511,33 +588,90 @@ class RAM(PropagationModel):
         run_mode : RunMode, optional
             COHERENT_TL (default) for narrowband TL grid,
             TIME_SERIES for broadband complex field.
-        zmax : float, optional
-            Per-call override for constructor default.
+        zmax, dr, dz, np_pade, ns_stability, rs_stability, Q, T,
+        depth_decimation, n_sed_points, absorbing_layer_width,
+        absorbing_layer_attn, c0 : optional
+            Per-call overrides for the matching constructor argument.
         **kwargs
-            Additional parameters (currently unused)
+            Silently ignored (warns on unknown kwargs).
 
         Returns
         -------
         field : Field
-            For COHERENT_TL: transmission loss field (depth x range)
-            For TIME_SERIES: complex transfer function (depth x frequency x range)
+            For COHERENT_TL: transmission loss field (depth x range).
+            For TIME_SERIES: complex transfer function
+            (depth x frequency x range). The returned pressure is the
+            PE envelope — the ``exp(+i k0 r)`` travelling-wave factor has
+            been removed, so a naive ``ifft`` of the spectrum does NOT
+            align arrivals at ``t = r/c``. The field's metadata sets
+            ``phase_reference='psif_envelope'`` to flag this convention.
         """
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
 
+        if kwargs:
+            warnings.warn(
+                f"RAM.run received unknown kwargs (ignored): {sorted(kwargs)}",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        with _resolve_overrides(self, zmax=zmax):
-            import time
-            start_time = time.time()
-
+        with _resolve_overrides(
+            self,
+            zmax=zmax,
+            dr=dr,
+            dz=dz,
+            np_pade=np_pade,
+            ns_stability=ns_stability,
+            rs_stability=rs_stability,
+            Q=Q,
+            T=T,
+            depth_decimation=depth_decimation,
+            n_sed_points=n_sed_points,
+            absorbing_layer_width=absorbing_layer_width,
+            absorbing_layer_attn=absorbing_layer_attn,
+            c0=c0,
+            timeout=timeout,
+        ):
             self.validate_inputs(env, source, receiver)
 
             if run_mode == RunMode.TIME_SERIES:
-                return self._run_broadband(env, source, receiver, **kwargs)
+                return self._run_broadband(env, source, receiver)
             else:
-                return self._run_tl(env, source, receiver, **kwargs)
+                return self._run_tl(env, source, receiver)
 
-    def _compute_dr(self, freq: float, c0: float = DEFAULT_SOUND_SPEED) -> float:
+    @staticmethod
+    def _warn_on_multi_source_or_freq(source: Source) -> None:
+        """
+        Warn when ``source`` contains more than one depth or frequency.
+
+        mpiramS accepts a single source depth and a single centre frequency
+        per run; RAM silently uses ``source.depth[0]`` / ``source.frequency[0]``
+        and discards the rest. Emit a visible warning so callers are aware.
+        """
+        depths = getattr(source, 'depth', None)
+        freqs = getattr(source, 'frequency', None)
+        if depths is not None and len(depths) > 1:
+            warnings.warn(
+                f"RAM (mpiramS) accepts only one source depth per run; "
+                f"using source.depth[0]={float(depths[0])} and ignoring "
+                f"the remaining {len(depths) - 1} depth(s). Loop over "
+                f"Sources externally for multi-source runs.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if freqs is not None and len(freqs) > 1:
+            warnings.warn(
+                f"RAM (mpiramS) accepts only one centre frequency per run; "
+                f"using source.frequency[0]={float(freqs[0])} and ignoring "
+                f"the remaining {len(freqs) - 1} frequency(ies). Use "
+                f"RunMode.TIME_SERIES (broadband via Q/T) or loop over "
+                f"Sources externally.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _compute_dr(self, freq: float, c0: Optional[float] = None) -> float:
         """
         Compute adaptive range step based on frequency.
 
@@ -545,10 +679,12 @@ class RAM(PropagationModel):
         For shallow water at high frequency this gives fine stepping;
         for deep water at low frequency it gives coarser stepping.
         """
+        if c0 is None:
+            c0 = self.c0
         dr = c0 / freq
         return float(np.clip(dr, 1.0, 500.0))
 
-    def _run_tl(self, env, source, receiver, **kwargs):
+    def _run_tl(self, env, source, receiver):
         """
         Run in narrowband TL mode.
 
@@ -557,6 +693,8 @@ class RAM(PropagationModel):
         """
         import time
         start_time = time.time()
+
+        self._warn_on_multi_source_or_freq(source)
 
         freq = float(source.frequency[0])
         zsrc = float(source.depth[0])
@@ -583,8 +721,7 @@ class RAM(PropagationModel):
             sedlayer, nzs, cs, rho_arr, attn_arr, isedrd, sed_filename = \
                 self._prepare_bottom_properties(env, work_dir)
 
-            ranges_filename = 'ranges.dat'
-            write_ranges_file(work_dir / ranges_filename, ranges)
+            write_ranges_file(work_dir / 'ranges.dat', ranges)
 
             rs = self.rs_stability if self.rs_stability is not None else rmax
 
@@ -608,7 +745,6 @@ class RAM(PropagationModel):
                 ihorz=ihorz,
                 ibot=ibot,
                 bth_filename=bth_filename,
-                ranges_filename=ranges_filename,
                 sedlayer=sedlayer,
                 nzs=nzs,
                 cs=cs,
@@ -641,6 +777,15 @@ class RAM(PropagationModel):
             from scipy.interpolate import RegularGridInterpolator
 
             rcv_depths = receiver.depths
+            # Warn if any receiver ranges exceed the PE computed range
+            if np.any(receiver.ranges > rout[-1]):
+                beyond = receiver.ranges[receiver.ranges > rout[-1]]
+                warnings.warn(
+                    f"Receiver ranges {beyond} exceed PE computed range; "
+                    f"clamped to {rout[-1]}",
+                    UserWarning,
+                    stacklevel=2,
+                )
             rcv_ranges = np.clip(receiver.ranges, rout[0], rout[-1])
 
             # Interpolate real and imaginary parts separately
@@ -670,9 +815,21 @@ class RAM(PropagationModel):
             # In mpiramS, psif = psi * exp(i*(k0*r + pi/4)) / (4*pi),
             # so |psi| = |psif| * 4*pi.
             #
+            # Protect 10*log10(r) from r=0; warn if we had to clip.
+            log_ranges = rcv_ranges.astype(np.float64).copy()
+            if log_ranges.size > 0 and log_ranges[0] <= 0.0:
+                warnings.warn(
+                    f"Receiver range at index 0 is {log_ranges[0]}; "
+                    f"clipping to dr={dr} for TL conversion to avoid "
+                    f"log(0). The receiver.ranges array is not modified.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                log_ranges[log_ranges <= 0.0] = dr
+
             with np.errstate(divide='ignore', invalid='ignore'):
                 psi_mag = np.abs(pressure_rcv) * 4.0 * np.pi
-                tl_output = -20.0 * np.log10(psi_mag + TL_FLOOR_PRESSURE) + 10.0 * np.log10(rcv_ranges)[np.newaxis, :]
+                tl_output = -20.0 * np.log10(psi_mag + PRESSURE_FLOOR) + 10.0 * np.log10(log_ranges)[np.newaxis, :]
 
             tl_output = np.clip(tl_output, 0.0, TL_MAX_DB)
 
@@ -704,7 +861,7 @@ class RAM(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _run_broadband(self, env, source, receiver, **kwargs):
+    def _run_broadband(self, env, source, receiver):
         """
         Run in broadband mode (native mpiramS use case).
 
@@ -712,6 +869,8 @@ class RAM(PropagationModel):
         """
         import time
         start_time = time.time()
+
+        self._warn_on_multi_source_or_freq(source)
 
         freq = float(source.frequency[0])
         zsrc = float(source.depth[0])
@@ -733,8 +892,7 @@ class RAM(PropagationModel):
             sedlayer, nzs, cs, rho_arr, attn_arr, isedrd, sed_filename = \
                 self._prepare_bottom_properties(env, work_dir)
 
-            ranges_filename = 'ranges.dat'
-            write_ranges_file(work_dir / ranges_filename, ranges)
+            write_ranges_file(work_dir / 'ranges.dat', ranges)
 
             rs = self.rs_stability if self.rs_stability is not None else rmax
 
@@ -757,7 +915,6 @@ class RAM(PropagationModel):
                 ihorz=ihorz,
                 ibot=ibot,
                 bth_filename=bth_filename,
-                ranges_filename=ranges_filename,
                 sedlayer=sedlayer,
                 nzs=nzs,
                 cs=cs,
@@ -805,6 +962,18 @@ class RAM(PropagationModel):
             else:
                 out_depths = zg
 
+            # Mask sub-bottom samples with NaN for consistency with _run_tl.
+            # RAM computes valid fields in the sediment, but other uacpy
+            # models return NaN below the seafloor.
+            if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
+                bathy = env.bathymetry
+                bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
+            else:
+                bathy_depths_rout = np.full(len(rout), env.depth)
+            for j, bd in enumerate(bathy_depths_rout):
+                mask = out_depths > bd
+                pressure[mask, :, j] = np.nan
+
             elapsed = time.time() - start_time
             self._log(f"RAM broadband completed in {elapsed:.2f}s", level='info')
             self._log(f"  Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
@@ -821,6 +990,16 @@ class RAM(PropagationModel):
                     'Q': result['Q'],
                     'c0': result['c0'],
                     'cmin': result['cmin'],
+                    # Phase convention: mpiramS stores psif (envelope of the
+                    # PE field) with the travelling-wave factor exp(+i k0 r)
+                    # already removed. We multiply by 4*pi*exp(-i*pi/4)/sqrt(r)
+                    # to recover the physical pressure envelope, but the
+                    # exp(+i k0 r) phase is NOT re-applied — so a naive IFFT
+                    # does NOT align arrivals at t = r/c. Consumers that want
+                    # a travelling pulse must reinstate the k0 r phase or use
+                    # time-shift logic.  See ``_run_broadband`` comments and
+                    # Dushaw, peramx.f90.
+                    'phase_reference': 'psif_envelope',
                 },
             )
 
@@ -837,33 +1016,25 @@ class RAM(PropagationModel):
         if 'OMP_NUM_THREADS' not in env:
             env['OMP_NUM_THREADS'] = str(os.cpu_count() or 1)
 
-        try:
-            result = subprocess.run(
-                [str(self.executable)],
-                cwd=str(work_dir),
-                capture_output=True,
-                text=True,
-                timeout=600,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("mpiramS execution timed out (600s limit)")
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"mpiramS binary not found at {self.executable}. "
-                f"Run install.sh to compile."
-            )
+        result = self._run_subprocess(
+            [str(self.executable)],
+            cwd=work_dir,
+            timeout=self.timeout,
+            env=env,
+        )
 
         if self.verbose and result.stdout:
             self._log(f"mpiramS output:\n{result.stdout}", level='debug')
 
-        if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            raise RuntimeError(f"mpiramS failed (code {result.returncode}): {error_msg}")
-
         # Verify output exists
         if not (work_dir / 'psif.dat').exists():
-            raise RuntimeError(
-                f"mpiramS produced no output. Check input parameters.\n"
-                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            from uacpy.core.exceptions import ModelExecutionError
+            raise ModelExecutionError(
+                self.model_name,
+                return_code=result.returncode,
+                stdout=result.stdout,
+                stderr=(
+                    "mpiramS produced no output file (psif.dat). "
+                    "Check input parameters.\n" + (result.stderr or "")
+                ),
             )

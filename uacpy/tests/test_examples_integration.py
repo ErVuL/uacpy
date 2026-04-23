@@ -50,13 +50,6 @@ class TestExamplesBasic:
         assert "Example 1 complete" in result.stdout or "✓" in result.stdout
 
 
-class TestExamplesAdvanced:
-    """Tests for advanced examples (17+)"""
-
-    # Examples 22 and 28 removed - they don't exist yet
-    pass
-
-
 class TestExamplesImports:
     """Tests that examples have correct imports"""
 

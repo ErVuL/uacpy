@@ -33,7 +33,11 @@ import uacpy
 from uacpy.models import Bellhop
 from uacpy.core.environment import BoundaryProperties
 from uacpy.visualization.plots import plot_transmission_loss
+from uacpy.models import RunMode
 import os
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 def main():
     print("=" * 80)
@@ -110,7 +114,7 @@ def main():
     try:
         result = bellhop.run(
             env, source, receiver,
-            run_type='C',        # Coherent TL
+            run_mode=RunMode.COHERENT_TL,        # Coherent TL
         )
         print("  ✓ Propagation complete!")
 
@@ -128,9 +132,9 @@ def main():
 
     # Plot 1: TL field using NEW uacpy plotting module
     ax = axes[0, 0]
-    # NEW: Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
+    #Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
     _, _, cbar = plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
-    ax.set_title('Transmission Loss Field\n(NEW: Auto TL limits, jet_r colormap)',
+    ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
                 fontweight='bold', fontsize=12)
 
     # Plot 2: TL vs Range (at source depth)
@@ -213,11 +217,10 @@ def main():
     plt.tight_layout()
 
     # Save figure
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_01_basic_shallow_water.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_01_basic_shallow_water.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("  ✓ Saved: output/example_01_basic_shallow_water.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_01_basic_shallow_water.png'}")
 
     # ═══════════════════════════════════════════════════════════════════════
     # Summary

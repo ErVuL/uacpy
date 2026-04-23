@@ -13,6 +13,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from uacpy.acoustic_signal.generation import (
@@ -106,11 +109,10 @@ def main():
     ax.set_xlim([0, min(2000, freqs[-1])])
 
     plt.tight_layout()
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_15_signal_processing.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_15_signal_processing.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("\n✓ Generated: output/example_15_signal_processing.png")
+    print(f"\n✓ Generated: {OUTPUT_DIR / 'example_15_signal_processing.png'}")
     print("\n" + "═"*80 + "\nEXAMPLE 15 COMPLETE\n" + "═"*80 + "\n")
     return 0
 

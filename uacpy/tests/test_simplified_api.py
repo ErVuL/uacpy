@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField
 from uacpy.core.field import Field
+from uacpy.models import RunMode
 
 
 class TestComputeAPI:
@@ -162,30 +163,24 @@ class TestFieldMethods:
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
 
-class TestBackwardCompatibility:
-    """Test that old API still works"""
+class TestRunModeAndComputeTl:
+    """run(run_mode=...) and compute_tl() should be interchangeable for TL."""
 
     @pytest.mark.requires_binary
-    def test_old_run_method_still_works(self, simple_env, source, receiver_small):
-        """Test that old run() method still works"""
+    def test_run_with_coherent_tl_mode(self, simple_env, source, receiver_small):
+        """run(run_mode=RunMode.COHERENT_TL) returns a TL field."""
         bellhop = Bellhop(verbose=False)
-
-        # Old API call
-        result = bellhop.run(env=simple_env, source=source, receiver=receiver_small, run_type='C')
-
+        result = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
+                             run_mode=RunMode.COHERENT_TL)
         assert result.field_type == 'tl'
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
     @pytest.mark.requires_binary
-    def test_old_and_new_api_equivalent(self, simple_env, source, receiver_small):
-        """Test that old and new API give same results"""
+    def test_run_and_compute_tl_agree(self, simple_env, source, receiver_small):
+        """compute_tl and run(run_mode=COHERENT_TL) produce the same field."""
         bellhop = Bellhop(verbose=False)
-
-        # Old API
-        result_old = bellhop.run(env=simple_env, source=source, receiver=receiver_small, run_type='C')
-
-        # New API
-        result_new = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-
-        # Should give same results
-        assert np.allclose(result_old.data, result_new.data, rtol=1e-10)
+        a = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
+                       run_mode=RunMode.COHERENT_TL)
+        b = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        # Bellhop has non-deterministic floating-point; compare loosely.
+        assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)

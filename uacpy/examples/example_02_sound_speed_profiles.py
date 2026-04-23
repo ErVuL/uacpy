@@ -190,7 +190,7 @@ def scenario_b_pekeris_waveguide():
     # ═══════════════════════════════════════════════════════════════════════
     # Define elastic bottom properties
     bottom_props = uacpy.BoundaryProperties(
-        acoustic_type='elastic',        # Elastic half-space
+        acoustic_type='half-space',     # Elastic is signalled via shear_speed > 0
         sound_speed=1700.0,             # Compressional wave speed (m/s)
         shear_speed=400.0,              # Shear wave speed (m/s) - KEY for elastic
         density=1.8,                    # Density (g/cm³)

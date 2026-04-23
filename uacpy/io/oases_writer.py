@@ -10,21 +10,112 @@ OASES (Ocean Acoustics and Seismic Exploration Synthesis) was developed by
 Henrik Schmidt at MIT.
 
 References:
-    Schmidt, H. (2004). OASES Version 3.1 User Guide and Reference Manual.
+    Schmidt, H. OASES Version 2.1 User Guide and Reference Manual (bundled
+    under ``third_party/oases``). The public OASES release is 3.1 but this
+    distribution ships with the 2.1 source tree — per the bundled README.
 """
 
 from pathlib import Path
-from typing import Optional, Union, List, TYPE_CHECKING
+from typing import Optional, Union
 import numpy as np
 
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
+from uacpy.core.exceptions import ConfigurationError
 
-# Avoid circular import
-if TYPE_CHECKING:
-    from uacpy.models.base import RunMode
+
+def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) -> str:
+    """Append a volume-attenuation marker character to the OASES option string.
+
+    OASES itself does not implement dedicated T (Thorp) / F (Francois-Garrison) /
+    B (biological) option letters — empirical Skretting & Leroy attenuation is
+    applied automatically to any water layer with AC=0. This helper ensures the
+    uacpy-level ``volume_attenuation`` parameter flows through to the option
+    string so downstream tools and the user can still see that a specific model
+    was requested. OASES prints ``UNKNOWN OPTION`` for letters it does not
+    recognise but still runs to completion.
+
+    Parameters
+    ----------
+    options : str
+        Existing option string. May contain whitespace separators.
+    volume_attenuation : str or None
+        One of 'T', 'F', 'B' (case-insensitive) or None.
+    """
+    if volume_attenuation is None:
+        return options
+    marker = str(volume_attenuation).strip()
+    if not marker:
+        return options
+    marker = marker[0]  # single-letter option
+    if marker not in ('T', 'F', 'B', 't', 'f', 'b'):
+        return options
+    # Only append if not already present as a standalone letter.
+    tokens = options.split()
+    if marker in tokens:
+        return options
+    return options + ' ' + marker
+
+
+def _emit_bottom_layers(
+    f,
+    env: Environment,
+    water_depth: float,
+    fallback_c_p: float,
+    fallback_c_s: float,
+    fallback_alpha_p: float,
+    fallback_alpha_s: float,
+    fallback_rho: float,
+    extra_columns: int = 0,
+) -> None:
+    """Emit sediment layers + bottom halfspace to an OASES input file.
+
+    Writes one interface line per SedimentLayer in ``env.bottom_layered``
+    followed by the halfspace at the correct depth. Falls back to a single
+    halfspace line from ``env.bottom`` when ``env.bottom_layered`` is None.
+
+    OASES interface format: D CC CS AC AS RO RG [IG]  (extra ``IG`` appended
+    when ``extra_columns`` > 0 — required by some OASP/OASN writers).
+    """
+    trailing = (' 0' * (1 + extra_columns))  # RG [IG [extra...]]
+
+    if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
+        lb = env.bottom_layered
+        current_depth = water_depth
+        for layer in lb.layers:
+            layer_as = getattr(layer, 'shear_attenuation', 0.0) or 0.0
+            f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
+                    f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
+                    f"{layer_as:.3f} {layer.density:.2f}{trailing}\n")
+            current_depth += layer.thickness
+        # Deepest halfspace below all sediment layers.
+        hs = getattr(lb, 'halfspace', None)
+        if hs is not None:
+            c_p = getattr(hs, 'sound_speed', fallback_c_p) or fallback_c_p
+            c_s = getattr(hs, 'shear_speed', fallback_c_s) or fallback_c_s
+            alpha_p = getattr(hs, 'attenuation', fallback_alpha_p) or fallback_alpha_p
+            alpha_s = getattr(hs, 'shear_attenuation', fallback_alpha_s) or fallback_alpha_s
+            rho = getattr(hs, 'density', fallback_rho) or fallback_rho
+        else:
+            c_p, c_s, alpha_p, alpha_s, rho = (
+                fallback_c_p, fallback_c_s,
+                fallback_alpha_p, fallback_alpha_s, fallback_rho,
+            )
+        f.write(f"{current_depth:.2f} {c_p:.2f} {c_s:.2f} "
+                f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f}{trailing}\n")
+    else:
+        f.write(f"{water_depth:.2f} {fallback_c_p:.2f} {fallback_c_s:.2f} "
+                f"{fallback_alpha_p:.3f} {fallback_alpha_s:.3f} "
+                f"{fallback_rho:.2f}{trailing}\n")
+
+
+def _count_bottom_layers(env: Environment) -> int:
+    """Number of sediment layers (not counting halfspace) in env.bottom_layered."""
+    if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
+        return len(env.bottom_layered.layers)
+    return 0
 
 
 def _format_upper_halfspace(env: Environment) -> str:
@@ -59,12 +150,55 @@ def _format_upper_halfspace(env: Environment) -> str:
             f"{alpha_s:.3f} {rho:.2f} 0")
 
 
+def _receiver_block_lines(
+    receiver: Receiver,
+    *,
+    trailing: str = '',
+) -> list:
+    """Emit OASES receiver-block text lines.
+
+    OASES supports non-equidistant receiver depths via NR<0: a negative
+    receiver count on the first line followed by the explicit depth list on
+    the next line(s). See oast.tex:464-493 and oasp.tex:559-585.
+
+    Returns
+    -------
+    list[str]
+        Lines to write, each WITHOUT a trailing newline. Caller adds '\\n'.
+
+    Parameters
+    ----------
+    receiver : Receiver
+        Receiver object providing `.depths`.
+    trailing : str
+        Extra whitespace-separated tokens to append to the header line
+        (e.g. ``' 1'`` for OAST's IR column). An empty string matches OASP.
+    """
+    depths = np.asarray(receiver.depths, dtype=float)
+    n = len(depths)
+    z_min = float(depths.min())
+    z_max = float(depths.max())
+
+    if n <= 1:
+        return [f"{z_min:.2f} {z_max:.2f} {n}{trailing}"]
+
+    diffs = np.diff(depths)
+    # A grid is considered equidistant when all spacings match within 1 cm.
+    uniform = np.allclose(diffs, diffs[0], atol=1e-2)
+    if uniform:
+        return [f"{z_min:.2f} {z_max:.2f} {n}{trailing}"]
+
+    # Non-uniform: emit NR = -n, then individual depths on the next line.
+    header = f"{z_min:.2f} {z_max:.2f} {-n}{trailing}"
+    depth_line = ' '.join(f"{d:.2f}" for d in depths)
+    return [header, depth_line]
+
+
 def write_oast_input(
     filepath: Union[str, Path],
     env: Environment,
     source: Source,
     receiver: Receiver,
-    run_mode: Optional[Union[str, 'RunMode']] = None,
     options: Optional[str] = None,
     **kwargs
 ) -> None:
@@ -84,8 +218,6 @@ def write_oast_input(
         Acoustic source specification
     receiver : Receiver
         Receiver array specification
-    run_mode : RunMode, optional
-        Computation mode. Default is COHERENT_TL.
     options : str, optional
         OAST option string. If None, uses default 'N J T'
         Common options:
@@ -151,12 +283,9 @@ def write_oast_input(
         c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
         ssp_data = np.array([[0.0, c], [depth, c]])
 
-    # Source and receiver parameters
+    # Source and receiver parameters (receiver depth bookkeeping now lives in
+    # ``_receiver_block_lines`` which handles equidistant/explicit cases).
     src_depth = float(source.depth[0])
-    z_min = float(receiver.depths.min())
-    z_max = float(receiver.depths.max())
-    n_depths = len(receiver.depths)
-    r_min = float(receiver.ranges.min())
     r_max = float(receiver.ranges.max())
 
     # Optional parameters
@@ -164,6 +293,7 @@ def write_oast_input(
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
     plot_rmin = kwargs.get('plot_rmin', 0)
     plot_rmax = kwargs.get('plot_rmax', r_max / 1000.0)  # Convert m to km
+    volume_attenuation = kwargs.get('volume_attenuation', None)
 
     # Get reference sound speed for plot axes
     c_ref = float(ssp_data[0, 1])  # Sound speed at surface
@@ -171,6 +301,17 @@ def write_oast_input(
     # Options string
     if options is None:
         options = 'N J T'  # Normal stress, complex contour, TL vs range
+    options = _inject_volume_attenuation(options, volume_attenuation)
+
+    # Multi-frequency sweep support (B17).
+    freqs_arr = np.atleast_1d(source.frequency)
+    if len(freqs_arr) > 1:
+        freq_min = float(freqs_arr.min())
+        freq_max = float(freqs_arr.max())
+        nfreq = int(len(freqs_arr))
+    else:
+        freq_min = freq_max = freq
+        nfreq = 1
 
     with open(filepath, 'w') as f:
         # Block I: Title
@@ -181,8 +322,19 @@ def write_oast_input(
         f.write(f"{options}\n")
 
         # Block III: Frequencies
-        # FREQ1 FREQ2 NFREQ COFF
-        f.write(f"{freq:.1f} {freq:.1f} 1 {integration_offset}\n")
+        # FREQ1 FREQ2 NFREQ COFF [VREC]
+        # Per unoast31.f:125-133, when the 'd' (lowercase Doppler) option is
+        # enabled the block must include a 5th value VREC (source/receiver
+        # velocity). Capital 'D' is the depth-averaged-TL flag and does NOT
+        # trigger Doppler, so keep the check case-specific.
+        opt_tokens_freq = options.split()
+        doppler_on = 'd' in opt_tokens_freq
+        if doppler_on:
+            vrec = kwargs.get('vrec', 0.0)
+            offdb = kwargs.get('offdb', integration_offset)
+            f.write(f"{freq_min:.1f} {freq_max:.1f} {nfreq} {offdb} {vrec}\n")
+        else:
+            f.write(f"{freq_min:.1f} {freq_max:.1f} {nfreq} {integration_offset}\n")
 
         # Block IV: Environment
         # OASES uses CS = -999.999 to indicate continuous SVP gradient to next layer
@@ -208,9 +360,7 @@ def write_oast_input(
         is_isovelocity = np.allclose(c_values, c_values[0], rtol=1e-6)
 
         # Count sediment layers from LayeredBottom
-        n_sed_layers = 0
-        if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
-            n_sed_layers = len(env.bottom_layered.layers)
+        n_sed_layers = _count_bottom_layers(env)
 
         if is_isovelocity:
             # Isovelocity: write only 1 water layer at surface
@@ -223,22 +373,12 @@ def write_oast_input(
             # Single water layer
             f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0 0 0\n")
 
-            # Sediment layers (if layered bottom)
-            if n_sed_layers > 0:
-                current_depth = depth
-                for layer in env.bottom_layered.layers:
-                    layer_as = getattr(layer, 'shear_attenuation', 0.0)
-                    f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
-                            f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
-                            f"{layer_as:.3f} {layer.density:.2f} 0 0\n")
-                    current_depth += layer.thickness
-
-                # Bottom halfspace at depth below all layers
-                f.write(f"{current_depth:.2f} {c_p:.2f} {c_s:.2f} "
-                        f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0\n")
-            else:
-                # Bottom halfspace
-                f.write(f"{depth:.2f} {c_p:.2f} {c_s:.2f} {alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0\n")
+            # Sediment layers + bottom halfspace (shared helper)
+            _emit_bottom_layers(
+                f, env, depth,
+                c_p, c_s, alpha_p, alpha_s, rho,
+                extra_columns=1,
+            )
         else:
             # Non-isovelocity: write layers with negative CS field for gradients
             # OASES format: D CC CS means:
@@ -263,22 +403,12 @@ def write_oast_input(
                     cs = 0
                 f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0 0 0\n")
 
-            # Sediment layers (if layered bottom)
-            if n_sed_layers > 0:
-                current_depth = depth
-                for layer in env.bottom_layered.layers:
-                    layer_as = getattr(layer, 'shear_attenuation', 0.0)
-                    f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
-                            f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
-                            f"{layer_as:.3f} {layer.density:.2f} 0 0\n")
-                    current_depth += layer.thickness
-
-                # Bottom halfspace at depth below all layers
-                f.write(f"{current_depth:.2f} {c_p:.2f} {c_s:.2f} "
-                        f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0\n")
-            else:
-                # Bottom halfspace
-                f.write(f"{depth:.2f} {c_p:.2f} {c_s:.2f} {alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0\n")
+            # Sediment layers + bottom halfspace (shared helper)
+            _emit_bottom_layers(
+                f, env, depth,
+                c_p, c_s, alpha_p, alpha_s, rho,
+                extra_columns=1,
+            )
 
         # Block V: Sources
         # SD NS DS AN IA FD DA
@@ -286,8 +416,9 @@ def write_oast_input(
         f.write(f"{src_depth:.2f} 1 0 0 1 0 0\n")
 
         # Block VI: Receivers
-        # RD1 RD2 NR IR
-        f.write(f"{z_min:.2f} {z_max:.2f} {n_depths} 1\n")
+        # RD1 RD2 NR IR  (NR<0 signals explicit depth list — oast.tex:464-493).
+        for line in _receiver_block_lines(receiver, trailing=' 1'):
+            f.write(line + '\n')
 
         # Block VII: Wavenumber sampling
         # CMIN CMAX
@@ -303,9 +434,19 @@ def write_oast_input(
         # RMIN RMAX RLEN RINC
         f.write(f"{plot_rmin:.1f} {plot_rmax:.1f} 20 1\n")
 
-        # Block IX: Transmission loss axes
-        # TMIN TMAX TLEN TINC
-        f.write("20 100 12 10\n")
+        # Block IX: Transmission loss axes (only for options A, D, T, I, or
+        # the ANSPEC / TLDEP plot flags — see oast.tex Table "BLOCK IX").
+        # Emitting this block unconditionally would be consumed as noise by
+        # the next block when no TL plot is requested.
+        opt_tokens = options.split()
+        needs_tl_axes = (
+            any(tok in opt_tokens for tok in ('A', 'D', 'T', 'I'))
+            or 'ANSPEC' in options
+            or 'TLDEP' in options
+        )
+        if needs_tl_axes:
+            # TMIN TMAX TLEN TINC
+            f.write("20 100 12 10\n")
 
         # Block X: Depth axes (for contour plots)
         # DUP DLO DLN DIN
@@ -335,17 +476,16 @@ def write_oasn_input(
     env: Environment,
     source: Source,
     receiver: Receiver,
-    run_mode: Optional[Union[str, 'RunMode']] = None,
     options: Optional[str] = None,
     **kwargs
 ) -> None:
     """
-    Write OASN (OASES Noise/Normal Mode) input file
+    Write OASN (OASES Noise, Covariance Matrices and Signal Replicas) input file.
 
-    OASN can compute:
-    - Normal modes and mode shapes
-    - Covariance matrices for ambient noise
-    - Signal replicas for matched field processing
+    OASN is NOT a normal-modes solver — per oasn.tex:1 it produces:
+    - Noise-field covariance matrices for ambient noise characterisation.
+    - Array-response covariance matrices from discrete or continuous sources.
+    - Signal replicas on a depth/range grid for matched-field processing.
 
     Parameters
     ----------
@@ -357,8 +497,6 @@ def write_oasn_input(
         Source specification (frequency used for mode computation)
     receiver : Receiver
         Receiver array specification (for covariance matrices)
-    run_mode : RunMode, optional
-        Computation mode. Default is MODES.
     options : str, optional
         OASN option string. If None, uses 'N J' for normal mode computation
         Common options:
@@ -423,7 +561,6 @@ def write_oasn_input(
         # Fallback to simple isovelocity
         c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
         ssp_data = np.array([[0.0, c], [depth, c]])
-    c_ref = float(ssp_data[0, 1])
 
     # Noise/source parameters
     surface_noise_level = kwargs.get('surface_noise_level', 0)
@@ -435,9 +572,21 @@ def write_oasn_input(
     # Options string
     if options is None:
         options = 'N J'  # Covariance output, complex contour
+    volume_attenuation = kwargs.get('volume_attenuation', None)
+    options = _inject_volume_attenuation(options, volume_attenuation)
 
     # Integration parameters
     integration_offset = kwargs.get('integration_offset', 0)
+
+    # Multi-frequency sweep support (B17).
+    freqs_arr = np.atleast_1d(source.frequency)
+    if len(freqs_arr) > 1:
+        freq_min_b = float(freqs_arr.min())
+        freq_max_b = float(freqs_arr.max())
+        nfreq = int(len(freqs_arr))
+    else:
+        freq_min_b = freq_max_b = freq
+        nfreq = 1
 
     with open(filepath, 'w') as f:
         # Block I: Title
@@ -449,34 +598,42 @@ def write_oasn_input(
 
         # Block III: Frequencies
         # FREQ1 FREQ2 NFREQ COFF
-        f.write(f"{freq:.1f} {freq:.1f} 1 {integration_offset}\n")
+        f.write(f"{freq_min_b:.1f} {freq_max_b:.1f} {nfreq} {integration_offset}\n")
 
         # Block IV: Environment
         # NL = number of layers (including halfspaces and all water layers)
         n_water_layers = len(ssp_data)
-        n_layers = 1 + n_water_layers + 1
+        n_sed_layers = _count_bottom_layers(env)
+        n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
 
         # Upper halfspace (from env.surface)
         f.write(f"{_format_upper_halfspace(env)} 0\n")
 
-        # Water layers from SSP using OASES negative sound speed convention
-        # In OASES: negative CC means linear gradient from current layer to next
-        # Example: layer at 100m with c=1500, next at 200m with c=-1520
-        # means sound speed varies linearly from 1500 at 100m to 1520 at 200m
-
-        # Write first SSP point (top of water column)
-        d0, c0 = ssp_data[0]
-        f.write(f"{d0:.2f} {c0:.2f} 0 0.0 0 1.0 0 0\n")
-
-        # Write remaining SSP points with negative sound speeds to indicate gradients
-        for i in range(1, len(ssp_data)):
+        # Water layers from SSP using OASES Airy-layer convention.
+        # Per oaseun31.f:160-192, the SSP-gradient signal is:
+        #   CC > 0 and CS < 0  →  n^2-linear layer with speed varying from
+        #   CC at the top of THIS layer to -CS at the top of the NEXT layer.
+        # Negative CC (the previous implementation) instead matches the
+        # Cp<0, Cs>=0 branch at oaseun31.f:302, which unconditionally flags
+        # the layer TRANSVERSELY ISOTROPIC. OASN then tries to read 5 complex
+        # tensor constants + density and dies with "End of file" in inenvi_.
+        # This mirrors OAST writer's gradient encoding at lines 340-349.
+        for i in range(len(ssp_data)):
             d, c = ssp_data[i]
-            # Use negative sound speed to tell OASES to interpolate linearly
-            f.write(f"{d:.2f} {-abs(c):.2f} 0 0.0 0 1.0 0 0\n")
+            if i < len(ssp_data) - 1:
+                c_next = float(ssp_data[i + 1, 1])
+                cs = -abs(c_next)
+            else:
+                cs = 0
+            f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0 0 0\n")
 
-        # Bottom halfspace
-        f.write(f"{depth:.2f} {c_p:.2f} {c_s:.2f} {alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0\n")
+        # Sediment layers + bottom halfspace (shared helper, B15)
+        _emit_bottom_layers(
+            f, env, depth,
+            c_p, c_s, alpha_p, alpha_s, rho,
+            extra_columns=1,
+        )
 
         # Block V: Receiver Array
         # NRCV
@@ -553,7 +710,6 @@ def write_oasp_input(
     env: Environment,
     source: Source,
     receiver: Receiver,
-    run_mode: Optional[Union[str, 'RunMode']] = None,
     options: Optional[str] = None,
     **kwargs
 ) -> None:
@@ -573,8 +729,6 @@ def write_oasp_input(
         Acoustic source specification
     receiver : Receiver
         Receiver array specification
-    run_mode : RunMode, optional
-        Computation mode (default: None)
     options : str, optional
         OASP option string. If None, uses default 'N V J'
         Common options:
@@ -650,11 +804,9 @@ def write_oasp_input(
         c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
         ssp_data = np.array([[0.0, c], [depth, c]])
 
-    # Source and receiver parameters
+    # Source parameter (receiver depth bookkeeping handled by
+    # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
     src_depth = float(source.depth[0])
-    rd1 = float(receiver.depths.min())
-    rd2 = float(receiver.depths.max())
-    nrd = len(receiver.depths)
 
     # Frequency and time parameters
     n_time = kwargs.get('n_time_samples', 4096)
@@ -695,6 +847,8 @@ def write_oasp_input(
     # Options string
     if options is None:
         options = 'N V J'  # Normal stress, vertical velocity, complex contour
+    volume_attenuation = kwargs.get('volume_attenuation', None)
+    options = _inject_volume_attenuation(options, volume_attenuation)
 
     with open(filepath, 'w') as f:
         # Block I: Title
@@ -711,7 +865,8 @@ def write_oasp_input(
         # Block IV: Environment
         # NL = number of layers (including halfspaces and all water layers)
         n_water_layers = len(ssp_data)
-        n_layers = 1 + n_water_layers + 1
+        n_sed_layers = _count_bottom_layers(env)
+        n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
 
         # Upper halfspace (from env.surface)
@@ -722,26 +877,38 @@ def write_oasp_input(
             d, c = ssp_data[i]
             f.write(f"{d:.2f} {c:.2f} 0 0.0 0 1.0 0 0 0\n")
 
-        # Bottom halfspace
-        f.write(f"{depth:.2f} {c_p:.2f} {c_s:.2f} {alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0 0 0\n")
+        # Sediment layers + bottom halfspace (shared helper, B15)
+        _emit_bottom_layers(
+            f, env, depth,
+            c_p, c_s, alpha_p, alpha_s, rho,
+            extra_columns=2,
+        )
 
         # Block V: Sources
         # SD NS DS AN IA FD DA
         # For single source: SD 1 0 0 1 0 0
         f.write(f"{src_depth:.2f} 1 0 0 1 0 0\n")
 
-        # Block VI: Receiver depths
-        # RD1 RD2 NRD
-        f.write(f"{rd1:.2f} {rd2:.2f} {nrd}\n")
+        # Block VI: Receiver depths (NRD<0 signals explicit depth list —
+        # oasp.tex:559-585).
+        for line in _receiver_block_lines(receiver):
+            f.write(line + '\n')
 
         # Block VII: Wavenumber sampling
         # CMIN CMAX
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
         # NW IC1 IC2 IF
-        # NW=-1 for automatic sampling
-        # IF = frequency sample increment for kernels (0 for all)
-        f.write(f"{nw_samples} 1 1 40\n")
+        # NW=-1 for automatic sampling — IC1/IC2 have no effect (oasp.tex:677).
+        # When NW > 0, IC2 must be set to NW so the Hankel transform is *not*
+        # prematurely zeroed. The old hard-coded '1 1' truncated everything
+        # past sample #1 whenever the user specified NW explicitly.
+        # IF = frequency sample increment for kernels (0 disables plotting).
+        if nw_samples is None or nw_samples <= 0:
+            ic1, ic2 = 1, 1
+        else:
+            ic1, ic2 = 1, int(nw_samples)
+        f.write(f"{nw_samples} {ic1} {ic2} 40\n")
 
         # Block VIII: Frequency and range sampling
         # NT FR1 FR2 DT R1 DR NR
@@ -754,6 +921,9 @@ def write_oasr_input(
     source: Source,
     receiver: Receiver,
     options: Optional[str] = None,
+    interface_roughness: Optional[list] = None,
+    angles: Optional[np.ndarray] = None,
+    angle_type: str = 'grazing',
     **kwargs
 ) -> None:
     """
@@ -786,6 +956,13 @@ def write_oasr_input(
         - Z: Plot velocity profiles
         - p: Use slowness sampling instead of angle
         - t: Transmission coefficients instead of reflection
+    angles : ndarray, optional
+        Angles (degrees). If provided, overrides angle_min/angle_max/n_angles
+        in ``kwargs``. Interpreted per ``angle_type`` (see below).
+    angle_type : str, optional
+        'grazing' (default) or 'incidence'. OASES expects grazing angles;
+        when ``angle_type='incidence'``, angles are converted via
+        ``grazing = 90 - incidence`` before being written.
     **kwargs : dict
         Additional parameters:
         - angle_min : float
@@ -844,29 +1021,90 @@ def write_oasr_input(
     alpha_p = bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5
     alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
 
-    # Sound speed profile - for OASR, use water sound speed at bottom
+    # Sound speed profile - for OASR we only need a single representative
+    # water sound speed: OASR is a *local* interface reflection solver, the
+    # source is placed 1 mm above the top of layer 2 (see unoasr21.f), and
+    # layer 1 is treated as the upper halfspace carrying the incident wave.
+    # A full stratified water column has no meaning here — OASR only sees the
+    # (homogeneous) medium immediately above the reflecting interface.
     ssp_data = env.ssp_data
     if ssp_data is None or len(ssp_data) == 0:
-        c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
+        c_water = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
     else:
-        # Use sound speed at the bottom depth for reflection coefficient
-        c = float(ssp_data[-1, 1])
+        # Sound speed right above the seabed interface.
+        c_water = float(ssp_data[-1, 1])
 
-    # Frequency parameters
-    freq_min = kwargs.get('freq_min', freq)
-    freq_max = kwargs.get('freq_max', freq)
-    n_frequencies = kwargs.get('n_frequencies', 1)
+    # Multi-frequency support (B17) — OASR sweep parameters.
+    freqs_arr = np.atleast_1d(source.frequency)
+    if len(freqs_arr) > 1:
+        freq_min = float(freqs_arr.min())
+        freq_max = float(freqs_arr.max())
+        n_frequencies = int(len(freqs_arr))
+    else:
+        freq_min = kwargs.get('freq_min', freq)
+        freq_max = kwargs.get('freq_max', freq)
+        n_frequencies = kwargs.get('n_frequencies', 1)
     freq_out_inc = kwargs.get('freq_output_increment', max(1, n_frequencies // 10))
 
-    # Angle parameters
-    angle_min = kwargs.get('angle_min', 0.0)
-    angle_max = kwargs.get('angle_max', 90.0)
-    n_angles = kwargs.get('n_angles', 181)
+    # Angle parameters. OASES natively uses grazing angles; if the caller
+    # requested 'incidence', convert to grazing via 90 - incidence.
+    if angle_type not in ('grazing', 'incidence'):
+        raise ConfigurationError(
+            f"OASR: angle_type must be 'grazing' or 'incidence', got {angle_type!r}"
+        )
+    if angles is not None:
+        angles_arr = np.atleast_1d(np.asarray(angles, dtype=float))
+        if angle_type == 'incidence':
+            angles_arr = 90.0 - angles_arr
+        angle_min = float(angles_arr.min())
+        angle_max = float(angles_arr.max())
+        n_angles = int(len(angles_arr))
+    else:
+        angle_min = kwargs.get('angle_min', 0.0)
+        angle_max = kwargs.get('angle_max', 90.0)
+        if angle_type == 'incidence':
+            # Convert scalar bounds as well so the user-facing axis is honored.
+            angle_min, angle_max = 90.0 - angle_max, 90.0 - angle_min
+        n_angles = kwargs.get('n_angles', 181)
     angle_out_inc = kwargs.get('angle_output_increment', max(1, n_angles // 10))
 
     # Options string
     if options is None:
         options = 'N T'  # Normal (P-P), Table output
+    volume_attenuation = kwargs.get('volume_attenuation', None)
+    options = _inject_volume_attenuation(options, volume_attenuation)
+
+    # Interface roughness (RG / CL / M) per interface (B13 #6).
+    # Indexed starting at 0 = upper-halfspace/surface interface; None -> no roughness.
+    if interface_roughness is None:
+        interface_roughness = []
+
+    def _roughness_tail(i):
+        """Return roughness-suffix string for interface index ``i``.
+
+        OASES convention (oases_gen.tex): RG > 0 → RMS roughness only;
+        RG < 0 → |RG| plus CL and M on same line (Goff-Jordan power spectrum).
+        """
+        if i < 0 or i >= len(interface_roughness):
+            return " 0"
+        spec = interface_roughness[i]
+        if spec is None:
+            return " 0"
+        if isinstance(spec, (int, float)):
+            return f" {float(spec):.4f}"
+        # dict or tuple
+        if isinstance(spec, dict):
+            rg = spec.get('RG', spec.get('roughness', 0.0))
+            cl = spec.get('CL', spec.get('correlation_length', None))
+            m = spec.get('M', spec.get('spectral_exponent', None))
+        else:  # assume tuple/list
+            rg = spec[0] if len(spec) > 0 else 0.0
+            cl = spec[1] if len(spec) > 1 else None
+            m = spec[2] if len(spec) > 2 else None
+        if cl is None or m is None:
+            return f" {float(rg):.4f}"
+        # Flag negative RG to signal CL + M follow.
+        return f" {-abs(float(rg)):.4f} {float(cl):.4f} {float(m):.4f}"
 
     with open(filepath, 'w') as f:
         # Block I: Title
@@ -876,18 +1114,60 @@ def write_oasr_input(
         # Block II: OPTIONS
         f.write(f"{options}\n")
 
-        # Block III: Environment
-        # NL = number of layers (including halfspaces)
-        # OASR uses 2 layers: water + bottom halfspace (no vacuum layer)
-        f.write("2\n")
+        # Block III: Environment (B13)
+        # OASR convention: layer 1 IS the upper halfspace in which the source
+        # sits (placed 1 mm above layer 2's top). Reflection is computed at the
+        # interface between layer 1 and layer 2. We therefore emit the water
+        # column as the upper halfspace — NOT a separate vacuum layer above a
+        # water layer, which would place the source in the vacuum and make the
+        # solver compute a vacuum/water reflection (empty .rco output).
+        #
+        # Reference: oasr.tex section "Output Files" (saffipr1.dat example) —
+        # NL = 3 with `0 1500 0 0 0 1 0` as layer 1 (water), followed by
+        # sediment + halfspace.
+        n_sed_layers = _count_bottom_layers(env)
+        n_layers = 1 + n_sed_layers + 1  # water-halfspace + sediment + bottom
+        f.write(f"{n_layers}\n")
 
-        # Water layer (upper halfspace, starts at depth 0)
-        # D CC CS AC AS RO RG
-        f.write(f"0 {c:.2f} 0 0.0 0 1.0 0\n")
+        # Layer 1: water as upper halfspace (D is dummy for layer 1).
+        # AC=0 triggers Skretting-Leroy empirical water attenuation inside OASR.
+        f.write(f"0.00 {c_water:.2f} 0 0.0 0 1.0{_roughness_tail(0)}\n")
 
-        # Bottom halfspace (starts at water depth)
-        # For reflection coefficients, bottom is at depth=0 (interface is at water surface)
-        f.write(f"0 {c_p:.2f} {c_s:.2f} {alpha_p:.3f} {alpha_s:.3f} {rho:.2f} 0\n")
+        # Sediment stack + bottom halfspace (first interface at z = env.depth).
+        iface_idx = 1
+        if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
+            lb = env.bottom_layered
+            current_depth = depth
+            for layer in lb.layers:
+                layer_as = getattr(layer, 'shear_attenuation', 0.0) or 0.0
+                f.write(
+                    f"{current_depth:.2f} {layer.sound_speed:.2f} "
+                    f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
+                    f"{layer_as:.3f} {layer.density:.2f}"
+                    f"{_roughness_tail(iface_idx)}\n"
+                )
+                current_depth += layer.thickness
+                iface_idx += 1
+            hs = getattr(lb, 'halfspace', None)
+            if hs is not None:
+                hs_cp = getattr(hs, 'sound_speed', c_p) or c_p
+                hs_cs = getattr(hs, 'shear_speed', c_s) or c_s
+                hs_ap = getattr(hs, 'attenuation', alpha_p) or alpha_p
+                hs_as = getattr(hs, 'shear_attenuation', alpha_s) or alpha_s
+                hs_ro = getattr(hs, 'density', rho) or rho
+            else:
+                hs_cp, hs_cs, hs_ap, hs_as, hs_ro = c_p, c_s, alpha_p, alpha_s, rho
+            f.write(
+                f"{current_depth:.2f} {hs_cp:.2f} {hs_cs:.2f} "
+                f"{hs_ap:.3f} {hs_as:.3f} {hs_ro:.2f}"
+                f"{_roughness_tail(iface_idx)}\n"
+            )
+        else:
+            f.write(
+                f"{depth:.2f} {c_p:.2f} {c_s:.2f} "
+                f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f}"
+                f"{_roughness_tail(iface_idx)}\n"
+            )
 
         # Block IV: Frequency sampling
         # FMIN FMAX NFREQ NFOU
@@ -926,7 +1206,7 @@ def write_oasr_input(
         if 'Z' in options or 'z' in options:
             # VLEF VRIG VLEN VINC
             # DVUP DVLO DVLN DVIN
-            c_min = min(c, c_p) * 0.95
-            c_max = max(c, c_p) * 1.05
+            c_min = min(c_water, c_p) * 0.95
+            c_max = max(c_water, c_p) * 1.05
             f.write(f"{c_min:.1f} {c_max:.1f} 12 100\n")
             f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")

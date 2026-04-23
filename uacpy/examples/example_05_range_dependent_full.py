@@ -65,7 +65,7 @@ def main():
     # Full range-dependent bottom requires special Environment configuration
 
     bottom_props = uacpy.BoundaryProperties(
-        acoustic_type='elastic',
+        acoustic_type='half-space',
         sound_speed=1620.0,
         shear_speed=150.0,
         density=1.6,

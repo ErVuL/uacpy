@@ -6,18 +6,20 @@ EXAMPLE 19: OASES Suite Comprehensive
 OBJECTIVE: Demonstrate OASES suite models (OAST, OASN, OASR, OASP).
 
 FEATURES: ✓ OAST transmission loss  ✓ OASN normal modes
-          ✓ OASR reflection coefficients  ✓ OASP parabolic equation
+          ✓ OASR reflection coefficients  ✓ OASP pulse/wideband TRF
 """
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import OAST, OASN, OASR, OASP
-import os
 
 def main():
     print("\n" + "═"*80)
@@ -31,7 +33,7 @@ def main():
         ssp_type='linear',
         ssp_data=[(0, 1500), (100, 1520)],
         bottom=uacpy.BoundaryProperties(
-            acoustic_type='elastic',
+            acoustic_type='half-space',
             sound_speed=1700,
             shear_speed=400,
             density=1.8,
@@ -88,10 +90,10 @@ def main():
         oasr_success = False
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 4: OASP - Parabolic Equation
+    # RUN 4: OASP - Pulse / Wideband Transfer Function
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[4/4] Running OASP (Parabolic Equation)...", end=" ", flush=True)
+    print("[4/4] Running OASP (Pulse / Wideband TRF)...", end=" ", flush=True)
     try:
         oasp = OASP(verbose=False)
         # OASP with reduced time samples for faster execution
@@ -113,7 +115,6 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nGenerating visualizations...")
-    os.makedirs('output', exist_ok=True)
 
     # Plot 1: OAST Transmission Loss
     fig1, ax1 = plt.subplots(figsize=(12, 7))
@@ -138,7 +139,7 @@ def main():
     cbar.ax.tick_params(labelsize=10)
 
     plt.tight_layout()
-    plt.savefig('output/example_19_oast_tl.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_19_oast_tl.png', dpi=150, bbox_inches='tight')
     plt.close()
     print("  ✓ Saved: output/example_19_oast_tl.png")
 
@@ -212,7 +213,7 @@ def main():
         plt.suptitle('OASES Suite: Reflection Coefficient Analysis (OASR)',
                     fontsize=15, fontweight='bold')
 
-        plt.savefig('output/example_19_oasr_reflection.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_19_oasr_reflection.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: output/example_19_oasr_reflection.png")
 
@@ -332,7 +333,7 @@ def main():
         summary += "  • Critical angle detection\n"
         summary += "  • Angle/slowness domain\n\n"
 
-        summary += "OASP (Parabolic Equation):\n"
+        summary += "OASP (Pulse / Wideband TRF):\n"
         summary += "  • PE propagation method\n"
         summary += "  • Range-dependent capability\n"
         summary += "  • Broadband support\n"
@@ -356,7 +357,7 @@ def main():
         plt.suptitle('OASES Suite: Comprehensive Acoustic Modeling',
                     fontsize=15, fontweight='bold')
 
-        plt.savefig('output/example_19_oasn_modes.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_19_oasn_modes.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: output/example_19_oasn_modes.png")
 
@@ -365,7 +366,7 @@ def main():
     print("  • OAST: Fast wavenumber integration for TL")
     print("  • OASN: Normal mode analysis with eigenfunctions")
     print("  • OASR: Reflection coefficients (P-P, P-SV)")
-    print("  • OASP: Parabolic equation for range-dependent problems")
+    print("  • OASP: Pulse / wideband transfer-function propagation")
     print("\nKey Capabilities:")
     print("  • Complete elastic modeling (compression + shear)")
     print("  • Range-independent and range-dependent scenarios")

@@ -7,9 +7,25 @@ from pathlib import Path
 from typing import Union
 
 
+def _validate_interp_type(interp_type: str) -> str:
+    """Return a single-character interpolation code or raise ValueError.
+
+    Only the first character of TYPE ('L' piecewise linear or 'C'
+    curvilinear) is user-selectable; the second character (format flag)
+    is chosen by the writer depending on the number of columns it emits
+    (see ``write_bty_file`` vs ``write_bty_long_format``).
+    """
+    t = str(interp_type).strip().upper()
+    if t not in ("L", "C"):
+        raise ValueError(
+            f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
+        )
+    return t
+
+
 def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_type: str = "L") -> None:
     """
-    Write bathymetry file for acoustic models.
+    Write bathymetry file (short format, bathymetry only).
 
     Parameters
     ----------
@@ -20,16 +36,20 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
         - Column 0: Range in meters
         - Column 1: Depth in meters
     interp_type : str, optional
-        Interpolation type (single character):
+        Interpolation type (single character, TYPE(1:1)):
         - 'C': Curvilinear (with tangents/normals)
         - 'L': Linear interpolation (default)
 
     Notes
     -----
-    File format:
-    - Line 1: Interpolation type in quotes
+    File format (see third_party/Acoustics-Toolbox/doc/ATI_BTY_File.htm):
+    - Line 1: 2-character TYPE in quotes — position 1 is interpolation
+      ('L' or 'C'), position 2 is format ('S' short, bathymetry only)
     - Line 2: Number of points
     - Following lines: range (km), depth (m) pairs
+
+    This writer always emits the short (2-column) format, so TYPE(2:2)
+    is hardcoded to 'S'.
 
     The function automatically converts ranges from meters to kilometers
     for the output file.
@@ -43,6 +63,9 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     >>> write_bty_file('test.bty', bathymetry, interp_type='L')
     """
     filepath = Path(filepath)
+    interp_char = _validate_interp_type(interp_type)
+    # 2-char TYPE: position 1 = interpolation, position 2 = 'S' short format
+    type_str = f"{interp_char}S"
 
     # Convert to km for range column (first column)
     bathy_km = bathymetry.copy()
@@ -51,8 +74,8 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     n_pts = bathy_km.shape[0]
 
     with open(filepath, "w") as f:
-        # Write interpolation type
-        f.write(f"'{interp_type}'\n")
+        # Write 2-character TYPE string
+        f.write(f"'{type_str}'\n")
 
         # Write number of points
         f.write(f"{n_pts}\n")
@@ -61,6 +84,73 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
         for i in range(n_pts):
             f.write(f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f}\n")
 
+        f.write("\n")
+
+
+def write_bty_long_format(
+    filepath: Union[str, Path],
+    bathymetry: np.ndarray,
+    bottom_rd,
+    interp_type: str = "L",
+) -> None:
+    """
+    Write long-format bathymetry file (.bty) with per-segment geoacoustics.
+
+    Unlike the 2-column ``write_bty_file`` output, the long format adds
+    bottom compressional sound speed, density, attenuation and shear speed
+    per range so Bellhop can use range-dependent bottom properties
+    (``BOTY(:)`` handling in ReadEnvironmentBell.f90).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output .bty path.
+    bathymetry : ndarray
+        Shape (N, 2): range (m), depth (m).
+    bottom_rd : RangeDependentBottom
+        Object carrying per-range geoacoustics with attributes
+        ``ranges_km``, ``sound_speed``, ``density``, ``attenuation``,
+        ``shear_speed``.
+    interp_type : str, optional
+        'L' (linear, default) or 'C' (curvilinear).
+
+    Notes
+    -----
+    File format (extended BTY — long format):
+    - Line 1: 2-character TYPE in quotes — position 1 is interpolation
+      ('L' or 'C'), position 2 is 'L' (long format, bathymetry +
+      geoacoustics). See ATI_BTY_File.htm.
+    - Line 2: number of points
+    - Following lines: ``range_km depth_m cp_m_s rho_g_cm3 atten cs_m_s``
+
+    Ranges in ``bottom_rd.ranges_km`` are re-sampled onto the bathymetry
+    range grid via ``numpy.interp`` so the two lengths always match.
+    """
+    filepath = Path(filepath)
+    interp_char = _validate_interp_type(interp_type)
+    # 2-char TYPE: position 1 = interpolation, position 2 = 'L' long format
+    type_str = f"{interp_char}L"
+
+    bathy_km = bathymetry.copy()
+    bathy_km[:, 0] = bathy_km[:, 0] / 1000.0
+    n_pts = bathy_km.shape[0]
+
+    rd_r = np.asarray(bottom_rd.ranges_km, dtype=float)
+    cp = np.interp(bathy_km[:, 0], rd_r, bottom_rd.sound_speed)
+    rho = np.interp(bathy_km[:, 0], rd_r, bottom_rd.density)
+    alpha = np.interp(bathy_km[:, 0], rd_r, bottom_rd.attenuation)
+    cs_arr = bottom_rd.shear_speed if bottom_rd.shear_speed is not None \
+        else np.zeros_like(rd_r)
+    cs = np.interp(bathy_km[:, 0], rd_r, cs_arr)
+
+    with open(filepath, "w") as f:
+        f.write(f"'{type_str}'\n")
+        f.write(f"{n_pts}\n")
+        for i in range(n_pts):
+            f.write(
+                f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f} "
+                f"{cp[i]:.3f} {rho[i]:.3f} {alpha[i]:.6f} {cs[i]:.3f}\n"
+            )
         f.write("\n")
 
 
@@ -77,13 +167,17 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
         - Column 0: Range in meters
         - Column 1: Altitude/height in meters (positive up from sea level)
     interp_type : str, optional
-        Interpolation type (single character):
+        Interpolation type (single character, TYPE(1:1)):
         - 'C': Curvilinear (with tangents/normals)
         - 'L': Linear interpolation (default)
 
     Notes
     -----
-    File format identical to bathymetry (.bty) files.
+    File format identical to bathymetry (.bty) files. Per the
+    Acoustics-Toolbox ATI/BTY specification, TYPE is a 2-character
+    string — position 2 is always 'S' (short format) for altimetry
+    since no geoacoustic parameters apply to the surface.
+
     Altimetry describes surface variations (ice keels, surface waves, etc.)
 
     Examples
@@ -95,6 +189,9 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     >>> write_ati_file('surface.ati', altimetry, interp_type='L')
     """
     filepath = Path(filepath)
+    interp_char = _validate_interp_type(interp_type)
+    # 2-char TYPE: position 1 = interpolation, position 2 = 'S' short format
+    type_str = f"{interp_char}S"
 
     # Convert to km for range column
     alti_km = altimetry.copy()
@@ -103,8 +200,8 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     n_pts = alti_km.shape[0]
 
     with open(filepath, "w") as f:
-        # Write interpolation type
-        f.write(f"'{interp_type}'\n")
+        # Write 2-character TYPE string
+        f.write(f"'{type_str}'\n")
 
         # Write number of points
         f.write(f"{n_pts}\n")

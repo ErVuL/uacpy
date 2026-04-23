@@ -11,7 +11,6 @@ from uacpy.models import (
 )
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
 
 
 class TestBellhop:
@@ -68,6 +67,25 @@ class TestBellhop:
         assert result.shape[0] == len(receiver_small.depths)
 
 
+class TestBellhopCUDA:
+    """Tests for BellhopCUDA model"""
+
+    @pytest.mark.requires_binary
+    def test_bellhopcuda_instantiation(self):
+        """Test creating BellhopCUDA instance"""
+        bhcuda = BellhopCUDA(verbose=False)
+        assert bhcuda.model_name in ('BellhopCUDA', 'bellhopcuda')
+        assert not bhcuda.verbose
+
+    @pytest.mark.requires_binary
+    def test_bellhopcuda_supported_modes(self):
+        """BellhopCUDA should support the same run modes Bellhop does (TL/rays/arrivals)"""
+        bhcuda = BellhopCUDA(verbose=False)
+        assert bhcuda.supports_mode(RunMode.COHERENT_TL)
+        # BellhopCUDA mirrors Bellhop — it does not compute normal modes
+        assert not bhcuda.supports_mode(RunMode.MODES)
+
+
 class TestKraken:
     """Tests for Kraken model"""
 
@@ -88,14 +106,26 @@ class TestKraken:
 
     @pytest.mark.requires_binary
     def test_kraken_compute_modes(self, simple_env, source):
-        """Test Kraken mode computation"""
+        """Test Kraken mode computation.
+
+        Note: standalone Kraken does not accept ``n_modes``; that knob
+        lives on ``KrakenField.run`` (MLimit in the FLP file).
+        """
         kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(env=simple_env, source=source, n_modes=20)
+        modes = kraken.compute_modes(env=simple_env, source=source)
 
         assert modes.field_type == 'modes'
         assert 'k' in modes.metadata
         assert 'phi' in modes.metadata
         assert len(modes.metadata['k']) > 0
+
+    @pytest.mark.requires_binary
+    def test_kraken_n_modes_clips_output(self, simple_env, source):
+        """``n_modes`` caps the number of returned modes from Kraken."""
+        kraken = Kraken(verbose=False)
+        capped = kraken.compute_modes(env=simple_env, source=source, n_modes=3)
+        assert len(capped.metadata['k']) <= 3
+        assert capped.metadata.get('n_modes_requested') == 3
 
     @pytest.mark.requires_binary
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
@@ -156,13 +186,17 @@ class TestBounce:
         """Test Bounce supported modes"""
         bounce = Bounce(verbose=False)
         # Bounce computes reflection coefficients, not TL or modes
-        assert bounce.supports_mode(RunMode.COHERENT_TL)
+        assert bounce.supports_mode(RunMode.REFLECTION)
+        assert not bounce.supports_mode(RunMode.COHERENT_TL)
         assert not bounce.supports_mode(RunMode.RAYS)
         assert not bounce.supports_mode(RunMode.MODES)
 
     @pytest.mark.requires_binary
-    def test_bounce_compute_reflection_coefficient(self, simple_env, source, receiver_small):
-        """Test Bounce reflection coefficient computation"""
+    def test_bounce_compute_reflection_coefficient(self, simple_env, source, receiver_small, tmp_path):
+        """Test Bounce reflection coefficient computation.
+
+        Uses ``output_dir`` so the .brc/.irc files survive cleanup.
+        """
         bounce = Bounce(verbose=False)
 
         # Bounce needs an environment with elastic bottom properties
@@ -186,13 +220,14 @@ class TestBounce:
             env=env_elastic,
             source=source,
             receiver=receiver_small,
+            output_dir=tmp_path,
         )
 
         assert result.field_type == 'reflection_coefficients'
         assert 'brc_file' in result.metadata
         assert result.metadata['brc_file'] is not None
 
-        # Check that .brc file was created
+        # Check that .brc file persisted via output_dir
         import os
         brc_file = result.metadata['brc_file']
         assert os.path.exists(brc_file), f"BRC file should exist: {brc_file}"
@@ -330,15 +365,10 @@ class TestModelConsistency:
             mean_diff = abs(np.mean(valid_bellhop) - np.mean(valid_kraken))
             assert mean_diff < 30, f"Mean TL difference too large: {mean_diff:.1f} dB"
 
-    # Test removed: OASN outputs covariance matrices (.xsm), not mode shapes (.mod)
-    # OASN is designed for matched field processing, not direct mode computation
-    # Use Kraken for normal mode analysis
-
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    @pytest.mark.skip(reason="Bellhop does not support reflection coefficient files ('F' type). Use KRAKEN or SCOOTER instead.")
     def test_bounce_bellhop_workflow(self, simple_env, source, receiver_small):
-        """Test BOUNCE -> Bellhop workflow with reflection coefficient files (NOT SUPPORTED)"""
+        """Test BOUNCE -> Bellhop workflow with reflection coefficient (.brc) files"""
         from uacpy.core import Environment, BoundaryProperties
 
         # Step 1: Compute reflection coefficients with BOUNCE
@@ -484,7 +514,7 @@ class TestModelConsistency:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_bounce_scooter_workflow(self, simple_env, source, receiver_small):
+    def test_bounce_scooter_workflow(self, simple_env, source, receiver_small, tmp_path):
         """Test BOUNCE -> SCOOTER workflow with reflection coefficient files"""
         from uacpy.core import Environment, BoundaryProperties
 
@@ -511,6 +541,7 @@ class TestModelConsistency:
             env=env_elastic,
             source=source,
             receiver=receiver_small,
+            output_dir=tmp_path,
         )
 
         # Verify BRC file was created
@@ -552,19 +583,4 @@ class TestModelConsistency:
         assert np.all(np.isfinite(scooter_result.data))
 
 
-class TestUnsupportedFeatures:
-    """Test that models properly report unsupported features"""
-
-    def test_kraken_rays_unsupported(self, simple_env, source):
-        """Test that Kraken raises error for ray computation"""
-        kraken = Kraken(verbose=False)
-
-        with pytest.raises(UnsupportedFeatureError):
-            kraken.compute_rays(env=simple_env, source=source)
-
-    def test_bellhop_modes_unsupported(self, simple_env, source):
-        """Test that Bellhop raises error for mode computation"""
-        bellhop = Bellhop(verbose=False)
-
-        with pytest.raises(UnsupportedFeatureError):
-            bellhop.compute_modes(env=simple_env, source=source)
+# TestUnsupportedFeatures moved to test_exceptions.py to avoid duplication

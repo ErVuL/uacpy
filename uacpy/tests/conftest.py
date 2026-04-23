@@ -4,11 +4,6 @@ Pytest configuration and fixtures for UACPY tests
 
 import pytest
 import numpy as np
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField

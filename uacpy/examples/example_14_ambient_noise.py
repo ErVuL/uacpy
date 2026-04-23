@@ -14,10 +14,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from uacpy.noise import AmbientNoiseSimulator
-import os
 
 def scenario_a_wind_shipping():
     """Basic wind and shipping noise with built-in plotting."""
@@ -42,11 +44,10 @@ def scenario_a_wind_shipping():
         show_total=True
     )
 
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_14a_wind_shipping.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_14a_wind_shipping.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("  ✓ Generated: output/example_14a_wind_shipping.png")
+    print(f"  ✓ Generated: {OUTPUT_DIR / 'example_14a_wind_shipping.png'}")
     print("  ✓ Plot includes text box with model details")
 
 
@@ -74,7 +75,7 @@ def scenario_b_multiple_sources():
         show_total=True
     )
 
-    plt.savefig('output/example_14b_multiple_sources.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_14b_multiple_sources.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print("  ✓ Generated: output/example_14b_multiple_sources.png")
@@ -124,7 +125,7 @@ def scenario_c_wind_model_comparison():
             verticalalignment='top', bbox=props, family='monospace')
 
     plt.tight_layout()
-    plt.savefig('output/example_14c_wind_models.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_14c_wind_models.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"  ✓ Generated: output/example_14c_wind_models.png")
@@ -192,7 +193,7 @@ def scenario_d_deep_vs_shallow():
         ax.set_ylim([ylim_min, ylim_max])
 
     plt.tight_layout()
-    plt.savefig('output/example_14d_deep_shallow.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_14d_deep_shallow.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print("  ✓ Generated: output/example_14d_deep_shallow.png")

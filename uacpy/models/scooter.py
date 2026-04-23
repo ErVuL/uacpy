@@ -4,13 +4,17 @@ Scooter finite-element FFP (Fast Field Program) model.
 Computes the acoustic field in the frequency-wavenumber domain using a
 finite-element discretization, then transforms to range via FFT. Supports
 coherent TL and broadband time-series output.
+
+By default, the Fortran ``fields.exe`` post-processor is invoked on the
+``.grn`` output to produce a ``.shd`` file. Set ``use_fields_exe=False`` to
+fall back to the in-tree Python Hankel transform in
+:mod:`uacpy.io.grn_reader`.
 """
 
-import subprocess
 from pathlib import Path
 from typing import Optional
 
-from uacpy.models.base import PropagationModel, _UNSET, _resolve_overrides
+from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -21,6 +25,7 @@ from uacpy.core.constants import (
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
+from uacpy.io.output_reader import read_shd_file
 from uacpy.io.at_env_writer import ATEnvWriter
 
 
@@ -49,12 +54,20 @@ class Scooter(PropagationModel):
     def __init__(
         self,
         executable: Optional[Path] = None,
+        fields_executable: Optional[Path] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         n_mesh: int = 0,
         roughness: float = 0.0,
         rmax_multiplier: float = 2.0,
         volume_attenuation: Optional[str] = None,
+        francois_garrison_params: Optional[tuple] = None,
+        bio_layers: Optional[list] = None,
+        source_type: str = 'R',
+        spectrum: str = 'positive',
+        stabilizing_attenuation_off: bool = False,
+        field_interp: str = 'O',
+        use_fields_exe: bool = True,
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -64,6 +77,8 @@ class Scooter(PropagationModel):
         ----------
         executable : Path, optional
             Path to scooter executable. Auto-detected if None.
+        fields_executable : Path, optional
+            Path to fields.exe post-processor. Auto-detected if None.
         c_low : float, optional
             Lower phase speed limit (m/s). None = auto (0.95 * min SSP speed).
         c_high : float, optional
@@ -76,6 +91,40 @@ class Scooter(PropagationModel):
             Multiply max receiver range for wavenumber resolution. Default: 2.0.
         volume_attenuation : str, optional
             'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
+        francois_garrison_params : tuple, optional
+            Required when ``volume_attenuation='F'``. Tuple
+            ``(T, S, pH, z_bar)``: temperature (degC), salinity (psu), pH,
+            mean depth (m).
+        bio_layers : list of tuples, optional
+            Required when ``volume_attenuation='B'``. List of per-layer
+            5-tuples ``(Z1, Z2, f0, Q, a0)``: depth range (m),
+            resonance frequency (Hz), quality factor, absorption coefficient.
+        source_type : {'R', 'X'}, optional
+            FLP Option(1:1). 'R' = cylindrical (point source, default),
+            'X' = Cartesian (line source).
+        spectrum : {'positive', 'negative', 'both'}, optional
+            FLP Option(2:2). 'positive' (default) uses only the positive
+            wavenumber spectrum (fast, recommended). 'negative' uses only
+            the negative branch; 'both' integrates along the full k-axis.
+        stabilizing_attenuation_off : bool, optional
+            If True, writes ``'0'`` at TopOpt position 7. Scooter then
+            sets its stabilising attenuation to zero (see
+            ``scooter.f90:81,129``). Leave False (default) unless you
+            know what you're doing — the stabiliser is there to prevent
+            pole-on-contour blow-ups.
+        field_interp : {'O', 'P'}, optional
+            FLP Option(3:3). 'O' = polynomial interpolation (default,
+            what Scooter's own sample FLP uses), 'P' = Pade. See
+            ``fields.f90:82-90``.
+        use_fields_exe : bool, optional
+            If True (default), run ``fields.exe`` on the ``.grn`` file to
+            obtain a ``.shd`` transmission-loss file. If False, use the
+            in-tree Python Hankel transform in ``grn_reader``.
+
+            Broadband runs (TIME_SERIES / TRANSFER_FUNCTION) and runs
+            where ``fields.exe`` is not installed transparently fall back
+            to the Python Hankel transform — a warning is emitted in both
+            cases so the override is visible.
         """
         super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
 
@@ -85,25 +134,85 @@ class Scooter(PropagationModel):
         self.roughness = roughness
         self.rmax_multiplier = rmax_multiplier
         self.volume_attenuation = volume_attenuation
+        self.francois_garrison_params = francois_garrison_params
+        self.bio_layers = bio_layers
 
-        # Declare supported modes for Scooter
-        from uacpy.models.base import RunMode
-        self._supported_modes = [RunMode.COHERENT_TL, RunMode.TIME_SERIES]
+        if source_type not in ('R', 'X'):
+            raise ValueError(
+                f"Invalid source_type '{source_type}'. Use 'R' (cylindrical) or 'X' (Cartesian)."
+            )
+        self.source_type = source_type
+
+        spectrum_map = {'positive': 'P', 'negative': 'N', 'both': 'B'}
+        if spectrum not in spectrum_map:
+            raise ValueError(
+                f"Invalid spectrum '{spectrum}'. Use 'positive', 'negative', or 'both'."
+            )
+        self.spectrum = spectrum
+        self._spectrum_code = spectrum_map[spectrum]
+
+        self.stabilizing_attenuation_off = bool(stabilizing_attenuation_off)
+
+        if field_interp not in ('O', 'P'):
+            raise ValueError(
+                f"Invalid field_interp '{field_interp}'. Use 'O' (polynomial) "
+                f"or 'P' (Pade) — see fields.f90:82-90."
+            )
+        self.field_interp = field_interp
+
+        self.use_fields_exe = use_fields_exe
+
+        # Declare supported modes for Scooter.
+        # INCOHERENT_TL is NOT implemented — Scooter computes the full
+        # coherent field; incoherent TL would require a modal decomposition
+        # we don't have here. See run() for the supported branches.
+        self._supported_modes = [
+            RunMode.COHERENT_TL,
+            RunMode.TIME_SERIES,
+            RunMode.TRANSFER_FUNCTION,
+        ]
 
         if executable is None:
-            self.executable = self._find_executable('scooter.exe')
+            self.executable = self._find_executable_in_paths(
+                'scooter.exe', bin_subdirs='oalib',
+                dev_subdir='Acoustics-Toolbox/Scooter',
+            )
         else:
             self.executable = Path(executable)
 
-        if not self.executable.exists():
-            raise FileNotFoundError(
-                f"Scooter executable not found: {self.executable}\n"
-                "Please run install.sh to build Fortran models."
-            )
+        if fields_executable is None:
+            # Auto-detect lazily; allow Scooter to be instantiated even when
+            # fields.exe is missing (user may have use_fields_exe=False).
+            self._fields_executable = None
+        else:
+            self._fields_executable = Path(fields_executable)
 
-    def _find_executable(self, name: str) -> Path:
-        """Find executable (cross-platform)"""
-        return self._find_executable_in_paths(name, 'oalib')
+        # Inherits base validation (PropagationModel._validate_volume_attenuation_params)
+        self._validate_volume_attenuation_params()
+
+    def _get_fields_executable(self) -> Optional[Path]:
+        """
+        Locate ``fields.exe`` (Scooter post-processor); cache the result.
+
+        Returns ``None`` if the binary cannot be found. Unlike ``scooter.exe``
+        the ``fields.exe`` post-processor is optional — the in-tree Python
+        Hankel transform in :mod:`uacpy.io.grn_reader` is used as a fallback.
+        Upstream Acoustics-Toolbox has flagged Fortran ``fields.exe`` as
+        deprecated (see ``Scooter/Makefile`` header), so many installations
+        simply don't ship it.
+        """
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        if self._fields_executable is None:
+            try:
+                self._fields_executable = self._find_executable_in_paths(
+                    'fields.exe', bin_subdirs='oalib',
+                    dev_subdir='Acoustics-Toolbox/Scooter',
+                )
+            except ExecutableNotFoundError:
+                self._fields_executable = False  # sentinel: searched, missing
+        if self._fields_executable is False:
+            return None
+        return self._fields_executable
 
     def run(
         self,
@@ -148,7 +257,6 @@ class Scooter(PropagationModel):
             TL field (COHERENT_TL) or transfer function field (TIME_SERIES)
         """
         import numpy as np
-        from uacpy.models.base import RunMode
 
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
@@ -166,9 +274,12 @@ class Scooter(PropagationModel):
 
             self.validate_inputs(env, source, receiver)
 
-            # For broadband mode, generate frequency vector if not provided
+            # Broadband mode (TIME_SERIES or TRANSFER_FUNCTION) requires a
+            # frequency vector; fields.exe only supports single-frequency GRNs,
+            # so we force the in-tree Hankel path in that case.
             broadband_freqs = None
-            if run_mode == RunMode.TIME_SERIES:
+            broadband_mode = run_mode in (RunMode.TIME_SERIES, RunMode.TRANSFER_FUNCTION)
+            if broadband_mode:
                 if frequencies is not None:
                     broadband_freqs = np.asarray(frequencies, dtype=float)
                 else:
@@ -176,6 +287,26 @@ class Scooter(PropagationModel):
                     broadband_freqs = np.linspace(fc * 0.5, fc * 2.0, 64)
                 self._log(f"Broadband mode: {len(broadband_freqs)} frequencies, "
                           f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
+
+            # Decide whether to use fields.exe. Broadband runs must use the
+            # Python Hankel transform; fields.exe bails on Nfreq > 1. If the
+            # user requested fields.exe but the binary is not installed,
+            # transparently fall back to the Python transform.
+            use_fields = self.use_fields_exe and not broadband_mode
+            if self.use_fields_exe and broadband_mode:
+                self._log(
+                    "fields.exe cannot handle Nfreq > 1; broadband run "
+                    "falls back to the in-tree Python Hankel transform "
+                    "(use_fields_exe=True is ignored in broadband mode).",
+                    level='warn',
+                )
+            if use_fields and self._get_fields_executable() is None:
+                self._log(
+                    "fields.exe not found; falling back to in-tree Python "
+                    "Hankel transform. Set use_fields_exe=False to silence.",
+                    level='warn',
+                )
+                use_fields = False
 
             fm = self._setup_file_manager()
             self.file_manager = fm
@@ -197,25 +328,48 @@ class Scooter(PropagationModel):
                 self._log("Running Scooter...")
                 self._run_scooter(base_name, fm.work_dir)
 
-                # Read Green's function output
+                # Sanity-check the Green's function output
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
                     self._log(f"Green's function file not found: {grn_file}", level='error')
                     raise FileNotFoundError(f"Green's function file not found: {grn_file}")
 
-                self._log("Reading Green's function...", level='info')
-                grn_data = read_grn_file(grn_file)
+                if use_fields:
+                    # Write FLP and invoke fields.exe -> .shd
+                    flp_file = fm.get_path(f'{base_name}.flp')
+                    self._log(f"Writing fields FLP file: {flp_file}")
+                    self._write_fields_flp(flp_file, env, source, receiver)
 
-                if grn_data['nk'] == 0:
-                    self._log("Scooter produced empty Green's function (nk=0)", level='error')
-                    raise RuntimeError("Scooter produced empty Green's function (nk=0)")
+                    self._log("Running fields.exe...")
+                    self._run_fields(base_name, fm.work_dir)
 
-                if run_mode == RunMode.TIME_SERIES:
-                    self._log(f"Transforming {grn_data['nfreq']} frequencies to range domain...")
-                    result = grn_to_transfer_function(grn_data, receiver.ranges)
+                    shd_file = fm.get_path(f'{base_name}.shd')
+                    if not shd_file.exists():
+                        raise FileNotFoundError(
+                            f"fields.exe did not produce {shd_file}; "
+                            f"check {fm.work_dir}/fields.prt for diagnostics."
+                        )
+                    self._log("Reading SHD file...")
+                    result = read_shd_file(shd_file)
+                    # Annotate provenance so callers can tell which path ran.
+                    result.metadata.update({
+                        'model': 'Scooter',
+                        'post_processor': 'fields.exe',
+                    })
                 else:
-                    self._log("Transforming to range domain (FFT-based Hankel transform)...")
-                    result = grn_to_field(grn_data, receiver.ranges, method='fft_hankel')
+                    self._log("Reading Green's function...", level='info')
+                    grn_data = read_grn_file(grn_file)
+
+                    if grn_data['nk'] == 0:
+                        self._log("Scooter produced empty Green's function (nk=0)", level='error')
+                        raise RuntimeError("Scooter produced empty Green's function (nk=0)")
+
+                    if broadband_mode:
+                        self._log(f"Transforming {grn_data['nfreq']} frequencies to range domain...")
+                        result = grn_to_transfer_function(grn_data, receiver.ranges)
+                    else:
+                        self._log("Transforming to range domain (FFT-based Hankel transform)...")
+                        result = grn_to_field(grn_data, receiver.ranges, method='fft_hankel')
 
                 self._log("Simulation complete")
                 return result
@@ -234,9 +388,7 @@ class Scooter(PropagationModel):
         - Receiver ranges (not in standard Kraken format)
         - Supports shear wave parameters in bottom halfspace
         """
-        import numpy as np
-
-        # Parse types with backward compatibility
+        # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
         ssp_type = parse_ssp_type(env.ssp_type)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.acoustic_type)
@@ -249,6 +401,11 @@ class Scooter(PropagationModel):
         # Get kwargs
         frequencies = kwargs.get('frequencies', None)
 
+        # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
+        # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
+        # reader then keeps Atten=Deltak (the default stabiliser).
+        topopt_extra = '0' if self.stabilizing_attenuation_off else ''
+
         with open(filepath, 'w') as f:
             # Write standard ENV sections using ATEnvWriter
             ATEnvWriter.write_header(
@@ -257,8 +414,17 @@ class Scooter(PropagationModel):
                 surface_type=surface_type,
                 attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
                 volume_attenuation=vol_atten,
-                frequencies=frequencies
+                frequencies=frequencies,
+                topopt_extra=topopt_extra,
             )
+
+            # Francois-Garrison / Biological follow-up lines (after TopOpt,
+            # before SSP). ReadTopOpt in AT reads these immediately when
+            # TopOpt(4)='F'/'B'.
+            if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
+                ATEnvWriter.write_fg_params(f, self.francois_garrison_params)
+            elif vol_atten == VolumeAttenuation.BIOLOGICAL:
+                ATEnvWriter.write_bio_layers(f, self.bio_layers)
 
             ATEnvWriter.write_ssp_section(
                 f, env, env.depth,
@@ -284,7 +450,6 @@ class Scooter(PropagationModel):
                 # Copy reflection file to working directory
                 if env.bottom.reflection_file:
                     import shutil
-                    from pathlib import Path
                     brc_source = Path(env.bottom.reflection_file)
                     if brc_source.exists():
                         # Copy to same directory as .env file with matching base name
@@ -341,38 +506,94 @@ class Scooter(PropagationModel):
                 rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_multiplier
                 f.write(f"{rmax:.6f}\n")
 
-            # Source depths
-            source_depth = float(source.depth[0]) if hasattr(source.depth, '__len__') else float(source.depth)
-            f.write(f"1\n")  # NSD
-            f.write(f"{source_depth:.1f} /\n")
-
-            # Receiver depths
-            f.write(f"{len(receiver.depths)}\n")  # NRD
-            if len(receiver.depths) == 1:
-                f.write(f"{receiver.depths[0]:.1f} /\n")
-            else:
-                f.write(f"{receiver.depths.min():.1f} {receiver.depths.max():.1f} /\n")
+            # Source and receiver depths. Use the shared ATEnvWriter so
+            # arbitrary-length depth arrays are written verbatim rather than
+            # collapsed to "min max /" (which the Fortran reader expands to a
+            # uniformly-spaced vector — losing user-specified samples).
+            ATEnvWriter.write_source_depths(f, source)
+            ATEnvWriter.write_receiver_depths(f, receiver)
 
             # Broadband frequency vector (ReadfreqVec reads after source/receiver depths)
             if frequencies is not None and len(frequencies) > 1:
                 ATEnvWriter.write_broadband_freqs(f, frequencies)
 
+    def _write_fields_flp(
+        self,
+        filepath: Path,
+        env: Environment,
+        source: Source,
+        receiver: Receiver,
+        options: Optional[str] = None,
+    ) -> None:
+        """
+        Write the FLP parameter file consumed by ``fields.exe``.
+
+        Per ``third_party/Acoustics-Toolbox/doc/fields.htm`` the Scooter
+        post-processor's FLP has three records:
+
+        1. 4-character option string (Coords / Spectrum / Interp / SBP)
+        2. NRr — number of receiver ranges
+        3. Rr(1:NRr) receiver ranges in **km** (terminated with ``/``)
+
+        Unlike Kraken's ``field.exe``, fields.exe takes source and receiver
+        *depths* from the ``.grn`` header, not the FLP file.
+
+        Parameters
+        ----------
+        filepath : Path
+            Destination ``.flp`` path.
+        env, source, receiver : core objects
+            Provided for API symmetry with Scooter's env writer; only
+            ``receiver.ranges`` is used here.
+        options : str, optional
+            Explicit 4-character option override. If None, the string is
+            built from ``self.source_type``, ``self._spectrum_code``,
+            polynomial interpolation (``'O'``), and no beam pattern.
+        """
+        if options is None:
+            # Pos 1: source_type ('R' cylindrical / 'X' Cartesian)
+            # Pos 2: spectrum code ('P' / 'N' / 'B')
+            # Pos 3: field_interp ('O' polynomial / 'P' Pade, see
+            #        fields.f90:82-90)
+            # Pos 4: ' ' (no source beam pattern file)
+            options = (
+                f"{self.source_type}{self._spectrum_code}"
+                f"{self.field_interp} "
+            )
+        if len(options) != 4:
+            raise ValueError(
+                f"FLP option string must be 4 characters, got {len(options)!r}"
+            )
+
+        ranges_km = receiver.ranges / 1000.0
+        with open(filepath, 'w') as f:
+            f.write(f"'{options}'\n")
+            f.write(f"{len(ranges_km)}\n")
+            # Explicit list; fields.exe expands the list if a trailing '/' is
+            # given after exactly two values, but listing all ranges avoids
+            # the uniform-spacing assumption.
+            ranges_str = " ".join(f"{r:.6f}" for r in ranges_km)
+            f.write(f"{ranges_str} /\n")
+
     def _run_scooter(self, base_name: str, work_dir: Path):
-        """Execute Scooter"""
-        cmd = [str(self.executable), base_name]
-
-        result = subprocess.run(
-            cmd,
-            cwd=str(work_dir),
-            capture_output=True,
-            text=True
+        """Execute Scooter via the shared ``_run_subprocess`` helper."""
+        result = self._run_subprocess(
+            [self.executable, base_name],
+            cwd=work_dir,
         )
-
-        if result.returncode != 0:
-            error_msg = f"Scooter failed with return code {result.returncode}\n"
-            error_msg += f"stdout: {result.stdout}\n"
-            error_msg += f"stderr: {result.stderr}"
-            raise RuntimeError(error_msg)
-
         if self.verbose and result.stdout:
             self._log(f"Scooter output:\n{result.stdout}", level='debug')
+
+    def _run_fields(self, base_name: str, work_dir: Path):
+        """Execute ``fields.exe`` to transform ``<base>.grn`` -> ``<base>.shd``."""
+        fields_exe = self._get_fields_executable()
+        if fields_exe is None:
+            # Caller is expected to check availability before invoking this.
+            from uacpy.core.exceptions import ExecutableNotFoundError
+            raise ExecutableNotFoundError(self.model_name, 'fields.exe')
+        result = self._run_subprocess(
+            [fields_exe, base_name],
+            cwd=work_dir,
+        )
+        if self.verbose and result.stdout:
+            self._log(f"fields.exe output:\n{result.stdout}", level='debug')

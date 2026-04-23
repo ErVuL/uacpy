@@ -91,15 +91,6 @@ class InvalidDepthError(EnvironmentError):
         self.context = context
 
 
-class InvalidRangeError(EnvironmentError):
-    """Range validation error"""
-
-    def __init__(self, range_value: float, message: str):
-        remediation = "Check that all range values are positive"
-        super().__init__(message, remediation)
-        self.range_value = range_value
-
-
 class UnsupportedFeatureError(UACPYError):
     """Model doesn't support requested feature"""
 
@@ -118,9 +109,4 @@ class UnsupportedFeatureError(UACPYError):
 
 class ConfigurationError(UACPYError):
     """Configuration file errors"""
-    pass
-
-
-class ValidationError(UACPYError):
-    """Input validation errors"""
     pass

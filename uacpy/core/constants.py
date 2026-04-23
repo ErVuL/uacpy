@@ -16,7 +16,6 @@ from typing import Dict
 DEFAULT_SOUND_SPEED = 1500.0  # m/s - typical ocean sound speed
 
 # Transmission loss
-TL_FLOOR_PRESSURE = 1e-20  # Minimum pressure amplitude before log10 (prevents -inf)
 TL_MAX_DB = 200.0  # dB - Maximum TL (deep shadow zone clamp)
 
 # Phase speed search bounds (fraction of c_min / c_max for mode finding)
@@ -29,147 +28,11 @@ DEFAULT_C_MAX = 10000.0  # m/s - above fastest expected compressional speed
 
 
 # ==============================================================================
-# RUN TYPE ENUMS
+# PRESSURE FLOOR
 # ==============================================================================
 
-class RunType(Enum):
-    """
-    Acoustic model run types
-
-    Provides unified enum with backward compatibility for string codes.
-    """
-    COHERENT_TL = 'C'           # Coherent transmission loss
-    INCOHERENT_TL = 'I'         # Incoherent (averaged) TL
-    SEMICOHERENT_TL = 'S'       # Semi-coherent TL
-    ARRIVALS = 'A'              # Arrival structure
-    EIGENRAYS = 'E'             # Eigenray paths
-    RAYS = 'R'                  # Ray trace
-
-    @classmethod
-    def from_string(cls, value: str) -> 'RunType':
-        """
-        Convert string code to RunType enum
-
-        Parameters
-        ----------
-        value : str
-            Run type code ('C', 'I', 'S', 'A', 'E', 'R') or full name
-
-        Returns
-        -------
-        RunType
-            Corresponding enum value
-
-        Examples
-        --------
-        >>> RunType.from_string('C')
-        <RunType.COHERENT_TL: 'C'>
-        >>> RunType.from_string('coherent_tl')
-        <RunType.COHERENT_TL: 'C'>
-        """
-        if isinstance(value, RunType):
-            return value
-
-        # Try direct value match (e.g., 'C')
-        for rt in cls:
-            if rt.value == value.upper():
-                return rt
-
-        # Try name match (e.g., 'coherent_tl' or 'COHERENT_TL')
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(
-                f"Invalid run type: {value}. "
-                f"Valid options: {[rt.value for rt in cls]} or {[rt.name for rt in cls]}"
-            )
-
-    def to_char(self) -> str:
-        """Get single-character code for Acoustics Toolbox"""
-        return self.value
-
-
-class BeamType(Enum):
-    """
-    Bellhop beam types
-
-    Different beam tracing algorithms with varying accuracy/speed tradeoffs.
-    """
-    GAUSSIAN = 'B'              # Gaussian beams (recommended, stable)
-    RAY_CENTERED = 'R'          # Ray-centered beams
-    CARTESIAN = 'C'             # Cartesian beams
-    GEOMETRIC_RAY = 'b'         # Geometric Gaussian beams (ray-centered)
-    GEOMETRIC_HAT_RAY = 'g'     # Geometric hat beams (ray-centered)
-    GEOMETRIC_HAT_CART = 'G'    # Geometric hat beams (Cartesian)
-    SIMPLE_GAUSSIAN = 'S'       # Simple Gaussian beams
-
-    @classmethod
-    def from_string(cls, value: str) -> 'BeamType':
-        """Convert string code to BeamType enum"""
-        if isinstance(value, BeamType):
-            return value
-
-        # Try direct value match
-        for bt in cls:
-            if bt.value == value:  # Case-sensitive for beam types
-                return bt
-
-        # Try name match
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(
-                f"Invalid beam type: {value}. "
-                f"Valid options: {[bt.value for bt in cls]}"
-            )
-
-    def to_char(self) -> str:
-        """Get single-character code for Bellhop"""
-        return self.value
-
-
-class SourceType(Enum):
-    """Bellhop source types"""
-    POINT = 'R'                 # Point source (cylindrical spreading)
-    LINE = 'X'                  # Line source (Cartesian)
-
-    @classmethod
-    def from_string(cls, value: str) -> 'SourceType':
-        """Convert string to SourceType enum"""
-        if isinstance(value, SourceType):
-            return value
-        for st in cls:
-            if st.value == value.upper():
-                return st
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(f"Invalid source type: {value}")
-
-    def to_char(self) -> str:
-        return self.value
-
-
-class GridType(Enum):
-    """Receiver grid types"""
-    RECTILINEAR = 'R'          # Rectilinear grid (Rr x Rz)
-    IRREGULAR = 'I'            # Irregular grid (Rr(i), Rz(i))
-
-    @classmethod
-    def from_string(cls, value: str) -> 'GridType':
-        """Convert string to GridType enum"""
-        if isinstance(value, GridType):
-            return value
-        for gt in cls:
-            if gt.value == value.upper():
-                return gt
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(f"Invalid grid type: {value}")
-
-    def to_char(self) -> str:
-        return self.value
+# Single floor used whenever we take 20*log10(|p|).
+PRESSURE_FLOOR = 1e-30
 
 
 # ==============================================================================
@@ -255,6 +118,7 @@ class BoundaryType(Enum):
     VACUUM = 'vacuum'           # Pressure-release (free surface)
     RIGID = 'rigid'             # Rigid boundary
     HALF_SPACE = 'half-space'   # Acousto-elastic half-space
+    GRAIN_SIZE = 'grain-size'   # Sediment parameters derived from grain size (phi)
     FILE = 'file'               # Reflection coefficients from file
     PRECALC = 'precalc'         # Pre-calculated reflection data
 
@@ -268,6 +132,8 @@ class BoundaryType(Enum):
         value_lower = value.lower()
         if value_lower in ['halfspace', 'elastic', 'half-space', 'a']:
             return cls.HALF_SPACE
+        if value_lower in ['grain-size', 'grainsize', 'grain_size', 'g']:
+            return cls.GRAIN_SIZE
 
         # Try standard conversion
         try:
@@ -285,12 +151,13 @@ class BoundaryType(Enum):
         Returns
         -------
         str
-            Single character: 'V', 'R', 'A', 'F', or 'P'
+            Single character: 'V', 'R', 'A', 'G', 'F', or 'P'
         """
         mapping = {
             BoundaryType.VACUUM: 'V',
             BoundaryType.RIGID: 'R',
             BoundaryType.HALF_SPACE: 'A',
+            BoundaryType.GRAIN_SIZE: 'G',
             BoundaryType.FILE: 'F',
             BoundaryType.PRECALC: 'P',
         }

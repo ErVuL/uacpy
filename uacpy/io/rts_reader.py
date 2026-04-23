@@ -24,7 +24,6 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     rts_data : dict
         Dictionary containing:
         - 'title': Run title
-        - 'freq': Reference frequency in Hz (placeholder)
         - 'dt': Time step in seconds
         - 'nt': Number of time samples
         - 'nr': Number of ranges/depths
@@ -35,50 +34,66 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     Notes
     -----
     SPARC outputs time-domain pressure fields which must be FFT'd
-    to extract frequency-domain transmission loss.
+    to extract frequency-domain transmission loss. The RTS file does
+    NOT store the analysis frequency; callers must pass it explicitly
+    to :func:`rts_to_tl`.
 
-    File format is Fortran ASCII (FORMATTED).
-    Line 1: Title (in quotes)
-    Line 2: NRr/NRz, then range/depth values
-    Subsequent lines: time, then pressure values (12G15.6 format)
+    File format is Fortran ASCII (FORMATTED), written by SPARC's output
+    routine (``Scooter/sparc.f90``):
+
+    - Line 1: Title, enclosed in single quotes.
+    - Subsequent whitespace-separated token stream:
+        * token 0: NRr (or NRz in vertical-array mode), an integer.
+        * tokens 1..NRr: range (or depth) values in metres.
+        * then repeating blocks of ``1 + NRr`` tokens:
+          ``t, p(r_1, t), ..., p(r_NRr, t)``.
+
+    Fortran writes these with ``12G15.6`` formatting, so the tokens wrap
+    to a new line every 12 values. The parser tokenises the whole stream
+    and is therefore insensitive to line wrapping.
     """
     filepath = Path(filepath)
 
+    # Tokenize the entire file. Fortran's 12G15.6 format wraps at 12
+    # values per line, so NRr > 12 causes the range vector to span
+    # multiple lines. Flattening the whole stream and walking token by
+    # token makes parsing independent of line wrapping.
     with open(filepath, "r") as f:
-        # Line 1: Title
         line1 = f.readline().strip()
-        # Remove surrounding quotes
         if line1.startswith("'") and line1.endswith("'"):
             title = line1[1:-1]
         else:
             title = line1
 
-        # Line 2: Nr and range/depth values
-        line2 = f.readline().strip().split()
-        nr = int(line2[0])
-        ranges = np.array([float(x) for x in line2[1:nr+1]])
-
-        # Read all time series data
-        # Note: Fortran format 12G15.6 means 12 values per line,
-        # so data may wrap across multiple lines
-        time_list = []
-        pressure_list = []
-
-        all_values = []
+        # Read remaining tokens as a flat stream.
+        raw_tokens = []
         for line in f:
-            values = [float(x) for x in line.strip().split()]
-            all_values.extend(values)
+            raw_tokens.extend(line.strip().split())
 
-        # Each time step has: 1 time value + nr pressure values
-        values_per_timestep = 1 + nr
-        nt = len(all_values) // values_per_timestep
+    if not raw_tokens:
+        raise ValueError(f"RTS file {filepath} appears empty after the title line")
 
-        for i in range(nt):
-            start_idx = i * values_per_timestep
-            time_list.append(all_values[start_idx])
-            pressure_list.append(all_values[start_idx+1:start_idx+1+nr])
+    # First token is NRr/NRz, then exactly NRr range/depth floats.
+    nr = int(raw_tokens[0])
+    if len(raw_tokens) < 1 + nr:
+        raise ValueError(
+            f"RTS file {filepath} truncated: expected {nr} range/depth values, "
+            f"only {len(raw_tokens) - 1} tokens available after count."
+        )
+    ranges = np.array([float(x) for x in raw_tokens[1:1 + nr]])
 
-    nt = len(time_list)
+    # Remaining tokens are time-series records: (1 time + nr pressures) per step.
+    rest = raw_tokens[1 + nr:]
+    values_per_timestep = 1 + nr
+    nt = len(rest) // values_per_timestep
+
+    time_list = []
+    pressure_list = []
+    for i in range(nt):
+        start_idx = i * values_per_timestep
+        time_list.append(float(rest[start_idx]))
+        pressure_list.append([float(x) for x in rest[start_idx + 1:start_idx + 1 + nr]])
+
     time = np.array(time_list)
     p = np.array(pressure_list)  # shape (nt, nr)
 
@@ -88,12 +103,8 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     else:
         dt = 0.0
 
-    # Frequency is not stored in RTS file - use placeholder
-    freq = 0.0
-
     return {
         "title": title,
-        "freq": freq,  # Not available in RTS file
         "dt": dt,
         "nt": nt,
         "nr": nr,

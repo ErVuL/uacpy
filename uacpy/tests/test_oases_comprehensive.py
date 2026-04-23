@@ -15,11 +15,9 @@ These models were previously minimally tested despite being fully implemented.
 
 import pytest
 import numpy as np
-from pathlib import Path
 
 pytestmark = pytest.mark.requires_oases
 
-import uacpy
 from uacpy.models import OAST, OASN, OASR, OASP, OASES
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 from uacpy.core.exceptions import ExecutableNotFoundError
@@ -143,12 +141,12 @@ class TestOASN:
         assert oasn.model_name == 'OASN'
 
     @pytest.mark.requires_binary
-    @pytest.mark.xfail(reason="OASN mode extraction is experimental - XSM format parsing not yet implemented")
     def test_oasn_compute_modes(self, oasn_env, source, receiver):
         """Test OASN mode computation
 
-        Note: OASN creates .xsm files but mode shape extraction is experimental.
-        For production normal mode analysis, use Kraken instead.
+        OASN's primary output is covariance matrices (.xsm); read_oasn_covariance
+        is implemented in uacpy.io. This test verifies the high-level
+        `compute_modes` workflow succeeds and returns populated metadata.
         """
         try:
             oasn = OASN(verbose=False)

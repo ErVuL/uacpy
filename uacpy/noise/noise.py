@@ -702,7 +702,7 @@ def compute_ambient_noise(
         freq = np.asarray(freq)
 
     if model_configs is None:
-        # Default configuration for backward compatibility
+        # Default model mix used when the caller doesn't supply one.
         model_configs = [
             ModelConfig("mellen", "thermal", thermal_noise_mellen, {}),
             ModelConfig("urick", "turbulence", turbulence_noise_urick, {}),

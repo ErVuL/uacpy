@@ -1,10 +1,13 @@
 """
-Professional matplotlib styling for UACPY visualizations
+Professional matplotlib styling for UACPY visualizations.
+
+Styles are applied automatically when ``uacpy.visualization`` is imported
+(see ``visualization/__init__.py``). Callers can re-apply them with
+``apply_professional_style()`` after tweaking their own rcParams, or
+revert to matplotlib defaults with ``matplotlib.rcdefaults()``.
 """
-import matplotlib.pyplot as plt
 import matplotlib as mpl
 from typing import Optional
-import numpy as np
 
 
 # Professional color schemes
@@ -258,35 +261,3 @@ def create_professional_colorbar(fig, im, ax, label: str = ''):
     return cbar
 
 
-def add_watermark(ax, text: str = 'UACPY', alpha: float = 0.05,
-                  position: str = 'bottom_right'):
-    """
-    Add subtle watermark to plot
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to add watermark to
-    text : str, optional
-        Watermark text
-    alpha : float, optional
-        Transparency (0-1)
-    position : str, optional
-        Position: 'bottom_right', 'bottom_left', 'center'
-    """
-    positions = {
-        'bottom_right': (0.95, 0.05),
-        'bottom_left': (0.05, 0.05),
-        'center': (0.5, 0.5),
-    }
-
-    x, y = positions.get(position, (0.95, 0.05))
-    ha = 'right' if 'right' in position else 'left' if 'left' in position else 'center'
-
-    ax.text(x, y, text, transform=ax.transAxes,
-            fontsize=24, color='gray', alpha=alpha,
-            ha=ha, va='bottom', fontweight='bold')
-
-
-# Apply professional style by default when module is imported
-apply_professional_style()

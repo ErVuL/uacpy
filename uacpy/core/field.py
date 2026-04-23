@@ -5,7 +5,7 @@ Field class for storing and manipulating acoustic field results
 import numpy as np
 from typing import Optional, Dict, Any, Tuple
 
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_FLOOR_PRESSURE
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
 
 
 class Field:
@@ -50,7 +50,8 @@ class Field:
     --------
     Access transmission loss field:
 
-    >>> tl = field.data  # Shape: (n_depths, n_ranges)
+    >>> tl = field.data  # Shape: (n_depths, n_ranges) for 2D,
+    ...                  # (n_depths, n_freqs, n_ranges) for broadband
     >>> tl_at_1km = field.get_at_range(1000)
 
     Get field at specific location:
@@ -128,7 +129,7 @@ class Field:
         value : float
             Interpolated field value
         """
-        if self.field_type in ['rays', 'arrivals', 'eigenrays']:
+        if self.field_type in ['rays', 'arrivals', 'eigenrays', 'time_series']:
             raise ValueError(f"get_value not supported for field_type='{self.field_type}'")
 
         # Find nearest indices
@@ -139,7 +140,8 @@ class Field:
             return self.data[d_idx, r_idx]
         elif len(self.data.shape) == 3 and frequency is not None:
             f_idx = np.argmin(np.abs(self.frequencies - frequency))
-            return self.data[f_idx, d_idx, r_idx]
+            # data shape is (n_depths, n_freqs, n_ranges) per class docstring
+            return self.data[d_idx, f_idx, r_idx]
         else:
             raise ValueError("Frequency required for multi-frequency field")
 
@@ -155,13 +157,16 @@ class Field:
         Returns
         -------
         values : ndarray
-            Field values at all depths at this range
+            Field values at all depths at this range.
+            Shape: (n_depths,) for 2D fields; (n_depths, n_freqs) for 3D
+            broadband fields.
         """
         r_idx = np.argmin(np.abs(self.ranges - range_m))
 
         if len(self.data.shape) == 2:
             return self.data[:, r_idx]
         elif len(self.data.shape) == 3:
+            # data shape is (n_depths, n_freqs, n_ranges)
             return self.data[:, :, r_idx]
         else:
             raise ValueError("Unsupported data shape")
@@ -178,14 +183,17 @@ class Field:
         Returns
         -------
         values : ndarray
-            Field values at all ranges at this depth
+            Field values at all ranges at this depth.
+            Shape: (n_ranges,) for 2D fields; (n_freqs, n_ranges) for 3D
+            broadband fields.
         """
         d_idx = np.argmin(np.abs(self.depths - depth))
 
         if len(self.data.shape) == 2:
             return self.data[d_idx, :]
         elif len(self.data.shape) == 3:
-            return self.data[:, d_idx, :]
+            # data shape is (n_depths, n_freqs, n_ranges)
+            return self.data[d_idx, :, :]
         else:
             raise ValueError("Unsupported data shape")
 
@@ -206,7 +214,7 @@ class Field:
             # Convert complex pressure to dB with proper handling of shadow zones
             p_abs = np.abs(self.data)
             # Set floor to prevent extreme TL values in shadow zones
-            p_abs = np.maximum(p_abs, TL_FLOOR_PRESSURE)
+            p_abs = np.maximum(p_abs, PRESSURE_FLOOR)
             data_db = 20 * np.log10(p_abs)
             # Note: This is pressure level in dB, not TL
             # For TL (transmission loss), use negative: TL = -data_db
@@ -480,7 +488,7 @@ class Field:
         max_depth : float
             Depth of maximum
         """
-        if self.field_type in ['rays', 'arrivals', 'eigenrays']:
+        if self.field_type in ['rays', 'arrivals', 'eigenrays', 'time_series']:
             raise ValueError(f"get_max not supported for field_type='{self.field_type}'")
 
         if len(self.data.shape) == 2:

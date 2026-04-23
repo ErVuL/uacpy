@@ -11,12 +11,12 @@ OBJECTIVE:
 COMPLEXITY LEVEL: ⭐⭐⭐ (3/5) - Advanced Model Features
 
 FEATURES DEMONSTRATED:
-    ✓ Coherent TL (run_type='C') - Phase-preserving transmission loss
-    ✓ Incoherent TL (run_type='I') - Phase-averaged transmission loss
-    ✓ Semi-coherent TL (run_type='S') - Hybrid coherent/incoherent
-    ✓ Ray tracing (run_type='R') - Ray path visualization
-    ✓ Eigenrays (run_type='E') - Specific receiver rays
-    ✓ Arrivals (run_type='A') - Arrival time/amplitude structure
+    ✓ Coherent TL (run_mode=RunMode.COHERENT_TL) - Phase-preserving transmission loss
+    ✓ Incoherent TL (run_mode=RunMode.INCOHERENT_TL) - Phase-averaged transmission loss
+    ✓ Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL) - Hybrid coherent/incoherent
+    ✓ Ray tracing (run_mode=RunMode.RAYS) - Ray path visualization
+    ✓ Eigenrays (run_mode=RunMode.EIGENRAYS) - Specific receiver rays
+    ✓ Arrivals (run_mode=RunMode.ARRIVALS) - Arrival time/amplitude structure
     ✓ Ray file reading and visualization
     ✓ Arrival structure analysis
 
@@ -95,10 +95,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bellhop
+from uacpy.models import RunMode
 from plotting_utils import plot_bathymetry_overlay
 import os
 
@@ -138,19 +142,19 @@ def scenario_a_tl_modes():
     # Coherent TL
     print("    • Coherent TL...", end=" ", flush=True)
     bellhop_coherent = Bellhop(verbose=False)
-    result_coherent = bellhop_coherent.run(env, source, receiver, run_type='C')
+    result_coherent = bellhop_coherent.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
     print("✓")
 
     # Incoherent TL
     print("    • Incoherent TL...", end=" ", flush=True)
     bellhop_incoherent = Bellhop(verbose=False)
-    result_incoherent = bellhop_incoherent.run(env, source, receiver, run_type='I')
+    result_incoherent = bellhop_incoherent.run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
     print("✓")
 
     # Semi-coherent TL
     print("    • Semi-coherent TL...", end=" ", flush=True)
     bellhop_semicoherent = Bellhop(verbose=False)
-    result_semicoherent = bellhop_semicoherent.run(env, source, receiver, run_type='S')
+    result_semicoherent = bellhop_semicoherent.run(env, source, receiver, run_mode=RunMode.SEMICOHERENT_TL)
     print("✓")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -171,7 +175,7 @@ def scenario_a_tl_modes():
     ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Coherent TL (run_type=\'C\')', fontweight='bold', fontsize=12)
+    ax.set_title('Coherent TL (run_mode=RunMode.COHERENT_TL)', fontweight='bold', fontsize=12)
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     plt.colorbar(im, ax=ax, label='TL (dB)')
@@ -186,7 +190,7 @@ def scenario_a_tl_modes():
     ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Incoherent TL (run_type=\'I\')', fontweight='bold', fontsize=12)
+    ax.set_title('Incoherent TL (run_mode=RunMode.INCOHERENT_TL)', fontweight='bold', fontsize=12)
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     plt.colorbar(im, ax=ax, label='TL (dB)')
@@ -201,7 +205,7 @@ def scenario_a_tl_modes():
     ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Semi-coherent TL (run_type=\'S\')', fontweight='bold', fontsize=12)
+    ax.set_title('Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)', fontweight='bold', fontsize=12)
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     plt.colorbar(im, ax=ax, label='TL (dB)')
@@ -235,8 +239,7 @@ def scenario_a_tl_modes():
         ax.set_ylim([tl_min, tl_max])
 
     plt.tight_layout()
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_16a_tl_modes.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_16a_tl_modes.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"\n  TL statistics at channel axis (1000m depth):")
@@ -259,7 +262,7 @@ def scenario_b_ray_tracing():
     Scenario B: Ray tracing and visualization.
     """
     print("\n" + "="*80)
-    print("SCENARIO B: Ray Tracing (run_type='R')")
+    print("SCENARIO B: Ray Tracing (run_mode=RunMode.RAYS)")
     print("="*80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -290,7 +293,7 @@ def scenario_b_ray_tracing():
     print("    • Computing ray paths...", end=" ", flush=True)
 
     bellhop = Bellhop(verbose=False)
-    result = bellhop.run(env, source, receiver, run_type='R')
+    result = bellhop.run(env, source, receiver, run_mode=RunMode.RAYS)
 
     print("✓")
 
@@ -343,7 +346,7 @@ def scenario_b_ray_tracing():
     ax.set_ylim([2000, 0])
 
     plt.tight_layout()
-    plt.savefig('output/example_16b_ray_tracing.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_16b_ray_tracing.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"\n  Ray tracing parameters:")
@@ -360,7 +363,7 @@ def scenario_c_eigenrays_arrivals():
     Scenario C: Eigenrays and arrival structure analysis.
     """
     print("\n" + "="*80)
-    print("SCENARIO C: Eigenrays & Arrivals (run_type='E' and 'A')")
+    print("SCENARIO C: Eigenrays & Arrivals (run_mode=RunMode.EIGENRAYS and 'A')")
     print("="*80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -392,7 +395,7 @@ def scenario_c_eigenrays_arrivals():
     print("    • Computing eigenrays...", end=" ", flush=True)
 
     bellhop_eigen = Bellhop(verbose=False)
-    result_eigen = bellhop_eigen.run(env, source, receiver, run_type='E')
+    result_eigen = bellhop_eigen.run(env, source, receiver, run_mode=RunMode.EIGENRAYS)
 
     print("✓")
 
@@ -402,7 +405,7 @@ def scenario_c_eigenrays_arrivals():
     print("    • Computing arrival structure...", end=" ", flush=True)
     try:
         bellhop_arr = Bellhop(verbose=False)
-        result_arr = bellhop_arr.run(env, source, receiver, run_type='A')
+        result_arr = bellhop_arr.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
         print("✓")
     except (NotImplementedError, Exception) as e:
         print(f"⚠ (ASCII format not yet supported - skipped)")
@@ -513,7 +516,7 @@ def scenario_c_eigenrays_arrivals():
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
     plt.tight_layout()
-    plt.savefig('output/example_16c_eigenrays_arrivals.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_16c_eigenrays_arrivals.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"\n  Analysis complete:")

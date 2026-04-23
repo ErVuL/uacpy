@@ -25,7 +25,10 @@ FEATURES DEMONSTRATED:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -45,10 +48,6 @@ def main():
     print("=" * 80)
     print("COMPREHENSIVE PLOTTING FEATURES DEMONSTRATION")
     print("=" * 80)
-
-    # Ensure output directory exists
-    import os
-    os.makedirs('output', exist_ok=True)
 
     # Apply professional style
     apply_professional_style(dpi=150)
@@ -99,12 +98,12 @@ def main():
         fig1, ax1, cbar1 = plot_transmission_loss(
             result_tl,
             env_tl,
-            contours=[70, 80, 90],  # NEW: P1-5 contour overlay
-            show_colorbar=True      # NEW: P1-4 colorbar control
+            contours=[70, 80, 90],  #P1-5 contour overlay
+            show_colorbar=True      #P1-4 colorbar control
         )
         ax1.set_title('P0-2: Auto TL Limits + P1-5: Contour Overlay\n'
                      'Blue=good, Red=poor (P0-1: jet_r colormap)')
-        plt.savefig('output/example_21_tl_auto_limits_contours.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_21_tl_auto_limits_contours.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: example_21_tl_auto_limits_contours.png")
         print(f"    - TL limits auto-computed and rounded to 10 dB")
@@ -148,11 +147,11 @@ def main():
         fig2, ax2 = plot_rays(
             rays_result,
             env_rays,
-            color_by_bounces=True,  # NEW: P0-3 ray color-coding
+            color_by_bounces=True,  #P0-3 ray color-coding
         )
         ax2.set_title('P0-3: Ray Color-Coding by Bounce Type\n'
                      'Red=direct, Green=surface, Blue=bottom, Black=both')
-        plt.savefig('output/example_21_ray_color_coding.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_21_ray_color_coding.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: example_21_ray_color_coding.png")
         print("    - Rays colored by bounce type (Acoustic Toolbox standard)")
@@ -191,12 +190,12 @@ def main():
     # Test P1-1: Shear wave plotting
     fig3, ax3 = plot_ssp(
         env_elastic,
-        show_shear=True,       # NEW: P1-1 shear wave plotting
-        show_data_points=True  # NEW: show data points as markers
+        show_shear=True,       #P1-1 shear wave plotting
+        show_data_points=True  #show data points as markers
     )
     ax3.set_title('P1-1: SSP with Shear Wave Visualization\n'
                  'Blue=compression, Red=shear (Acoustic Toolbox standard)')
-    plt.savefig('output/example_21_ssp_shear_waves.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_21_ssp_shear_waves.png', dpi=150, bbox_inches='tight')
     plt.close()
     print("  ✓ Saved: example_21_ssp_shear_waves.png")
     print("    - Compression (blue) and shear (red) wave speeds shown")
@@ -242,12 +241,12 @@ def main():
         # Test P1-2: Mode imaginary parts (dashed lines)
         fig4, (ax4a, ax4b) = plot_modes(
             modes_result,
-            show_imaginary=True,  # NEW: P1-2 show imaginary parts as dashed lines
+            show_imaginary=True,  #P1-2 show imaginary parts as dashed lines
         )
         fig4.suptitle('P1-2: Mode Shapes with Imaginary Parts\n'
                      'Solid=real, Dashed=imaginary (Acoustic Toolbox standard)',
                      fontsize=14, fontweight='bold')
-        plt.savefig('output/example_21_mode_imaginary_parts.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_21_mode_imaginary_parts.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: example_21_mode_imaginary_parts.png")
         print(f"    - Computed {modes_result.metadata['M']} modes")
@@ -268,12 +267,12 @@ def main():
             # Test P1-3: Mode wavenumber complex plot
             fig5, ax5 = plot_mode_wavenumbers(
                 modes_result,
-                annotate_modes=True,    # NEW: P1-3 wavenumber k-plane plot
+                annotate_modes=True,    #P1-3 wavenumber k-plane plot
                 max_annotations=15      # Show first 15 mode numbers
             )
             ax5.set_title('P1-3: Mode Wavenumbers in Complex k-Plane\n'
                          'Real(k) vs Imag(k) - Modal structure visualization')
-            plt.savefig('output/example_21_mode_wavenumbers.png', dpi=150, bbox_inches='tight')
+            plt.savefig(OUTPUT_DIR / 'example_21_mode_wavenumbers.png', dpi=150, bbox_inches='tight')
             plt.close()
             print("  ✓ Saved: example_21_mode_wavenumbers.png")
             print("    - Complex k-plane scatter plot (Acoustic Toolbox standard)")
@@ -314,7 +313,7 @@ def main():
             result_50,
             env_tl,
             ax=axes6[0],
-            show_colorbar=False,  # NEW: P1-4 disable colorbar for subplots
+            show_colorbar=False,  #P1-4 disable colorbar for subplots
             contours=[70, 85],    # With contours
         )
         ax6a.set_title('50 Hz', fontsize=12, fontweight='bold')
@@ -324,7 +323,7 @@ def main():
             result_200,
             env_tl,
             ax=axes6[1],
-            show_colorbar=False,  # NEW: P1-4 disable colorbar for subplots
+            show_colorbar=False,  #P1-4 disable colorbar for subplots
             contours=[70, 85],    # With contours
         )
         ax6b.set_title('200 Hz', fontsize=12, fontweight='bold')
@@ -344,7 +343,7 @@ def main():
                      'Frequency Comparison: 50 Hz vs 200 Hz',
                      fontsize=14, fontweight='bold')
 
-        plt.savefig('output/example_21_subplot_colorbar_control.png', dpi=150, bbox_inches='tight')
+        plt.savefig(OUTPUT_DIR / 'example_21_subplot_colorbar_control.png', dpi=150, bbox_inches='tight')
         plt.close()
         print("  ✓ Saved: example_21_subplot_colorbar_control.png")
         print("    - Multiple TL plots in subplots with shared colorbar")

@@ -15,8 +15,12 @@ from uacpy.models import SPARC
 
 
 @pytest.fixture
-def simple_env():
-    """Simple isovelocity environment for testing"""
+def sparc_simple_env():
+    """Simple isovelocity environment configured for SPARC (vacuum bottom).
+
+    Renamed from ``simple_env`` to avoid shadowing the shared conftest fixture,
+    which uses a default half-space bottom that SPARC cannot handle.
+    """
     env = Environment(
         name="Test Environment",
         depth=100.0,
@@ -46,7 +50,7 @@ class TestSPARCOutputModes:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_horizontal_array_mode(self, simple_env, source_50hz, receiver_grid):
+    def test_sparc_horizontal_array_mode(self, sparc_simple_env, source_50hz, receiver_grid):
         """
         Test SPARC horizontal array mode ('R')
 
@@ -57,7 +61,7 @@ class TestSPARCOutputModes:
 
             # Run with horizontal array mode (default)
             result = sparc.run(
-                simple_env,
+                sparc_simple_env,
                 source_50hz,
                 receiver_grid,
             )
@@ -74,7 +78,7 @@ class TestSPARCOutputModes:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_vertical_array_mode(self, simple_env, source_50hz):
+    def test_sparc_vertical_array_mode(self, sparc_simple_env, source_50hz):
         """
         Test SPARC vertical array mode ('D')
 
@@ -90,7 +94,7 @@ class TestSPARCOutputModes:
 
             # Run with vertical array mode
             result = sparc.run(
-                simple_env,
+                sparc_simple_env,
                 source_50hz,
                 receiver,
             )
@@ -108,7 +112,7 @@ class TestSPARCOutputModes:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_snapshot_mode(self, simple_env, source_50hz, receiver_grid):
+    def test_sparc_snapshot_mode(self, sparc_simple_env, source_50hz, receiver_grid):
         """
         Test SPARC snapshot mode ('S')
 
@@ -119,7 +123,7 @@ class TestSPARCOutputModes:
 
             # Run with snapshot mode
             result = sparc.run(
-                simple_env,
+                sparc_simple_env,
                 source_50hz,
                 receiver_grid,
             )
@@ -142,7 +146,7 @@ class TestSPARCModeComparison:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_horizontal_vs_vertical_consistency(self, simple_env, source_50hz):
+    def test_horizontal_vs_vertical_consistency(self, sparc_simple_env, source_50hz):
         """
         Test that horizontal and vertical modes give consistent results
 
@@ -161,9 +165,9 @@ class TestSPARCModeComparison:
 
             # Run both modes
             sparc_h = SPARC(verbose=False, output_mode='R')
-            result_h = sparc_h.run(simple_env, source_50hz, receiver_h)
+            result_h = sparc_h.run(sparc_simple_env, source_50hz, receiver_h)
             sparc_v = SPARC(verbose=False, output_mode='D')
-            result_v = sparc_v.run(simple_env, source_50hz, receiver_v)
+            result_v = sparc_v.run(sparc_simple_env, source_50hz, receiver_v)
 
             # Check shapes match
             assert result_h.data.shape == result_v.data.shape
@@ -185,7 +189,7 @@ class TestSPARCModeComparison:
 class TestSPARCErrorHandling:
     """Test SPARC error handling for output modes"""
 
-    def test_sparc_invalid_output_mode(self, simple_env, source_50hz, receiver_grid):
+    def test_sparc_invalid_output_mode(self, sparc_simple_env, source_50hz, receiver_grid):
         """Test error handling for invalid output mode"""
         with pytest.raises(ValueError, match="Invalid output mode"):
             SPARC(output_mode='X')  # Invalid mode
@@ -195,7 +199,7 @@ class TestSPARCErrorHandling:
         """Test that halfspace bottom generates warning"""
         try:
             env = Environment(name="Test", depth=100, sound_speed=1500)
-            env.bottom.acoustic_type = 'halfspace'  # SPARC doesn't support this
+            env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
 
             sparc = SPARC(verbose=True)
 
@@ -214,7 +218,7 @@ class TestSPARCPerformance:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_depth_scaling(self, simple_env, source_50hz):
+    def test_sparc_depth_scaling(self, sparc_simple_env, source_50hz):
         """
         Test that computation time scales with number of depths
 
@@ -233,7 +237,7 @@ class TestSPARCPerformance:
                 receiver = Receiver(depths=depths, ranges=ranges)
 
                 start = time.time()
-                result = sparc.run(simple_env, source_50hz, receiver)
+                result = sparc.run(sparc_simple_env, source_50hz, receiver)
                 elapsed = time.time() - start
 
                 times.append(elapsed)

@@ -25,11 +25,22 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
     flp_data : dict
         Dictionary containing:
         - 'title': str - Title from file
-        - 'opt': str - Options string
-          - opt[0:2]: Output type ('R'=pressure, 'N'=particle velocity, etc.)
-          - opt[2]: Source beam pattern ('O'=omni, '*'=from file)
-          - opt[3]: Coherence ('C'=coherent, 'I'=incoherent)
-        - 'comp': str - Component selector ('P'=pressure, 'V'=vertical, etc.)
+        - 'opt': str - 4-character field.exe option string. Column
+          semantics per AT ``field.f90:70-99`` / ``ReadModes.f90``:
+
+          * ``opt[0]`` (source type):
+            'R' = cylindrical point source (pressure),
+            'X' = Cartesian line source,
+            'S' = scaled-cylindrical point source.
+          * ``opt[1]`` (profile mode for NProf > 1):
+            'C' = coupled modes, 'A' = adiabatic.
+          * ``opt[2]`` (elastic component selector / SBP flag):
+            'P' = acoustic pressure (default), 'H' = horizontal velocity,
+            'V' = vertical velocity, 'T' = tangential stress,
+            'N' = normal stress, or '*' = apply .sbp beam pattern.
+          * ``opt[3]`` (mode summation):
+            'C' = coherent, 'I' = incoherent.
+        - 'comp': str - Component selector (same as ``opt[2]``).
         - 'M_limit': int - Maximum number of modes to use
         - 'N_prof': int - Number of profiles
         - 'r_prof': ndarray - Profile ranges in meters
@@ -91,14 +102,20 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
             opt = opt[start:end]
         print(f"Options: {opt}")
 
-        # Set defaults for options
+        # Fill missing option columns with reasonable placeholders.
+        # pos 3 is the elastic-component / beam-pattern column; we fill
+        # it with ' ' (no beam pattern, no elastic component info) rather
+        # than fabricating a default. pos 4 defaults to 'C' (coherent).
         if len(opt) <= 2:
-            opt += "O"  # Default: omni source
+            opt += " "
         if len(opt) <= 3:
-            opt += "C"  # Default: coherent TL
+            opt += "C"
 
-        # Select component
-        comp = opt[2] if len(opt) >= 3 else "P"
+        # Component selector lives in option column 3 (AT
+        # ReadModes.f90:315-324). If the file didn't specify one, return
+        # it verbatim rather than inventing a "P" default that wasn't in
+        # the file — downstream code can distinguish ' ' vs 'P'.
+        comp = opt[2]
 
         # Read MLimit
         M_limit = int(f.readline().strip())
@@ -198,11 +215,12 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
             opt = opt[start:end]
 
         if len(opt) <= 2:
-            opt += "O"
+            opt += " "
         if len(opt) <= 3:
             opt += "C"
 
-        comp = opt[2] if len(opt) >= 3 else "P"
+        # See read_flp: column 3 is the elastic component / SBP flag.
+        comp = opt[2]
 
         # Read MLimit
         M_limit = int(f.readline().strip())

@@ -23,15 +23,10 @@ Date: 2025-11-15
 
 import pytest
 import numpy as np
-import warnings
-from pathlib import Path
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import uacpy
 from uacpy.models import (
-    Bellhop, BellhopCUDA, RAM, Kraken, KrakenField, KrakenC,
+    Bellhop, RAM, Kraken, KrakenField, KrakenC,
     Scooter, SPARC, OAST, OASN, OASR, OASP
 )
 from uacpy.models.base import RunMode
@@ -141,8 +136,12 @@ def high_freq_source():
 
 
 @pytest.fixture
-def receiver_grid():
-    """Standard receiver grid"""
+def receiver_grid_dense():
+    """Denser receiver grid local to this module (20 ranges, 5 depths).
+
+    Renamed from ``receiver_grid`` to avoid shadowing the shared conftest
+    fixture that uses 11 ranges.
+    """
     return uacpy.Receiver(
         depths=np.array([10.0, 30.0, 50.0, 70.0, 90.0]),
         ranges=np.linspace(100, 5000, 20)
@@ -166,10 +165,10 @@ class TestBellhopPhysics:
     """Test Bellhop physical validity and accuracy"""
 
     @pytest.mark.requires_binary
-    def test_bellhop_tl_increases_with_range(self, pekeris_env, mid_freq_source, receiver_grid):
+    def test_bellhop_tl_increases_with_range(self, pekeris_env, mid_freq_source, receiver_grid_dense):
         """TL should increase with range (energy conservation)"""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid)
+        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
         # Average TL over depths at each range
         tl_vs_range = result.data.mean(axis=0)
@@ -183,20 +182,20 @@ class TestBellhopPhysics:
         assert tl_smoothed[-1] > tl_smoothed[0], "TL should increase with range"
 
     @pytest.mark.requires_binary
-    def test_bellhop_no_nan_inf(self, pekeris_env, mid_freq_source, receiver_grid):
+    def test_bellhop_no_nan_inf(self, pekeris_env, mid_freq_source, receiver_grid_dense):
         """Bellhop should not produce NaN or inf values"""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid)
+        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
         assert np.all(np.isfinite(result.data)), "All TL values should be finite"
         assert not np.any(np.isnan(result.data)), "No NaN values"
         assert not np.any(np.isinf(result.data)), "No inf values"
 
     @pytest.mark.requires_binary
-    def test_bellhop_positive_tl(self, pekeris_env, mid_freq_source, receiver_grid):
+    def test_bellhop_positive_tl(self, pekeris_env, mid_freq_source, receiver_grid_dense):
         """TL values should be positive (physical constraint)"""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid)
+        result = bellhop.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
         assert np.all(result.data > 0), "All TL values must be positive"
         assert np.all(result.data < 200), "TL should not exceed 200 dB (sanity check)"
@@ -269,15 +268,15 @@ class TestBellhopPhysics:
         bellhop = Bellhop(verbose=False)
 
         # Coherent TL
-        result_c = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_type='C')
+        result_c = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_mode=RunMode.COHERENT_TL)
         assert result_c.field_type == 'tl'
 
         # Incoherent TL
-        result_i = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_type='I')
+        result_i = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_mode=RunMode.INCOHERENT_TL)
         assert result_i.field_type == 'tl'
 
         # Semi-coherent TL
-        result_s = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_type='S')
+        result_s = bellhop.run(pekeris_env, mid_freq_source, receiver_small, run_mode=RunMode.SEMICOHERENT_TL)
         assert result_s.field_type == 'tl'
 
         # All should produce valid output
@@ -309,11 +308,10 @@ class TestBellhopPhysics:
         )
 
         try:
-            result = bellhop.run(pekeris_env, mid_freq_source, receiver, run_type='R')
+            result = bellhop.run(pekeris_env, mid_freq_source, receiver, run_mode=RunMode.RAYS)
             # Ray output may have different format
             assert result is not None
-        except Exception as e:
-            # Ray tracing may fail if no rays reach receiver
+        except (FileNotFoundError, ExecutableNotFoundError) as e:
             pytest.skip(f"Ray tracing test skipped: {e}")
 
 
@@ -408,13 +406,13 @@ class TestKrakenFieldPhysics:
     """Test KrakenField TL computation from modes"""
 
     @pytest.mark.requires_binary
-    def test_krakenfield_tl_output(self, pekeris_env, mid_freq_source, receiver_grid):
+    def test_krakenfield_tl_output(self, pekeris_env, mid_freq_source, receiver_grid_dense):
         """KrakenField should produce valid TL field"""
         kf = KrakenField(verbose=False)
-        result = kf.compute_tl(pekeris_env, mid_freq_source, receiver_grid)
+        result = kf.compute_tl(pekeris_env, mid_freq_source, receiver_grid_dense)
 
         assert result.field_type == 'tl'
-        assert result.shape == (len(receiver_grid.depths), len(receiver_grid.ranges))
+        assert result.shape == (len(receiver_grid_dense.depths), len(receiver_grid_dense.ranges))
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -535,6 +533,8 @@ class TestSPARCPhysics:
             ranges=np.array([500.0, 1000.0, 2000.0, 5000.0])  # Only 4 ranges
         )
 
+        from uacpy.core.exceptions import ModelExecutionError
+
         try:
             result = sparc.run(pekeris_rigid, mid_freq_source, receiver)
 
@@ -542,18 +542,19 @@ class TestSPARCPhysics:
                 assert result.field_type == 'tl'
                 assert np.all(np.isfinite(result.data))
                 assert result.shape == (1, 4)  # Single depth, 4 ranges
-        except RuntimeError as e:
-            # SPARC may timeout if computation is too expensive
-            if "timed out" in str(e):
-                pytest.skip(f"SPARC computation too expensive, timed out after 30s")
+        except ModelExecutionError as e:
+            # SPARC may timeout if computation is too expensive for the host
+            if "Timed out" in str(e) or "timed out" in str(e):
+                pytest.skip(f"SPARC computation too expensive: {e}")
             else:
                 raise
-        except Exception as e:
+        except (FileNotFoundError, ExecutableNotFoundError) as e:
             pytest.skip(f"SPARC test skipped: {e}")
 
     @pytest.mark.requires_binary
     def test_sparc_rejects_range_dependent(self, sloping_env, mid_freq_source):
-        """SPARC should raise on range-dependent environments (binary hangs)"""
+        """SPARC hangs on range-dependent input; wrapper surfaces ModelExecutionError."""
+        from uacpy.core.exceptions import ModelExecutionError
         sparc = SPARC(verbose=False)
 
         receiver = uacpy.Receiver(
@@ -561,9 +562,7 @@ class TestSPARCPhysics:
             ranges=np.array([1000.0])
         )
 
-        # SPARC binary hangs on range-dependent input (times out),
-        # or the wrapper raises a RuntimeError
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ModelExecutionError):
             sparc.run(sloping_env, mid_freq_source, receiver)
 
 
@@ -584,7 +583,7 @@ class TestScooterPhysics:
 
             assert result.field_type == 'tl'
             assert np.all(np.isfinite(result.data))
-        except Exception as e:
+        except (FileNotFoundError, ExecutableNotFoundError) as e:
             pytest.skip(f"Scooter test skipped: {e}")
 
     @pytest.mark.requires_binary
@@ -604,7 +603,7 @@ class TestScooterPhysics:
             # Both should produce finite results
             assert np.all(np.isfinite(result_low.data))
             assert np.all(np.isfinite(result_high.data))
-        except Exception as e:
+        except (FileNotFoundError, ExecutableNotFoundError) as e:
             pytest.skip(f"Scooter multiplier test skipped: {e}")
 
 
@@ -781,7 +780,7 @@ class TestEdgeCases:
             bellhop = Bellhop(verbose=False)
             result = bellhop.compute_tl(pekeris_env, source, receiver_small)
             assert np.all(np.isfinite(result.data))
-        except Exception:
+        except (FileNotFoundError, ExecutableNotFoundError):
             pytest.skip("Model may not support source at 1m depth")
 
     def test_source_near_bottom(self, pekeris_env, receiver_small):
@@ -792,7 +791,7 @@ class TestEdgeCases:
             bellhop = Bellhop(verbose=False)
             result = bellhop.compute_tl(pekeris_env, source, receiver_small)
             assert np.all(np.isfinite(result.data))
-        except Exception:
+        except (FileNotFoundError, ExecutableNotFoundError):
             pytest.skip("Model may not support source at 99m depth")
 
 

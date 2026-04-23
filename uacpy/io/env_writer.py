@@ -18,6 +18,8 @@ from uacpy.io.bty_writer import write_bty_file
 _SURFACE_TYPE_MAP = {
     "vacuum": "V", "rigid": "R",
     "halfspace": "A", "half-space": "A",
+    "file": "F",
+    "grain-size": "G", "grain_size": "G", "grain": "G",
 }
 
 
@@ -387,28 +389,32 @@ def write_source_beam_pattern(
         Beam angles in degrees, shape (N,)
         Typically from -90 to +90 degrees
     pattern : ndarray
-        Beam pattern amplitude (real), shape (N,)
-        Normalized (typically 0 to 1, with 1 at peak)
+        Beam pattern level in dB relative to peak, shape (N,)
+        (typically 0 dB at peak, negative elsewhere).  Bellhop
+        converts dB -> linear via 10**(SrcBmPat(:,2)/20) at load time
+        (bellhop.f90:132).
 
     Notes
     -----
     File format (.sbp):
     - Line 1: Number of angles
-    - Following lines: angle (degrees), amplitude
+    - Following lines: angle (degrees), level (dB re peak)
 
     Used to specify directional source characteristics.
 
     Examples
     --------
-    >>> # Create Gaussian beam pattern
+    >>> # Create Gaussian beam pattern (levels in dB)
     >>> angles = np.linspace(-90, 90, 181)
     >>> width = 10  # degrees (half-power beamwidth)
-    >>> pattern = np.exp(-(angles**2) / (2 * width**2))
-    >>> write_source_beam_pattern('source.sbp', angles, pattern)
+    >>> # linear -> dB; 0 dB at peak
+    >>> linear = np.exp(-(angles**2) / (2 * width**2))
+    >>> pattern_db = 20 * np.log10(np.clip(linear, 1e-6, None))
+    >>> write_source_beam_pattern('source.sbp', angles, pattern_db)
 
-    >>> # Create omnidirectional source
+    >>> # Create omnidirectional source (0 dB everywhere)
     >>> angles = np.array([-90, 0, 90])
-    >>> pattern = np.array([1.0, 1.0, 1.0])
+    >>> pattern = np.array([0.0, 0.0, 0.0])
     >>> write_source_beam_pattern('omni.sbp', angles, pattern)
     """
     filepath = Path(filepath)

@@ -13,18 +13,15 @@ COMPLEXITY LEVEL: ⭐⭐ (2/5) - Utility Features
 FEATURES DEMONSTRATED:
     ✓ Thorp formula (1967) - Classic, simple
     ✓ Francois-Garrison formula (1982) - Comprehensive, physically-based
-    ✓ Fisher-Simmons formula (1977) - Shallow water corrections
-    ✓ Ainslie-McColm - Simplified modern formula
     ✓ Frequency dependence (10 Hz - 1 MHz)
     ✓ Environmental parameter sensitivity (T, S, pH, depth)
     ✓ Unit conversions (dB/km, dB/m, dB/wavelength, Nepers/m)
-    ✓ AttenuationModel class usage
 
 SCENARIOS:
 
     Scenario A: Model Comparison
     ────────────────────────────
-    - Compare all 4 formulas over full frequency range
+    - Compare Thorp and Francois-Garrison over full frequency range
     - Standard conditions (T=10°C, S=35 ppt, pH=8, depth=100m)
     - Identify applicable frequency ranges
     - Show differences between models
@@ -74,6 +71,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+OUTPUT_DIR = Path(__file__).parent / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from uacpy.core.attenuation import (
@@ -82,7 +82,6 @@ from uacpy.core.attenuation import (
     convert_attenuation_units
 )
 from uacpy.core.acoustics import soundspeed
-import os
 
 
 def scenario_a_model_comparison():
@@ -205,11 +204,10 @@ def scenario_a_model_comparison():
             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
 
     plt.tight_layout()
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_17a_model_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_17a_model_comparison.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("\n✓ Generated: output/example_17a_model_comparison.png")
+    print(f"\n✓ Generated: {OUTPUT_DIR / 'example_17a_model_comparison.png'}")
 
 
 def scenario_b_environmental_sensitivity():
@@ -308,7 +306,7 @@ def scenario_b_environmental_sensitivity():
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('output/example_17b_environmental_sensitivity.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_17b_environmental_sensitivity.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     # Print sensitivity statistics
@@ -405,7 +403,7 @@ def scenario_c_unit_conversions():
             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
 
     plt.tight_layout()
-    plt.savefig('output/example_17c_unit_conversions.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_17c_unit_conversions.png', dpi=150, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Generated: output/example_17c_unit_conversions.png")

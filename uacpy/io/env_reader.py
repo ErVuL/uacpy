@@ -544,11 +544,6 @@ def read_env_core(envfil: str):
         BotOpt = _read_quoted_string(BotOpt_line)
         BotOpt_padded = BotOpt + " " * max(0, 3 - len(BotOpt))
         Bdry["Bot"]["Opt"] = BotOpt_padded
-
-        # convert deprecated '*' to '~' at position 2 if present
-        if len(Bdry["Bot"]["Opt"]) >= 2 and Bdry["Bot"]["Opt"][1] == "*":
-            Bdry["Bot"]["Opt"] = Bdry["Bot"]["Opt"][0] + "~" + Bdry["Bot"]["Opt"][2:]
-
         Bdry["Bot"]["BC"] = Bdry["Bot"]["Opt"][0]
         cp_bot, cs_bot, rho_bot, HS_bot = topbot(f, freq, Bdry["Bot"]["BC"], AttenUnit)
         Bdry["Bot"].update({"cp": cp_bot, "cs": cs_bot, "rho": rho_bot, "HS": HS_bot})

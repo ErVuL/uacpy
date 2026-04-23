@@ -195,7 +195,9 @@ env = uacpy.Environment(name="tab", depth=200, ssp_type='linear',
 # 3. Analytic (Munk) — self-generating
 env = uacpy.Environment(name="munk", depth=5000, ssp_type='munk')
 
-# 4. Range-dependent SSP — ssp_2d_matrix shape is (n_depths, n_ranges)
+# 4. Range-dependent SSP — ssp_2d_matrix shape is (n_depths, n_ranges).
+#    `ssp_data` is REQUIRED when passing a 2-D matrix: it defines the depth
+#    axis that indexes the rows of `ssp_2d_matrix`.
 ranges_km = np.array([0, 10, 20, 30])
 depths_m  = np.linspace(0, 1000, 50)
 ssp_2d    = np.zeros((50, 4))  # fill in...
@@ -211,7 +213,7 @@ env = uacpy.Environment(name="rd", depth=1000, ssp_type='linear',
 from uacpy import BoundaryProperties
 
 BoundaryProperties(
-    acoustic_type='vacuum',        # 'vacuum'|'rigid'|'half-space'|'grain-size'|'file'|'precalc'
+    acoustic_type='vacuum',        # 'vacuum'|'rigid'|'half-space'|'grain-size'|'file'
     density=1.5,                   # g/cm³
     sound_speed=1600.0,            # m/s — compressional
     attenuation=0.5,               # dB/λ  — compressional
@@ -260,12 +262,15 @@ bot = RangeDependentBottom(
     density      = np.array([1.5, 1.7, 1.9, 2.1]),
     attenuation  = np.array([0.8, 0.6, 0.4, 0.3]),
     shear_speed  = np.zeros(4),
-    acoustic_type='half-space',
+    acoustic_type='half-space',              # default is 'vacuum'
 )
 ```
 
 Bellhop will take the **median** of range-dependent bottom properties and
-warn; RAM (mpiramS) handles this natively.
+warn; RAM (mpiramS) handles this natively. `shear_attenuation` and
+`roughness` are NOT accepted by `RangeDependentBottom` — no writer consumes
+them; use a per-range `BoundaryProperties` list if you need per-range shear
+attenuation.
 
 ### Layered bottom (varies with depth only)
 
@@ -354,18 +359,14 @@ env_ri = env.get_range_independent_approximation(method='median')  # 'max'|'min'
 uacpy.Source(
     depth,                      # float or array — positive, down from surface (m)
     frequency,                  # float or array — Hz
-    position=(0.0, 0.0),        # (x, y) in m
     angles=None,                # launch angles (deg). Default: linspace(-80, 80, 361)
-    source_type='point',        # 'point' | 'line' | 'array'
-    beam_pattern='omni',        # 'omni' or a callable(angle_deg) -> amplitude
-    power=0.0,                  # dB re 1 μPa @ 1 m
-    phase=0.0,                  # radians
+    source_type='point',        # 'point' | 'line'
+    bandwidth=None,             # for broadband sources (Hz)
 )
 ```
 
 Useful properties: `source.n_sources`, `source.n_frequencies`,
-`source.n_angles`, `source.wavelength` (uses 1500 m/s nominal — for accurate
-wavelengths pass through the environment).
+`source.n_angles`.
 
 ### Receiver
 
@@ -373,18 +374,14 @@ wavelengths pass through the environment).
 uacpy.Receiver(
     depths=None,                # array or scalar (m)
     ranges=None,                # array or scalar (m)
-    positions=None,             # list[(x,y)] or list[(x,y,z)] — overrides depths/ranges
     receiver_type='grid',       # 'grid' (meshgrid) | 'line' (paired) | 'point'
 )
 ```
 
 - `'grid'` is a full `depths × ranges` mesh (default).
 - `'line'` pairs `depths[i]` with `ranges[i]` (same length or one scalar).
-- `positions=[(x,y,z), ...]` is taken verbatim for 3D configurations.
 
-Useful properties: `n_receivers`, `n_depths`, `n_ranges`, `depth_min/max`,
-`range_min/max`, `get_positions()`, `get_cylindrical_positions()`,
-`subset(depth_range=, range_range=)`.
+Useful properties: `n_depths`, `n_ranges`, `depth_min/max`, `range_min/max`.
 
 ```python
 # Full TL grid
@@ -460,7 +457,8 @@ bh = Bellhop(
     use_tmpfs=False, verbose=False, work_dir=None,
 )
 
-field = bh.run(env, source, receiver, run_type='C', **per_call_overrides)
+from uacpy.models import RunMode
+field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL, **per_call_overrides)
 ```
 
 **`run_type` (Bellhop-native letter code, passed through to Fortran):**
@@ -473,11 +471,23 @@ field = bh.run(env, source, receiver, run_type='C', **per_call_overrides)
 | `R`  | Ray trace                               |
 | `E`  | Eigenrays                               |
 | `A`  | Arrivals (ASCII)                        |
-| `a`  | Arrivals (binary)                       |
+| `a`  | Arrivals (binary) — reader not yet supported; call with `arrivals_format='ascii'` |
 
 **`beam_type`:** `'B'` Gaussian (default), `'R'` ray-centered,
 `'C'` Cartesian, `'b'` geometric Gaussian, `'g'` geometric hat (ray),
-`'G'` geometric hat (Cartesian), `'S'` simple Gaussian.
+`'G'` geometric hat (Cartesian), `'S'` simple Gaussian. Case matters:
+lowercase variants are ray-centered (distinct numerical method).
+
+**Unsupported knobs (raise `ConfigurationError`):**
+`attenuation_unit='m'` (power-law) is rejected because uacpy has no
+environment field for the BETA exponent. Grid-type `'I'` requires
+`len(receiver.depths) == len(receiver.ranges)` and is pre-validated.
+
+**Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but raises
+`NotImplementedError`. The 3D env writer, .bty 3D writer, and 3D shd reader
+are all present — only the wrapper needs wiring. See
+`third_party/Acoustics-Toolbox/doc/bellhop3d.htm` if you want to contribute
+the missing glue.
 
 **Bellhop + BOUNCE for elastic bottoms.** When the bottom has significant
 shear, run BOUNCE first to produce a reflection coefficient file, then feed
@@ -486,7 +496,7 @@ it to Bellhop:
 ```python
 field = bh.run_with_bounce(
     env, source, receiver,
-    run_type='C',
+    run_mode=RunMode.COHERENT_TL,
     cmin=1400.0, cmax=10000.0, rmax_km=10.0,
 )
 ```
@@ -510,7 +520,7 @@ bhc = BellhopCUDA(
     dimensionality='2D',      # '2D' only in current build
     use_tmpfs=False, verbose=False,
 )
-field = bhc.run(env, source, receiver, run_type='C')
+field = bhc.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 ```
 
 Requires CUDA toolkit; falls back to the CPU `bellhopcxx` build if `use_gpu=False`.
@@ -661,9 +671,9 @@ from uacpy.models import OAST, OASN, OASR, OASP
 oast = OAST(volume_attenuation=None)
 field = oast.run(env, source, receiver)
 
-# Normal modes (experimental — prefer Kraken for production)
+# Noise / covariance / replicas (NOT normal modes — name is historical)
 oasn = OASN(volume_attenuation=None)
-modes = oasn.run(env, source, receiver, n_modes=None)
+cov = oasn.run(env, source, receiver)      # field_type='modes' wrapper around .xsm
 
 # Reflection coefficients
 oasr = OASR(
@@ -673,7 +683,7 @@ oasr = OASR(
 )
 refl = oasr.run(env, source, receiver)     # field_type='reflection_coefficients'
 
-# Parabolic equation (broadband)
+# Broadband / pulse transfer function (NOT parabolic-equation — see note)
 oasp = OASP(
     n_time_samples=4096,
     freq_max=250.0,
@@ -682,8 +692,11 @@ oasp = OASP(
 field = oasp.run(env, source, receiver)
 ```
 
-OAST warns and uses maximum bathymetry depth for range-dependent cases —
-for proper range-dependent OASES runs, use OASP.
+OASP is the **wideband wavenumber-integration / pulse-synthesis** branch of
+OASES, not a parabolic-equation solver — the name is historical. Use OASP
+for broadband TRF or for range-dependent problems where OAST's
+range-independent kernel is inappropriate. For a narrowband RD problem,
+OAST warns and uses maximum bathymetry depth.
 
 ### 5.12 OASES unified façade
 
@@ -693,15 +706,16 @@ from uacpy.models.base import RunMode
 
 oases = OASES(use_tmpfs=False, verbose=False)
 
-field  = oases.compute_tl(env, source, receiver)          # → OAST
-modes  = oases.compute_modes(env, source, n_modes=30)     # → OASN
-field  = oases.run(env, source, receiver,
-                   run_mode=RunMode.COHERENT_TL,
-                   use_pe=True)                           # RD + use_pe → OASP
+field  = oases.compute_tl(env, source, receiver)                      # → OAST
+field  = oases.compute_tl(env, source, receiver, broadband=True)      # → OASP
+cov    = oases.compute_modes(env, source, receiver)                   # → OASN
+refl   = oases.compute_reflection(env, source, receiver)              # → OASR
+trf    = oases.compute_transfer_function(env, source, receiver)       # → OASP
 ```
 
 For maximum control use the individual classes; the façade is for
-convenience.
+convenience. The `broadband=True` kwarg replaces the old `use_pe=True` (that
+name was retained temporarily and has been removed).
 
 ---
 
@@ -756,6 +770,17 @@ ts = field.data              # shape (n_receivers, n_time_samples)
 All plotting functions live in `uacpy.visualization` (also exposed as
 `uacpy.plot`). They accept a `Field` and optionally an `Environment` and
 return matplotlib objects so you can further customize.
+
+The uacpy rcParams (grid, fonts, colors) are applied automatically when
+`uacpy.visualization` is imported. If you tweak `matplotlib.rcParams`
+yourself and want to snap back to the uacpy defaults, call:
+
+```python
+from uacpy.visualization.style import apply_professional_style
+apply_professional_style()
+```
+
+To revert entirely to matplotlib's defaults, use `mpl.rcdefaults()`.
 
 ### Transmission loss
 

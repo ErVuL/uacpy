@@ -10,11 +10,13 @@ OASES (Ocean Acoustics and Seismic Exploration Synthesis) was developed by
 Henrik Schmidt at MIT.
 
 References:
-    Schmidt, H. (2004). OASES Version 3.1 User Guide and Reference Manual.
+    Schmidt, H. OASES Version 2.1 User Guide and Reference Manual (bundled
+    under ``third_party/oases``). Public OASES is 3.1 but the distribution
+    vendored here is 2.1 — see the bundled README.
 """
 
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, Tuple, Union
 import numpy as np
 import struct
 import warnings
@@ -537,54 +539,116 @@ def read_oases_modes(
     filepath: Union[str, Path]
 ) -> Dict:
     """
-    Read OASES mode file
+    Best-effort recovery of OASN mode-related information from auxiliary files.
 
-    Mode files can be in different formats depending on the OASES module used.
-    This function attempts to read mode shapes and wavenumbers.
+    OASN does not have a documented mode-shape output format. Its primary
+    outputs are:
+      - ``.xsm`` covariance matrix (direct-access unformatted, 8-byte records)
+        — read via :func:`read_oasn_covariance`, NOT this function.
+      - ``.rpo`` replica field — read via :func:`read_oasn_replicas`.
+
+    Some deployments happen to write a TRF-style Fortran-SEQUENTIAL file
+    alongside the .xsm (typically via a custom build); this helper tries a
+    sequential PULSETRF parse first as a best-effort probe. It will fail
+    cleanly on a real ``.xsm`` file (which is direct-access) and fall through
+    to the log-scan strategy.
+
+    Strategies, in order:
+
+    1. Try :func:`_read_oasp_trf_binary` — only succeeds for Fortran-sequential
+       PULSETRF-header files. ``.xsm`` files will fail at the record-marker
+       check; that's expected.
+    2. Scan companion ``.prt`` / ``.log`` files for WAVENUMBER / EIGENVALUE
+       lines and extract real eigenvalues.
+    3. If neither strategy yields data, warn and return empty arrays.
 
     Parameters
     ----------
     filepath : str or Path
-        Path to mode file
+        Path to mode file (``.xsm``, ``.mod``, or ``fort.16``).
 
     Returns
     -------
     modes : dict
-        Dictionary containing:
-        - 'k': ndarray, mode wavenumbers
-        - 'phi': ndarray, mode shapes (depth x n_modes)
-        - 'z': ndarray, depth grid
-        - 'n_modes': int, number of modes
-        - 'model': str, 'OASN'
+        - ``k``: ndarray, mode wavenumbers (rad/m). Real eigenvalues when
+          available from the log; empty otherwise.
+        - ``phi``: ndarray, mode shapes (2D: n_z x n_modes). Often empty —
+          OASN does not write explicit shapes to a documented format.
+        - ``z``: ndarray, depth grid for ``phi`` (or empty).
+        - ``n_modes``: int.
+        - ``model``: 'OASN'.
 
     Notes
     -----
-    This is a basic implementation. OASES mode file formats can vary.
-    For production use, consult OASES documentation for the specific
-    file format used by your version.
+    OASES mode files remain under-documented in the public OASES distribution;
+    the authoritative output is the covariance file (``read_oasn_covariance``).
+    For reliable modal analysis, prefer Kraken/KrakenC.
     """
     filepath = Path(filepath)
 
     if not filepath.exists():
         raise FileNotFoundError(f"OASES mode file not found: {filepath}")
 
-    # Placeholder implementation
-    # Actual format depends on OASES version and module
-    warnings.warn(
-        f"OASES mode file reading is experimental.\n"
-        f"File: {filepath}\n"
-        "Mode file format depends on OASES version.\n"
-        "For production use, verify against OASES manual.",
-        UserWarning, stacklevel=2
-    )
+    k_list = []
+    phi = np.array([])
+    z = np.array([])
 
-    # Return empty structure
+    # --- Strategy 1: try TRF-style Fortran unformatted ---
+    try:
+        trf = _read_oasp_trf_binary(filepath)
+        # Transfer-function magnitude can be treated as a rough modal envelope
+        # when OASN writes a .trf-style file. Mode wavenumbers are not directly
+        # recoverable from that payload, so we only populate phi/z/depths.
+        tf = trf.get('transfer_function')
+        if tf is not None and tf.size > 0:
+            phi = np.abs(tf[0, :, :]).T  # (n_depth, n_range) as pseudo-shapes
+            z = np.asarray(trf.get('depths', np.array([])))
+        # Fall through to also try log parsing for wavenumbers.
+    except Exception:
+        pass
+
+    # --- Strategy 2: scan companion .prt / log file ---
+    candidates = [
+        filepath.with_suffix('.prt'),
+        filepath.with_suffix('.log'),
+        filepath.with_name(filepath.stem + '.prt'),
+    ]
+    for log_path in candidates:
+        if log_path.exists():
+            try:
+                with open(log_path, 'r', errors='ignore') as lf:
+                    for line in lf:
+                        up = line.upper()
+                        if 'WAVENUMBER' in up or 'EIGENVALUE' in up:
+                            # Extract floats on the line
+                            parts = line.replace(',', ' ').split()
+                            for tok in parts:
+                                try:
+                                    v = float(tok)
+                                    if 1e-4 < abs(v) < 1e3:
+                                        k_list.append(v)
+                                except ValueError:
+                                    continue
+                break
+            except Exception:
+                continue
+
+    if not k_list and phi.size == 0:
+        warnings.warn(
+            f"OASN mode reader found no usable data in {filepath} "
+            "(format remains under-documented; only wavenumber scan or "
+            "TRF-style payloads are supported). Prefer Kraken for modes.",
+            UserWarning, stacklevel=2,
+        )
+
+    k_arr = np.array(k_list, dtype=np.float64) if k_list else np.array([])
+
     return {
-        'k': np.array([]),
-        'phi': np.array([]),
-        'z': np.array([]),
-        'n_modes': 0,
-        'model': 'OASN'
+        'k': k_arr,
+        'phi': phi,
+        'z': z,
+        'n_modes': int(max(len(k_arr), phi.shape[1] if phi.ndim == 2 else 0)),
+        'model': 'OASN',
     }
 
 
@@ -636,235 +700,226 @@ def read_oasp_trf(
     if not filepath.exists():
         raise FileNotFoundError(f"OASP transfer function file not found: {filepath}")
 
-    # Try binary format first
+    # Try Fortran-unformatted binary first (current OASES default).
+    errors = []
     try:
         return _read_oasp_trf_binary(filepath)
-    except Exception as binary_error:
-        # Try ASCII format as fallback
-        try:
-            return _read_oasp_trf_ascii(filepath)
-        except Exception as ascii_error:
-            raise IOError(
-                f"Failed to read OASP transfer function file {filepath}.\n"
-                f"Binary format error: {binary_error}\n"
-                f"ASCII format error: {ascii_error}"
-            )
+    except Exception as e:
+        errors.append(('fortran-unformatted', e))
+
+    # ASCII path always raises NotImplemented, but wrap so the binary
+    # error surfaces when both paths fail.
+    try:
+        return _read_oasp_trf_ascii(filepath)
+    except Exception as e:
+        errors.append(('ascii', e))
+
+    err_msg = '\n'.join(f"  {k}: {v}" for k, v in errors)
+    raise IOError(
+        f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
+    )
+
+
+def _read_fortran_record(f, fmt=None, raw=False, endian='<'):
+    """Read a single Fortran UNFORMATTED sequential record.
+
+    Layout::
+
+        [4-byte length N][N bytes payload][4-byte length N]
+
+    Both length markers must match; mismatch indicates file corruption or
+    wrong endianness and raises ``IOError``.
+
+    Parameters
+    ----------
+    f : file object (binary mode)
+    fmt : str, optional
+        struct format string for the payload (excluding endian prefix).
+    raw : bool, optional
+        If True, return raw bytes. Default False.
+    endian : str, optional
+        '<' (little-endian, x86 default) or '>' (big-endian).
+
+    Returns
+    -------
+    tuple | bytes
+        Unpacked payload (or raw bytes).
+    """
+    head = f.read(4)
+    if len(head) < 4:
+        raise IOError("Unexpected EOF reading Fortran record head")
+    (nbytes,) = struct.unpack(endian + 'i', head)
+    if nbytes < 0 or nbytes > (1 << 28):  # magic-number sanity: <256 MB
+        raise IOError(
+            f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
+        )
+    payload = f.read(nbytes)
+    if len(payload) < nbytes:
+        raise IOError(
+            f"Short read: expected {nbytes} bytes, got {len(payload)}"
+        )
+    tail = f.read(4)
+    if len(tail) < 4:
+        raise IOError("Unexpected EOF reading Fortran record tail")
+    (ntail,) = struct.unpack(endian + 'i', tail)
+    if ntail != nbytes:
+        raise IOError(
+            f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
+            "(wrong endianness or truncated file)"
+        )
+    if raw or fmt is None:
+        return payload
+    expected = struct.calcsize(endian + fmt)
+    if expected != nbytes:
+        raise IOError(
+            f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
+        )
+    return struct.unpack(endian + fmt, payload)
 
 
 def _read_oasp_trf_binary(filepath: Path) -> Dict:
-    """Read mixed-format (ASCII headers + binary data) TRF file
+    """Read OASES PULSETRF binary file (Fortran UNFORMATTED).
 
-    Based on MATLAB trf_reader_oases.m from OASES distribution.
-    Format: ASCII text headers followed by binary float/int data.
-    No Fortran record markers!
+    Inferred record layout (oasiun23.f:844-898 + trford.f:159-192) — each
+    record is bracketed by 4-byte length markers::
+
+        1.  CHARACTER*8  FILEID         ('PULSETRF')
+        2.  CHARACTER*6  PROGNM
+        3.  INTEGER      NOUT
+        4.  INTEGER      IPARM(1..NOUT)
+        5.  CHARACTER*80 TITLE
+        6.  CHARACTER*1  SIGNN
+        7.  REAL*4       FREQS
+        8.  REAL*4       SD
+        9.  REAL*4 RD, REAL*4 RDLOW, INTEGER IR
+        9a. (only if IR<0) REAL*4 RDC(|IR|)
+        10. REAL*4 R0, REAL*4 RSPACE, INTEGER NPLOTS
+        11. INTEGER NX, INTEGER LX, INTEGER MX, REAL*4 DT
+        12. INTEGER      ICDR
+        13. REAL*4       OMEGIM
+        14. INTEGER      MSUFT
+        15. INTEGER      ISROW
+        16. INTEGER      INTTYP
+        17-18. INTEGER   IDUMMY (x2)
+        19-23. REAL*4    DUMMY  (x5)
+
+    Data records (NF = MX-LX+1 frequency bins)::
+
+        for ifr:     for is:      for m:
+         for jrh:     for jrv:    REC: COMPLEX*8 CFFX(1..NOUT)
+
+    Default TRF files use single-precision complex (COMPLEX*8). Little-endian
+    on x86 by default.
     """
-    import io
+    endian = '<'
+    with open(filepath, 'rb') as f:
+        try:
+            fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
+        except IOError as e:
+            raise IOError(
+                f"Cannot open {filepath} as Fortran-unformatted TRF: {e}"
+            ) from e
+        fileid = fileid_raw.decode('ascii', errors='ignore').strip()
+        if 'PULSETRF' not in fileid:
+            raise IOError(
+                f"Expected 'PULSETRF' in first record, got {fileid!r}"
+            )
 
-    try:
-        with open(filepath, 'rb') as f:
-            # Read ASCII text until we find "PULSETRF"
-            text_chunk = b''
-            while b'PULSETRF' not in text_chunk:
-                byte = f.read(1)
-                if not byte:
-                    raise ValueError("Could not find PULSETRF identifier in TRF file")
-                text_chunk += byte
+        # prognm record consumed but not used
+        _read_fortran_record(f, raw=True, endian=endian)
+        (nout,) = _read_fortran_record(f, 'i', endian=endian)
+        iparm_raw = _read_fortran_record(f, raw=True, endian=endian)
+        iparm = list(struct.unpack(endian + f'{len(iparm_raw) // 4}i',
+                                   iparm_raw))[:nout]
 
-            # Find the position right after "PULSETRF"
-            pulsetrf_end = text_chunk.index(b'PULSETRF') + len(b'PULSETRF')
-            # Seek back to after PULSETRF
-            f.seek(pulsetrf_end)
+        title = _read_fortran_record(f, raw=True, endian=endian).decode(
+            'ascii', errors='ignore').strip()
+        # signn record consumed but not used
+        _read_fortran_record(f, raw=True, endian=endian)
 
-            # Read until we find '+' or '-' sign
-            sign_byte = b''
-            while sign_byte not in [b'+', b'-']:
-                sign_byte = f.read(1)
-                if not sign_byte:
-                    raise ValueError("Could not find sign byte")
+        (freqs,) = _read_fortran_record(f, 'f', endian=endian)
+        (sd,) = _read_fortran_record(f, 'f', endian=endian)
 
-            # Now read binary data (little-endian floats and ints)
-            # Skip 2 floats
-            f.read(8)
-
-            # Read fc (center frequency)
-            fc, = struct.unpack('f', f.read(4))
-
-            # Skip 2 floats
-            f.read(8)
-
-            # Read sd (source depth)
-            sd, = struct.unpack('f', f.read(4))
-
-            # Skip 2 floats
-            f.read(8)
-
-            # Read receiver depth parameters
-            z1, = struct.unpack('f', f.read(4))
-            z2, = struct.unpack('f', f.read(4))
-            num_z, = struct.unpack('i', f.read(4))
-
-            # Create receiver depth array
-            if num_z > 1:
-                receiver_depths = np.linspace(z1, z2, num_z)
+        rd, rdlow, ir = _read_fortran_record(f, 'ffi', endian=endian)
+        if ir < 0:
+            nrd = abs(ir)
+            rdc = np.array(
+                _read_fortran_record(f, f'{nrd}f', endian=endian),
+                dtype=np.float64,
+            )
+            receiver_depths = rdc
+        else:
+            nrd = max(1, ir)
+            if nrd > 1:
+                receiver_depths = np.linspace(rd, rdlow, nrd)
             else:
-                receiver_depths = np.array([z1])
+                receiver_depths = np.array([rd])
 
-            # Skip 2 floats
-            f.read(8)
+        r0, rspace, nplots = _read_fortran_record(f, 'ffi', endian=endian)
+        ranges = r0 + np.arange(nplots) * rspace
 
-            # Read range parameters
-            r1, = struct.unpack('f', f.read(4))
-            dr, = struct.unpack('f', f.read(4))
-            nr, = struct.unpack('i', f.read(4))
+        nx, lx, mx, dt = _read_fortran_record(f, 'iiif', endian=endian)
+        (icdr,) = _read_fortran_record(f, 'i', endian=endian)
+        (omegim,) = _read_fortran_record(f, 'f', endian=endian)
 
-            # Create range array
-            ranges = np.array([r1 + i * dr for i in range(nr)])
+        (msuft,) = _read_fortran_record(f, 'i', endian=endian)
+        (isrow,) = _read_fortran_record(f, 'i', endian=endian)
+        (inttyp,) = _read_fortran_record(f, 'i', endian=endian)
+        for _ in range(2):
+            _read_fortran_record(f, 'i', endian=endian)
+        for _ in range(5):
+            _read_fortran_record(f, 'f', endian=endian)
 
-            # Skip 2 floats
-            f.read(8)
+        # --- Data records ---
+        nf = max(1, mx - lx + 1)
+        freq_array = np.array(
+            [(k / (dt * nx)) for k in range(lx, mx + 1)], dtype=np.float64
+        ) if nf >= 1 else np.array([freqs], dtype=np.float64)
 
-            # Read FFT parameters
-            nfft, = struct.unpack('i', f.read(4))
-            bin_low, = struct.unpack('i', f.read(4))
-            bin_high, = struct.unpack('i', f.read(4))
-            dt, = struct.unpack('f', f.read(4))
+        transfer_function = np.zeros((nf, nplots, nrd), dtype=np.complex64)
+        for j in range(nf):
+            for _is in range(max(1, isrow)):
+                for _m in range(max(1, msuft)):
+                    for jrh in range(nplots):
+                        for jrv in range(nrd):
+                            rec = _read_fortran_record(
+                                f, f'{2 * nout}f', endian=endian)
+                            transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
-            # Calculate frequencies
-            nf = bin_high - bin_low + 1
-            freq_array = np.array([(k / (dt * nfft)) for k in range(bin_low, bin_high + 1)])
-
-            # Skip 2 floats
-            f.read(8)
-
-            # Read icdr
-            icdr, = struct.unpack('i', f.read(4))
-
-            # Skip 2 floats
-            f.read(8)
-
-            # Read omegim
-            omegim, = struct.unpack('f', f.read(4))
-
-            # Skip remaining header (5 dummy values with 2 floats before each)
-            for _ in range(5):
-                f.read(8)  # 2 floats
-                f.read(4)  # 1 int or float
-
-            # Skip 1 float
-            f.read(4)
-
-            # Read transfer function data
-            # Data structure: for each frequency, for each range, read num_z complex values
-            transfer_function = np.zeros((nf, nr, num_z), dtype=np.complex64)
-
-            for j in range(nf):
-                for jj in range(nr):
-                    # Skip 1 float (record marker)
-                    f.read(4)
-
-                    # Read num_z*4-2 floats (interleaved real/imag pairs + some overhead)
-                    # Based on MATLAB: temp=fread(fid,num_z*4-2,'float')
-                    n_floats = num_z * 4 - 2
-                    data = struct.unpack(f'{n_floats}f', f.read(4 * n_floats))
-
-                    # Extract real and imaginary parts
-                    # MATLAB: temp(1:2:length(temp))+i*temp(2:2:length(temp))
-                    real_parts = np.array(data[0::2])
-                    imag_parts = np.array(data[1::2])
-
-                    # MATLAB: temp(1:2:length(temp)) - takes every other element again
-                    # This extracts num_z values
-                    transfer_function[j, jj, :] = real_parts[:num_z] + 1j * imag_parts[:num_z]
-
-                    # Skip 1 float (record marker)
-                    f.read(4)
-
-        return {
-            'title': 'OASP Transfer Function',
-            'option': '',
-            'freq': freq_array,
-            'ranges': ranges,
-            'depths': receiver_depths,
-            'transfer_function': transfer_function,
-            'source_depth': sd,
-            'center_frequency': fc,
-            'model': 'OASP'
-        }
-
-    except Exception as e:
-        raise IOError(f"Binary TRF read failed: {e}")
+    return {
+        'title': title,
+        'option': ''.join(chr(ord('A') - 1 + p) for p in iparm if 0 < p < 27),
+        'freq': freq_array,
+        'ranges': ranges,
+        'depths': receiver_depths,
+        'transfer_function': transfer_function,
+        'source_depth': float(sd),
+        'center_frequency': float(freqs),
+        'model': 'OASP',
+    }
 
 
 def _read_oasp_trf_ascii(filepath: Path) -> Dict:
-    """Read ASCII (formatted) TRF file
+    """Read ASCII (formatted) TRF file.
 
-    Returns minimal data structure with empty transfer functions.
-    Full ASCII TRF reading is complex and rarely used.
+    ASCII TRF reading is not implemented — the previous stub silently returned
+    ``np.ones(...)`` for the transfer function, which produced bogus TL values
+    downstream (uniform 0 dB). OASES is expected to be run with binary TRF
+    output (the default); if users genuinely need ASCII TRF support they can
+    open a PR with the proper payload reader.
+
+    Raises
+    ------
+    RuntimeError
+        Always. Either re-run OASES with binary TRF (default) or extend this
+        reader to parse the ASCII payload.
     """
-    try:
-        with open(filepath, 'r') as f:
-            # Line 1: FILEID
-            fileid = f.readline().strip()
-            if fileid != 'PULSETRF':
-                raise ValueError(f"Invalid ASCII TRF file ID: {fileid}")
-
-            # Line 2: PROGNM
-            prognm = f.readline().strip()
-
-            # Line 3: NOUT
-            nout = int(f.readline().strip())
-
-            # Line 4: IPARM array
-            iparm_line = f.readline().strip()
-            iparm = [int(x) for x in iparm_line.split()]
-
-            # Line 5: TITLE
-            title = f.readline().strip()
-
-            # Line 6: SIGNN
-            signn = f.readline().strip()
-
-            # Line 7: FREQS (center frequency)
-            freqs = float(f.readline().strip())
-
-            # Line 8: SD (source depth)
-            sd = float(f.readline().strip())
-
-            # Line 9: RD, RDLOW, IR
-            rd_line = f.readline().strip().split()
-            rd, rdlow, ir = float(rd_line[0]), float(rd_line[1]), int(rd_line[2])
-
-            # Handle receiver depths
-            if ir < 0:
-                # Non-equidistant
-                depth_line = f.readline().strip()
-                receiver_depths = [float(x) for x in depth_line.split()]
-            else:
-                # Equidistant
-                receiver_depths = list(np.linspace(rd, rdlow, ir))
-
-            # Line 10: R0, RSPACE, NPLOTS
-            range_line = f.readline().strip().split()
-            r0, rspace, nplots = float(range_line[0]), float(range_line[1]), int(range_line[2])
-
-            ranges = np.array([r0 + i * rspace for i in range(nplots)])
-
-            # Return minimal structure - full ASCII TRF parsing is complex
-            # Most users should use binary format
-            return {
-                'title': title,
-                'option': ''.join([chr(p + ord('A') - 1) for p in iparm if 0 < p < 27]),
-                'freq': np.array([freqs]),  # Single frequency for now
-                'ranges': ranges,
-                'depths': np.array(receiver_depths),
-                'transfer_function': np.ones((1, len(ranges), len(receiver_depths)), dtype=np.complex64),
-                'source_depth': sd,
-                'center_frequency': freqs,
-                'model': 'OASP'
-            }
-
-    except Exception as e:
-        raise IOError(f"ASCII TRF read failed: {e}")
+    raise RuntimeError(
+        f"ASCII TRF reader not implemented for {filepath}. "
+        "OASES must be run with binary (Fortran-unformatted) TRF output — "
+        "that is the default; do not pass any ASCII conversion option. "
+        "If you have a mixed-format legacy file, use the binary reader."
+    )
 
 
 def read_oasr_reflection_coefficients(
@@ -1000,3 +1055,84 @@ def read_oasr_reflection_coefficients(
 
     except Exception as e:
         raise IOError(f"Failed to read OASR reflection coefficient file {filepath}: {e}")
+
+
+def _trf_regression_selftest(tmp_path=None):
+    """Write a synthetic PULSETRF-style file and round-trip through the reader.
+
+    Produces a minimal single-frequency, single-depth, single-range file with
+    known complex payload and validates the reader returns matching values.
+    Used by the OASES reader test-suite and available as a quick sanity check::
+
+        from uacpy.io.oases_reader import _trf_regression_selftest
+        _trf_regression_selftest()
+    """
+    import tempfile
+    endian = '<'
+
+    def w(f, payload: bytes):
+        f.write(struct.pack(endian + 'i', len(payload)))
+        f.write(payload)
+        f.write(struct.pack(endian + 'i', len(payload)))
+
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp()) / 'synthetic.trf'
+    else:
+        tmp_path = Path(tmp_path)
+
+    # --- Build synthetic header matching the documented layout ---
+    title = 'synthetic-trf-test'
+    prognm = 'OASP17'
+    nout = 1
+    iparm = [1]
+    signn = '+'
+    freqs = 100.0
+    sd = 50.0
+    rd, rdlow, ir = 20.0, 20.0, 1   # single receiver depth
+    r0, rspace, nplots = 1000.0, 1000.0, 1  # single range
+    nx, lx, mx, dt = 4, 1, 1, 0.01       # NX=power of 2, single freq bin
+    icdr = 0
+    omegim = 0.0
+    msuft = 1
+    isrow = 1
+    inttyp = 0
+
+    test_real, test_imag = 0.75, -0.25
+
+    with open(tmp_path, 'wb') as f:
+        w(f, b'PULSETRF')
+        w(f, prognm.encode())
+        w(f, struct.pack(endian + 'i', nout))
+        w(f, struct.pack(endian + f'{nout}i', *iparm))
+        w(f, title.ljust(80).encode())
+        w(f, signn.encode())
+        w(f, struct.pack(endian + 'f', freqs))
+        w(f, struct.pack(endian + 'f', sd))
+        w(f, struct.pack(endian + 'ffi', rd, rdlow, ir))
+        w(f, struct.pack(endian + 'ffi', r0, rspace, nplots))
+        w(f, struct.pack(endian + 'iiif', nx, lx, mx, dt))
+        w(f, struct.pack(endian + 'i', icdr))
+        w(f, struct.pack(endian + 'f', omegim))
+        w(f, struct.pack(endian + 'i', msuft))
+        w(f, struct.pack(endian + 'i', isrow))
+        w(f, struct.pack(endian + 'i', inttyp))
+        for _ in range(2):
+            w(f, struct.pack(endian + 'i', 0))
+        for _ in range(5):
+            w(f, struct.pack(endian + 'f', 0.0))
+        # Data records: 1 freq * 1 isrow * 1 msuft * 1 nplots * 1 ir
+        w(f, struct.pack(endian + 'ff', test_real, test_imag))
+
+    data = _read_oasp_trf_binary(tmp_path)
+    tf = data['transfer_function']
+    assert tf.shape == (1, 1, 1), f"shape mismatch: {tf.shape}"
+    assert np.isclose(tf[0, 0, 0].real, test_real), tf[0, 0, 0]
+    assert np.isclose(tf[0, 0, 0].imag, test_imag), tf[0, 0, 0]
+    assert np.isclose(data['source_depth'], sd)
+    assert np.isclose(data['center_frequency'], freqs)
+    return True
+
+
+if __name__ == '__main__':
+    _trf_regression_selftest()
+    print('TRF regression self-test: OK')

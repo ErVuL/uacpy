@@ -8,7 +8,6 @@ import uacpy
 from uacpy.core.exceptions import (
     UACPYError, ModelError, ExecutableNotFoundError,
     EnvironmentError, InvalidDepthError, UnsupportedFeatureError,
-    ValidationError
 )
 from uacpy.models import Bellhop, Kraken
 
@@ -108,8 +107,6 @@ class TestUnsupportedOperations:
     @pytest.mark.requires_binary
     def test_kraken_range_dependent_error(self, range_dependent_env, source):
         """Test that Kraken raises error for range-dependent environment"""
-        from uacpy.core.exceptions import EnvironmentError
-
         kraken = Kraken(verbose=False)
 
         # Should raise EnvironmentError for range-dependent environments

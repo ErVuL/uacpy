@@ -7,14 +7,12 @@ use the same underlying physics (normal mode theory).
 
 import pytest
 import numpy as np
-import sys
-import os
-
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import uacpy
 from uacpy.models import Kraken, KrakenField, Scooter, OAST
+
+# All tests in this module spawn model binaries (Kraken, Scooter, OAST)
+pytestmark = pytest.mark.requires_binary
 
 
 class TestModalModelAgreement:

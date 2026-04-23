@@ -66,6 +66,9 @@ import matplotlib.pyplot as plt
 example_dir = Path(__file__).parent
 sys.path.insert(0, str(example_dir.parent))
 
+OUTPUT_DIR = example_dir / 'output'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 import uacpy
 from uacpy.models import Bellhop, RAM, KrakenField
 
@@ -267,8 +270,7 @@ def main():
                    xy=(9, 150), fontsize=10, color='black', ha='center',
                    bbox=dict(boxstyle='round,pad=0.4', facecolor='yellow', alpha=0.7), zorder=15)
 
-    os.makedirs('output', exist_ok=True)
-    plt.savefig('output/example_10_thermal_fronts_ssp.png', dpi=150, bbox_inches='tight')
+    plt.savefig(OUTPUT_DIR / 'example_10_thermal_fronts_ssp.png', dpi=150, bbox_inches='tight')
     plt.close(fig_ssp)
     print("  ✓ Saved: output/example_10_thermal_fronts_ssp.png")
 
