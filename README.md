@@ -145,14 +145,23 @@ source uacpy_venv/bin/activate
 
 ### 3. Clone and install
 
+bellhopcuda lives in `uacpy/third_party/bellhopcuda` as a git submodule
+pinned to upstream `v1.5`. Pass `--recurse-submodules` so it (and its
+nested GLM submodule) populate on clone:
+
 ``` bash
-git clone https://github.com/ErVuL/uacpy.git
+git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
 cd uacpy
 pip install -e .
 ./install.sh        # Linux / macOS
 # or
 install.bat         # Windows
 ```
+
+If you forgot `--recurse-submodules` on an existing checkout, run
+`git submodule update --init --recursive` from the repo root before
+`./install.sh`. The install script will also try to do this automatically
+if it detects the submodule isn't initialized.
 
 The installer compiles OALIB, OASES, BellhopCUDA, and other required
 binaries, then places them inside UACPY's internal directory for API
