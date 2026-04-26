@@ -58,14 +58,6 @@ command_exists() {
     command -v "$1" &> /dev/null
 }
 
-run_sudo() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        sudo "$@"
-    else
-        "$@"
-    fi
-}
-
 get_nproc() {
     nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2
 }
@@ -86,30 +78,28 @@ prompt_yes_no() {
     done
 }
 
-install_package() {
-    # $1 package name (best-effort; different package managers may differ)
-    pkg="$1"
+# install.sh is a pure builder — it does not install system packages itself.
+# When a dependency is missing we print the per-OS install command and exit so
+# the user (or CI image) can provision once and rerun. The full per-OS list
+# also lives in README.md → "Install dependencies".
+fail_missing() {
+    # $1 = tool / library name, $2 = pre-formatted install hint
+    echo -e "${RED}Missing dependency: $1${NC}" >&2
+    echo -e "${YELLOW}$2${NC}" >&2
+    echo -e "See README.md → 'Install dependencies' for the full per-OS list." >&2
+    exit 1
+}
+
+# Render an install hint for the detected package manager.
+# Args: $1 apt-pkg  $2 dnf/yum-pkg  $3 pacman-pkg  $4 brew-pkg
+hint_for() {
     case "$PACKAGE_MANAGER" in
-        apt)
-            run_sudo apt-get update -y
-            run_sudo apt-get install -y "$pkg"
-            ;;
-        dnf)
-            run_sudo dnf install -y "$pkg"
-            ;;
-        yum)
-            run_sudo yum install -y "$pkg"
-            ;;
-        pacman)
-            run_sudo pacman -S --noconfirm "$pkg"
-            ;;
-        brew)
-            brew install "$pkg"
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown package manager; please install $pkg manually.${NC}"
-            return 1
-            ;;
+        apt)    echo "Install with: sudo apt-get install -y $1" ;;
+        dnf)    echo "Install with: sudo dnf install -y $2" ;;
+        yum)    echo "Install with: sudo yum install -y $2" ;;
+        pacman) echo "Install with: sudo pacman -S --noconfirm $3" ;;
+        brew)   echo "Install with: brew install $4" ;;
+        *)      echo "Install one of: $1 (apt) / $2 (dnf) / $3 (pacman) / $4 (brew)" ;;
     esac
 }
 
@@ -327,101 +317,34 @@ echo ""
 # Check and install prerequisites
 # -------------------------
 
-# gfortran
+# gfortran (always required: OALIB, mpiramS, OASES are all Fortran)
 if ! command_exists gfortran; then
-    echo -e "${YELLOW}gfortran not found.${NC}"
-    if [[ "$OS" == "macOS" ]]; then
-        if ! command_exists brew; then
-            if prompt_yes_no "Homebrew not found. Install Homebrew?"; then
-                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            else
-                echo -e "${RED}Please install gfortran (via Homebrew) and re-run.${NC}"
-                exit 1
-            fi
-        fi
-        echo -e "${BLUE}Installing gcc (includes gfortran) via Homebrew...${NC}"
-        brew install gcc
-        # Homebrew may produce gfortran-<ver> but not plain 'gfortran'; try to symlink where possible
-        if ! command_exists gfortran; then
-            gf_bin="$(command -v gfortran-14 || command -v gfortran-13 || command -v gfortran-12 || true)"
-            if [[ -n "$gf_bin" ]]; then
-                if [[ -w "$(dirname "$gf_bin")" ]]; then
-                    ln -sf "$gf_bin" "$(dirname "$gf_bin")/gfortran" || true
-                else
-                    if prompt_yes_no "Create /usr/local/bin/gfortran symlink to $gf_bin (requires sudo)?"; then
-                        run_sudo ln -sf "$gf_bin" /usr/local/bin/gfortran || true
-                    fi
-                fi
-            fi
-        fi
-    else
-        # linux package manager
-        case "$PACKAGE_MANAGER" in
-            apt)
-                run_sudo apt-get update -y
-                run_sudo apt-get install -y gfortran make
-                ;;
-            dnf)
-                run_sudo dnf install -y gcc-gfortran make
-                ;;
-            yum)
-                run_sudo yum install -y gcc-gfortran make
-                ;;
-            pacman)
-                run_sudo pacman -S --noconfirm gcc-fortran make
-                ;;
-            *)
-                echo -e "${RED}Could not detect package manager. Please install gfortran manually.${NC}"
-                exit 1
-                ;;
-        esac
-    fi
-
-    if ! command_exists gfortran; then
-        echo -e "${RED}gfortran still not found after attempted install. Aborting.${NC}"
-        exit 1
-    fi
+    fail_missing "gfortran" \
+        "$(hint_for gfortran gcc-gfortran gcc-fortran gcc)"
 fi
 echo -e "✓ gfortran: ${GREEN}$(gfortran --version | head -n1)${NC}"
 
-# make
+# make (always required)
 if ! command_exists make; then
-    echo -e "${YELLOW}make not found.${NC}"
     if [[ "$OS" == "macOS" ]]; then
-        echo "Installing Xcode Command Line Tools (contains make)..."
-        xcode-select --install || true
-        echo "Please finish Xcode install if prompted and re-run."
-        exit 0
+        fail_missing "make" \
+            "Install Xcode Command Line Tools: xcode-select --install"
     else
-        install_package make
+        fail_missing "make" "$(hint_for make make make make)"
     fi
 fi
 echo -e "✓ make: ${GREEN}$(make --version | head -n1)${NC}"
 
-# CMake (required for bellhopcxx/bellhopcuda)
+# CMake (required for bellhopcxx/bellhopcuda only — not for the Fortran build)
 check_cmake() {
     if command_exists cmake; then
         echo -e "✓ cmake: ${GREEN}$(cmake --version | head -n1)${NC}"
         return 0
     fi
-    echo -e "${YELLOW}cmake not found.${NC}"
-    if [[ "$OS" == "macOS" ]]; then
-        if prompt_yes_no "Install cmake via Homebrew?"; then
-            brew install cmake
-        else
-            return 1
-        fi
-    else
-        if prompt_yes_no "Install cmake using package manager?"; then
-            install_package cmake
-        else
-            return 1
-        fi
-    fi
-    command_exists cmake
+    fail_missing "cmake" "$(hint_for cmake cmake cmake cmake)"
 }
 
-# C++ compiler
+# C++ compiler (required for bellhopcxx/bellhopcuda only)
 check_cxx_compiler() {
     if command_exists g++; then
         echo -e "✓ g++: ${GREEN}$(g++ --version | head -n1)${NC}"
@@ -430,23 +353,62 @@ check_cxx_compiler() {
         echo -e "✓ clang++: ${GREEN}$(clang++ --version | head -n1)${NC}"
         return 0
     fi
+    fail_missing "C++ compiler (g++ or clang++)" \
+        "$(hint_for g++ gcc-c++ gcc gcc)"
+}
 
-    echo -e "${YELLOW}C++ compiler not found.${NC}"
-    if [[ "$OS" == "macOS" ]]; then
-        brew install gcc
-    else
-        if prompt_yes_no "Install C++ compiler via package manager?"; then
-            case "$PACKAGE_MANAGER" in
-                apt) run_sudo apt-get update -y; run_sudo apt-get install -y g++;;
-                dnf|yum) run_sudo $PACKAGE_MANAGER install -y gcc-c++;;
-                pacman) run_sudo pacman -S --noconfirm gcc;;
-                *) echo -e "${RED}Please install g++ or clang++ manually${NC}"; return 1;;
-            esac
-        else
-            return 1
-        fi
+# git (required when fetching GLM for bellhopcxx/bellhopcuda)
+check_git() {
+    if command_exists git; then
+        return 0
     fi
-    command_exists g++ || command_exists clang++
+    fail_missing "git" "$(hint_for git git git git)"
+}
+
+# curl (required only if downloading OASES)
+check_curl() {
+    if command_exists curl; then
+        return 0
+    fi
+    fail_missing "curl" "$(hint_for curl curl curl curl)"
+}
+
+# LAPACK (required: Kraken/Scooter link with -llapack)
+# - Linux: probe ldconfig for liblapack.so*
+# - macOS: probe Homebrew's lapack formula. We do NOT fall back to Accelerate
+#   because the OALIB Makefiles call -llapack literally; pointing at brew's
+#   prefix is the simplest fix that keeps the upstream Makefiles untouched.
+# Side effect: sets LAPACK_LIBS in the global scope to the right link flags.
+check_lapack() {
+    if [[ "$OS" == "macOS" ]]; then
+        if command_exists brew && brew list lapack &>/dev/null; then
+            local prefix
+            prefix="$(brew --prefix lapack 2>/dev/null || true)"
+            if [[ -n "$prefix" && -f "$prefix/lib/liblapack.dylib" ]]; then
+                LAPACK_LIBS="-L${prefix}/lib -llapack"
+                echo -e "✓ lapack: ${GREEN}${prefix}${NC}"
+                return 0
+            fi
+        fi
+        fail_missing "lapack" "Install with: brew install lapack"
+    fi
+
+    # Linux: trust ldconfig's cache. Some minimal images don't ship ldconfig
+    # in PATH, so fall back to a direct file probe in common library dirs.
+    if command_exists ldconfig && ldconfig -p 2>/dev/null | grep -q "liblapack\.so"; then
+        LAPACK_LIBS="-llapack"
+        echo -e "✓ lapack: ${GREEN}found via ldconfig${NC}"
+        return 0
+    fi
+    for d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/local/lib; do
+        if compgen -G "$d/liblapack.so*" >/dev/null; then
+            LAPACK_LIBS="-llapack"
+            echo -e "✓ lapack: ${GREEN}found in $d${NC}"
+            return 0
+        fi
+    done
+    fail_missing "lapack (development library)" \
+        "$(hint_for liblapack-dev lapack-devel lapack lapack)"
 }
 
 # CUDA
@@ -500,10 +462,7 @@ check_glm() {
         return 1
     fi
 
-    if ! command_exists git; then
-        echo -e "${RED}git is required to fetch GLM${NC}"
-        return 1
-    fi
+    check_git
 
     # 1) Try submodule init if this looks like a proper git checkout
     if [ -f "$SCRIPT_DIR/.gitmodules" ] || [ -f "$BHC_DIR/.gitmodules" ]; then
@@ -660,6 +619,13 @@ fi
 # Kraken/Scooter from completing; the copy step downstream verifies each
 # expected binary is present.
 echo -e "${BLUE}=== Building OALIB (Acoustics-Toolbox) ===${NC}"
+
+# OALIB always links LAPACK; check upfront so we fail before a long build.
+# check_lapack also fills in $LAPACK_LIBS with the right -L/-l flags (Homebrew
+# lapack on macOS isn't on the default linker path, so a bare -llapack fails).
+LAPACK_LIBS="-llapack"
+check_lapack
+
 cd "$OALIB_DIR"
 
 OALIB_FFLAGS="-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib"
@@ -688,7 +654,7 @@ make -k all \
     FFLAGS="$OALIB_FFLAGS" \
     CC=gcc \
     CFLAGS="$OALIB_CFLAGS" \
-    LAPACK_LIBS="-llapack" \
+    LAPACK_LIBS="$LAPACK_LIBS" \
     MAKEFLAGS= \
     2>&1 | tee /tmp/oalib_build.log
 OALIB_STATUS=${PIPESTATUS[0]:-1}
@@ -713,6 +679,9 @@ if [[ "$INSTALL_OASES" != "yes" ]]; then
 else
 echo -e "${BLUE}=== Building OASES ===${NC}"
 if [ ! -d "$OASES_DIR" ]; then
+    # curl is only needed when fetching OASES — check here so a cxx-only build
+    # without OASES selected doesn't require it.
+    check_curl
     echo -e "${BLUE}Downloading OASES from $OASES_URL ...${NC}"
     OASES_TMP="$(mktemp -d)"
     if curl -fSL "$OASES_URL" -o "$OASES_TMP/oases.tar.gz"; then

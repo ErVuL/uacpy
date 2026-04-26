@@ -260,6 +260,21 @@ if %errorlevel% equ 0 (
     )
 )
 
+REM LAPACK — probe via gfortran's library search. If gfortran can resolve
+REM liblapack.dll.a it returns the absolute path; if not, it echoes the input
+REM string back unchanged. Done before the OALIB build so we fail fast with a
+REM clear MSYS2/pacman hint instead of an opaque linker error 5 minutes later.
+set "LAPACK_PROBE="
+for /f "delims=" %%p in ('gfortran -print-file-name^=liblapack.dll.a 2^>nul') do set "LAPACK_PROBE=%%p"
+if /i "%LAPACK_PROBE%"=="liblapack.dll.a" (
+    set "LAPACK_PROBE="
+    for /f "delims=" %%p in ('gfortran -print-file-name^=liblapack.a 2^>nul') do set "LAPACK_PROBE=%%p"
+    if /i "!LAPACK_PROBE!"=="liblapack.a" set "LAPACK_PROBE="
+)
+if not defined LAPACK_PROBE goto :install_lapack
+echo [32m+ lapack found[0m
+echo   %LAPACK_PROBE%
+
 REM CMake and C++ compiler (for bellhopcxx/bellhopcuda)
 if "%BELLHOP_VERSION%"=="cxx" goto :check_cxx_tools
 if "%BELLHOP_VERSION%"=="cuda" goto :check_cxx_tools
@@ -398,6 +413,7 @@ echo    - Install with Fortran support
 echo.
 echo After installation, add the compiler to your PATH and run this script again.
 echo.
+echo See README.md - "Install dependencies" for the full list.
 if "%AUTO_YES%"=="0" pause
 exit /b 1
 
@@ -410,6 +426,22 @@ echo.
 echo If using MSYS2: pacman -S mingw-w64-x86_64-make
 echo If using MinGW-w64: make.exe should be included
 echo.
+echo See README.md - "Install dependencies" for the full list.
+if "%AUTO_YES%"=="0" pause
+exit /b 1
+
+:install_lapack
+echo [33mLAPACK is required but not installed.[0m
+echo.
+echo Kraken/Scooter link with -llapack at build time. On Windows the
+echo standard source is MSYS2's MinGW-w64 LAPACK package:
+echo.
+echo     pacman -S mingw-w64-x86_64-lapack
+echo.
+echo (run from the MSYS2 MINGW64 shell, then re-run install.bat from
+echo  the same shell so gfortran can find the library).
+echo.
+echo See README.md - "Install dependencies" for the full list.
 if "%AUTO_YES%"=="0" pause
 exit /b 1
 
@@ -568,7 +600,6 @@ if %OALIB_STATUS% equ 0 (
     echo [33m! OALIB build had issues (exit %OALIB_STATUS%). Continuing —[0m
     echo [33m  any binaries that built will still be installed.[0m
     echo Common issues:
-    echo - LAPACK library not found: Install with 'pacman -S mingw-w64-x86_64-lapack' (MSYS2)
     echo - Fortran syntax errors: Try updating gfortran
 )
 echo.
@@ -594,22 +625,29 @@ goto :build_oases
 :download_oases
 echo [34mDownloading OASES...[0m
 
-REM Check for curl
+REM curl / tar are only required when fetching OASES. Fail with a clear
+REM message instead of silently skipping — silent-skip masks the real reason
+REM the OAST/OASN/etc. binaries never appear.
 where curl >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [31mcurl not found. Please install curl or download OASES manually.[0m
-    echo   URL: %OASES_URL%
-    echo   Extract to: %OASES_DIR%
-    goto :build_mpirams
+    echo [31mMissing dependency: curl[0m
+    echo   curl is required to download OASES from %OASES_URL%
+    echo   On MSYS2: pacman -S curl
+    echo   Or download manually and extract to: %OASES_DIR%
+    echo   See README.md - "Install dependencies" for the full list.
+    if "%AUTO_YES%"=="0" pause
+    exit /b 1
 )
 
-REM Check for tar
 where tar >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [31mtar not found. Please install tar or download OASES manually.[0m
-    echo   URL: %OASES_URL%
-    echo   Extract to: %OASES_DIR%
-    goto :build_mpirams
+    echo [31mMissing dependency: tar[0m
+    echo   tar is required to extract the OASES archive.
+    echo   On MSYS2: pacman -S tar
+    echo   Or extract manually to: %OASES_DIR%
+    echo   See README.md - "Install dependencies" for the full list.
+    if "%AUTO_YES%"=="0" pause
+    exit /b 1
 )
 
 set "OASES_TMP=%TEMP%\oases_download_%RANDOM%"

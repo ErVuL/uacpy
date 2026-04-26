@@ -75,10 +75,66 @@ requires toolchain adjustments.
 
 ### 1. Install dependencies
 
--   Fortran compiler
--   C/C++ compiler
--   (Optional) CUDA toolkit
--   (Windows) MSYS2 or WSL
+The build scripts (`install.sh` / `install.bat`) verify these are present and
+abort with a clear message if anything is missing — they do **not** install
+system packages themselves. Provision the toolchain once with the relevant
+command below, then run the build script.
+
+**Always required**
+
+| Tool        | Purpose                                              |
+|-------------|------------------------------------------------------|
+| `gfortran`  | OALIB, mpiramS, OASES (all Fortran)                  |
+| `make`      | Driving the upstream Makefiles                       |
+| LAPACK dev  | Kraken/Scooter link with `-llapack`                  |
+| `git`       | Cloning GLM (only for bellhopcxx/cuda) and uacpy itself |
+
+**Optional**
+
+| Tool                  | When you need it                                  |
+|-----------------------|---------------------------------------------------|
+| `cmake`, `g++`/`clang++` | Building the C++ Bellhop variant (`--bellhop cxx`) |
+| CUDA toolkit (`nvcc`) | Building the GPU Bellhop variant (`--bellhop cuda`) |
+| `curl`, `tar`         | Only when installing OASES (`--oases yes`)        |
+
+**Per-OS install commands**
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y gfortran make liblapack-dev git \
+                        cmake g++ curl tar
+
+# Fedora / RHEL
+sudo dnf install -y gcc-gfortran make lapack-devel git \
+                    cmake gcc-c++ curl tar
+
+# Arch / Manjaro
+sudo pacman -S --needed gcc-fortran make lapack git \
+                        cmake gcc curl tar
+
+# macOS
+
+# Install Homebrew (skip if 'brew' is already on PATH). See https://brew.sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install Xcode Command Line Tools (provides make, clang, git, tar)
+xcode-select --install
+
+# Install build dependencies via Homebrew.
+#    Note: the 'gcc' formula is what provides gfortran on macOS.
+brew install gcc lapack cmake curl
+
+# Windows / MSYS2 — run from the MSYS2 MINGW64 shell
+pacman -S --needed mingw-w64-x86_64-gcc-fortran \
+                   mingw-w64-x86_64-make \
+                   mingw-w64-x86_64-lapack \
+                   mingw-w64-x86_64-cmake \
+                   mingw-w64-x86_64-gcc \
+                   git curl tar
+```
+
+For GPU Bellhop, additionally install the CUDA toolkit.
 
 ### 2. Create a virtual environment
 
