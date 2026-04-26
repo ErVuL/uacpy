@@ -1,3 +1,0 @@
-//2D TL runs which match on single-threaded, but inconsistently sometimes don't match on multithreaded or CUDA
-freeLine_ParaxialB
-LloydLine_gbtB

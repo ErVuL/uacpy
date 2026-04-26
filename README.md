@@ -145,14 +145,23 @@ source uacpy_venv/bin/activate
 
 ### 3. Clone and install
 
+bellhopcuda lives in `uacpy/third_party/bellhopcuda` as a git submodule
+pinned to upstream `v1.5`. Pass `--recurse-submodules` so it (and its
+nested GLM submodule) populate on clone:
+
 ``` bash
-git clone https://github.com/ErVuL/uacpy.git
+git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
 cd uacpy
 pip install -e .
 ./install.sh        # Linux / macOS
 # or
 install.bat         # Windows
 ```
+
+If you forgot `--recurse-submodules` on an existing checkout, run
+`git submodule update --init --recursive` from the repo root before
+`./install.sh`. The install script will also try to do this automatically
+if it detects the submodule isn't initialized.
 
 The installer compiles OALIB, OASES, BellhopCUDA, and other required
 binaries, then places them inside UACPY's internal directory for API
@@ -290,7 +299,7 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 ### 🛠️ Hardening & validation (priority)
 
 - **🧱 API audit** — consistency of `PropagationModel` and per‑model overrides; spot‑check the `DOCUMENTATION.md` capability matrix; hunt drifted conventions and inconsistent units.
-- **🔬 Native model re‑validation** — every in‑tree modification is potential silent numerical drift. Diff mpiramS against unmodified upstream; confirm the KrakenField OOB fix and the bellhopcuda CUDA‑arch / SHDFIL fixes; validate the UACPY RAM TL formula; run cross‑model regressions (Bellhop / Kraken / Scooter / RAM / OASES agree within tolerance).
+- **🔬 Native model re‑validation** — every in‑tree modification is potential silent numerical drift. Diff mpiramS against unmodified upstream; confirm the KrakenField OOB fix; validate the UACPY RAM TL formula; run cross‑model regressions (Bellhop / Kraken / Scooter / RAM / OASES agree within tolerance).
 - **🐍 Python‑side review** — dead / hallucinated code paths, doc ↔ code drift, clean error handling, `subprocess` + file‑I/O security, magic numbers traced to references.
 - **📊 Visualization review** — axes / units / orientation, colormap and dynamic‑range defaults, overlay coordinate frames, ray & mode ordering conventions, honest interpolation in comparison helpers, rcParams leakage.
 - **🧪 Test suite audit** — separate smoke from validation; add reference‑case regressions (ASA 1990, Pekeris, Munk, Jensen–Kuperman); audit marker application; verify every `uacpy/examples/` script runs.
@@ -363,7 +372,7 @@ when redistributing or modifying UACPY or its outputs.
 |----------------------------|------------------------------------|--------------------------------------------------|--------------------------------------------------|
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
 | Acoustics Toolbox (Porter) | `third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
-| bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | vendored C++/CUDA sources, **modified**          | GPL-3.0                                          |
+| bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | downloaded at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |

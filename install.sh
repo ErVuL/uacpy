@@ -422,74 +422,50 @@ check_cuda() {
     return 1
 }
 
-# Detect the compute capability of the first visible GPU via nvidia-smi and
-# print it as a 2+ digit integer (e.g. "8.6" -> "86"). bellhopcuda's CMake
-# has a hardcoded GPU-name -> compute-cap table that misses newer/laptop
-# cards; passing CUDA_ARCH_OVERRIDE bypasses that lookup entirely.
-# Prints nothing on failure so callers can check with [ -n "$(...)" ].
-detect_cuda_arch() {
-    command_exists nvidia-smi || return 0
-    local cap
-    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]' || true)
-    [ -z "$cap" ] && return 0
-    echo "${cap//./}"
-}
-
-# GLM (header-only C++ math library used by bellhopcuda) detection.
-# bellhopcuda's CMake adds "${CMAKE_SOURCE_DIR}/glm" to its include path, so
-# the headers must live at $BHC_DIR/glm/glm/*.hpp — a system pkg-config hit
-# is NOT enough on its own. Upstream ships GLM as a git submodule, but the
-# vendored copy in third_party/ may not have submodule metadata, so we fall
-# back to a plain `git clone` of g-truc/glm into $BHC_DIR/glm.
-GLM_REPO_URL="https://github.com/g-truc/glm.git"
-
-check_glm() {
-    # Already vendored?
-    if [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
-        echo -e "✓ glm headers present at $BHC_DIR/glm"
+# bellhopcuda + GLM submodule sanity check. bellhopcuda is now a git submodule
+# pinned to an upstream tag (see .gitmodules); GLM is a nested submodule of
+# bellhopcuda. Both are populated by `git submodule update --init --recursive`,
+# which we attempt automatically if the directory looks empty.
+check_bellhopcuda_submodule() {
+    if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
+        echo -e "✓ bellhopcuda submodule (with GLM) initialized"
+        fixup_bhc_dotgit
         return 0
     fi
 
-    if [ ! -d "$BHC_DIR" ]; then
-        return 1
-    fi
-
-    echo -e "${YELLOW}GLM not found at $BHC_DIR/glm${NC}"
-    echo -e "  GLM = OpenGL Mathematics, a header-only C++ math library"
-    echo -e "  (https://github.com/g-truc/glm) that bellhopcuda includes directly."
-
-    if ! prompt_yes_no "Fetch GLM into $BHC_DIR/glm now?"; then
-        return 1
-    fi
-
-    check_git
-
-    # 1) Try submodule init if this looks like a proper git checkout
-    if [ -f "$SCRIPT_DIR/.gitmodules" ] || [ -f "$BHC_DIR/.gitmodules" ]; then
-        echo -e "${BLUE}Attempting git submodule update...${NC}"
-        (cd "$SCRIPT_DIR" && git submodule update --init --recursive) 2>/dev/null || true
-        if [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
-            echo -e "${GREEN}✓ glm submodule initialized${NC}"
+    # Try to initialize automatically — works when the user did a fresh clone
+    # without --recurse-submodules.
+    if [ -f "$SCRIPT_DIR/.gitmodules" ] && command_exists git; then
+        echo -e "${BLUE}Initializing bellhopcuda + GLM submodules...${NC}"
+        (cd "$SCRIPT_DIR" && git submodule update --init --recursive) 2>&1 | tail -5
+        if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
+            echo -e "${GREEN}✓ submodules initialized${NC}"
+            fixup_bhc_dotgit
             return 0
         fi
     fi
 
-    # 2) Fallback: clone GLM directly. The target dir may already exist and
-    # be empty (stale submodule placeholder) — remove it so clone can proceed.
-    if [ -d "$BHC_DIR/glm" ] && [ -z "$(ls -A "$BHC_DIR/glm" 2>/dev/null)" ]; then
-        rmdir "$BHC_DIR/glm"
-    fi
-    echo -e "${BLUE}Cloning GLM from $GLM_REPO_URL ...${NC}"
-    if git clone --depth 1 "$GLM_REPO_URL" "$BHC_DIR/glm"; then
-        if [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
-            echo -e "${GREEN}✓ GLM headers installed at $BHC_DIR/glm${NC}"
-            return 0
-        fi
-    fi
+    fail_missing "bellhopcuda submodule" \
+        "Run: git submodule update --init --recursive (from the uacpy repo root)"
+}
 
-    echo -e "${RED}Failed to install GLM. Install manually with:${NC}"
-    echo -e "  git clone $GLM_REPO_URL $BHC_DIR/glm"
-    return 1
+# Workaround for upstream bellhopcuda issue: config/CMakeLists.txt installs a
+# clang-format pre-commit hook by copying into ${PROJECT_SOURCE_DIR}/.git/hooks/.
+# When bellhopcuda is a submodule, .git is a regular file (a "gitdir: ..."
+# pointer), so file(COPY) fails with "Not a directory". Replace the .git file
+# with a symlink to the resolved gitdir so .git/hooks/ resolves correctly.
+fixup_bhc_dotgit() {
+    if [ ! -f "$BHC_DIR/.git" ]; then
+        return 0   # already a directory or symlink
+    fi
+    local gitdir_rel gitdir_abs
+    gitdir_rel="$(sed -n 's|^gitdir: ||p' "$BHC_DIR/.git")"
+    if [ -z "$gitdir_rel" ]; then
+        return 0
+    fi
+    gitdir_abs="$(cd "$BHC_DIR" && cd "$gitdir_rel" 2>/dev/null && pwd)" || return 0
+    rm -f "$BHC_DIR/.git"
+    ln -s "$gitdir_abs" "$BHC_DIR/.git"
 }
 
 # Pre-checks for build paths
@@ -502,34 +478,15 @@ fi
 echo -e "✓ Found OALIB (Acoustics-Toolbox): ${GREEN}$OALIB_DIR${NC}"
 
 if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
-    if [ ! -d "$BHC_DIR" ]; then
-        echo -e "${RED}bellhopcuda directory not found at:${NC}"
-        echo "  $BHC_DIR"
-        exit 1
-    fi
-    echo -e "✓ Found bellhopcuda repo: ${GREEN}$BHC_DIR${NC}"
-fi
-
-# If building CXX/CUDA, ensure cmake and C++ compiler and glm are available
-if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
-    if ! check_cmake; then
-        echo -e "${RED}CMake required. Aborting.${NC}"
-        exit 1
-    fi
-    if ! check_cxx_compiler; then
-        echo -e "${RED}C++ compiler required. Aborting.${NC}"
-        exit 1
-    fi
+    check_cmake
+    check_cxx_compiler
     if [[ "$BELLHOP_VERSION" == "cuda" ]]; then
         if ! check_cuda; then
             echo -e "${YELLOW}CUDA not present; falling back to C++/CPU bellhop (cxx).${NC}"
             BELLHOP_VERSION="cxx"
         fi
     fi
-    if ! check_glm; then
-        echo -e "${RED}GLM dependency missing for bellhopcuda. Aborting.${NC}"
-        exit 1
-    fi
+    check_bellhopcuda_submodule
 fi
 
 echo ""
@@ -572,22 +529,13 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     # uacpy doesn't use them, and at least examples/background.cpp is missing
     # an explicit #include <cstring> that GCC >= 13 no longer transitively
     # provides, which breaks the overall build.
+    # bellhopcuda v1.5+ sets CMAKE_CUDA_ARCHITECTURES=native, so nvcc targets
+    # the local GPU automatically — no GPU-name table or CUDA_ARCH_OVERRIDE
+    # workaround needed.
     CMAKE_OPTIONS="-DCMAKE_BUILD_TYPE=Release -DBHC_ENABLE_TESTS=OFF -DBHC_BUILD_EXAMPLES=OFF"
     if [[ "$BELLHOP_VERSION" == "cuda" ]]; then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBHC_ENABLE_CUDA=ON"
-        echo -e "  - CUDA support: ON"
-        # bellhopcuda's SetupCUDA.cmake looks up the GPU name in a hardcoded
-        # table to pick a compute capability. The table misses laptop variants
-        # and newer cards, aborting the build. Query nvidia-smi directly and
-        # pass the compute cap as an override when available.
-        CUDA_ARCH=$(detect_cuda_arch)
-        if [ -n "$CUDA_ARCH" ]; then
-            CMAKE_OPTIONS="${CMAKE_OPTIONS} -DCUDA_ARCH_OVERRIDE=${CUDA_ARCH}"
-            echo -e "  - GPU compute capability: ${GREEN}${CUDA_ARCH}${NC} (auto-detected)"
-        else
-            echo -e "  - ${YELLOW}Could not auto-detect GPU compute capability${NC}"
-            echo -e "    If configure fails, rerun with: ${YELLOW}-DCUDA_ARCH_OVERRIDE=<XX>${NC}"
-        fi
+        echo -e "  - CUDA support: ON (compute arch: native — auto-targeted)"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBHC_ENABLE_CUDA=OFF"
         echo -e "  - CUDA support: OFF (CPU build)"

@@ -1,3 +1,0 @@
-'RPO'				! 'R/X (coord), Pos/Neg/Both' 
-500				! Nrr number of receiver ranges
-0.002  1.0 /			! rr( 1 : Nrr ) receiver ranges (km)

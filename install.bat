@@ -328,61 +328,66 @@ if "%BELLHOP_VERSION%"=="cuda" (
     )
 )
 
-REM Check for GLM (OpenGL Mathematics - header-only C++ math library from
-REM https://github.com/g-truc/glm). bellhopcuda includes it directly via
-REM "${CMAKE_SOURCE_DIR}/glm", so the headers must live at %BHC_DIR%\glm\glm\*.hpp.
-REM Upstream ships it as a git submodule, but the vendored third_party copy may
-REM lack submodule metadata, so we fall back to a plain git clone.
-set "GLM_REPO_URL=https://github.com/g-truc/glm.git"
-
-if exist "%BHC_DIR%\glm\glm\glm.hpp" (
-    echo [32m+ GLM headers found at %BHC_DIR%\glm[0m
-    goto :glm_ok
+REM bellhopcuda is a git submodule; GLM lives inside it as a nested submodule.
+REM Both are populated by `git submodule update --init --recursive` from the
+REM uacpy repo root. If either is missing, attempt to initialize automatically.
+if exist "%BHC_DIR%\CMakeLists.txt" if exist "%BHC_DIR%\glm\glm\glm.hpp" (
+    echo [32m+ bellhopcuda submodule (with GLM) initialized[0m
+    goto :submodule_ok
 )
-
-echo [33mGLM not found at %BHC_DIR%\glm[0m
-echo   GLM = OpenGL Mathematics, a header-only C++ math library
-echo   (https://github.com/g-truc/glm) that bellhopcuda includes directly.
 
 where git >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [31mgit is required to fetch GLM[0m
+    echo [31mgit is required to initialize the bellhopcuda submodule[0m
     if "%AUTO_YES%"=="0" pause
     exit /b 1
 )
 
-REM 1) Try submodule init if this looks like a proper git checkout
-if exist "%SCRIPT_DIR%.gitmodules" goto :try_glm_submodule
-if exist "%BHC_DIR%\.gitmodules" goto :try_glm_submodule
-goto :clone_glm
+if exist "%SCRIPT_DIR%.gitmodules" (
+    echo [34mInitializing bellhopcuda + GLM submodules...[0m
+    pushd "%SCRIPT_DIR%"
+    git submodule update --init --recursive
+    popd
+)
 
-:try_glm_submodule
-echo [34mAttempting git submodule update...[0m
-pushd "%SCRIPT_DIR%"
-git submodule update --init --recursive >nul 2>&1
+if exist "%BHC_DIR%\CMakeLists.txt" if exist "%BHC_DIR%\glm\glm\glm.hpp" (
+    echo [32m+ submodules initialized[0m
+    goto :submodule_ok
+)
+
+echo [31mMissing dependency: bellhopcuda submodule[0m
+echo   Run from the uacpy repo root:
+echo     git submodule update --init --recursive
+echo   See README.md - "Install dependencies" for the full list.
+if "%AUTO_YES%"=="0" pause
+exit /b 1
+
+:submodule_ok
+
+REM Workaround for upstream bellhopcuda issue: config/CMakeLists.txt installs a
+REM clang-format pre-commit hook by copying into ${PROJECT_SOURCE_DIR}/.git/hooks/.
+REM When bellhopcuda is a submodule, .git is a regular file (a "gitdir: ..."
+REM pointer), so file(COPY) fails with "Not a directory". Replace the .git file
+REM with a directory junction to the resolved gitdir so .git/hooks/ resolves.
+if exist "%BHC_DIR%\.git\" goto :bhc_dotgit_ok
+if not exist "%BHC_DIR%\.git" goto :bhc_dotgit_ok
+set "BHC_GITDIR_REL="
+for /f "tokens=1,*" %%a in ('type "%BHC_DIR%\.git"') do (
+    if /i "%%a"=="gitdir:" set "BHC_GITDIR_REL=%%b"
+)
+if not defined BHC_GITDIR_REL goto :bhc_dotgit_ok
+pushd "%BHC_DIR%"
+pushd "%BHC_GITDIR_REL%" 2>nul
+if errorlevel 1 (
+    popd
+    goto :bhc_dotgit_ok
+)
+set "BHC_GITDIR_ABS=%CD%"
 popd
-if exist "%BHC_DIR%\glm\glm\glm.hpp" (
-    echo [32m+ GLM submodule initialized[0m
-    goto :glm_ok
-)
-
-:clone_glm
-REM Remove empty placeholder dir so clone can proceed
-if exist "%BHC_DIR%\glm" (
-    dir /b "%BHC_DIR%\glm" 2>nul | findstr "^" >nul
-    if !errorlevel! neq 0 rmdir "%BHC_DIR%\glm" 2>nul
-)
-echo [34mCloning GLM from %GLM_REPO_URL% ...[0m
-git clone --depth 1 "%GLM_REPO_URL%" "%BHC_DIR%\glm"
-if not exist "%BHC_DIR%\glm\glm\glm.hpp" (
-    echo [31mFailed to install GLM. Install manually with:[0m
-    echo   git clone %GLM_REPO_URL% %BHC_DIR%\glm
-    if "%AUTO_YES%"=="0" pause
-    exit /b 1
-)
-echo [32m+ GLM headers installed at %BHC_DIR%\glm[0m
-
-:glm_ok
+popd
+del "%BHC_DIR%\.git" >nul 2>&1
+mklink /J "%BHC_DIR%\.git" "%BHC_GITDIR_ABS%" >nul
+:bhc_dotgit_ok
 
 goto :check_directories
 
@@ -506,29 +511,12 @@ REM use them, and at least examples\background.cpp is missing an explicit
 REM #include <cstring> that newer compilers no longer transitively provide.
 set "CMAKE_OPTIONS=-DCMAKE_BUILD_TYPE=Release -DBHC_ENABLE_TESTS=OFF -DBHC_BUILD_EXAMPLES=OFF"
 
+REM bellhopcuda v1.5+ sets CMAKE_CUDA_ARCHITECTURES=native, so nvcc targets
+REM the local GPU automatically — no GPU-name table or CUDA_ARCH_OVERRIDE
+REM workaround needed.
 if "%BELLHOP_VERSION%"=="cuda" (
     set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DBHC_ENABLE_CUDA=ON"
-    echo   - CUDA support: ON
-    REM bellhopcuda's SetupCUDA.cmake looks up the GPU name in a hardcoded
-    REM table to pick a compute capability. The table misses laptop variants
-    REM and newer cards, aborting the build. Query nvidia-smi directly and
-    REM pass the compute cap as an override when available.
-    set "CUDA_ARCH="
-    where nvidia-smi >nul 2>&1
-    if !errorlevel! equ 0 (
-        for /f "tokens=*" %%c in ('nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul') do (
-            if not defined CUDA_ARCH set "CUDA_ARCH=%%c"
-        )
-        if defined CUDA_ARCH set "CUDA_ARCH=!CUDA_ARCH:.=!"
-        if defined CUDA_ARCH set "CUDA_ARCH=!CUDA_ARCH: =!"
-    )
-    if defined CUDA_ARCH (
-        set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DCUDA_ARCH_OVERRIDE=!CUDA_ARCH!"
-        echo   - GPU compute capability: [32m!CUDA_ARCH![0m ^(auto-detected^)
-    ) else (
-        echo   - [33mCould not auto-detect GPU compute capability[0m
-        echo     If configure fails, rerun with: [33m-DCUDA_ARCH_OVERRIDE=^<XX^>[0m
-    )
+    echo   - CUDA support: ON ^(compute arch: native — auto-targeted^)
 ) else (
     set "CMAKE_OPTIONS=!CMAKE_OPTIONS! -DBHC_ENABLE_CUDA=OFF"
     echo   - CUDA support: OFF (CPU build)
