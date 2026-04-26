@@ -101,19 +101,26 @@ command below, then run the build script.
 
 ```bash
 # Debian / Ubuntu
+#################
+
 sudo apt-get update
 sudo apt-get install -y gfortran make liblapack-dev git \
                         cmake g++ curl tar
 
 # Fedora / RHEL
+###############
+
 sudo dnf install -y gcc-gfortran make lapack-devel git \
                     cmake gcc-c++ curl tar
 
 # Arch / Manjaro
+################
+
 sudo pacman -S --needed gcc-fortran make lapack git \
                         cmake gcc curl tar
 
 # macOS
+#######
 
 # Install Homebrew (skip if 'brew' is already on PATH). See https://brew.sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -126,6 +133,8 @@ xcode-select --install
 brew install gcc lapack cmake curl
 
 # Windows / MSYS2 — run from the MSYS2 MINGW64 shell
+####################################################
+
 pacman -S --needed mingw-w64-x86_64-gcc-fortran \
                    mingw-w64-x86_64-make \
                    mingw-w64-x86_64-lapack \
@@ -138,16 +147,29 @@ For GPU Bellhop, additionally install the CUDA toolkit.
 
 ### 2. Create a virtual environment
 
+Create the venv:
+
 ``` bash
 python -m venv uacpy_venv
-source uacpy_venv/bin/activate
 ```
+
+Then activate it:
+
+``` bash
+# Linux / macOS
+source uacpy_venv/bin/activate
+
+# Windows — MSYS2 MINGW64 (recommended for the install scripts)
+source uacpy_venv/Scripts/activate
+
+# Windows — cmd.exe
+uacpy_venv\Scripts\activate.bat
+```
+
 
 ### 3. Clone and install
 
-bellhopcuda lives in `uacpy/third_party/bellhopcuda` as a git submodule
-pinned to upstream `v1.5`. Pass `--recurse-submodules` so it (and its
-nested GLM submodule) populate on clone:
+Clone the project and its submodules, install the module and run the installation script.
 
 ``` bash
 git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
@@ -157,11 +179,6 @@ pip install -e .
 # or
 install.bat         # Windows
 ```
-
-If you forgot `--recurse-submodules` on an existing checkout, run
-`git submodule update --init --recursive` from the repo root before
-`./install.sh`. The install script will also try to do this automatically
-if it detects the submodule isn't initialized.
 
 The installer compiles OALIB, OASES, BellhopCUDA, and other required
 binaries, then places them inside UACPY's internal directory for API
@@ -406,7 +423,6 @@ etc.), the maintainer can be reached at:
 - https://github.com/nposdalj/PropaMod
 - https://github.com/marcuskd/pyram
 - https://github.com/org-arl/UnderwaterAcoustics.jl
-
 
 
 
