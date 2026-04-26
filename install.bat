@@ -364,6 +364,31 @@ exit /b 1
 
 :submodule_ok
 
+REM Workaround for upstream bellhopcuda issue: config/CMakeLists.txt installs a
+REM clang-format pre-commit hook by copying into ${PROJECT_SOURCE_DIR}/.git/hooks/.
+REM When bellhopcuda is a submodule, .git is a regular file (a "gitdir: ..."
+REM pointer), so file(COPY) fails with "Not a directory". Replace the .git file
+REM with a directory junction to the resolved gitdir so .git/hooks/ resolves.
+if exist "%BHC_DIR%\.git\" goto :bhc_dotgit_ok
+if not exist "%BHC_DIR%\.git" goto :bhc_dotgit_ok
+set "BHC_GITDIR_REL="
+for /f "tokens=1,*" %%a in ('type "%BHC_DIR%\.git"') do (
+    if /i "%%a"=="gitdir:" set "BHC_GITDIR_REL=%%b"
+)
+if not defined BHC_GITDIR_REL goto :bhc_dotgit_ok
+pushd "%BHC_DIR%"
+pushd "%BHC_GITDIR_REL%" 2>nul
+if errorlevel 1 (
+    popd
+    goto :bhc_dotgit_ok
+)
+set "BHC_GITDIR_ABS=%CD%"
+popd
+popd
+del "%BHC_DIR%\.git" >nul 2>&1
+mklink /J "%BHC_DIR%\.git" "%BHC_GITDIR_ABS%" >nul
+:bhc_dotgit_ok
+
 goto :check_directories
 
 REM -------------------------

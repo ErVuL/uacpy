@@ -429,6 +429,7 @@ check_cuda() {
 check_bellhopcuda_submodule() {
     if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
         echo -e "✓ bellhopcuda submodule (with GLM) initialized"
+        fixup_bhc_dotgit
         return 0
     fi
 
@@ -439,12 +440,32 @@ check_bellhopcuda_submodule() {
         (cd "$SCRIPT_DIR" && git submodule update --init --recursive) 2>&1 | tail -5
         if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
             echo -e "${GREEN}✓ submodules initialized${NC}"
+            fixup_bhc_dotgit
             return 0
         fi
     fi
 
     fail_missing "bellhopcuda submodule" \
         "Run: git submodule update --init --recursive (from the uacpy repo root)"
+}
+
+# Workaround for upstream bellhopcuda issue: config/CMakeLists.txt installs a
+# clang-format pre-commit hook by copying into ${PROJECT_SOURCE_DIR}/.git/hooks/.
+# When bellhopcuda is a submodule, .git is a regular file (a "gitdir: ..."
+# pointer), so file(COPY) fails with "Not a directory". Replace the .git file
+# with a symlink to the resolved gitdir so .git/hooks/ resolves correctly.
+fixup_bhc_dotgit() {
+    if [ ! -f "$BHC_DIR/.git" ]; then
+        return 0   # already a directory or symlink
+    fi
+    local gitdir_rel gitdir_abs
+    gitdir_rel="$(sed -n 's|^gitdir: ||p' "$BHC_DIR/.git")"
+    if [ -z "$gitdir_rel" ]; then
+        return 0
+    fi
+    gitdir_abs="$(cd "$BHC_DIR" && cd "$gitdir_rel" 2>/dev/null && pwd)" || return 0
+    rm -f "$BHC_DIR/.git"
+    ln -s "$gitdir_abs" "$BHC_DIR/.git"
 }
 
 # Pre-checks for build paths
