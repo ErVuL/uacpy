@@ -69,124 +69,224 @@ and cross‑model comparisons.
 
 ## 📦 Installation
 
-Linux is currently the primary supported platform.\
-Windows and macOS should work with similar steps, though compilation
-requires toolchain adjustments.
+**Linux is the primary supported platform.** macOS works with Homebrew.
+Windows is supported **via WSL2** (Windows Subsystem for Linux) — see the
+[Windows section](#-windows-via-wsl2) below for why and how.
 
-### 1. Install dependencies
+What `install.sh` builds:
 
-The build scripts (`install.sh` / `install.bat`) verify these are present and
-abort with a clear message if anything is missing — they do **not** install
-system packages themselves. Provision the toolchain once with the relevant
-command below, then run the build script.
+| Tool                     | Required for                                      |
+|--------------------------|---------------------------------------------------|
+| `gfortran`, `make`       | OALIB, mpiramS, OASES (Fortran models — always)   |
+| LAPACK dev               | Kraken / Scooter (link with `-llapack` — always)  |
+| `git`                    | Cloning uacpy + submodules (always)               |
+| `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
+| CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`)            |
+| `curl`, `tar`            | OASES download (`--oases yes`)                    |
 
-**Always required**
+`install.sh` **verifies** these are present and aborts with a clear
+message if anything is missing — it does *not* install system packages
+itself. Provision the toolchain once for your platform, then run the
+build.
 
-| Tool        | Purpose                                              |
-|-------------|------------------------------------------------------|
-| `gfortran`  | OALIB, mpiramS, OASES (all Fortran)                  |
-| `make`      | Driving the upstream Makefiles                       |
-| LAPACK dev  | Kraken/Scooter link with `-llapack`                  |
-| `git`       | Cloning GLM (only for bellhopcxx/cuda) and uacpy itself |
+---
 
-**Optional**
+### 🐧 Linux
 
-| Tool                  | When you need it                                  |
-|-----------------------|---------------------------------------------------|
-| `cmake`, `g++`/`clang++` | Building the C++ Bellhop variant (`--bellhop cxx`) |
-| CUDA toolkit (`nvcc`) | Building the GPU Bellhop variant (`--bellhop cuda`) |
-| `curl`, `tar`         | Only when installing OASES (`--oases yes`)        |
-
-**Per-OS install commands**
+**1. Install dependencies**
 
 ```bash
 # Debian / Ubuntu
-#################
-
 sudo apt-get update
 sudo apt-get install -y gfortran make liblapack-dev git \
-                        cmake g++ curl tar
+                        cmake g++ curl tar python3-venv python3-pip
 
 # Fedora / RHEL
-###############
-
 sudo dnf install -y gcc-gfortran make lapack-devel git \
-                    cmake gcc-c++ curl tar
+                    cmake gcc-c++ curl tar python3-virtualenv python3-pip
 
 # Arch / Manjaro
-################
-
 sudo pacman -S --needed gcc-fortran make lapack git \
-                        cmake gcc curl tar
+                        cmake gcc curl tar python python-pip
+```
 
-# macOS
-#######
+For GPU Bellhop, additionally install the CUDA toolkit from your
+distribution or NVIDIA's site.
 
+**2. Clone, create venv, install**
+
+```bash
+git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
+cd uacpy
+python3 -m venv uacpy_venv
+source uacpy_venv/bin/activate
+pip install -e .
+./install.sh
+```
+
+`./install.sh` runs interactively by default. Useful flags:
+
+| Flag                      | Effect                                                      |
+|---------------------------|-------------------------------------------------------------|
+| `-y` / `--yes`            | Non-interactive — auto-detect everything                    |
+| `--bellhop fortran`       | Skip the C++ build (Fortran Bellhop is always built)        |
+| `--bellhop cxx`           | Also build C++ Bellhop (CPU)                                |
+| `--bellhop cuda`          | Also build CUDA Bellhop (GPU, requires `nvcc`)              |
+| `--oases yes` / `no`      | Download + build OASES (or skip the prompt)                 |
+| `--force`                 | Rebuild even if binaries already exist                      |
+
+---
+
+### 🍎 macOS (NOT TESTED)
+
+**1. Install dependencies**
+
+```bash
 # Install Homebrew (skip if 'brew' is already on PATH). See https://brew.sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# Install Xcode Command Line Tools (provides make, clang, git, tar)
+# Xcode Command Line Tools (provides make, clang, git, tar)
 xcode-select --install
 
-# Install build dependencies via Homebrew.
-#    Note: the 'gcc' formula is what provides gfortran on macOS.
-brew install gcc lapack cmake curl
-
-# Windows / MSYS2 — run from the MSYS2 MINGW64 shell
-####################################################
-
-pacman -S --needed mingw-w64-x86_64-gcc-fortran \
-                   mingw-w64-x86_64-make \
-                   mingw-w64-x86_64-lapack \
-                   mingw-w64-x86_64-cmake \
-                   mingw-w64-x86_64-gcc \
-                   git curl tar
+# Build dependencies. The 'gcc' formula provides gfortran on macOS.
+brew install gcc lapack cmake curl python
 ```
 
-For GPU Bellhop, additionally install the CUDA toolkit.
+CUDA Bellhop is **not** available on macOS (no NVIDIA toolkit). The C++
+Bellhop variant (`--bellhop cxx`) builds fine with Apple's clang.
 
-### 2. Create a virtual environment
+**2. Clone, create venv, install**
 
-Create the venv:
-
-``` bash
-python -m venv uacpy_venv
-```
-
-Then activate it:
-
-``` bash
-# Linux / macOS
-source uacpy_venv/bin/activate
-
-# Windows — MSYS2 MINGW64 (recommended for the install scripts)
-source uacpy_venv/Scripts/activate
-
-# Windows — cmd.exe
-uacpy_venv\Scripts\activate.bat
-```
-
-
-### 3. Clone and install
-
-Clone the project and its submodules, install the module and run the installation script.
-
-``` bash
+```bash
 git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
 cd uacpy
+python3 -m venv uacpy_venv
+source uacpy_venv/bin/activate
 pip install -e .
-./install.sh        # Linux / macOS
-# or
-install.bat         # Windows
+./install.sh
 ```
 
-The installer compiles OALIB, OASES, BellhopCUDA, and other required
-binaries, then places them inside UACPY's internal directory for API
-access.
+(See the Linux section above for `install.sh` flags — they're identical
+on macOS.)
+
+---
+
+### 🪟 Windows (via WSL2)
+
+**uacpy on Windows runs inside WSL2 (Windows Subsystem for Linux),
+following the Linux instructions above.** Native Windows builds via
+MSYS2 / `install.bat` are *not* currently supported on Windows 11 —
+Smart App Control blocks unsigned MSYS2 binaries (gfortran's `f951.exe`,
+`git.exe`, etc.), and bellhopcuda's headers conflict with MinGW's
+`math.h`. WSL2 sidesteps both issues by running real Linux binaries in
+a lightweight VM.
+
+You'll work like a Linux developer, but with a Windows desktop, Windows
+file explorer, and Windows IDE. Plots open in normal Windows windows
+(WSLg). It feels native.
+
+#### Step 1 — Enable hardware virtualization in BIOS/UEFI
+
+WSL2 needs CPU virtualization extensions. Some computer ship with this
+**disabled by default**.
+
+1. Reboot, press `F2` (Dell / Lenovo) or `F10` / `Esc` (HP) at the
+   vendor logo to enter BIOS/UEFI.
+2. Find and enable, depending on your CPU:
+   - Intel: **Intel Virtualization Technology** (or **VT-x**), and
+     **VT-d** if listed
+   - AMD: **SVM Mode** (or **AMD-V**)
+3. Save & exit (usually `F10`).
+
+#### Step 2 — Install WSL2 + Ubuntu
+
+In an **elevated PowerShell** (Run as Administrator):
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Reboot when prompted. After reboot an Ubuntu window should opens 
+automaticallyand asks you to set a username + password. (You can 
+skip the user creation by closing it — the default user becomes 
+`root`)
+
+#### Step 3 — Install uacpy inside Ubuntu
+
+Open Ubuntu (Start menu → "Ubuntu") and follow the **Linux / Debian**
+recipe from above:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y gfortran make liblapack-dev git \
+                        cmake g++ curl tar python3-venv python3-pip
+
+cd ~
+git clone --recurse-submodules https://github.com/ErVuL/uacpy.git
+cd uacpy
+python3 -m venv uacpy_venv
+source uacpy_venv/bin/activate
+pip install -e .
+./install.sh -y
+```
+
+> **Tip:** clone into the WSL filesystem (`~/uacpy`), **not** into
+> `/mnt/c/...`. Cross-filesystem I/O is 10–20× slower and the
+> Acoustics-Toolbox build does a lot of small file writes.
+
+#### Step 4 — Pick a development workflow (NOT TESTED !)
+
+You have three options for using uacpy from Windows:
+
+**Option A — VS Code with the WSL extension (recommended).**
+Edit and run from a Windows-native IDE; Python and uacpy execute
+inside WSL transparently.
+
+1. Install [VS Code](https://code.visualstudio.com/) for Windows.
+2. Install the **WSL** extension (`ms-vscode-remote.remote-wsl`).
+3. From Ubuntu: `cd ~/uacpy && code .`
+   VS Code opens on Windows, auto-installs a small server in WSL.
+4. In VS Code: `Ctrl+Shift+P` → *Python: Select Interpreter* →
+   pick `~/uacpy/uacpy_venv/bin/python`.
+
+Run scripts, debug, open Jupyter notebooks — everything works as if
+you were on Linux. Plots open in real Windows windows via WSLg.
+
+**Option B — Jupyter Lab in WSL, browser on Windows.**
+From Ubuntu:
+
+```bash
+source ~/uacpy/uacpy_venv/bin/activate
+pip install jupyterlab
+jupyter lab --no-browser --ip=127.0.0.1
+```
+
+Open the `http://127.0.0.1:8888/...` URL it prints in any Windows
+browser.
+
+**Option C — Plain Ubuntu terminal.**
+Run scripts directly:
+
+```bash
+cd ~/uacpy
+source uacpy_venv/bin/activate
+python uacpy/examples/example_01_basic_shallow_water.py
+```
+
+Plot windows still appear on the Windows desktop (WSLg).
+
+> **Why not call uacpy from Windows-native Python?** The compiled
+> Fortran/C++ binaries are Linux ELF executables and Windows can't
+> exec them. You *could* shim each subprocess call through `wsl.exe`
+> with WSL↔Windows path translation, but it's fragile and breaks on
+> uacpy updates. Run Python inside WSL instead — VS Code makes it
+> feel native.
+
+---
 
 ### Uninstall
 
-``` bash
+```bash
 pip uninstall uacpy
 rm -rf uacpy
 ```
