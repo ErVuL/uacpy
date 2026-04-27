@@ -174,12 +174,9 @@ on macOS.)
 ### 🪟 Windows (via WSL2)
 
 **uacpy on Windows runs inside WSL2 (Windows Subsystem for Linux),
-following the Linux instructions above.** Native Windows builds via
-MSYS2 / `install.bat` are *not* currently supported on Windows 11 —
-Smart App Control blocks unsigned MSYS2 binaries (gfortran's `f951.exe`,
-`git.exe`, etc.), and bellhopcuda's headers conflict with MinGW's
-`math.h`. WSL2 sidesteps both issues by running real Linux binaries in
-a lightweight VM.
+following the Linux instructions above.** Smart App Control can 
+block unsigned MSYS2 binaries (gfortran's `f951.exe`,`git.exe`, etc.), 
+and bellhopcuda's headers conflict with MinGW's `math.h`..
 
 You'll work like a Linux developer, but with a Windows desktop, Windows
 file explorer, and Windows IDE. Plots open in normal Windows windows
@@ -206,8 +203,8 @@ In an **elevated PowerShell** (Run as Administrator):
 wsl --install -d Ubuntu
 ```
 
-Reboot when prompted. After reboot an Ubuntu window should opens 
-automaticallyand asks you to set a username + password. (You can 
+Reboot when prompted. After reboot an Ubuntu window should open 
+automatically and asks you to set a username + password. (You can 
 skip the user creation by closing it — the default user becomes 
 `root`)
 
