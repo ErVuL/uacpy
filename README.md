@@ -275,13 +275,6 @@ python uacpy/examples/example_01_basic_shallow_water.py
 
 Plot windows still appear on the Windows desktop (WSLg).
 
-> **Why not call uacpy from Windows-native Python?** The compiled
-> Fortran/C++ binaries are Linux ELF executables and Windows can't
-> exec them. You *could* shim each subprocess call through `wsl.exe`
-> with WSL↔Windows path translation, but it's fragile and breaks on
-> uacpy updates. Run Python inside WSL instead — VS Code makes it
-> feel native.
-
 ---
 
 ### Uninstall
