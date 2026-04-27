@@ -423,6 +423,7 @@ etc.), the maintainer can be reached at:
 - https://github.com/nposdalj/PropaMod
 - https://github.com/marcuskd/pyram
 - https://github.com/org-arl/UnderwaterAcoustics.jl
+- https://github.com/SPECFEM
 
 
 
