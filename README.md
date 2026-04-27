@@ -52,15 +52,15 @@ processing, ambient noise, and visualization.
 
 **Propagation models**
 
-| Model             | Kind                                                       |
-|-------------------|------------------------------------------------------------|
-| **Bellhop**       | Ray / beam tracing                                         |
-| **Kraken**        | Normal modes                                               |
-| **Scooter**       | Fast‑field / normal modes                                  |
-| **SPARC**         | PE fast field                                              |
-| **RAM** (mpiramS) | Parabolic equation (broadband + TL)                        |
-| **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)   |
-| **Bounce**        | Reflection coefficients                                    |
+| Model             | Kind                                                               |
+|-------------------|--------------------------------------------------------------------|
+| **Bellhop**       | Ray / beam tracing                                                 |
+| **Kraken**        | Normal modes                                                       |
+| **Scooter**       | Finite elements for range independant env                          |
+| **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
+| **RAM** (mpiramS) | Parabolic equation                                                 |
+| **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)           |
+| **Bounce**        | Reflection coefficients                                            |
 
 **Beyond propagation** — signal processing (waveforms, matched filtering,
 beamforming, spectra), ambient noise (Wenz curves, wind, shipping,
