@@ -23,7 +23,7 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overri
 from uacpy.core.environment import Environment, BoundaryProperties
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result, TimeTrace, TransferFunction
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX
 from uacpy.io.bellhop_writer import BellhopEnvWriter
 from uacpy.io.output_reader import read_shd_file, read_arr_file, read_ray_file
@@ -345,7 +345,7 @@ class Bellhop(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        run_mode=_UNSET,
+        run_mode: Optional[RunMode] = None,
         beam_type=_UNSET,
         n_beams=_UNSET,
         alpha=_UNSET,
@@ -362,7 +362,7 @@ class Bellhop(PropagationModel):
         source_beam_pattern_file=_UNSET,
         arrivals_format=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run Bellhop simulation
 
@@ -402,15 +402,16 @@ class Bellhop(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Simulation results
         """
         # ── Resolve run_mode → internal single-char Bellhop code ────────
         from uacpy.core.model_utils import ParameterMapper
-        if run_mode is _UNSET:
+        if run_mode is None:
             run_mode = RunMode.COHERENT_TL
-        if run_mode == RunMode.TIME_SERIES:
-            # Delegate to broadband pipeline (arrivals + synthesis)
+        if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
+            # Both routes go through the arrivals → H(f) pipeline. Without
+            # source_waveform → TransferFunction; with it → TimeTrace.
             return self._run_broadband(env, source, receiver, **kwargs)
         run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
 
@@ -640,6 +641,37 @@ class Bellhop(PropagationModel):
             )
         return self.run(env, source, receiver, run_mode=run_mode, **kwargs)
 
+    def find_eigenrays(
+        self,
+        env: Environment,
+        source: Source,
+        range_m: float,
+        depth_m: float,
+        tolerance_m: Optional[float] = None,
+        max_rays: Optional[int] = None,
+        truncate: bool = True,
+        **run_kwargs,
+    ):
+        """Run Bellhop in EIGENRAYS mode and return rays arriving at one point.
+
+        Convenience wrapper around ``run(... run_mode=RunMode.EIGENRAYS)``
+        that targets a single ``(range_m, depth_m)`` point and post-filters
+        the result with :meth:`Rays.at_receiver` to keep only rays whose
+        closest-approach distance is within ``tolerance_m`` (default: one
+        acoustic wavelength). Returned rays are sorted by miss distance and
+        truncated at the closest-approach point so they visibly terminate
+        on the receiver. ``max_rays`` caps the count after sorting.
+        """
+        from uacpy.core.receiver import Receiver as _Recv
+        rcv = _Recv(depths=np.array([float(depth_m)]),
+                    ranges=np.array([float(range_m)]))
+        result = self.run(env, source, rcv,
+                          run_mode=RunMode.EIGENRAYS, **run_kwargs)
+        return result.at_receiver(
+            range_m=range_m, depth_m=depth_m,
+            tolerance_m=tolerance_m, max_rays=max_rays, truncate=truncate,
+        )
+
     def run_with_bounce(
         self,
         env: Environment,
@@ -649,7 +681,7 @@ class Bellhop(PropagationModel):
         cmax: float = DEFAULT_C_MAX,
         rmax_km: float = 10.0,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run Bellhop using BOUNCE-generated reflection coefficients.
 
@@ -678,7 +710,7 @@ class Bellhop(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Bellhop simulation results using reflection coefficients
         """
         from uacpy.models.bounce import Bounce
@@ -724,7 +756,7 @@ class Bellhop(PropagationModel):
         n_freqs: int = 128,
         bandwidth_factor: float = 1.0,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run Bellhop in broadband mode to produce a time-series or
         transfer function result.
@@ -782,7 +814,7 @@ class Bellhop(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             If source_waveform is None: field_type='transfer_function'
                 (call field.to_time_domain() to get time series)
             If source_waveform is provided: field_type='time_series'
@@ -844,23 +876,21 @@ class Bellhop(PropagationModel):
 
             dt = 1.0 / sample_rate
 
-            return Field(
-                field_type='time_series',
+            return TimeTrace(
                 data=rts,
-                ranges=np.array([rcv_range]),
-                depths=np.array([rcv_depth]),
-                frequencies=np.array([fc]),
+                time=t_vec,
+                depth=rcv_depth,
+                range_m=rcv_range,
+                model=self.model_name,
+                backend='bellhop',
+                source_depths=sz,
+                frequency=fc,
                 metadata={
-                    'model': 'bellhop',
-                    'time': t_vec,
                     'dt': dt,
                     'fs': sample_rate,
                     'nt': len(rts),
                     't_start': float(t_vec[0]),
-                    'depth': rcv_depth,
-                    'range': rcv_range,
                     'center_frequency': fc,
-                    'source_depths': sz,
                 },
             )
 
@@ -873,15 +903,13 @@ class Bellhop(PropagationModel):
         frequencies = np.asarray(frequencies, dtype=float)
         n_freq = len(frequencies)
 
-        # Build H(f) for each (source, receiver_depth, receiver_range)
-        # Use first source depth (most common case)
-        # Output shape: (n_depths, n_freq, n_ranges) to match Field convention
-        H = np.zeros((nrd, n_freq, nrr), dtype=complex)
-
+        # Build H(d, r, f) for each (receiver_depth, receiver_range).
+        # Use first source depth (most common case). Trailing-axis convention.
+        H = np.zeros((nrd, nrr, n_freq), dtype=complex)
         for ird in range(nrd):
             for irr in range(nrr):
                 rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, :, irr] = self._arrivals_to_tf(
+                H[ird, irr, :] = self._arrivals_to_tf(
                     rcv_arr, frequencies, fc
                 )
 
@@ -891,19 +919,19 @@ class Bellhop(PropagationModel):
 
         c0 = float(env.ssp_data[0, 1]) if hasattr(env, 'ssp_data') and env.ssp_data is not None else DEFAULT_SOUND_SPEED
 
-        return Field(
-            field_type='transfer_function',
+        return TransferFunction(
             data=H,
             ranges=rr,
             depths=rz,
-            frequencies=frequencies,
-            metadata={
-                'model': 'bellhop',
-                'center_frequency': fc,
-                'source_depths': sz,
-                'arrivals_field': arr_field,
-                'c0': c0,
-            },
+            phase_reference='travelling_wave',
+            **self._result_kwargs(
+                source,
+                backend='bellhop',
+                frequencies=frequencies,
+                center_frequency=fc,
+                arrivals_field=arr_field,
+                c0=c0,
+            ),
         )
 
     @staticmethod

@@ -54,7 +54,7 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overri
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result, Modes, PressureField, TransferFunction
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
@@ -186,19 +186,18 @@ class _KrakenBase(PropagationModel):
             if phi_arr.ndim == 2 and phi_arr.shape[1] > n_modes:
                 phi_arr = phi_arr[:, :n_modes]
 
-        return Field(
-            field_type='modes',
-            data=phi_arr,
-            depths=z_arr,
-            metadata={
-                'k': k_arr,
-                'phi': phi_arr,
-                'z': z_arr,
-                'frequency': float(source.frequency[0]),
-                'n_modes': len(k_arr),
-                'n_modes_requested': n_modes,
-                'leaky_modes': self.leaky_modes,
-            },
+        return Modes(
+            k=k_arr,
+            phi=phi_arr,
+            z=z_arr,
+            n_modes=len(k_arr),
+            **self._result_kwargs(
+                source,
+                backend=Path(self.executable).name if self.executable else self.model_name.lower(),
+                frequency=float(source.frequency[0]),
+                n_modes_requested=n_modes,
+                leaky_modes=self.leaky_modes,
+            ),
         )
 
     @staticmethod
@@ -534,6 +533,9 @@ class Kraken(_KrakenBase):
     def __init__(self, executable: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
         self._supported_modes = [RunMode.MODES]
+        # Kraken: range-independent modal solver, layered bottom honored,
+        # rejects range-dependent envs explicitly (compute_modes raises).
+        self._supports_layered_bottom = True
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -549,6 +551,8 @@ class Kraken(_KrakenBase):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         n_modes: Optional[int] = None,
         c_low=_UNSET,
         c_high=_UNSET,
@@ -556,7 +560,7 @@ class Kraken(_KrakenBase):
         roughness=_UNSET,
         volume_attenuation=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute normal modes
 
@@ -584,6 +588,13 @@ class Kraken(_KrakenBase):
         Field
             Mode data in metadata dict
         """
+        if run_mode is not None and run_mode != RunMode.MODES:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.MODES", "KrakenField for TL fields"],
+            )
+
         self.validate_inputs(env, source, receiver)
 
         if env.is_range_dependent:
@@ -650,6 +661,9 @@ class KrakenC(_KrakenBase):
     def __init__(self, executable: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
         self._supported_modes = [RunMode.MODES]
+        # KrakenC: complex-mode solver, same env support as Kraken
+        # (layered bottom honored; range-dep rejected by compute_modes).
+        self._supports_layered_bottom = True
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -665,6 +679,8 @@ class KrakenC(_KrakenBase):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         n_modes: Optional[int] = None,
         c_low=_UNSET,
         c_high=_UNSET,
@@ -672,7 +688,7 @@ class KrakenC(_KrakenBase):
         roughness=_UNSET,
         volume_attenuation=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute complex normal modes.
 
@@ -697,11 +713,15 @@ class KrakenC(_KrakenBase):
 
         Returns
         -------
-        Field
-            Field with field_type='modes'. Mode data (wavenumbers, mode shapes)
-            available in metadata dict with keys 'k', 'phi', 'z', 'frequency',
-            'n_modes'.
+        Modes
+            Typed modal result with ``k``, ``phi``, ``z``, ``n_modes``.
         """
+        if run_mode is not None and run_mode != RunMode.MODES:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.MODES", "KrakenField for TL fields"],
+            )
         self.validate_inputs(env, source, receiver)
 
         if env.is_range_dependent:
@@ -826,9 +846,18 @@ class KrakenField(_KrakenBase):
         super().__init__(**kwargs)
         self._supported_modes = [
             RunMode.COHERENT_TL,
+            RunMode.BROADBAND,
             RunMode.TIME_SERIES,
-            RunMode.TRANSFER_FUNCTION,
         ]
+        # KrakenField: segments range-dependent SSP / bathymetry into
+        # adiabatic-or-coupled modes; layered bottom honored. Range-
+        # dependent geoacoustic properties (bottom_rd / bottom_rd_layered)
+        # are NOT plumbed through and warn via the base helper.
+        self._supports_range_dependent_ssp = True
+        self._supports_range_dependent_bottom = False
+        self._supports_layered_bottom = True
+        self._supports_range_dependent_layered_bottom = False
+        self._unsupported_env_alternatives = "RAM (PE) for full range-dep geoacoustics"
 
         if mode_coupling not in ('adiabatic', 'coupled'):
             raise ValueError(
@@ -948,8 +977,10 @@ class KrakenField(_KrakenBase):
         mode_coupling=_UNSET,
         n_segments=_UNSET,
         mode_points_per_meter=_UNSET,
+        source_waveform=None,
+        sample_rate=None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute TL field using normal modes.
 
@@ -964,7 +995,8 @@ class KrakenField(_KrakenBase):
         receiver : Receiver
             Receiver grid.
         run_mode : RunMode, optional
-            COHERENT_TL (default), TIME_SERIES, or TRANSFER_FUNCTION.
+            ``COHERENT_TL`` (default), ``BROADBAND``, or ``TIME_SERIES``.
+            ``TIME_SERIES`` requires ``source_waveform`` + ``sample_rate``.
         frequencies : ndarray, optional
             Frequency vector (Hz) for native broadband computation. Uses
             TopOpt(6)='B' so kraken writes one multi-frequency .mod file
@@ -975,6 +1007,10 @@ class KrakenField(_KrakenBase):
             'adiabatic' or 'coupled' (per-call override).
         n_segments : int, optional
             Number of range segments (per-call override).
+        source_waveform : ndarray, optional
+            Source pulse for ``TIME_SERIES`` mode.
+        sample_rate : float, optional
+            Sampling rate of ``source_waveform`` in Hz.
         """
         if mode_coupling is not _UNSET and mode_coupling not in (
             'adiabatic', 'coupled'
@@ -1008,19 +1044,33 @@ class KrakenField(_KrakenBase):
                 )
 
             if run_mode is None:
-                # Default run mode: TRANSFER_FUNCTION if a freq vector is
-                # provided, else single-frequency coherent TL.
+                # Default run mode: BROADBAND if a freq vector is provided,
+                # else single-frequency coherent TL.
                 if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
-                    run_mode = RunMode.TRANSFER_FUNCTION
+                    run_mode = RunMode.BROADBAND
                 else:
                     run_mode = RunMode.COHERENT_TL
 
-            if run_mode in (RunMode.TIME_SERIES, RunMode.TRANSFER_FUNCTION):
-                return self._compute_broadband_field(
+            if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+                if run_mode == RunMode.TIME_SERIES and (
+                    source_waveform is None or sample_rate is None
+                ):
+                    raise ValueError(
+                        "KrakenField.run(run_mode=TIME_SERIES) requires "
+                        "source_waveform and sample_rate. For the broadband "
+                        "transfer function H(f), use run_mode=RunMode.BROADBAND."
+                    )
+                tf = self._compute_broadband_field(
                     env, source, receiver,
                     frequencies=frequencies, n_modes=n_modes,
                     **kwargs
                 )
+                if run_mode == RunMode.TIME_SERIES:
+                    return tf.synthesize_time_series(
+                        source_waveform=source_waveform,
+                        sample_rate=sample_rate,
+                    )
+                return tf
 
             self.validate_inputs(env, source, receiver)
             return self._compute_field_via_exe(
@@ -1233,26 +1283,27 @@ class KrakenField(_KrakenBase):
 
                 shd0 = read_shd_bin(str(shd_file))
                 freqs_read = np.asarray(shd0['freqVec'], dtype=float)
+                # New layout: (n_d, n_r, n_f).
                 p_stack = np.zeros(
-                    (len(receiver.depths), len(freqs_read), len(receiver.ranges)),
+                    (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
                     dtype=np.complex128,
                 )
                 for i_freq, fr in enumerate(freqs_read):
                     shd_i = read_shd_bin(str(shd_file), freq=float(fr))
-                    p_stack[:, i_freq, :] = -shd_i['pressure'][0, 0, :, :]
-                field = Field(
-                    field_type='transfer_function',
+                    p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
+                field = TransferFunction(
                     data=p_stack,
                     depths=receiver.depths,
                     ranges=receiver.ranges,
-                    frequencies=freqs_read,
-                    metadata={
-                        'model': 'KrakenField',
-                        'mode_coupling': self.mode_coupling if is_rd else 'none',
-                        'n_profiles': n_profiles,
-                        'backend': 'field.exe',
-                        'native_broadband': True,
-                    },
+                    phase_reference='porter_negated',
+                    **self._result_kwargs(
+                        source,
+                        backend='field.exe',
+                        frequencies=freqs_read,
+                        mode_coupling=self.mode_coupling if is_rd else 'none',
+                        n_profiles=n_profiles,
+                        native_broadband=True,
+                    ),
                 )
             elif return_pressure:
                 # Return complex pressure for broadband/transfer function use.
@@ -1262,25 +1313,26 @@ class KrakenField(_KrakenBase):
                 # by Scooter, Bellhop, and RAM for consistent time-series.
                 shd_data = read_shd_bin(str(shd_file))
                 p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
-                field = Field(
-                    field_type='pressure',
+                field = PressureField(
                     data=p,
                     depths=receiver.depths,
                     ranges=receiver.ranges,
-                    frequencies=source.frequency,
-                    metadata={
-                        'model': 'KrakenField',
-                        'mode_coupling': self.mode_coupling if is_rd else 'none',
-                        'n_profiles': n_profiles,
-                        'backend': 'field.exe',
-                    },
+                    **self._result_kwargs(
+                        source,
+                        backend='field.exe',
+                        frequency=float(np.atleast_1d(source.frequency)[0]),
+                        mode_coupling=self.mode_coupling if is_rd else 'none',
+                        n_profiles=n_profiles,
+                    ),
                 )
             else:
                 field = read_shd_file(shd_file)
+                field.model = 'KrakenField'
+                field.backend = 'field.exe'
                 field.metadata['model'] = 'KrakenField'
+                field.metadata['backend'] = 'field.exe'
                 field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
                 field.metadata['n_profiles'] = n_profiles
-                field.metadata['backend'] = 'field.exe'
 
             self._log("KrakenField simulation complete", level='info')
             return field

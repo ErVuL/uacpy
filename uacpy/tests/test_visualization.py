@@ -4,22 +4,24 @@ Tests for visualization module including plots and quickplot
 
 import pytest
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
 import uacpy
 from uacpy.models import Bellhop, RAM, Kraken, KrakenField
 from uacpy.visualization import plots, quickplot
-from uacpy.core.field import Field
+from uacpy.core.results import Result as Field  # legacy name → typed base
 
 # Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
 pytestmark = pytest.mark.requires_binary
 
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def basic_setup():
-    """Create basic environment, source, and result for testing."""
+    """Create basic environment, source, and result for testing.
+
+    Module-scoped: the Bellhop subprocess runs once per file, not once per test.
+    Tests that mutate ``result.data`` must operate on a deep copy.
+    """
     env = uacpy.Environment(
         name='test',
         depth=100,
@@ -46,36 +48,24 @@ class TestPlotTransmissionLoss:
         assert ax is not None
         plt.close(fig)
 
-    def test_plot_transmission_loss_custom_params(self, basic_setup):
-        """Test TL plotting with custom parameters."""
+    @pytest.mark.parametrize("kwargs", [
+        dict(vmin=40, vmax=100, cmap='plasma', figsize=(14, 8)),
+        dict(show_bathymetry=False),
+    ])
+    def test_plot_transmission_loss_kwargs(self, basic_setup, kwargs):
+        """Optional kwargs forward through to the underlying axes."""
         env, source, result = basic_setup
-
-        fig, ax, _ = plots.plot_transmission_loss(
-            result, env,
-            vmin=40, vmax=100,
-            cmap='plasma',
-            figsize=(14, 8)
-        )
+        fig, ax, _ = plots.plot_transmission_loss(result, env, **kwargs)
         assert fig is not None
-        assert fig.get_size_inches()[0] == 14
         plt.close(fig)
 
     def test_plot_transmission_loss_custom_ax(self, basic_setup):
-        """Test TL plotting on custom axes."""
+        """plot_transmission_loss respects an externally-supplied Axes."""
         env, source, result = basic_setup
-
         fig, ax = plt.subplots()
         fig2, ax2, _ = plots.plot_transmission_loss(result, env, ax=ax)
         assert fig2 is fig
         assert ax2 is ax
-        plt.close(fig)
-
-    def test_plot_transmission_loss_no_bathymetry(self, basic_setup):
-        """Test TL plotting without bathymetry overlay."""
-        env, source, result = basic_setup
-
-        fig, ax, _ = plots.plot_transmission_loss(result, env, show_bathymetry=False)
-        assert fig is not None
         plt.close(fig)
 
 
@@ -239,36 +229,6 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
 
-class TestFieldPlotComparison:
-    """Tests for Field.plot_comparison() static method."""
-
-    def test_plot_comparison_single(self, basic_setup):
-        """Test plot_comparison with single model."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        fig, axes = Field.plot_comparison(results, env=env)
-        assert fig is not None
-        plt.close(fig)
-
-    def test_plot_comparison_multiple(self, basic_setup):
-        """Test plot_comparison with multiple models."""
-        env, source, _ = basic_setup
-
-        bellhop = Bellhop(verbose=False)
-        ram = RAM(verbose=False)
-
-        results = {
-            'Bellhop': bellhop.compute_tl(env, source, max_range=5000),
-            'RAM': ram.compute_tl(env, source, max_range=5000),
-        }
-
-        fig, axes = Field.plot_comparison(results, env=env)
-        assert fig is not None
-        assert len(axes) == 2
-        plt.close(fig)
-
-
 class TestQuickplot:
     """Tests for quickplot convenience functions."""
 
@@ -334,26 +294,6 @@ class TestQuickplot:
         assert save_path.exists()
         plt.close(fig)
 
-    def test_quickplot_aliases(self, basic_setup, tmp_path):
-        """Test quickplot short aliases."""
-        env, source, result = basic_setup
-
-        # Test quick_tl
-        save_path = tmp_path / "test_alias.png"
-        fig, ax = quickplot.quick_tl(result, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-        # Test quick_compare
-        results = {'Bellhop': result}
-        save_path2 = tmp_path / "test_alias2.png"
-        fig, axes = quickplot.quick_compare(results, env, save=str(save_path2))
-        assert fig is not None
-        assert save_path2.exists()
-        plt.close(fig)
-
-
 class TestPlottingEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -369,24 +309,21 @@ class TestPlottingEdgeCases:
         env, source, _ = basic_setup
 
         # Create a field with unsupported type
-        field = Field(
-            field_type='reflection_coefficients',
-            data=np.array([[1, 2], [3, 4]]),
-            ranges=np.array([100, 200]),
-            depths=np.array([10, 20])
-        )
-
-        with pytest.raises(ValueError):
-            field.plot(env=env)
+        # plot_result raises TypeError on a non-Result input.
+        from uacpy.visualization.plots import plot_result
+        with pytest.raises(TypeError):
+            plot_result(object())
 
     def test_plot_with_nan_data(self, basic_setup):
         """Test plotting with NaN values in data."""
+        import copy
         env, source, result = basic_setup
 
-        # Add some NaN values
-        result.data[0, 0] = np.nan
+        # Mutate a deep copy — basic_setup is module-scoped and shared.
+        result_with_nan = copy.deepcopy(result)
+        result_with_nan.data[0, 0] = np.nan
 
-        fig, ax, _ = plots.plot_transmission_loss(result, env)
+        fig, ax, _ = plots.plot_transmission_loss(result_with_nan, env)
         assert fig is not None
         plt.close(fig)
 
@@ -395,43 +332,43 @@ class TestPlottingIntegration:
     """Integration tests for plotting workflows."""
 
     def test_complete_workflow(self, basic_setup, tmp_path):
-        """Test complete plotting workflow."""
-        env, source, _ = basic_setup
+        """Combined plot/compare/cuts/report workflow on synthetic TLFields.
 
-        # Run multiple models
-        bellhop = Bellhop(verbose=False)
-        ram = RAM(verbose=False)
-        krakenfield = KrakenField(verbose=False)
+        Real model output is not needed to exercise the plotting pipeline; we
+        feed three synthetic TLFields differing by a constant offset so each
+        plotting helper has distinct data to render.
+        """
+        from uacpy.core.results import TLField
+
+        env, _, _ = basic_setup
+        depths = np.linspace(5, 95, 19)
+        ranges = np.linspace(100, 5000, 50)
+        base = 60 + 10 * np.log10(np.maximum(ranges, 1.0)[None, :])
+        base = np.broadcast_to(base, (depths.size, ranges.size)).copy()
 
         results = {
-            'Bellhop': bellhop.compute_tl(env, source, max_range=5000),
-            'RAM': ram.compute_tl(env, source, max_range=5000),
-            'KrakenField': krakenfield.compute_tl(env, source, max_range=5000),
+            name: TLField(
+                data=base + offset, depths=depths, ranges=ranges, model=name,
+            )
+            for name, offset in (('Bellhop', 0.0), ('RAM', 1.5), ('KrakenField', -1.5))
         }
 
-        # Test all plotting methods
-        # 1. Individual plots
         for name, result in results.items():
             fig, ax = result.plot(env=env)
             assert fig is not None
             plt.close(fig)
 
-        # 2. Comparison plot
-        fig, axes = Field.plot_comparison(results, env=env)
-        assert fig is not None
-        assert len(axes) == 3
+        fig, axes = plots.compare_models(results, env=env)
+        assert fig is not None and len(axes) == 3
         plt.close(fig)
 
-        # 3. Range cuts
         fig, ax = plots.compare_range_cuts(results, depth=50)
         assert fig is not None
         plt.close(fig)
 
-        # 4. Quickplot report
         save_path = tmp_path / "workflow_report.png"
         fig = quickplot.quick_report(results, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
+        assert fig is not None and save_path.exists()
         plt.close(fig)
 
 

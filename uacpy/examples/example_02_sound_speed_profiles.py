@@ -122,23 +122,18 @@ def scenario_a_munk_profile():
     # RECEIVER GRID - Deep water column, long range
     # ═══════════════════════════════════════════════════════════════════════
     receiver = uacpy.Receiver(
-        depths=np.linspace(100, 4900, 50),      # Deep water (avoid boundaries)
-        ranges=np.linspace(1000, 100000, 100),  # 1-100 km
+        depths=np.linspace(100, 4900, 25),
+        ranges=np.linspace(1000, 20000, 25),
         receiver_type='grid'
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN ALL MODELS
+    # RUN MODELS
     # ═══════════════════════════════════════════════════════════════════════
     results = {}
-
     models = [
         ('Bellhop', Bellhop(verbose=False)),
-        ('RAM', RAM(verbose=False)),
         ('KrakenField', KrakenField(verbose=False)),
-        ('Scooter', Scooter(verbose=False)),
-        
-        ('OAST', OAST(verbose=False)),
     ]
 
     print("\nRunning propagation models:")
@@ -222,23 +217,20 @@ def scenario_b_pekeris_waveguide():
     # RECEIVER GRID
     # ═══════════════════════════════════════════════════════════════════════
     receiver = uacpy.Receiver(
-        depths=np.linspace(3, 97, 60),          # Full water column (margins)
-        ranges=np.linspace(100, 15000, 100),    # 0.1-15 km
+        depths=np.linspace(3, 97, 30),
+        ranges=np.linspace(100, 5000, 40),
         receiver_type='grid'
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN ALL MODELS
+    # RUN MODELS
     # ═══════════════════════════════════════════════════════════════════════
     results = {}
-
     models = [
         ('Bellhop', Bellhop(verbose=False)),
         ('RAM', RAM(verbose=False)),
         ('KrakenField', KrakenField(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
-        
-        ('OAST', OAST(verbose=False)),
     ]
 
     print("\nRunning propagation models:")
@@ -324,23 +316,20 @@ def scenario_c_thermocline():
     # RECEIVER GRID
     # ═══════════════════════════════════════════════════════════════════════
     receiver = uacpy.Receiver(
-        depths=np.linspace(3, 197, 60),         # Full water column
-        ranges=np.linspace(500, 20000, 100),    # 0.5-20 km
+        depths=np.linspace(3, 197, 30),
+        ranges=np.linspace(500, 5000, 40),
         receiver_type='grid'
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN ALL MODELS
+    # RUN MODELS
     # ═══════════════════════════════════════════════════════════════════════
     results = {}
-
     models = [
         ('Bellhop', Bellhop(verbose=False)),
         ('RAM', RAM(verbose=False)),
         ('KrakenField', KrakenField(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
-        
-        ('OAST', OAST(verbose=False)),
     ]
 
     print("\nRunning propagation models:")

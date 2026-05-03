@@ -1,10 +1,21 @@
 """Pytest configuration and fixtures for UACPY tests."""
 
-import pytest
+# Lock matplotlib to a non-interactive backend before any test imports it.
+# Must run before any other matplotlib import in the test session.
+import matplotlib
+
+matplotlib.use("Agg")
+
 import numpy as np
+import pytest
 
 import uacpy
-from uacpy.models import Bellhop, Kraken, KrakenField
+
+
+@pytest.fixture(autouse=True)
+def _seed_numpy():
+    """Seed numpy.random before every test to keep fixture data reproducible."""
+    np.random.seed(0xACED)
 
 
 @pytest.fixture
@@ -76,24 +87,6 @@ def receiver_small():
     )
 
 
-@pytest.fixture
-def bellhop_model():
-    """Bellhop model instance."""
-    return Bellhop(verbose=False)
-
-
-@pytest.fixture
-def kraken_model():
-    """Kraken model instance."""
-    return Kraken(verbose=False)
-
-
-@pytest.fixture
-def krakenfield_model():
-    """KrakenField model instance."""
-    return KrakenField(verbose=False)
-
-
 # Pytest configuration
 def pytest_configure(config):
     """Configure pytest with custom markers."""
@@ -102,9 +95,6 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "requires_binary: marks tests requiring compiled native binaries (Fortran/C)"
-    )
-    config.addinivalue_line(
-        "markers", "integration: marks integration tests"
     )
     config.addinivalue_line(
         "markers", "requires_oases: marks tests requiring compiled OASES binaries"

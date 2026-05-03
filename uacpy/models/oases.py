@@ -44,7 +44,10 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import (
+    Result, TLField, TransferFunction,
+    Modes, OASNCovariance, ReflectionCoefficient,
+)
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
 from uacpy.io.oases_reader import (
     read_oast_tl,
@@ -116,6 +119,10 @@ class OAST(_OASESBase):
         self._validate_volume_attenuation_params()
 
         self._supported_modes = [RunMode.COHERENT_TL]
+        # OAST: range-independent wavenumber integration; multi-layer
+        # fluid + elastic bottom honored.
+        self._supports_layered_bottom = True
+        self._unsupported_env_alternatives = "OASP (range-dep) or RAM"
 
         if executable is None:
             self.executable = self._find_executable('oast')
@@ -133,9 +140,11 @@ class OAST(_OASESBase):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         volume_attenuation=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run OAST transmission loss computation
 
@@ -158,9 +167,17 @@ class OAST(_OASESBase):
 
         Returns
         -------
-        field : Field
+        result : Result
             Transmission loss field
         """
+        # OAST emits coherent TL only — guard against other modes.
+        if run_mode is not None and run_mode != RunMode.COHERENT_TL:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.COHERENT_TL", "OASP for broadband"],
+            )
+
         # Resolve per-call overrides
         volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
 
@@ -235,16 +252,18 @@ class OAST(_OASESBase):
                 receiver_ranges=receiver.ranges
             )
 
-            # Stamp provenance so all OASES Field outputs carry the model tag.
-            metadata['model'] = 'OAST'
-
-            # Package as Field object
-            result = Field(
-                field_type='tl',
+            # Build a typed TLField. OAST stashes the rest in metadata.
+            metadata.pop('model', None)
+            metadata.pop('backend', None)
+            result = TLField(
                 data=tl_data,
                 depths=receiver.depths,
                 ranges=receiver.ranges,
-                metadata=metadata
+                model='OAST',
+                backend='oast',
+                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
+                frequency=float(np.atleast_1d(source.frequency)[0]),
+                metadata=metadata,
             )
 
             self._log("OAST simulation complete")
@@ -330,6 +349,10 @@ class OASN(_OASESBase):
         self._validate_volume_attenuation_params()
 
         self._supported_modes = [RunMode.MODES]
+        # OASN: range-independent covariance / replica field; multi-layer
+        # bottom honored.
+        self._supports_layered_bottom = True
+        self._unsupported_env_alternatives = "Kraken/KrakenC for full mode shapes"
 
         if executable is None:
             self.executable = self._find_executable('oasn2_bin')
@@ -347,9 +370,11 @@ class OASN(_OASESBase):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         volume_attenuation=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run OASN covariance / replica computation.
 
@@ -373,10 +398,15 @@ class OASN(_OASESBase):
 
         Returns
         -------
-        field : Field
-            Covariance / replica field (wrapped as Field.field_type='modes'
-            so downstream consumers share the mode-handling plot API).
+        result : OASNCovariance
+            Replica vectors and spatial covariance matrices.
         """
+        if run_mode is not None and run_mode != RunMode.MODES:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.MODES (replica/covariance)"],
+            )
         volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
         self.validate_inputs(env, source, receiver)
         fm = self._setup_file_manager()
@@ -433,23 +463,23 @@ class OASN(_OASESBase):
             # Package as Field object. OASN outputs covariance matrices, not
             # mode shapes; we expose both the covariance and any wavenumbers
             # scraped from the print log in metadata.
-            return Field(
-                field_type='modes',
-                data=mode_aux.get('phi', np.array([])),
-                depths=mode_aux.get('z', receiver.depths),
+            return OASNCovariance(
+                phi=mode_aux.get('phi', np.array([])),
+                z=mode_aux.get('z', receiver.depths),
+                covariance=cov_data.get('covariance'),
+                n_modes=mode_aux.get('n_modes', 0),
+                model='OASN',
+                backend='oasn',
+                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
+                frequency=float(np.atleast_1d(source.frequency)[0]),
                 metadata={
-                    'model': 'OASN',
-                    'frequency': source.frequency[0],
-                    'n_modes': mode_aux.get('n_modes', 0),
                     'k': mode_aux.get('k', np.array([])),
-                    'z': mode_aux.get('z', receiver.depths),
-                    'covariance': cov_data.get('covariance'),
                     'n_receivers': cov_data.get('n_receivers'),
                     'n_frequencies': cov_data.get('n_frequencies'),
                     'freq_min': cov_data.get('freq_min'),
                     'freq_max': cov_data.get('freq_max'),
                     'experimental': True,
-                }
+                },
             )
 
         finally:
@@ -557,6 +587,8 @@ class OASR(_OASESBase):
         # OASR is strictly a boundary-reflection solver; it does not produce
         # transmission loss. Declare that explicitly.
         self._supported_modes = [RunMode.REFLECTION]
+        # OASR: range-independent reflection vs angle/freq; layered bottom honored.
+        self._supports_layered_bottom = True
 
         if executable is None:
             self.executable = self._find_executable('oasr')
@@ -574,11 +606,13 @@ class OASR(_OASESBase):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         angles=_UNSET,
         angle_type=_UNSET,
         volume_attenuation=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run OASR reflection coefficient computation.
 
@@ -599,9 +633,16 @@ class OASR(_OASESBase):
 
         Returns
         -------
-        field : Field
+        result : Result
             Reflection coefficients field
         """
+        if run_mode is not None and run_mode != RunMode.REFLECTION:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.REFLECTION"],
+            )
+
         # Resolve per-call overrides
         angles = angles if angles is not _UNSET else self.angles
         angle_type = angle_type if angle_type is not _UNSET else self.angle_type
@@ -652,15 +693,19 @@ class OASR(_OASESBase):
             self._log(f"Reading OASR output: {output_file}")
             data = read_oasr_reflection_coefficients(output_file)
 
-            # Stamp provenance so all OASES Field outputs carry the model tag.
-            data['model'] = 'OASR'
-
-            # Convert dict to Field object
-            from uacpy.core.field import Field
-            field = Field(
-                field_type='reflection_coefficients',
-                data=None,  # Reflection coefficients stored in metadata
-                metadata=data
+            # Build a typed ReflectionCoefficient. OASR stashed everything in
+            # ``data`` (theta, R, phi, …); we lift the spectrum-defining keys
+            # to typed attributes and pass the rest as metadata.
+            theta = data.pop('theta', np.array([]))
+            R = data.pop('R', np.array([]))
+            phi = data.pop('phi', np.zeros_like(np.atleast_1d(theta)))
+            field = ReflectionCoefficient(
+                theta=theta, R=R, phi=phi,
+                model='OASR',
+                backend='oasr',
+                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
+                frequency=float(np.atleast_1d(source.frequency)[0]),
+                metadata=data,
             )
 
             self._log("OASR simulation complete")
@@ -773,7 +818,16 @@ class OASP(_OASESBase):
         self.bio_layers = bio_layers
         self._validate_volume_attenuation_params()
 
-        self._supported_modes = [RunMode.COHERENT_TL, RunMode.TIME_SERIES]
+        self._supported_modes = [
+            RunMode.COHERENT_TL,
+            RunMode.BROADBAND,
+            RunMode.TIME_SERIES,
+        ]
+        # OASP: broadband wavenumber-integration PE; supports layered fluid
+        # / elastic bottoms and limited range dependence (bathymetry only).
+        self._supports_layered_bottom = True
+        self._supports_range_dependent_bottom = False
+        self._unsupported_env_alternatives = "RAM (PE) for full range-dep"
 
         if executable is None:
             self.executable = self._find_executable('oasp')
@@ -795,8 +849,10 @@ class OASP(_OASESBase):
         n_time_samples=_UNSET,
         freq_max=_UNSET,
         volume_attenuation=_UNSET,
+        source_waveform=None,
+        sample_rate=None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run OASP parabolic equation computation
 
@@ -809,8 +865,14 @@ class OASP(_OASESBase):
         receiver : Receiver
             Receiver array
         run_mode : RunMode, optional
-            COHERENT_TL (default): extract TL at source frequency.
-            TIME_SERIES: return full broadband transfer function.
+            ``COHERENT_TL`` (default) — extract TL at source frequency.
+            ``BROADBAND`` — full H(f).
+            ``TIME_SERIES`` — real pressure p(t); requires
+            ``source_waveform`` + ``sample_rate``.
+        source_waveform : ndarray, optional
+            Source pulse for ``TIME_SERIES`` mode.
+        sample_rate : float, optional
+            Sampling rate of ``source_waveform`` in Hz.
         n_time_samples, freq_max, volume_attenuation : optional
             Per-call overrides for constructor defaults.
         **kwargs
@@ -818,8 +880,10 @@ class OASP(_OASESBase):
 
         Returns
         -------
-        field : Field
-            TL field (COHERENT_TL) or transfer function field (TIME_SERIES)
+        result : Result
+            ``field_type='tl'`` for COHERENT_TL,
+            ``'transfer_function'`` for BROADBAND,
+            ``'time_series'`` for TIME_SERIES.
         """
         # Resolve per-call overrides
         n_time_samples = n_time_samples if n_time_samples is not _UNSET else self.n_time_samples
@@ -828,6 +892,15 @@ class OASP(_OASESBase):
 
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
+
+        if run_mode == RunMode.TIME_SERIES and (
+            source_waveform is None or sample_rate is None
+        ):
+            raise ValueError(
+                "OASP.run(run_mode=TIME_SERIES) requires source_waveform "
+                "and sample_rate. For the broadband transfer function "
+                "H(f), use run_mode=RunMode.BROADBAND."
+            )
         self.validate_inputs(env, source, receiver)
         fm = self._setup_file_manager()
 
@@ -874,55 +947,58 @@ class OASP(_OASESBase):
 
             transfer_func = trf_data['transfer_function']  # shape: (n_freq, n_range, n_depth)
 
-            if run_mode == RunMode.TIME_SERIES:
-                # Return full broadband transfer function
-                # Reshape to (n_depth, n_freq, n_range) for consistency with RAM
-                tf_reordered = np.transpose(transfer_func, (2, 0, 1))
+            if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+                # Convention: (n_depth, n_range, n_freq) — trailing
+                # axis is the variable dim. Source axes: (freq, range, depth).
+                tf_reordered = np.transpose(transfer_func, (2, 1, 0))
 
-                result = Field(
-                    field_type='transfer_function',
+                result = TransferFunction(
                     data=tf_reordered,
                     depths=trf_data['depths'],
                     ranges=trf_data['ranges'],
-                    metadata={
-                        'model': 'OASP',
-                        'frequencies': trf_data['freq'],
-                        'source_depth': trf_data['source_depth'],
-                        'center_frequency': trf_data['center_frequency'],
-                        'n_time_samples': n_time_samples,
-                        'freq_max': freq_max,
-                    }
+                    phase_reference='travelling_wave',
+                    **self._result_kwargs(
+                        source,
+                        backend='oasp',
+                        frequencies=trf_data['freq'],
+                        center_frequency=trf_data['center_frequency'],
+                        n_time_samples=n_time_samples,
+                        freq_max=freq_max,
+                    ),
                 )
+                if run_mode == RunMode.TIME_SERIES:
+                    result = result.synthesize_time_series(
+                        source_waveform=source_waveform,
+                        sample_rate=sample_rate,
+                    )
             else:
-                # COHERENT_TL: extract TL at source frequency
+                # COHERENT_TL: extract TL at source frequency.
                 freq_idx = 0
                 if len(trf_data['freq']) > 1:
                     freq_diff = np.abs(trf_data['freq'] - source.frequency[0])
                     freq_idx = np.argmin(freq_diff)
 
                 tl_at_freq = transfer_func[freq_idx, :, :]
-
                 magnitude = np.abs(tl_at_freq)
                 magnitude[magnitude == 0] = 1e-30
                 tl_db = -20 * np.log10(magnitude)
-
-                # Transpose to (n_depth, n_range)
+                # Transpose to (n_depth, n_range).
                 tl_db = tl_db.T
 
-                result = Field(
-                    field_type='tl',
+                result = TLField(
                     data=tl_db,
                     depths=trf_data['depths'],
                     ranges=trf_data['ranges'],
-                    metadata={
-                        'model': 'OASP',
-                        'frequency': trf_data['freq'][freq_idx],
-                        'frequencies_available': trf_data['freq'],
-                        'source_depth': trf_data['source_depth'],
-                        'center_frequency': trf_data['center_frequency'],
-                        'n_time_samples': n_time_samples,
-                        'freq_max': freq_max,
-                    }
+                    **self._result_kwargs(
+                        source,
+                        backend='oasp',
+                        frequency=float(trf_data['freq'][freq_idx]),
+                        frequencies_available=trf_data['freq'],
+                        source_depth=trf_data['source_depth'],
+                        center_frequency=trf_data['center_frequency'],
+                        n_time_samples=n_time_samples,
+                        freq_max=freq_max,
+                    ),
                 )
 
             self._log("OASP simulation complete")
@@ -1027,7 +1103,7 @@ class OASES(PropagationModel):
         receiver: Receiver,
         run_mode: RunMode = RunMode.COHERENT_TL,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run OASES computation
 
@@ -1055,7 +1131,7 @@ class OASES(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Simulation results.
         """
         if run_mode == RunMode.COHERENT_TL:
@@ -1067,9 +1143,11 @@ class OASES(PropagationModel):
             return self._oasn.run(env, source, receiver, **kwargs)
         if run_mode == RunMode.REFLECTION:
             return self._oasr.run(env, source, receiver, **kwargs)
-        if run_mode == RunMode.TIME_SERIES:
+        if run_mode in (
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ):
             return self._oasp.run(env, source, receiver,
-                                  run_mode=RunMode.TIME_SERIES, **kwargs)
+                                  run_mode=run_mode, **kwargs)
         raise ValueError(f"Run mode {run_mode} not supported by OASES")
 
     def compute_tl(
@@ -1079,7 +1157,7 @@ class OASES(PropagationModel):
         receiver: Receiver = None,
         broadband: bool = False,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute transmission loss using OAST (wavenumber integration) or OASP
         (wideband transfer function) when ``broadband=True``.
@@ -1101,7 +1179,7 @@ class OASES(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Transmission loss field.
         """
         if receiver is None:
@@ -1119,7 +1197,7 @@ class OASES(PropagationModel):
         source: Source,
         n_modes: Optional[int] = None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute OASN covariance / replica field.
 
@@ -1142,7 +1220,7 @@ class OASES(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Covariance / replica field.
         """
         # n_modes is deliberately dropped — OASN has no mode-truncation knob.
@@ -1161,7 +1239,7 @@ class OASES(PropagationModel):
         angles: Optional[np.ndarray] = None,
         angle_type: str = 'grazing',
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute reflection coefficients using OASR.
 
@@ -1185,7 +1263,7 @@ class OASES(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Reflection coefficients field.
         """
         return self._oasr.run(
@@ -1198,23 +1276,35 @@ class OASES(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        source_waveform=None,
+        sample_rate=None,
         **kwargs,
-    ) -> Field:
+    ) -> Result:
         """
-        Compute broadband time-series / transfer functions using OASP.
+        Compute time-domain pressure p(t) using OASP.
+
+        Internally runs the OASP broadband H(f) and convolves with the
+        given source waveform.
 
         Parameters
         ----------
         env, source, receiver : see :class:`OASP`.
+        source_waveform : ndarray
+            1-D source pulse.
+        sample_rate : float
+            Source-waveform sampling rate (Hz).
 
         Returns
         -------
-        field : Field
-            Transfer-function / time-series field.
+        result : Result
+            ``field_type='time_series'``.
         """
         return self._oasp.run(
             env, source, receiver,
-            run_mode=RunMode.TIME_SERIES, **kwargs,
+            run_mode=RunMode.TIME_SERIES,
+            source_waveform=source_waveform,
+            sample_rate=sample_rate,
+            **kwargs,
         )
 
     def compute_transfer_function(
@@ -1223,9 +1313,9 @@ class OASES(PropagationModel):
         source: Source,
         receiver: Receiver,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
-        Compute broadband transfer function via OASP.
+        Compute broadband transfer function H(f) via OASP.
 
         Parameters
         ----------
@@ -1240,8 +1330,11 @@ class OASES(PropagationModel):
 
         Returns
         -------
-        field : Field
-            Transfer-function field (Field.field_type='tl' at source
-            frequency, or 'transfer_function' when run_mode=TIME_SERIES).
+        result : Result
+            ``field_type='transfer_function'``.
         """
-        return self._oasp.run(env, source, receiver, **kwargs)
+        kwargs.pop('run_mode', None)
+        return self._oasp.run(
+            env, source, receiver,
+            run_mode=RunMode.BROADBAND, **kwargs,
+        )

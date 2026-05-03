@@ -7,12 +7,14 @@
 #   - BellhopCUDA: C++/CUDA Bellhop (optional, for GPU acceleration)
 #   - OASES: Ocean Acoustics and Seismics (optional, downloaded from MIT)
 #   - mpiramS: Parabolic Equation model (broadband PE)
+#   - ramsurf: Collins-style PE family (rams0.5 elastic, ramsurf1.5 rough surface)
 #
 # Layout produced:
 #   uacpy/bin/oalib/       — Kraken, Scooter, SPARC, Bellhop (Fortran)
 #   uacpy/bin/bellhopcuda/ — BellhopCXX / BellhopCUDA (C++/CUDA)
 #   uacpy/bin/oases/       — OASES suite
 #   uacpy/bin/mpirams/     — mpiramS PE model
+#   uacpy/bin/ramsurf/     — Collins rams0.5 (elastic), ramsurf1.5 (rough surface)
 #
 # By default runs interactively. Use -y/--yes for non-interactive mode.
 #
@@ -35,12 +37,18 @@ OALIB_DIR="${SCRIPT_DIR}/uacpy/third_party/Acoustics-Toolbox"   # Fortran suite
 BHC_DIR="${SCRIPT_DIR}/uacpy/third_party/bellhopcuda"           # C++/CUDA bellhop
 OASES_DIR="${SCRIPT_DIR}/uacpy/third_party/oases"               # OASES
 MPIRAMS_DIR="${SCRIPT_DIR}/uacpy/third_party/mpiramS"           # mpiramS PE
+RAMSURF_DIR="${SCRIPT_DIR}/uacpy/third_party/ramsurf"           # Collins RAM family
 BIN_ROOT="${SCRIPT_DIR}/uacpy/bin"
 
 BIN_DIR_OALIB="${BIN_ROOT}/oalib"
 BIN_DIR_BELLHOP="${BIN_ROOT}/bellhopcuda"
 BIN_DIR_OASES="${BIN_ROOT}/oases"
 BIN_DIR_MPIRAMS="${BIN_ROOT}/mpirams"
+BIN_DIR_RAMSURF="${BIN_ROOT}/ramsurf"
+
+# Bellhopcuda upstream release we build against; install.sh forces the
+# submodule HEAD to this tag.
+BELLHOPCUDA_TAG="v1.5"
 
 # Default behavior: interactive
 AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
@@ -48,8 +56,16 @@ FORCE=0
 BELLHOP_VERSION="" # "fortran", "cxx", or "cuda" (empty => prompt/auto)
 INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
 
-# OpenMP default (user requested yes)
 ENABLE_OPENMP=1
+
+# Fortran architecture flags shared by every Fortran build in this script
+# (OALIB, mpiramS). OASES is excluded — it ships -O2 with no -march and is
+# already portable. Default targets the build host (-march=native), giving
+# the best local performance but producing a binary tied to the build CPU's
+# instruction-set extensions (e.g. AVX-512). CI overrides this with
+# UACPY_FORTRAN_ARCH_FLAGS=-march=x86-64-v3 so the cached binaries are
+# portable across the full GitHub-hosted runner pool.
+FORTRAN_ARCH_FLAGS="${UACPY_FORTRAN_ARCH_FLAGS:--march=native -mtune=native}"
 
 # -------------------------
 # Helpers
@@ -62,9 +78,7 @@ get_nproc() {
     nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2
 }
 
-# Prompt function honors AUTO_YES
 prompt_yes_no() {
-    # $1 = question text
     if [[ $AUTO_YES -eq 1 ]]; then
         return 0
     fi
@@ -373,43 +387,6 @@ check_curl() {
     fail_missing "curl" "$(hint_for curl curl curl curl)"
 }
 
-# LAPACK (required: Kraken/Scooter link with -llapack)
-# - Linux: probe ldconfig for liblapack.so*
-# - macOS: probe Homebrew's lapack formula. We do NOT fall back to Accelerate
-#   because the OALIB Makefiles call -llapack literally; pointing at brew's
-#   prefix is the simplest fix that keeps the upstream Makefiles untouched.
-# Side effect: sets LAPACK_LIBS in the global scope to the right link flags.
-check_lapack() {
-    if [[ "$OS" == "macOS" ]]; then
-        if command_exists brew && brew list lapack &>/dev/null; then
-            local prefix
-            prefix="$(brew --prefix lapack 2>/dev/null || true)"
-            if [[ -n "$prefix" && -f "$prefix/lib/liblapack.dylib" ]]; then
-                LAPACK_LIBS="-L${prefix}/lib -llapack"
-                echo -e "✓ lapack: ${GREEN}${prefix}${NC}"
-                return 0
-            fi
-        fi
-        fail_missing "lapack" "Install with: brew install lapack"
-    fi
-
-    # Linux: trust ldconfig's cache. Some minimal images don't ship ldconfig
-    # in PATH, so fall back to a direct file probe in common library dirs.
-    if command_exists ldconfig && ldconfig -p 2>/dev/null | grep -q "liblapack\.so"; then
-        LAPACK_LIBS="-llapack"
-        echo -e "✓ lapack: ${GREEN}found via ldconfig${NC}"
-        return 0
-    fi
-    for d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/local/lib; do
-        if compgen -G "$d/liblapack.so*" >/dev/null; then
-            LAPACK_LIBS="-llapack"
-            echo -e "✓ lapack: ${GREEN}found in $d${NC}"
-            return 0
-        fi
-    done
-    fail_missing "lapack (development library)" \
-        "$(hint_for liblapack-dev lapack-devel lapack lapack)"
-}
 
 # CUDA
 check_cuda() {
@@ -430,6 +407,7 @@ check_bellhopcuda_submodule() {
     if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
         echo -e "✓ bellhopcuda submodule (with GLM) initialized"
         fixup_bhc_dotgit
+        pin_bellhopcuda_tag
         return 0
     fi
 
@@ -441,6 +419,7 @@ check_bellhopcuda_submodule() {
         if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
             echo -e "${GREEN}✓ submodules initialized${NC}"
             fixup_bhc_dotgit
+            pin_bellhopcuda_tag
             return 0
         fi
     fi
@@ -466,6 +445,43 @@ fixup_bhc_dotgit() {
     gitdir_abs="$(cd "$BHC_DIR" && cd "$gitdir_rel" 2>/dev/null && pwd)" || return 0
     rm -f "$BHC_DIR/.git"
     ln -s "$gitdir_abs" "$BHC_DIR/.git"
+}
+
+# Force the bellhopcuda submodule HEAD to $BELLHOPCUDA_TAG.
+pin_bellhopcuda_tag() {
+    if ! command_exists git; then
+        echo -e "${YELLOW}git not available; skipping bellhopcuda tag verification${NC}"
+        return 0
+    fi
+
+    local current_tag
+    current_tag="$(git -C "$BHC_DIR" describe --tags --exact-match 2>/dev/null || true)"
+    if [[ "$current_tag" == "$BELLHOPCUDA_TAG" ]]; then
+        echo -e "✓ bellhopcuda at tag ${GREEN}${BELLHOPCUDA_TAG}${NC}"
+        return 0
+    fi
+
+    echo -e "${BLUE}Pinning bellhopcuda to ${BELLHOPCUDA_TAG}...${NC}"
+
+    # Shallow clones (CI) may not have tags — fetch on demand.
+    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "refs/tags/${BELLHOPCUDA_TAG}" >/dev/null; then
+        echo -e "  Fetching tags from origin..."
+        git -C "$BHC_DIR" fetch --tags origin 2>&1 | tail -3 || true
+    fi
+    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "refs/tags/${BELLHOPCUDA_TAG}" >/dev/null; then
+        fail_missing "bellhopcuda tag '${BELLHOPCUDA_TAG}'" \
+            "Tag not found in ${BHC_DIR}. Edit BELLHOPCUDA_TAG in install.sh or fetch tags manually."
+    fi
+
+    if ! git -C "$BHC_DIR" checkout --quiet "${BELLHOPCUDA_TAG}"; then
+        fail_missing "bellhopcuda checkout" \
+            "Could not check out tag '${BELLHOPCUDA_TAG}' in ${BHC_DIR}"
+    fi
+
+    # GLM (nested submodule) commit may differ between tags — re-sync it.
+    git -C "$BHC_DIR" submodule update --init --recursive 2>&1 | tail -3 || true
+
+    echo -e "${GREEN}✓ bellhopcuda pinned to ${BELLHOPCUDA_TAG}${NC}"
 }
 
 # Pre-checks for build paths
@@ -513,6 +529,7 @@ ensure_dir "$BIN_DIR_OALIB"
 ensure_dir "$BIN_DIR_OASES"
 ensure_dir "$BIN_DIR_BELLHOP"
 ensure_dir "$BIN_DIR_MPIRAMS"
+ensure_dir "$BIN_DIR_RAMSURF"
 
 # -------------------------
 # Build bellhopcxx / bellhopcuda (if selected)
@@ -568,15 +585,9 @@ fi
 # expected binary is present.
 echo -e "${BLUE}=== Building OALIB (Acoustics-Toolbox) ===${NC}"
 
-# OALIB always links LAPACK; check upfront so we fail before a long build.
-# check_lapack also fills in $LAPACK_LIBS with the right -L/-l flags (Homebrew
-# lapack on macOS isn't on the default linker path, so a bare -llapack fails).
-LAPACK_LIBS="-llapack"
-check_lapack
-
 cd "$OALIB_DIR"
 
-OALIB_FFLAGS="-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib"
+OALIB_FFLAGS="${FORTRAN_ARCH_FLAGS} -O2 -ffast-math -funroll-loops -fomit-frame-pointer -I../misc -I../tslib"
 if [[ $ENABLE_OPENMP -eq 1 ]]; then
     OALIB_FFLAGS="$OALIB_FFLAGS -fopenmp"
     OALIB_CFLAGS="-g -fopenmp"
@@ -602,7 +613,6 @@ make -k all \
     FFLAGS="$OALIB_FFLAGS" \
     CC=gcc \
     CFLAGS="$OALIB_CFLAGS" \
-    LAPACK_LIBS="$LAPACK_LIBS" \
     MAKEFLAGS= \
     2>&1 | tee /tmp/oalib_build.log
 OALIB_STATUS=${PIPESTATUS[0]:-1}
@@ -763,8 +773,15 @@ if [ -d "$MPIRAMS_DIR" ]; then
     make clean 2>/dev/null || true
 
     echo -e "${BLUE}Compiling mpiramS (single-processor version, double precision)...${NC}"
+    # mpiramS Makefile hardcodes -march=native in FFLAGS and LDFLAGS (lines
+    # 22-23). Override on the make command line so the same UACPY_FORTRAN_ARCH_FLAGS
+    # plumbing used for OALIB also controls mpiramS — keeps cached binaries
+    # portable when CI sets -march=x86-64-v3. Default keeps upstream's
+    # -march=native behaviour for local installs.
+    MPIRAMS_FFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -fopenmp -I mod -Wall -fuse-linker-plugin"
+    MPIRAMS_LDFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -fopenmp -flto"
     set +e
-    make 2>&1 | tee /tmp/mpirams_build.log
+    make FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee /tmp/mpirams_build.log
     MPIRAMS_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -777,6 +794,45 @@ if [ -d "$MPIRAMS_DIR" ]; then
     fi
 else
     echo -e "${YELLOW}mpiramS source not found at: $MPIRAMS_DIR. Skipping.${NC}"
+fi
+echo ""
+
+# -------------------------
+# Build ramsurf (Collins RAM family: rams0.5 elastic, ramsurf1.5 rough surface)
+# -------------------------
+echo -e "${BLUE}=== Building ramsurf (Collins RAM family) ===${NC}"
+if [ -d "$RAMSURF_DIR" ]; then
+    cd "$RAMSURF_DIR"
+
+    echo -e "${YELLOW}Cleaning previous ramsurf builds...${NC}"
+    make clean 2>/dev/null || true
+
+    echo -e "${BLUE}Compiling rams0.5 (elastic) / ramsurf1.5 (rough surface)...${NC}"
+    # Same flag profile as mpiramS: -Ofast plus the shared FORTRAN_ARCH_FLAGS
+    # (host-optimised locally; CI passes UACPY_FORTRAN_ARCH_FLAGS=-march=x86-64-v3
+    # so the cached binaries are portable across GitHub-hosted runner CPUs).
+    # `-std=legacy -w` accepts the F77-era idioms in Calvo's sources.
+    RAMSURF_FFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    set +e
+    make FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee /tmp/ramsurf_build.log
+    RAMSURF_STATUS=${PIPESTATUS[0]:-1}
+    set -e
+
+    if [[ $RAMSURF_STATUS -eq 0 ]]; then
+        for bin in rams0.5 ramsurf1.5; do
+            if [ -f "$RAMSURF_DIR/$bin" ]; then
+                cp "$RAMSURF_DIR/$bin" "$BIN_DIR_RAMSURF/$bin"
+                chmod +x "$BIN_DIR_RAMSURF/$bin"
+                echo -e "${GREEN}✓ Installed ramsurf binary: $bin${NC}"
+            else
+                echo -e "${YELLOW}⚠ Expected binary not built: $bin${NC}"
+            fi
+        done
+    else
+        echo -e "${YELLOW}⚠ ramsurf build failed. See /tmp/ramsurf_build.log${NC}"
+    fi
+else
+    echo -e "${YELLOW}ramsurf source not found at: $RAMSURF_DIR. Skipping.${NC}"
 fi
 echo ""
 
@@ -896,6 +952,10 @@ fi
 if [ -f "$BIN_DIR_MPIRAMS/s_mpiram" ]; then
     test_runnable "$BIN_DIR_MPIRAMS/s_mpiram" || true
 fi
+# test ramsurf (just one — they share the build path)
+if [ -f "$BIN_DIR_RAMSURF/ramsurf1.5" ]; then
+    test_runnable "$BIN_DIR_RAMSURF/ramsurf1.5" || true
+fi
 
 echo ""
 echo -e "${GREEN}============================================${NC}"
@@ -910,6 +970,9 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
 fi
 if [ -f "$BIN_DIR_MPIRAMS/s_mpiram" ]; then
     echo "  RAM (mpiramS PE):      $BIN_DIR_MPIRAMS"
+fi
+if ls "$BIN_DIR_RAMSURF"/ramsurf1.5 1>/dev/null 2>&1; then
+    echo "  Collins RAM family:    $BIN_DIR_RAMSURF (rams0.5 elastic, ramsurf1.5 rough surface)"
 fi
 if ls "$BIN_DIR_OASES"/* 1>/dev/null 2>&1; then
     echo "  OASES:                 $BIN_DIR_OASES"

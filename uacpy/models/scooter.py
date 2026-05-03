@@ -14,11 +14,13 @@ fall back to the in-tree Python Hankel transform in
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
@@ -101,11 +103,14 @@ class Scooter(PropagationModel):
             resonance frequency (Hz), quality factor, absorption coefficient.
         source_type : {'R', 'X'}, optional
             FLP Option(1:1). 'R' = cylindrical (point source, default),
-            'X' = Cartesian (line source).
+            'X' = Cartesian (line source). Honoured by both ``fields.exe``
+            and the in-tree Hankel transform — the latter scales by
+            ``√k`` and ``1/√(2πr)`` for 'R' and by ``1/√(2π)`` for 'X'.
         spectrum : {'positive', 'negative', 'both'}, optional
             FLP Option(2:2). 'positive' (default) uses only the positive
             wavenumber spectrum (fast, recommended). 'negative' uses only
             the negative branch; 'both' integrates along the full k-axis.
+            Honoured by both ``fields.exe`` and the in-tree transform.
         stabilizing_attenuation_off : bool, optional
             If True, writes ``'0'`` at TopOpt position 7. Scooter then
             sets its stabilising attenuation to zero (see
@@ -121,7 +126,7 @@ class Scooter(PropagationModel):
             obtain a ``.shd`` transmission-loss file. If False, use the
             in-tree Python Hankel transform in ``grn_reader``.
 
-            Broadband runs (TIME_SERIES / TRANSFER_FUNCTION) and runs
+            Broadband runs (TIME_SERIES / BROADBAND) and runs
             where ``fields.exe`` is not installed transparently fall back
             to the Python Hankel transform — a warning is emitted in both
             cases so the override is visible.
@@ -168,9 +173,14 @@ class Scooter(PropagationModel):
         # we don't have here. See run() for the supported branches.
         self._supported_modes = [
             RunMode.COHERENT_TL,
+            RunMode.BROADBAND,
             RunMode.TIME_SERIES,
-            RunMode.TRANSFER_FUNCTION,
         ]
+        # Scooter: range-independent wavenumber integration. Honors
+        # multi-layer fluid/elastic bottom natively. Range dependence in
+        # any form is collapsed to range-0 with a warning.
+        self._supports_layered_bottom = True
+        self._unsupported_env_alternatives = "Bellhop, KrakenField, or RAM"
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -227,8 +237,10 @@ class Scooter(PropagationModel):
         roughness=_UNSET,
         rmax_multiplier=_UNSET,
         volume_attenuation=_UNSET,
+        source_waveform=None,
+        sample_rate=None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run Scooter simulation
 
@@ -241,11 +253,17 @@ class Scooter(PropagationModel):
         receiver : Receiver
             Receiver array
         run_mode : RunMode, optional
-            COHERENT_TL (default): single-frequency TL.
-            TIME_SERIES: broadband transfer function over frequency vector.
+            ``COHERENT_TL`` (default) — single-frequency TL.
+            ``BROADBAND`` — broadband H(f).
+            ``TIME_SERIES`` — real pressure p(t); requires
+            ``source_waveform`` + ``sample_rate``.
         frequencies : ndarray, optional
-            Frequency vector for broadband (TIME_SERIES) mode. If not provided,
+            Frequency vector for BROADBAND/TIME_SERIES. If not provided,
             a default vector spanning fc/2 to 2*fc is generated.
+        source_waveform : ndarray, optional
+            Source pulse for ``TIME_SERIES`` mode.
+        sample_rate : float, optional
+            Sampling rate of ``source_waveform`` in Hz.
         c_low, c_high, n_mesh, roughness, rmax_multiplier, volume_attenuation : optional
             Per-call overrides for constructor defaults.
         **kwargs
@@ -253,13 +271,24 @@ class Scooter(PropagationModel):
 
         Returns
         -------
-        field : Field
-            TL field (COHERENT_TL) or transfer function field (TIME_SERIES)
+        result : Result
+            ``field_type='tl'`` for COHERENT_TL,
+            ``'transfer_function'`` for BROADBAND,
+            ``'time_series'`` for TIME_SERIES.
         """
         import numpy as np
 
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
+
+        if run_mode == RunMode.TIME_SERIES and (
+            source_waveform is None or sample_rate is None
+        ):
+            raise ValueError(
+                "Scooter.run(run_mode=TIME_SERIES) requires source_waveform "
+                "and sample_rate. For the broadband transfer function "
+                "H(f), use run_mode=RunMode.BROADBAND."
+            )
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
                                 roughness=roughness, rmax_multiplier=rmax_multiplier,
@@ -274,11 +303,11 @@ class Scooter(PropagationModel):
 
             self.validate_inputs(env, source, receiver)
 
-            # Broadband mode (TIME_SERIES or TRANSFER_FUNCTION) requires a
+            # Broadband mode (BROADBAND or TIME_SERIES) requires a
             # frequency vector; fields.exe only supports single-frequency GRNs,
             # so we force the in-tree Hankel path in that case.
             broadband_freqs = None
-            broadband_mode = run_mode in (RunMode.TIME_SERIES, RunMode.TRANSFER_FUNCTION)
+            broadband_mode = run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES)
             if broadband_mode:
                 if frequencies is not None:
                     broadband_freqs = np.asarray(frequencies, dtype=float)
@@ -351,11 +380,15 @@ class Scooter(PropagationModel):
                         )
                     self._log("Reading SHD file...")
                     result = read_shd_file(shd_file)
-                    # Annotate provenance so callers can tell which path ran.
-                    result.metadata.update({
-                        'model': 'Scooter',
-                        'post_processor': 'fields.exe',
-                    })
+                    result.metadata.update(self._build_base_metadata(
+                        source,
+                        backend='scooter.exe+fields.exe',
+                        frequency=float(source.frequency[0]),
+                        phase_reference='travelling_wave',
+                        source_type=self.source_type,
+                        spectrum=self.spectrum,
+                        post_processor='fields.exe',
+                    ))
                 else:
                     self._log("Reading Green's function...", level='info')
                     grn_data = read_grn_file(grn_file)
@@ -364,14 +397,43 @@ class Scooter(PropagationModel):
                         self._log("Scooter produced empty Green's function (nk=0)", level='error')
                         raise RuntimeError("Scooter produced empty Green's function (nk=0)")
 
+                    if grn_data['nsd'] > 1:
+                        self._log(
+                            f"Multi-source-depth GRN ({grn_data['nsd']} sources); "
+                            "in-tree Hankel transform returns the field for the "
+                            "first source depth only.",
+                            level='warn',
+                        )
+
+                    transform_kwargs = dict(
+                        source_type=self.source_type,
+                        spectrum=self._spectrum_code,
+                    )
                     if broadband_mode:
                         self._log(f"Transforming {grn_data['nfreq']} frequencies to range domain...")
-                        result = grn_to_transfer_function(grn_data, receiver.ranges)
+                        result = grn_to_transfer_function(
+                            grn_data, receiver.ranges, **transform_kwargs,
+                        )
                     else:
                         self._log("Transforming to range domain (FFT-based Hankel transform)...")
-                        result = grn_to_field(grn_data, receiver.ranges, method='fft_hankel')
+                        result = grn_to_field(
+                            grn_data, receiver.ranges, method='fft_hankel',
+                            **transform_kwargs,
+                        )
+                    result.metadata.update(self._build_base_metadata(
+                        source,
+                        backend='scooter.exe',
+                        frequency=float(source.frequency[0]),
+                        phase_reference='travelling_wave',
+                        post_processor='in_tree_hankel',
+                    ))
 
                 self._log("Simulation complete")
+                if run_mode == RunMode.TIME_SERIES:
+                    result = result.synthesize_time_series(
+                        source_waveform=source_waveform,
+                        sample_rate=sample_rate,
+                    )
                 return result
 
             finally:

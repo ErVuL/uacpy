@@ -40,6 +40,112 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
 
 ---
 
+## ramsurf (Collins-style RAM family)
+
+Vendored verbatim from https://github.com/quiet-oceans/ramsurf — BSD-3
+(Calvo / Guelton). Only the three Fortran solver sources are kept:
+
+- `src/ram1.5.f` — fluid PE, flat surface, layered piecewise bottom
+- `src/rams0.5.f` — *elastic* PE (RAMS), flat surface, layered piecewise
+  bottom with shear (cs/attns/Lamé)
+- `src/ramsurf1.5.f` — fluid PE with variable surface zsrf(r) for rough
+  surfaces / beach geometry [Collins, JASA 97 (1995)]
+
+Skipped from upstream: `ramclr.f`, `ramsurfclr2.0.f` (PostScript plotters
+— uacpy uses matplotlib), the C reimplementation (`ramsurf.c`,
+`ramsurflib.c` — fluid only, no win over the Fortran), and the autotools
+files (`configure.ac`, `Makefile.am` — replaced by a plain Makefile in
+this directory). LICENSE and `readme.orig` (Calvo's input-format reference)
+are kept verbatim.
+
+### `outpt` patch — complex-envelope dump
+
+Calvo's original `outpt` writes only real TL to `tl.grid`, which discards
+the phase needed to assemble a broadband transfer function. Both
+`rams0.5.f` and `ramsurf1.5.f` are patched to also dump the complex PE
+envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
+`tl.grid`'s record geometry. The phase convention is the same as mpiramS
+(`phase_reference='psif_envelope'`): the travelling-wave factor
+`exp(+i k0 r)` is factored out by the PE march;
+`Field.synthesize_time_series` re-applies it before IFFT via the
+`t_start = r/cmin` shift.
+
+#### `ramsurf1.5.f` diff
+
+```diff
+@@ -31,6 +31,11 @@
+       open(unit=1,status='old',file='ram.in')
+       open(unit=2,status='unknown',file='tl.line')
+       open(unit=3,status='unknown',file='tl.grid',form='unformatted')
++c     UACPY: complex envelope u*f3/sqrt(r) per output range, sequential
++c     unformatted records mirroring tl.grid geometry. Used by uacpy's
++c     RAM dispatcher to assemble broadband H(f) by looping frequencies.
++      open(unit=11,status='unknown',file='pcomplex.bin',
++     >  form='unformatted')
+@@ -50,6 +55,7 @@
+       close(1)
+       close(2)
+       close(3)
++      close(11)
+@@ -140,6 +146,7 @@
+     7 continue
+       write(3)lz
++      write(11)lz
+@@ -414,7 +421,7 @@
+       subroutine outpt(mz,mdr,ndr,ndz,iz,nzplt,lz,ir,dir,eps,r,f3,u,tlg)
+-      complex ur,u(mz)
++      complex ur,u(mz),urg(mz)
+       real f3(mz),tlg(mz)
+@@ -431,9 +438,13 @@
+       ur=u(i)*f3(i)
+       j=j+1
+       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
++c     UACPY: same envelope as tlg uses, with cylindrical-spreading
++c     factor included. phase_reference = 'psif_envelope'.
++      urg(j)=ur/sqrt(r+eps)
+     1 continue
+       write(3)(tlg(j),j=1,lz)
++      write(11)(urg(j),j=1,lz)
+       end if
+```
+
+#### `rams0.5.f` diff
+
+Same shape as `ramsurf1.5.f` — open unit 11 in the main, mirror `lz`
+header into it, declare a local complex `urg(mz)` in `outpt`, store
+`ur/sqrt(r+eps)`, write the array per range step, close unit 11.
+
+The driver `uacpy.models.ram._run_collins_broadband` consumes
+`pcomplex.bin` via `read_pcomplex_grid` and assembles
+`Field(field_type='transfer_function')` by looping the binary over the
+Q/T-derived frequency vector. The complex envelope is bit-exact w.r.t.
+the existing `tl.grid` magnitude (`-20·log10(|pcomplex|)` reproduces
+`tl.grid` to 0.0000 dB on a Pekeris reference run).
+
+`rams0.5.f` and `ramsurf1.5.f` store *different* envelopes despite the
+identical-looking `outpt` patch: rams0.5's `solve(... g0)` multiplies
+the field by `g0 = exp(i k₀ Δr)` at every range step (`rams0.5.f:830-831`),
+so its `u` accumulates the full `exp(+i k₀ r)` carrier — same
+convention as mpiramS' `psif`. ramsurf1.5's `solve` has no `g0`
+argument (`ramsurf1.5.f:310`); the carrier is absorbed into the
+matrix coefficients by the operator function
+`g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:564`),
+so its `u` is the bare envelope. `_run_collins_broadband` therefore
+branches on `kind`: rams gets `np.conj(H)` only, ramsurf gets
+`np.conj(H) · exp(−i k₀(ω) r)`. After this convention bookkeeping all
+three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
+*Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
+waveguide modal dispersion ~20 ms).
+
+### Dispatcher
+
+The RAM dispatcher (`uacpy.models.ram`) selects whichever binary matches
+the environment: elastic bottom → rams0.5; altimetry → ramsurf1.5;
+default fluid + flat surface → mpiramS for in-process Fortran broadband.
+Collins backends loop in Python (one subprocess per frequency).
+
+---
+
 ## mpiramS (RAM parabolic-equation model)
 
 ### `Makefile` -- portability
@@ -378,6 +484,84 @@ range when `isedrd == 1`.
 ```
 
 ### `src/peramx.f90` -- I/O rewrite (largest change)
+
+#### Sequential unformatted output for `psif.dat`
+
+The original output used direct-access I/O with a single fixed record size
+sized to the LARGEST record (typically the `rout` array of `nr` reals). Every
+depth record (only `1 + 2*nf` reals of useful data) was zero-padded out to
+`max(8, nf, nr, 1+2*nf) * wp` bytes. For typical use (e.g. `nr=500`,
+`nzo=2000-5000`) the file ballooned to **multi-GB of mostly zeros**, hitting
+tmpfs limits and OOM-killing the binary.
+
+Switched to ``access='sequential', form='unformatted'``. Each record is now
+self-sized; depth records take `(1 + 2*nf) * wp ≈ 56 bytes` instead of
+`max(...) * wp ≈ 4000 bytes`. The output file shrinks ~500× (e.g. 6 GB → 12 MB
+for typical example_26 settings). ``recl.dat`` is no longer needed and is
+not written. The Python reader uses ``scipy.io.FortranFile`` to parse
+gfortran's standard sequential-unformatted record markers.
+
+```diff
+-block
+-  integer :: rl1
+-  inquire(iolength=rl1) fc        ! iolength of one real(wp)
+-  length = max(8, nf, nr, 1+2*nf) * rl1
+-end block
+-
+-open(nunit, form='formatted',file='recl.dat')
+-write(nunit,*) length
+-close(nunit)
+-
+-open(nunit, access='direct',recl=length,file='psif.dat')
+-write(nunit,rec=1) Nsam,real(nf,wp),real(nzo,wp),real(nr,wp),c0,cmin,fs,Q
+-write(nunit,rec=2) frq
+-write(nunit,rec=3) rout
+-do ir=1,nr
+-  do ii=1,nzo
+-    write(nunit,rec=3+(ir-1)*nzo+ii) zg1(ii), &
+-        ((real(psif(ii,jj,ir))),(aimag(psif(ii,jj,ir))),jj=1,nf)
+-  end do
+-end do
++open(nunit, access='sequential', form='unformatted', file='psif.dat')
++write(nunit) Nsam,real(nf,wp),real(nzo,wp),real(nr,wp),c0,cmin,fs,Q
++write(nunit) frq
++write(nunit) rout
++do ir=1,nr
++  do ii=1,nzo
++    write(nunit) zg1(ii), &
++        ((real(psif(ii,jj,ir))),(aimag(psif(ii,jj,ir))),jj=1,nf)
++  end do
++end do
+```
+
+#### User-pinned PE reference speed `c0`
+
+Reads a positive `c0_user` (m/s) from a new line in `in.pe` between `dzm` and
+the SSP filename. The value is the PE expansion speed
+(``exp(ik0*x)`` carrier factored out of the Helmholtz solution), and lets
+the caller pick the Lytaev (2023) Eq. 15 optimum that centres the spectrum
+``[ξ_min, ξ_max]`` around 0 and minimises the Padé approximation error.
+The binary stops with an error if the value is non-positive — the caller
+is required to supply a sensible reference speed.
+
+```diff
++real(kind=wp) :: c0_user      ! PE reference speed; required positive
+ ...
+ read (nunit,*) dzm                    ! output depth decimation (integer)
++read (nunit,*) c0_user                ! PE reference speed (m/s); must be positive
+ read (nunit,'(a)') name1              ! sound speed filename
+ ...
+-! mean sound speed
+-n=size(cw)
+-c0=sum(cw)/n
++if (c0_user <= 0.0_wp) then
++   print *, 'ERROR: c0_user must be positive in in.pe (got ', c0_user, ')'
++   stop 1
++end if
++c0=c0_user
+ ic0=1.0_wp/c0
+ cmin=minval(cw)
+```
 
 #### Free-format input parsing and longer filename buffers
 

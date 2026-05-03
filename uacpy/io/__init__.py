@@ -8,7 +8,10 @@ from uacpy.io.env_writer import (
 from uacpy.io.env_reader import read_env_file, read_env_core
 from uacpy.io.output_reader import read_shd_file, read_arr_file, read_ray_file, read_modes, read_modes_bin, read_modes_asc
 from uacpy.io.bty_writer import write_bty_file, write_bty_3d, write_ati_file
-from uacpy.io.grn_reader import read_grn_file, grn_to_field
+from uacpy.io.grn_reader import (
+    read_grn_file, grn_to_field, grn_to_transfer_function,
+    sparc_snapshot_to_field,
+)
 from uacpy.io.rts_reader import read_rts_file, rts_to_tl
 from uacpy.io.flp_reader import read_flp, read_flp3d
 from uacpy.io.flp_writer import write_fieldflp, write_field3dflp
@@ -44,8 +47,10 @@ __all__ = [
     "read_modes_bin",  # Binary .mod format
     "read_modes_asc",  # ASCII .moa format
     # Model-specific readers
-    "read_grn_file",  # Scooter Green's functions
-    "grn_to_field",  # GRN → Field transform
+    "read_grn_file",  # Scooter / SPARC snapshot Green's functions
+    "grn_to_field",  # GRN → TL Field (single-frequency Hankel transform)
+    "grn_to_transfer_function",  # broadband GRN → H(f, r, z)
+    "sparc_snapshot_to_field",  # SPARC snapshot → TL via time-FFT + Hankel
     "read_rts_file",  # SPARC time series (binary)
     "rts_to_tl",  # RTS → TL transform
     "read_ts",  # Generic time series (ASCII)

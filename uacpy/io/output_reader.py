@@ -7,11 +7,11 @@ import struct
 from pathlib import Path
 from typing import Union, Tuple, Dict, Optional, Any
 
-from uacpy.core.field import Field
+from uacpy.core.results import TLField, Arrivals, Rays
 from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
 
 
-def read_shd_file(filepath: Union[str, Path]) -> Field:
+def read_shd_file(filepath: Union[str, Path]) -> TLField:
     """
     Read shade file (.shd) - binary TL output from Bellhop/Kraken/Scooter
 
@@ -118,24 +118,35 @@ def read_shd_file(filepath: Union[str, Path]) -> Field:
         tl_data = -20 * np.log10(p_abs)
         tl_data = np.clip(tl_data, None, TL_MAX_DB)
 
-    return Field(
-        field_type="tl",
+    # ``freqs`` may be the broadband freqVec (multi-entry) or a single
+    # nominal frequency. Pick the right Result-constructor argument.
+    freqs_arr = np.atleast_1d(np.asarray(freqs, dtype=float))
+    if len(freqs_arr) > 1:
+        result_freq = None
+        result_freqs = freqs_arr
+    else:
+        result_freq = float(freqs_arr[0]) if len(freqs_arr) else None
+        result_freqs = None
+
+    return TLField(
         data=tl_data,
         ranges=rr,
         depths=rz,
-        frequencies=freqs,
+        model='', backend='',
+        source_depths=sz,
+        frequency=result_freq,
+        frequencies=result_freqs,
         metadata={
             "title": title,
             "plot_type": plot_type,
             "source_file": str(filepath),
             "freq0": freq0,
             "atten": atten,
-            "source_depths": sz,
         },
     )
 
 
-def read_arr_file(filepath: Union[str, Path]) -> Field:
+def read_arr_file(filepath: Union[str, Path]):
     """
     Read arrivals file (.arr) from Bellhop
 
@@ -412,23 +423,18 @@ def read_arr_file(filepath: Union[str, Path]) -> Field:
             # 3D format - similar structure but with more dimensions
             raise NotImplementedError("3D arrivals format not yet implemented")
 
-    return Field(
-        field_type="arrivals",
-        data=np.array([]),  # Arrivals don't have regular grid data
-        ranges=rr,
-        depths=rz,
-        frequencies=np.array([freq]),
-        metadata={
-            "arrivals_by_receiver": arrivals_by_receiver,
-            "frequency": freq,
-            "source_depths": sz,
-            "receiver_depths": rz,
-            "receiver_ranges": rr,
-        },
+    return Arrivals(
+        by_receiver=arrivals_by_receiver,
+        receiver_depths=rz,
+        receiver_ranges=rr,
+        model='', backend='',
+        source_depths=sz,
+        frequency=float(freq),
+        metadata={},
     )
 
 
-def read_ray_file(filepath: Union[str, Path]) -> Field:
+def read_ray_file(filepath: Union[str, Path]):
     """
     Read ray file (.ray) from Bellhop
 
@@ -534,11 +540,7 @@ def read_ray_file(filepath: Union[str, Path]) -> Field:
         # Try binary format
         rays = _read_ray_file_binary(filepath)
 
-    return Field(
-        field_type="rays",
-        data=np.array([]),  # Rays don't have regular grid data
-        metadata={"rays": rays},
-    )
+    return Rays(rays=rays, model='', backend='')
 
 
 def _read_ray_file_binary(filepath: Path) -> list:

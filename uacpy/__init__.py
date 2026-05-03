@@ -14,9 +14,16 @@ from uacpy.core.environment import (
     generate_sea_surface,
 )
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import (
+    Result,
+    TLField, PressureField, TransferFunction,
+    TimeSeriesField, TimeTrace,
+    Arrivals, Rays, Modes, OASNCovariance,
+    ReflectionCoefficient,
+)
 
 from uacpy import models
+from uacpy.models.base import RunMode
 from uacpy.visualization import plots as plot
 from uacpy import io
 
@@ -37,7 +44,12 @@ __all__ = [
     'RangeDependentLayeredBottom',
     'generate_sea_surface',
     'Receiver',
-    'Field',
+    'Result',
+    'TLField', 'PressureField', 'TransferFunction',
+    'TimeSeriesField', 'TimeTrace',
+    'Arrivals', 'Rays', 'Modes', 'OASNCovariance',
+    'ReflectionCoefficient',
+    'RunMode',
     'models',
     'plot',
     'io',

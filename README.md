@@ -58,7 +58,7 @@ processing, ambient noise, and visualization.
 | **Kraken**        | Normal modes                                                       |
 | **Scooter**       | Finite elements for range independant env                          |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
-| **RAM** (mpiramS) | Parabolic equation                                                 |
+| **RAM**           | Parabolic equation — auto-dispatches to mpiramS (broadband fluid), rams0.5 (elastic bottoms, broadband via Python freq loop), or ramsurf1.5 (rough surface, broadband via Python freq loop) based on the environment. All three backends support `COHERENT_TL`, `BROADBAND`, and `TIME_SERIES`. |
 | **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)           |
 | **Bounce**        | Reflection coefficients                                            |
 
@@ -77,8 +77,7 @@ What `install.sh` builds:
 
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
-| `gfortran`, `make`       | OALIB, mpiramS, OASES (Fortran models — always)   |
-| LAPACK dev               | Kraken / Scooter (link with `-llapack` — always)  |
+| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
 | CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`)            |
@@ -98,15 +97,15 @@ build.
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y gfortran make liblapack-dev git \
+sudo apt-get install -y gfortran make git \
                         cmake g++ curl tar python3-venv python3-pip
 
 # Fedora / RHEL
-sudo dnf install -y gcc-gfortran make lapack-devel git \
+sudo dnf install -y gcc-gfortran make git \
                     cmake gcc-c++ curl tar python3-virtualenv python3-pip
 
 # Arch / Manjaro
-sudo pacman -S --needed gcc-fortran make lapack git \
+sudo pacman -S --needed gcc-fortran make git \
                         cmake gcc curl tar python python-pip
 ```
 
@@ -149,7 +148,7 @@ pip install -e .
 xcode-select --install
 
 # Build dependencies. The 'gcc' formula provides gfortran on macOS.
-brew install gcc lapack cmake curl python
+brew install gcc cmake curl python
 ```
 
 CUDA Bellhop is **not** available on macOS (no NVIDIA toolkit). The C++
@@ -215,7 +214,7 @@ recipe from above:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y gfortran make liblapack-dev git \
+sudo apt-get install -y gfortran make git \
                         cmake g++ curl tar python3-venv python3-pip
 
 cd ~
@@ -456,6 +455,15 @@ Michael D. Collins (Naval Research Laboratory)
 
 Brian D. Dushaw --- https://zenodo.org/records/10818570
 
+### ramsurf --- Collins RAM family (rams0.5 elastic, ramsurf1.5 rough surface)
+
+Vendored from the Quiet Oceans repackaging of David C. Calvo's NRL
+distribution --- https://github.com/quiet-oceans/ramsurf
+
+- Collins, *A split-step Padé solution for the parabolic equation method*, JASA, 1993
+- Collins, *Higher-order parabolic approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA, 1991 (RAMS / elastic)
+- Collins, *Generalization of the split-step Padé solution* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
+
 ### OASES --- OAST, OASN, OASR, OASP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
@@ -481,6 +489,7 @@ when redistributing or modifying UACPY or its outputs.
 | Acoustics Toolbox (Porter) | `third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
+| ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored upstream tree, unmodified (`.f` sources only used; thin local Makefile) | BSD-3-Clause                          |
 | arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | downloaded at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 

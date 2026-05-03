@@ -27,6 +27,7 @@ complex(kind=wp),dimension(:,:,:),allocatable :: psif  ! (nzo, nf, nr)
 ! input parameters - c.f., file "in.pe"
 integer :: dzm, iflat, ihorz, ibot
 real(kind=wp) :: fc,Q,T,dum
+real(kind=wp) :: c0_user      ! PE reference speed; required positive
 real(kind=wp),dimension(:),allocatable :: zsrc,rmax
 character(len=256) :: name1,name2,name3,name4  ! ssp, bathymetry, ranges, sediment filenames
 real(kind=wp),dimension(:),allocatable :: eps
@@ -34,7 +35,7 @@ real(kind=wp),dimension(:,:),allocatable :: cq
 
 integer :: nss
 
-integer :: nb,nzp,nrp,nrp0,n,nf1,nf,nr
+integer :: nb,nzp,nrp,nrp0,nf1,nf,nr
 real(kind=wp) :: bw, fs, Nsam, df, tmp
 real(kind=wp),dimension(:),allocatable :: frq
 
@@ -44,7 +45,7 @@ real(kind=wp) :: omega
 real(kind=wp) :: rate
 integer :: t1,t2,cr,cm
 
-integer :: ii,jj,iff,ir,length
+integer :: ii,jj,iff,ir
 
 integer, parameter :: nunit=2
 complex(kind=wp), parameter :: j=cmplx(0.0_wp,1.0_wp,wp)
@@ -79,6 +80,7 @@ read (nunit,*) deltar                 ! range accuracy parameter (m)
 read (nunit,*) np, nss                ! np-# pade coefficients, ns-# stability terms
 read (nunit,*) rs                     ! stability range (m)
 read (nunit,*) dzm                    ! output depth decimation (integer)
+read (nunit,*) c0_user                ! PE reference speed (m/s); must be positive
 read (nunit,'(a)') name1              ! sound speed filename
 name1=trim(adjustl(name1))
 read (nunit,*) iflat                  ! 0=no flat earth transform, 1=yes
@@ -272,9 +274,15 @@ else
 endif
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-! mean sound speed
-n=size(cw)
-c0=sum(cw)/n
+! Reference sound speed for the PE march. ``c0`` is the algorithmic
+! expansion point — the carrier ``exp(ik0*x)`` factored out of the
+! Helmholtz solution, NOT a physical input. The caller picks it
+! (Lytaev Eq. 15 centres the spectrum and minimises the Pade error).
+if (c0_user <= 0.0_wp) then
+   print *, 'ERROR: c0_user must be positive in in.pe (got ', c0_user, ')'
+   stop 1
+end if
+c0=c0_user
 ic0=1.0_wp/c0
 cmin=minval(cw)     ! minimum sound speed for calculating tdelay
 print '(a,f10.2,a,f10.2)', 'c0=',c0,' cmin=',cmin
@@ -433,33 +441,23 @@ allocate(psi1(nzo))
 !     zg1(ii), re(psif(ii,1,ir)), im(psif(ii,1,ir)), ..., re(psif(ii,nf,ir)), im(psif(ii,nf,ir))
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-! Record length in iolength units (same units as recl= expects).
-! Must be large enough for ALL record types:
-!   header: 8 reals;  frq: nf reals;  rout: nr reals;  depth: 1+2*nf reals
-! Use inquire to get the iolength of a single real, then multiply.
-block
-  integer :: rl1
-  inquire(iolength=rl1) fc        ! iolength of one real(wp)
-  length = max(8, nf, nr, 1+2*nf) * rl1
-end block
-
-open(nunit, form='formatted',file='recl.dat')
-write(nunit,*) length
-close(nunit)
-
-open(nunit, access='direct',recl=length,file='psif.dat')
+! Sequential unformatted I/O — gfortran writes a 4-byte big-endian
+! length marker before and after each record. ``scipy.io.FortranFile``
+! parses this format directly. No fixed record size means depth records
+! (1 + 2*nf reals) write as 1+2*nf reals, not padded to max(nf, nr).
+open(nunit, access='sequential', form='unformatted', file='psif.dat')
 
 ! Record 1: header parameters
-write(nunit,rec=1) Nsam,real(nf,wp),real(nzo,wp),real(nr,wp),c0,cmin,fs,Q
+write(nunit) Nsam,real(nf,wp),real(nzo,wp),real(nr,wp),c0,cmin,fs,Q
 ! Record 2: frequency vector
-write(nunit,rec=2) frq
+write(nunit) frq
 ! Record 3: output ranges
-write(nunit,rec=3) rout
+write(nunit) rout
 
 ! Records 4+: data blocks, one per range, each containing nzo depth records
 do ir=1,nr
   do ii=1,nzo
-    write(nunit,rec=3+(ir-1)*nzo+ii) zg1(ii), &
+    write(nunit) zg1(ii), &
         ((real(psif(ii,jj,ir))),(aimag(psif(ii,jj,ir))),jj=1,nf)
   end do
 end do
@@ -468,7 +466,7 @@ close(nunit)
 
 print *, 'ALL DONE! '
 print '(a,i6,a,i4,a)','Wrote ',nzo,' depths x ',nr,' ranges to psif.dat'
-print *,'recl.dat has the record length of the direct access file.'
+print *,'psif.dat is sequential unformatted (scipy.io.FortranFile compatible).'
 
 stop
 

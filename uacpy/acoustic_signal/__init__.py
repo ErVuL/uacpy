@@ -1,86 +1,88 @@
-"""Signal processing and generation tools for acoustic signals."""
+"""Signal processing and generation tools for acoustic signals.
 
-import logging as _logging
+The package is named ``acoustic_signal`` so it does not collide with Python's
+own ``signal`` module; ``uacpy`` re-exposes it as ``uacpy.signal``.
 
-_log = _logging.getLogger(__name__)
+Top-level exports below are a curated subset of the most commonly-used
+helpers from the four submodules. Everything in the submodules is also
+reachable directly (e.g. ``uacpy.signal.generation.tone_burst``).
+"""
 
-try:
-    from .generation import (
-        cw_pulse,
-        lfm_chirp,
-        hfm_chirp,
-        mfsk_signal,
-        psk_signal,
-        noise_signal,
-        composite_signal,
-    )
-except ImportError as _e:
-    _log.debug("Could not import generation module: %s", _e)
+# --- Curated waveform generators ---------------------------------------------
+# Source: acoustic_signal/generation.py
+from .generation import (
+    bpsk_modulate,
+    gaussian_pulse,
+    hfm_chirp,
+    lfm_chirp,
+    ricker_wavelet,
+    tone_burst,
+)
 
-try:
-    from .processing import (
-        planewave_rep,
-        beamform,
-        add_noise,
-        make_bandlimited_noise,
-        fourier_synthesis,
-    )
-except ImportError as _e:
-    _log.debug("Could not import processing module: %s", _e)
+# --- Curated processing helpers ----------------------------------------------
+# Source: acoustic_signal/processing.py
+from .processing import (
+    add_noise,
+    beamform,
+    fourier_synthesis,
+    make_bandlimited_noise,
+    planewave_rep,
+)
 
-try:
-    from .advanced import (
-        time,
-        cw,
-        sweep,
-        bb2pb,
-        pb2bb,
-        lfilter0,
-        correlate_periodic,
-        goertzel,
-        nco,
-        nco_gen,
-        lfilter_gen,
-        mseq,
-        resample,
-    )
-except ImportError as _e:
-    _log.debug("Could not import advanced module: %s", _e)
+# --- Curated DSP / utility helpers -------------------------------------------
+# Source: acoustic_signal/advanced.py
+# Note: `mseq` is defined in both generation.py and advanced.py with different
+# signatures; we expose the advanced.py version at the top level (more general,
+# accepts either degree or polynomial spec). The generation.py version is still
+# reachable via ``uacpy.signal.generation.mseq``.
+from .advanced import (
+    bb2pb,
+    correlate_periodic,
+    cw,
+    goertzel,
+    lfilter0,
+    lfilter_gen,
+    mseq,
+    nco,
+    nco_gen,
+    pb2bb,
+    resample,
+    sweep,
+    time,
+)
 
-try:
-    from . import advanced
-    from . import analysis
-    from . import generation
-    from . import processing
-except ImportError as _e:
-    _log.debug("Could not import submodules: %s", _e)
+# --- Submodules (also reachable as attributes) -------------------------------
+from . import advanced, analysis, generation, processing
 
 __all__ = [
-    "cw_pulse",
-    "lfm_chirp",
+    # Generators
+    "bpsk_modulate",
+    "gaussian_pulse",
     "hfm_chirp",
-    "mfsk_signal",
-    "psk_signal",
-    "noise_signal",
-    "composite_signal",
-    "planewave_rep",
-    "beamform",
+    "lfm_chirp",
+    "ricker_wavelet",
+    "tone_burst",
+    # Processing
     "add_noise",
-    "make_bandlimited_noise",
+    "beamform",
     "fourier_synthesis",
-    "time",
-    "cw",
-    "sweep",
+    "make_bandlimited_noise",
+    "planewave_rep",
+    # Advanced / DSP
     "bb2pb",
-    "pb2bb",
-    "lfilter0",
     "correlate_periodic",
+    "cw",
     "goertzel",
-    "nco",
-    "nco_gen",
+    "lfilter0",
     "lfilter_gen",
     "mseq",
+    "nco",
+    "nco_gen",
+    "pb2bb",
     "resample",
+    "sweep",
+    "time",
+    # Submodules
     "advanced",
     "analysis",
     "generation",

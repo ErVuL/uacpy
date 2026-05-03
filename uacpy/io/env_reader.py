@@ -13,12 +13,37 @@ Env file reader — partial MATLAB port.
 """
 
 import os
+from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional, Tuple, List
+
 from uacpy.core.environment import Environment
-from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
+from uacpy.core.source import Source
+from uacpy.io.utils import crci
+
+
+# ---------------------------------------------------------------------------
+# Sound speed profile data container
+# ---------------------------------------------------------------------------
+# Counterpart of the Fortran ``SSPStructure`` type (see
+# third_party/Acoustics-Toolbox/misc/sspMod.f90). The Python port uses it as
+# a mutable bag-of-attributes during the .env parse: NMedia / N / sigma /
+# depth are set first, then the per-medium arrays z/c/cs/rho are appended in
+# the layer-parsing loop, and ``raw`` keeps the as-read tabulated values.
+@dataclass
+class SSPStruct:
+    NMedia: int = 0
+    N: List[int] = field(default_factory=list)
+    sigma: List[float] = field(default_factory=list)
+    depth: List[float] = field(default_factory=list)
+    z: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    c: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    cs: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    rho: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    raw: List[dict] = field(default_factory=list)
+    Npts: List[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
