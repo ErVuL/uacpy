@@ -491,7 +491,7 @@ when redistributing or modifying UACPY or its outputs.
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
 | arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
-| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | downloaded at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** downloaded at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 
 ## 📬 Contact
