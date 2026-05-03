@@ -340,7 +340,11 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 25+ example scripts.
+Inside `uacpy/examples/` you will find 22 example scripts numbered
+sequentially (`example_01_*.py` through `example_22_*.py`); the full
+suite runs in under 5 minutes on a laptop. See the
+[examples index](./DOCUMENTATION.md#12-examples-index) for a description
+of each one.
 
 ## 🧪 Testing
 
@@ -374,18 +378,14 @@ pytest uacpy/tests/test_models.py::TestClassName::test_method -v
 
 Tests use custom markers to allow selective execution:
 
-- `slow` -- Long-running tests (broadband, large grids)
+- `slow` -- Long-running tests (broadband, large grids, slow examples)
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
-- `integration` -- End-to-end integration tests
 
 ``` bash
 
 # Skip slow tests
 pytest uacpy/tests/ -m "not slow"
-
-# Run only integration tests
-pytest uacpy/tests/ -m "integration"
 
 # Run only tests that don't need compiled binaries
 pytest uacpy/tests/ -m "not requires_binary"
