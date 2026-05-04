@@ -9,7 +9,7 @@ configurations.
 
 import copy as _copy
 import numpy as np
-from typing import Union, List, Tuple, Optional
+from typing import Union, List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
 
@@ -292,6 +292,67 @@ class LayeredBottom:
             depths.append((top, bottom))
             current_depth = bottom
         return depths
+
+    def to_piecewise_breakpoints(
+        self,
+        seafloor_depth: float,
+        zmax: Optional[float] = None,
+        properties: Tuple[str, ...] = (
+            'sound_speed', 'density', 'attenuation',
+        ),
+    ) -> Dict[str, List[Tuple[float, float]]]:
+        """
+        Project this layered bottom onto Collins-style ``(depth, value)``
+        breakpoint sequences — the format consumed by ``ram.in`` for
+        rams0.5 (elastic) and ramsurf1.5 (rough surface).
+
+        Each layer becomes two breakpoints (top depth, bottom depth) with
+        the same value, producing a step function under the linear
+        interpolation rules of Collins' ``zread`` routine. The half-space
+        is appended as one final breakpoint at ``zmax`` (or at the deepest
+        layer bottom if ``zmax`` is omitted) carrying the half-space
+        value.
+
+        Parameters
+        ----------
+        seafloor_depth : float
+            Depth of the top of the first sediment layer (m).
+        zmax : float, optional
+            Maximum depth of the PE computational grid. If provided, a
+            final breakpoint is emitted at ``zmax`` with the half-space
+            value so the absorbing region carries the right properties.
+        properties : tuple of str, optional
+            Which fields to extract. Pass e.g. ``('sound_speed', 'density',
+            'attenuation', 'shear_speed', 'shear_attenuation')`` for RAMS.
+            Layers / half-space that don't expose the property contribute
+            ``0.0`` (the convention RAM family uses for "no shear").
+
+        Returns
+        -------
+        dict
+            ``{property_name: [(depth, value), ...]}`` — one list per
+            requested property, in increasing depth order.
+        """
+        out = {p: [] for p in properties}
+
+        depths = self.layer_depths(seafloor_depth)
+        for (top, bottom), layer in zip(depths, self.layers):
+            for prop in properties:
+                value = float(getattr(layer, prop, 0.0) or 0.0)
+                out[prop].append((float(top), value))
+                out[prop].append((float(bottom), value))
+
+        deepest_layer_bottom = depths[-1][1] if depths else seafloor_depth
+        final_depth = float(zmax) if zmax is not None else deepest_layer_bottom
+        if final_depth <= deepest_layer_bottom:
+            final_depth = deepest_layer_bottom + 1.0
+
+        for prop in properties:
+            hs_value = float(getattr(self.halfspace, prop, 0.0) or 0.0)
+            out[prop].append((deepest_layer_bottom, hs_value))
+            out[prop].append((final_depth, hs_value))
+
+        return out
 
 
 @dataclass

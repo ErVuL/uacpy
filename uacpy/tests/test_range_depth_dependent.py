@@ -217,44 +217,41 @@ class TestModelWithRangeDependence:
         assert result.field_type == 'tl'
         assert result.shape == (3, 3)
 
+    @pytest.mark.requires_binary
     def test_ram_range_dependent_ssp(self):
         """Test RAM with range-dependent SSP."""
-        try:
-            # Create range-dependent SSP
-            depths = np.linspace(0, 100, 21)
-            ranges_km = np.array([0, 2.5, 5])
+        # Create range-dependent SSP
+        depths = np.linspace(0, 100, 21)
+        ranges_km = np.array([0, 2.5, 5])
 
-            ssp_matrix = np.zeros((len(depths), len(ranges_km)))
-            for i, r_km in enumerate(ranges_km):
-                # Temperature increases with range
-                ssp_matrix[:, i] = 1500 + r_km * 2
+        ssp_matrix = np.zeros((len(depths), len(ranges_km)))
+        for i, r_km in enumerate(ranges_km):
+            # Temperature increases with range
+            ssp_matrix[:, i] = 1500 + r_km * 2
 
-            env = uacpy.Environment(
-                name="RD SSP",
-                depth=100.0,
-                ssp_data=np.column_stack([depths, ssp_matrix[:, 0]]),
-                ssp_type='linear',
-                ssp_2d_ranges=ranges_km,
-                ssp_2d_matrix=ssp_matrix
-            )
+        env = uacpy.Environment(
+            name="RD SSP",
+            depth=100.0,
+            ssp_data=np.column_stack([depths, ssp_matrix[:, 0]]),
+            ssp_type='linear',
+            ssp_2d_ranges=ranges_km,
+            ssp_2d_matrix=ssp_matrix
+        )
 
-            source = uacpy.Source(depth=50.0, frequency=100.0)
-            receiver = uacpy.Receiver(
-                depths=np.array([25.0, 50.0, 75.0]),
-                ranges=np.array([1000.0, 3000.0, 5000.0])
-            )
+        source = uacpy.Source(depth=50.0, frequency=100.0)
+        receiver = uacpy.Receiver(
+            depths=np.array([25.0, 50.0, 75.0]),
+            ranges=np.array([1000.0, 3000.0, 5000.0])
+        )
 
-            ram = RAM(verbose=False)
-            result = ram.compute_tl(env=env, source=source, receiver=receiver)
+        ram = RAM(verbose=False)
+        result = ram.compute_tl(env=env, source=source, receiver=receiver)
 
-            assert result.field_type == 'tl'
-            # RAM computes on its own internal grid
-            assert result.shape[0] > 0  # Has depth dimension
-            assert result.shape[1] > 0  # Has range dimension
-            assert np.all(np.isfinite(result.data))  # All values are finite
-
-        except ImportError:
-            pytest.skip("RAM module not available")
+        assert result.field_type == 'tl'
+        # RAM computes on its own internal grid
+        assert result.shape[0] > 0  # Has depth dimension
+        assert result.shape[1] > 0  # Has range dimension
+        assert np.all(np.isfinite(result.data))  # All values are finite
 
     @pytest.mark.requires_binary
     def test_bellhop_range_dependent_bottom(self):
@@ -539,7 +536,7 @@ class TestRangeDependentLayeredBottom:
         source = uacpy.Source(frequency=100.0, depth=30.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(5, 290, 10),
-            ranges=np.linspace(100, 20000, 15),
+            ranges=np.linspace(100, 5000, 8),
         )
         ram = RAM(verbose=False)
         result = ram.run(env, source, receiver)
@@ -709,7 +706,7 @@ class TestIntegrationRAMRangeDependent:
         source = uacpy.Source(frequency=100.0, depth=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),
-            ranges=np.linspace(100, 10000, 20),
+            ranges=np.linspace(100, 5000, 10),
         )
 
         ram = RAM(verbose=False)

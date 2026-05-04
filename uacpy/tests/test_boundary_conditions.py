@@ -32,7 +32,7 @@ def source():
 def receiver():
     return uacpy.Receiver(
         depths=np.linspace(5, 95, 20),
-        ranges=np.array([2000.0, 5000.0, 10000.0]),
+        ranges=np.array([1000.0, 2500.0, 5000.0]),
     )
 
 

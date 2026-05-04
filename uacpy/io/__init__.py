@@ -8,7 +8,10 @@ from uacpy.io.env_writer import (
 from uacpy.io.env_reader import read_env_file, read_env_core
 from uacpy.io.output_reader import read_shd_file, read_arr_file, read_ray_file, read_modes, read_modes_bin, read_modes_asc
 from uacpy.io.bty_writer import write_bty_file, write_bty_3d, write_ati_file
-from uacpy.io.grn_reader import read_grn_file, grn_to_field
+from uacpy.io.grn_reader import (
+    read_grn_file, grn_to_field, grn_to_transfer_function,
+    sparc_snapshot_to_field,
+)
 from uacpy.io.rts_reader import read_rts_file, rts_to_tl
 from uacpy.io.flp_reader import read_flp, read_flp3d
 from uacpy.io.flp_writer import write_fieldflp, write_field3dflp
@@ -17,7 +20,8 @@ from uacpy.io.utils import equally_spaced, crci, complex_ssp
 from uacpy.io.shd_utils import merge_shd_files
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
 from uacpy.io.oases_reader import (
-    read_oast_tl, read_oasn_covariance, read_oasn_replicas, read_oases_modes, read_oasp_trf
+    read_oast_tl, read_oasn_covariance, read_oasn_replicas, read_oasp_trf,
+    read_oasr_reflection_coefficients,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
@@ -44,8 +48,10 @@ __all__ = [
     "read_modes_bin",  # Binary .mod format
     "read_modes_asc",  # ASCII .moa format
     # Model-specific readers
-    "read_grn_file",  # Scooter Green's functions
-    "grn_to_field",  # GRN → Field transform
+    "read_grn_file",  # Scooter / SPARC snapshot Green's functions
+    "grn_to_field",  # GRN → TL Field (single-frequency Hankel transform)
+    "grn_to_transfer_function",  # broadband GRN → H(f, r, z)
+    "sparc_snapshot_to_field",  # SPARC snapshot → TL via time-FFT + Hankel
     "read_rts_file",  # SPARC time series (binary)
     "rts_to_tl",  # RTS → TL transform
     "read_ts",  # Generic time series (ASCII)
@@ -67,8 +73,8 @@ __all__ = [
     "read_oast_tl",  # OAST transmission loss reader
     "read_oasn_covariance",  # OASN covariance matrix reader (.xsm)
     "read_oasn_replicas",  # OASN replica field reader (.rpo)
-    "read_oases_modes",  # OASES mode file reader
     "read_oasp_trf",  # OASP transfer function reader (.trf)
+    "read_oasr_reflection_coefficients",  # OASR reflection-coefficient reader
     # mpiramS I/O
     "write_inpe",  # mpiramS input file writer
     "write_ssp_file",  # mpiramS SSP file writer

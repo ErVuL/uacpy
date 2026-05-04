@@ -37,6 +37,8 @@ def write_inpe(
     attn: Optional[np.ndarray] = None,
     isedrd: int = 0,
     sed_filename: str = '',
+    *,
+    c0_user: float,
 ):
     """
     Write mpiramS input configuration file (in.pe).
@@ -92,6 +94,10 @@ def write_inpe(
         1=range-dependent from external file.
     sed_filename : str, optional
         Sediment profile filename (used when isedrd=1).
+    c0_user : float, keyword-only
+        PE reference sound speed (m/s). The Fortran binary requires a
+        positive value (e.g. Lytaev Eq. (15) optimum) and stops with
+        an error otherwise.
     """
     if cs is None:
         cs = np.zeros(nzs)
@@ -112,6 +118,7 @@ def write_inpe(
         f.write(f"{np_pade} {nss}\n")
         f.write(f"{rs}\n")
         f.write(f"{dzm}\n")
+        f.write(f"{c0_user}\n")
         f.write(f"{ssp_filename}\n")
         f.write(f"{iflat}\n")
         f.write(f"{ihorz}\n")

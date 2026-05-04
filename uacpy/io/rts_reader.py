@@ -154,26 +154,21 @@ def rts_to_tl(rts_data: Dict[str, Any], freq: float, method: str = "fft") -> Tup
     nt, nr = p.shape
 
     if method == "fft":
-        # Apply Hanning window to reduce spectral leakage
+        # Apply Hanning window to reduce spectral leakage from the finite
+        # SPARC observation window.
         window = np.hanning(nt)
 
-        # FFT for each range
+        # FFT for each range.
         p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
-
-        # Frequency vector
         freqs = np.fft.rfftfreq(nt, dt)
-
-        # Find frequency bin closest to target
         freq_idx = np.argmin(np.abs(freqs - freq))
-
-        # Extract amplitude at target frequency
         p_at_freq = p_freq[freq_idx, :]
 
-        # Apply correction for window energy
-        window_correction = np.sum(window) / nt
-
-        # Normalize amplitude
-        p_at_freq = p_at_freq / (nt * window_correction)
+        # Normalise by ``sum(window)`` (== ``nt * mean(window)``). For a
+        # pure tone this lands at ``0.5`` — i.e. the half-amplitude
+        # convention. The cross-model agreement suite calibrates against
+        # this convention, so the leading 2× is intentionally omitted.
+        p_at_freq = p_at_freq / np.sum(window)
 
     elif method == "goertzel":
         # Goertzel algorithm for single-frequency extraction

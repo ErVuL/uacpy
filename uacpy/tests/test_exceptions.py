@@ -46,8 +46,14 @@ class TestCustomExceptions:
 class TestInputValidation:
     """Tests for input validation and error handling."""
 
+    @pytest.mark.requires_binary
     def test_source_depth_exceeds_environment(self, simple_env):
-        """Test error when source depth exceeds environment depth."""
+        """Test error when source depth exceeds environment depth.
+
+        Bellhop's constructor probes for the bellhop.exe binary, so this test
+        is gated by `requires_binary` even though the assertion only exercises
+        Python-side input validation.
+        """
         source = uacpy.Source(depth=150, frequency=100)
         receiver = uacpy.Receiver(depths=[50], ranges=[1000])
 
@@ -56,6 +62,7 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="Source depth.*exceeds"):
             bellhop.validate_inputs(simple_env, source, receiver)
 
+    @pytest.mark.requires_binary
     def test_receiver_depth_exceeds_environment(self, simple_env):
         """Test error when receiver depth exceeds environment depth."""
         source = uacpy.Source(depth=50, frequency=100)
@@ -105,52 +112,47 @@ class TestUnsupportedOperations:
         assert "Kraken" in str(exc_info.value) or "OASN" in str(exc_info.value)
 
     @pytest.mark.requires_binary
-    def test_kraken_range_dependent_error(self, range_dependent_env, source):
-        """Test that Kraken raises error for range-dependent environment."""
+    def test_kraken_range_dependent_warns_and_collapses(
+        self, range_dependent_env, source,
+    ):
+        """Kraken warns and collapses range-dependent envs to range-independent."""
+        import warnings as _warn
         kraken = Kraken(verbose=False)
-
-        # Should raise EnvironmentError for range-dependent environments
-        with pytest.raises(EnvironmentError, match="does not support range-dependent"):
+        with _warn.catch_warnings(record=True) as caught:
+            _warn.simplefilter('always')
             modes = kraken.compute_modes(env=range_dependent_env, source=source)
+        assert modes.n_modes > 0
+        assert any('range-dependent' in str(w.message) for w in caught)
 
 
 class TestFieldErrors:
     """Tests for Field object error handling."""
 
     def test_invalid_field_type(self):
-        """Test error for invalid field type."""
-        from uacpy.core.field import Field
-
-        with pytest.raises(ValueError, match="field_type must be one of"):
-            Field(
-                field_type='invalid_type',
-                data=np.random.rand(10, 20)
+        """Constructing a TLField with mismatched depth/range vs data raises."""
+        from uacpy.core.results import TLField
+        with pytest.raises(ValueError, match="must equal"):
+            TLField(
+                data=np.random.rand(10, 20),
+                depths=np.array([1.0]), ranges=np.array([1.0]),
+                model='Test',
             )
 
     def test_field_get_value_on_rays(self):
-        """Test that get_value raises error for ray fields."""
-        from uacpy.core.field import Field
+        """Rays Result has no get_value (only spatial grids do)."""
+        from uacpy.core.results import Rays
 
-        field = Field(
-            field_type='rays',
-            data=np.array([]),
-            metadata={'rays': []}
-        )
-
-        with pytest.raises(ValueError, match="get_value not supported"):
-            field.get_value(range_m=1000, depth=50)
+        rays = Rays(rays=[], model='Bellhop')
+        with pytest.raises(AttributeError):
+            rays.get_value(range_m=1000, depth=50)
 
     def test_field_to_db_unsupported(self):
-        """Test that to_db raises error for unsupported field types."""
-        from uacpy.core.field import Field
+        """Rays Result has no to_db method (only PressureField has one)."""
+        from uacpy.core.results import Rays
 
-        field = Field(
-            field_type='rays',
-            data=np.array([])
-        )
-
-        with pytest.raises(ValueError, match="to_db not supported"):
-            field.to_db()
+        rays = Rays(rays=[], model='Bellhop')
+        with pytest.raises(AttributeError):
+            rays.to_db()
 
 
 class TestErrorMessages:

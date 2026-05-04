@@ -4,13 +4,12 @@ Tests for the simplified UACPY API
 
 import pytest
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for testing
 import matplotlib.pyplot as plt
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField
-from uacpy.core.field import Field
+from uacpy.core.results import Result, TLField, Modes
+from uacpy.visualization import plots
 from uacpy.models import RunMode
 
 
@@ -43,7 +42,7 @@ class TestComputeAPI:
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
-        assert isinstance(modes, Field)
+        assert isinstance(modes, Modes)
         assert modes.field_type == 'modes'
         assert 'k' in modes.metadata
         assert 'phi' in modes.metadata
@@ -59,8 +58,8 @@ class TestComputeAPI:
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, max_range=3000)
 
         # Both should return Field objects with 'tl' type
-        assert isinstance(result_bellhop, Field)
-        assert isinstance(result_kraken, Field)
+        assert isinstance(result_bellhop, TLField)
+        assert isinstance(result_kraken, TLField)
         assert result_bellhop.field_type == 'tl'
         assert result_kraken.field_type == 'tl'
 
@@ -124,7 +123,7 @@ class TestPlottingAPI:
             'KrakenField': krakenfield.compute_tl(env=simple_env, source=source, max_range=3000),
         }
 
-        fig, axes = Field.plot_comparison(results, env=simple_env)
+        fig, axes = plots.compare_models(results, env=simple_env)
 
         assert fig is not None
         assert axes is not None

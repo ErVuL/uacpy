@@ -11,7 +11,7 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result
 from uacpy.io.file_manager import FileManager
 
 
@@ -66,11 +66,23 @@ class RunMode(Enum):
     EIGENRAYS = 'eigenrays'              # Eigenrays (specific paths)
     ARRIVALS = 'arrivals'                # Arrival structure
 
-    MODES = 'modes'                      # Normal modes only
+    MODES = 'modes'                      # Normal modes (Kraken/KrakenC depth eigenfunctions)
 
-    TIME_SERIES = 'time_series'          # Time-domain response (SPARC, OASP)
+    # OASN frequency-domain array products: COVARIANCE → C(f, i, j) hydrophone
+    # × hydrophone matrix; REPLICA → Green's-function samples at the array
+    # elements per candidate source position. See core/results.Covariance and
+    # core/results.Replicas.
+    COVARIANCE = 'covariance'
+    REPLICA = 'replica'
 
-    TRANSFER_FUNCTION = 'transfer_function'
+    # Time-domain pressure p(t) at the receiver(s). Models that compute a
+    # broadband transfer function natively (Bellhop, RAM, Scooter,
+    # KrakenField, OASES) require ``source_waveform=`` + ``sample_rate=``;
+    # SPARC computes p(t) directly from its source pulse and ignores them.
+    TIME_SERIES = 'time_series'
+
+    # Broadband complex transfer function H(f).
+    BROADBAND = 'broadband'
 
     REFLECTION = 'reflection'            # Plane-wave reflection coefficients (Bounce, OASR)
 
@@ -110,17 +122,40 @@ class PropagationModel(ABC):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        range_independent_method: str = 'max',
     ):
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
         self.verbose = verbose
         self.work_dir = work_dir
+        # When a range-independent-only model receives a range-dependent
+        # env, the wrapper collapses it via
+        # ``Environment.get_range_independent_approximation(method=…)``.
+        # ``'max'`` keeps source/receiver depths inside the seafloor;
+        # ``'median'`` / ``'mean'`` / ``'min'`` are the other valid
+        # choices. See :meth:`Environment.get_representative_depth`.
+        self.range_independent_method = range_independent_method
         self.file_manager = None
 
         # Subclasses override to declare the run modes they support.
         self._supported_modes: List[RunMode] = [RunMode.COHERENT_TL]
-        # Subclasses set True if they honour env.altimetry.
+
+        # Capability flags — subclasses set True for each Environment feature
+        # they honour natively. Anything left False that's present in env on
+        # ``run()`` triggers a warning via ``_warn_on_unsupported_env_features``
+        # rather than silently dropping the data.
+        #
+        # Default model-suggestion strings appended to each warning. Override
+        # ``_unsupported_env_alternatives`` per subclass to point users at
+        # the right alternative (e.g., RAM for range-dependent fluid PE).
         self._supports_altimetry: bool = False
+        self._supports_range_dependent_ssp: bool = False
+        self._supports_range_dependent_bottom: bool = False
+        self._supports_layered_bottom: bool = False
+        self._supports_range_dependent_layered_bottom: bool = False
+        self._unsupported_env_alternatives: str = (
+            "Bellhop / KrakenField / RAM"
+        )
 
     @property
     def supported_modes(self) -> List[RunMode]:
@@ -137,26 +172,50 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional['RunMode'] = None,
         **kwargs
-    ) -> Field:
-        """
-        Run the propagation model.
+    ) -> Result:
+        """Run the propagation model.
+
+        Every wrapper takes the same first four parameters in the same
+        order: the common ``Environment`` / ``Source`` / ``Receiver``
+        triple, followed by the optional ``run_mode``.
+
+        Model-specific settings come from two places:
+
+        1. **Constructor kwargs** — the long-lived configuration of the
+           model instance (e.g. ``RAM(dr=2.0, dz=0.5, np_pade=8)``).
+        2. **Per-call overrides via ``**kwargs``** — any keyword whose
+           name matches a constructor attribute is temporarily applied
+           for the duration of this call. This lets you reuse one
+           configured instance with localised tweaks.
+
+        Mode-specific kwargs (e.g. ``source_waveform`` and ``sample_rate``
+        for ``RunMode.TIME_SERIES``) are also accepted via ``**kwargs``;
+        each model documents its own.
 
         Parameters
         ----------
         env : Environment
-            Environment definition.
+            Ocean environment.
         source : Source
-            Source definition.
+            Acoustic source.
         receiver : Receiver
-            Receiver definition.
+            Receiver grid.
+        run_mode : RunMode, optional
+            Output type to compute. ``None`` selects the model's natural
+            default (typically ``RunMode.COHERENT_TL``). Each wrapper's
+            :attr:`supported_modes` lists what it accepts.
         **kwargs
-            Model-specific parameters.
+            Per-call overrides (matching constructor attribute names) and
+            mode-specific extras. See subclass docstrings.
 
         Returns
         -------
-        field : Field
-            Simulation results.
+        result : Result
+            One of the typed :mod:`uacpy.core.results` subclasses
+            (``TLField``, ``TransferFunction``, ``Modes``, …) determined
+            by ``run_mode`` and the model.
         """
         pass
 
@@ -261,14 +320,11 @@ class PropagationModel(ABC):
             self._log("Receiver depths must be positive", level='error')
             raise ValueError("Receiver depths must be positive")
 
-        if getattr(env, 'altimetry', None) is not None and not self._supports_altimetry:
-            warnings.warn(
-                f"{self.model_name} does not support sea surface altimetry. "
-                "Altimetry data will be ignored and a flat surface will be used. "
-                "Use Bellhop for altimetry/sea surface roughness support.",
-                UserWarning,
-                stacklevel=3,
-            )
+        # Warn on env features the model doesn't honour (covers altimetry,
+        # range-dep SSP / bottom, layered, range-dep layered). Bellhop has
+        # its own custom warnings inside ``run()`` and sets the relevant
+        # supports flags so this helper doesn't double-warn.
+        self._warn_on_unsupported_env_features(env)
 
     def compute_tl(
         self,
@@ -276,7 +332,7 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver = None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute transmission loss (convenience wrapper around ``run``).
 
@@ -295,7 +351,7 @@ class PropagationModel(ABC):
 
         Returns
         -------
-        field : Field
+        result : Result
             Transmission loss field.
 
         Examples
@@ -339,7 +395,7 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver = None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute ray paths (convenience wrapper around ``run``).
 
@@ -356,7 +412,7 @@ class PropagationModel(ABC):
 
         Returns
         -------
-        field : Field
+        result : Result
             Ray path data.
 
         Raises
@@ -392,7 +448,7 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute the arrival structure (convenience wrapper around ``run``).
 
@@ -409,7 +465,7 @@ class PropagationModel(ABC):
 
         Returns
         -------
-        field : Field
+        result : Result
             Arrival data.
 
         Raises
@@ -439,7 +495,7 @@ class PropagationModel(ABC):
         source: Source,
         n_modes: int = None,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Compute normal modes (convenience wrapper around ``run``).
 
@@ -457,7 +513,7 @@ class PropagationModel(ABC):
 
         Returns
         -------
-        field : Field
+        result : Result
             Mode data (``field_type='modes'``).
 
         Raises
@@ -484,15 +540,13 @@ class PropagationModel(ABC):
                 alternatives=['Kraken', 'OASN']
             )
 
-        if env.is_range_dependent:
-            # Only KrakenField handles range-dependent modes (coupled mode theory).
-            if self.model_name not in ['KrakenField']:
-                raise EnvironmentError(
-                    f"{self.model_name} does not support range-dependent environments for mode computation. "
-                    f"Environment has bathymetry ranging from {env.bathymetry[:, 1].min():.1f}m to "
-                    f"{env.bathymetry[:, 1].max():.1f}m.",
-                    "Use a range-independent environment or try KrakenField with adiabatic coupling"
-                )
+        if env.is_range_dependent and self.model_name != 'KrakenField':
+            # Range-independent mode solvers (Kraken, KrakenC, OASN) collapse
+            # the environment via ``range_independent_method`` and warn,
+            # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
+            env = self._handle_range_dependent_environment(
+                env, alternatives='KrakenField (coupled / adiabatic modes)',
+            )
 
         return self._compute_modes_impl(env, source, n_modes, **kwargs)
 
@@ -694,6 +748,75 @@ class PropagationModel(ABC):
                 "bio_layers=[(Z1, Z2, f0, Q, a0), ...]",
             )
 
+    def _warn_on_unsupported_env_features(self, env: 'Environment') -> None:
+        """Warn for every Environment feature this model does not support.
+
+        Replaces the older pattern where each model's ``run()`` either
+        warned with custom wording or silently dropped data. Subclasses
+        declare what they honour by setting the ``_supports_*`` flags in
+        ``__init__``; this helper inspects ``env`` and emits one
+        ``UserWarning`` per unsupported feature actually present.
+
+        Notes
+        -----
+        Bellhop keeps its existing custom warnings (``run_with_bounce`` is
+        the right alternative there, not the generic suggestion). Other
+        subclasses should call this helper instead of writing their own.
+        """
+        import warnings as _w
+
+        alts = self._unsupported_env_alternatives
+
+        if (not self._supports_altimetry
+                and getattr(env, 'altimetry', None) is not None):
+            _w.warn(
+                f"{self.model_name} does not support sea-surface altimetry. "
+                f"Altimetry data will be ignored and a flat surface used. "
+                f"For rough-surface support use Bellhop or RAM.",
+                UserWarning, stacklevel=3,
+            )
+
+        if (not self._supports_range_dependent_ssp
+                and getattr(env, 'has_range_dependent_ssp', None) is not None
+                and env.has_range_dependent_ssp()):
+            _w.warn(
+                f"{self.model_name} does not support range-dependent SSP. "
+                f"The range-0 profile will be used. "
+                f"For range-dependent SSP use {alts}.",
+                UserWarning, stacklevel=3,
+            )
+
+        if (not self._supports_range_dependent_bottom
+                and getattr(env, 'has_range_dependent_bottom', None) is not None
+                and env.has_range_dependent_bottom()):
+            _w.warn(
+                f"{self.model_name} does not support range-dependent bottom "
+                f"properties. Using the range-0 (or median) bottom only. "
+                f"For range-dependent bottoms use {alts}.",
+                UserWarning, stacklevel=3,
+            )
+
+        if (not self._supports_layered_bottom
+                and getattr(env, 'has_layered_bottom', None) is not None
+                and env.has_layered_bottom()):
+            _w.warn(
+                f"{self.model_name} does not support layered (depth-"
+                f"dependent) bottoms. Using halfspace properties only. "
+                f"For layered bottoms use Kraken/KrakenC, Scooter, or OASES.",
+                UserWarning, stacklevel=3,
+            )
+
+        if (not self._supports_range_dependent_layered_bottom
+                and getattr(env, 'has_range_dependent_layered_bottom', None)
+                is not None
+                and env.has_range_dependent_layered_bottom()):
+            _w.warn(
+                f"{self.model_name} does not support range-dependent "
+                f"layered bottoms. Using halfspace properties only. "
+                f"For range+depth-dependent bottoms use RAM.",
+                UserWarning, stacklevel=3,
+            )
+
     def _handle_range_dependent_environment(
         self, env: 'Environment', alternatives: str = 'Bellhop or RAM'
     ) -> 'Environment':
@@ -717,19 +840,106 @@ class PropagationModel(ABC):
         """
         if env.is_range_dependent:
             import warnings
+            method = self.range_independent_method
+            collapsed = env.get_range_independent_approximation(method=method)
             min_depth = env.bathymetry[:, 1].min()
             max_depth = env.bathymetry[:, 1].max()
             warning_msg = (
                 f"{self.model_name} does not support range-dependent environments. "
-                f"Using MAXIMUM bathymetry depth ({max_depth:.1f}m) as approximation. "
-                f"Bathymetry range: {min_depth:.1f}m - {max_depth:.1f}m. "
-                f"This ensures source/receiver depths remain valid (prevents depth violations). "
-                f"For accurate range-dependent modeling, use {alternatives}."
+                f"Using {method!r} bathymetry depth ({collapsed.depth:.1f} m) "
+                f"as approximation. Bathymetry range: {min_depth:.1f}–{max_depth:.1f} m. "
+                f"For accurate range-dependent modeling, use {alternatives}. "
+                f"Override with `range_independent_method='min'|'median'|'mean'|'max'`."
             )
             warnings.warn(warning_msg, UserWarning, stacklevel=3)
             self._log(warning_msg, level='warn')
-            return env.get_range_independent_approximation(method='max')
+            return collapsed
         return env
+
+    def _build_base_metadata(
+        self,
+        source: 'Source',
+        *,
+        backend: Optional[str] = None,
+        frequency: Optional[float] = None,
+        frequencies: Optional[np.ndarray] = None,
+        phase_reference: Optional[str] = None,
+        **extra,
+    ) -> dict:
+        """Construct the standard ``metadata`` dict every Field should carry.
+
+        Common keys
+        -----------
+        ``model``           : str — class name (e.g. 'Bellhop', 'KrakenField').
+        ``backend``         : str — concrete binary that ran (e.g. 'kraken.exe',
+                              'mpiramS'). Defaults to ``model_name`` when the
+                              wrapper is not a dispatcher.
+        ``source_depths``   : ndarray — every source depth in the run.
+        ``frequency``       : float — single (centre) frequency, when applicable.
+        ``frequencies``     : ndarray — frequency vector, when broadband.
+        ``phase_reference`` : str, optional — describes the phase convention
+                              of the stored complex pressure (e.g.
+                              ``'travelling_wave'``, ``'porter_negated'``,
+                              ``'psif_envelope'``). Lets ``synthesize_time_series``
+                              and downstream consumers correctly interpret H(f).
+
+        Extra model-specific keys are merged via ``**extra``; existing
+        per-model keys (``Q``, ``Nsam``, ``mode_coupling``, etc.) keep
+        their names.
+        """
+        meta = {
+            'model': self.model_name,
+            'backend': backend or self.model_name,
+            'source_depths': np.atleast_1d(np.asarray(
+                getattr(source, 'depth', []), dtype=float
+            )),
+        }
+        if frequency is not None:
+            meta['frequency'] = float(frequency)
+        if frequencies is not None:
+            meta['frequencies'] = np.asarray(frequencies, dtype=float)
+        if phase_reference is not None:
+            meta['phase_reference'] = phase_reference
+        meta.update(extra)
+        return meta
+
+    def _result_kwargs(
+        self,
+        source: 'Source',
+        *,
+        backend: Optional[str] = None,
+        frequency: Optional[float] = None,
+        frequencies: Optional[np.ndarray] = None,
+        phase_reference: Optional[str] = None,
+        **extra,
+    ) -> dict:
+        """Pre-built kwargs for any :mod:`uacpy.core.results` constructor.
+
+        Returns a dict with the harmonised identification fields
+        (``model``, ``backend``, ``source_depths``, ``frequency``,
+        ``frequencies``) plus a ``metadata`` dict carrying the rest
+        (``phase_reference`` and the model-specific ``**extra``).
+
+        Spread it into a typed-Result constructor:
+
+        >>> kw = self._result_kwargs(source, backend='ram', frequency=fc,
+        ...                          phase_reference='psif_envelope', dr=2.0)
+        >>> tlf = TLField(data=tl, depths=…, ranges=…, **kw)
+        """
+        md = dict(extra)
+        if phase_reference is not None:
+            md['phase_reference'] = phase_reference
+        return dict(
+            model=self.model_name,
+            backend=backend or self.model_name,
+            source_depths=np.atleast_1d(np.asarray(
+                getattr(source, 'depth', []), dtype=float
+            )),
+            frequency=(float(frequency) if frequency is not None else None),
+            frequencies=(np.asarray(frequencies, dtype=float)
+                         if frequencies is not None else None),
+            metadata=md,
+        )
 
     def _clip_receiver_depths(
         self, receiver: 'Receiver', env_depth: float, margin: float = 3.0

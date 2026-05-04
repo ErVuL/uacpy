@@ -108,17 +108,13 @@ class PPSD:
 
         psd_array = _np.array(psd_list)
 
-        # --- Compute mean and std in linear power ---
-        mean_psd_linear = _np.mean(psd_array, axis=0)
-        std_psd_linear = _np.std(psd_array, axis=0)
-
-        # Convert mean to dB
-        self.mean_psd = 10 * _np.log10(mean_psd_linear / self.ref**2)
-        # Convert std to dB relative to mean
-        self.std_psd = 10 * _np.log10((mean_psd_linear + std_psd_linear)/self.ref**2) - self.mean_psd
-
-        # --- PDF in dB ---
+        # Convert to dB once; mean/std/percentiles all live in dB-space so
+        # they line up with the histogram (and with how users read PPSD).
         psd_segments_dB = 10 * _np.log10(psd_array / self.ref**2)
+
+        self.mean_psd = _np.mean(psd_segments_dB, axis=0)
+        self.std_psd = _np.std(psd_segments_dB, axis=0)
+
         pdf_matrix = _np.zeros((len(levels)-1, len(freqs)))
         for i in range(len(freqs)):
             hist, _ = _np.histogram(psd_segments_dB[:, i], bins=levels, density=True)
@@ -160,7 +156,7 @@ class PPSD:
         ax.plot(self.freqs, self.mean_psd + self.std_psd, "k--", label="Mean level ± STD")
         ax.plot(self.freqs, self.mean_psd - self.std_psd, "k--")
 
-        ax.set_title(f"[PSD-PDF {self.seg_duration}s] {title}", loc="left")
+        ax.set_title(f"[PPSD {self.seg_duration}s] {title}", loc="left")
         ax.set_xlabel("Frequency [Hz]")
         ax.set_ylabel("Level [dB]")
         ax.set_xscale("log")

@@ -5,7 +5,7 @@ Tests for core UACPY classes: Environment, Source, Receiver, Field
 import pytest
 import numpy as np
 import uacpy
-from uacpy.core.field import Field
+from uacpy.core.results import Result as Field  # legacy alias
 
 
 class TestEnvironment:
@@ -106,20 +106,16 @@ class TestReceiver:
 
 
 class TestField:
-    """Tests for Field class."""
+    """Tests for the typed Result hierarchy (TLField etc.)."""
 
     def test_create_tl_field(self):
-        """Test creating transmission loss field."""
+        from uacpy.core.results import TLField
         data = np.random.rand(10, 20) * 50 + 40  # Random TL between 40-90 dB
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = Field(
-            field_type='tl',
-            data=data,
-            ranges=ranges,
-            depths=depths
-        )
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
 
         assert field.field_type == 'tl'
         assert field.shape == (10, 20)
@@ -127,74 +123,73 @@ class TestField:
         assert field.n_depths == 10
 
     def test_field_get_value(self):
-        """Test getting value at specific location."""
-        data = np.arange(100).reshape(10, 10)
+        from uacpy.core.results import TLField
+        data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = Field('tl', data, ranges, depths)
-
-        # Get value at closest point (data is row-major: depth x range)
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
         value = field.get_value(range_m=4500, depth=45)
-        # depth=45 is index 5, range=4500 is index 5, so data[5,5] = 55
-        # But actual closest indices may vary slightly
-        assert 44 <= value <= 55  # Should be near middle of grid
+        assert 44 <= value <= 55
 
     def test_field_get_at_range(self):
-        """Test getting field values at specific range."""
-        data = np.arange(100).reshape(10, 10)
+        from uacpy.core.results import TLField
+        data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = Field('tl', data, ranges, depths)
-
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
         values = field.get_at_range(4500)
         assert len(values) == 10
-        # Values should be from the closest range column
-        assert 50 <= values[5] <= 59  # Middle depth, near middle range
+        assert 50 <= values[5] <= 59
 
     def test_field_get_at_depth(self):
-        """Test getting field values at specific depth."""
-        data = np.arange(100).reshape(10, 10)
+        from uacpy.core.results import TLField
+        data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = Field('tl', data, ranges, depths)
-
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
         values = field.get_at_depth(45)
         assert len(values) == 10
-        # Values should be from the closest depth row
-        assert 40 <= values[5] <= 49  # Near middle depth, middle range
+        assert 40 <= values[5] <= 49
 
     def test_field_copy(self):
-        """Test field copy."""
+        from uacpy.core.results import TLField
         data = np.random.rand(10, 20)
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = Field('tl', data, ranges, depths)
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
         field_copy = field.copy()
 
-        assert field_copy.field_type == field.field_type
+        assert type(field_copy) is type(field)
         assert np.array_equal(field_copy.data, field.data)
         assert field_copy is not field
         assert field_copy.data is not field.data
 
     def test_invalid_field_type(self):
-        """Test that invalid field type raises error."""
+        """Constructing a TLField with mismatched shapes raises ValueError."""
+        from uacpy.core.results import TLField
         with pytest.raises(ValueError):
-            Field('invalid_type', np.array([1, 2, 3]))
+            TLField(data=np.array([1.0, 2.0, 3.0]),
+                    depths=np.array([1.0]), ranges=np.array([1.0]),
+                    model='Test')
 
     def test_field_repr(self):
-        """Test field string representation."""
+        from uacpy.core.results import TLField
         data = np.random.rand(10, 20)
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = Field('tl', data, ranges, depths)
+        field = TLField(data=data, ranges=ranges, depths=depths,
+                        model='Test', frequency=100.0)
         repr_str = repr(field)
-
-        assert 'tl' in repr_str
-        assert '10x20' in repr_str
-        assert '20 ranges' in repr_str
-        assert '10 depths' in repr_str
+        assert 'TLField' in repr_str
+        assert field.shape == (10, 20)
+        assert field.n_ranges == 20
+        assert field.n_depths == 10

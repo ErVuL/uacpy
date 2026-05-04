@@ -119,44 +119,36 @@ class TestFieldIO:
     """Tests for Field I/O operations."""
 
     def test_field_metadata_preservation(self):
-        """Test that Field preserves metadata."""
-        from uacpy.core.field import Field
-
-        metadata = {
-            'model': 'Bellhop',
-            'frequency': 100.0,
-            'source_depth': 50.0,
-            'custom_param': 'test_value'
-        }
-
-        field = Field(
-            field_type='tl',
+        """Result subclasses preserve metadata + identification kwargs."""
+        from uacpy.core.results import TLField
+        field = TLField(
             data=np.random.rand(10, 20),
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),
-            metadata=metadata
+            model='Bellhop',
+            frequency=100.0,
+            metadata={'source_depth': 50.0, 'custom_param': 'test_value'},
         )
-
+        # `model` and `frequency` are typed attributes; everything else lives
+        # in metadata. Both are also mirrored into metadata for legacy code.
+        assert field.model == 'Bellhop'
+        assert field.frequency == 100.0
         assert field.metadata['model'] == 'Bellhop'
         assert field.metadata['frequency'] == 100.0
         assert field.metadata['custom_param'] == 'test_value'
 
     def test_field_copy_preserves_metadata(self):
-        """Test that Field.copy() preserves metadata."""
-        from uacpy.core.field import Field
-
-        metadata = {'test_key': 'test_value'}
-
-        field = Field(
-            field_type='tl',
+        """Result.copy() returns a deep copy with metadata preserved."""
+        from uacpy.core.results import TLField
+        field = TLField(
             data=np.random.rand(10, 20),
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),
-            metadata=metadata
+            model='Bellhop',
+            frequency=100.0,
+            metadata={'test_key': 'test_value'},
         )
-
         field_copy = field.copy()
-
         assert field_copy.metadata['test_key'] == 'test_value'
         assert field_copy.metadata is not field.metadata
 

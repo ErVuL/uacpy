@@ -68,7 +68,11 @@ class TestBellhop:
 
 
 class TestBellhopCUDA:
-    """Tests for BellhopCUDA model."""
+    """Tests for BellhopCUDA model.
+
+    The wrapper auto-picks bellhopcuda (GPU) or bellhopcxx (CPU) — whichever
+    install.sh built — so these tests run unchanged on GPU and CPU machines.
+    """
 
     @pytest.mark.requires_binary
     def test_bellhopcuda_instantiation(self):
@@ -245,57 +249,62 @@ class TestRAM:
     @pytest.mark.requires_binary
     def test_ram_instantiation(self):
         """Test creating RAM instance."""
-        try:
-            ram = RAM(verbose=False)
-            assert ram.model_name == 'RAM'
-        except FileNotFoundError:
-            pytest.skip("mpiramS binary not available")
+        ram = RAM(verbose=False)
+        assert ram.model_name == 'RAM'
 
     @pytest.mark.requires_binary
     def test_ram_supported_modes(self):
         """Test RAM supported modes."""
-        try:
-            ram = RAM(verbose=False)
-            assert ram.supports_mode(RunMode.COHERENT_TL)
-            assert ram.supports_mode(RunMode.TIME_SERIES)
-            assert not ram.supports_mode(RunMode.RAYS)
-            assert not ram.supports_mode(RunMode.MODES)
-        except FileNotFoundError:
-            pytest.skip("mpiramS binary not available")
+        ram = RAM(verbose=False)
+        assert ram.supports_mode(RunMode.COHERENT_TL)
+        assert ram.supports_mode(RunMode.BROADBAND)
+        assert ram.supports_mode(RunMode.BROADBAND)
+        assert ram.supports_mode(RunMode.TIME_SERIES)
+        assert not ram.supports_mode(RunMode.RAYS)
+        assert not ram.supports_mode(RunMode.MODES)
 
     @pytest.mark.requires_binary
     def test_ram_compute_tl(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
-        try:
-            ram = RAM(verbose=False)
-            result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        ram = RAM(verbose=False)
+        result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-            assert result.field_type == 'tl'
-            assert result.shape[0] > 0  # Has depth dimension
-            assert result.shape[1] > 0  # Has range dimension
-            assert np.all(np.isfinite(result.data))
-        except FileNotFoundError:
-            pytest.skip("mpiramS binary not available")
+        assert result.field_type == 'tl'
+        assert result.shape[0] > 0  # Has depth dimension
+        assert result.shape[1] > 0  # Has range dimension
+        assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
     def test_ram_broadband_mode(self, simple_env, source):
-        """Test RAM broadband (TIME_SERIES) mode."""
-        try:
-            ram = RAM(Q=2.0, T=2.0, verbose=False)
-            receiver = Receiver(
-                depths=np.array([25.0, 50.0, 75.0]),
-                ranges=np.array([5000.0])
-            )
-            result = ram.run(
-                simple_env, source, receiver,
-                run_mode=RunMode.TIME_SERIES
-            )
-            assert result.field_type == 'transfer_function'
-            assert np.iscomplexobj(result.data)
-            assert result.data.shape[0] > 0  # depth dimension
-            assert result.data.shape[1] > 0  # frequency dimension
-        except FileNotFoundError:
-            pytest.skip("mpiramS binary not available")
+        """RAM BROADBAND returns the H(f) transfer function."""
+        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        receiver = Receiver(
+            depths=np.array([25.0, 50.0, 75.0]),
+            ranges=np.array([5000.0])
+        )
+        result = ram.run(
+            simple_env, source, receiver,
+            run_mode=RunMode.BROADBAND
+        )
+        assert result.field_type == 'transfer_function'
+        assert np.iscomplexobj(result.data)
+        # Shape: (n_d, n_r, n_f) — trailing axis is the
+        # variable dimension (frequency, here).
+        assert result.data.shape[0] > 0  # depth
+        assert result.data.shape[1] > 0  # range
+        assert result.data.shape[2] > 0  # frequency
+
+    @pytest.mark.requires_binary
+    def test_ram_time_series_requires_waveform(self, simple_env, source):
+        """TIME_SERIES without source_waveform must raise."""
+        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        receiver = Receiver(
+            depths=np.array([50.0]),
+            ranges=np.array([5000.0])
+        )
+        with pytest.raises(ValueError, match="source_waveform"):
+            ram.run(simple_env, source, receiver,
+                    run_mode=RunMode.TIME_SERIES)
 
 
 class TestScooter:
@@ -318,28 +327,8 @@ class TestSPARC:
         assert sparc.model_name == 'SPARC'
 
 
-@pytest.mark.requires_oases
-class TestOASES:
-    """Tests for OASES models."""
-
-    @pytest.mark.requires_binary
-    def test_oasn_instantiation(self):
-        """Test creating OASN instance."""
-        oasn = OASN(verbose=False)
-        assert oasn.model_name == 'OASN'
-
-    @pytest.mark.requires_binary
-    def test_oasn_supported_modes(self):
-        """Test OASN supported modes
-
-        OASN is the normal modes module in OASES suite.
-        OAST handles transmission loss computation.
-        """
-        oasn = OASN(verbose=False)
-        # OASN supports normal mode computation (line 309)
-        assert oasn.supports_mode(RunMode.MODES)
-        # OASN does not compute TL directly - use OAST for that
-        assert not oasn.supports_mode(RunMode.COHERENT_TL)
+# OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;
+# the cross-model workflow tests below cover Bounce → {Bellhop, Scooter, KrakenC}.
 
 
 class TestModelConsistency:
@@ -367,192 +356,65 @@ class TestModelConsistency:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_bounce_bellhop_workflow(self, simple_env, source, receiver_small):
-        """Test BOUNCE -> Bellhop workflow with reflection coefficient (.brc) files."""
-        from uacpy.core import Environment, BoundaryProperties
+    @pytest.mark.parametrize(
+        "downstream",
+        [
+            pytest.param("Bellhop", id="bellhop"),
+            pytest.param(
+                "KrakenC",
+                id="krakenc",
+                marks=pytest.mark.xfail(
+                    reason=(
+                        "KRAKENC support for .brc files is experimental in the "
+                        "Acoustics Toolbox and currently fails with file format "
+                        "errors. Use SCOOTER for production .brc workflows."
+                    ),
+                    strict=True,
+                ),
+            ),
+            pytest.param("Scooter", id="scooter"),
+        ],
+    )
+    def test_bounce_to_downstream_workflow(
+        self, simple_env, source, receiver_small, tmp_path, downstream
+    ):
+        """BOUNCE → downstream model workflow via .brc reflection coefficients.
 
-        # Step 1: Compute reflection coefficients with BOUNCE
-        bounce = Bounce(verbose=False)
-
-        # Create elastic bottom
-        bottom_elastic = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600,
-            shear_speed=400,
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        env_elastic = Environment(
-            name="elastic_test",
-            depth=simple_env.depth,
-            sound_speed=simple_env.sound_speed,
-            bottom=bottom_elastic
-        )
-
-        bounce_result = bounce.run(
-            env=env_elastic,
-            source=source,
-            receiver=receiver_small,
-        )
-
-        # Verify BRC file was created
-        assert 'brc_file' in bounce_result.metadata
-        brc_file = bounce_result.metadata['brc_file']
-
-        import os
-        assert os.path.exists(brc_file), "BRC file should exist"
-
-        # Step 2: Use reflection coefficient in Bellhop
-        # Extract parameters from BOUNCE result for Bellhop
-        bottom_with_rc = BoundaryProperties(
-            acoustic_type='file',
-            reflection_file=brc_file,
-            depth=100,
-            sound_speed=1600,
-            density=1.8,
-            reflection_cmin=bounce_result.metadata['cmin'],
-            reflection_cmax=bounce_result.metadata['cmax'],
-            reflection_rmax_km=bounce_result.metadata['rmax_km']
-        )
-        env_with_rc = Environment(
-            name="test_with_rc",
-            depth=simple_env.depth,
-            sound_speed=simple_env.sound_speed,
-            bottom=bottom_with_rc
-        )
-
-        bellhop = Bellhop(verbose=False)
-        bellhop_result = bellhop.compute_tl(
-            env=env_with_rc,
-            source=source,
-            receiver=receiver_small
-        )
-
-        # Verify Bellhop succeeded with reflection coefficient file
-        assert bellhop_result.field_type == 'tl'
-        assert bellhop_result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
-        assert np.all(np.isfinite(bellhop_result.data))
-
-    @pytest.mark.requires_binary
-    @pytest.mark.slow
-    @pytest.mark.xfail(reason="KRAKENC support for .brc files is experimental and currently fails")
-    def test_bounce_krakenc_workflow(self, simple_env, source, receiver_small):
-        """Test BOUNCE -> KRAKENC workflow with reflection coefficient files
-
-        NOTE: This test is marked as xfail because KRAKENC support for .brc files
-        is experimental according to the Acoustics Toolbox documentation and currently
-        fails with file format errors. Use SCOOTER for production .brc file workflows.
+        Step 1 computes reflection coefficients on an elastic half-space with
+        BOUNCE, persisting the .brc file to ``tmp_path``. Step 2 feeds the
+        .brc back into the downstream model (Bellhop / KrakenC / Scooter)
+        and verifies it produces a valid result.
         """
-        from uacpy.core import Environment, BoundaryProperties
-        from uacpy.models import KrakenC, KrakenField
-
-        # Step 1: Compute reflection coefficients with BOUNCE
-        bounce = Bounce(verbose=False)
-
-        # Create elastic bottom
-        bottom_elastic = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600,
-            shear_speed=400,
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        env_elastic = Environment(
-            name="elastic_test",
-            depth=simple_env.depth,
-            sound_speed=simple_env.sound_speed,
-            bottom=bottom_elastic
-        )
-
-        bounce_result = bounce.run(
-            env=env_elastic,
-            source=source,
-            receiver=receiver_small,
-        )
-
-        # Verify BRC file was created
-        assert 'brc_file' in bounce_result.metadata
-        brc_file = bounce_result.metadata['brc_file']
-
         import os
-        assert os.path.exists(brc_file), "BRC file should exist"
 
-        # Step 2: Use reflection coefficient in KRAKEN
-        # Extract parameters from BOUNCE result
-        bottom_with_rc = BoundaryProperties(
-            acoustic_type='file',
-            reflection_file=brc_file,
-            depth=100,
-            sound_speed=1600,
-            density=1.8,
-            reflection_cmin=bounce_result.metadata['cmin'],
-            reflection_cmax=bounce_result.metadata['cmax'],
-            reflection_rmax_km=bounce_result.metadata['rmax_km']
-        )
-        env_with_rc = Environment(
-            name="test_with_rc",
-            depth=simple_env.depth,
-            sound_speed=simple_env.sound_speed,
-            bottom=bottom_with_rc
-        )
-
-        # Use KrakenC for modes with reflection files
-        krakenc = KrakenC(verbose=False)
-        modes = krakenc.run(env=env_with_rc, source=source, receiver=receiver_small)
-
-        # Verify KRAKENC succeeded with reflection coefficient file
-        assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert len(modes.metadata['k']) > 0
-        assert 'phi' in modes.metadata
-        assert modes.metadata['phi'].shape[1] == len(modes.metadata['k'])
-
-        # Verify all wavenumbers are valid
-        assert np.all(np.isfinite(modes.metadata['k']))
-
-    @pytest.mark.requires_binary
-    @pytest.mark.slow
-    def test_bounce_scooter_workflow(self, simple_env, source, receiver_small, tmp_path):
-        """Test BOUNCE -> SCOOTER workflow with reflection coefficient files."""
         from uacpy.core import Environment, BoundaryProperties
+        from uacpy.models import KrakenC
 
-        # Step 1: Compute reflection coefficients with BOUNCE
-        bounce = Bounce(verbose=False)
-
-        # Create elastic bottom
+        # Step 1 — BOUNCE on elastic bottom
         bottom_elastic = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600,
             shear_speed=400,
             density=1.8,
             attenuation=0.2,
-            shear_attenuation=0.5
+            shear_attenuation=0.5,
         )
         env_elastic = Environment(
             name="elastic_test",
             depth=simple_env.depth,
             sound_speed=simple_env.sound_speed,
-            bottom=bottom_elastic
+            bottom=bottom_elastic,
         )
-
+        bounce = Bounce(verbose=False)
         bounce_result = bounce.run(
-            env=env_elastic,
-            source=source,
-            receiver=receiver_small,
+            env=env_elastic, source=source, receiver=receiver_small,
             output_dir=tmp_path,
         )
-
-        # Verify BRC file was created
         assert 'brc_file' in bounce_result.metadata
         brc_file = bounce_result.metadata['brc_file']
-
-        import os
         assert os.path.exists(brc_file), "BRC file should exist"
 
-        # Step 2: Use reflection coefficient in SCOOTER
-        # Extract parameters from BOUNCE result
+        # Step 2 — feed .brc into the downstream model
         bottom_with_rc = BoundaryProperties(
             acoustic_type='file',
             reflection_file=brc_file,
@@ -561,26 +423,30 @@ class TestModelConsistency:
             density=1.8,
             reflection_cmin=bounce_result.metadata['cmin'],
             reflection_cmax=bounce_result.metadata['cmax'],
-            reflection_rmax_km=bounce_result.metadata['rmax_km']
+            reflection_rmax_km=bounce_result.metadata['rmax_km'],
         )
         env_with_rc = Environment(
             name="test_with_rc",
             depth=simple_env.depth,
             sound_speed=simple_env.sound_speed,
-            bottom=bottom_with_rc
+            bottom=bottom_with_rc,
         )
 
-        scooter = Scooter(verbose=False)
-        scooter_result = scooter.compute_tl(
-            env=env_with_rc,
-            source=source,
-            receiver=receiver_small
-        )
-
-        # Verify SCOOTER succeeded with reflection coefficient file
-        assert scooter_result.field_type == 'tl'
-        assert scooter_result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
-        assert np.all(np.isfinite(scooter_result.data))
-
-
-# TestUnsupportedFeatures moved to test_exceptions.py to avoid duplication
+        if downstream == "KrakenC":
+            modes = KrakenC(verbose=False).run(
+                env=env_with_rc, source=source, receiver=receiver_small,
+            )
+            assert modes.field_type == 'modes'
+            assert 'k' in modes.metadata and len(modes.metadata['k']) > 0
+            assert modes.metadata['phi'].shape[1] == len(modes.metadata['k'])
+            assert np.all(np.isfinite(modes.metadata['k']))
+        else:
+            model_cls = {"Bellhop": Bellhop, "Scooter": Scooter}[downstream]
+            result = model_cls(verbose=False).compute_tl(
+                env=env_with_rc, source=source, receiver=receiver_small,
+            )
+            assert result.field_type == 'tl'
+            assert result.shape == (
+                len(receiver_small.depths), len(receiver_small.ranges)
+            )
+            assert np.all(np.isfinite(result.data))

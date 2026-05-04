@@ -76,7 +76,7 @@ class TestElasticBoundaryAutoDetection:
 
     def test_krakenfield_detects_elastic_bottom(self, elastic_env, source, receiver_small):
         """Test that KrakenField detects elastic bottom and uses KrakenC."""
-        krakenfield = KrakenField(verbose=True)
+        krakenfield = KrakenField(verbose=False)
 
         # This should automatically detect elastic boundary and use KrakenC
         result = krakenfield.compute_tl(elastic_env, source, receiver_small)
@@ -251,50 +251,6 @@ class TestBounceToScooterWorkflow:
     @pytest.fixture
     def receiver_bounce(self):
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-
-    def test_bounce_to_scooter(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
-        """Test complete BOUNCE → SCOOTER workflow."""
-        # Step 1: Run BOUNCE to generate .brc file
-        bounce = Bounce(verbose=False, cmin=1400.0, cmax=10000.0, rmax_km=10.0)
-        bounce_result = bounce.run(
-            env=elastic_env,
-            source=source,
-            receiver=receiver_bounce,
-            output_dir=tmp_path,
-        )
-
-        brc_file = bounce_result.metadata['brc_file']
-        assert Path(brc_file).exists()
-
-        # Step 2: Create environment with .brc file
-        bottom_with_file = BoundaryProperties(
-            acoustic_type='file',
-            reflection_file=brc_file,
-            depth=100,
-            sound_speed=1600.0,
-            density=1.8,
-            attenuation=0.2,
-            reflection_cmin=1400.0,
-            reflection_cmax=10000.0,
-            reflection_rmax_km=10.0
-        )
-
-        env_with_rc = Environment(
-            name="SCOOTER with BRC",
-            depth=100.0,
-            sound_speed=1500.0,
-            ssp_type='isovelocity',
-            bottom=bottom_with_file
-        )
-
-        # Step 3: Run SCOOTER with .brc file
-        scooter = Scooter(verbose=False)
-        result = scooter.compute_tl(env_with_rc, source, receiver_small)
-
-        assert result is not None
-        assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
-        assert np.all(np.isfinite(result.data))
-        assert np.any(result.data > 0)
 
     def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
         """Test that BOUNCE→SCOOTER gives similar results to direct elastic."""

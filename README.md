@@ -58,8 +58,8 @@ processing, ambient noise, and visualization.
 | **Kraken**        | Normal modes                                                       |
 | **Scooter**       | Finite elements for range independant env                          |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
-| **RAM** (mpiramS) | Parabolic equation                                                 |
-| **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)           |
+| **RAM**           | Parabolic equation — auto-dispatches to mpiramS (broadband fluid), rams0.5 (elastic bottoms, broadband via Python freq loop), or ramsurf1.5 (rough surface, broadband via Python freq loop) based on the environment. All three backends support `COHERENT_TL`, `BROADBAND`, and `TIME_SERIES`. |
+| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |
 
 **Beyond propagation** — signal processing (waveforms, matched filtering,
@@ -77,8 +77,7 @@ What `install.sh` builds:
 
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
-| `gfortran`, `make`       | OALIB, mpiramS, OASES (Fortran models — always)   |
-| LAPACK dev               | Kraken / Scooter (link with `-llapack` — always)  |
+| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
 | CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`)            |
@@ -98,15 +97,15 @@ build.
 ```bash
 # Debian / Ubuntu
 sudo apt-get update
-sudo apt-get install -y gfortran make liblapack-dev git \
+sudo apt-get install -y gfortran make git \
                         cmake g++ curl tar python3-venv python3-pip
 
 # Fedora / RHEL
-sudo dnf install -y gcc-gfortran make lapack-devel git \
+sudo dnf install -y gcc-gfortran make git \
                     cmake gcc-c++ curl tar python3-virtualenv python3-pip
 
 # Arch / Manjaro
-sudo pacman -S --needed gcc-fortran make lapack git \
+sudo pacman -S --needed gcc-fortran make git \
                         cmake gcc curl tar python python-pip
 ```
 
@@ -149,7 +148,7 @@ pip install -e .
 xcode-select --install
 
 # Build dependencies. The 'gcc' formula provides gfortran on macOS.
-brew install gcc lapack cmake curl python
+brew install gcc cmake curl python
 ```
 
 CUDA Bellhop is **not** available on macOS (no NVIDIA toolkit). The C++
@@ -215,7 +214,7 @@ recipe from above:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y gfortran make liblapack-dev git \
+sudo apt-get install -y gfortran make git \
                         cmake g++ curl tar python3-venv python3-pip
 
 cd ~
@@ -341,7 +340,11 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 25+ example scripts.
+Inside `uacpy/examples/` you will find 22 example scripts numbered
+sequentially (`example_01_*.py` through `example_22_*.py`); the full
+suite runs in under 5 minutes on a laptop. See the
+[examples index](./DOCUMENTATION.md#12-examples-index) for a description
+of each one.
 
 ## 🧪 Testing
 
@@ -375,18 +378,14 @@ pytest uacpy/tests/test_models.py::TestClassName::test_method -v
 
 Tests use custom markers to allow selective execution:
 
-- `slow` -- Long-running tests (broadband, large grids)
+- `slow` -- Long-running tests (broadband, large grids, slow examples)
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
-- `integration` -- End-to-end integration tests
 
 ``` bash
 
 # Skip slow tests
 pytest uacpy/tests/ -m "not slow"
-
-# Run only integration tests
-pytest uacpy/tests/ -m "integration"
 
 # Run only tests that don't need compiled binaries
 pytest uacpy/tests/ -m "not requires_binary"
@@ -456,6 +455,15 @@ Michael D. Collins (Naval Research Laboratory)
 
 Brian D. Dushaw --- https://zenodo.org/records/10818570
 
+### ramsurf --- Collins RAM family (rams0.5 elastic, ramsurf1.5 rough surface)
+
+Vendored from the Quiet Oceans repackaging of David C. Calvo's NRL
+distribution --- https://github.com/quiet-oceans/ramsurf
+
+- Collins, *A split-step Padé solution for the parabolic equation method*, JASA, 1993
+- Collins, *Higher-order parabolic approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA, 1991 (RAMS / elastic)
+- Collins, *Generalization of the split-step Padé solution* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
+
 ### OASES --- OAST, OASN, OASR, OASP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
@@ -481,8 +489,9 @@ when redistributing or modifying UACPY or its outputs.
 | Acoustics Toolbox (Porter) | `third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
+| ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
 | arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
-| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | downloaded at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 
 ## 📬 Contact

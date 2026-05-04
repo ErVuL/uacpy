@@ -1,116 +1,95 @@
 """
-Integration tests for UACPY examples
+Auto-discovered smoke tests for uacpy/examples/.
 
-Tests that key examples run without errors and produce expected outputs
+Every example runs end-to-end as a subprocess with a generous timeout.
+All examples are tagged ``slow`` so the default ``pytest -m "not slow"``
+run skips them; the on-demand / nightly path runs them via plain
+``pytest`` or ``pytest -m slow``.
+
+Documentation-style checks of the examples (e.g. "examples 11+ must not
+import example_helpers") are NOT here — those are static lints, see
+``scripts/check_example_helpers.py``.
 """
 
-import pytest
+from __future__ import annotations
+
+import os
 import subprocess
 import sys
-import os
 from pathlib import Path
 
-# Examples directory
-EXAMPLES_DIR = Path(__file__).parent.parent / 'examples'
+import pytest
+
+import uacpy
+
+EXAMPLES_DIR = Path(uacpy.__file__).parent / "examples"
+
+# Examples that import (and run) at least one OASES wrapper — must be
+# de-selectable with `-m "not requires_oases"` when the OASES binaries are
+# absent. Docstring-only mentions of OASES don't count.
+_OASES_STEMS = {
+    "example_02_sound_speed_profiles",
+    "example_03_multi_frequency",
+    "example_07_all_models_comparison",
+    "example_08_long_range",
+    "example_13_oases_suite",
+}
+
+# Examples that need a noticeably longer subprocess timeout (deep-ocean /
+# multi-model / Lytaev-grid runs may take several minutes each).
+_LONG_TIMEOUT_STEMS = {
+    "example_02_sound_speed_profiles",
+    "example_17_boundary_conditions_layered",
+    "example_19_broadband_comparison",
+    "example_22_ram_lytaev_grid",
+}
+
+ALL_EXAMPLES = sorted(
+    p for p in EXAMPLES_DIR.glob("example_*.py")
+    if p.name != "example_helpers.py"
+)
 
 
-class TestExamplesBasic:
-    """Tests for basic examples (01-10)."""
-
-    def test_example_helpers_import(self):
-        """Test that example_helpers can be imported."""
-        sys.path.insert(0, str(EXAMPLES_DIR))
-        try:
-            import example_helpers
-            assert hasattr(example_helpers, 'create_example_report')
-        finally:
-            sys.path.remove(str(EXAMPLES_DIR))
-
-    @pytest.mark.slow
-    def test_example_01_runs(self):
-        """Test example 01 runs without errors."""
-        example_path = EXAMPLES_DIR / 'example_01_basic_shallow_water.py'
-        if not example_path.exists():
-            pytest.skip("Example 01 not found")
-
-        # Set PYTHONPATH to find uacpy module
-        env = os.environ.copy()
-        env['PYTHONPATH'] = str(EXAMPLES_DIR.parent.parent)
-
-        result = subprocess.run(
-            [sys.executable, str(example_path)],
-            cwd=str(EXAMPLES_DIR),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env
-        )
-
-        assert result.returncode == 0, f"Example 01 failed with error:\n{result.stderr}"
-        assert "Example 1 complete" in result.stdout or "✓" in result.stdout
+def _example_marks(example: Path):
+    marks = [pytest.mark.requires_binary, pytest.mark.slow]
+    if example.stem in _OASES_STEMS:
+        marks.append(pytest.mark.requires_oases)
+    return marks
 
 
-class TestExamplesImports:
-    """Tests that examples have correct imports."""
-
-    def test_example_helpers_only_in_01_10(self):
-        """Verify example_helpers is only used in examples 01-10."""
-        examples = list(EXAMPLES_DIR.glob('example_*.py'))
-
-        for example_file in examples:
-            # Extract example number
-            name = example_file.stem
-            if not name.startswith('example_'):
-                continue
-
-            try:
-                num_str = name.split('_')[1]
-                num = int(num_str[:2])  # Get first two digits
-            except (IndexError, ValueError):
-                continue
-
-            with open(example_file, 'r') as f:
-                content = f.read()
-
-            uses_example_helpers = 'from example_helpers import' in content or \
-                                 'import example_helpers' in content
-
-            if num <= 10:
-                # Examples 01-10 may use example_helpers OR official UACPY API
-                # Both are acceptable
-                pass
-            else:
-                # Examples 11+ should NOT use example_helpers
-                assert not uses_example_helpers, \
-                    f"{example_file.name} (11+) should not use example_helpers"
+def _params(examples):
+    return [
+        pytest.param(p, marks=_example_marks(p), id=p.stem)
+        for p in examples
+    ]
 
 
-class TestExamplesDocumentation:
-    """Tests for examples documentation."""
-
-    def test_example_helpers_has_warnings(self):
-        """Test example_helpers.py has proper warnings."""
-        helpers = EXAMPLES_DIR / 'example_helpers.py'
-        if not helpers.exists():
-            pytest.skip("example_helpers.py not found")
-
-        with open(helpers, 'r') as f:
-            content = f.read()
-
-        assert '⚠️ IMPORTANT' in content, "example_helpers.py missing warning"
-        assert 'examples-only' in content.lower() or 'examples directory' in content.lower()
-        assert 'quickplot' in content, "example_helpers.py should mention quickplot"
-
-
-class TestExamplesOutputs:
-    """Tests that examples create expected outputs."""
-
-    def test_example_output_directory_exists(self):
-        """Test output directory exists."""
-        output_dir = EXAMPLES_DIR / 'output'
-        assert output_dir.exists(), "examples/output directory not found"
-        assert output_dir.is_dir(), "examples/output is not a directory"
+def _run(example: Path, timeout: int) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    # Make sure the in-tree `uacpy` package is importable when `pip install -e`
+    # was not used. This mirrors what the example would do when run by hand.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(EXAMPLES_DIR.parent.parent), env.get("PYTHONPATH", "")]
+    )
+    # Force matplotlib non-interactive in case the example imports pyplot.
+    env.setdefault("MPLBACKEND", "Agg")
+    return subprocess.run(
+        [sys.executable, str(example)],
+        cwd=str(EXAMPLES_DIR),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+@pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
+def test_example_runs(example):
+    """Run an example end-to-end and assert it exits cleanly."""
+    timeout = 240 if example.stem in _LONG_TIMEOUT_STEMS else 120
+    result = _run(example, timeout=timeout)
+    assert result.returncode == 0, (
+        f"{example.name} failed (rc={result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout[-2000:]}\n"
+        f"--- stderr ---\n{result.stderr[-2000:]}"
+    )

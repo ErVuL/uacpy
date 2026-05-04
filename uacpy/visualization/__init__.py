@@ -29,6 +29,7 @@ from uacpy.visualization.plots import (
     plot_bottom_properties,
     plot_layered_bottom,
     plot_rd_layered_bottom,
+    plot_rd_bottom,
     plot_modes,
     plot_mode_functions,
     plot_modes_heatmap,
@@ -43,6 +44,7 @@ from uacpy.visualization.plots import (
     plot_mode_wavenumbers,
     plot_dispersion_curves,
     plot_transfer_function,
+    plot_tl_difference,
 )
 
 from uacpy.visualization import quickplot
@@ -61,6 +63,7 @@ __all__ = [
     'plot_bottom_properties',
     'plot_layered_bottom',
     'plot_rd_layered_bottom',
+    'plot_rd_bottom',
     'plot_modes',
     'plot_mode_functions',
     'plot_modes_heatmap',
@@ -75,5 +78,6 @@ __all__ = [
     'plot_mode_wavenumbers',
     'plot_dispersion_curves',
     'plot_transfer_function',
+    'plot_tl_difference',
     'quickplot',
 ]

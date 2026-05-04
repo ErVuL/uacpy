@@ -1,35 +1,24 @@
 """
-Ambient Noise Module for UACPY
+Ambient-noise model — Tollefsen / Pecknold packaging.
 
-This module provides comprehensive ambient noise modeling capabilities for
-underwater acoustics, including:
-
-- Multiple noise source models (wind, shipping, rain, biological, seismic, etc.)
-- Composite noise simulation framework
-- Wenz-based empirical models
-- Knudsen 1948 historical reference models
-
-Main Classes
-------------
-AmbientNoiseSimulator : Composite noise simulator supporting multiple sources
-ModelConfig : Configuration container for individual noise models
+Compact Wenz-style noise spectrum (wind / shipping / rain / thermal /
+turbulence), in dB re 1 µPa²/Hz.
 
 Examples
 --------
->>> from uacpy.noise import AmbientNoiseSimulator
->>> simulator = AmbientNoiseSimulator()
->>> simulator.add_wind_noise(wind_speed=10)
->>> simulator.add_shipping_noise(shipping_density=0.5)
->>> simulator.compute()
->>> fig, ax = simulator.plot()
+>>> import numpy as np
+>>> from uacpy.noise import WenzNoise
+>>> f = np.linspace(1, 1e5, 1000)
+>>> wenz = WenzNoise(f, wind_speed=15,
+...                  water_depth='deep', shipping_level='medium',
+...                  rain_rate='moderate')
+>>> wenz.plot()
+>>> psd_pa2_per_hz = wenz.as_psd(ref=1)            # linear, Pa²/Hz
 """
 
-from uacpy.noise.noise import (
-    AmbientNoiseSimulator,
-    ModelConfig,
-)
+from uacpy.noise.noise import compute_windnoise, WenzNoise
 
 __all__ = [
-    'AmbientNoiseSimulator',
-    'ModelConfig',
+    'compute_windnoise',
+    'WenzNoise',
 ]

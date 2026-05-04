@@ -24,7 +24,7 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result, ReflectionCoefficient
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
     AttenuationUnits, VolumeAttenuation,
@@ -178,6 +178,9 @@ class Bounce(PropagationModel):
 
         # BOUNCE computes plane-wave reflection coefficients, not TL.
         self._supported_modes = [RunMode.REFLECTION]
+        # BOUNCE writes a layered AT env; layered bottoms honored.
+        self._supports_layered_bottom = True
+        self._unsupported_env_alternatives = "OASES (range-independent reflection)"
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -204,6 +207,8 @@ class Bounce(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
         output_brc: bool = True,
         output_irc: bool = True,
         output_dir: Optional[Path] = None,
@@ -213,7 +218,7 @@ class Bounce(PropagationModel):
         volume_attenuation=_UNSET,
         n_angles=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run BOUNCE reflection coefficient computation
 
@@ -234,7 +239,7 @@ class Bounce(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             Field containing reflection coefficient data with:
             - angles: grazing angles (degrees)
             - R_magnitude: reflection coefficient magnitudes
@@ -250,6 +255,15 @@ class Bounce(PropagationModel):
         - The output .BRC / .IRC files can be used directly by other
           models. Pass ``output_dir=<path>`` to persist them across cleanup.
         """
+        # Bounce only emits reflection coefficients — guard against the
+        # caller asking for something else explicitly.
+        if run_mode is not None and run_mode != RunMode.REFLECTION:
+            from uacpy.core.exceptions import UnsupportedFeatureError
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=["RunMode.REFLECTION"],
+            )
+
         # Resolve per-call overrides
         cmin = cmin if cmin is not _UNSET else self.cmin
         cmax = cmax if cmax is not _UNSET else self.cmax
@@ -373,31 +387,30 @@ class Bounce(PropagationModel):
             if persisted_irc is not None:
                 result['irc_file'] = str(persisted_irc)
 
-            # Convert to Field object
+            # Build a typed ReflectionCoefficient result.
+            from uacpy.core.results import ReflectionCoefficient
             frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
 
-            field = Field(
-                field_type='reflection_coefficients',
-                data=result.get('R', np.array([])),  # Magnitude array
-                ranges=result.get('theta', np.array([])),  # Using angles as "ranges"
-                depths=np.array([0.0]),  # Not applicable for BOUNCE
-                frequencies=np.array([frequency]),
+            field = ReflectionCoefficient(
+                theta=result.get('theta', np.array([])),
+                R=result.get('R', np.array([])),
+                phi=result.get('phi', np.array([])),
+                model='Bounce',
+                backend='bounce',
+                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
+                frequency=frequency,
                 metadata={
-                    'theta': result.get('theta', np.array([])),
-                    'R': result.get('R', np.array([])),
-                    'phi': result.get('phi', np.array([])),
                     'brc_file': result.get('brc_file'),
                     'irc_file': result.get('irc_file'),
                     'n_pts': result.get('n_pts', 0),
-                    # Store parameters for later use in Bellhop/Kraken/Scooter
+                    # Store parameters for later use in Bellhop/Kraken/Scooter.
                     'cmin': cmin,
                     'cmax': cmax,
                     'rmax_km': rmax_km,
                     'volume_attenuation': volume_attenuation,
-                }
+                    'full_result': result,
+                },
             )
-
-            field.metadata['full_result'] = result
 
             # Tie the private tempdir lifetime to the Field (if no
             # user-owned output_dir).

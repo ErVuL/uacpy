@@ -13,7 +13,7 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import Result, TLField, TimeSeriesField
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
@@ -146,11 +146,12 @@ class SPARC(PropagationModel):
         t_start: float = -0.1,
         t_mult: float = 0.999,
         max_depths: int = 20,
-        rmax_multiplier: float = 1.000001,
+        rmax_multiplier: float = 1.0001,
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         timeout: float = 180.0,
+        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -170,6 +171,11 @@ class SPARC(PropagationModel):
             Bottom roughness (m). Default: 0.0.
         output_mode : str, optional
             'R' (horizontal array), 'D' (vertical array), 'S' (snapshot). Default: 'R'.
+
+            ``'S'`` mode time-FFTs the snapshot's tout axis and picks the
+            source-frequency bin (``uacpy.io.grn_reader.sparc_snapshot_to_field``);
+            ``n_t_out`` must be large enough that the source frequency
+            stays below ``0.5/dt``.
         pulse_type : str, optional
             Pulse type string. Default: 'PN+B'.
         n_t_out : int, optional
@@ -185,7 +191,8 @@ class SPARC(PropagationModel):
         rmax_multiplier : float, optional
             Multiplicative margin on SPARC's RMax so it strictly exceeds
             the largest receiver range (absorbs float roundoff when the
-            user asks for ranges equal to the max). Default: 1.000001.
+            user asks for ranges equal to the max). Default: 1.0001
+            (0.01% margin).
         volume_attenuation : str, optional
             'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
         francois_garrison_params : tuple, optional
@@ -198,7 +205,10 @@ class SPARC(PropagationModel):
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            range_independent_method=range_independent_method,
+        )
 
         self.c_low = c_low
         self.c_high = c_high
@@ -227,6 +237,11 @@ class SPARC(PropagationModel):
             RunMode.COHERENT_TL,
             RunMode.TIME_SERIES,
         ]
+        # SPARC: range-independent time-marched FFP. Multi-layer fluid /
+        # elastic bottom honored via the AT layered-env writer. Range
+        # dependence collapses to range-0 with a warning.
+        self._supports_layered_bottom = True
+        self._unsupported_env_alternatives = "RAM (PE) for range-dependent"
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -260,7 +275,7 @@ class SPARC(PropagationModel):
         volume_attenuation=_UNSET,
         timeout=_UNSET,
         **kwargs
-    ) -> Field:
+    ) -> Result:
         """
         Run SPARC simulation (range-dependent environments will be approximated)
 
@@ -283,7 +298,7 @@ class SPARC(PropagationModel):
 
         Returns
         -------
-        field : Field
+        result : Result
             TL field (COHERENT_TL) or time-series field (TIME_SERIES)
 
         Notes
@@ -371,20 +386,27 @@ class SPARC(PropagationModel):
                     rts_data = read_rts_file(rts_file)
 
                     if run_mode == RunMode.TIME_SERIES:
-                        # Return raw time-series pressure data
-                        result = Field(
-                            field_type='time_series',
-                            data=rts_data['p'],  # shape: (nt, nr)
+                        # rts_data['p'] is (nt, nr). New shape contract is
+                        # (n_d, n_r, n_t) so swap axes 0↔1 and add the
+                        # leading n_d=1 axis.
+                        p_3d = np.asarray(rts_data['p']).T[None, :, :]
+                        dt = rts_data['dt']
+                        time = rts_data['time']
+                        result = TimeSeriesField(
+                            data=p_3d,
                             ranges=rts_data['ranges'],
                             depths=receiver.depths,
-                            metadata={
-                                'model': 'SPARC',
-                                'frequency': freq,
-                                'time': rts_data['time'],
-                                'dt': rts_data['dt'],
-                                'nt': rts_data['nt'],
-                                'receiver_depth': receiver.depths[0],
-                            }
+                            time=time,
+                            **self._result_kwargs(
+                                source,
+                                backend='sparc.exe',
+                                frequency=freq,
+                                phase_reference='time_domain_native',
+                                dt=float(dt),
+                                fs=(1.0 / float(dt)) if dt else float('nan'),
+                                nt=int(rts_data['nt']),
+                                t_start=float(time[0]) if len(time) else 0.0,
+                            ),
                         )
                         self._log("SPARC simulation complete (time-series mode)")
                         return result
@@ -392,23 +414,14 @@ class SPARC(PropagationModel):
                     tl, ranges_out = rts_to_tl(rts_data, freq, method='fft')
                     tl_field = tl.reshape(1, -1)
 
-                    time_series_data = {
-                        'time': rts_data['time'],
-                        'pressure': rts_data['p'],
-                        'dt': rts_data['dt'],
-                        'nt': rts_data['nt'],
-                        'receiver_depth': receiver.depths[0],
-                    }
-
                 else:
                     # Multiple depths - run SPARC for each depth
                     self._log(f"Computing for {len(receiver.depths)} depths (SPARC horizontal array mode)...")
 
                     tl_field = []
                     ranges_out = receiver.ranges
-                    time_series_data = None  # Only store for single depth to save memory
-
                     pressure_all = [] if run_mode == RunMode.TIME_SERIES else None
+                    time_grid = None  # captured from first run; SPARC's grid is depth-independent
 
                     for idx, depth in enumerate(receiver.depths):
                         # Create single-depth receiver
@@ -431,6 +444,12 @@ class SPARC(PropagationModel):
                             raise FileNotFoundError(f"RTS file not found: {rts_file}")
 
                         rts_data = read_rts_file(rts_file)
+                        if time_grid is None:
+                            time_grid = {
+                                'time': rts_data['time'],
+                                'dt': rts_data['dt'],
+                                'nt': rts_data['nt'],
+                            }
 
                         if run_mode == RunMode.TIME_SERIES:
                             pressure_all.append(rts_data['p'])  # (nt, nr)
@@ -439,20 +458,29 @@ class SPARC(PropagationModel):
                             tl_field.append(tl_single)
 
                     if run_mode == RunMode.TIME_SERIES:
-                        # Stack: (n_depths, nt, nr)
-                        pressure_stack = np.stack(pressure_all, axis=0)
-                        result = Field(
-                            field_type='time_series',
+                        # Each pressure_all[i] is (nt, nr); stack into
+                        # (n_d, nt, nr) then transpose middle/last axes to
+                        # match the (n_d, n_r, n_t) contract.
+                        pressure_stack = np.moveaxis(
+                            np.stack(pressure_all, axis=0), 1, 2,
+                        )
+                        time = time_grid['time']
+                        dt = time_grid['dt']
+                        result = TimeSeriesField(
                             data=pressure_stack,
                             ranges=receiver.ranges,
                             depths=receiver.depths,
-                            metadata={
-                                'model': 'SPARC',
-                                'frequency': freq,
-                                'time': rts_data['time'],
-                                'dt': rts_data['dt'],
-                                'nt': rts_data['nt'],
-                            }
+                            time=time,
+                            **self._result_kwargs(
+                                source,
+                                backend='sparc.exe',
+                                frequency=freq,
+                                phase_reference='time_domain_native',
+                                dt=float(dt),
+                                fs=(1.0 / float(dt)) if dt else float('nan'),
+                                nt=int(time_grid['nt']),
+                                t_start=float(time[0]) if len(time) else 0.0,
+                            ),
                         )
                         self._log("SPARC simulation complete (time-series mode)")
                         return result
@@ -460,20 +488,18 @@ class SPARC(PropagationModel):
                     # Stack all depths into 2D array
                     tl_field = np.vstack(tl_field)  # shape: (n_depths, n_ranges)
 
-                result = Field(
-                    field_type='tl',
+                result = TLField(
                     data=tl_field,
                     ranges=ranges_out,
                     depths=receiver.depths,
-                    metadata={
-                        'model': 'SPARC',
-                        'frequency': freq,
-                        'conversion_method': 'fft',
-                        'output_mode': 'R',
-                        'n_depth_runs': len(receiver.depths),
-                        'time_series': time_series_data,  # Only available for single-depth runs
-                        'note': 'Time-series data only preserved for single-depth runs due to memory constraints'
-                    }
+                    **self._result_kwargs(
+                        source,
+                        backend='sparc.exe',
+                        frequency=freq,
+                        conversion_method='fft',
+                        output_mode='R',
+                        n_depth_runs=len(receiver.depths),
+                    ),
                 )
 
             elif self.output_mode == 'D':
@@ -528,24 +554,26 @@ class SPARC(PropagationModel):
                     # Stack all ranges into 2D array
                     tl_field = np.column_stack(tl_field)  # shape: (n_depths, n_ranges)
 
-                result = Field(
-                    field_type='tl',
+                result = TLField(
                     data=tl_field,
                     ranges=receiver.ranges,
                     depths=depths_out,
-                    metadata={
-                        'model': 'SPARC',
-                        'frequency': freq,
-                        'conversion_method': 'fft',
-                        'output_mode': 'D',
-                        'n_range_runs': len(receiver.ranges),
-                    }
+                    **self._result_kwargs(
+                        source,
+                        backend='sparc.exe',
+                        frequency=freq,
+                        conversion_method='fft',
+                        output_mode='D',
+                        n_range_runs=len(receiver.ranges),
+                    ),
                 )
 
             elif self.output_mode == 'S':
                 # Snapshot mode: wavenumber-domain Green's function
-                # SPARC outputs .grn file which needs Hankel transform
-                from uacpy.io.grn_reader import read_grn_file, grn_to_field
+                # SPARC outputs .grn file holding G(itout, irz, ik). To
+                # extract steady-state TL at the source frequency we
+                # time-FFT then Hankel-transform (see grn_reader docstring).
+                from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 
                 self._log("Computing snapshot (wavenumber domain)...")
 
@@ -565,19 +593,28 @@ class SPARC(PropagationModel):
                         "Check SPARC output for errors."
                     )
 
-                self._log("Reading Green's function and transforming to range domain...")
+                self._log("Reading snapshot Green's function and extracting source-freq TL...")
                 grn_data = read_grn_file(grn_file)
+                if not grn_data['is_sparc']:
+                    raise RuntimeError(
+                        "GRN title does not start with 'SPARC' — snapshot path "
+                        "expects a SPARC-produced file."
+                    )
 
-                # Transform to range domain using Hankel transform
-                result = grn_to_field(grn_data, receiver.ranges, method='fft_hankel')
-
-                # Update metadata
-                result.metadata.update({
-                    'model': 'SPARC',
-                    'frequency': freq,
-                    'output_mode': 'S',
-                    'note': 'Snapshot mode: Green function transformed via Hankel transform'
-                })
+                # Time-FFT along the snapshot's tout axis, pick the source
+                # frequency bin, then Hankel transform — recovers steady-state
+                # TL despite SPARC being natively a transient solver.
+                result = sparc_snapshot_to_field(
+                    grn_data, receiver.ranges, frequency=freq,
+                )
+                result.metadata.update(self._build_base_metadata(
+                    source,
+                    backend='sparc.exe',
+                    frequency=freq,
+                    phase_reference='travelling_wave',
+                    output_mode='S',
+                    note='Snapshot mode: time-FFT then Hankel transform',
+                ))
 
             else:
                 raise ValueError(

@@ -8,7 +8,14 @@ from uacpy.core.environment import (
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom
 )
 from uacpy.core.receiver import Receiver
-from uacpy.core.field import Field
+from uacpy.core.results import (
+    Result, PhaseReference,
+    TLField, PressureField, TransferFunction,
+    TimeSeriesField, TimeTrace,
+    Arrivals, Rays, ModalResult, Modes,
+    Covariance, Replicas,
+    ReflectionCoefficient,
+)
 
 try:
     from uacpy.core import acoustics
@@ -24,6 +31,11 @@ __all__ = [
     'LayeredBottom',
     'RangeDependentLayeredBottom',
     'Receiver',
-    'Field',
-    'acoustics'
+    'Result', 'PhaseReference',
+    'TLField', 'PressureField', 'TransferFunction',
+    'TimeSeriesField', 'TimeTrace',
+    'Arrivals', 'Rays', 'ModalResult', 'Modes',
+    'Covariance', 'Replicas',
+    'ReflectionCoefficient',
+    'acoustics',
 ]

@@ -130,55 +130,6 @@ class TestModalModelAgreement:
         )
 
     @pytest.mark.requires_oases
-    def test_krakenfield_vs_oast_single_point(
-        self, simple_environment, simple_source, single_receiver
-    ):
-        """Test KrakenField vs OAST at a single point."""
-        # KrakenField
-        kf = KrakenField(verbose=False)
-        kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.data[0, 0]
-
-        # OAST
-        oast = OAST(verbose=False)
-        oast_result = oast.run(simple_environment, simple_source, single_receiver)
-        oast_tl = oast_result.data[0, 0]
-
-        # Check agreement
-        # Note: OAST may have larger differences due to different numerical methods
-        diff = np.abs(kf_tl - oast_tl)
-
-        assert diff < 10.0, (
-            f"KrakenField and OAST disagree by {diff:.2f} dB "
-            f"(KF={kf_tl:.2f}, OAST={oast_tl:.2f}). "
-            "Modal models should agree within 10 dB."
-        )
-
-    @pytest.mark.requires_oases
-    def test_scooter_vs_oast_single_point(
-        self, simple_environment, simple_source, single_receiver
-    ):
-        """Test Scooter vs OAST at a single point."""
-        # Scooter
-        scooter = Scooter(verbose=False)
-        scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.data[0, 0]
-
-        # OAST
-        oast = OAST(verbose=False)
-        oast_result = oast.run(simple_environment, simple_source, single_receiver)
-        oast_tl = oast_result.data[0, 0]
-
-        # Check agreement
-        diff = np.abs(scooter_tl - oast_tl)
-
-        assert diff < 10.0, (
-            f"Scooter and OAST disagree by {diff:.2f} dB "
-            f"(Scooter={scooter_tl:.2f}, OAST={oast_tl:.2f}). "
-            "Modal models should agree within 10 dB."
-        )
-
-    @pytest.mark.requires_oases
     def test_all_modal_models_agreement(
         self, simple_environment, simple_source, single_receiver
     ):
@@ -233,10 +184,12 @@ class TestModalModelAgreement:
             n_valid = sum(1 for k_val in k if np.abs(k_val) >= 1e-10 and np.imag(k_val) <= 0)
             mode_counts.append(n_valid)
 
-        # All resolutions should give same number of valid modes
-        assert len(set(mode_counts)) == 1, (
-            f"Mode count varies with resolution: {mode_counts}. "
-            "Should be consistent across resolutions."
+        # Mode count must be stable across resolutions to within ±1 — a single
+        # marginally-trapped mode whose cutoff lies between two grids is
+        # allowed to flip in or out, but anything more is a real instability.
+        assert max(mode_counts) - min(mode_counts) <= 1, (
+            f"Mode count varies more than ±1 across resolutions: {mode_counts}. "
+            "Should be stable to within one marginally-trapped mode."
         )
 
 

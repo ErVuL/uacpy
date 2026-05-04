@@ -42,7 +42,7 @@ class BellhopEnvWriter:
         source_type: str = "R",
         grid_type: str = "R",
         volume_attenuation: Optional[str] = None,
-        attenuation_unit: str = 'W',
+        attenuation_unit='W',
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         bty_interp_type: str = 'L',
@@ -219,8 +219,12 @@ class BellhopEnvWriter:
             #   Bellhop but requires a separate exponent that uacpy's
             #   Environment does not expose; rejected below.)
             # Position 4: Volume attenuation formula: T/F/B/' '.
-            atten_unit_char = attenuation_unit if attenuation_unit in (
-                'N', 'F', 'M', 'W', 'Q', 'L', 'm') else 'W'
+            from uacpy.core.constants import AttenuationUnits
+            if isinstance(attenuation_unit, AttenuationUnits):
+                atten_unit_char = attenuation_unit.to_char()
+            else:
+                atten_unit_char = attenuation_unit if attenuation_unit in (
+                    'N', 'F', 'M', 'W', 'Q', 'L', 'm') else 'W'
             # 'm' (dB/m with per-SSP BETA/fT power-law) requires a
             # separate power-law exponent (BETA) and reference frequency
             # (fT), which are distinct from env.attenuation.  uacpy's

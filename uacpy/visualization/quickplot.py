@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional, Union, Dict
 
-from uacpy.core.field import Field
+from uacpy.core.results import Result as Field
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -72,7 +72,7 @@ def quick_compare(results: Dict[str, Field], env: Optional[Environment] = None,
     ... }
     >>> quick_compare(results, env)
     """
-    fig, axes = Field.plot_comparison(results, env=env)
+    fig, axes = plots.compare_models(results, env=env)
 
     if save:
         plt.savefig(save, dpi=150, bbox_inches='tight')

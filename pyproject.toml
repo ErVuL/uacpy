@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.0.2"
+version = "0.1.0"
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.8"
@@ -44,11 +44,11 @@ dependencies = [
     "numpy>=1.20.0",
     "scipy>=1.7.0",
     "matplotlib>=3.3.0",
+    "pytest>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=6.0",
     "pytest-cov",
     "black",
     "flake8",
