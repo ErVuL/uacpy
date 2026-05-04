@@ -1,14 +1,13 @@
 """
 Auto-discovered smoke tests for uacpy/examples/.
 
-Examples 01 and 05 are the cheap introductory walkthroughs that finish in
-seconds and run on every PR (60-second subprocess timeout). The rest are
-gated behind ``slow`` and run on the nightly / on-demand path with a
-generous 1200-second timeout, since the Lytaev-optimized PE grids can
-push deep-ocean / multi-model examples to several minutes each.
+Every example runs end-to-end as a subprocess with a generous timeout.
+All examples are tagged ``slow`` so the default ``pytest -m "not slow"``
+run skips them; the on-demand / nightly path runs them via plain
+``pytest`` or ``pytest -m slow``.
 
-Documentation-style checks of the examples (e.g. "examples 11+ must not import
-example_helpers") are NOT here — those are static lints, see
+Documentation-style checks of the examples (e.g. "examples 11+ must not
+import example_helpers") are NOT here — those are static lints, see
 ``scripts/check_example_helpers.py``.
 """
 
@@ -25,22 +24,44 @@ import uacpy
 
 EXAMPLES_DIR = Path(uacpy.__file__).parent / "examples"
 
-# Slow examples (>=30 s on the reference machine) are gated behind ``slow``;
-# everything else runs on every PR.
-_SLOW_STEMS = {
+# Examples that import (and run) at least one OASES wrapper — must be
+# de-selectable with `-m "not requires_oases"` when the OASES binaries are
+# absent. Docstring-only mentions of OASES don't count.
+_OASES_STEMS = {
+    "example_02_sound_speed_profiles",
+    "example_03_multi_frequency",
+    "example_07_all_models_comparison",
+    "example_08_long_range",
+    "example_13_oases_suite",
+}
+
+# Examples that need a noticeably longer subprocess timeout (deep-ocean /
+# multi-model / Lytaev-grid runs may take several minutes each).
+_LONG_TIMEOUT_STEMS = {
     "example_02_sound_speed_profiles",
     "example_17_boundary_conditions_layered",
     "example_19_broadband_comparison",
     "example_22_ram_lytaev_grid",
 }
-FAST_EXAMPLES = sorted(
+
+ALL_EXAMPLES = sorted(
     p for p in EXAMPLES_DIR.glob("example_*.py")
-    if p.stem not in _SLOW_STEMS and p.name != "example_helpers.py"
+    if p.name != "example_helpers.py"
 )
-SLOW_EXAMPLES = sorted(
-    p for p in EXAMPLES_DIR.glob("example_*.py")
-    if p.stem in _SLOW_STEMS
-)
+
+
+def _example_marks(example: Path):
+    marks = [pytest.mark.requires_binary, pytest.mark.slow]
+    if example.stem in _OASES_STEMS:
+        marks.append(pytest.mark.requires_oases)
+    return marks
+
+
+def _params(examples):
+    return [
+        pytest.param(p, marks=_example_marks(p), id=p.stem)
+        for p in examples
+    ]
 
 
 def _run(example: Path, timeout: int) -> subprocess.CompletedProcess:
@@ -62,24 +83,11 @@ def _run(example: Path, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.requires_binary
-@pytest.mark.parametrize("example", FAST_EXAMPLES, ids=lambda p: p.stem)
-def test_fast_example_runs(example):
-    """Fast examples (<30s on the reference machine) run on every PR."""
-    result = _run(example, timeout=120)
-    assert result.returncode == 0, (
-        f"{example.name} failed (rc={result.returncode}):\n"
-        f"--- stdout ---\n{result.stdout[-2000:]}\n"
-        f"--- stderr ---\n{result.stderr[-2000:]}"
-    )
-
-
-@pytest.mark.requires_binary
-@pytest.mark.slow
-@pytest.mark.parametrize("example", SLOW_EXAMPLES, ids=lambda p: p.stem)
-def test_slow_example_runs(example):
-    """Examples >=30 s run end-to-end on the nightly path."""
-    result = _run(example, timeout=240)
+@pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
+def test_example_runs(example):
+    """Run an example end-to-end and assert it exits cleanly."""
+    timeout = 240 if example.stem in _LONG_TIMEOUT_STEMS else 120
+    result = _run(example, timeout=timeout)
     assert result.returncode == 0, (
         f"{example.name} failed (rc={result.returncode}):\n"
         f"--- stdout ---\n{result.stdout[-2000:]}\n"

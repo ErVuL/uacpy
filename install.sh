@@ -58,6 +58,37 @@ INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
 
 ENABLE_OPENMP=1
 
+# -------------------------
+# Per-component build status
+# -------------------------
+# Every build phase sets one of these to "ok" / "skipped" / "failed" and
+# (optionally) appends a one-line note. The final summary prints every
+# component in the same format so the user sees a single, consistent report.
+STATUS_OALIB="skipped"        # Bellhop (Fortran) + Kraken/KrakenC/Bounce/Scooter/SPARC/KrakenField
+STATUS_BELLHOPCUDA="skipped"  # bellhopcxx / bellhopcuda (optional)
+STATUS_OASES="skipped"        # OAST / OASN / OASR / OASP (optional)
+STATUS_MPIRAMS="skipped"      # mpiramS PE
+STATUS_RAMSURF="skipped"      # rams0.5 + ramsurf1.5
+NOTE_OALIB=""
+NOTE_BELLHOPCUDA=""
+NOTE_OASES=""
+NOTE_MPIRAMS=""
+NOTE_RAMSURF=""
+
+# Pretty-print one component status row. Used by the final summary.
+print_status_row() {
+    local label="$1" status="$2" note="$3"
+    local color symbol
+    case "$status" in
+        ok)      color="$GREEN";  symbol="✓ installed" ;;
+        partial) color="$YELLOW"; symbol="◐ partial  " ;;
+        failed)  color="$RED";    symbol="✗ failed   " ;;
+        skipped) color="$YELLOW"; symbol="– skipped  " ;;
+        *)       color="$NC";     symbol="? unknown  " ;;
+    esac
+    printf "  ${color}%s${NC}  %-22s %s\n" "$symbol" "$label" "$note"
+}
+
 # Fortran architecture flags shared by every Fortran build in this script
 # (OALIB, mpiramS). OASES is excluded — it ships -O2 with no -march and is
 # already portable. Default targets the build host (-march=native), giving
@@ -565,7 +596,9 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     NPROC=$(get_nproc)
     cmake --build "$BUILD_DIR" --config Release -j"$NPROC"
 
-    echo -e "${GREEN}✓ Bellhop build finished${NC}"
+    echo -e "${GREEN}✓ Bellhop (${BELLHOP_VERSION}) build finished${NC}"
+    STATUS_BELLHOPCUDA="ok"
+    NOTE_BELLHOPCUDA="${BELLHOP_VERSION} → $BIN_DIR_BELLHOP"
     echo ""
 fi
 
@@ -620,9 +653,13 @@ set -e
 
 if [[ $OALIB_STATUS -eq 0 ]]; then
     echo -e "${GREEN}✓ OALIB build finished${NC}"
+    STATUS_OALIB="ok"
+    NOTE_OALIB="$BIN_DIR_OALIB"
 else
     echo -e "${YELLOW}⚠ OALIB build had issues (exit $OALIB_STATUS). See /tmp/oalib_build.log${NC}"
     echo -e "${YELLOW}  Continuing — any binaries that built will still be installed.${NC}"
+    STATUS_OALIB="partial"
+    NOTE_OALIB="see /tmp/oalib_build.log"
 fi
 echo ""
 
@@ -633,6 +670,7 @@ OASES_URL="http://acoustics.mit.edu/faculty/henrik/LAMSS/pub/Oases/oases.tar.gz"
 
 if [[ "$INSTALL_OASES" != "yes" ]]; then
     echo -e "${YELLOW}=== Skipping OASES (not selected) ===${NC}"
+    NOTE_OASES="not selected (rerun with --oases yes)"
     echo ""
 else
 echo -e "${BLUE}=== Building OASES ===${NC}"
@@ -752,8 +790,12 @@ if [ -d "$OASES_DIR" ]; then
 
     if [[ $OASES_INSTALLED -eq 0 ]]; then
         echo -e "${YELLOW}No OASES executables installed. Check /tmp/oases_build.log${NC}"
+        STATUS_OASES="failed"
+        NOTE_OASES="see /tmp/oases_build.log"
     else
         echo -e "${GREEN}✓ Installed $OASES_INSTALLED OASES components${NC}"
+        STATUS_OASES="ok"
+        NOTE_OASES="$OASES_INSTALLED binaries → $BIN_DIR_OASES"
     fi
 fi
 echo ""
@@ -789,11 +831,17 @@ if [ -d "$MPIRAMS_DIR" ]; then
         cp "$MPIRAMS_DIR/s_mpiram" "$BIN_DIR_MPIRAMS/s_mpiram"
         chmod +x "$BIN_DIR_MPIRAMS/s_mpiram"
         echo -e "${GREEN}✓ Installed mpiramS binary: s_mpiram${NC}"
+        STATUS_MPIRAMS="ok"
+        NOTE_MPIRAMS="$BIN_DIR_MPIRAMS"
     else
         echo -e "${YELLOW}⚠ mpiramS build failed. See /tmp/mpirams_build.log${NC}"
+        STATUS_MPIRAMS="failed"
+        NOTE_MPIRAMS="see /tmp/mpirams_build.log"
     fi
 else
     echo -e "${YELLOW}mpiramS source not found at: $MPIRAMS_DIR. Skipping.${NC}"
+    STATUS_MPIRAMS="skipped"
+    NOTE_MPIRAMS="source missing: $MPIRAMS_DIR"
 fi
 echo ""
 
@@ -819,20 +867,36 @@ if [ -d "$RAMSURF_DIR" ]; then
     set -e
 
     if [[ $RAMSURF_STATUS -eq 0 ]]; then
+        RAMSURF_INSTALLED=0
         for bin in rams0.5 ramsurf1.5; do
             if [ -f "$RAMSURF_DIR/$bin" ]; then
                 cp "$RAMSURF_DIR/$bin" "$BIN_DIR_RAMSURF/$bin"
                 chmod +x "$BIN_DIR_RAMSURF/$bin"
                 echo -e "${GREEN}✓ Installed ramsurf binary: $bin${NC}"
+                RAMSURF_INSTALLED=$((RAMSURF_INSTALLED + 1))
             else
                 echo -e "${YELLOW}⚠ Expected binary not built: $bin${NC}"
             fi
         done
+        if [[ $RAMSURF_INSTALLED -eq 2 ]]; then
+            STATUS_RAMSURF="ok"
+            NOTE_RAMSURF="$BIN_DIR_RAMSURF"
+        elif [[ $RAMSURF_INSTALLED -gt 0 ]]; then
+            STATUS_RAMSURF="partial"
+            NOTE_RAMSURF="$RAMSURF_INSTALLED/2 binaries → $BIN_DIR_RAMSURF"
+        else
+            STATUS_RAMSURF="failed"
+            NOTE_RAMSURF="see /tmp/ramsurf_build.log"
+        fi
     else
         echo -e "${YELLOW}⚠ ramsurf build failed. See /tmp/ramsurf_build.log${NC}"
+        STATUS_RAMSURF="failed"
+        NOTE_RAMSURF="see /tmp/ramsurf_build.log"
     fi
 else
     echo -e "${YELLOW}ramsurf source not found at: $RAMSURF_DIR. Skipping.${NC}"
+    STATUS_RAMSURF="skipped"
+    NOTE_RAMSURF="source missing: $RAMSURF_DIR"
 fi
 echo ""
 
@@ -958,25 +1022,45 @@ if [ -f "$BIN_DIR_RAMSURF/ramsurf1.5" ]; then
 fi
 
 echo ""
-echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}  Installation completed${NC}"
-echo -e "${GREEN}============================================${NC}"
+
+# -------------------------
+# Final harmonized summary
+# -------------------------
+# If the GPU/CXX build wasn't selected, mark it explicitly so the row prints
+# with a useful "skipped" reason instead of an empty default.
+if [[ "$BELLHOP_VERSION" == "fortran" ]]; then
+    NOTE_BELLHOPCUDA="not selected (rerun with --bellhop cxx|cuda)"
+fi
+
+# Decide overall outcome: any "failed" row → failed, otherwise ok.
+OVERALL="ok"
+for s in "$STATUS_OALIB" "$STATUS_BELLHOPCUDA" "$STATUS_OASES" \
+         "$STATUS_MPIRAMS" "$STATUS_RAMSURF"; do
+    if [[ "$s" == "failed" || "$s" == "partial" ]]; then
+        OVERALL="partial"
+    fi
+done
+
+if [[ "$OVERALL" == "ok" ]]; then
+    echo -e "${GREEN}============================================${NC}"
+    echo -e "${GREEN}  UACPY installation completed${NC}"
+    echo -e "${GREEN}============================================${NC}"
+else
+    echo -e "${YELLOW}============================================${NC}"
+    echo -e "${YELLOW}  UACPY installation finished with warnings${NC}"
+    echo -e "${YELLOW}============================================${NC}"
+fi
 echo ""
-echo "Installed models:"
-echo "  Kraken/Scooter/SPARC:  $BIN_DIR_OALIB"
-echo "  Bellhop (Fortran):     $BIN_DIR_OALIB"
-if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
-    echo "  Bellhop (${BELLHOP_VERSION}):       $BIN_DIR_BELLHOP"
-fi
-if [ -f "$BIN_DIR_MPIRAMS/s_mpiram" ]; then
-    echo "  RAM (mpiramS PE):      $BIN_DIR_MPIRAMS"
-fi
-if ls "$BIN_DIR_RAMSURF"/ramsurf1.5 1>/dev/null 2>&1; then
-    echo "  Collins RAM family:    $BIN_DIR_RAMSURF (rams0.5 elastic, ramsurf1.5 rough surface)"
-fi
-if ls "$BIN_DIR_OASES"/* 1>/dev/null 2>&1; then
-    echo "  OASES:                 $BIN_DIR_OASES"
-fi
+echo "Component summary:"
+print_status_row "OALIB (Fortran)"   "$STATUS_OALIB"      "$NOTE_OALIB"
+print_status_row "Bellhop (cxx/cuda)" "$STATUS_BELLHOPCUDA" "$NOTE_BELLHOPCUDA"
+print_status_row "mpiramS (PE)"      "$STATUS_MPIRAMS"    "$NOTE_MPIRAMS"
+print_status_row "Collins RAM family" "$STATUS_RAMSURF"   "$NOTE_RAMSURF"
+print_status_row "OASES suite"       "$STATUS_OASES"      "$NOTE_OASES"
+echo ""
+echo -e "${BLUE}Notes:${NC}"
+echo "  - OALIB row covers Bellhop (Fortran), Kraken, KrakenC, Bounce, Scooter, SPARC, KrakenField."
+echo "  - Per-build logs: /tmp/oalib_build.log /tmp/oases_build.log /tmp/mpirams_build.log /tmp/ramsurf_build.log"
 echo ""
 echo "Quick test:"
 echo "  cd uacpy && python -c \"import uacpy; print(uacpy.__version__)\""

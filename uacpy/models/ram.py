@@ -792,6 +792,8 @@ class RAM(PropagationModel):
         absorbing_layer_width=_UNSET,
         absorbing_layer_attn=_UNSET,
         c0=_UNSET,
+        accuracy=_UNSET,
+        theta_max=_UNSET,
         timeout=_UNSET,
         source_waveform=None,
         sample_rate=None,
@@ -822,7 +824,7 @@ class RAM(PropagationModel):
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
         zmax, dr, dz, np_pade, ns_stability, rs_stability, Q, T,
         depth_decimation, n_sed_points, absorbing_layer_width,
-        absorbing_layer_attn, c0 : optional
+        absorbing_layer_attn, c0, accuracy, theta_max : optional
             Per-call overrides for the matching constructor argument.
         **kwargs
             Silently ignored (warns on unknown kwargs).
@@ -859,6 +861,8 @@ class RAM(PropagationModel):
             absorbing_layer_width=absorbing_layer_width,
             absorbing_layer_attn=absorbing_layer_attn,
             c0=c0,
+            accuracy=accuracy,
+            theta_max=theta_max,
             timeout=timeout,
         ):
             self.validate_inputs(env, source, receiver)

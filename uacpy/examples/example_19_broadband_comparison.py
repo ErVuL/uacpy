@@ -357,10 +357,13 @@ def main():
         except Exception as e:
             print(f"  {name}: FAILED ({e})")
 
-    # Add Bellhop delay-and-sum result
+    # Add Bellhop delay-and-sum result. Bellhop TIME_SERIES returns a
+    # TimeSeriesField over a 1×1 grid → data shape (1, 1, n_t); pick the
+    # single trace.
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, r.data)
+        trace = r.data[0, 0, :] if r.data.ndim == 3 else r.data
+        ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, trace)
 
     # Add SPARC (depth 0, last range). New shape: (n_d, n_r, n_t) — pick
     # depth 0, last range, all time samples.
@@ -422,7 +425,8 @@ def main():
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
         t_ms = r.metadata['time'] * 1000
-        data = r.data
+        # Bellhop TIME_SERIES is a TimeSeriesField over a 1×1 grid → (1, 1, n_t).
+        data = r.data[0, 0, :] if r.data.ndim == 3 else r.data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
 

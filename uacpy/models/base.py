@@ -66,7 +66,14 @@ class RunMode(Enum):
     EIGENRAYS = 'eigenrays'              # Eigenrays (specific paths)
     ARRIVALS = 'arrivals'                # Arrival structure
 
-    MODES = 'modes'                      # Normal modes only
+    MODES = 'modes'                      # Normal modes (Kraken/KrakenC depth eigenfunctions)
+
+    # OASN frequency-domain array products: COVARIANCE → C(f, i, j) hydrophone
+    # × hydrophone matrix; REPLICA → Green's-function samples at the array
+    # elements per candidate source position. See core/results.Covariance and
+    # core/results.Replicas.
+    COVARIANCE = 'covariance'
+    REPLICA = 'replica'
 
     # Time-domain pressure p(t) at the receiver(s). Models that compute a
     # broadband transfer function natively (Bellhop, RAM, Scooter,
@@ -115,11 +122,19 @@ class PropagationModel(ABC):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        range_independent_method: str = 'max',
     ):
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
         self.verbose = verbose
         self.work_dir = work_dir
+        # When a range-independent-only model receives a range-dependent
+        # env, the wrapper collapses it via
+        # ``Environment.get_range_independent_approximation(method=…)``.
+        # ``'max'`` keeps source/receiver depths inside the seafloor;
+        # ``'median'`` / ``'mean'`` / ``'min'`` are the other valid
+        # choices. See :meth:`Environment.get_representative_depth`.
+        self.range_independent_method = range_independent_method
         self.file_manager = None
 
         # Subclasses override to declare the run modes they support.
@@ -525,15 +540,13 @@ class PropagationModel(ABC):
                 alternatives=['Kraken', 'OASN']
             )
 
-        if env.is_range_dependent:
-            # Only KrakenField handles range-dependent modes (coupled mode theory).
-            if self.model_name not in ['KrakenField']:
-                raise EnvironmentError(
-                    f"{self.model_name} does not support range-dependent environments for mode computation. "
-                    f"Environment has bathymetry ranging from {env.bathymetry[:, 1].min():.1f}m to "
-                    f"{env.bathymetry[:, 1].max():.1f}m.",
-                    "Use a range-independent environment or try KrakenField with adiabatic coupling"
-                )
+        if env.is_range_dependent and self.model_name != 'KrakenField':
+            # Range-independent mode solvers (Kraken, KrakenC, OASN) collapse
+            # the environment via ``range_independent_method`` and warn,
+            # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
+            env = self._handle_range_dependent_environment(
+                env, alternatives='KrakenField (coupled / adiabatic modes)',
+            )
 
         return self._compute_modes_impl(env, source, n_modes, **kwargs)
 
@@ -827,18 +840,20 @@ class PropagationModel(ABC):
         """
         if env.is_range_dependent:
             import warnings
+            method = self.range_independent_method
+            collapsed = env.get_range_independent_approximation(method=method)
             min_depth = env.bathymetry[:, 1].min()
             max_depth = env.bathymetry[:, 1].max()
             warning_msg = (
                 f"{self.model_name} does not support range-dependent environments. "
-                f"Using MAXIMUM bathymetry depth ({max_depth:.1f}m) as approximation. "
-                f"Bathymetry range: {min_depth:.1f}m - {max_depth:.1f}m. "
-                f"This ensures source/receiver depths remain valid (prevents depth violations). "
-                f"For accurate range-dependent modeling, use {alternatives}."
+                f"Using {method!r} bathymetry depth ({collapsed.depth:.1f} m) "
+                f"as approximation. Bathymetry range: {min_depth:.1f}–{max_depth:.1f} m. "
+                f"For accurate range-dependent modeling, use {alternatives}. "
+                f"Override with `range_independent_method='min'|'median'|'mean'|'max'`."
             )
             warnings.warn(warning_msg, UserWarning, stacklevel=3)
             self._log(warning_msg, level='warn')
-            return env.get_range_independent_approximation(method='max')
+            return collapsed
         return env
 
     def _build_base_metadata(

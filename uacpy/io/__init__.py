@@ -20,7 +20,8 @@ from uacpy.io.utils import equally_spaced, crci, complex_ssp
 from uacpy.io.shd_utils import merge_shd_files
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
 from uacpy.io.oases_reader import (
-    read_oast_tl, read_oasn_covariance, read_oasn_replicas, read_oases_modes, read_oasp_trf
+    read_oast_tl, read_oasn_covariance, read_oasn_replicas, read_oasp_trf,
+    read_oasr_reflection_coefficients,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
@@ -72,8 +73,8 @@ __all__ = [
     "read_oast_tl",  # OAST transmission loss reader
     "read_oasn_covariance",  # OASN covariance matrix reader (.xsm)
     "read_oasn_replicas",  # OASN replica field reader (.rpo)
-    "read_oases_modes",  # OASES mode file reader
     "read_oasp_trf",  # OASP transfer function reader (.trf)
+    "read_oasr_reflection_coefficients",  # OASR reflection-coefficient reader
     # mpiramS I/O
     "write_inpe",  # mpiramS input file writer
     "write_ssp_file",  # mpiramS SSP file writer

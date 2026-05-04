@@ -15,7 +15,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace, Arrivals, Rays, Modes,
-    OASNCovariance, ReflectionCoefficient,
+    Covariance, Replicas, ReflectionCoefficient,
 )
 # Legacy type-hint name kept as an alias for ``Result`` so older code that
 # uses ``Field`` for type hints still resolves. The discriminated union is
@@ -89,9 +89,15 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
         return plot_arrivals(result, **kwargs)
     if isinstance(result, Rays):
         return plot_rays(result, env=env, **kwargs)
-    if isinstance(result, (Modes, OASNCovariance)):
+    if isinstance(result, Modes):
         return plot_modes(result, **kwargs)
+    if isinstance(result, Covariance):
+        return plot_covariance(result, **kwargs)
+    if isinstance(result, Replicas):
+        return plot_replicas(result, **kwargs)
     if isinstance(result, ReflectionCoefficient):
+        if result.is_broadband:
+            return plot_reflection_coefficient_heatmap(result, **kwargs)
         return plot_reflection_coefficient(result, **kwargs)
     raise TypeError(
         f"plot_result(): no plotter registered for {type(result).__name__}"
@@ -971,10 +977,10 @@ def plot_modes(
     >>> fig, axes = modes.plot(n_modes=10)
     >>> plt.show()
     """
-    if not isinstance(modes, (Modes, OASNCovariance)) and getattr(modes, 'field_type', None) != 'modes':
-        raise ValueError("plot_modes/plot_mode_* requires a Modes / OASNCovariance Result")
+    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+        raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
-    # Accept either typed Modes/OASNCovariance attributes or a dict-style
+    # Accept either typed Modes attributes or a dict-style
     # ``metadata['phi']`` (e.g. when the caller hand-built the result).
     phi = getattr(modes, 'phi', None)
     if phi is None:
@@ -1079,10 +1085,10 @@ def plot_mode_functions(
     >>> fig, axes = plot_mode_functions(modes, mode_indices=[0, 1, 2])
     >>> plt.show()
     """
-    if not isinstance(modes, (Modes, OASNCovariance)) and getattr(modes, 'field_type', None) != 'modes':
-        raise ValueError("plot_modes/plot_mode_* requires a Modes / OASNCovariance Result")
+    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+        raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
-    # Accept either typed Modes/OASNCovariance attributes or a dict-style
+    # Accept either typed Modes attributes or a dict-style
     # ``metadata['phi']`` (e.g. when the caller hand-built the result).
     phi = getattr(modes, 'phi', None)
     if phi is None:
@@ -1190,7 +1196,7 @@ def plot_mode_wavenumbers(
     - The pattern reveals the modal structure of the waveguide
     - Follows Acoustic Toolbox plotmode.m standard
     """
-    if not isinstance(modes, (Modes, OASNCovariance)) and getattr(modes, 'field_type', None) != 'modes':
+    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
         raise ValueError("plot_mode_wavenumbers requires a Modes Result")
     k = getattr(modes, 'k', None)
     if k is None or (hasattr(k, '__len__') and len(k) == 0):
@@ -1291,6 +1297,8 @@ def compare_models(
     >>> plt.show()
     """
     n_models = len(results)
+    if n_models == 0:
+        raise ValueError("compare_models: 'results' is empty — pass at least one model.")
     if ncols is None:
         ncols = n_models
     nrows = int(np.ceil(n_models / ncols))
@@ -1384,7 +1392,7 @@ def compare_models(
         cbar_ax = fig.add_axes([0.935, bottom, 0.012, top - bottom])
         fig.colorbar(im, cax=cbar_ax, label='TL (dB)')
 
-    return fig, axes
+    return fig, axes_flat
 
 
 def plot_dispersion_curves(
@@ -1392,13 +1400,13 @@ def plot_dispersion_curves(
     figsize: Tuple[float, float] = (12, 8),
 ) -> Tuple[Figure, Axes]:
     """
-    Plot dispersion curves (phase speed vs frequency) for multiple frequencies
+    Plot dispersion curves (phase speed vs frequency) for multiple frequencies.
 
     Parameters
     ----------
     modes_dict : dict
-        Dictionary with frequencies as keys and mode data as values
-        Example: {50: modes_50hz, 100: modes_100hz, ...}
+        Either ``{freq: Modes_instance}`` (preferred) or the legacy raw form
+        ``{freq: {'M': n_modes, 'k': complex_k_array}}``.
     figsize : tuple, optional
         Figure size. Default is (12, 8).
 
@@ -1411,33 +1419,30 @@ def plot_dispersion_curves(
 
     Examples
     --------
-    >>> modes_dict = {50: kraken.compute_modes(env, source_50),
-    ...               100: kraken.compute_modes(env, source_100)}
+    >>> modes_dict = {50: kraken.compute_modes(env, src_50),
+    ...               100: kraken.compute_modes(env, src_100)}
     >>> fig, axes = plot_dispersion_curves(modes_dict)
-    >>> plt.show()
     """
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=figsize)
 
+    def _unpack(entry):
+        """Return (n_modes, k_array) regardless of dict vs Modes input."""
+        if isinstance(entry, Modes):
+            return entry.n_modes, np.asarray(entry.k)
+        return entry['M'], np.asarray(entry['k'])
+
     frequencies = sorted(modes_dict.keys())
-
-    # Collect data for each mode across frequencies
-    max_modes = max(modes['M'] for modes in modes_dict.values())
-
-    # Plot dispersion curves (phase speed vs frequency)
+    max_modes = max(_unpack(modes_dict[f])[0] for f in frequencies)
     colors = plt.cm.tab10(np.linspace(0, 1, min(10, max_modes)))
 
     for mode_idx in range(max_modes):
-        freqs = []
-        phase_speeds = []
-        attenuations = []
-
+        freqs, phase_speeds, attenuations = [], [], []
         for freq in frequencies:
-            modes = modes_dict[freq]
-            if mode_idx < modes['M']:
-                k = modes['k'][mode_idx]
-                cp = 2 * np.pi * freq / k.real
-                alpha = -8.686 * k.imag  # Convert to dB/m
-
+            n_modes, k_arr = _unpack(modes_dict[freq])
+            if mode_idx < n_modes:
+                k = k_arr[mode_idx]
+                cp = 2 * np.pi * freq / k.real if k.real != 0 else np.nan
+                alpha = -8.686 * k.imag  # dB/m
                 freqs.append(freq)
                 phase_speeds.append(cp)
                 attenuations.append(alpha)
@@ -1450,7 +1455,7 @@ def plot_dispersion_curves(
                         color=color)
 
     # Plot number of modes vs frequency
-    mode_counts = [modes_dict[f]['M'] for f in frequencies]
+    mode_counts = [_unpack(modes_dict[f])[0] for f in frequencies]
     ax3.plot(frequencies, mode_counts, 'ko-', linewidth=2, markersize=8)
 
     # Labels
@@ -2932,19 +2937,70 @@ def plot_transfer_function(
     show_phase: bool = True,
     unwrap_phase: bool = True,
     title: Optional[str] = None,
+    frequency: Optional[float] = None,
 ):
-    """Plot broadband transfer function H(f) — magnitude (and optionally phase).
+    """Plot a broadband transfer function ``H(f)``.
 
-    Accepts either a single transfer-function field or a mapping
-    ``{model_name: field}`` to overlay multiple results on the same axes.
-    By default plots both ``|H(f)|`` (dB) and the unwrapped phase below.
-    Set ``unwrap_phase=False`` to keep phase wrapped to ``(-π, π]``.
+    Two modes:
 
-    Field data shape may be ``(n_depths, n_freqs, n_ranges)`` (broadband
-    convention used by RAM / KrakenField / OASP) or ``(n_depths, n_ranges,
-    n_freqs)`` (Bellhop synthesis); the trailing-frequency layout is
-    detected automatically by matching against ``len(field.frequencies)``.
+    1. Default (``frequency=None``): magnitude — and optionally phase — vs
+       frequency at one ``(depth, range)`` cell. Pass ``field`` as a single
+       result or a mapping ``{model_name: field}`` to overlay several.
+    2. ``frequency=<Hz>``: 2-D ``|H(f)|`` heatmap on the ``(depth, range)``
+       grid at the nearest frequency. Mirrors :func:`plot_transmission_loss`
+       for broadband ``TLField``. Returns ``(fig, ax)`` only.
+
+    Field data shape may be ``(n_depths, n_freqs, n_ranges)`` (RAM /
+    KrakenField / OASP convention) or ``(n_depths, n_ranges, n_freqs)``
+    (Bellhop). Layout is detected automatically.
     """
+    # ── 2-D heatmap branch ─────────────────────────────────────────────
+    if frequency is not None:
+        if isinstance(field, dict):
+            raise ValueError(
+                "plot_transfer_function(frequency=…) does not support a "
+                "dict of fields; pass a single TransferFunction."
+            )
+        data = np.asarray(field.data)
+        freqs = np.asarray(field.frequencies)
+        if data.ndim != 3 or len(freqs) == 0:
+            raise ValueError(
+                "frequency= requires a 3-D broadband transfer function "
+                "with `frequencies` populated."
+            )
+        if data.shape[-1] == len(freqs):
+            spectrum_axis = -1
+        elif data.shape[1] == len(freqs):
+            spectrum_axis = 1
+        else:
+            raise ValueError(
+                f"Cannot locate frequency axis in shape {data.shape} "
+                f"(n_freqs={len(freqs)})."
+            )
+        k = int(np.argmin(np.abs(freqs - frequency)))
+        slab = data[..., k] if spectrum_axis == -1 else data[:, k, :]
+        mag_db = 20.0 * np.log10(np.abs(slab) + 1e-30)
+        if figsize is None:
+            figsize = (10, 6)
+        if ax is None:
+            fig2, ax2 = plt.subplots(figsize=figsize)
+        else:
+            fig2, ax2 = ax.figure, ax
+        im = ax2.pcolormesh(
+            np.asarray(field.ranges) / 1000.0, np.asarray(field.depths),
+            mag_db, shading='auto', cmap='viridis',
+        )
+        ax2.set_xlim(field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0)
+        ax2.set_ylim(np.max(field.depths), 0)
+        ax2.set_xlabel('Range (km)')
+        ax2.set_ylabel('Depth (m)')
+        if title is None:
+            title = f'|H(f)| (dB) @ {freqs[k]:.2f} Hz'
+        ax2.set_title(title, fontsize=12, fontweight='bold')
+        fig2.colorbar(im, ax=ax2, label='|H| (dB)')
+        return fig2, ax2
+
+    # ── Default 1-D spectrum branch ────────────────────────────────────
     if isinstance(field, dict):
         items = list(field.items())
     else:
@@ -3380,8 +3436,8 @@ def plot_modes_heatmap(
     plot_modes : Standard mode plotting with line plots
     plot_mode_functions : Detailed individual mode function plots
     """
-    if not isinstance(modes, (Modes, OASNCovariance)) and getattr(modes, 'field_type', None) != 'modes':
-        raise ValueError("plot_modes_heatmap requires a Modes / OASNCovariance Result")
+    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+        raise ValueError("plot_modes_heatmap requires a Modes Result")
 
     if cmap is None:
         cmap = COLORMAPS.get('modes', 'RdBu_r')
@@ -3694,3 +3750,208 @@ def plot_tl_difference(
     format_axes_professional(ax, title=label,
                              xlabel='Range (km)', ylabel='Depth (m)')
     return fig, ax, cbar
+
+
+def plot_phase_field(
+    field,
+    *,
+    frequency: Optional[float] = None,
+    figsize: Tuple[float, float] = (10, 6),
+    cmap: str = 'twilight',
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+):
+    """Phase heatmap on the (depth, range) grid for a complex field.
+
+    Accepts a :class:`PressureField` (single-frequency) or a
+    :class:`TransferFunction` (broadband — pass ``frequency=`` to choose
+    the slice). The phase is wrapped to ``(-π, π]``; use a cyclic colormap
+    (default ``twilight``) to avoid the ±π discontinuity artefact.
+    """
+    data = np.asarray(field.data)
+    if isinstance(field, PressureField):
+        if data.ndim != 2:
+            raise ValueError(
+                f"PressureField.data must be 2-D for phase plot, got {data.shape}"
+            )
+        slab = data
+        f_label = field.frequency
+    elif isinstance(field, TransferFunction):
+        if frequency is None:
+            frequency = float(field.frequencies[len(field.frequencies) // 2])
+        k = int(np.argmin(np.abs(field.frequencies - frequency)))
+        slab = data[..., k]
+        f_label = float(field.frequencies[k])
+    else:
+        raise TypeError(
+            "plot_phase_field requires a PressureField or TransferFunction"
+        )
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.pcolormesh(
+        np.asarray(field.ranges) / 1000.0, np.asarray(field.depths),
+        np.angle(slab), shading='auto', cmap=cmap, vmin=-np.pi, vmax=np.pi,
+    )
+    ax.set_xlim(field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0)
+    ax.set_ylim(np.max(field.depths), 0)
+    ax.set_xlabel('Range (km)')
+    ax.set_ylabel('Depth (m)')
+    if title is None:
+        title = '∠p (rad)' if f_label is None else f'∠p (rad) @ {f_label:.2f} Hz'
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='radians')
+    return fig, ax
+
+
+def plot_reflection_coefficient_heatmap(
+    rc: 'ReflectionCoefficient',
+    *,
+    figsize: Tuple[float, float] = (8, 5),
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+    show_phase: bool = False,
+):
+    """Heatmap of broadband ``|R(theta, f)|`` (and optionally phase).
+
+    Counterpart to :func:`plot_reflection_coefficient` for the broadband
+    case where ``R`` and ``phi`` are shape ``(n_angles, n_frequencies)``.
+
+    Parameters
+    ----------
+    rc : ReflectionCoefficient
+        Must satisfy ``rc.is_broadband``.
+    show_phase : bool, optional
+        If True, render two stacked heatmaps (magnitude + phase). Default
+        False (magnitude only).
+
+    Returns
+    -------
+    (fig, ax) for ``show_phase=False`` or ``(fig, (ax_mag, ax_phs))``.
+    """
+    if not isinstance(rc, ReflectionCoefficient):
+        raise TypeError(
+            "plot_reflection_coefficient_heatmap requires a ReflectionCoefficient"
+        )
+    if not rc.is_broadband:
+        raise ValueError(
+            "plot_reflection_coefficient_heatmap requires a broadband result; "
+            "use plot_reflection_coefficient for single-frequency data."
+        )
+    extent = [
+        float(rc.frequencies[0]), float(rc.frequencies[-1]),
+        float(rc.theta[0]), float(rc.theta[-1]),
+    ]
+    if show_phase:
+        fig, (ax_mag, ax_phs) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+        im_m = ax_mag.imshow(
+            rc.R, origin='lower', aspect='auto', cmap='viridis',
+            extent=extent, vmin=0.0, vmax=1.0,
+        )
+        ax_mag.set_ylabel('Grazing angle (deg)')
+        ax_mag.set_title(title or '|R(θ, f)|', fontweight='bold')
+        if show_colorbar:
+            fig.colorbar(im_m, ax=ax_mag, label='|R|')
+        im_p = ax_phs.imshow(
+            rc.phi, origin='lower', aspect='auto', cmap='twilight',
+            extent=extent, vmin=-np.pi, vmax=np.pi,
+        )
+        ax_phs.set_xlabel('Frequency (Hz)')
+        ax_phs.set_ylabel('Grazing angle (deg)')
+        ax_phs.set_title('∠R(θ, f) (rad)', fontweight='bold')
+        if show_colorbar:
+            fig.colorbar(im_p, ax=ax_phs, label='radians')
+        fig.tight_layout()
+        return fig, (ax_mag, ax_phs)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(
+        rc.R, origin='lower', aspect='auto', cmap='viridis',
+        extent=extent, vmin=0.0, vmax=1.0,
+    )
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('Grazing angle (deg)')
+    ax.set_title(title or '|R(θ, f)|', fontweight='bold')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='|R|')
+    return fig, ax
+
+
+def plot_covariance(
+    cov: Covariance,
+    *,
+    freq_index: int = 0,
+    figsize: Tuple[float, float] = (6, 5),
+    show_colorbar: bool = True,
+):
+    """Heatmap of |C(i, j)| at a chosen frequency.
+
+    Parameters
+    ----------
+    cov : Covariance
+        OASN covariance result.
+    freq_index : int, optional
+        Index into ``cov.frequencies`` to plot. Defaults to 0.
+    """
+    if not isinstance(cov, Covariance):
+        raise TypeError("plot_covariance requires a Covariance Result")
+    if freq_index < 0 or freq_index >= cov.n_frequencies:
+        raise IndexError(
+            f"freq_index={freq_index} out of range [0, {cov.n_frequencies})"
+        )
+    M = np.abs(cov.covariance[freq_index])
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(M, origin='upper', cmap='viridis', aspect='equal')
+    title = 'OASN covariance |C(i, j)|'
+    if cov.frequencies is not None and len(cov.frequencies) > freq_index:
+        title += f' @ {cov.frequencies[freq_index]:.1f} Hz'
+    ax.set_title(title, fontweight='bold')
+    ax.set_xlabel('Receiver j')
+    ax.set_ylabel('Receiver i')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='|C|')
+    return fig, ax
+
+
+def plot_replicas(
+    rep: Replicas,
+    *,
+    freq_index: int = 0,
+    receiver_index: int = 0,
+    figsize: Tuple[float, float] = (8, 5),
+    show_colorbar: bool = True,
+):
+    """Heatmap of |replica(z, x)| at a chosen frequency / receiver.
+
+    The replica grid in y is averaged out so the plot shows a 2-D
+    candidate-source map. For more detailed inspection, index
+    ``rep.replicas`` directly.
+    """
+    if not isinstance(rep, Replicas):
+        raise TypeError("plot_replicas requires a Replicas Result")
+    if freq_index < 0 or freq_index >= rep.n_frequencies:
+        raise IndexError(
+            f"freq_index={freq_index} out of range [0, {rep.n_frequencies})"
+        )
+    if receiver_index < 0 or receiver_index >= rep.n_receivers:
+        raise IndexError(
+            f"receiver_index={receiver_index} out of range [0, {rep.n_receivers})"
+        )
+    R = np.abs(rep.replicas[freq_index, :, :, :, receiver_index])
+    R2D = R.mean(axis=-1)            # average over y for visualisation
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(
+        R2D, origin='upper', cmap='magma', aspect='auto',
+        extent=[
+            rep.replica_x[0] / 1000.0, rep.replica_x[-1] / 1000.0,
+            rep.replica_z[-1], rep.replica_z[0],
+        ],
+    )
+    title = f'OASN replica |G(z, x)| — array element {receiver_index}'
+    if rep.frequencies is not None and len(rep.frequencies) > freq_index:
+        title += f' @ {rep.frequencies[freq_index]:.1f} Hz'
+    ax.set_title(title, fontweight='bold')
+    ax.set_xlabel('Candidate-source x (km)')
+    ax.set_ylabel('Candidate-source depth (m)')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='|G|')
+    return fig, ax

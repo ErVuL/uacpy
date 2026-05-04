@@ -9,10 +9,11 @@ from uacpy.core.environment import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result,
+    Result, PhaseReference,
     TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, Modes, OASNCovariance,
+    Arrivals, Rays, ModalResult, Modes,
+    Covariance, Replicas,
     ReflectionCoefficient,
 )
 
@@ -30,10 +31,11 @@ __all__ = [
     'LayeredBottom',
     'RangeDependentLayeredBottom',
     'Receiver',
-    'Result',
+    'Result', 'PhaseReference',
     'TLField', 'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
-    'Arrivals', 'Rays', 'Modes', 'OASNCovariance',
+    'Arrivals', 'Rays', 'ModalResult', 'Modes',
+    'Covariance', 'Replicas',
     'ReflectionCoefficient',
     'acoustics',
 ]

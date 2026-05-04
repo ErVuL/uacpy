@@ -595,13 +595,10 @@ class Kraken(_KrakenBase):
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
 
+        env = self._handle_range_dependent_environment(
+            env, alternatives='KrakenField (modal segments) or RAM',
+        )
         self.validate_inputs(env, source, receiver)
-
-        if env.is_range_dependent:
-            raise ValueError(
-                "Kraken does not support range-dependent environments for mode computation.\n"
-                "Use KrakenField for range-dependent scenarios."
-            )
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
                                 roughness=roughness, volume_attenuation=volume_attenuation):
@@ -722,10 +719,10 @@ class KrakenC(_KrakenBase):
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
+        env = self._handle_range_dependent_environment(
+            env, alternatives='KrakenField (modal segments) or RAM',
+        )
         self.validate_inputs(env, source, receiver)
-
-        if env.is_range_dependent:
-            raise ValueError("KrakenC requires range-independent environment")
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
                                 roughness=roughness, volume_attenuation=volume_attenuation):

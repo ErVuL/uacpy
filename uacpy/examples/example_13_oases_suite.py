@@ -1,12 +1,14 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 19: OASES Suite Comprehensive
+EXAMPLE 13: OASES Suite Comprehensive
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE: Demonstrate OASES suite models (OAST, OASN, OASR, OASP).
 
-FEATURES: ✓ OAST transmission loss  ✓ OASN normal modes
-          ✓ OASR reflection coefficients  ✓ OASP pulse/wideband TRF
+FEATURES: ✓ OAST transmission loss
+          ✓ OASN spatial covariance C(f, i, j)
+          ✓ OASR reflection coefficients
+          ✓ OASP pulse/wideband TRF
 """
 
 import sys
@@ -57,13 +59,13 @@ def main():
     print("✓")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 2: OASN - Normal Modes
+    # RUN 2: OASN - Spatial covariance matrix
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/4] Running OASN (Normal Modes)...", end=" ", flush=True)
+    print("[2/4] Running OASN (spatial covariance)...", end=" ", flush=True)
     try:
         oasn = OASN(verbose=False)
-        result_oasn = oasn.run(env, source, receiver)
+        result_oasn = oasn.compute_covariance(env, source, receiver)
         print("✓")
         oasn_success = True
     except Exception as e:
@@ -96,13 +98,17 @@ def main():
     print("[4/4] Running OASP (Pulse / Wideband TRF)...", end=" ", flush=True)
     try:
         oasp = OASP(verbose=False)
-        # OASP with reduced time samples for faster execution
         receiver_small = uacpy.Receiver(
             depths=np.linspace(5, 95, 20),
-            ranges=np.linspace(500, 15000, 30)
+            ranges=np.linspace(500, 15000, 30),
         )
-        result_oasp = oasp.run(env, source, receiver_small,
-                               n_time_samples=256, freq_max=120)
+        # BROADBAND returns a TransferFunction H(d, r, f) so the example can
+        # render TL at center frequency and synthesize a time trace.
+        result_oasp = oasp.run(
+            env, source, receiver_small,
+            run_mode=uacpy.RunMode.BROADBAND,
+            n_time_samples=256, freq_max=120,
+        )
         print("✓")
         oasp_success = True
     except Exception as e:
@@ -111,292 +117,113 @@ def main():
         oasp_success = False
 
     # ═══════════════════════════════════════════════════════════════════════
-    # PLOTTING
+    # PLOTTING — driven by uacpy.plot helpers. Each result type knows how
+    # to render itself via ``.plot(env=...)``.
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nGenerating visualizations...")
 
-    # Plot 1: OAST Transmission Loss
-    fig1, ax1 = plt.subplots(figsize=(12, 7))
-
-    im = ax1.pcolormesh(result_oast.ranges/1000, result_oast.depths,
-                       result_oast.data, cmap='viridis', vmin=50, vmax=110,
-                       shading='auto', zorder=1)
-
-    ax1.set_xlim([result_oast.ranges[0]/1000, result_oast.ranges[-1]/1000])
-    ax1.set_ylim([result_oast.depths[-1], result_oast.depths[0]])
-    ax1.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
-    ax1.axhline(env.depth, color='k', linewidth=3, label='Seafloor', zorder=11)
-
-    ax1.set_title('OAST: Wavenumber Integration Transmission Loss',
-                 fontweight='bold', fontsize=14)
-    ax1.set_xlabel('Range (km)', fontweight='bold', fontsize=12)
-    ax1.set_ylabel('Depth (m)', fontweight='bold', fontsize=12)
-    ax1.legend(loc='upper right', fontsize=10, framealpha=0.9)
-    ax1.grid(True, alpha=0.3)
-
-    cbar = plt.colorbar(im, ax=ax1, label='TL (dB)')
-    cbar.ax.tick_params(labelsize=10)
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / 'example_13_oast_tl.png', dpi=150, bbox_inches='tight')
-    plt.close()
+    # Plot 1: OAST transmission loss (TLField → plot_transmission_loss).
+    fig1, _, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
+    fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
+                 dpi=150, bbox_inches='tight')
+    plt.close(fig1)
     print("  ✓ Saved: output/example_13_oast_tl.png")
 
-    # Plot 2: OASR Reflection Coefficients (if available)
+    # Plot 2: OASR reflection coefficient (1-D R(θ) and phase).
     if oasr_success and result_oasr is not None:
-        fig2 = plt.figure(figsize=(14, 10))
-        gs = fig2.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
-
-        # Subplot 1: Reflection coefficient magnitude vs angle
-        ax1 = fig2.add_subplot(gs[0, 0])
-
-        angles = result_oasr.metadata['angles_or_slowness'][0]
-        magnitude = result_oasr.metadata['magnitude'][0]
-        phase = result_oasr.metadata['phase'][0]
-
-        ax1.plot(angles, magnitude, 'b-', linewidth=2.5, label='P-P Reflection')
-        ax1.set_xlabel('Grazing Angle (degrees)', fontweight='bold')
-        ax1.set_ylabel('Reflection Coefficient |R|', fontweight='bold')
-        ax1.set_title('OASR: Reflection Coefficient Magnitude',
-                     fontweight='bold', fontsize=13)
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(loc='best', fontsize=10, framealpha=0.9)
-        ax1.set_xlim([angles.min(), angles.max()])
-        ax1.set_ylim([0, 1.05])
-
-        # Subplot 2: Phase vs angle
-        ax2 = fig2.add_subplot(gs[0, 1])
-        ax2.plot(angles, phase, 'r-', linewidth=2.5, label='Phase')
-        ax2.set_xlabel('Grazing Angle (degrees)', fontweight='bold')
-        ax2.set_ylabel('Phase (degrees)', fontweight='bold')
-        ax2.set_title('OASR: Reflection Coefficient Phase',
-                     fontweight='bold', fontsize=13)
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(loc='best', fontsize=10, framealpha=0.9)
-        ax2.set_xlim([angles.min(), angles.max()])
-
-        # Subplot 3: Polar plot of reflection coefficient
-        ax3 = fig2.add_subplot(gs[1, 0], projection='polar')
-        theta = np.deg2rad(angles)
-        ax3.plot(theta, magnitude, 'b-', linewidth=2.5)
-        ax3.set_theta_zero_location('N')
-        ax3.set_theta_direction(-1)
-        ax3.set_ylim([0, 1])
-        ax3.set_title('Polar View: |R| vs Angle', fontweight='bold', fontsize=12, pad=20)
-        ax3.grid(True, alpha=0.3)
-
-        # Subplot 4: Summary text
-        ax4 = fig2.add_subplot(gs[1, 1])
-        ax4.axis('off')
-
-        summary = "OASR REFLECTION COEFFICIENTS\n" + "="*50 + "\n\n"
-        summary += "Model: P-P (compressional-compressional)\n\n"
-        summary += "Bottom Properties:\n"
-        summary += f"  • Vp: {env.bottom.sound_speed} m/s\n"
-        summary += f"  • Vs: {env.bottom.shear_speed} m/s\n"
-        summary += f"  • Density: {env.bottom.density} g/cm³\n"
-        summary += f"  • Attenuation: {env.bottom.attenuation} dB/λ\n\n"
-        summary += "Angle Range:\n"
-        summary += f"  • Min: {angles.min():.1f}°\n"
-        summary += f"  • Max: {angles.max():.1f}°\n"
-        summary += f"  • Points: {len(angles)}\n\n"
-        summary += "Key Observations:\n"
-        summary += f"  • Critical angle effect visible\n"
-        summary += f"  • Elastic bottom response\n"
-        summary += f"  • Frequency: {source.frequency[0]} Hz"
-
-        ax4.text(0.05, 0.95, summary, transform=ax4.transAxes, fontsize=9,
-                verticalalignment='top', family='monospace',
-                bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.7))
-
-        plt.suptitle('OASES Suite: Reflection Coefficient Analysis (OASR)',
-                    fontsize=15, fontweight='bold')
-
-        plt.savefig(OUTPUT_DIR / 'example_13_oasr_reflection.png', dpi=150, bbox_inches='tight')
-        plt.close()
+        rc_for_plot = (
+            result_oasr.at_frequency(result_oasr.frequencies[len(result_oasr.frequencies) // 2])
+            if result_oasr.is_broadband else result_oasr
+        )
+        fig2, _ = uacpy.plot.plot_reflection_coefficient(
+            rc_for_plot, show_phase=True,
+            title=(
+                f"OASR {result_oasr.metadata.get('reflection_type', 'P-P')} "
+                f"@ {rc_for_plot.frequency:.1f} Hz"
+            ),
+        )
+        fig2.savefig(OUTPUT_DIR / 'example_13_oasr_reflection.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig2)
         print("  ✓ Saved: output/example_13_oasr_reflection.png")
 
-    # Plot 3: OASN Mode Analysis (if available)
-    if oasn_success and result_oasn is not None:
-        fig3 = plt.figure(figsize=(16, 10))
-        gs = fig3.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
-
-        # Subplot 1: Note about OASN
-        ax1 = fig3.add_subplot(gs[0, :])
-
-        ax1.axis('off')
-        note_text = ("OASN Normal Mode Analysis\n" + "="*60 + "\n\n"
-                    "OASN computes normal modes and cross-spectral matrices.\n"
-                    "Mode data extraction is experimental in UACPY.\n\n"
-                    "For production normal mode analysis, use Kraken.\n\n"
-                    "OASN Features:\n"
-                    "  • Modal decomposition\n"
-                    "  • Eigenfunctions (mode shapes)\n"
-                    "  • Phase & group velocities\n"
-                    "  • Cross-spectral matrices (.xsm files)")
-
-        ax1.text(0.5, 0.5, note_text, transform=ax1.transAxes,
-                fontsize=12, verticalalignment='center', horizontalalignment='center',
-                family='monospace',
-                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
-
-        # New typed result: OASNCovariance with .phi, .z, .k attributes.
-        phi = getattr(result_oasn, 'phi', None)
-        z = getattr(result_oasn, 'z', None)
-        k = getattr(result_oasn, 'k', None)
-        cov = getattr(result_oasn, 'covariance', None)
-        if k is None or not hasattr(k, '__len__') or len(k) == 0:
-            k = result_oasn.metadata.get('k', np.array([]))
-
-        # OASN often does not emit explicit mode shapes — just the spatial
-        # covariance / cross-spectral matrix. When phi/k are empty we
-        # eigendecompose the (one or first-frequency) covariance matrix to
-        # obtain replica-vector "modes" that are physically meaningful for
-        # matched-field processing (the eigenvectors are the principal
-        # components of the noise field). Mark the resulting plot as
-        # COV-derived so the reader knows these are not Kraken eigenmodes.
-        cov_modes = False
-        if (phi is None or not hasattr(phi, 'shape') or phi.size == 0) \
-                and cov is not None and cov.size > 0:
-            R = np.asarray(cov)
-            if R.ndim == 3:
-                R = R[0]                         # first frequency
-            # Hermitian eigendecomposition.
-            evals, evecs = np.linalg.eigh(R)
-            # Sort by descending eigenvalue (largest = strongest mode).
-            order = np.argsort(np.abs(evals))[::-1]
-            evals = evals[order]
-            evecs = evecs[:, order]
-            phi = evecs                          # (n_z, n_modes)
-            z = np.asarray(receiver.depths, dtype=float)
-            # Approximate "wavenumbers": map eigenvalue magnitudes onto a
-            # log scale so the wavenumber-spectrum plot still shows a
-            # progression of replicas. Real OASN runs do not expose modal
-            # k directly.
-            mags = np.abs(evals)
-            mags = np.where(mags > 0, mags, mags.max() * 1e-30)
-            k = np.linspace(0, 2 * np.pi * source.frequency[0] / 1500.0,
-                            len(evals))
-            cov_modes = True
-
-        if phi is not None and z is not None and k is not None and len(k) > 0:
-            n_modes_plot = min(6, phi.shape[1] if phi.ndim == 2 else len(k))
-
-            # Subplot 2: Mode shapes
-            ax2 = fig3.add_subplot(gs[1, 0])
-            for i in range(n_modes_plot):
-                col = phi[:, i].real if phi.ndim == 2 else phi.real
-                peak = np.max(np.abs(col))
-                phi_norm = col / peak if peak > 0 else col
-                ax2.plot(phi_norm, z, linewidth=2, label=f'Mode {i+1}')
-
-            ax2.set_xlabel('Normalized Amplitude', fontweight='bold')
-            ax2.set_ylabel('Depth (m)', fontweight='bold')
-            ax2.set_title(
-                f'First {n_modes_plot} '
-                + ('Cov. Eigenvectors' if cov_modes else 'Mode Shapes'),
-                fontweight='bold', fontsize=12,
+        # Broadband: also save a |R(θ, f)| heatmap (no helper for this yet).
+        if result_oasr.is_broadband:
+            fig2b, ax = plt.subplots(figsize=(8, 5))
+            im = ax.imshow(
+                result_oasr.R, origin='lower', aspect='auto', cmap='viridis',
+                extent=[
+                    result_oasr.frequencies[0], result_oasr.frequencies[-1],
+                    result_oasr.theta[0], result_oasr.theta[-1],
+                ],
+                vmin=0, vmax=1,
             )
-            ax2.invert_yaxis()
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(loc='best', fontsize=9, framealpha=0.9)
-            ax2.axvline(0, color='k', linewidth=0.5, linestyle='--')
+            ax.set_xlabel('Frequency (Hz)')
+            ax.set_ylabel('Grazing angle (deg)')
+            ax.set_title('|R(θ, f)|')
+            fig2b.colorbar(im, ax=ax, label='|R|')
+            fig2b.savefig(OUTPUT_DIR / 'example_13_oasr_broadband.png',
+                          dpi=150, bbox_inches='tight')
+            plt.close(fig2b)
+            print("  ✓ Saved: output/example_13_oasr_broadband.png")
 
-            # Subplot 3: Wavenumber spectrum
-            ax3 = fig3.add_subplot(gs[1, 1])
-            k_real = np.real(np.asarray(k))
-            phase_speed = 2 * np.pi * source.frequency[0] / np.where(k_real != 0, k_real, np.nan)
+    # Plot 3: OASN spatial covariance heatmap (Covariance → plot_covariance).
+    if oasn_success and result_oasn is not None:
+        fig3, _ = uacpy.plot.plot_covariance(result_oasn)
+        fig3.savefig(OUTPUT_DIR / 'example_13_oasn_covariance.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig3)
+        print("  ✓ Saved: output/example_13_oasn_covariance.png")
 
-            colors = plt.cm.viridis(np.linspace(0, 1, len(k_real)))
-            for i in range(len(k_real)):
-                size = 150 if i < n_modes_plot else 80
-                alpha = 0.9 if i < n_modes_plot else 0.4
-                ax3.scatter(phase_speed[i], k_real[i], s=size, c=[colors[i]],
-                          edgecolors='black', linewidths=1.5, alpha=alpha,
-                          label=f'Mode {i+1}' if i < n_modes_plot else None, zorder=3)
+    # Plot 4: OASP — broadband transfer function. Slice |H| → TLField at the
+    # center frequency, then use the helper. Also synthesize a time trace
+    # with a Gaussian pulse and let TimeTrace.plot() render it.
+    if oasp_success and result_oasp is not None:
+        from uacpy.core.constants import PRESSURE_FLOOR
+        from uacpy import TLField
 
-            ax3.set_xlabel('Phase Speed (m/s)', fontweight='bold')
-            ax3.set_ylabel('Wavenumber k (1/m)', fontweight='bold')
-            ax3.set_title(f'Wavenumber Spectrum ({len(k_real)} modes)',
-                         fontweight='bold', fontsize=12)
-            ax3.grid(True, alpha=0.3)
-            if len(k_real) <= 6:
-                ax3.legend(loc='best', fontsize=9, framealpha=0.9)
+        H = result_oasp.data
+        freqs_h = result_oasp.frequencies
+        depths_h = result_oasp.depths
+        ranges_h = result_oasp.ranges
+        f_center = float(freqs_h[len(freqs_h) // 2])
+        k_c = int(np.argmin(np.abs(freqs_h - f_center)))
 
-        # Subplot 4: OASN information panel
-        ax4 = fig3.add_subplot(gs[2, 0])
-        ax4.axis('off')
+        TL_centre = -20.0 * np.log10(np.maximum(np.abs(H[..., k_c]), PRESSURE_FLOOR))
+        tl_field = TLField(
+            data=TL_centre, depths=depths_h, ranges=ranges_h,
+            model='OASP', backend='oasp',
+            source_depths=result_oasp.source_depths,
+            frequency=f_center,
+        )
+        fig4, _, _ = uacpy.plot.plot_transmission_loss(tl_field, env=env)
+        fig4.savefig(OUTPUT_DIR / 'example_13_oasp_tl.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig4)
+        print("  ✓ Saved: output/example_13_oasp_tl.png")
 
-        info_text = ("OASN MODEL INFORMATION\n" + "="*40 + "\n\n"
-                    f"Frequency: {source.frequency[0]} Hz\n"
-                    f"Water Depth: {env.depth} m\n"
-                    f"Bottom Type: Elastic\n"
-                    f"  Vp = {env.bottom.sound_speed} m/s\n"
-                    f"  Vs = {env.bottom.shear_speed} m/s\n\n"
-                    "Output Files:\n"
-                    "  • .xsm - Cross-spectral matrix\n"
-                    "  • Mode shapes & wavenumbers\n\n"
-                    "Note: For production normal mode\n"
-                    "analysis, Kraken is recommended\n"
-                    "due to more reliable mode\n"
-                    "extraction and analysis tools.")
-
-        ax4.text(0.1, 0.9, info_text, transform=ax4.transAxes,
-                fontsize=10, verticalalignment='top', family='monospace',
-                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
-
-        # Subplot 5: OASES Summary
-        ax5 = fig3.add_subplot(gs[2, 1])
-        ax5.axis('off')
-
-        summary = "OASES SUITE OVERVIEW\n" + "="*50 + "\n\n"
-
-        summary += "OAST (Transmission Loss):\n"
-        summary += "  • Wavenumber integration method\n"
-        summary += "  • FFT-based fast computation\n"
-        summary += "  • Elastic bottom support\n"
-        summary += "  • Range-independent environments\n\n"
-
-        summary += "OASN (Normal Modes):\n"
-        summary += "  • Modal decomposition\n"
-        summary += "  • Computes eigenfunctions\n"
-        summary += "  • Phase/group velocities\n"
-        summary += "  • Cross-spectral matrices\n\n"
-
-        summary += "OASR (Reflection Coefficients):\n"
-        summary += "  • P-P, P-SV coefficients\n"
-        summary += "  • Elastic bottom analysis\n"
-        summary += "  • Critical angle detection\n"
-        summary += "  • Angle/slowness domain\n\n"
-
-        summary += "OASP (Pulse / Wideband TRF):\n"
-        summary += "  • PE propagation method\n"
-        summary += "  • Range-dependent capability\n"
-        summary += "  • Broadband support\n"
-        summary += "  • Transfer functions\n\n"
-
-        summary += "KEY FEATURES:\n"
-        summary += "  • Developed by MIT & SACLANT\n"
-        summary += "  • Complete elastic modeling\n"
-        summary += "  • Poro-elastic sediments\n"
-        summary += "  • Shear wave support\n\n"
-
-        summary += "SIMULATION PARAMETERS:\n"
-        summary += f"  • Frequency: {source.frequency[0]} Hz\n"
-        summary += f"  • Water depth: {env.depth}m\n"
-        summary += f"  • Bottom: Elastic (Vp={env.bottom.sound_speed}, Vs={env.bottom.shear_speed})"
-
-        ax5.text(0.05, 0.95, summary, transform=ax5.transAxes, fontsize=9,
-                verticalalignment='top', family='monospace',
-                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
-
-        plt.suptitle('OASES Suite: Comprehensive Acoustic Modeling',
-                    fontsize=15, fontweight='bold')
-
-        plt.savefig(OUTPUT_DIR / 'example_13_oasn_modes.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        print("  ✓ Saved: output/example_13_oasn_modes.png")
+        # Synthesized time trace at one (depth, range) using a Gaussian pulse.
+        d_pick = float(depths_h[int(np.argmin(np.abs(depths_h - source.depth[0])))])
+        r_pick = float(ranges_h[int(np.argmin(np.abs(ranges_h - 5000.0)))])
+        fs = 4.0 * float(freqs_h[-1])
+        nt_pulse = 64
+        t_pulse = np.arange(nt_pulse) / fs
+        sigma = nt_pulse / (8.0 * fs)
+        pulse = (
+            np.sin(2 * np.pi * f_center * (t_pulse - t_pulse[-1] / 2))
+            * np.exp(-((t_pulse - t_pulse[-1] / 2) ** 2) / (2 * sigma ** 2))
+        )
+        try:
+            ts = result_oasp.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
+            trace = ts.get_trace(depth=d_pick, range_m=r_pick)
+            fig5, _ = uacpy.plot.plot_time_trace(trace)
+            fig5.savefig(OUTPUT_DIR / 'example_13_oasp_trace.png',
+                         dpi=150, bbox_inches='tight')
+            plt.close(fig5)
+            print("  ✓ Saved: output/example_13_oasp_trace.png")
+        except Exception as e:
+            print(f"  ! Skipped time-series synthesis: {e}")
 
     print("\n✓ OASES suite examples complete")
     print("\nAll 4 OASES Models Demonstrated:")

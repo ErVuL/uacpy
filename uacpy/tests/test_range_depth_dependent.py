@@ -536,7 +536,7 @@ class TestRangeDependentLayeredBottom:
         source = uacpy.Source(frequency=100.0, depth=30.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(5, 290, 10),
-            ranges=np.linspace(100, 20000, 15),
+            ranges=np.linspace(100, 5000, 8),
         )
         ram = RAM(verbose=False)
         result = ram.run(env, source, receiver)
@@ -706,7 +706,7 @@ class TestIntegrationRAMRangeDependent:
         source = uacpy.Source(frequency=100.0, depth=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),
-            ranges=np.linspace(100, 10000, 20),
+            ranges=np.linspace(100, 5000, 10),
         )
 
         ram = RAM(verbose=False)

@@ -482,7 +482,7 @@ def write_oasn_input(
     """
     Write OASN (OASES Noise, Covariance Matrices and Signal Replicas) input file.
 
-    OASN is NOT a normal-modes solver — per oasn.tex:1 it produces:
+    Per oasn.tex:1, OASN produces:
     - Noise-field covariance matrices for ambient noise characterisation.
     - Array-response covariance matrices from discrete or continuous sources.
     - Signal replicas on a depth/range grid for matched-field processing.
@@ -915,6 +915,14 @@ def write_oasp_input(
         f.write(f"{n_time} {freq_min:.1f} {freq_max:.1f} {dt:.6f} {r1_km:.3f} {dr_km:.3f} {nr}\n")
 
 
+_REFL_TYPE_TO_OPTION = {
+    'P-P': 'N',          # default — P-wave to P-wave reflection
+    'P-SV': 'S',         # P-wave to vertical shear
+    'P-Slow': 'B',       # P-wave to Biot slow wave
+    'transmission': 't', # transmission instead of reflection
+}
+
+
 def write_oasr_input(
     filepath: Union[str, Path],
     env: Environment,
@@ -924,6 +932,7 @@ def write_oasr_input(
     interface_roughness: Optional[list] = None,
     angles: Optional[np.ndarray] = None,
     angle_type: str = 'grazing',
+    reflection_type: str = 'P-P',
     **kwargs
 ) -> None:
     """
@@ -1068,9 +1077,17 @@ def write_oasr_input(
         n_angles = kwargs.get('n_angles', 181)
     angle_out_inc = kwargs.get('angle_output_increment', max(1, n_angles // 10))
 
-    # Options string
+    # Options string. The wrapper translates ``reflection_type`` to the
+    # corresponding OASR letter; the ASCII ``T`` table is always added so
+    # the Python reader has something to parse.
+    if reflection_type not in _REFL_TYPE_TO_OPTION:
+        raise ConfigurationError(
+            f"OASR: reflection_type must be one of {list(_REFL_TYPE_TO_OPTION)}, "
+            f"got {reflection_type!r}"
+        )
     if options is None:
-        options = 'N T'  # Normal (P-P), Table output
+        opt_letter = _REFL_TYPE_TO_OPTION[reflection_type]
+        options = f"{opt_letter} T"
     volume_attenuation = kwargs.get('volume_attenuation', None)
     options = _inject_volume_attenuation(options, volume_attenuation)
 

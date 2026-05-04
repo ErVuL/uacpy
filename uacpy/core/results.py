@@ -33,8 +33,10 @@ Hierarchy
     ├── TimeTrace                   (single point, no spatial grid)
     ├── Arrivals                    (per-receiver list of arrivals)
     ├── Rays                        (per-source list of ray paths)
-    ├── Modes                       (Kraken normal modes)
-    ├── OASNCovariance              (OASN replica/covariance modes)
+    ├── ModalResult (ABC)
+    │   └── Modes                   (Kraken normal modes — depth eigenfunctions)
+    ├── Covariance                  (OASN hydrophone × hydrophone covariance)
+    ├── Replicas                    (OASN MFP frequency-domain Green's-function templates)
     └── ReflectionCoefficient       (R(theta) at a boundary)
 
 Identification fields (``model``, ``backend``, ``source_depths``,
@@ -44,10 +46,53 @@ callers can use either typed attributes or dict-style access.
 
 from __future__ import annotations
 
+from abc import abstractmethod
+from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
+
+
+class PhaseReference(str, Enum):
+    """Phase convention of a complex transfer function ``H(f)``.
+
+    Each model writes its native phase convention into
+    :class:`TransferFunction`; downstream consumers (IFFT, time-series
+    synthesis) branch on this value. Adding a new value requires updating
+    ``core/field._ifft_to_trace`` so the IFFT path interprets the spectrum
+    correctly. Inheriting from ``str`` keeps backward-compatible string
+    comparison (``ref == 'travelling_wave'`` still works).
+
+    Members
+    -------
+    TRAVELLING_WAVE
+        Receiver phase **includes** the propagator ``exp(-i k0 r)``. IFFT
+        directly yields the causal pulse arrival time — no carrier
+        re-injection needed. Used by Bellhop, Scooter, OASES OAST/OASP.
+    PORTER_NEGATED
+        Kraken/KrakenField convention: the modal sum is written with a
+        sign flip on the carrier so the IFFT must negate the imaginary
+        axis (``np.conj(H)``) before iFFT to recover the same pulse
+        arrival time as TRAVELLING_WAVE.
+    PSIF_ENVELOPE
+        RAM (mpiramS / Collins backends): the broadband payload is the
+        complex envelope ``ψ(r,z; f)`` with the carrier ``exp(+i k0 r)``
+        already factored out. To recover the travelling-wave pulse the
+        IFFT must multiply by ``exp(+i k0 r)`` before transforming.
+    TIME_DOMAIN_NATIVE
+        SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
+        already-time-domain trace; consumers that want a time series
+        should take it from ``TimeSeriesField`` instead.
+
+    See Also
+    --------
+    uacpy.core.field._ifft_to_trace : honours these conventions.
+    """
+    TRAVELLING_WAVE = 'travelling_wave'
+    PORTER_NEGATED = 'porter_negated'
+    PSIF_ENVELOPE = 'psif_envelope'
+    TIME_DOMAIN_NATIVE = 'time_domain_native'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,7 +405,7 @@ class TransferFunction(_GridResult):
         depths: np.ndarray,
         ranges: np.ndarray,
         frequencies: np.ndarray,
-        phase_reference: str,
+        phase_reference: Union[PhaseReference, str],
         **kwargs,
     ):
         if frequencies is None or len(frequencies) == 0:
@@ -378,14 +423,22 @@ class TransferFunction(_GridResult):
                 f"TransferFunction.data axis 2 ({data.shape[2]}) does not "
                 f"match len(frequencies) ({len(self.frequencies)})"
             )
-        if not phase_reference:
+        if phase_reference is None or phase_reference == "":
             raise ValueError(
-                "TransferFunction requires a non-empty phase_reference "
-                "('travelling_wave', 'porter_negated', 'psif_envelope', ...)"
+                "TransferFunction requires a phase_reference. "
+                f"Valid values: {[m.value for m in PhaseReference]}"
             )
-        self.phase_reference = phase_reference
-        # Mirror into ``metadata`` for dict-style access.
-        self.metadata.setdefault('phase_reference', phase_reference)
+        try:
+            ref = PhaseReference(phase_reference)
+        except ValueError:
+            raise ValueError(
+                f"Unknown phase_reference {phase_reference!r}. "
+                f"Valid values: {[m.value for m in PhaseReference]}"
+            ) from None
+        self.phase_reference = ref
+        # Mirror the string form into ``metadata`` so dict-style consumers
+        # see the same value they wrote (``ref.value`` round-trips).
+        self.metadata.setdefault('phase_reference', ref.value)
 
     # Time-domain conversion ------------------------------------------------
     # Implementation lives in core.field for now (heavy IFFT machinery); we
@@ -475,6 +528,25 @@ class TimeSeriesField(_GridResult):
     def n_t(self) -> int:
         return self.data.shape[2]
 
+    @property
+    def dt(self) -> float:
+        return float(self.time[1] - self.time[0]) if len(self.time) >= 2 else 0.0
+
+    @property
+    def fs(self) -> float:
+        return 1.0 / self.dt if self.dt > 0 else 0.0
+
+    def get_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(freqs, X)`` from a real FFT along the time axis.
+
+        Mirrors :meth:`TimeTrace.spectrum` but operates on the full
+        ``(n_d, n_r, n_t)`` grid: ``X.shape == (n_d, n_r, n_freq)`` with
+        ``n_freq == n_t // 2 + 1`` and ``freqs == np.fft.rfftfreq(n_t, dt)``.
+        """
+        X = np.fft.rfft(self.data, axis=-1)
+        freqs = np.fft.rfftfreq(self.n_t, self.dt)
+        return freqs, X
+
     def get_trace(self, depth: float, range_m: float) -> "TimeTrace":
         """Extract the single-point :class:`TimeTrace` at the nearest
         ``(depth, range)``."""
@@ -502,7 +574,7 @@ class TimeTrace(Result):
 
     ``data`` shape: ``(n_t,)`` real.
     """
-    field_type = "time_series"   # legacy field_type for visualization dispatch
+    field_type = "time_series"
 
     def __init__(
         self,
@@ -631,9 +703,6 @@ class Arrivals(Result):
         """The per-receiver arrivals payload. Same as ``self.by_receiver``."""
         return self.by_receiver
 
-    def extract_arrivals(self) -> Any:
-        return self.by_receiver
-
     def at(self, range_idx: int = 0, depth_idx: int = 0,
            src_idx: int = 0) -> Dict[str, np.ndarray]:
         """Return the flat arrivals dict for one (source, depth, range) cell.
@@ -728,9 +797,6 @@ class Rays(Result):
         """The ray list. Same as ``self.rays``."""
         return self.rays
 
-    def extract_rays(self) -> List[Any]:
-        return self.rays
-
     def at_receiver(
         self,
         range_m: float,
@@ -799,13 +865,30 @@ class Rays(Result):
                     metadata=meta)
 
 
-class Modes(Result):
-    """Kraken normal modes.
+class ModalResult(Result):
+    """Abstract base for results that decompose a field into discrete modes.
+
+    A concrete subclass must expose ``n_modes`` (count) and the depth grid
+    on which mode shapes are sampled.
+
+    Subclasses set ``field_type = "modes"`` so visualization helpers route
+    to :func:`uacpy.visualization.plots.plot_modes`.
+    """
+    field_type = "modes"
+
+    @property
+    @abstractmethod
+    def n_modes(self) -> int:           # noqa: D401 — abstract property
+        """Number of modes contained in this result."""
+
+
+class Modes(ModalResult):
+    """Kraken normal modes — depth eigenfunctions of the Helmholtz operator.
 
     Attributes
     ----------
     k : ndarray, shape ``(n_modes,)`` complex
-        Modal wavenumbers.
+        Modal horizontal wavenumbers.
     phi : ndarray, shape ``(n_z, n_modes)``
         Mode shapes sampled at ``z``.
     z : ndarray, shape ``(n_z,)``
@@ -826,12 +909,16 @@ class Modes(Result):
         self.k = np.asarray(k)
         self.phi = np.asarray(phi)
         self.z = np.atleast_1d(np.asarray(z, dtype=float))
-        self.n_modes = int(n_modes if n_modes is not None else len(self.k))
+        self._n_modes = int(n_modes if n_modes is not None else len(self.k))
         # Mirror modal data into ``metadata`` for dict-style access.
         self.metadata.setdefault('k', self.k)
         self.metadata.setdefault('phi', self.phi)
         self.metadata.setdefault('z', self.z)
-        self.metadata.setdefault('n_modes', self.n_modes)
+        self.metadata.setdefault('n_modes', self._n_modes)
+
+    @property
+    def n_modes(self) -> int:
+        return self._n_modes
 
     @property
     def depths(self) -> np.ndarray:    # scalar (depth, range) → 1-D arrays for the plotting helpers
@@ -845,65 +932,202 @@ class Modes(Result):
         omega = 2.0 * np.pi * (self.frequency or 0.0)
         return omega / np.real(self.k)
 
+    def group_velocity(self, other: "Modes") -> np.ndarray:
+        """Approximate group velocity ``v_g = dω/dk`` using a second
+        :class:`Modes` instance at a nearby frequency.
+
+        Parameters
+        ----------
+        other : Modes
+            Modes computed at a slightly different frequency.
+
+        Returns
+        -------
+        v_g : ndarray, shape ``(min(self.n_modes, other.n_modes),)``
+            Mode-by-mode group velocity in m/s. Modes that exist in only
+            one of the two results are dropped (the array is truncated to
+            the shared count).
+        """
+        if other.frequency is None or self.frequency is None:
+            raise ValueError(
+                "group_velocity requires both Modes instances to have a `.frequency`."
+            )
+        if other.frequency == self.frequency:
+            raise ValueError(
+                "group_velocity needs Modes at two distinct frequencies."
+            )
+        n = min(self.n_modes, other.n_modes)
+        if n == 0:
+            return np.array([])
+        domega = 2.0 * np.pi * (other.frequency - self.frequency)
+        dk = np.real(other.k[:n] - self.k[:n])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(dk != 0, domega / dk, np.nan)
+
     def plot(self, **kwargs):
         from uacpy.visualization import plots
         return plots.plot_modes(self, **kwargs)
 
 
-class OASNCovariance(Result):
-    """OASN replica vectors / spatial covariance modes.
+class Covariance(Result):
+    """OASN spatial covariance matrix ``C(f, i, j)``.
 
-    Different physics from Kraken's :class:`Modes` (these are eigenvectors
-    of a covariance matrix, not eigenfunctions of the depth-separated wave
-    equation). Kept distinct so downstream code can't accidentally treat
-    them as Kraken modes.
+    Hydrophone × hydrophone correlation per frequency, written by OASN with
+    option ``N`` to a ``.xsm`` file. The eigenvectors of ``C[ifreq]`` are
+    matched-field-processing replica vectors used for signal-subspace
+    detection and localization.
 
     Attributes
     ----------
-    phi : ndarray
-        Replica field samples (depth × mode-index).
-    z : ndarray
-        Sampling depths.
-    covariance : ndarray, optional
-        Spatial covariance matrix when present.
+    covariance : ndarray, shape ``(n_frequencies, n_receivers, n_receivers)``
+        Complex covariance matrices.
+    receiver_positions : ndarray, optional, shape ``(n_receivers, 3)``
+        ``(x, y, z)`` positions in metres.
+
+    Notes
+    -----
+    To extract MFP signal-subspace eigenvectors call
+    ``np.linalg.eigh(cov.covariance[ifreq])`` directly.
     """
-    field_type = "modes"   # legacy dispatch — same plot helper
+    field_type = "covariance"
 
     def __init__(
         self,
         *,
-        phi: np.ndarray,
-        z: np.ndarray,
-        covariance: Optional[np.ndarray] = None,
-        n_modes: Optional[int] = None,
+        covariance: np.ndarray,
+        receiver_positions: Optional[np.ndarray] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.phi = np.asarray(phi)
-        self.z = np.atleast_1d(np.asarray(z, dtype=float))
-        self.covariance = np.asarray(covariance) if covariance is not None else None
-        self.n_modes = int(n_modes if n_modes is not None else self.phi.shape[-1] if self.phi.ndim else 0)
+        cov = np.asarray(covariance)
+        if cov.ndim != 3 or cov.shape[1] != cov.shape[2]:
+            raise ValueError(
+                "Covariance.covariance must be 3-D (n_freq, n_rcv, n_rcv); "
+                f"got shape {cov.shape}"
+            )
+        self.covariance = cov
+        if receiver_positions is not None:
+            rp = np.asarray(receiver_positions, dtype=float)
+            if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != cov.shape[1]:
+                raise ValueError(
+                    "Covariance.receiver_positions must have shape "
+                    f"(n_receivers={cov.shape[1]}, 3); got {rp.shape}"
+                )
+            self.receiver_positions = rp
+        else:
+            self.receiver_positions = None
+        # Mirror into ``metadata`` for dict-style access.
+        self.metadata.setdefault('covariance', self.covariance)
+        if self.receiver_positions is not None:
+            self.metadata.setdefault('receiver_positions', self.receiver_positions)
 
     @property
-    def depths(self) -> np.ndarray:
-        return self.z
+    def n_frequencies(self) -> int:
+        return int(self.covariance.shape[0])
 
     @property
-    def data(self) -> np.ndarray:
-        return self.phi
+    def n_receivers(self) -> int:
+        return int(self.covariance.shape[1])
+
+
+class Replicas(Result):
+    """OASN matched-field-processing replicas.
+
+    Frequency-domain Green's-function samples at every array element for
+    every candidate source position. Written by OASN with option ``R`` to
+    a ``.rpo`` file.
+
+    Attributes
+    ----------
+    replicas : ndarray, shape ``(n_frequencies, n_zr, n_xr, n_yr, n_receivers)``
+        Complex array responses per candidate source ``(z, x, y)``.
+    replica_z, replica_x, replica_y : ndarray
+        Coordinate axes of the candidate-source grid (m, m, m).
+    receiver_positions : ndarray, optional, shape ``(n_receivers, 3)``
+        ``(x, y, z)`` positions in metres.
+
+    Notes
+    -----
+    To compute a Bartlett MFP ambiguity surface, contract a covariance
+    estimate against the replica field across the array index.
+    """
+    field_type = "replicas"
+
+    def __init__(
+        self,
+        *,
+        replicas: np.ndarray,
+        replica_z: np.ndarray,
+        replica_x: np.ndarray,
+        replica_y: np.ndarray,
+        receiver_positions: Optional[np.ndarray] = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        rep = np.asarray(replicas)
+        if rep.ndim != 5:
+            raise ValueError(
+                "Replicas.replicas must be 5-D (n_freq, n_zr, n_xr, n_yr, n_rcv); "
+                f"got shape {rep.shape}"
+            )
+        self.replicas = rep
+        self.replica_z = np.atleast_1d(np.asarray(replica_z, dtype=float))
+        self.replica_x = np.atleast_1d(np.asarray(replica_x, dtype=float))
+        self.replica_y = np.atleast_1d(np.asarray(replica_y, dtype=float))
+        expected = (
+            len(self.replica_z), len(self.replica_x), len(self.replica_y),
+        )
+        if rep.shape[1:4] != expected:
+            raise ValueError(
+                f"Replicas.replicas axes 1-3 {rep.shape[1:4]} must match "
+                f"(n_zr, n_xr, n_yr) = {expected}"
+            )
+        if receiver_positions is not None:
+            rp = np.asarray(receiver_positions, dtype=float)
+            if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != rep.shape[4]:
+                raise ValueError(
+                    "Replicas.receiver_positions must have shape "
+                    f"(n_receivers={rep.shape[4]}, 3); got {rp.shape}"
+                )
+            self.receiver_positions = rp
+        else:
+            self.receiver_positions = None
+        self.metadata.setdefault('replicas', self.replicas)
+        self.metadata.setdefault('replica_z', self.replica_z)
+        self.metadata.setdefault('replica_x', self.replica_x)
+        self.metadata.setdefault('replica_y', self.replica_y)
+        if self.receiver_positions is not None:
+            self.metadata.setdefault('receiver_positions', self.receiver_positions)
+
+    @property
+    def n_frequencies(self) -> int:
+        return int(self.replicas.shape[0])
+
+    @property
+    def n_receivers(self) -> int:
+        return int(self.replicas.shape[4])
+
+    @property
+    def n_replica_points(self) -> int:
+        return int(self.replicas.shape[1] * self.replicas.shape[2] * self.replicas.shape[3])
 
 
 class ReflectionCoefficient(Result):
-    """Angle-dependent reflection coefficient ``R(theta)``.
+    """Angle-dependent reflection coefficient ``R(theta[, f])``.
 
-    Unifies what Bounce and OASR produce. Use this for both bottom (BRC)
-    and top (TRC) reflection coefficients.
+    Unifies what Bounce and OASR produce. Used for both bottom (BRC) and
+    top (TRC) reflection coefficients. ``R`` and ``phi`` may be 1-D
+    (single-frequency) or 2-D (frequency-resolved); ``theta`` is always 1-D.
 
     Attributes
     ----------
     theta : ndarray, shape ``(n_angles,)``  — grazing angles in degrees
-    R     : ndarray, shape ``(n_angles,)``  — magnitude in [0, 1]
-    phi   : ndarray, shape ``(n_angles,)``  — phase in radians
+    R     : ndarray, shape ``(n_angles,)`` or ``(n_angles, n_frequencies)``
+            — magnitude in [0, 1]
+    phi   : ndarray, same shape as ``R`` — phase in radians
+    frequencies : ndarray, optional, shape ``(n_frequencies,)`` — Hz
+        Required when ``R`` is 2-D.
+    is_broadband : bool — True iff ``R.ndim == 2``.
     """
     field_type = "reflection_coefficients"
 
@@ -917,12 +1141,39 @@ class ReflectionCoefficient(Result):
     ):
         super().__init__(**kwargs)
         self.theta = np.atleast_1d(np.asarray(theta, dtype=float))
-        self.R = np.atleast_1d(np.asarray(R, dtype=float))
-        self.phi = np.atleast_1d(np.asarray(phi, dtype=float))
-        if not (len(self.theta) == len(self.R) == len(self.phi)):
+        self.R = np.asarray(R, dtype=float)
+        self.phi = np.asarray(phi, dtype=float)
+        if self.R.ndim == 1:
+            self.R = self.R.reshape(-1)
+            self.phi = self.phi.reshape(-1)
+            if not (len(self.theta) == len(self.R) == len(self.phi)):
+                raise ValueError(
+                    f"ReflectionCoefficient: theta/R/phi length mismatch "
+                    f"({len(self.theta)}, {len(self.R)}, {len(self.phi)})"
+                )
+        elif self.R.ndim == 2:
+            if self.R.shape != self.phi.shape:
+                raise ValueError(
+                    f"ReflectionCoefficient: R.shape {self.R.shape} != "
+                    f"phi.shape {self.phi.shape}"
+                )
+            if self.R.shape[0] != len(self.theta):
+                raise ValueError(
+                    f"ReflectionCoefficient.R axis 0 ({self.R.shape[0]}) "
+                    f"must equal len(theta) ({len(self.theta)})"
+                )
+            if self.frequencies is None:
+                raise ValueError(
+                    "ReflectionCoefficient: 2-D R requires `frequencies=`"
+                )
+            if self.R.shape[1] != len(self.frequencies):
+                raise ValueError(
+                    f"ReflectionCoefficient.R axis 1 ({self.R.shape[1]}) "
+                    f"must equal len(frequencies) ({len(self.frequencies)})"
+                )
+        else:
             raise ValueError(
-                f"ReflectionCoefficient: theta/R/phi length mismatch "
-                f"({len(self.theta)}, {len(self.R)}, {len(self.phi)})"
+                f"ReflectionCoefficient.R must be 1-D or 2-D, got shape {self.R.shape}"
             )
         # Mirror into ``metadata`` for dict-style access.
         self.metadata.setdefault('theta', self.theta)
@@ -933,7 +1184,25 @@ class ReflectionCoefficient(Result):
     def n_angles(self) -> int:
         return len(self.theta)
 
-    
+    @property
+    def is_broadband(self) -> bool:
+        return self.R.ndim == 2
+
+    def at_frequency(self, freq: float) -> "ReflectionCoefficient":
+        """Single-frequency slice of a broadband reflection coefficient."""
+        if not self.is_broadband:
+            raise ValueError("at_frequency() only valid for broadband ReflectionCoefficient")
+        k = int(np.argmin(np.abs(self.frequencies - freq)))
+        return ReflectionCoefficient(
+            theta=self.theta,
+            R=self.R[:, k],
+            phi=self.phi[:, k],
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequency=float(self.frequencies[k]),
+            metadata=dict(self.metadata),
+        )
+
     @property
     def data(self) -> np.ndarray:
         return self.R
@@ -954,11 +1223,13 @@ class ReflectionCoefficient(Result):
 
 __all__ = [
     "Result",
+    "PhaseReference",
     # Spatial
     "TLField", "PressureField", "TransferFunction",
     # Time-domain
     "TimeSeriesField", "TimeTrace",
     # Sparse / non-grid
-    "Arrivals", "Rays", "Modes", "OASNCovariance",
+    "Arrivals", "Rays", "ModalResult", "Modes",
+    "Covariance", "Replicas",
     "ReflectionCoefficient",
 ]

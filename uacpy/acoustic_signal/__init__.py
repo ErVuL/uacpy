@@ -16,8 +16,13 @@ from .generation import (
     hfm_chirp,
     lfm_chirp,
     ricker_wavelet,
+    ssrp,
     tone_burst,
 )
+
+# --- Curated analysis helpers -----------------------------------------------
+# Source: acoustic_signal/analysis.py
+from .analysis import PPSD
 
 # --- Curated processing helpers ----------------------------------------------
 # Source: acoustic_signal/processing.py
@@ -61,7 +66,10 @@ __all__ = [
     "hfm_chirp",
     "lfm_chirp",
     "ricker_wavelet",
+    "ssrp",
     "tone_burst",
+    # Analysis
+    "PPSD",
     # Processing
     "add_noise",
     "beamform",

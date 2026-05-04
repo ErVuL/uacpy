@@ -151,6 +151,7 @@ class SPARC(PropagationModel):
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         timeout: float = 180.0,
+        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -204,7 +205,10 @@ class SPARC(PropagationModel):
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            range_independent_method=range_independent_method,
+        )
 
         self.c_low = c_low
         self.c_high = c_high

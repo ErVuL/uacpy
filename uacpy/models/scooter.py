@@ -63,6 +63,7 @@ class Scooter(PropagationModel):
         roughness: float = 0.0,
         rmax_multiplier: float = 2.0,
         volume_attenuation: Optional[str] = None,
+        attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         source_type: str = 'R',
@@ -70,6 +71,7 @@ class Scooter(PropagationModel):
         stabilizing_attenuation_off: bool = False,
         field_interp: str = 'O',
         use_fields_exe: bool = True,
+        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -131,7 +133,10 @@ class Scooter(PropagationModel):
             to the Python Hankel transform — a warning is emitted in both
             cases so the override is visible.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            range_independent_method=range_independent_method,
+        )
 
         self.c_low = c_low
         self.c_high = c_high
@@ -139,6 +144,7 @@ class Scooter(PropagationModel):
         self.roughness = roughness
         self.rmax_multiplier = rmax_multiplier
         self.volume_attenuation = volume_attenuation
+        self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
 
@@ -474,7 +480,7 @@ class Scooter(PropagationModel):
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
-                attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
+                attenuation_unit=self.attenuation_unit,
                 volume_attenuation=vol_atten,
                 frequencies=frequencies,
                 topopt_extra=topopt_extra,

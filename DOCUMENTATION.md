@@ -98,7 +98,7 @@ sig = uacpy.signal     # signal processing. The on-disk package is
                        # `signal`); the alias is only an attribute on
                        # `uacpy`, so `import uacpy.signal` would fail —
                        # go through the parent module as shown.
-from uacpy.noise import AmbientNoiseSimulator
+from uacpy.noise import WenzNoise
 ```
 
 ---
@@ -147,7 +147,9 @@ RunMode.SEMICOHERENT_TL    # Lloyd-mirror only (Bellhop)
 RunMode.RAYS               # ray paths
 RunMode.EIGENRAYS          # rays reaching each receiver
 RunMode.ARRIVALS           # amplitude–delay pairs
-RunMode.MODES              # normal modes
+RunMode.MODES              # normal modes (Kraken / KrakenC / KrakenField)
+RunMode.COVARIANCE         # OASN spatial covariance C(f, i, j)
+RunMode.REPLICA            # OASN MFP replica fields G(z_src, x_src, y_src; f) at array elements
 RunMode.TIME_SERIES        # time-domain output
 RunMode.BROADBAND          # complex broadband H(f) (KrakenField, Scooter, RAM, OASP, Bellhop)
 RunMode.REFLECTION         # plane-wave reflection coefficients (Bounce, OASR)
@@ -159,9 +161,14 @@ Which modes each model supports is listed in [Section 5](#5-propagation-models).
 
 ```python
 Model(
-    use_tmpfs=False,   # Use RAM-backed tmpfs for scratch I/O (Linux, faster)
-    verbose=False,     # Print per-step progress
-    work_dir=None,     # Pin scratch directory instead of using a temp dir
+    use_tmpfs=False,             # Use RAM-backed tmpfs for scratch I/O (Linux, faster)
+    verbose=False,               # Print per-step progress
+    work_dir=None,               # Pin scratch directory instead of using a temp dir
+    range_independent_method='max',
+                                  # Bathymetry collapse for range-indep models
+                                  # ('min' | 'median' | 'mean' | 'max') when env
+                                  # is range-dependent. 'max' keeps source/receiver
+                                  # depths above the seafloor.
 )
 ```
 
@@ -441,7 +448,7 @@ rx = uacpy.Receiver(depths=[20, 40, 60], ranges=[1000, 2000, 3000],
 | RAM          | ✓ | — | — | — | — | — | ✓ | — | — | — | Split-step Padé PE; dispatcher → mpiramS / rams0.5 / ramsurf1.5 |
 | SPARC        | ✓ | — | — | — | — | — | ✓ | — | — | — | Time-domain PE |
 | OAST         | ✓ | — | — | — | — | — | — | — | — | — | OASES TL |
-| OASN         | — | — | — | — | — | ✓ | — | — | — | — | OASES covariance / replicas |
+| OASN         | — | — | — | — | — | — | — | — | — | — | OASES covariance / replicas (RunMode.COVARIANCE / RunMode.REPLICA) |
 | OASR         | — | — | — | — | — | — | — | — | ✓ | — | OASES reflection coefficients |
 | OASP         | ✓ | — | — | — | — | — | ✓ | — | — | — | OASES wideband (wavenumber-int) |
 | Bounce       | — | — | — | — | — | — | — | — | ✓ | — | Writes .brc / .irc reflection files |
@@ -457,12 +464,12 @@ representation reachable through `RunMode.BROADBAND`.
 | Environment feature             | Bellhop | RAM | Kraken / KrakenC | KrakenField | Scooter | SPARC | OASES | Bounce |
 |---------------------------------|:-------:|:---:|:----------------:|:-----------:|:-------:|:-----:|:-----:|:------:|
 | 1-D SSP                         | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 2-D (range-dep) SSP             | ✓ | ✓ via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | reject | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
-| Range-dep bathymetry            | ✓ | ✓ (all three RAM backends honour multi-point bathymetry) | reject | **native** (segments) | warn+collapse | warn+collapse | warn+collapse (OASP only) | — |
+| 2-D (range-dep) SSP             | ✓ | ✓ via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
+| Range-dep bathymetry            | ✓ | ✓ (all three RAM backends honour multi-point bathymetry) | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
 | Halfspace bottom                | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `RangeDependentBottom`          | warn+median | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | reject | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
+| `RangeDependentBottom`          | warn+median | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
 | `LayeredBottom` (multi-layer)   | warn+halfspace | **native** (mpiramS samples nzs depths; Collins backends use `to_piecewise_breakpoints`) | **native** | **native** | **native** | **native** | **native** | — |
-| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | reject | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
+| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
 | Elastic bottom (shear)          | via BOUNCE | ✓ (auto → rams0.5) | KrakenC only (Kraken rejects) | ✓ (via KrakenC) | ✓ | ✓ | ✓ | ✓ |
 | Reflection file (.brc / .trc)   | ✓ | — | ✓ | ✓ | ✓ | — | — | **output** |
 | Altimetry (rough surface)       | ✓ | ✓ (auto → ramsurf1.5) | — | — | — | — | — | — |
@@ -477,11 +484,15 @@ representation reachable through `RunMode.BROADBAND`.
 > honoured. To keep range-dependent SSP / bottom plumbed all the way
 > through, choose an env that routes to mpiramS.
 
-`reject` = the wrapper raises `ConfigurationError` (or equivalent) up front;
-`warn+collapse` = uacpy collapses to a range-independent approximation and
-warns; `warn+median` / `warn+approx` = same idea with a model-specific
-heuristic (Bellhop uses the median bottom; KrakenField uses an averaged
-profile across segments).
+`warn+collapse` = uacpy emits a `UserWarning` and collapses the env to a
+range-independent approximation via
+`Environment.get_range_independent_approximation(method=…)`. The
+representative depth is selected by the wrapper's
+`range_independent_method` constructor kwarg (default `'max'` —
+guarantees source/receiver depths stay above the seafloor; other valid
+values are `'min'`, `'median'`, `'mean'`). `warn+median` / `warn+approx`
+= model-specific heuristics (Bellhop uses the median bottom; KrakenField
+uses an averaged profile across segments).
 
 ### 5.3 Bellhop — ray/beam tracing
 
@@ -500,13 +511,21 @@ bh = Bellhop(
     source_type='R',                 # 'R' (point, cylindrical) | 'X' (line, Cartesian)
     grid_type='R',                   # 'R' (rectilinear) | 'I' (irregular)
     volume_attenuation=None,         # None | 'T' Thorp | 'F' Francois–Garrison | 'B' Biological
-    attenuation_unit='W',            # TopOpt(3): 'W' dB/λ (default), 'N' Np/m, 'F' dB/kmHz,
-                                      # 'M' dB/m, 'Q' Q-factor, 'L' loss-tangent, 'm' dB/m + per-SSP β
+    attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
+                                      # AttenuationUnits enum or letter — 'W' dB/λ (default),
+                                      # 'N' Np/m, 'F' dB/kmHz, 'M' dB/m, 'Q' Q-factor, 'L' loss-tangent
     francois_garrison_params=None,   # required when volume_attenuation='F': (T, S, pH, z_bar)
     bio_layers=None,                 # required when volume_attenuation='B': [(Z1, Z2, f0, Q, a0), ...]
     bty_interp_type='L',             # '.bty' / '.ati' interpolation: 'L' (linear) | 'C' (curvilinear)
     source_beam_pattern_file=None,   # .sbp path or (angle_deg, level_dB) array; sets RunType(3)='*'
     arrivals_format='ascii',         # 'ascii' → 'A', 'binary' → 'a' (Fortran unformatted)
+    # Cerveny / simple-Gaussian advanced beam knobs (used when beam_type ∈ {C, R, S}):
+    beam_width_type='F',             # 'F' filling | 'M' match | 'W' waveguide
+    beam_curvature='D',              # 'D' double | 'S' single | 'Z' zero
+    eps_multiplier=1.0,
+    r_loop=1.0,                      # km
+    n_image=1, ib_win=4,
+    component='P',                   # 'P' pressure | 'D' displacement
     use_tmpfs=False, verbose=False, work_dir=None,
 )
 
@@ -548,7 +567,7 @@ kwargs (defaulting to the first depth and first range when omitted —
 `np.argmin` picks the nearest gridpoint):
 
 ```python
-rts = bh.run(
+ts = bh.run(
     env, source, receiver,
     run_mode=RunMode.TIME_SERIES,
     source_waveform=s,           # 1-D ndarray (the transmitted pulse)
@@ -556,12 +575,13 @@ rts = bh.run(
     depth=50.0, range_m=2000.0,  # which receiver of the grid to pick
     time_window=None, t_start=None,
 )
-# rts.data shape (n_samples,);  rts.metadata['time'], 'fs', 'dt'
+# ts is a TimeSeriesField over a 1×1 grid:
+trace = ts.get_trace(depth=50.0, range_m=2000.0)   # → TimeTrace
 ```
 
-Without `source_waveform` you get a `TransferFunction`
-covering the full receiver grid; call `tf.to_time_trace(depth=,
-range_m=)` to extract a `TimeTrace` at one cell.
+Without `source_waveform` you get a `TransferFunction` covering the full
+receiver grid; call `tf.to_time_trace(depth=, range_m=)` to extract a
+`TimeTrace` at one cell.
 
 **Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but its
 constructor raises `NotImplementedError`. Partial 3D support is already
@@ -645,15 +665,16 @@ kr = Kraken(
     use_tmpfs=False, verbose=False, work_dir=None,
 )
 modes = kr.run(env, source, receiver, n_modes=None)
-# modes is a Field(Modes / OASNCovariance)
-# modes.metadata['k'], modes.metadata['phi'], modes.metadata['z']
+# modes is a Modes Result; access via .k, .phi, .z (also mirrored in metadata)
 
 krc = KrakenC(...)               # identical signature
 modes = krc.run(env_with_shear_bottom, source, receiver)
 ```
 
-The environment must be range-independent. For range-dependent modal
-propagation use `KrakenField`.
+For genuinely range-dependent modal propagation use `KrakenField`. When
+`Kraken` / `KrakenC` are given a range-dependent env, the wrapper emits a
+`UserWarning` and collapses to a range-independent approximation via
+`range_independent_method` (default `'max'`).
 
 Note: real Kraken cannot handle elastic media (`shear_speed > 0`); the
 wrapper rejects such environments. KrakenField also rejects the `'Q'`
@@ -697,6 +718,8 @@ sc = Scooter(
     n_mesh=0, roughness=0.0,
     rmax_multiplier=2.0,            # multiply max receiver range for k-resolution
     volume_attenuation=None,        # 'T' | 'F' | 'B' | None
+    attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
+                                     # AttenuationUnits enum or letter (W/N/F/M/Q/L)
     francois_garrison_params=None,
     bio_layers=None,
     source_type='R',                # FLP Option(1): 'R' cylindrical (default) | 'X' Cartesian
@@ -773,6 +796,11 @@ ram = RAM(
 # https://doi.org/10.3390/jmse11030496
 field = ram.run(env, source, receiver)
 ```
+
+Every constructor knob — including the Lytaev tuning pair `accuracy` and
+`theta_max` — is also accepted as a per-call override on `run()`. Pass
+e.g. `ram.run(env, source, receiver, accuracy=5e-4, theta_max=45.0)` to
+tighten the grid for one call without rebuilding the wrapper.
 
 Supported run modes per backend:
 
@@ -924,42 +952,56 @@ plumbing kwargs.
 
 ```python
 from uacpy.models import OAST, OASN, OASR, OASP
+from uacpy.models.base import RunMode
 
 # Transmission loss (wavenumber integration) — RunMode.COHERENT_TL
-oast = OAST(volume_attenuation=None,
-            francois_garrison_params=None, bio_layers=None)
+oast = OAST(
+    volume_attenuation=None,
+    francois_garrison_params=None, bio_layers=None,
+    compute_contour=False,         # add 'C' option (range-depth contour plot)
+    compute_depth_average=False,   # add 'A' option (depth-averaged TL)
+    complex_contour=True,          # 'J' option (complex integration contour)
+)
 field = oast.run(env, source, receiver)
 
-# Covariance / replicas (NOT normal modes — name is historical) — RunMode.MODES
-oasn = OASN(volume_attenuation=None,
-            francois_garrison_params=None, bio_layers=None)
-cov = oasn.run(env, source, receiver)      # Modes / OASNCovariance wrapper around .xsm
+# Spatial covariance + matched-field replicas — RunMode.COVARIANCE / RunMode.REPLICA
+oasn = OASN(volume_attenuation=None)
+cov = oasn.compute_covariance(env, source, receiver)   # Covariance result
+# Replicas need Block-X grid kwargs (replica_zmin/zmax/nz, …):
+rep = oasn.compute_replicas(
+    env, source, receiver,
+    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
+    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+)                                                       # Replicas result
 
 # Reflection coefficients — RunMode.REFLECTION
 oasr = OASR(
     angles=None,                   # default linspace(0, 90, 181)
     angle_type='grazing',          # 'grazing' (OASES native) | 'incidence' (90 - x)
+    reflection_type='P-P',         # 'P-P' (default) | 'P-SV' | 'P-Slow' | 'transmission'
     volume_attenuation=None,
     francois_garrison_params=None, bio_layers=None,
 )
 refl = oasr.run(env, source, receiver)     # ReflectionCoefficient
+# Broadband sweep: pass freq_min / freq_max / n_frequencies via kwargs:
+broad = oasr.run(env, source, receiver,
+                 freq_min=50.0, freq_max=200.0, n_frequencies=16)
+assert broad.is_broadband                           # R/phi shape (n_angles, n_freq)
 
 # Broadband / pulse transfer function (NOT parabolic-equation — see note)
-# RunMode.COHERENT_TL or RunMode.TIME_SERIES
 oasp = OASP(
     n_time_samples=4096,
     freq_max=250.0,
     volume_attenuation=None,
     francois_garrison_params=None, bio_layers=None,
 )
-field = oasp.run(env, source, receiver)
+tf = oasp.run(env, source, receiver, run_mode=RunMode.BROADBAND)
 ```
 
-OASP is the **wideband wavenumber-integration / pulse-synthesis** branch of
-OASES, not a parabolic-equation solver — the name is historical. Use OASP
-for broadband TRF or for range-dependent problems where OAST's
-range-independent kernel is inappropriate. For a narrowband RD problem,
-OAST warns and uses maximum bathymetry depth.
+OASP is the **wideband wavenumber-integration / pulse-synthesis** branch
+of OASES. Use it for broadband TRF or for range-dependent problems where
+OAST's range-independent kernel is inappropriate. For a narrowband RD
+problem, OAST warns and uses maximum bathymetry depth.
 
 `OASP.run(run_mode=BROADBAND)` returns a `TransferFunction` shaped
 `(n_d, n_r, n_f)`. With `run_mode=TIME_SERIES` plus `source_waveform`
@@ -967,10 +1009,11 @@ and `sample_rate`, the wrapper internally calls
 `tf.synthesize_time_series(...)` and returns a `TimeSeriesField`. For a
 single-cell trace use `tf.to_time_trace(depth, range_m)` → `TimeTrace`.
 
-OASN does not produce explicit mode shapes; it returns covariance
-matrices (`.xsm`) and matched-field replicas (`.rpo`), wrapped as
-`OASNCovariance` (distinct from Kraken's `Modes` — different physics).
-For true modal analysis use Kraken or KrakenC.
+OASN produces covariance matrices (`.xsm`) and matched-field replicas
+(`.rpo`), exposed via `RunMode.COVARIANCE` / `RunMode.REPLICA` and
+packaged as the typed `Covariance` / `Replicas` results. A covariance is
+a hydrophone × hydrophone correlation; replicas are frequency-domain
+Green's-function templates for matched-field processing.
 
 ### 5.12 OASES unified façade
 
@@ -1003,10 +1046,11 @@ shape, methods, and convention. Test the type with `isinstance`:
 
 ```python
 from uacpy.core.results import (
-    Result,
+    Result, PhaseReference,
     TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, Modes, OASNCovariance, ReflectionCoefficient,
+    Arrivals, Rays, ModalResult, Modes,
+    Covariance, Replicas, ReflectionCoefficient,
 )
 
 result = bellhop.run(env, source, receiver)
@@ -1024,9 +1068,11 @@ Result                              identification + metadata
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
 ├── Arrivals                        per-(isd, ird, irr) arrival lists
 ├── Rays                            list of ray paths
-├── Modes                           Kraken normal modes (k, phi, z)
-├── OASNCovariance                  OASN replica/covariance modes
-└── ReflectionCoefficient           (n_angles,) — theta, R, phi
+├── ModalResult (ABC)               base for results decomposed into modes
+│   └── Modes                       Kraken normal modes (k, phi, z)
+├── Covariance                      OASN spatial covariance C(f, i, j)
+├── Replicas                        OASN MFP replica fields (n_f, n_z, n_x, n_y, n_rcv)
+└── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_freq)
 ```
 
 ### Rays helpers
@@ -1111,7 +1157,12 @@ Every model populates these on every Field:
 
 ### Phase convention (`TransferFunction.phase_reference`)
 
-The complex pressure stored in a `TransferFunction` carries a phase whose interpretation depends on what the underlying solver produces. Only the conventions below are valid; `TransferFunction.synthesize_time_series` and `TransferFunction.to_time_trace` honour them transparently.
+`TransferFunction.phase_reference` is a typed `PhaseReference` enum
+member (subclass of `str`, so existing string comparisons still work).
+The constructor coerces a raw string via
+`PhaseReference(phase_reference)` and raises on unknown values, so a
+typo can no longer silently corrupt the IFFT path. `synthesize_time_series`
+and `to_time_trace` honour each value transparently.
 
 | Value | Models that emit it | Meaning |
 |---|---|---|
@@ -1145,11 +1196,20 @@ modes.k                          # complex wavenumbers, shape (M,)
 modes.phi                        # mode shapes, shape (nz, M)
 modes.z                          # depth grid
 
-# OASN replica/covariance modes — distinct OASNCovariance Result.
-cov = oasn.run(env, source, receiver, run_mode=RunMode.MODES)
-cov.covariance                   # spatial covariance matrix
-cov.phi                          # replica vectors
-cov.metadata['experimental']     # True — semantics differ from Kraken
+# OASN spatial covariance — Covariance Result.
+cov = oasn.compute_covariance(env, source, receiver)
+cov.covariance                   # shape (n_freq, n_rcv, n_rcv) complex
+cov.frequencies                  # (n_freq,) Hz
+cov.receiver_positions           # (n_rcv, 3) (x, y, z) in metres
+
+# OASN matched-field replicas — Replicas Result.
+rep = oasn.compute_replicas(
+    env, source, receiver,
+    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
+    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+)
+rep.replicas                     # shape (n_freq, n_z, n_x, n_y, n_rcv) complex
+rep.replica_z, rep.replica_x, rep.replica_y
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)
@@ -1178,6 +1238,8 @@ ts.data         # (n_d, n_r, n_t)
 ts.time         # (n_t,) seconds
 ts.fs           # sample rate, Hz
 trace = ts.get_trace(depth=50.0, range_m=1000.0)   # → TimeTrace
+freqs, X = ts.get_spectrum()                       # rfft along time axis
+                                                    # X shape (n_d, n_r, n_freq)
 ```
 
 There is no separate "point" receiver type. To get a single-position
@@ -1288,9 +1350,16 @@ returned from a multi-receiver EIGENRAYS run).
 from uacpy.visualization import plot_modes, plot_mode_functions, \
     plot_modes_heatmap, plot_mode_wavenumbers, plot_dispersion_curves
 
-plot_modes(field, mode_numbers=[1, 2, 3, 5, 10], normalize=True)
-plot_mode_wavenumbers(field)
-plot_dispersion_curves(...)
+plot_modes(modes, mode_numbers=[1, 2, 3, 5, 10], normalize=True)
+plot_mode_wavenumbers(modes)
+
+# plot_dispersion_curves accepts {freq: Modes_instance, ...}:
+modes_50  = kraken.compute_modes(env, source_50)
+modes_100 = kraken.compute_modes(env, source_100)
+plot_dispersion_curves({50: modes_50, 100: modes_100})
+
+# Group velocity v_g = dω/dk between two Modes at adjacent frequencies:
+v_g = modes_50.group_velocity(modes_100)            # ndarray (n_modes,)
 ```
 
 ### Environment / bathymetry / SSP
@@ -1325,21 +1394,37 @@ plot_ssp_2d(env)                 # range-dependent SSP heatmap
 
 ```python
 from uacpy.visualization import (
-    plot_arrivals, plot_time_series, plot_reflection_coefficient,
-    plot_transfer_function, plot_range_cut, plot_depth_cut,
-    plot_tl_difference,
+    plot_arrivals, plot_time_series, plot_time_trace,
+    plot_reflection_coefficient, plot_reflection_coefficient_heatmap,
+    plot_transfer_function, plot_phase_field,
+    plot_covariance, plot_replicas,
+    plot_range_cut, plot_depth_cut, plot_tl_difference,
 )
 
 # Arrivals — coloured by bounce class (direct/surface/bottom/both),
 # walks any nesting of arrivals_data automatically:
 plot_arrivals(arrivals_field)
 
-# Transfer function — accepts a single field or a dict of {name: field}
-# to overlay multiple models. Adds optional unwrapped-or-wrapped phase
-# panel below magnitude:
+# Transfer function — 1-D spectrum overlay (optionally with phase),
+# OR a (depth, range) magnitude heatmap when frequency= is supplied:
 plot_transfer_function({'Bellhop': bh, 'RAM': ram, 'Scooter': sc},
                         depth_idx=0, range_idx=0,
                         show_phase=True, unwrap_phase=False)
+plot_transfer_function(tf, frequency=120.0)         # 2-D heatmap @ 120 Hz
+
+# Phase heatmap on the (depth, range) grid for any complex Field:
+plot_phase_field(pressure_field)                    # PressureField
+plot_phase_field(tf, frequency=120.0)               # TransferFunction slice
+
+# Reflection coefficient. Single-frequency → 1-D R(θ). Broadband → 2-D
+# heatmap |R(θ, f)|; pass ``show_phase=True`` to add a phase panel.
+plot_reflection_coefficient(rc_single)
+plot_reflection_coefficient_heatmap(rc_broadband, show_phase=True)
+# `result.plot()` auto-dispatches to whichever is appropriate.
+
+# OASN spatial covariance and MFP replicas:
+plot_covariance(cov, freq_index=0)                   # |C(i,j)| heatmap
+plot_replicas(rep, freq_index=0, receiver_index=0)   # |G(z, x)| heatmap
 
 # Signed TL difference (a − b) on a diverging colormap, with the
 # bathy floor matched to plot_transmission_loss for clean side-by-side:
@@ -1575,47 +1660,57 @@ from arlpy (BSD-3-Clause) — see `uacpy/third_party/arlpy/LICENSE` and
 
 ## 9. Ambient Noise
 
+`uacpy.noise` packages a Tollefsen / Pecknold-style Wenz model
+(wind / shipping / rain / thermal / turbulence). The user-facing API
+is the :class:`WenzNoise` class plus the standalone
+:func:`compute_windnoise` helper.
+
 ```python
-from uacpy.noise import AmbientNoiseSimulator
+import numpy as np
+from uacpy.noise import WenzNoise
 
-sim = AmbientNoiseSimulator(freq=np.logspace(0, 5, 1000))   # 1 Hz – 100 kHz
+f    = np.logspace(0, 5, 1000)                     # 1 Hz – 100 kHz
+wenz = WenzNoise(f, wind_speed=15,
+                  rain_rate='moderate',
+                  water_depth='deep',
+                  shipping_level='medium')
 
-# Add contributions. Each helper takes a model name + free-form kwargs.
-# Model names must match the registry keys below — passing an unknown name
-# raises ValueError immediately.
-sim.add_wind('knudsen', wind_speed=10)
-sim.add_shipping('wenz', shipping_level=5)
-sim.add_rain('ma_nystuen', rainfall=10)              # mm/hr
-sim.add_turbulence('urick')                          # only registered key
-sim.add_thermal('mellen')
-sim.add_biological('snapping_shrimp_cato')
-sim.add_seismic('high_frequency_microseism_webb')
-sim.add_explosion('chapman', charge_kg=1, range_km=5)
+# Per-component spectral levels (dB re 1 µPa²/Hz):
+wenz.total          # incoherent sum
+wenz.shipping       # Wenz 1962
+wenz.wind           # Merklinger 1979 + Piggott 1964 shallow correction
+wenz.rain           # Torres & Costa 2019
+wenz.thermal        # Mellen 1952
+wenz.turbulence     # Nichols & Bradley 2016
+wenz.components     # (N, 6) ndarray: [total, ship, wind, rain, therm, turb]
 
-# Global parameters passed to every model that accepts them
-sim.set_global_params(wind_speed=10)
-
-components, total = sim.compute()
-#   components : {label: ndarray}  — per-model spectra (dB re 1 μPa²/Hz)
-#   total      : ndarray           — incoherent sum (dB)
-
-fig, ax = sim.plot(title="Ambient noise", show_total=True)
+fig, ax = wenz.plot()                              # all components
+fig, ax = wenz.plot(show_components=False)         # total only
 ```
 
-Registered model names per category (from `uacpy.noise.noise.MODEL_REGISTRY`):
+`shipping_level` ∈ `{'no','low','medium','high'}`, `rain_rate` ∈
+`{'no','light','moderate','heavy','veryheavy'}`, `water_depth` ∈
+`{'deep','shallow'}`. `wind_speed` is in **knots**.
 
-| Category    | Names                                                                                                      |
-|-------------|------------------------------------------------------------------------------------------------------------|
-| wind        | `piggot_merklinger`, `wilson`, `kewley`, `gsm`, `knudsen`                                                  |
-| shipping    | `wenz`, `knudsen`                                                                                          |
-| rain        | `ma_nystuen`                                                                                               |
-| turbulence  | `urick`                                                                                                    |
-| thermal     | `mellen`                                                                                                   |
-| biological  | `snapping_shrimp_cato`, `marine_mammals_wenz`, `fish_chorus_mccauley_parsons`                              |
-| seismic     | `composite`, `primary_microseism_longuet_higgins`, `secondary_microseism_hasselmann`, `high_frequency_microseism_webb` |
-| explosion   | `chapman`, `arons`, `broadband_generic`                                                                    |
+To synthesise a time-domain noise realisation from the spectrum and
+verify the round-trip, pair `WenzNoise.as_psd()` with
+:func:`uacpy.signal.ssrp` (spectral synthesis of random processes) and
+:class:`uacpy.signal.PPSD` (probability density of Welch-PSD levels):
 
-Each model documents its own parameter set.
+```python
+import uacpy
+Pxx = wenz.as_psd()                                # Pa² / Hz (linear)
+t, x, fs = uacpy.signal.ssrp(Pxx, wenz.frequencies, duration=30.0)
+ppsd = uacpy.signal.PPSD(ref=1e-6, seg_duration=1.0)
+ppsd.compute(x, fs)
+fig, ax = ppsd.plot()
+```
+
+See `examples/example_09_ambient_noise.py` for the full pipeline.
+
+References: Tollefsen & Pecknold (2018); Wenz (1962); Mellen (1952);
+Piggott (1964); Merklinger (1979); Torres & Costa (2019); Nichols &
+Bradley (2016).
 
 ---
 
@@ -1680,11 +1775,10 @@ geoacoustics, use RAM.
 **`LayeredBottom` in RAM/Bellhop collapses to a halfspace.** Use Kraken,
 Scooter, SPARC, or OASES for layered sediment.
 
-**OASN `metadata['k']` / `metadata['phi']` are empty.** OASN does not
-emit explicit mode shapes — it produces covariance matrices (`.xsm`) and
-matched-field replicas (`.rpo`). The wrapper exposes those under
-`metadata['covariance']` and stamps `experimental=True`. For production
-modal analysis use Kraken / KrakenC.
+**OASN normal modes.** OASN produces covariance matrices (`.xsm`) and
+matched-field replicas (`.rpo`), exposed via `oasn.compute_covariance(...)`
+→ `Covariance` and `oasn.compute_replicas(...)` → `Replicas`. For
+depth-eigenfunction normal modes use Kraken or KrakenC.
 
 **Bellhop ray box too small.** Increase `r_box` / `z_box` or let them
 default (1.2 × receiver extent).
@@ -1732,7 +1826,7 @@ reference machine) are flagged below — these are gated behind
 | 06 | `example_06_kraken_advanced.py`                | Modal analysis with Kraken | |
 | 07 | `example_07_all_models_comparison.py`          | All models side by side, `compare_models` + `plot_rd_bottom` | |
 | 08 | `example_08_long_range.py`                     | Convergence-zone propagation | |
-| 09 | `example_09_ambient_noise.py`                  | `AmbientNoiseSimulator` (Wenz, wind, shipping) | |
+| 09 | `example_09_ambient_noise.py`                  | Wenz ambient noise + ssrp synthesis + PPSD verification | |
 | 10 | `example_10_signal_processing.py`              | CW, chirps, matched filtering | |
 | 11 | `example_11_bellhop_run_modes.py`              | Every Bellhop run mode + `find_eigenrays` API | |
 | 12 | `example_12_attenuation_models.py`             | Thorp / Francois-Garrison / biological | |

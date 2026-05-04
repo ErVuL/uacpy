@@ -59,7 +59,7 @@ processing, ambient noise, and visualization.
 | **Scooter**       | Finite elements for range independant env                          |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
 | **RAM**           | Parabolic equation — auto-dispatches to mpiramS (broadband fluid), rams0.5 (elastic bottoms, broadband via Python freq loop), or ramsurf1.5 (rough surface, broadband via Python freq loop) based on the environment. All three backends support `COHERENT_TL`, `BROADBAND`, and `TIME_SERIES`. |
-| **OASES**         | OAST (TL) · OASN (noise) · OASR (reflection) · OASP (PE)           |
+| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |
 
 **Beyond propagation** — signal processing (waveforms, matched filtering,

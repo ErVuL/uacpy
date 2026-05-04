@@ -156,7 +156,7 @@ class PPSD:
         ax.plot(self.freqs, self.mean_psd + self.std_psd, "k--", label="Mean level ± STD")
         ax.plot(self.freqs, self.mean_psd - self.std_psd, "k--")
 
-        ax.set_title(f"[PSD-PDF {self.seg_duration}s] {title}", loc="left")
+        ax.set_title(f"[PPSD {self.seg_duration}s] {title}", loc="left")
         ax.set_xlabel("Frequency [Hz]")
         ax.set_ylabel("Level [dB]")
         ax.set_xscale("log")

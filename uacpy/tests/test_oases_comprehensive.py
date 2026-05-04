@@ -18,7 +18,7 @@ import numpy as np
 
 pytestmark = pytest.mark.requires_oases
 
-from uacpy.models import OAST, OASN, OASR, OASP, OASES
+from uacpy.models import OAST, OASN, OASR, OASP, OASES, RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 from uacpy.core.exceptions import ExecutableNotFoundError
 
@@ -135,37 +135,21 @@ class TestOASN:
         assert oasn.model_name == 'OASN'
 
     @pytest.mark.requires_binary
-    def test_oasn_compute_modes(self, oasn_env, source, receiver):
-        """Test OASN mode computation
-
-        OASN's primary output is covariance matrices (.xsm); read_oasn_covariance
-        is implemented in uacpy.io. This test verifies the high-level
-        `compute_modes` workflow succeeds and returns populated metadata.
-        """
+    def test_oasn_compute_covariance(self, oasn_env, source, receiver):
+        """OASN.compute_covariance returns a populated Covariance result."""
+        from uacpy import Covariance
         oasn = OASN(verbose=False)
-        modes = oasn.compute_modes(
-            env=oasn_env,
-            source=source,
-            n_modes=30
-        )
-
-        assert modes.field_type == 'modes'
-        # OASN outputs covariance matrices (.xsm) or replica fields (.rpo)
-        # Check that mode data exists in metadata
-        assert 'modes' in modes.metadata or 'k' in modes.metadata
-        # Check that mode data is not empty
-        if 'modes' in modes.metadata:
-            assert modes.metadata['n_modes'] > 0, "No modes extracted"
+        cov = oasn.compute_covariance(env=oasn_env, source=source, receiver=receiver)
+        assert isinstance(cov, Covariance)
+        assert cov.field_type == 'covariance'
+        assert cov.covariance.ndim == 3
+        assert cov.covariance.shape[1] == cov.covariance.shape[2] == cov.n_receivers
+        assert cov.n_frequencies >= 1
 
     @pytest.mark.requires_binary
-    def test_oasn_elastic_modes(self, source, receiver):
-        """OASN accepts an elastic-bottom env and returns a modes Field.
-
-        The wrapper may emit a UserWarning when the .xsm payload is empty
-        (under-documented format). Quantitative mode content is exercised by
-        Kraken/KrakenC tests; here we only verify the binary completes and
-        the wrapper packages a Field of type ``modes``.
-        """
+    def test_oasn_elastic_covariance(self, source, receiver):
+        """OASN accepts an elastic-bottom env and returns a Covariance."""
+        from uacpy import Covariance
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0,
@@ -182,8 +166,8 @@ class TestOASN:
         )
 
         oasn = OASN(verbose=False)
-        modes = oasn.compute_modes(env=env, source=source)
-        assert modes.field_type == 'modes'
+        cov = oasn.compute_covariance(env=env, source=source, receiver=receiver)
+        assert isinstance(cov, Covariance)
 
 
 class TestOASR:
@@ -223,27 +207,20 @@ class TestOASR:
 
     @pytest.mark.requires_binary
     def test_oasr_reflection_coefficients(self, oasr_env, source, receiver):
-        """Test OASR reflection coefficient computation."""
+        """OASR populates the typed ReflectionCoefficient attributes."""
+        from uacpy import ReflectionCoefficient
         oasr = OASR(verbose=False)
-
-        # OASR computes reflection coefficients vs angle
         result = oasr.run(
-            env=oasr_env,
-            source=source,
-            receiver=receiver,
-            angle_min=0.0,
-            angle_max=90.0,
-            n_angles=91
+            env=oasr_env, source=source, receiver=receiver,
+            angle_min=0.0, angle_max=90.0, n_angles=91,
         )
 
+        assert isinstance(result, ReflectionCoefficient)
         assert result.field_type == 'reflection_coefficients'
-        # Should have reflection coefficient data in metadata
-        assert 'magnitude' in result.metadata and 'angles_or_slowness' in result.metadata
-        # Data should not be empty
-        assert len(result.metadata['magnitude']) > 0, "No magnitude data returned"
-        assert len(result.metadata['angles_or_slowness']) > 0, "No angle/slowness data returned"
-        assert len(result.metadata['magnitude'][0]) > 0, "Empty magnitude array"
-        assert len(result.metadata['angles_or_slowness'][0]) > 0, "Empty angle/slowness array"
+        assert result.theta.shape == (91,)
+        assert result.R.shape == result.phi.shape
+        assert result.R.size > 0 and np.all(np.isfinite(result.R))
+        assert np.all((result.R >= 0.0) & (result.R <= 1.0 + 1e-6))
 
     @pytest.mark.requires_binary
     def test_oasr_angle_resolution(self, oasr_env, source, receiver):
@@ -326,23 +303,25 @@ class TestOASP:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oasp_broadband(self, oasp_env, receiver):
-        """Test OASP broadband output."""
-        # Multiple frequencies for broadband
+        """OASP run_mode=BROADBAND returns a populated TransferFunction."""
+        from uacpy.core.results import TransferFunction
         source = Source(
             depth=50.0,
-            frequency=np.array([30.0, 50.0, 70.0])
+            frequency=np.array([30.0, 50.0, 70.0]),
         )
 
         oasp = OASP(verbose=False)
-        result = oasp.compute_tl(
+        result = oasp.run(
             env=oasp_env,
             source=source,
-            receiver=receiver
+            receiver=receiver,
+            run_mode=RunMode.BROADBAND,
         )
 
-        assert result.field_type == 'tl'
-        # Should handle multiple frequencies
-        assert 'frequencies' in result.metadata or result.frequencies is not None
+        assert isinstance(result, TransferFunction)
+        assert result.field_type == 'transfer_function'
+        assert result.frequencies is not None and len(result.frequencies) > 0
+        assert result.data.shape[:2] == (len(receiver.depths), len(receiver.ranges))
 
 
 class TestOASESUnified:

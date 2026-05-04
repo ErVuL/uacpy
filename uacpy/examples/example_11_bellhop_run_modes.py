@@ -383,8 +383,7 @@ def scenario_c_eigenrays_arrivals():
 
     from uacpy.visualization.plots import plot_rays
 
-    rays_list = getattr(result_eigen, 'rays', None) or getattr(result_eigen, 'ray_data', None)
-    n_eigenrays = len(rays_list) if rays_list else 0
+    n_eigenrays = len(result_eigen.rays)
 
     arrivals_ok = False
     if result_arr is not None:
@@ -461,11 +460,14 @@ def scenario_c_eigenrays_arrivals():
     plt.close(fig)
 
     print(f"\n  Analysis complete:")
-    if hasattr(result_eigen, 'ray_data') and result_eigen.ray_data:
-        print(f"    • Eigenrays found: {len(result_eigen.ray_data)}")
-    if hasattr(result_arr, 'arrival_data') and result_arr.arrival_data:
-        print(f"    • Arrivals detected: {len(result_arr.arrival_data)}")
-        print(f"    • Time spread: {max(arr['travel_time'] for arr in result_arr.arrival_data) - min(arr['travel_time'] for arr in result_arr.arrival_data):.4f} s")
+    if result_eigen.rays:
+        print(f"    • Eigenrays found: {len(result_eigen.rays)}")
+    if arrivals_ok and result_arr is not None:
+        rec = result_arr.to_table(range_idx=0, depth_idx=0, src_idx=0)
+        if rec:
+            delays = [r['delay'] for r in rec]
+            print(f"    • Arrivals detected: {len(rec)}")
+            print(f"    • Time spread: {max(delays) - min(delays):.4f} s")
 
     print("\n✓ Generated: output/example_11c_eigenrays_arrivals.png")
 

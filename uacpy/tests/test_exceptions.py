@@ -112,13 +112,17 @@ class TestUnsupportedOperations:
         assert "Kraken" in str(exc_info.value) or "OASN" in str(exc_info.value)
 
     @pytest.mark.requires_binary
-    def test_kraken_range_dependent_error(self, range_dependent_env, source):
-        """Test that Kraken raises error for range-dependent environment."""
+    def test_kraken_range_dependent_warns_and_collapses(
+        self, range_dependent_env, source,
+    ):
+        """Kraken warns and collapses range-dependent envs to range-independent."""
+        import warnings as _warn
         kraken = Kraken(verbose=False)
-
-        # Should raise EnvironmentError for range-dependent environments
-        with pytest.raises(EnvironmentError, match="does not support range-dependent"):
+        with _warn.catch_warnings(record=True) as caught:
+            _warn.simplefilter('always')
             modes = kraken.compute_modes(env=range_dependent_env, source=source)
+        assert modes.n_modes > 0
+        assert any('range-dependent' in str(w.message) for w in caught)
 
 
 class TestFieldErrors:
