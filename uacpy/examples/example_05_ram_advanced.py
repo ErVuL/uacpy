@@ -40,6 +40,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy import RangeDependentBottom
 from uacpy.models import RAM
 from uacpy.visualization.plots import (
@@ -100,8 +101,7 @@ def main():
     env = uacpy.Environment(
         name="Sediment Transition with Sloping Shelf",
         depth=150.0,
-        ssp_type='pchip',
-        ssp_data=ssp_1d,
+        ssp=SoundSpeedProfile.from_pairs(ssp_1d, interp='pchip'),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )
@@ -208,7 +208,7 @@ def main():
 
     # Plot 4: TL field result
     if result is not None:
-        fig4, ax4, cbar4 = plot_transmission_loss(
+        fig4, ax4 = plot_transmission_loss(
             result, env,
             contours=[70, 85, 100],
             show_colorbar=True,

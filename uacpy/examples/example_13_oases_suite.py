@@ -21,6 +21,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import OAST, OASN, OASR, OASP
 
 def main():
@@ -32,8 +33,9 @@ def main():
     env = uacpy.Environment(
         name="OASES Demonstration",
         depth=100,
-        ssp_type='linear',
-        ssp_data=[(0, 1500), (100, 1520)],
+        ssp=SoundSpeedProfile.from_pairs(
+            [(0, 1500), (100, 1520)], interp='linear',
+        ),
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700,
@@ -124,7 +126,7 @@ def main():
     print("\nGenerating visualizations...")
 
     # Plot 1: OAST transmission loss (TLField → plot_transmission_loss).
-    fig1, _, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
+    fig1, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
     fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
                  dpi=150, bbox_inches='tight')
     plt.close(fig1)
@@ -197,7 +199,7 @@ def main():
             source_depths=result_oasp.source_depths,
             frequency=f_center,
         )
-        fig4, _, _ = uacpy.plot.plot_transmission_loss(tl_field, env=env)
+        fig4, _ = uacpy.plot.plot_transmission_loss(tl_field, env=env)
         fig4.savefig(OUTPUT_DIR / 'example_13_oasp_tl.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig4)

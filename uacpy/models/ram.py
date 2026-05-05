@@ -36,7 +36,7 @@ from typing import Optional, List
 import scipy.interpolate
 
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
-from uacpy.core.environment import Environment
+from uacpy.core.environment import Environment, LayeredBottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, TLField, TransferFunction
@@ -209,6 +209,7 @@ class RAM(PropagationModel):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -276,7 +277,9 @@ class RAM(PropagationModel):
             cap; the tighter of the two wins. Default 5.0 — set to 1.0
             to disable, raise for unusually noisy long-range runs.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
 
         self._supported_modes = [
             RunMode.COHERENT_TL,
@@ -290,10 +293,15 @@ class RAM(PropagationModel):
         # or to rams0.5 / ramsurf1.5 (range-0 only) for elastic / rough surface.
         # Flag everything True at the dispatcher level; the Collins backends
         # already emit their own warnings when they drop range-dep data.
+        self._supports_range_dependent_bathymetry = True
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = True
         self._supports_layered_bottom = True
         self._supports_range_dependent_layered_bottom = True
+        # Elastic bottom auto-routes to rams0.5; surface elastic isn't
+        # supported by any backend. _drop_unsupported_surface_shear() in
+        # run() warns + zeros surface shear when present.
+        self._supports_elastic_media = True
 
         if executable is not None:
             self.executable = Path(executable)
@@ -409,7 +417,7 @@ class RAM(PropagationModel):
         if self.c0 is not None:
             return float(self.c0)
         from uacpy.models._pade_optimizer import optimal_c0
-        speeds = [float(s[1]) for s in env.ssp_data]
+        speeds = [float(c) for c in env.ssp.data[:, 0]]
         b = getattr(env, 'bottom', None)
         if b is not None and getattr(b, 'sound_speed', None):
             speeds.append(float(b.sound_speed))
@@ -470,9 +478,8 @@ class RAM(PropagationModel):
         constant at its last value; sediment properties are handled
         separately by the profl() routine in mpiramS.
         """
-        ssp_data = env.ssp_data
-        depths_orig = ssp_data[:, 0].copy()
-        speeds_orig = ssp_data[:, 1] if ssp_data.ndim == 2 else ssp_data[:, 1].copy()
+        depths_orig = env.ssp.depths.copy()
+        speeds_orig = env.ssp.data[:, 0].copy()
 
         zmax_pe = self._compute_zmax(env, freq)
 
@@ -490,34 +497,14 @@ class RAM(PropagationModel):
 
         ssp_filename = 'ssp.dat'
 
-        if env.has_range_dependent_ssp() and \
-                getattr(env, 'ssp_2d_matrix', None) is not None:
+        if env.ssp.is_range_dependent:
             self._log("Using 2D SSP matrix", level='info')
-            ranges_km = env.ssp_2d_ranges.copy()
-
-            # Depth axis for the 2D matrix. Prefer a dedicated
-            # ``ssp_2d_depths`` attribute; fall back to ``ssp_data[:, 0]``
-            # only when its length matches the matrix rows. Environment
-            # synthesises dummy ``np.arange(n_depth)`` depths when the user
-            # omits ``ssp_data`` (see environment.py:656-658), which would
-            # silently mis-index the 2D profiles — refuse that case.
-            ssp_2d_depths = getattr(env, 'ssp_2d_depths', None)
-            if ssp_2d_depths is not None:
-                ssp_depths = np.asarray(ssp_2d_depths, dtype=np.float64)
-            else:
-                ssp_depths = env.ssp_data[:, 0]
-            if len(ssp_depths) != env.ssp_2d_matrix.shape[0]:
-                from uacpy.core.exceptions import ConfigurationError
-                raise ConfigurationError(
-                    f"2D SSP depth axis length ({len(ssp_depths)}) does not "
-                    f"match ssp_2d_matrix rows ({env.ssp_2d_matrix.shape[0]}). "
-                    f"Provide ssp_data with the matching depth column, or set "
-                    f"env.ssp_2d_depths explicitly."
-                )
+            ranges_km = env.ssp.ranges_km.copy()
+            ssp_depths = env.ssp.depths
 
             speeds_2d = np.zeros((len(depths), len(ranges_km)))
             for i in range(len(ranges_km)):
-                profile = env.ssp_2d_matrix[:, i]
+                profile = env.ssp.data[:, i]
                 interp_func = scipy.interpolate.interp1d(
                     ssp_depths, profile, kind='linear',
                     bounds_error=False,
@@ -575,7 +562,7 @@ class RAM(PropagationModel):
                 range_m = 0.0
             ssp = env.get_ssp_at_range(range_m)
         else:
-            ssp = env.ssp_data  # (depth, speed)
+            ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
 
     def _prepare_bottom_properties(self, env: Environment, work_dir=None):
@@ -624,7 +611,7 @@ class RAM(PropagationModel):
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
                     cwg_local = float(np.interp(rdl.depths[i],
-                                                env.ssp_data[:, 0], env.ssp_data[:, 1]))
+                                                env.ssp.depths, env.ssp.data[:, 0]))
 
                 # Points 0,1 = water (zero perturbation), rest = sediment
                 cs_profiles[0, i] = 0.0
@@ -696,7 +683,7 @@ class RAM(PropagationModel):
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
                     cwg_local = float(np.interp(bottom_rd.depths[i],
-                                                env.ssp_data[:, 0], env.ssp_data[:, 1]))
+                                                env.ssp.depths, env.ssp.data[:, 0]))
                 cs_offset = cb - cwg_local
                 cs_profiles[:2, i] = 0.0
                 cs_profiles[2:, i] = cs_offset
@@ -795,6 +782,7 @@ class RAM(PropagationModel):
         accuracy=_UNSET,
         theta_max=_UNSET,
         timeout=_UNSET,
+        frequencies=None,
         source_waveform=None,
         sample_rate=None,
         **kwargs
@@ -818,6 +806,11 @@ class RAM(PropagationModel):
             removed (``metadata['phase_reference']='psif_envelope'``).
             ``TIME_SERIES`` — real pressure p(t); requires
             ``source_waveform`` and ``sample_rate``.
+        frequencies : ndarray, optional
+            Frequency vector (Hz) for ``BROADBAND`` / ``TIME_SERIES``.
+            When provided, overrides ``source.frequency`` for the duration
+            of this call (mirrors Bellhop / Kraken / Scooter). When
+            ``None``, RAM uses ``source.frequency`` as the frequency grid.
         source_waveform : ndarray, optional
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
@@ -846,6 +839,15 @@ class RAM(PropagationModel):
                 stacklevel=2,
             )
 
+        if frequencies is not None:
+            freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
+            if freqs_arr.size == 0:
+                raise ValueError(
+                    "RAM.run(frequencies=…) requires at least one positive "
+                    "frequency"
+                )
+            source = Source(depth=source.depth, frequency=freqs_arr)
+
         with _resolve_overrides(
             self,
             zmax=zmax,
@@ -865,11 +867,13 @@ class RAM(PropagationModel):
             theta_max=theta_max,
             timeout=timeout,
         ):
+            env = self._project_environment(env)
             self.validate_inputs(env, source, receiver)
 
             backend = self.select_backend(env)
             self._log(f"RAM dispatch → {backend} backend", level='info')
             self._warn_on_mpirams_only_overrides(backend)
+            env = self._drop_unsupported_surface_shear(env)
 
             if backend == 'mpiramS':
                 if run_mode == RunMode.BROADBAND:
@@ -1257,7 +1261,7 @@ class RAM(PropagationModel):
             )
             seg = dict(
                 range=0.0,
-                water_ssp=[(float(d), float(c)) for d, c in env.ssp_data],
+                water_ssp=[(float(d), float(c)) for d, c in env.ssp.to_pairs()],
                 bottom_c=bp['sound_speed'],
                 bottom_cs=bp['shear_speed'],
                 bottom_rho=bp['density'],
@@ -1272,7 +1276,7 @@ class RAM(PropagationModel):
             )
             seg = dict(
                 range=0.0,
-                water_ssp=[(float(d), float(c)) for d, c in env.ssp_data],
+                water_ssp=[(float(d), float(c)) for d, c in env.ssp.to_pairs()],
                 bottom_c=bp['sound_speed'],
                 bottom_rho=bp['density'],
                 bottom_attn=bp['attenuation'],
@@ -1535,39 +1539,17 @@ class RAM(PropagationModel):
         )
 
     def _fallback_layered_from_bottom(self, env: Environment) -> 'LayeredBottom':
-        """Build a one-layer LayeredBottom from a plain ``env.bottom``.
+        """Synthetic single-layer LayeredBottom for the Collins backends.
 
-        The Collins backends always need a layered representation. When
-        the user only provided a half-space ``BoundaryProperties``,
-        wrap it as a single sediment layer (a few metres thick) above
-        an identical half-space so ``to_piecewise_breakpoints`` has
-        something to emit.
+        Delegates to :meth:`LayeredBottom.from_halfspace` so the wrapping
+        rule (10% of water depth, 5 m floor) is shared with any other
+        wrapper that needs a synthetic sediment layer.
         """
-        from uacpy.core.environment import (
-            LayeredBottom, SedimentLayer, BoundaryProperties,
-        )
-        b = env.bottom
-        if b is None:
+        if env.bottom is None:
             raise ValueError(
                 "RAM backend requires env.bottom (or env.bottom_layered)"
             )
-        layer = SedimentLayer(
-            thickness=max(env.depth * 0.1, 5.0),
-            sound_speed=getattr(b, 'sound_speed', 1600.0) or 1600.0,
-            density=getattr(b, 'density', 1.5) or 1.5,
-            attenuation=getattr(b, 'attenuation', 0.5) or 0.5,
-            shear_speed=getattr(b, 'shear_speed', 0.0) or 0.0,
-            shear_attenuation=getattr(b, 'shear_attenuation', 0.0) or 0.0,
-        )
-        halfspace = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=layer.sound_speed,
-            density=layer.density,
-            attenuation=layer.attenuation,
-            shear_speed=layer.shear_speed,
-            shear_attenuation=layer.shear_attenuation,
-        )
-        return LayeredBottom(layers=[layer], halfspace=halfspace)
+        return LayeredBottom.from_halfspace(env.bottom, env.depth)
 
     # Settings that only the mpiramS backend consumes. When the dispatcher
     # picks rams0.5 / ramsurf1.5 and one of these has been overridden from
@@ -1583,6 +1565,27 @@ class RAM(PropagationModel):
         ('n_sed_points', 50),
     )
 
+
+    def _drop_unsupported_surface_shear(self, env: Environment) -> Environment:
+        """No RAM backend reads surface shear properties; warn and zero them."""
+        s = getattr(env, 'surface', None)
+        cs = getattr(s, 'shear_speed', None) if s is not None else None
+        if cs is None or float(cs) <= 0.0:
+            return env
+        import warnings as _w
+        e = env.copy()
+        e.surface = self._collapse_elastic_boundary(
+            e.surface, self.elastic_collapse_method, default_depth=0.0,
+        )
+        _w.warn(
+            "RAM: surface shear is not supported by any backend "
+            "(mpiramS / rams0.5 / ramsurf1.5 all model the surface as "
+            "pressure-release); collapsed surface shear "
+            f"(elastic_collapse_method={self.elastic_collapse_method!r}). "
+            "For an elastic surface use Bellhop or KrakenC.",
+            UserWarning, stacklevel=3,
+        )
+        return e
 
     def _warn_on_mpirams_only_overrides(self, backend: str) -> None:
         if backend == 'mpiramS':
@@ -1652,8 +1655,8 @@ class RAM(PropagationModel):
 
         # Spectrum bounds: slowest / fastest acoustic speeds in the env.
         speeds = [c0_pe]
-        for s in env.ssp_data:
-            speeds.append(float(s[1]))
+        for c in env.ssp.data[:, 0]:
+            speeds.append(float(c))
         b = getattr(env, 'bottom', None)
         if b is not None and getattr(b, 'sound_speed', None):
             speeds.append(float(b.sound_speed))

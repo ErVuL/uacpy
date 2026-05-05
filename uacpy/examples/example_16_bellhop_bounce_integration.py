@@ -29,6 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, BoundaryProperties,
@@ -66,7 +67,6 @@ def demo_bellhop_bounce():
     env = uacpy.Environment(
         name='Elastic Sandy Bottom',
         depth=100,
-        ssp_type='isovelocity',
         sound_speed=1500.0,
         bottom=bottom,
     )
@@ -133,7 +133,7 @@ def demo_bellhop_bounce():
     print(f"  Saved: example_16_bounce_comparison.png")
 
     # Also plot TL with contours using the plot function
-    fig2, ax2, _ = plot_transmission_loss(result_bounce, env, contours=[60, 70, 80])
+    fig2, ax2 = plot_transmission_loss(result_bounce, env, contours=[60, 70, 80])
     ax2.set_title('Bellhop + BOUNCE TL with Contours')
     plt.savefig(OUTPUT_DIR / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
     print(f"  Saved: example_16_bounce_tl.png")
@@ -168,7 +168,6 @@ def demo_layered_bottom():
     env = uacpy.Environment(
         name='Continental Shelf - Layered Sediment',
         depth=200.0,
-        ssp_type='isovelocity',
         sound_speed=1500.0,
         bottom=layered,
     )
@@ -189,7 +188,7 @@ def demo_layered_bottom():
         print(f"Scooter TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
 
         # Plot TL
-        fig1, ax1, _ = plot_transmission_loss(result, env, contours=[70, 80, 90])
+        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 80, 90])
         ax1.set_title('Scooter TL — Layered Sediment (3 layers + halfspace)')
         plt.savefig(OUTPUT_DIR / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
         print(f"  Saved: example_16_layered_tl.png")
@@ -243,10 +242,10 @@ def demo_range_dependent_bottom():
     env = uacpy.Environment(
         name='Shelf Break: Mud to Sand',
         depth=250.0,
-        ssp_type='pchip',
-        ssp_data=ssp_1d,
-        ssp_2d_ranges=ranges_ssp,
-        ssp_2d_matrix=ssp_2d,
+        ssp=SoundSpeedProfile.from_2d(
+            depths=ssp_1d[:, 0], ranges_km=ranges_ssp, matrix=ssp_2d,
+            interp='pchip',
+        ),
         bathymetry=np.column_stack([bottom_rd.ranges_km * 1000, bottom_rd.depths]),
         bottom=bottom_rd,
     )
@@ -264,7 +263,7 @@ def demo_range_dependent_bottom():
         result = ram.run(env, source, receiver)
         print(f"RAM TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
 
-        fig1, ax1, _ = plot_transmission_loss(result, env, contours=[70, 85, 100])
+        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
         plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
         print(f"  Saved: example_16_rd_bottom_tl.png")
@@ -354,7 +353,6 @@ def demo_rd_layered_bottom():
     env = uacpy.Environment(
         name='Shelf: Mud/Clay to Sand/Rock',
         depth=280.0,
-        ssp_type='isovelocity',
         sound_speed=1500.0,
         bottom=rdl,
     )
@@ -376,7 +374,7 @@ def demo_rd_layered_bottom():
         print(f"RAM TL: {np.nanmin(result.data):.1f} to "
               f"{np.nanmax(result.data):.1f} dB")
 
-        fig1, ax1, _ = plot_transmission_loss(result, env, contours=[70, 85, 100])
+        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
         plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
                     bbox_inches='tight')

@@ -17,7 +17,7 @@ import numpy as np
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField, RAM
-from uacpy.core.environment import BoundaryProperties
+from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
 
 
 class TestPekerisWaveguide:
@@ -46,7 +46,6 @@ class TestPekerisWaveguide:
             name='Pekeris Waveguide',
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
         return env
@@ -218,7 +217,6 @@ class TestRangeDependentEnvironment:
             name='Sloping Bottom',
             depth=100.0,  # Initial depth
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bathymetry=bathymetry,
             bottom=bottom
         )
@@ -282,7 +280,7 @@ class TestMunkProfile:
         env = uacpy.Environment(
             name='Munk Profile',
             depth=5000.0,
-            ssp_type='munk',
+            ssp=SoundSpeedProfile.from_munk(5000.0),
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,
@@ -349,8 +347,7 @@ class TestInterpolationAccuracy:
         env = uacpy.Environment(
             name='Test',
             depth=100.0,
-            ssp_type='linear',
-            ssp_data=ssp_data
+            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
         )
 
         # At exact points, should return exact values
@@ -367,8 +364,7 @@ class TestInterpolationAccuracy:
         env = uacpy.Environment(
             name='Test',
             depth=100.0,
-            ssp_type='linear',
-            ssp_data=ssp_data
+            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
         )
 
         # Interpolate at intermediate points
@@ -394,7 +390,6 @@ class TestNumericalStability:
             name='Very Shallow',
             depth=10.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,
@@ -420,7 +415,6 @@ class TestNumericalStability:
             name='High Frequency',
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,

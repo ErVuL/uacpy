@@ -15,16 +15,16 @@ class TestEnvironment:
         """Test creating a simple isovelocity environment."""
         assert simple_env.name == "Test Environment"
         assert simple_env.depth == 100.0
-        assert simple_env.sound_speed == 1500.0
-        assert simple_env.ssp_type == 'isovelocity'
+        assert float(simple_env.ssp.data[0, 0]) == 1500.0
+        assert simple_env.ssp.interp == 'isovelocity'
         assert not simple_env.is_range_dependent
 
     def test_create_munk_environment(self, munk_env):
         """Test creating environment with Munk profile."""
         assert munk_env.name == "Munk Profile"
         assert munk_env.depth == 100.0
-        assert len(munk_env.ssp_data) == 21
-        assert munk_env.ssp_type == 'pchip'
+        assert munk_env.ssp.n_depths == 21
+        assert munk_env.ssp.interp == 'pchip'
 
     def test_range_dependent_environment(self, range_dependent_env):
         """Test range-dependent environment."""
@@ -33,10 +33,10 @@ class TestEnvironment:
         assert range_dependent_env.bathymetry[0, 1] == 80.0
         assert range_dependent_env.bathymetry[-1, 1] == 120.0
 
-    def test_ssp_data_shape(self, simple_env, munk_env):
-        """Test SSP data has correct shape."""
-        assert simple_env.ssp_data.shape[1] == 2  # [depth, sound_speed]
-        assert munk_env.ssp_data.shape[1] == 2
+    def test_ssp_pairs_shape(self, simple_env, munk_env):
+        """SSP pairs view always has shape (N, 2)."""
+        assert simple_env.ssp.to_pairs().shape[1] == 2
+        assert munk_env.ssp.to_pairs().shape[1] == 2
 
     def test_get_representative_depth(self, range_dependent_env):
         """Test getting representative depth for range-dependent environment."""
@@ -46,7 +46,7 @@ class TestEnvironment:
     def test_invalid_depth(self):
         """Test that negative depth raises error."""
         with pytest.raises(ValueError):
-            uacpy.Environment(name="Test", depth=-10, sound_speed=1500, ssp_type='isovelocity')
+            uacpy.Environment(name="Test", depth=-10, sound_speed=1500)
 
 
 class TestSource:

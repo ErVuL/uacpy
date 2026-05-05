@@ -46,9 +46,8 @@ def segment_environment_by_range(
     bathy_ranges_km = env.bathymetry[:, 0] / 1000.0
     max_range_km = bathy_ranges_km[-1]
 
-    # Also consider 2D SSP range extent (env may be RD via SSP only)
-    if hasattr(env, 'ssp_2d_ranges') and env.ssp_2d_ranges is not None:
-        max_range_km = max(max_range_km, np.max(env.ssp_2d_ranges))
+    if env.ssp.is_range_dependent:
+        max_range_km = max(max_range_km, float(env.ssp.ranges_km[-1]))
 
     if max_range_km <= 0:
         return [(0.0, env)]
@@ -61,8 +60,8 @@ def segment_environment_by_range(
         # Automatic segmentation based on bathymetry points,
         # 2D SSP range points, and maximum segment length
         key_ranges_km = set(bathy_ranges_km)
-        if hasattr(env, 'ssp_2d_ranges') and env.ssp_2d_ranges is not None:
-            key_ranges_km.update(env.ssp_2d_ranges)
+        if env.ssp.is_range_dependent:
+            key_ranges_km.update(env.ssp.ranges_km)
         key_ranges_km = sorted(key_ranges_km)
 
         segment_ranges_km = [key_ranges_km[0]]
@@ -112,16 +111,18 @@ def segment_environment_by_range(
         c_at_depth = float(np.interp(depth_rounded, ssp_at_range[:, 0], ssp_at_range[:, 1]))
         ssp_for_segment = np.vstack([ssp_for_segment, [depth_rounded, c_at_depth]])
 
+        from uacpy.core.environment import SoundSpeedProfile
+        seg_ssp = SoundSpeedProfile.from_pairs(
+            ssp_for_segment, interp=env.ssp.interp,
+        )
         env_segment = Environment(
             name=f"{env.name} @ {range_km:.1f}km",
             depth=depth_at_range,
-            ssp_type=env.ssp_type,
-            ssp_data=ssp_for_segment,
-            sound_speed=env.sound_speed,
-            bathymetry=None,  # Flat bottom at depth_at_range
+            ssp=seg_ssp,
+            bathymetry=None,
             bottom=bottom_segment,
             surface=env.surface,
-            attenuation=env.attenuation
+            volume_attenuation=env.volume_attenuation
         )
 
         segments.append((range_km, env_segment))

@@ -50,7 +50,6 @@ def demo_stacked_time_series():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         depth=100,
-        ssp_type='isovelocity',
         sound_speed=1500,
         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'),
     )
@@ -100,7 +99,6 @@ def demo_modes_heatmap():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         depth=100,
-        ssp_type='isovelocity',
         sound_speed=1500,
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
@@ -123,14 +121,14 @@ def demo_modes_heatmap():
     n_modes = len(modes.metadata.get('k', []))
     print(f"✓  ({n_modes} modes)")
 
-    fig, _, _ = plot_modes_heatmap(modes, mode_range=None,
+    fig, _ = plot_modes_heatmap(modes, mode_range=None,
                                    normalize=True, figsize=(14, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_all.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  ✓ saved {out.name}")
 
-    fig, _, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
+    fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
                                    normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')

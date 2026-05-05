@@ -57,14 +57,11 @@ class Receiver:
 
     def __init__(
         self,
-        depths: Optional[Union[float, List[float], np.ndarray]] = None,
+        depths: Union[float, List[float], np.ndarray],
         ranges: Optional[Union[float, List[float], np.ndarray]] = None,
         receiver_type: str = 'grid',
     ):
         self.receiver_type = receiver_type
-
-        if depths is None:
-            depths = 0.0
         if ranges is None:
             ranges = 0.0
 

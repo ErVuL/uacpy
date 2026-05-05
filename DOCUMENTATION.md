@@ -68,10 +68,18 @@ plt.show()
 ```python
 # Core
 from uacpy import (
-    Environment, Source, Receiver, Field,
+    Environment, Source, Receiver,
+    SoundSpeedProfile,
     BoundaryProperties, RangeDependentBottom,
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
     generate_sea_surface,
+)
+# Result types (used for type checks in user code)
+from uacpy import (
+    Result, TLField, PressureField, TransferFunction,
+    TimeSeriesField, TimeTrace,
+    Arrivals, Rays, ModalResult, Modes,
+    Covariance, Replicas, ReflectionCoefficient,
 )
 
 # Models
@@ -161,16 +169,25 @@ Which modes each model supports is listed in [Section 5](#5-propagation-models).
 
 ```python
 Model(
-    use_tmpfs=False,             # Use RAM-backed tmpfs for scratch I/O (Linux, faster)
-    verbose=False,               # Print per-step progress
-    work_dir=None,               # Pin scratch directory instead of using a temp dir
-    range_independent_method='max',
-                                  # Bathymetry collapse for range-indep models
-                                  # ('min' | 'median' | 'mean' | 'max') when env
-                                  # is range-dependent. 'max' keeps source/receiver
-                                  # depths above the seafloor.
+    use_tmpfs=False,                          # tmpfs scratch I/O (Linux, faster)
+    verbose=False,                            # print per-step progress
+    work_dir=None,                            # pin scratch dir (default: temp)
+    # Per-feature collapse policies — applied by ``_project_environment``
+    # at the top of ``run()`` when env contains a feature this model does
+    # not natively support. Defaults preserve historical behaviour.
+    bathymetry_collapse_method='max',         # max|median|mean|min|initial
+    ssp_collapse_method='r0',                 # r0|rmax|mean|median
+    bottom_collapse_method='r0',              # r0|rmax|mean|median
+    layered_collapse_method='halfspace',      # halfspace|top_layer|volume_average
+    rd_layered_collapse_method='halfspace',   # same set as layered
+    altimetry_collapse_method='drop',         # drop
+    elastic_collapse_method='fluid',          # fluid (zero shear) | vacuum
 )
 ```
+
+Each unsupported feature emits one `UserWarning` per `run()` citing the
+chosen method and an alternative-model hint. See `_project_environment`
+in `models/base.py`.
 
 Most models add their own tuning parameters on top of these (e.g. `dr`, `dz`,
 `beam_type`, `cmin`, `cmax`, `volume_attenuation`). Every constructor
@@ -186,50 +203,61 @@ sentinel pattern — see each model for specifics.
 ```python
 uacpy.Environment(
     name: str,
-    depth: float,                                     # max water depth (m)
-    ssp_type: str = 'isovelocity',                    # see table below
-    ssp_data = None,                                  # list[(z, c)] or ndarray
-    ssp_2d_ranges = None,                             # range-dep SSP: km
-    ssp_2d_matrix = None,                             # range-dep SSP: (nz, nr)
-    sound_speed: float = 1500.0,                      # used when ssp_type='isovelocity'
-    bathymetry = None,                                # list[(r_m, z_m)] or ndarray
-    altimetry  = None,                                # list[(r_m, z_m)] sea surface
-    bottom   = None,                                  # Boundary / RD / Layered / RDLayered
-    surface  = None,                                  # BoundaryProperties (default: vacuum)
-    attenuation: float = 0.0,                         # water volume attenuation (dB/λ)
+    depth: float,                          # max water depth (m)
+    ssp = None,                            # SoundSpeedProfile (None → isovelocity)
+    sound_speed: float = 1500.0,           # default isovelocity speed when ssp=None
+    bathymetry = None,                     # list[(r_m, z_m)] or ndarray (range-dep)
+    altimetry  = None,                     # list[(r_m, h_m)] sea surface (positive up)
+    bottom   = None,                       # Boundary / RD / Layered / RDLayered
+    surface  = None,                       # BoundaryProperties (default: vacuum)
+    volume_attenuation: float = 0.0,       # water-column volume attenuation (dB/λ)
 )
 ```
 
-### Sound-speed profiles
+### Sound-speed profile (`SoundSpeedProfile`)
 
-Valid `ssp_type` values (lowercased automatically): `'isovelocity'`,
-`'linear'`, `'bilinear'`, `'munk'`, `'pchip'`, `'cubic'`, `'analytic'`,
-`'n2linear'`, `'quad'`.
+The water-column speed lives in a single object that handles both the
+1-D and 2-D (range-dependent) forms uniformly. Construct via the
+classmethods; the `interp` field carries the writer hint
+(`'isovelocity' | 'linear' | 'bilinear' | 'munk' | 'pchip' | 'cubic' |
+'analytic' | 'n2linear' | 'quad'`).
 
 ```python
-# 1. Constant
-env = uacpy.Environment(name="iso", depth=100, sound_speed=1500.0,
-                        ssp_type='isovelocity')
+from uacpy import SoundSpeedProfile
 
-# 2. Tabulated profile — ssp_data is a list of (depth, speed)
+# 1. Constant — also the default when Environment(ssp=None)
+env = uacpy.Environment(name="iso", depth=100, sound_speed=1500.0)
+
+# 2. Tabulated 1-D profile
 profile = [(0, 1540), (50, 1520), (100, 1510), (200, 1505)]
-env = uacpy.Environment(name="tab", depth=200, ssp_type='linear',
-                        ssp_data=profile)
+env = uacpy.Environment(
+    name="tab", depth=200,
+    ssp=SoundSpeedProfile.from_pairs(profile, interp='linear'),
+)
 
-# 3. Analytic (Munk) — self-generating
-env = uacpy.Environment(name="munk", depth=5000, ssp_type='munk')
+# 3. Analytic (Munk)
+env = uacpy.Environment(
+    name="munk", depth=5000,
+    ssp=SoundSpeedProfile.from_munk(5000),
+)
 
-# 4. Range-dependent SSP — ssp_2d_matrix shape is (n_depths, n_ranges).
-#    `ssp_data` is REQUIRED when passing a 2-D matrix: it defines the depth
-#    axis that indexes the rows of `ssp_2d_matrix`.
+# 4. Range-dependent — c(depth, range)
 ranges_km = np.array([0, 10, 20, 30])
 depths_m  = np.linspace(0, 1000, 50)
-ssp_2d    = np.zeros((50, 4))  # fill in...
-env = uacpy.Environment(name="rd", depth=1000, ssp_type='linear',
-                        ssp_data=[(d, 1500) for d in depths_m],
-                        ssp_2d_ranges=ranges_km,
-                        ssp_2d_matrix=ssp_2d)
+ssp_2d    = np.zeros((50, 4))  # fill in…
+env = uacpy.Environment(
+    name="rd", depth=1000,
+    ssp=SoundSpeedProfile.from_2d(
+        depths=depths_m, ranges_km=ranges_km, matrix=ssp_2d,
+        interp='quad',  # required for Bellhop to honour the 2-D form
+    ),
+)
 ```
+
+The class exposes `at_range(r_m)` (1-D slice), `collapse(method)` (used
+by the per-feature collapse pipeline), `to_pairs()` (legacy `(N, 2)` view
+of the range-0 column), and `extend_to(z_max)` (constant-extrapolation
+to a deeper bathymetry level).
 
 ### BoundaryProperties (surface or bottom)
 
@@ -290,13 +318,17 @@ bot = RangeDependentBottom(
 )
 ```
 
-Bellhop will take the **median** of range-dependent bottom properties and
-warn; RAM dispatches to mpiramS, which handles this natively. The Collins
-backends (rams0.5, ramsurf1.5) currently use the range-0 profile only and
-warn on the dropped data. `shear_attenuation` and
-`roughness` are NOT accepted by `RangeDependentBottom` — no writer consumes
-them; use a per-range `BoundaryProperties` list if you need per-range shear
-attenuation.
+Bellhop honours range-dependent bottom geoacoustics natively through the
+long `.bty` format (per-range `cp / ρ / α / cs` written to the
+`'XL'`-typed bathymetry file and consumed by `BOTY(:)` in
+`ReadEnvironmentBell.f90`). RAM dispatches to mpiramS, which threads the
+RD-bottom through the Fortran natively. The Collins backends (rams0.5,
+ramsurf1.5) use the range-0 profile only and warn on the dropped data.
+Models that don't natively support RD bottoms collapse via
+`bottom_collapse_method` (default `'r0'` — see §5.2).
+`shear_attenuation` and `roughness` are NOT accepted by
+`RangeDependentBottom` — no writer consumes them; use a per-range
+`BoundaryProperties` list if you need per-range shear attenuation.
 
 ### Layered bottom (varies with depth only)
 
@@ -319,8 +351,7 @@ bottom = LayeredBottom(
 )
 
 env = uacpy.Environment(name="layered", depth=200,
-                        ssp_type='isovelocity', sound_speed=1500,
-                        bottom=bottom)
+                        sound_speed=1500, bottom=bottom)
 
 env.has_layered_bottom()          # True
 bottom.total_thickness()          # 35.0 m
@@ -356,8 +387,12 @@ bathy = np.array([[0, 100], [5000, 150], [10000, 200]])  # (range_m, depth_m)
 env = uacpy.Environment(name="slope", depth=200, sound_speed=1500,
                         bathymetry=bathy)
 
-# Rough sea surface (Bellhop only — other models warn and ignore)
-alt = uacpy.generate_sea_surface(length=10_000, rms_height=0.5, n_points=201)
+# Rough sea surface (Bellhop and RAM ramsurf backend — others drop it)
+# generate_sea_surface returns (range_m, surface_height_m) pairs from a
+# Pierson-Moskowitz spectrum parameterised by 10-m wind speed.
+alt = uacpy.generate_sea_surface(
+    max_range_m=10_000, wind_speed_ms=10.0, n_points=500, seed=0xACED,
+)
 env = uacpy.Environment(name="rough", depth=100, sound_speed=1500,
                         altimetry=alt)
 ```
@@ -365,14 +400,18 @@ env = uacpy.Environment(name="rough", depth=100, sound_speed=1500,
 ### Environment introspection
 
 ```python
-env.is_range_dependent                         # bathymetry or RD bottom present
+env.is_range_dependent                         # any axis varies with range
+env.has_range_dependent_bathymetry()
 env.has_range_dependent_ssp()
 env.has_range_dependent_bottom()
 env.has_layered_bottom()
 env.has_range_dependent_layered_bottom()
 
-# Collapse to range-independent
-env_ri = env.get_range_independent_approximation(method='median')  # 'max'|'min'|'mean'
+# Per-feature collapse is the canonical path now: pass *_collapse_method
+# kwargs to the model constructor (see §2). The whole-env shortcut below
+# still exists but only collapses bathymetry + truncates SSP — it does
+# not honour the per-feature methods.
+env_ri = env.get_range_independent_approximation(method='median')  # legacy
 ```
 
 ---
@@ -400,8 +439,8 @@ Useful properties: `source.n_sources`, `source.n_frequencies`,
 
 ```python
 uacpy.Receiver(
-    depths=None,                # array or scalar (m)
-    ranges=None,                # array or scalar (m)
+    depths,                     # required: array or scalar (m)
+    ranges=None,                # array or scalar (m); default 0.0
     receiver_type='grid',       # 'grid' (meshgrid) | 'line' (paired)
 )
 ```
@@ -467,9 +506,9 @@ representation reachable through `RunMode.BROADBAND`.
 | 2-D (range-dep) SSP             | ✓ | ✓ via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
 | Range-dep bathymetry            | ✓ | ✓ (all three RAM backends honour multi-point bathymetry) | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
 | Halfspace bottom                | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `RangeDependentBottom`          | warn+median | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
+| `RangeDependentBottom`          | **native** (long .bty geoacoustics) | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | — |
 | `LayeredBottom` (multi-layer)   | warn+halfspace | **native** (mpiramS samples nzs depths; Collins backends use `to_piecewise_breakpoints`) | **native** | **native** | **native** | **native** | **native** | — |
-| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+approx | warn+collapse | warn+collapse | warn+collapse | — |
+| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | — |
 | Elastic bottom (shear)          | via BOUNCE | ✓ (auto → rams0.5) | KrakenC only (Kraken rejects) | ✓ (via KrakenC) | ✓ | ✓ | ✓ | ✓ |
 | Reflection file (.brc / .trc)   | ✓ | — | ✓ | ✓ | ✓ | — | — | **output** |
 | Altimetry (rough surface)       | ✓ | ✓ (auto → ramsurf1.5) | — | — | — | — | — | — |
@@ -484,15 +523,40 @@ representation reachable through `RunMode.BROADBAND`.
 > honoured. To keep range-dependent SSP / bottom plumbed all the way
 > through, choose an env that routes to mpiramS.
 
-`warn+collapse` = uacpy emits a `UserWarning` and collapses the env to a
-range-independent approximation via
-`Environment.get_range_independent_approximation(method=…)`. The
-representative depth is selected by the wrapper's
-`range_independent_method` constructor kwarg (default `'max'` —
-guarantees source/receiver depths stay above the seafloor; other valid
-values are `'min'`, `'median'`, `'mean'`). `warn+median` / `warn+approx`
-= model-specific heuristics (Bellhop uses the median bottom; KrakenField
-uses an averaged profile across segments).
+`warn+collapse` = uacpy emits a `UserWarning` and collapses each
+unsupported feature axis via the matching `*_collapse_method`
+constructor kwarg (`bathymetry_collapse_method`, `ssp_collapse_method`,
+`bottom_collapse_method`, `layered_collapse_method`,
+`rd_layered_collapse_method`, `altimetry_collapse_method`). The default
+`bathymetry_collapse_method='max'` keeps source/receiver depths above the
+seafloor; other valid values are `'min'`, `'median'`, `'mean'`,
+`'initial'`. SSP/bottom defaults are `'r0'` (range-0 column / sample);
+layered defaults are `'halfspace'`. See
+`PropagationModel._project_environment` (`models/base.py`).
+
+The matrix above is driven by six boolean capability flags each model
+sets in its `__init__`:
+
+```python
+self._supports_altimetry
+self._supports_range_dependent_bathymetry
+self._supports_range_dependent_ssp
+self._supports_range_dependent_bottom
+self._supports_layered_bottom
+self._supports_range_dependent_layered_bottom
+self._supports_elastic_media
+```
+
+The flag list is intentionally bounded: each entry answers a distinct
+*env-shape* question. Niche numerical-method requirements (3-D,
+broadband, specific SSP interp scheme, volume-attenuation formula)
+belong in `run()`-time asserts, not in this matrix.
+
+Per-feature alternative-model hints emitted in the warnings come from
+`self._unsupported_env_alternatives: Dict[str, str]` keyed by the
+feature name (e.g. `'layered_bottom'`). Bellhop overrides
+`'layered_bottom'` and `'range_dependent_layered_bottom'` to point users
+at `Bellhop.run_with_bounce()`.
 
 ### 5.3 Bellhop — ray/beam tracing
 
@@ -673,8 +737,9 @@ modes = krc.run(env_with_shear_bottom, source, receiver)
 
 For genuinely range-dependent modal propagation use `KrakenField`. When
 `Kraken` / `KrakenC` are given a range-dependent env, the wrapper emits a
-`UserWarning` and collapses to a range-independent approximation via
-`range_independent_method` (default `'max'`).
+`UserWarning` per unsupported feature and collapses each via the
+matching `*_collapse_method` (bathymetry default `'max'`, SSP/bottom
+default `'r0'`).
 
 Note: real Kraken cannot handle elastic media (`shear_speed > 0`); the
 wrapper rejects such environments. KrakenField also rejects the `'Q'`
@@ -1768,12 +1833,20 @@ environment.
 **"Kraken does not support range-dependent environments".** Use
 `KrakenField` (adiabatic or coupled modes) or switch to Bellhop/RAM.
 
-**`RangeDependentBottom` in Bellhop silently medians the properties.** This
-is by design but produces a warning. If you need true range-dependent
-geoacoustics, use RAM.
+**A model dropped my range-dependent SSP / bottom / layered bottom.**
+Each unsupported feature triggers one `UserWarning` per `run()` and is
+collapsed via the matching `*_collapse_method` constructor kwarg.
+Either pick a model that supports the feature (see the matrix in §5.2)
+or change the collapse policy — e.g.
+`Kraken(ssp_collapse_method='mean', bottom_collapse_method='median')`.
 
-**`LayeredBottom` in RAM/Bellhop collapses to a halfspace.** Use Kraken,
-Scooter, SPARC, or OASES for layered sediment.
+**`LayeredBottom` in Bellhop collapses to a halfspace.** Bellhop natively
+honours range-dependent bathymetry and range-dependent bottom
+geoacoustics (long `.bty`), but does not handle stratified sediment.
+For layered bottoms with Bellhop, run `Bellhop.run_with_bounce()` to
+generate a reflection-coefficient table from BOUNCE and feed it back via
+`BoundaryProperties(acoustic_type='file', reflection_file=…)`.
+Otherwise use Kraken, KrakenC, Scooter, SPARC, or OASES.
 
 **OASN normal modes.** OASN produces covariance matrices (`.xsm`) and
 matched-field replicas (`.rpo`), exposed via `oasn.compute_covariance(...)`
@@ -1812,7 +1885,7 @@ Kraken/Scooter.
 All scripts live in `uacpy/uacpy/examples/` and are runnable as-is once
 `./install.sh` has completed.
 
-The 22 examples are numbered sequentially. Slow examples (>=30 s on the
+The 23 examples are numbered sequentially. Slow examples (>=30 s on the
 reference machine) are flagged below — these are gated behind
 `@pytest.mark.slow` in the integration test (the rest run on every PR).
 
@@ -1840,6 +1913,7 @@ reference machine) are flagged below — these are gated behind
 | 20 | `example_20_ram_backends.py`                   | RAM dispatcher: mpiramS / rams / ramsurf | |
 | 21 | `example_21_bellhop_vs_ramsurf.py`             | Bellhop vs ramsurf with rough surface | |
 | 22 | `example_22_ram_lytaev_grid.py`                | RAM Lytaev (2023) Padé grid optimizer | ✓ |
+| 23 | `example_23_collapse_methods.py`               | Same RD env collapsed four ways via `*_collapse_method` kwargs | |
 
 Smoke test:
 

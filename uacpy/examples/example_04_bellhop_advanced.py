@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy import RangeDependentBottom
 from uacpy.models import Bellhop
 from uacpy.visualization.plots import plot_transmission_loss, plot_environment_advanced, plot_rays
@@ -77,7 +78,7 @@ def main():
     env = uacpy.Environment(
         name="Continental Shelf - Munk Profile",
         depth=500.0,
-        ssp_type='munk',
+        ssp=SoundSpeedProfile.from_munk(500.0),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )
@@ -209,12 +210,12 @@ def main():
         fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         #Disable individual colorbars, add contours at 70, 85, 100 dB
-        _, _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
+        _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
                                          show_colorbar=False,
                                          contours=[70, 85, 100])
         ax1.set_title('Standard Gaussian Beams\n(with Thorp attenuation)')
 
-        _, _, _ = plot_transmission_loss(result_cerveny, env, ax=ax2,
+        _, _ = plot_transmission_loss(result_cerveny, env, ax=ax2,
                                          show_colorbar=False,
                                          contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
@@ -237,11 +238,11 @@ def main():
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-        _, _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
+        _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
                                          show_colorbar=False)
         ax1.set_title('Point Source (Cylindrical)\nRunType: CB R2')
 
-        _, _, _ = plot_transmission_loss(result_line, env, ax=ax2,
+        _, _ = plot_transmission_loss(result_line, env, ax=ax2,
                                          show_colorbar=False)
         ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
 

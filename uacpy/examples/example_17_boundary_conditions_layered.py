@@ -19,7 +19,7 @@ import numpy as np
 import uacpy
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, generate_sea_surface,
+    RangeDependentLayeredBottom, SoundSpeedProfile, generate_sea_surface,
 )
 
 
@@ -41,7 +41,7 @@ def example_vacuum_surface():
     env = uacpy.Environment(
         name='vacuum_surface',
         depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600,
             density=1.5, attenuation=0.5,
@@ -59,7 +59,7 @@ def example_rough_surface():
     env = uacpy.Environment(
         name='rough_surface',
         depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         altimetry=surface,
         bottom=BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600,
@@ -89,7 +89,7 @@ def example_ice_surface():
     env = uacpy.Environment(
         name='ice_surface',
         depth=100,
-        ssp_data=[(0, 1480), (100, 1480)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1480), (100, 1480)]),
         surface=ice,
         bottom=BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600,
@@ -116,7 +116,7 @@ def example_single_layer_bottom():
     )
     env = uacpy.Environment(
         name='single_layer_bottom', depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=lb,
     )
     return env, source, receiver
@@ -141,7 +141,7 @@ def example_multi_layer_bottom():
     )
     env = uacpy.Environment(
         name='multi_layer_bottom', depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=lb,
     )
     return env, source, receiver
@@ -183,7 +183,7 @@ def example_range_dependent_layered():
     )
     env = uacpy.Environment(
         name='rd_layered_bottom', depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=rdl,
     )
     return env, source, receiver

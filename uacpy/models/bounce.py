@@ -128,6 +128,7 @@ class Bounce(PropagationModel):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -155,7 +156,9 @@ class Bounce(PropagationModel):
             ``rmax_km`` such that bounce's internal formula yields
             approximately ``n_angles`` samples.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
 
         self.cmin = cmin
         self.cmax = cmax
@@ -180,8 +183,7 @@ class Bounce(PropagationModel):
         self._supported_modes = [RunMode.REFLECTION]
         # BOUNCE writes a layered AT env; layered bottoms honored.
         self._supports_layered_bottom = True
-        self._unsupported_env_alternatives = "OASES (range-independent reflection)"
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable_in_paths(
                 'bounce',
@@ -309,6 +311,7 @@ class Bounce(PropagationModel):
                 )
                 rmax_km = 0.1
 
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         # Use the standard FileManager path so cleanup is always consistent.
@@ -453,7 +456,7 @@ class Bounce(PropagationModel):
         source/receiver depth blocks.
         """
         # Parse types
-        ssp_type = parse_ssp_type(env.ssp_type)
+        ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.acoustic_type)
 
@@ -464,7 +467,7 @@ class Bounce(PropagationModel):
 
         # Calculate dense mesh for BOUNCE (needs ~20 points per wavelength)
         frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
-        c_water = env.sound_speed if hasattr(env, 'sound_speed') else DEFAULT_SOUND_SPEED
+        c_water = float(env.ssp.to_pairs()[0, 1])
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
 

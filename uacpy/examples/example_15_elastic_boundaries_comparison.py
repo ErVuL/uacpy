@@ -84,7 +84,6 @@ def main():
         name="Elastic Bottom Test",
         depth=100.0,
         sound_speed=1500.0,
-        ssp_type='isovelocity',
         bottom=bottom_elastic
     )
 
@@ -177,7 +176,6 @@ def main():
         name="SCOOTER with BOUNCE RC",
         depth=100.0,
         sound_speed=1500.0,
-        ssp_type='isovelocity',
         bottom=bottom_with_file
     )
 

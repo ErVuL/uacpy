@@ -122,7 +122,7 @@ def plot_source_receiver_config(env, source, receiver):
 
     # Plot 1: Sound Speed Profile
     ax = axes[0]
-    ax.plot(env.ssp_data[:,1], env.ssp_data[:,0], 'b-', linewidth=2)
+    ax.plot(env.ssp.to_pairs()[:,1], env.ssp.to_pairs()[:,0], 'b-', linewidth=2)
     ax.axhline(source.depth[0], color='r', linestyle='--', linewidth=2, label='Source', alpha=0.7)
     for rd in receiver.depths[::len(receiver.depths)//5]:  # Show 5 receiver depths
         ax.axhline(rd, color='g', linestyle=':', linewidth=1, alpha=0.5)
@@ -452,7 +452,7 @@ def create_example_report(example_num: int, title: str, description: str,
     # Environment info
     print(f"Environment: {env.name}")
     print(f"  Depth: {env.depth}m")
-    print(f"  SSP type: {env.ssp_type}")
+    print(f"  SSP type: {env.ssp.interp}")
     if env.is_range_dependent:
         print(f"  Range-dependent: YES (bathymetry points: {len(env.bathymetry)})")
     else:

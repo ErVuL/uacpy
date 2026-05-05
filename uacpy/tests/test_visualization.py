@@ -25,8 +25,7 @@ def basic_setup():
     env = uacpy.Environment(
         name='test',
         depth=100,
-        sound_speed=1500,
-        ssp_type='isovelocity'
+        sound_speed=1500
     )
     source = uacpy.Source(depth=50, frequency=100)
 
@@ -43,7 +42,7 @@ class TestPlotTransmissionLoss:
         """Test basic TL plotting."""
         env, source, result = basic_setup
 
-        fig, ax, _ = plots.plot_transmission_loss(result, env)
+        fig, ax = plots.plot_transmission_loss(result, env)
         assert fig is not None
         assert ax is not None
         plt.close(fig)
@@ -55,7 +54,7 @@ class TestPlotTransmissionLoss:
     def test_plot_transmission_loss_kwargs(self, basic_setup, kwargs):
         """Optional kwargs forward through to the underlying axes."""
         env, source, result = basic_setup
-        fig, ax, _ = plots.plot_transmission_loss(result, env, **kwargs)
+        fig, ax = plots.plot_transmission_loss(result, env, **kwargs)
         assert fig is not None
         plt.close(fig)
 
@@ -63,7 +62,7 @@ class TestPlotTransmissionLoss:
         """plot_transmission_loss respects an externally-supplied Axes."""
         env, source, result = basic_setup
         fig, ax = plt.subplots()
-        fig2, ax2, _ = plots.plot_transmission_loss(result, env, ax=ax)
+        fig2, ax2 = plots.plot_transmission_loss(result, env, ax=ax)
         assert fig2 is fig
         assert ax2 is ax
         plt.close(fig)
@@ -299,7 +298,7 @@ class TestPlottingEdgeCases:
 
     def test_plot_empty_results(self):
         """Test plotting with empty results dict."""
-        env = uacpy.Environment(name='test', depth=100, sound_speed=1500, ssp_type='isovelocity')
+        env = uacpy.Environment(name='test', depth=100, sound_speed=1500)
 
         with pytest.raises((ValueError, KeyError, IndexError)):
             plots.compare_models({}, env)
@@ -323,7 +322,7 @@ class TestPlottingEdgeCases:
         result_with_nan = copy.deepcopy(result)
         result_with_nan.data[0, 0] = np.nan
 
-        fig, ax, _ = plots.plot_transmission_loss(result_with_nan, env)
+        fig, ax = plots.plot_transmission_loss(result_with_nan, env)
         assert fig is not None
         plt.close(fig)
 

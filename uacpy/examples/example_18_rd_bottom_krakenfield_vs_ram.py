@@ -26,7 +26,7 @@ import numpy as np
 import uacpy
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom,
+    RangeDependentLayeredBottom, SoundSpeedProfile,
 )
 from uacpy.models.ram import RAM
 from uacpy.models.kraken import KrakenField
@@ -47,10 +47,10 @@ def make_base_env(bottom):
     env = uacpy.Environment(
         name='rd_comparison',
         depth=200,
-        ssp_type='linear',
-        ssp_data=list(zip(ssp_depths, ssp_near)),
-        ssp_2d_ranges=ssp_ranges_km,
-        ssp_2d_matrix=ssp_2d,
+        ssp=SoundSpeedProfile.from_2d(
+            depths=ssp_depths, ranges_km=ssp_ranges_km, matrix=ssp_2d,
+            interp='linear',
+        ),
         bathymetry=bathymetry,
         bottom=bottom,
     )

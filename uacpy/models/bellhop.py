@@ -213,6 +213,7 @@ class Bellhop(PropagationModel):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -290,7 +291,9 @@ class Bellhop(PropagationModel):
             Output component for displacement-receiver fields: 'P'
             pressure (default), 'D' displacement.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
 
         # Declare supported modes for Bellhop
         self._supported_modes = [
@@ -303,6 +306,20 @@ class Bellhop(PropagationModel):
             RunMode.TIME_SERIES,
         ]
         self._supports_altimetry = True
+        self._supports_range_dependent_bathymetry = True
+        # RD-SSP gated on ssp.interp='quad' — non-quad warned in run().
+        self._supports_range_dependent_ssp = True
+        self._supports_range_dependent_bottom = True
+        self._supports_elastic_media = True
+        # Bellhop users can synthesise a reflection-coefficient table via
+        # run_with_bounce() instead of switching models for layered bottoms.
+        self._unsupported_env_alternatives['layered_bottom'] = (
+            'Kraken/KrakenC, Scooter, OASES, or Bellhop.run_with_bounce()'
+        )
+        self._unsupported_env_alternatives['range_dependent_layered_bottom'] = (
+            'RAM (or Bellhop.run_with_bounce() with a single representative '
+            'layered profile)'
+        )
 
         self.prefer_cuda = prefer_cuda
         self.beam_type = beam_type
@@ -473,43 +490,17 @@ class Bellhop(PropagationModel):
             volume_attenuation=volume_attenuation,
         )
 
-        # Warn about unsupported range/depth-dependent bottom features
-        if env.has_range_dependent_bottom():
+        if env.has_range_dependent_ssp() and env.ssp.interp != 'quad':
             warnings.warn(
-                "Bellhop does not support range-dependent bottom properties. "
-                "Using median-range approximation via env.bottom. "
-                "For range-dependent bottoms, consider RAM or KrakenField. "
-                "For elastic bottoms, use run_with_bounce().",
+                "Bellhop reads range-dependent SSP only when "
+                "ssp.interp='quad' (external .ssp file). With "
+                f"ssp.interp={env.ssp.interp!r} the range-0 column is used. "
+                "Set interp='quad' on the SoundSpeedProfile to enable the "
+                "2-D profile.",
                 UserWarning, stacklevel=2
-            )
-            self._log(
-                "Bellhop: range-dependent bottom properties ignored, "
-                "using median-range approximation.", level='warn'
-            )
-        if env.has_layered_bottom():
-            warnings.warn(
-                "Bellhop does not support layered (depth-dependent) bottoms. "
-                "Using halfspace properties only. "
-                "For layered bottoms, use Kraken, Scooter, or OASES. "
-                "For elastic bottoms, use run_with_bounce().",
-                UserWarning, stacklevel=2
-            )
-            self._log(
-                "Bellhop: layered bottom ignored, using halfspace only.",
-                level='warn'
-            )
-        if env.has_range_dependent_layered_bottom():
-            warnings.warn(
-                "Bellhop does not support range-dependent layered bottoms. "
-                "Using halfspace properties only. "
-                "For range+depth-dependent bottoms, use RAM.",
-                UserWarning, stacklevel=2
-            )
-            self._log(
-                "Bellhop: range-dependent layered bottom ignored, using halfspace only.",
-                level='warn'
             )
 
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         # Irregular receiver grid ('I' in RunType position 5) requires the
@@ -517,9 +508,7 @@ class Bellhop(PropagationModel):
         # length (they are paired point-by-point).  Rectilinear ('R')
         # takes the Cartesian product.  Catch the mismatch here so users
         # see a clear error instead of a confusing Bellhop .prt message.
-        eff_grid_type = (
-            grid_type if grid_type is not _UNSET else self.grid_type
-        )
+        eff_grid_type = self._resolve(grid_type, 'grid_type')
         if (
             eff_grid_type is not None
             and str(eff_grid_type).upper() == 'I'
@@ -539,33 +528,20 @@ class Bellhop(PropagationModel):
         fm = self._setup_file_manager()
         self.file_manager = fm
 
-        # Writer kwargs that are not tied to the overrides context. Each is
-        # pulled from the per-call override when supplied, otherwise from the
-        # constructor default on self.
+        # Writer kwargs not threaded through ``_resolve_overrides`` because
+        # the writer needs the *resolved* value, not the model attribute.
         extra_writer_kwargs = {
             'attenuation_unit': AttenuationUnits.from_string(
-                attenuation_unit if attenuation_unit is not _UNSET
-                else self.attenuation_unit
+                self._resolve(attenuation_unit, 'attenuation_unit')
             ),
-            'francois_garrison_params': (
-                francois_garrison_params if francois_garrison_params is not _UNSET
-                else self.francois_garrison_params
-            ),
-            'bio_layers': (
-                bio_layers if bio_layers is not _UNSET
-                else self.bio_layers
-            ),
-            'bty_interp_type': (
-                bty_interp_type if bty_interp_type is not _UNSET
-                else self.bty_interp_type
-            ),
+            'francois_garrison_params': self._resolve(
+                francois_garrison_params, 'francois_garrison_params'),
+            'bio_layers': self._resolve(bio_layers, 'bio_layers'),
+            'bty_interp_type': self._resolve(bty_interp_type, 'bty_interp_type'),
         }
 
-        # Resolve source beam pattern (file path or (angle, level_dB) array).
-        sbp_spec = (
-            source_beam_pattern_file if source_beam_pattern_file is not _UNSET
-            else self.source_beam_pattern_file
-        )
+        sbp_spec = self._resolve(source_beam_pattern_file,
+                                 'source_beam_pattern_file')
 
         with _resolve_overrides(self, **override_kwargs):
             try:
@@ -970,7 +946,7 @@ class Bellhop(PropagationModel):
                   f"({nrd} depths x {n_freq} freqs x {nrr} ranges)",
                   level='info')
 
-        c0 = float(env.ssp_data[0, 1]) if hasattr(env, 'ssp_data') and env.ssp_data is not None else DEFAULT_SOUND_SPEED
+        c0 = float(env.ssp.data[0, 0])
 
         return TransferFunction(
             data=H,

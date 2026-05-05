@@ -151,10 +151,10 @@ class SPARC(PropagationModel):
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         timeout: float = 180.0,
-        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -207,7 +207,7 @@ class SPARC(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            range_independent_method=range_independent_method,
+            **kwargs,
         )
 
         self.c_low = c_low
@@ -238,10 +238,10 @@ class SPARC(PropagationModel):
             RunMode.TIME_SERIES,
         ]
         # SPARC: range-independent time-marched FFP. Multi-layer fluid /
-        # elastic bottom honored via the AT layered-env writer. Range
-        # dependence collapses to range-0 with a warning.
+        # SPARC's run() auto-converts halfspace bottoms to rigid (line ~650),
+        # so elastic_bottom flag is False — collapse to fluid up front so
+        # the user gets a uniform warning instead of a silent rigidify.
         self._supports_layered_bottom = True
-        self._unsupported_env_alternatives = "RAM (PE) for range-dependent"
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -334,7 +334,7 @@ class SPARC(PropagationModel):
 
     def _run_impl(self, env, source, receiver, run_mode, **kwargs):
         """Internal run implementation (called within the override context)."""
-        env = self._handle_range_dependent_environment(env, alternatives='Bellhop or RAM')
+        env = self._project_environment(env)
         receiver = self._clip_receiver_depths(receiver, env.depth)
 
         # SPARC limitation: horizontal array mode requires one run per depth
@@ -641,7 +641,7 @@ class SPARC(PropagationModel):
         - Integration parameters
         """
         # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp_type)
+        ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 
         # SPARC limitation: only supports Vacuum and Rigid boundaries
@@ -714,8 +714,9 @@ class SPARC(PropagationModel):
             # SPARC-SPECIFIC SECTIONS
 
             # Phase speed limits (cLow, cHigh)
-            c_min = min([c for _, c in env.ssp_data])
-            c_max = max([c for _, c in env.ssp_data] + [env.bottom.sound_speed])
+            _ssp_pairs = env.ssp.to_pairs()
+            c_min = float(_ssp_pairs[:, 1].min())
+            c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
             c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
             c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
             f.write(f"{c_low:.1f} {c_high:.1f}\n")

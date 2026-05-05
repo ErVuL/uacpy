@@ -2,6 +2,14 @@
 uacpy - Underwater Acoustics Python Library
 
 A comprehensive library for underwater acoustics propagation modeling.
+
+Conventions
+-----------
+Distances are in **metres** unless the attribute or argument name carries
+an explicit suffix (``_km``, ``_cm``). Sound speeds are m/s, densities
+g/cm³, attenuations dB/wavelength, frequencies Hz. Depth is positive
+downward; sea-surface altimetry height is positive upward (z=0 at the
+mean sea surface).
 """
 
 __version__ = '0.0.1'
@@ -11,7 +19,7 @@ from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
-    generate_sea_surface,
+    SoundSpeedProfile, generate_sea_surface,
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
@@ -21,6 +29,9 @@ from uacpy.core.results import (
     Arrivals, Rays, ModalResult, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
+)
+from uacpy.core.constants import (
+    AttenuationUnits, VolumeAttenuation, BoundaryType,
 )
 
 from uacpy import models
@@ -43,6 +54,7 @@ __all__ = [
     'SedimentLayer',
     'LayeredBottom',
     'RangeDependentLayeredBottom',
+    'SoundSpeedProfile',
     'generate_sea_surface',
     'Receiver',
     'Result', 'PhaseReference',
@@ -51,6 +63,7 @@ __all__ = [
     'Arrivals', 'Rays', 'ModalResult', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
+    'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
     'RunMode',
     'models',
     'plot',

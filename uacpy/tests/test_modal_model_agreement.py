@@ -9,6 +9,7 @@ import pytest
 import numpy as np
 
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Kraken, KrakenField, Scooter, OAST
 
 # All tests in this module spawn model binaries (Kraken, Scooter, OAST)
@@ -25,8 +26,7 @@ class TestModalModelAgreement:
         env = uacpy.Environment(
             name='Pekeris',
             depth=100,
-            ssp_type='linear',
-            ssp_data=ssp_data,
+            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear'),
             sound_speed=1500
         )
         return env

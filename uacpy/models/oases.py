@@ -168,14 +168,14 @@ class OAST(_OASESBase):
         compute_contour: bool = False,
         compute_depth_average: bool = False,
         complex_contour: bool = True,
-        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            range_independent_method=range_independent_method,
+            **kwargs,
         )
         self.volume_attenuation = volume_attenuation
         self.francois_garrison_params = francois_garrison_params
@@ -189,8 +189,7 @@ class OAST(_OASESBase):
         # OAST: range-independent wavenumber integration; multi-layer
         # fluid + elastic bottom honored.
         self._supports_layered_bottom = True
-        self._unsupported_env_alternatives = "OASP (range-dep) or RAM"
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable('oast')
         else:
@@ -249,16 +248,16 @@ class OAST(_OASESBase):
             )
 
         # Resolve per-call overrides
-        volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
+        volume_attenuation = self._resolve(volume_attenuation, 'volume_attenuation')
         compute_contour = (
-            compute_contour if compute_contour is not _UNSET else self.compute_contour
+            self._resolve(compute_contour, 'compute_contour')
         )
         compute_depth_average = (
             compute_depth_average if compute_depth_average is not _UNSET
             else self.compute_depth_average
         )
         complex_contour = (
-            complex_contour if complex_contour is not _UNSET else self.complex_contour
+            self._resolve(complex_contour, 'complex_contour')
         )
 
         # ``broadband`` is only meaningful on the unified OASES wrapper (where
@@ -271,9 +270,7 @@ class OAST(_OASESBase):
                 "use OASES(compute_tl(broadband=True))."
             )
 
-        env = self._handle_range_dependent_environment(
-            env, alternatives='OASP, Bellhop, or RAM',
-        )
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
         fm = self._setup_file_manager()
 
@@ -427,8 +424,11 @@ class OASN(_OASESBase):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
         self.volume_attenuation = volume_attenuation
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
@@ -438,8 +438,7 @@ class OASN(_OASESBase):
         # OASN: range-independent covariance / replica field; multi-layer
         # bottom honored.
         self._supports_layered_bottom = True
-        self._unsupported_env_alternatives = "Kraken/KrakenC for normal modes"
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable('oasn2_bin')
         else:
@@ -491,8 +490,9 @@ class OASN(_OASESBase):
             )
 
         volume_attenuation = (
-            volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
+            self._resolve(volume_attenuation, 'volume_attenuation')
         )
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         # Force the OASN options block to include the file output we need.
@@ -693,6 +693,7 @@ class OASR(_OASESBase):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -716,7 +717,9 @@ class OASR(_OASESBase):
         bio_layers : list, optional
             [(Z1, Z2, f0, Q, a0), ...] required when ``volume_attenuation='B'``.
         """
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
         self.angles = angles
         self.angle_type = angle_type
         self.reflection_type = reflection_type
@@ -730,7 +733,7 @@ class OASR(_OASESBase):
         self._supported_modes = [RunMode.REFLECTION]
         # OASR: range-independent reflection vs angle/freq; layered bottom honored.
         self._supports_layered_bottom = True
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable('oasr')
         else:
@@ -781,15 +784,16 @@ class OASR(_OASESBase):
                 alternatives=["RunMode.REFLECTION"],
             )
 
-        angles = angles if angles is not _UNSET else self.angles
-        angle_type = angle_type if angle_type is not _UNSET else self.angle_type
+        angles = self._resolve(angles, 'angles')
+        angle_type = self._resolve(angle_type, 'angle_type')
         reflection_type = (
-            reflection_type if reflection_type is not _UNSET else self.reflection_type
+            self._resolve(reflection_type, 'reflection_type')
         )
         volume_attenuation = (
-            volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
+            self._resolve(volume_attenuation, 'volume_attenuation')
         )
 
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         # Only synthesize a default angle grid when the user passed neither an
@@ -950,10 +954,10 @@ class OASP(_OASESBase):
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
-        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -973,7 +977,7 @@ class OASP(_OASESBase):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            range_independent_method=range_independent_method,
+            **kwargs,
         )
         self.n_time_samples = n_time_samples
         self.freq_max = freq_max
@@ -991,7 +995,7 @@ class OASP(_OASESBase):
         # / elastic bottoms and limited range dependence (bathymetry only).
         self._supports_layered_bottom = True
         self._supports_range_dependent_bottom = False
-        self._unsupported_env_alternatives = "RAM (PE) for full range-dep"
+        self._supports_elastic_media = True
 
         if executable is None:
             self.executable = self._find_executable('oasp')
@@ -1050,9 +1054,9 @@ class OASP(_OASESBase):
             ``'time_series'`` for TIME_SERIES.
         """
         # Resolve per-call overrides
-        n_time_samples = n_time_samples if n_time_samples is not _UNSET else self.n_time_samples
-        freq_max = freq_max if freq_max is not _UNSET else self.freq_max
-        volume_attenuation = volume_attenuation if volume_attenuation is not _UNSET else self.volume_attenuation
+        n_time_samples = self._resolve(n_time_samples, 'n_time_samples')
+        freq_max = self._resolve(freq_max, 'freq_max')
+        volume_attenuation = self._resolve(volume_attenuation, 'volume_attenuation')
 
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
@@ -1066,7 +1070,7 @@ class OASP(_OASESBase):
                 "H(f), use run_mode=RunMode.BROADBAND."
             )
 
-        env = self._handle_range_dependent_environment(env, alternatives='RAM')
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
         fm = self._setup_file_manager()
 
@@ -1245,8 +1249,11 @@ class OASES(PropagationModel):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
-        super().__init__(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
 
         # Create instances of all OASES models
         self._oast = OAST(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)

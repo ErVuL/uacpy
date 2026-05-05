@@ -28,6 +28,9 @@ from uacpy.visualization.style import (
     create_professional_colorbar,
     get_model_color,
     COLORMAPS,
+    BOTTOM_FILL_COLOR,
+    BOTTOM_FILL_STYLE,
+    BOTTOM_HALFSPACE_COLOR,
 )
 
 # Z-order constants for consistent layering (Acoustic Toolbox standard)
@@ -74,11 +77,9 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
     ``Result`` subclass. Used by ``Result.plot()``.
     """
     if isinstance(result, TLField):
-        fig, ax, _cb = plot_transmission_loss(result, env=env, **kwargs)
-        return fig, ax
+        return plot_transmission_loss(result, env=env, **kwargs)
     if isinstance(result, PressureField):
-        # Convert to TL and plot.
-        return plot_transmission_loss(result.to_tl(), env=env, **kwargs)[:2]
+        return plot_transmission_loss(result.to_tl(), env=env, **kwargs)
     if isinstance(result, TransferFunction):
         return plot_transfer_function(result, **kwargs)
     if isinstance(result, TimeSeriesField):
@@ -114,7 +115,7 @@ def plot_time_trace(trace: TimeTrace, ax=None, figsize: Tuple[float, float] = (1
     ax.set_xlabel('Time (ms)', fontweight='bold')
     ax.set_ylabel('Pressure (a.u.)', fontweight='bold')
     ax.set_title(
-        f"Time trace at depth={trace.depth:.1f} m, range={trace.range:.1f} m",
+        f"Time trace at depth={trace.depth:.1f} m, range={trace.range_m:.1f} m",
         fontweight='bold',
     )
     ax.grid(True, alpha=0.3)
@@ -278,8 +279,7 @@ def plot_transmission_loss(
                        (env.bathymetry[:, 0] / 1000.0 <= ranges_km[-1])
             if np.any(in_range):
                 max_depth = max(max_depth, env.bathymetry[in_range, 1].max())
-        else:
-            max_depth = max(max_depth, env.depth)
+        max_depth = max(max_depth, env.depth)
     ax.set_ylim([max_depth * 1.05, 0])
 
     # Professional formatting
@@ -311,26 +311,23 @@ def plot_transmission_loss(
 
     # Bathymetry overlay - MUST BE BEFORE CONTOURS to mask data below seafloor
     if show_bathymetry and env is not None:
-        if len(env.bathymetry) > 1:
+        if env.has_range_dependent_bathymetry():
             bathy_ranges = env.bathymetry[:, 0] / 1000.0
             bathy_depths = env.bathymetry[:, 1]
-            # Seafloor fill MUST have high zorder to mask everything below it
             ax.fill_between(
                 bathy_ranges, bathy_depths, max_depth * 1.05,
-                color='sienna', alpha=seafloor_alpha, zorder=ZORDER_SEDIMENT + 5, edgecolor='none'
+                **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5
             )
-            # Bathymetry line on top of fill
-            ax.plot(bathy_ranges, bathy_depths, 'k-', linewidth=2.5, label='Bathymetry',
-                   zorder=ZORDER_SEDIMENT + 6)
+            ax.plot(bathy_ranges, bathy_depths, 'k-', linewidth=2.5,
+                    label='Bathymetry', zorder=ZORDER_SEDIMENT + 6)
         else:
-            # Flat bottom - fill MUST mask everything below
+            # Flat bottom — dashed line to signal "constant depth"
             ax.fill_between(
                 ranges_km, env.depth, max_depth * 1.05,
-                color='sienna', alpha=seafloor_alpha, zorder=ZORDER_SEDIMENT + 5, edgecolor='none'
+                **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5
             )
-            # Bathymetry line on top
             ax.axhline(env.depth, color='k', linewidth=2.5, linestyle='--',
-                      zorder=ZORDER_SEDIMENT + 6)
+                       zorder=ZORDER_SEDIMENT + 6)
 
     # Contour overlay (AT standard: black lines with labels)
     # Contours drawn BEFORE bathymetry so seafloor masks them
@@ -352,7 +349,7 @@ def plot_transmission_loss(
 
     ax.grid(True, alpha=0.3, zorder=0)
 
-    return fig, ax, cbar
+    return fig, ax
 
 
 def plot_rays(
@@ -516,16 +513,16 @@ def plot_rays(
                     zorder=ZORDER_SEDIMENT + 6)
             ylims = ax.get_ylim()
             ax.fill_between(bathy_r, bathy_z, ylims[0],
-                            color='sienna', alpha=seafloor_alpha,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
         else:
             ax.axhline(env.depth, color='k', linewidth=2.0, linestyle='-',
                        zorder=ZORDER_SEDIMENT + 6)
             ylims = ax.get_ylim()
             xlims_now = ax.get_xlim() if xlim is None else xlim
             ax.fill_between(xlims_now, env.depth, ylims[0],
-                            color='sienna', alpha=seafloor_alpha,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
 
     src_handle = None
     rcv_handle = None
@@ -633,8 +630,9 @@ def plot_ssp(
         fig = ax.get_figure()
 
     # Plot SSP
-    depths = env.ssp_data[:, 0]
-    sound_speeds = env.ssp_data[:, 1]
+    _ssp_pairs = env.ssp.to_pairs()
+    depths = _ssp_pairs[:, 0]
+    sound_speeds = _ssp_pairs[:, 1]
 
     # Plot compression wave speed
     if show_data_points:
@@ -709,7 +707,7 @@ def plot_bathymetry(
     depths = env.bathymetry[:, 1]
 
     ax.plot(ranges_km, depths, 'k-', linewidth=2.5)
-    ax.fill_between(ranges_km, depths, depths.max() * 1.2, color='sienna', alpha=seafloor_alpha, edgecolor='none')
+    ax.fill_between(ranges_km, depths, depths.max() * 1.2, **BOTTOM_FILL_STYLE)
 
     # Invert y-axis
     ax.invert_yaxis()
@@ -893,7 +891,7 @@ def plot_environment(
         ax_env.plot(ranges_km, depths, 'k-', linewidth=2.5, zorder=3)
         ax_env.fill_between(
             ranges_km, depths, max_depth * 1.15,
-            color='sienna', alpha=seafloor_alpha, zorder=1, edgecolor='none'
+            **BOTTOM_FILL_STYLE, zorder=1
         )
     else:
         # Flat bottom: draw a horizontal line across the full axes
@@ -924,7 +922,7 @@ def plot_environment(
         xlims = ax_env.get_xlim()
         ax_env.fill_between(
             xlims, env.depth, max_depth * 1.15,
-            color='sienna', alpha=seafloor_alpha, zorder=1, edgecolor='none'
+            **BOTTOM_FILL_STYLE, zorder=1
         )
 
     ax_env.invert_yaxis()
@@ -1366,16 +1364,16 @@ def compare_models(
 
         if bathy_r is not None:
             ax.fill_between(bathy_r, bathy_d, max_depth * 1.05,
-                            color='sienna', alpha=1.0,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
             ax.plot(bathy_r, bathy_d, 'k-', linewidth=2,
                     zorder=ZORDER_SEDIMENT + 6)
         else:
             ax.axhline(env.depth, color='k', linewidth=2.5, linestyle='--',
                        alpha=0.8, zorder=ZORDER_SEDIMENT + 6)
             ax.fill_between(ranges_km, env.depth, max_depth * 1.05,
-                            color='sienna', alpha=1.0,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
 
         if idx % ncols == 0:
             ax.set_ylabel('Depth (m)', fontsize=12)
@@ -2125,7 +2123,7 @@ def plot_ssp_2d(
 
     Examples
     --------
-    >>> env = Environment(..., ssp_2d_ranges=ranges, ssp_2d_matrix=ssp_matrix)
+    >>> env = Environment(..., ssp=SoundSpeedProfile.from_2d(depths, ranges, ssp_matrix))
     >>> fig, ax = plot_ssp_2d(env)
     >>> plt.show()
     """
@@ -2141,17 +2139,9 @@ def plot_ssp_2d(
     if cmap is None:
         cmap = get_cmap_for_field('ssp')
 
-    # Get data
-    ranges_km = env.ssp_2d_ranges
-    ssp_matrix = env.ssp_2d_matrix
-
-    # Use depths that match ssp_2d_matrix dimensions
-    # env.ssp_data may have extra points added by Environment processing
-    if env.ssp_2d_matrix.shape[0] != env.ssp_data.shape[0]:
-        # Create depth array matching ssp_2d_matrix first dimension
-        depths = np.linspace(0, env.depth, env.ssp_2d_matrix.shape[0])
-    else:
-        depths = env.ssp_data[:, 0]
+    ranges_km = env.ssp.ranges_km
+    ssp_matrix = env.ssp.data
+    depths = env.ssp.depths
 
     # Create meshgrid
     R, Z = np.meshgrid(ranges_km, depths)
@@ -2166,7 +2156,7 @@ def plot_ssp_2d(
         ax.plot(bathy_ranges, bathy_depths, 'k-', linewidth=3, label='Bathymetry', zorder=5)
         ax.fill_between(
             bathy_ranges, bathy_depths, depths.max() * 1.1,
-            color='sienna', alpha=seafloor_alpha, edgecolor='black', linewidth=1.5, zorder=4
+            **BOTTOM_FILL_STYLE, zorder=4
         )
 
     # Invert y-axis
@@ -2233,7 +2223,7 @@ def plot_bottom_properties(
     # Plot 1: Depth (Bathymetry)
     axes[0].plot(ranges_km, bottom_rd.depths, 'o-', linewidth=2, markersize=8, color='brown')
     axes[0].fill_between(ranges_km, bottom_rd.depths, bottom_rd.depths.max() * 1.1,
-                         color='saddlebrown', alpha=seafloor_alpha)
+                         **BOTTOM_FILL_STYLE)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Range (km)', fontsize=11)
     axes[0].set_ylabel('Depth (m)', fontsize=11)
@@ -2319,7 +2309,7 @@ def plot_layered_bottom(
 
     # Draw water column
     ax.axhspan(0, seafloor, color='lightblue', alpha=0.3, label='Water')
-    ax.axhline(seafloor, color='saddlebrown', linewidth=2)
+    ax.axhline(seafloor, color=BOTTOM_HALFSPACE_COLOR, linewidth=2)
 
     # Draw each layer
     depth_top = seafloor
@@ -2329,7 +2319,7 @@ def plot_layered_bottom(
         color = cmap(0.2 + 0.6 * norm_cs)  # avoid extremes
 
         ax.axhspan(depth_top, depth_bot, color=color, alpha=0.7)
-        ax.axhline(depth_bot, color='saddlebrown', linewidth=1, linestyle='--')
+        ax.axhline(depth_bot, color=BOTTOM_HALFSPACE_COLOR, linewidth=1, linestyle='--')
 
         # Annotate
         mid = (depth_top + depth_bot) / 2
@@ -2349,7 +2339,7 @@ def plot_layered_bottom(
     # Draw halfspace below
     hs = lb.halfspace
     hs_display = depth_top + max(10.0, lb.total_thickness() * 0.3)
-    ax.axhspan(depth_top, hs_display, color='saddlebrown', alpha=0.4)
+    ax.axhspan(depth_top, hs_display, color=BOTTOM_HALFSPACE_COLOR, alpha=0.4)
     hs_mid = (depth_top + hs_display) / 2
     hs_text = (f"Halfspace\n"
                f"cp={hs.sound_speed:.0f} m/s, "
@@ -2411,21 +2401,19 @@ def plot_rd_layered_bottom(
         boundaries.append(0.5 * (rdl.ranges_km[i] + rdl.ranges_km[i + 1]))
     boundaries.append(rdl.ranges_km[-1])
 
-    seg_seafloor_top = []
+    total_span = rdl.ranges_km[-1] - rdl.ranges_km[0]
     seg_seafloor_bot = []
     seg_x = []
     for i_r, lb in enumerate(rdl.profiles):
         r_lo, r_hi = boundaries[i_r], boundaries[i_r + 1]
-        top_lo = float(np.interp(r_lo, rdl.ranges_km, rdl.depths))
-        top_hi = float(np.interp(r_hi, rdl.ranges_km, rdl.depths))
-        x = np.array([r_lo, r_hi])
-        top = np.array([top_lo, top_hi])
-        seg_x.append(x)
-        seg_seafloor_top.append(top.copy())
+        n_pts = max(20, int(401 * (r_hi - r_lo) / total_span))
+        x_bin = np.linspace(r_lo, r_hi, n_pts)
+        top = np.interp(x_bin, rdl.ranges_km, rdl.depths)
+        seg_x.append(x_bin)
         for layer in lb.layers:
             bot = top + layer.thickness
             ax_main.fill_between(
-                x, top, bot,
+                x_bin, top, bot,
                 color=_color(layer.sound_speed),
                 edgecolor='black', linewidth=0.4,
                 zorder=ZORDER_SEDIMENT,
@@ -2436,11 +2424,11 @@ def plot_rd_layered_bottom(
     layer_bottoms_max = max(float(np.max(b)) for b in seg_seafloor_bot)
     halfspace_depth = layer_bottoms_max + halfspace_extension_m
 
-    for i_r, x in enumerate(seg_x):
+    for i_r, x_bin in enumerate(seg_x):
         bot = seg_seafloor_bot[i_r]
         ax_main.fill_between(
-            x, bot, halfspace_depth,
-            color='saddlebrown', alpha=0.35, edgecolor='black',
+            x_bin, bot, halfspace_depth,
+            color=BOTTOM_HALFSPACE_COLOR, alpha=0.35, edgecolor='black',
             linewidth=0.4, zorder=ZORDER_SEDIMENT - 1, hatch='///',
         )
 
@@ -2551,22 +2539,22 @@ def plot_rd_bottom(
         boundaries.append(0.5 * (ranges_km[i] + ranges_km[i + 1]))
     boundaries.append(ranges_km[-1])
 
+    total_span = ranges_km[-1] - ranges_km[0]
     for i_r, r in enumerate(ranges_km):
         r_lo, r_hi = boundaries[i_r], boundaries[i_r + 1]
-        x = np.array([r_lo, r_hi])
-        top_lo = float(np.interp(r_lo, ranges_km, seafloor_nodes))
-        top_hi = float(np.interp(r_hi, ranges_km, seafloor_nodes))
-        cap_top = np.array([top_lo, top_hi])
-        cap_bot = cap_top + cap_extension
+        n_pts = max(20, int(401 * (r_hi - r_lo) / total_span))
+        x_bin = np.linspace(r_lo, r_hi, n_pts)
+        cap_top_bin = np.interp(x_bin, ranges_km, seafloor_nodes)
+        cap_bot_bin = cap_top_bin + cap_extension
         ax_main.fill_between(
-            x, cap_top, cap_bot,
+            x_bin, cap_top_bin, cap_bot_bin,
             color=cm(0.20 + 0.65 * (rd.sound_speed[i_r] - cs_min) / cs_span),
             edgecolor='black', linewidth=0.4,
             zorder=ZORDER_SEDIMENT,
         )
         ax_main.fill_between(
-            x, cap_bot, halfspace_depth,
-            color='saddlebrown', alpha=0.35, edgecolor='black',
+            x_bin, cap_bot_bin, halfspace_depth,
+            color=BOTTOM_HALFSPACE_COLOR, alpha=0.35, edgecolor='black',
             linewidth=0.4, zorder=ZORDER_SEDIMENT - 1, hatch='///',
         )
 
@@ -2705,7 +2693,7 @@ def plot_environment_advanced(
             ax_setup.plot(bathy_ranges, bathy_depths, 'k-', linewidth=2.5, label='Bathymetry')
             ax_setup.fill_between(
                 bathy_ranges, bathy_depths, bathy_depths.max() * 1.2,
-                color='saddlebrown', alpha=0.3, edgecolor='black'
+                color=BOTTOM_HALFSPACE_COLOR, alpha=0.3, edgecolor='black'
             )
 
         # Plot source and receivers
@@ -2908,7 +2896,7 @@ def plot_transmission_loss_polar(
 
     # Select colormap (match standard TL plots)
     if cmap is None:
-        cmap = 'jet_r'
+        cmap = get_cmap_for_field('tl')
 
     # Plot
     im = ax.pcolormesh(Theta, R, tl, shading='auto', cmap=cmap, vmin=vmin, vmax=vmax)
@@ -2925,7 +2913,7 @@ def plot_transmission_loss_polar(
     if show_colorbar:
         cbar = create_professional_colorbar(fig, im, ax, label='TL (dB)')
 
-    return fig, ax, cbar
+    return fig, ax
 
 
 def plot_transfer_function(
@@ -2988,7 +2976,7 @@ def plot_transfer_function(
             fig2, ax2 = ax.figure, ax
         im = ax2.pcolormesh(
             np.asarray(field.ranges) / 1000.0, np.asarray(field.depths),
-            mag_db, shading='auto', cmap='viridis',
+            mag_db, shading='auto', cmap=get_cmap_for_field('tl'),
         )
         ax2.set_xlim(field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0)
         ax2.set_ylim(np.max(field.depths), 0)
@@ -2998,7 +2986,7 @@ def plot_transfer_function(
             title = f'|H(f)| (dB) @ {freqs[k]:.2f} Hz'
         ax2.set_title(title, fontsize=12, fontweight='bold')
         fig2.colorbar(im, ax=ax2, label='|H| (dB)')
-        return fig2, ax2
+        return fig2, (ax2,)
 
     # ── Default 1-D spectrum branch ────────────────────────────────────
     if isinstance(field, dict):
@@ -3087,8 +3075,8 @@ def plot_transfer_function(
 
     fig.tight_layout()
     if ax_phs is None:
-        return fig, ax_mag
-    return fig, axes
+        return fig, (ax_mag,)
+    return fig, tuple(axes)
 
 
 def plot_time_series(
@@ -3521,7 +3509,7 @@ def plot_modes_heatmap(
     format_axes_professional(ax)
     plt.tight_layout()
 
-    return fig, ax, cbar
+    return fig, ax
 
 def plot_reflection_coefficient(
     field: 'Field',
@@ -3661,8 +3649,7 @@ def plot_reflection_coefficient(
 
     if show_phase and show_magnitude:
         return fig, (ax1, ax2)
-    else:
-        return fig, ax1
+    return fig, (ax1,)
 
 
 def plot_tl_difference(
@@ -3729,15 +3716,15 @@ def plot_tl_difference(
             bathy_r = env.bathymetry[:, 0] / 1000.0
             bathy_d = env.bathymetry[:, 1]
             ax.fill_between(bathy_r, bathy_d, max_depth * 1.05,
-                            color='sienna', alpha=1.0,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
             ax.plot(bathy_r, bathy_d, 'k-', linewidth=2,
                     zorder=ZORDER_SEDIMENT + 6)
         else:
             ax.fill_between([ranges_km[0], ranges_km[-1]],
                             env.depth, max_depth * 1.05,
-                            color='sienna', alpha=1.0,
-                            zorder=ZORDER_SEDIMENT + 5, edgecolor='none')
+                            **BOTTOM_FILL_STYLE,
+                            zorder=ZORDER_SEDIMENT + 5, )
             ax.axhline(env.depth, color='k', linewidth=2, linestyle='--',
                        zorder=ZORDER_SEDIMENT + 6)
 
@@ -3749,7 +3736,7 @@ def plot_tl_difference(
 
     format_axes_professional(ax, title=label,
                              xlabel='Range (km)', ylabel='Depth (m)')
-    return fig, ax, cbar
+    return fig, ax
 
 
 def plot_phase_field(
@@ -3865,7 +3852,7 @@ def plot_reflection_coefficient_heatmap(
 
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(
-        rc.R, origin='lower', aspect='auto', cmap='viridis',
+        rc.R, origin='lower', aspect='auto', cmap=get_cmap_for_field('tl'),
         extent=extent, vmin=0.0, vmax=1.0,
     )
     ax.set_xlabel('Frequency (Hz)')
@@ -3873,7 +3860,7 @@ def plot_reflection_coefficient_heatmap(
     ax.set_title(title or '|R(θ, f)|', fontweight='bold')
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='|R|')
-    return fig, ax
+    return fig, (ax,)
 
 
 def plot_covariance(

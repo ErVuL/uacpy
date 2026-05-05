@@ -74,7 +74,7 @@ def create_example_report(
     # Environment info
     print(f"Environment: {env.name}")
     print(f"  Depth: {env.depth}m")
-    print(f"  SSP type: {env.ssp_type}")
+    print(f"  SSP type: {env.ssp.interp}")
     if env.is_range_dependent:
         print(f"  Range-dependent: YES")
     else:

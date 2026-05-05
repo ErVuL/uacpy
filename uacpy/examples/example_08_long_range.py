@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, SPARC, OAST
 from plotting_utils import create_example_report
 
@@ -77,7 +78,7 @@ def main():
     env = uacpy.Environment(
         name="Deep Ocean - Long Range SOFAR",
         depth=5500.0,
-        ssp_type='munk',
+        ssp=SoundSpeedProfile.from_munk(5500.0),
         bottom=bottom_props
     )
 
