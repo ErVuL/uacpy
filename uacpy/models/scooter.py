@@ -71,10 +71,10 @@ class Scooter(PropagationModel):
         stabilizing_attenuation_off: bool = False,
         field_interp: str = 'O',
         use_fields_exe: bool = True,
-        range_independent_method: str = 'max',
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        **kwargs,
     ):
         """
         Parameters
@@ -135,7 +135,7 @@ class Scooter(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            range_independent_method=range_independent_method,
+            **kwargs,
         )
 
         self.c_low = c_low
@@ -186,8 +186,7 @@ class Scooter(PropagationModel):
         # multi-layer fluid/elastic bottom natively. Range dependence in
         # any form is collapsed to range-0 with a warning.
         self._supports_layered_bottom = True
-        self._unsupported_env_alternatives = "Bellhop, KrakenField, or RAM"
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable_in_paths(
                 'scooter.exe', bin_subdirs='oalib',
@@ -300,9 +299,7 @@ class Scooter(PropagationModel):
                                 roughness=roughness, rmax_multiplier=rmax_multiplier,
                                 volume_attenuation=volume_attenuation):
             # Handle range-dependent environments
-            env = self._handle_range_dependent_environment(
-                env, alternatives='Bellhop, RAM, or KrakenField'
-            )
+            env = self._project_environment(env)
 
             # Clip receiver depths to environment depth (with safety margin)
             receiver = self._clip_receiver_depths(receiver, env.depth)
@@ -457,7 +454,7 @@ class Scooter(PropagationModel):
         - Supports shear wave parameters in bottom halfspace
         """
         # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp_type)
+        ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.acoustic_type)
 
@@ -563,8 +560,9 @@ class Scooter(PropagationModel):
             # because they were already written as part of the boundary specification
             if bottom_code != 'F':
                 # Phase speed limits (cLow, cHigh)
-                c_min = min([c for _, c in env.ssp_data])
-                c_max = max([c for _, c in env.ssp_data] + [env.bottom.sound_speed])
+                _ssp_pairs = env.ssp.to_pairs()
+                c_min = float(_ssp_pairs[:, 1].min())
+                c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
                 c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
                 c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
                 f.write(f"{c_low:.1f} {c_high:.1f}\n")

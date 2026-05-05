@@ -160,6 +160,27 @@ def get_model_color(model_name: str) -> str:
     return MODEL_COLORS.get(model_name, COLORS['primary'])
 
 
+BOTTOM_CMAP = 'YlOrBr'
+# Sediment fill — opaque sandy-tan with diagonal hatching, matching the
+# *rendered appearance* of saddlebrown @ alpha=0.35 in
+# ``plot_rd_bottom`` / ``plot_layered_bottom``. We use the opaque blend
+# (`saddlebrown × 0.35 + white × 0.65 ≈ #d6beac`) instead of the literal
+# alpha=0.35 because TL plots have a coloured heatmap behind the mask,
+# which would otherwise blend through and darken the visible result.
+# Apply via ``ax.fill_between(..., **BOTTOM_FILL_STYLE)``.
+BOTTOM_FILL_COLOR = '#d6beac'
+BOTTOM_FILL_HATCH = '///'
+BOTTOM_FILL_STYLE = {
+    'color': BOTTOM_FILL_COLOR,
+    'hatch': BOTTOM_FILL_HATCH,
+    'edgecolor': 'black',
+    'linewidth': 0.4,
+}
+# Same colour used inside ``plot_rd_bottom`` (with alpha=0.35) for the
+# deep absorbing halfspace beneath the resolved sediment cap.
+BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
+
+
 def get_cmap_for_field(field_type: str) -> str:
     """
     Return the colormap name associated with a field type.

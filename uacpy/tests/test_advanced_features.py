@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
@@ -33,8 +34,7 @@ class TestBellhopRunModes:
         return Environment(
             name="run_mode_test",
             depth=100.0,
-            sound_speed=1500.0,
-            ssp_type='isovelocity'
+            sound_speed=1500.0
         )
 
     @pytest.fixture
@@ -167,8 +167,7 @@ class TestRAMAdvancedParameters:
         return Environment(
             name="ram_test",
             depth=100.0,
-            sound_speed=1500.0,
-            ssp_type='isovelocity'
+            sound_speed=1500.0
         )
 
     @pytest.fixture
@@ -264,8 +263,7 @@ class TestSSPInterpolationMethods:
         env = Environment(
             name="iso_test",
             depth=100.0,
-            sound_speed=1500.0,
-            ssp_type='isovelocity'
+            sound_speed=1500.0
         )
 
         bellhop = Bellhop(verbose=False)
@@ -281,8 +279,7 @@ class TestSSPInterpolationMethods:
         env = Environment(
             name="linear_test",
             depth=100.0,
-            ssp_data=np.column_stack([depths, speeds]),
-            ssp_type='linear'
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='linear')
         )
 
         bellhop = Bellhop(verbose=False)
@@ -298,8 +295,7 @@ class TestSSPInterpolationMethods:
         env = Environment(
             name="cubic_test",
             depth=100.0,
-            ssp_data=np.column_stack([depths, speeds]),
-            ssp_type='cubic'
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='cubic')
         )
 
         bellhop = Bellhop(verbose=False)

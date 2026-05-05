@@ -225,7 +225,7 @@ class ATEnvWriter:
         ssp_to_write = []
         prev_depth = None
 
-        for depth, c in env.ssp_data:
+        for depth, c in env.ssp.to_pairs():
             # Clip SSP depth to not exceed rounded bottom depth
             if depth > bottom_depth_rounded:
                 depth = bottom_depth_rounded
@@ -245,8 +245,8 @@ class ATEnvWriter:
 
         # Write SSP data (Kraken format: depth sound_speed /)
         for depth, c in ssp_to_write:
-            if env.attenuation > 0:
-                f.write(f"  {depth:.6f} {c:.6f} {env.attenuation:.6f} /\n")
+            if env.volume_attenuation > 0:
+                f.write(f"  {depth:.6f} {c:.6f} {env.volume_attenuation:.6f} /\n")
             else:
                 f.write(f"  {depth:.6f} {c:.6f} /\n")
 
@@ -546,7 +546,7 @@ class ATEnvWriter:
 
         with open(filepath, 'w') as f:
             for i, (_range_km, env_seg) in enumerate(segments):
-                ssp_type = parse_ssp_type(env_seg.ssp_type)
+                ssp_type = parse_ssp_type(env_seg.ssp.interp)
                 # Respect the user's surface BC rather than silently
                 # forcing every profile to VACUUM. segment_environment_by_range
                 # copies env.surface onto each segment (see coupled_modes.py),
@@ -654,10 +654,11 @@ class ATEnvWriter:
                 )
 
                 # Phase speed limits (cLow, cHigh) — part of ReadEnvironment
-                c_min = min(c for _, c in env_seg.ssp_data)
+                _ssp_pairs = env_seg.ssp.to_pairs()
+                c_min = float(_ssp_pairs[:, 1].min())
                 c_max = max(
-                    [c for _, c in env_seg.ssp_data] +
-                    [env_seg.bottom.sound_speed]
+                    float(_ssp_pairs[:, 1].max()),
+                    env_seg.bottom.sound_speed,
                 )
                 _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
                 _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR

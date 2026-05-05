@@ -206,7 +206,7 @@ class BellhopEnvWriter:
                 "quad": "Q",         # Quad approximation (needs .ssp file)
                 "analytic": "A",     # Analytic SSP option
             }
-            interp_char = ssp_interp_map.get(env.ssp_type.lower(), "C")
+            interp_char = ssp_interp_map.get(env.ssp.interp, "C")
 
             # Top boundary (surface)
             top_bc = get_top_bc_code(env)
@@ -227,9 +227,9 @@ class BellhopEnvWriter:
                     'N', 'F', 'M', 'W', 'Q', 'L', 'm') else 'W'
             # 'm' (dB/m with per-SSP BETA/fT power-law) requires a
             # separate power-law exponent (BETA) and reference frequency
-            # (fT), which are distinct from env.attenuation.  uacpy's
+            # (fT), which are distinct from env.volume_attenuation. uacpy's
             # Environment does not expose a power-law exponent field, so
-            # emitting 'm' here would mis-use env.attenuation as BETA
+            # emitting 'm' here would mis-use env.volume_attenuation as BETA
             # (ssp_mod.f90 / EnvironmentalFile.html:411-424).  Fail loudly
             # until a dedicated field is added.
             if atten_unit_char == 'm':
@@ -316,10 +316,9 @@ class BellhopEnvWriter:
 
             # Handle range-dependent SSP if using Quad interpolation
             if interp_char == 'Q' and env.has_range_dependent_ssp():
-                # Write external .ssp file for Quad interpolation
                 from uacpy.io.env_writer import write_ssp
                 ssp_file = filepath.with_suffix('.ssp')
-                write_ssp(ssp_file, env.ssp_2d_ranges, env.ssp_2d_matrix)
+                write_ssp(ssp_file, env.ssp.ranges_km, env.ssp.data)
                 if verbose:
                     print(f"[BellhopEnvWriter] Wrote range-dependent SSP file: {ssp_file}")
 
@@ -336,16 +335,10 @@ class BellhopEnvWriter:
             )
             z_max = max(env.depth, max_bathy_depth)
 
-            # Extend SSP if needed
-            ssp_data_extended = env.ssp_data.copy()
-            # Extend upward for altimetry (same sound speed as surface)
+            ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
             if z_min < ssp_data_extended[0, 0]:
                 first_c = ssp_data_extended[0, 1]
                 ssp_data_extended = np.vstack([[z_min, first_c], ssp_data_extended])
-            # Extend downward for deep bathymetry
-            if z_max > ssp_data_extended[-1, 0]:
-                last_c = ssp_data_extended[-1, 1]
-                ssp_data_extended = np.vstack([ssp_data_extended, [z_max, last_c]])
 
             n_ssp = len(ssp_data_extended)
             f.write(f"{n_ssp}  {z_min:.1f}  {z_max:.1f},\n")
@@ -359,7 +352,7 @@ class BellhopEnvWriter:
             for depth, c in ssp_data_extended:
                 f.write(
                     f"{depth:.6f} {c:.6f} 0.0 1.0 "
-                    f"{env.attenuation:.6f} 0.0 /\n"
+                    f"{env.volume_attenuation:.6f} 0.0 /\n"
                 )
 
             # Bottom properties

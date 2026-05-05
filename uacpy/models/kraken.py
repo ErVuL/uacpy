@@ -159,10 +159,7 @@ class _KrakenBase(PropagationModel):
         N (N^2-linear), C (C-linear), P (PCHIP), S (spline). The 'Q'
         quadrilateral code is Bellhop-only (see RangeDepSSPFile.htm).
         """
-        ssp_type = getattr(env, 'ssp_type', None)
-        if ssp_type is None:
-            return
-        val = str(ssp_type).lower()
+        val = env.ssp.interp
         if val in ('q', 'quad', 'quadratic', 'ssptype.quadratic'):
             raise ConfigurationError(
                 "Kraken/KrakenC/KrakenField do not support the 'Q' "
@@ -234,7 +231,7 @@ class _KrakenBase(PropagationModel):
         self._validate_volume_attenuation_params()
 
         # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp_type)
+        ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.acoustic_type)
 
@@ -303,8 +300,9 @@ class _KrakenBase(PropagationModel):
             # KRAKEN-SPECIFIC SECTIONS
 
             # Phase speed limits (cLow, cHigh)
-            c_min = min([c for _, c in env.ssp_data])
-            c_max = max([c for _, c in env.ssp_data] + [env.bottom.sound_speed])
+            _ssp_pairs = env.ssp.to_pairs()
+            c_min = float(_ssp_pairs[:, 1].min())
+            c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
             c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
             c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
             f.write(f"{c_low:.1f} {c_high:.1f}\n")
@@ -533,10 +531,9 @@ class Kraken(_KrakenBase):
     def __init__(self, executable: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
         self._supported_modes = [RunMode.MODES]
-        # Kraken: range-independent modal solver, layered bottom honored,
-        # rejects range-dependent envs explicitly (compute_modes raises).
+        # Elastic media auto-route to krakenc.exe via _select_kraken_exe.
         self._supports_layered_bottom = True
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable_in_paths(
                 'kraken.exe',
@@ -595,9 +592,7 @@ class Kraken(_KrakenBase):
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
 
-        env = self._handle_range_dependent_environment(
-            env, alternatives='KrakenField (modal segments) or RAM',
-        )
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
@@ -658,10 +653,8 @@ class KrakenC(_KrakenBase):
     def __init__(self, executable: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
         self._supported_modes = [RunMode.MODES]
-        # KrakenC: complex-mode solver, same env support as Kraken
-        # (layered bottom honored; range-dep rejected by compute_modes).
         self._supports_layered_bottom = True
-
+        self._supports_elastic_media = True
         if executable is None:
             self.executable = self._find_executable_in_paths(
                 'krakenc.exe',
@@ -719,9 +712,7 @@ class KrakenC(_KrakenBase):
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
-        env = self._handle_range_dependent_environment(
-            env, alternatives='KrakenField (modal segments) or RAM',
-        )
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
@@ -850,12 +841,12 @@ class KrakenField(_KrakenBase):
         # adiabatic-or-coupled modes; layered bottom honored. Range-
         # dependent geoacoustic properties (bottom_rd / bottom_rd_layered)
         # are NOT plumbed through and warn via the base helper.
+        self._supports_range_dependent_bathymetry = True
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = False
         self._supports_layered_bottom = True
         self._supports_range_dependent_layered_bottom = False
-        self._unsupported_env_alternatives = "RAM (PE) for full range-dep geoacoustics"
-
+        self._supports_elastic_media = True
         if mode_coupling not in ('adiabatic', 'coupled'):
             raise ValueError(
                 f"mode_coupling must be 'adiabatic' or 'coupled', "
@@ -942,11 +933,11 @@ class KrakenField(_KrakenBase):
     def _select_kraken_exe(self, env):
         """Return 'kraken.exe' or 'krakenc.exe' based on environment."""
         needs_krakenc = False
-        if hasattr(env, 'bottom') and env.bottom is not None:
-            if (hasattr(env.bottom, 'shear_speed')
-                    and env.bottom.shear_speed is not None
-                    and env.bottom.shear_speed > 0):
+        for boundary in (getattr(env, 'bottom', None), getattr(env, 'surface', None)):
+            cs = getattr(boundary, 'shear_speed', None) if boundary else None
+            if cs is not None and float(cs) > 0:
                 needs_krakenc = True
+                break
         # leaky_modes requires complex arithmetic for convergence.
         if getattr(self, 'leaky_modes', False):
             needs_krakenc = True
@@ -1069,6 +1060,7 @@ class KrakenField(_KrakenBase):
                     )
                 return tf
 
+            env = self._project_environment(env)
             self.validate_inputs(env, source, receiver)
             return self._compute_field_via_exe(
                 env, source, receiver, n_modes=n_modes, **kwargs
@@ -1163,7 +1155,7 @@ class KrakenField(_KrakenBase):
                 freq = float(source.frequency[0])
                 all_c = []
                 for _, seg in segments:
-                    all_c.extend([c for _, c in seg.ssp_data])
+                    all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
                     if hasattr(seg, 'bottom') and seg.bottom is not None:
                         all_c.append(seg.bottom.sound_speed)
                 min_c = min(all_c) if all_c else 1500.0
@@ -1366,6 +1358,7 @@ class KrakenField(_KrakenBase):
         self._log(f"Broadband mode: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")
 
+        env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
         return self._compute_field_via_exe(
             env, source, receiver,

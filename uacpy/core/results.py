@@ -464,6 +464,37 @@ class TransferFunction(_GridResult):
             window=window, nfft=nfft, t_start=t_start,
         )
 
+    def to_tl(self, frequency: Optional[float] = None) -> "TLField":
+        """Magnitude-in-dB view of this transfer function at one frequency.
+
+        Picks the frequency-axis sample whose value is closest to
+        ``frequency`` (or the centre frequency if ``None``) and returns a
+        :class:`TLField` of shape ``(n_depth, n_range)`` carrying
+        ``-20 * log10(|H|)`` clamped to ``PRESSURE_FLOOR``.
+        """
+        if self.data.ndim < 3:
+            raise ValueError(
+                "TransferFunction.to_tl needs a 3-D (depth, range, freq) "
+                f"array; got shape {self.data.shape}"
+            )
+        from uacpy.core.constants import PRESSURE_FLOOR
+        freqs = np.asarray(self.frequencies, dtype=float)
+        target = float(frequency) if frequency is not None else float(np.median(freqs))
+        i_f = int(np.argmin(np.abs(freqs - target)))
+        H = self.data[..., i_f]
+        tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
+        kw = self._result_kwargs_passthrough()
+        kw.setdefault('frequency', float(freqs[i_f]))
+        return TLField(data=tl, depths=self.depths, ranges=self.ranges, **kw)
+
+    def _result_kwargs_passthrough(self) -> dict:
+        return dict(
+            model=getattr(self, 'model', None),
+            backend=getattr(self, 'backend', None),
+            source_depths=getattr(self, 'source_depths', None),
+            metadata=dict(self.metadata),
+        )
+
     def synthesize_time_series(
         self,
         source_waveform: np.ndarray,
@@ -600,12 +631,11 @@ class TimeTrace(Result):
         self.data = data
         self.time = time
         self.depth = float(depth)
-        self.range = float(range_m)
-        # Mirror time-axis info into ``metadata`` for dict-style consumers.
+        self.range_m = float(range_m)
         self.metadata.setdefault('time', time)
         self.metadata.setdefault('nt', int(len(time)))
         self.metadata.setdefault('depth', self.depth)
-        self.metadata.setdefault('range', self.range)
+        self.metadata.setdefault('range_m', self.range_m)
         if len(time) >= 2:
             self.metadata.setdefault('dt', float(time[1] - time[0]))
             self.metadata.setdefault('fs', 1.0 / float(time[1] - time[0]))
@@ -644,7 +674,7 @@ class TimeTrace(Result):
 
     @property
     def ranges(self) -> np.ndarray:
-        return np.array([self.range])
+        return np.array([self.range_m])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -702,6 +732,21 @@ class Arrivals(Result):
     def arrivals_data(self) -> Any:
         """The per-receiver arrivals payload. Same as ``self.by_receiver``."""
         return self.by_receiver
+
+    @property
+    def delays(self) -> np.ndarray:
+        """Travel times of every arrival at the (src=0, depth=0, range=0) cell."""
+        return np.asarray(self.at().get('delays', []), dtype=float)
+
+    @property
+    def amplitudes(self) -> np.ndarray:
+        """Amplitudes of every arrival at the (src=0, depth=0, range=0) cell."""
+        return np.asarray(self.at().get('amplitudes', []), dtype=float)
+
+    @property
+    def phases(self) -> np.ndarray:
+        """Phases (rad) of every arrival at the (src=0, depth=0, range=0) cell."""
+        return np.asarray(self.at().get('phases', []), dtype=float)
 
     def at(self, range_idx: int = 0, depth_idx: int = 0,
            src_idx: int = 0) -> Dict[str, np.ndarray]:

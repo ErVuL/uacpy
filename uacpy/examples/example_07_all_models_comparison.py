@@ -40,6 +40,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy import RangeDependentBottom
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
 from uacpy.visualization.plots import (
@@ -119,10 +120,10 @@ def main():
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
         depth=200.0,
-        ssp_type='pchip',
-        ssp_data=ssp_1d,
-        ssp_2d_ranges=ranges_km,
-        ssp_2d_matrix=ssp_2d_matrix,
+        ssp=SoundSpeedProfile.from_2d(
+            depths=ssp_1d[:, 0], ranges_km=ranges_km, matrix=ssp_2d_matrix,
+            interp='pchip',
+        ),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )

@@ -14,7 +14,7 @@ import pytest
 import uacpy
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom,
+    RangeDependentLayeredBottom, SoundSpeedProfile,
 )
 from uacpy.models.ram import RAM
 from uacpy.models.kraken import Kraken
@@ -124,7 +124,7 @@ def rd_layered_bottom():
 def _make_env(bottom, surface=None, name='test'):
     return uacpy.Environment(
         name=name, depth=100,
-        ssp_data=[(0, 1500), (100, 1500)],
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=bottom,
         surface=surface,
     )
@@ -224,7 +224,7 @@ class TestRAMBoundaries:
     def test_ram_rd_layered(self, source, receiver, rd_layered_bottom):
         env = uacpy.Environment(
             name='rd_layered', depth=100,
-            ssp_data=[(0, 1500), (100, 1500)],
+            ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
             bottom=rd_layered_bottom,
         )
         field = RAM(verbose=False).run(env, source, receiver)
@@ -305,7 +305,7 @@ class TestKrakenFieldSegmentation:
         from uacpy.models.coupled_modes import segment_environment_by_range
         env = uacpy.Environment(
             name='test', depth=200,
-            ssp_data=[(0, 1500), (200, 1500)],
+            ssp=SoundSpeedProfile.from_pairs([(0, 1500), (200, 1500)]),
             bathymetry=np.array([[0, 100], [20000, 200]]),
             bottom=multi_layer_bottom,
         )
@@ -319,7 +319,7 @@ class TestKrakenFieldSegmentation:
         from uacpy.models.coupled_modes import segment_environment_by_range
         env = uacpy.Environment(
             name='test', depth=100,
-            ssp_data=[(0, 1500), (100, 1500)],
+            ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
             bottom=rd_layered_bottom,
         )
         segments = segment_environment_by_range(env, n_segments=4)
@@ -349,7 +349,7 @@ class TestGetBottomAtRange:
     def test_rd_layered_nearest_profile(self, rd_layered_bottom):
         env = uacpy.Environment(
             name='test', depth=100,
-            ssp_data=[(0, 1500), (100, 1500)],
+            ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
             bottom=rd_layered_bottom,
         )
         # Near range: profile[0] has 2 layers

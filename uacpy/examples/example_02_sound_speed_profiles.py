@@ -76,6 +76,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
 from example_helpers import create_example_report
 
@@ -97,7 +98,7 @@ def scenario_a_munk_profile():
     env = uacpy.Environment(
         name="Deep Ocean - Munk Profile",
         depth=5000.0,            # Deep ocean
-        ssp_type='munk',         # Canonical Munk profile (built-in)
+        ssp=SoundSpeedProfile.from_munk(5000.0),
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),
@@ -197,7 +198,6 @@ def scenario_b_pekeris_waveguide():
         name="Pekeris Waveguide - Elastic Bottom",
         depth=100.0,             # Shallow water
         sound_speed=1500.0,      # Isovelocity water column
-        ssp_type='isovelocity',
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),
@@ -290,8 +290,7 @@ def scenario_c_thermocline():
     env = uacpy.Environment(
         name="Coastal - Thermocline with Surface Duct",
         depth=200.0,
-        ssp_type='bilinear',    # Bilinear interpolation
-        ssp_data=ssp_data,
+        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='bilinear'),
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),

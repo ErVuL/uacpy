@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.io.file_manager import FileManager
 
 
@@ -85,7 +86,6 @@ class TestEnvironmentIO:
                 name="Test",
                 depth=100.0,
                 sound_speed=1500.0,
-                ssp_type='isovelocity',
                 bathymetry=bathymetry
             )
 
@@ -107,12 +107,11 @@ class TestEnvironmentIO:
         env = uacpy.Environment(
             name="Test",
             depth=100.0,
-            ssp_data=ssp_data,
-            ssp_type='pchip'
+            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip')
         )
 
-        assert len(env.ssp_data) == 11
-        assert np.allclose(env.ssp_data[:, 0], depths)
+        assert len(env.ssp.to_pairs()) == 11
+        assert np.allclose(env.ssp.to_pairs()[:, 0], depths)
 
 
 class TestFieldIO:
@@ -159,7 +158,7 @@ class TestDataValidation:
     def test_environment_depth_validation(self):
         """Test environment depth validation."""
         with pytest.raises(ValueError):
-            uacpy.Environment(name="Test", depth=-10, sound_speed=1500, ssp_type='isovelocity')
+            uacpy.Environment(name="Test", depth=-10, sound_speed=1500)
 
     def test_source_receiver_depth_validation(self, simple_env):
         """Test source/receiver depth validation."""

@@ -63,13 +63,12 @@ def main():
         name="Pekeris Waveguide",
         depth=100.0,              # Flat bottom at 100m
         sound_speed=1500.0,       # Isovelocity water column
-        ssp_type='isovelocity',
         bottom=bottom             # Use BoundaryProperties object
     )
 
     print(f"  ✓ Created Pekeris waveguide:")
     print(f"    - Water depth: {env.depth}m")
-    print(f"    - Sound speed: {env.sound_speed} m/s")
+    print(f"    - Sound speed: {float(env.ssp.data[0, 0])} m/s")
     print(f"    - Bottom type: Fluid half-space")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -133,7 +132,7 @@ def main():
     # Plot 1: TL field using NEW uacpy plotting module
     ax = axes[0, 0]
     #Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
-    _, _, cbar = plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
+    _, _ = plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
     ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
                 fontweight='bold', fontsize=12)
 
@@ -205,7 +204,7 @@ def main():
     # Add text box with simulation parameters
     textstr = (f'Simulation Parameters:\n'
                f'  Water depth: {env.depth}m\n'
-               f'  Sound speed: {env.sound_speed} m/s\n'
+               f'  Sound speed: {float(env.ssp.data[0, 0])} m/s\n'
                f'  Frequency: {source.frequency[0]} Hz\n'
                f'  Source depth: {source.depth[0]}m\n'
                f'  Model: Bellhop (Gaussian beams)\n'

@@ -25,15 +25,14 @@ def simple_env():
         name="Test Environment",
         depth=100.0,
         sound_speed=1500.0,
-        ssp_type='isovelocity'
     )
 
 
 @pytest.fixture
 def munk_env():
     """Munk profile environment."""
+    from uacpy.core.environment import SoundSpeedProfile
     depths = np.linspace(0, 100, 21)
-    # Simple Munk-like profile
     axis_depth = 50
     c_axis = 1485
     sound_speeds = c_axis * (1 + 0.00737 * ((depths - axis_depth) / axis_depth) ** 2)
@@ -41,15 +40,15 @@ def munk_env():
     return uacpy.Environment(
         name="Munk Profile",
         depth=100.0,
-        ssp_data=np.column_stack([depths, sound_speeds]),
-        ssp_type='pchip'
+        ssp=SoundSpeedProfile.from_pairs(
+            np.column_stack([depths, sound_speeds]), interp='pchip',
+        ),
     )
 
 
 @pytest.fixture
 def range_dependent_env():
     """Range-dependent environment with bathymetry."""
-    # Create bathymetry: slope from 80m to 120m over 10km
     ranges = np.linspace(0, 10000, 11)
     depths = np.linspace(80, 120, 11)
     bathymetry = np.column_stack([ranges, depths])
@@ -58,8 +57,7 @@ def range_dependent_env():
         name="Range Dependent",
         depth=100.0,
         sound_speed=1500.0,
-        ssp_type='isovelocity',
-        bathymetry=bathymetry
+        bathymetry=bathymetry,
     )
 
 

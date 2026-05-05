@@ -37,6 +37,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy import RangeDependentBottom
 from uacpy.models import Kraken, KrakenField, KrakenC
 from uacpy.visualization.plots import (
@@ -93,8 +94,7 @@ def main():
     env = uacpy.Environment(
         name="Continental Shelf - Mode Coupling",
         depth=400.0,
-        ssp_type='pchip',  # Smooth interpolation
-        ssp_data=ssp_data,
+        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )
@@ -126,8 +126,9 @@ def main():
     env_shallow = uacpy.Environment(
         name="Shelf (100m)",
         depth=100.0,
-        ssp_type='pchip',
-        ssp_data=ssp_data[ssp_data[:, 0] <= 100],
+        ssp=SoundSpeedProfile.from_pairs(
+            ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
+        ),
         bottom=bottom_rd.get_at_range(0)
     )
 
@@ -143,8 +144,7 @@ def main():
     env_deep = uacpy.Environment(
         name="Slope (400m)",
         depth=400.0,
-        ssp_type='pchip',
-        ssp_data=ssp_data,
+        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
         bottom=bottom_rd.get_at_range(20000)
     )
 
@@ -293,7 +293,7 @@ def main():
         #Use plot_modes_heatmap - Show all modes as 2D heatmap
         try:
             print("  Creating mode heatmap...", end=" ", flush=True)
-            fig_heatmap, ax_heatmap, cbar_heatmap = plot_modes_heatmap(
+            fig_heatmap, ax_heatmap = plot_modes_heatmap(
                 modes_field,
                 mode_range=None,  # Plot all modes
                 normalize=True,
@@ -311,7 +311,7 @@ def main():
     # Plot 3: Coupled mode TL field
     #Using auto TL limits and contour overlays
     if result is not None:
-        fig3, ax3, cbar3 = plot_transmission_loss(
+        fig3, ax3 = plot_transmission_loss(
             result, env,
             contours=[70, 85, 100],  #Add labeled contours
             show_colorbar=True

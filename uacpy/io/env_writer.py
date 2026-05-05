@@ -138,7 +138,7 @@ def write_env_file(
             "quad": "Q",  # Quad approximation (needs .ssp file)
             "analytic": "A",  # Analytic SSP option
         }
-        interp_char = ssp_interp_map.get(env.ssp_type.lower(), "C")
+        interp_char = ssp_interp_map.get(env.ssp.interp, "C")
 
         # Top boundary (surface)
         top_bc = get_top_bc_code(env)
@@ -161,20 +161,15 @@ def write_env_file(
         )
         z_max = max(env.depth, max_bathy_depth)
 
-        # Extend SSP if needed
-        ssp_data_extended = env.ssp_data.copy()
-        if z_max > env.ssp_data[-1, 0]:
-            # Add point at max depth with same sound speed as last point
-            last_c = env.ssp_data[-1, 1]
-            ssp_data_extended = np.vstack([ssp_data_extended, [z_max, last_c]])
+        ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
 
         n_ssp = len(ssp_data_extended)
         f.write(f"{n_ssp}  {z_min:.1f}  {z_max:.1f},\n")
 
         for depth, c in ssp_data_extended:
             # Format: depth(m) c(m/s) [attenuation(dB/wavelength)]
-            if env.attenuation > 0:
-                f.write(f"{depth:.6f} {c:.6f} {env.attenuation:.6f} /\n")
+            if env.volume_attenuation > 0:
+                f.write(f"{depth:.6f} {c:.6f} {env.volume_attenuation:.6f} /\n")
             else:
                 f.write(f"{depth:.6f} {c:.6f} /\n")
 

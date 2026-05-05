@@ -49,7 +49,6 @@ def main():
         name='pekeris-100hz',
         depth=waveguide_depth,
         sound_speed=1500.0,
-        ssp_type='isovelocity',
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,

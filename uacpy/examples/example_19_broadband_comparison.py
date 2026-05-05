@@ -72,8 +72,7 @@ def main():
     env = uacpy.Environment(
         name='Pekeris Waveguide',
         depth=100,
-        sound_speed=1500,
-        ssp_type='isovelocity'
+        sound_speed=1500
     )
 
     source = uacpy.Source(depth=36, frequency=100)
@@ -137,11 +136,11 @@ def main():
     )
     env_mp = uacpy.Environment(
         name='Pekeris-fluid-flat', depth=env.depth,
-        sound_speed=1500.0, ssp_type='isovelocity', bottom=fluid_bottom,
+        sound_speed=1500.0, bottom=fluid_bottom,
     )
     env_rs = uacpy.Environment(
         name='Pekeris-fluid-altimetry', depth=env.depth,
-        sound_speed=1500.0, ssp_type='isovelocity', bottom=fluid_bottom,
+        sound_speed=1500.0, bottom=fluid_bottom,
         altimetry=[(0.0, 0.0), (8000.0, 0.0)],
     )
     elastic_tiny_shear = LayeredBottom(
@@ -157,7 +156,7 @@ def main():
     )
     env_ra = uacpy.Environment(
         name='Pekeris-elastic-tiny-shear', depth=env.depth,
-        sound_speed=1500.0, ssp_type='isovelocity',
+        sound_speed=1500.0,
         bottom=elastic_tiny_shear,
     )
 

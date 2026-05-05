@@ -41,7 +41,6 @@ class TestElasticBoundaryAutoDetection:
             name="Elastic Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
 
@@ -59,7 +58,6 @@ class TestElasticBoundaryAutoDetection:
             name="Fluid Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
 
@@ -133,7 +131,6 @@ class TestBounceReflectionCoefficients:
             name="BOUNCE Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
 
@@ -233,7 +230,6 @@ class TestBounceToScooterWorkflow:
             name="Workflow Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
 
@@ -279,7 +275,6 @@ class TestBounceToScooterWorkflow:
             name="SCOOTER with BRC",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom_with_file
         )
 
@@ -316,7 +311,6 @@ class TestWorkflowComparison:
             name="Comparison Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom
         )
 
@@ -364,7 +358,6 @@ class TestWorkflowComparison:
             name="SCOOTER with BRC",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom_with_file
         )
 

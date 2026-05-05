@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
 from example_helpers import create_example_report
 
@@ -76,13 +77,10 @@ def main():
     env = uacpy.Environment(
         name="Summer Thermocline - Multi-Frequency",
         depth=200.0,
-        ssp_type='linear',  # Linear interpolation between points
-        ssp_data=[
-            (0, 1525),      # Warm mixed layer
-            (25, 1525),     # Bottom of mixed layer
-            (60, 1490),     # Through thermocline
-            (200, 1490)     # Isothermal deep
-        ],
+        ssp=SoundSpeedProfile.from_pairs(
+            [(0, 1525), (25, 1525), (60, 1490), (200, 1490)],
+            interp='linear',
+        ),
         bottom=bottom_props
     )
 

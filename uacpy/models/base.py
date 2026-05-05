@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 from enum import Enum
 import warnings
 
@@ -122,40 +122,88 @@ class PropagationModel(ABC):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
-        range_independent_method: str = 'max',
+        bathymetry_collapse_method: str = 'max',
+        ssp_collapse_method: str = 'r0',
+        bottom_collapse_method: str = 'r0',
+        layered_collapse_method: str = 'halfspace',
+        rd_layered_collapse_method: str = 'halfspace',
+        altimetry_collapse_method: str = 'drop',
+        elastic_collapse_method: str = 'fluid',
     ):
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
         self.verbose = verbose
         self.work_dir = work_dir
-        # When a range-independent-only model receives a range-dependent
-        # env, the wrapper collapses it via
-        # ``Environment.get_range_independent_approximation(method=…)``.
-        # ``'max'`` keeps source/receiver depths inside the seafloor;
-        # ``'median'`` / ``'mean'`` / ``'min'`` are the other valid
-        # choices. See :meth:`Environment.get_representative_depth`.
-        self.range_independent_method = range_independent_method
+        # Per-feature collapse policies applied by ``_project_environment``
+        # when an env contains a feature this model doesn't support.
+        # Defaults preserve historical behaviour (range-0 / halfspace / drop)
+        # so existing callers are unaffected.
+        #
+        # bathymetry_collapse_method : 'max'|'median'|'mean'|'min'|'initial'
+        #     Single representative water depth for range-independent models.
+        # ssp_collapse_method : 'r0'|'rmax'|'mean'|'median'
+        #     Reduce 2-D SSP to 1-D.
+        # bottom_collapse_method : 'r0'|'rmax'|'mean'|'median'
+        #     Reduce ``RangeDependentBottom`` to a single ``BoundaryProperties``.
+        # layered_collapse_method : 'halfspace'|'top_layer'|'volume_average'
+        #     Reduce ``LayeredBottom`` to a single ``BoundaryProperties``.
+        # rd_layered_collapse_method : 'halfspace'|'top_layer'|'volume_average'
+        #     Layered method applied after picking a single profile from a
+        #     ``RangeDependentLayeredBottom``.
+        # altimetry_collapse_method : 'drop'
+        # elastic_collapse_method   : 'fluid' (zero shear) | 'vacuum'
+        #     Applied to BOTH env.surface and env.bottom whenever the
+        #     interface has shear_speed > 0 and the model does not support
+        #     elastic media.
+        self.bathymetry_collapse_method = bathymetry_collapse_method
+        self.ssp_collapse_method = ssp_collapse_method
+        self.bottom_collapse_method = bottom_collapse_method
+        self.layered_collapse_method = layered_collapse_method
+        self.rd_layered_collapse_method = rd_layered_collapse_method
+        self.altimetry_collapse_method = altimetry_collapse_method
+        self.elastic_collapse_method = elastic_collapse_method
         self.file_manager = None
 
         # Subclasses override to declare the run modes they support.
         self._supported_modes: List[RunMode] = [RunMode.COHERENT_TL]
 
-        # Capability flags — subclasses set True for each Environment feature
-        # they honour natively. Anything left False that's present in env on
-        # ``run()`` triggers a warning via ``_warn_on_unsupported_env_features``
-        # rather than silently dropping the data.
+        # Capability flags — one per axis of ``Environment`` shape. Subclasses
+        # flip True for each feature they honour natively; anything left False
+        # that's present in env on ``run()`` is collapsed by
+        # ``_project_environment`` and triggers one ``UserWarning`` per dropped
+        # feature.
         #
-        # Default model-suggestion strings appended to each warning. Override
-        # ``_unsupported_env_alternatives`` per subclass to point users at
-        # the right alternative (e.g., RAM for range-dependent fluid PE).
+        # The flag list is intentionally bounded. Add a flag ONLY for a
+        # question of the form "does this env shape work with this model?".
+        # Niche numerical-method requirements (3-D, broadband, specific SSP
+        # interp scheme, volume-attenuation formula) belong in run()-time
+        # asserts, not here.
         self._supports_altimetry: bool = False
+        self._supports_range_dependent_bathymetry: bool = False
         self._supports_range_dependent_ssp: bool = False
         self._supports_range_dependent_bottom: bool = False
         self._supports_layered_bottom: bool = False
         self._supports_range_dependent_layered_bottom: bool = False
-        self._unsupported_env_alternatives: str = (
-            "Bellhop / KrakenField / RAM"
-        )
+        self._supports_elastic_media: bool = False
+        # Per-feature suggestion strings appended to each warning. Override
+        # individual entries per subclass (e.g. Bellhop adds a
+        # ``run_with_bounce()`` hint to ``layered_bottom``).
+        self._unsupported_env_alternatives: Dict[str, str] = {
+            'altimetry': 'Bellhop or RAM (ramsurf backend)',
+            'range_dependent_bathymetry': (
+                'Bellhop, BellhopCUDA, KrakenField, or RAM'
+            ),
+            'range_dependent_ssp': (
+                'Bellhop (with ssp.interp=\'quad\'), KrakenField, or RAM'
+            ),
+            'range_dependent_bottom': 'Bellhop (long .bty) or RAM',
+            'layered_bottom': 'Kraken/KrakenC, Scooter, or OASES',
+            'range_dependent_layered_bottom': 'RAM',
+            'elastic_media': (
+                'Bellhop, KrakenC, KrakenField, Scooter, OASES, Bounce, '
+                'or RAM (auto-routes to rams0.5 for elastic bottom)'
+            ),
+        }
 
     @property
     def supported_modes(self) -> List[RunMode]:
@@ -218,6 +266,16 @@ class PropagationModel(ABC):
             by ``run_mode`` and the model.
         """
         pass
+
+    def _resolve(self, value, attr: str):
+        """Resolve a per-call override against the constructor default.
+
+        Returns ``value`` unchanged unless it is the ``_UNSET`` sentinel,
+        in which case ``getattr(self, attr)`` is returned. Used by
+        ``run()`` paths that pass resolved values straight to writers
+        (where the ``_resolve_overrides`` context manager doesn't apply).
+        """
+        return getattr(self, attr) if value is _UNSET else value
 
     def _setup_file_manager(self) -> FileManager:
         """
@@ -319,12 +377,6 @@ class PropagationModel(ABC):
         if receiver.depth_min < 0:
             self._log("Receiver depths must be positive", level='error')
             raise ValueError("Receiver depths must be positive")
-
-        # Warn on env features the model doesn't honour (covers altimetry,
-        # range-dep SSP / bottom, layered, range-dep layered). Bellhop has
-        # its own custom warnings inside ``run()`` and sets the relevant
-        # supports flags so this helper doesn't double-warn.
-        self._warn_on_unsupported_env_features(env)
 
     def compute_tl(
         self,
@@ -542,11 +594,9 @@ class PropagationModel(ABC):
 
         if env.is_range_dependent and self.model_name != 'KrakenField':
             # Range-independent mode solvers (Kraken, KrakenC, OASN) collapse
-            # the environment via ``range_independent_method`` and warn,
+            # the environment via ``bathymetry_collapse_method`` and warn,
             # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
-            env = self._handle_range_dependent_environment(
-                env, alternatives='KrakenField (coupled / adiabatic modes)',
-            )
+            env = self._project_environment(env)
 
         return self._compute_modes_impl(env, source, n_modes, **kwargs)
 
@@ -748,113 +798,201 @@ class PropagationModel(ABC):
                 "bio_layers=[(Z1, Z2, f0, Q, a0), ...]",
             )
 
-    def _warn_on_unsupported_env_features(self, env: 'Environment') -> None:
-        """Warn for every Environment feature this model does not support.
+    @staticmethod
+    def _has_shear(boundary) -> bool:
+        """True if a ``BoundaryProperties`` carries a non-zero shear speed."""
+        cs = getattr(boundary, 'shear_speed', None)
+        return cs is not None and float(cs) > 0.0
 
-        Replaces the older pattern where each model's ``run()`` either
-        warned with custom wording or silently dropped data. Subclasses
-        declare what they honour by setting the ``_supports_*`` flags in
-        ``__init__``; this helper inspects ``env`` and emits one
-        ``UserWarning`` per unsupported feature actually present.
+    @staticmethod
+    def _collapse_elastic_boundary(boundary, method: str, default_depth: float):
+        """Collapse an elastic ``BoundaryProperties`` per ``method``.
 
-        Notes
-        -----
-        Bellhop keeps its existing custom warnings (``run_with_bounce`` is
-        the right alternative there, not the generic suggestion). Other
-        subclasses should call this helper instead of writing their own.
+        ``'fluid'``  : zero shear_speed and shear_attenuation; keep cp / ρ / α.
+        ``'vacuum'`` : replace with default vacuum BoundaryProperties.
+        """
+        from uacpy.core.environment import BoundaryProperties
+        import copy as _copy
+        if method == 'fluid':
+            b = _copy.deepcopy(boundary)
+            b.shear_speed = 0.0
+            b.shear_attenuation = 0.0
+            return b
+        if method == 'vacuum':
+            return BoundaryProperties(
+                acoustic_type='vacuum', depth=float(default_depth),
+            )
+        raise ValueError(
+            f"Unknown elastic collapse method {method!r}. Use "
+            "'fluid' or 'vacuum'."
+        )
+
+    def _project_environment(self, env: 'Environment') -> 'Environment':
+        """Return a copy of ``env`` with every unsupported feature collapsed.
+
+        Walks the eight feature axes (altimetry, range-dependent
+        bathymetry, range-dependent SSP, range-dependent bottom, layered
+        bottom, range-dependent layered bottom, elastic surface, elastic
+        bottom) and applies the per-feature ``*_collapse_method``
+        configured on the model. Emits one ``UserWarning`` per dropped
+        feature, citing the chosen method and the alternative-model hint
+        from ``self._unsupported_env_alternatives``.
+
+        Models call this once at the top of ``run()`` instead of
+        inspecting the env themselves.
         """
         import warnings as _w
 
+        e = env.copy()
         alts = self._unsupported_env_alternatives
 
-        if (not self._supports_altimetry
-                and getattr(env, 'altimetry', None) is not None):
+        if env.altimetry is not None and not self._supports_altimetry:
+            method = self.altimetry_collapse_method
+            if method != 'drop':
+                raise ValueError(
+                    f"Unknown altimetry_collapse_method {method!r}. "
+                    "Currently only 'drop' is supported."
+                )
+            e.altimetry = None
             _w.warn(
-                f"{self.model_name} does not support sea-surface altimetry. "
-                f"Altimetry data will be ignored and a flat surface used. "
-                f"For rough-surface support use Bellhop or RAM.",
+                f"{self.model_name} does not support sea-surface altimetry; "
+                f"using flat surface (altimetry_collapse_method={method!r}). "
+                f"For rough-surface support use {alts['altimetry']}.",
                 UserWarning, stacklevel=3,
             )
-
-        if (not self._supports_range_dependent_ssp
-                and getattr(env, 'has_range_dependent_ssp', None) is not None
-                and env.has_range_dependent_ssp()):
-            _w.warn(
-                f"{self.model_name} does not support range-dependent SSP. "
-                f"The range-0 profile will be used. "
-                f"For range-dependent SSP use {alts}.",
-                UserWarning, stacklevel=3,
+            self._log(
+                f"{self.model_name}: altimetry dropped ({method}).",
+                level='warn',
             )
 
-        if (not self._supports_range_dependent_bottom
-                and getattr(env, 'has_range_dependent_bottom', None) is not None
-                and env.has_range_dependent_bottom()):
-            _w.warn(
-                f"{self.model_name} does not support range-dependent bottom "
-                f"properties. Using the range-0 (or median) bottom only. "
-                f"For range-dependent bottoms use {alts}.",
-                UserWarning, stacklevel=3,
-            )
-
-        if (not self._supports_layered_bottom
-                and getattr(env, 'has_layered_bottom', None) is not None
-                and env.has_layered_bottom()):
-            _w.warn(
-                f"{self.model_name} does not support layered (depth-"
-                f"dependent) bottoms. Using halfspace properties only. "
-                f"For layered bottoms use Kraken/KrakenC, Scooter, or OASES.",
-                UserWarning, stacklevel=3,
-            )
-
-        if (not self._supports_range_dependent_layered_bottom
-                and getattr(env, 'has_range_dependent_layered_bottom', None)
-                is not None
-                and env.has_range_dependent_layered_bottom()):
+        if (env.has_range_dependent_bathymetry()
+                and not self._supports_range_dependent_bathymetry):
+            method = self.bathymetry_collapse_method
+            new_depth = env.get_representative_depth(method)
+            e.bathymetry = np.array([[0.0, new_depth]], dtype=np.float64)
+            e.depth = float(new_depth)
+            if e.ssp.depths[-1] < new_depth:
+                e.ssp = e.ssp.extend_to(new_depth)
+            min_d = float(env.bathymetry[:, 1].min())
+            max_d = float(env.bathymetry[:, 1].max())
             _w.warn(
                 f"{self.model_name} does not support range-dependent "
-                f"layered bottoms. Using halfspace properties only. "
-                f"For range+depth-dependent bottoms use RAM.",
+                f"bathymetry; collapsed to {new_depth:.1f} m "
+                f"(method={method!r}, range {min_d:.1f}–{max_d:.1f} m). "
+                f"For RD bathymetry use "
+                f"{alts['range_dependent_bathymetry']}. "
+                f"Override with `bathymetry_collapse_method='min'|'median'|"
+                f"'mean'|'max'|'initial'`.",
                 UserWarning, stacklevel=3,
             )
-
-    def _handle_range_dependent_environment(
-        self, env: 'Environment', alternatives: str = 'Bellhop or RAM'
-    ) -> 'Environment':
-        """
-        Handle range-dependent environments for range-independent models.
-
-        Warns the user and creates a range-independent approximation using
-        the maximum bathymetry depth (to ensure source/receiver depths remain valid).
-
-        Parameters
-        ----------
-        env : Environment
-            Input environment (may be range-dependent)
-        alternatives : str
-            Models to suggest as alternatives for range-dependent modeling
-
-        Returns
-        -------
-        Environment
-            Range-independent environment (unchanged if already range-independent)
-        """
-        if env.is_range_dependent:
-            import warnings
-            method = self.range_independent_method
-            collapsed = env.get_range_independent_approximation(method=method)
-            min_depth = env.bathymetry[:, 1].min()
-            max_depth = env.bathymetry[:, 1].max()
-            warning_msg = (
-                f"{self.model_name} does not support range-dependent environments. "
-                f"Using {method!r} bathymetry depth ({collapsed.depth:.1f} m) "
-                f"as approximation. Bathymetry range: {min_depth:.1f}–{max_depth:.1f} m. "
-                f"For accurate range-dependent modeling, use {alternatives}. "
-                f"Override with `range_independent_method='min'|'median'|'mean'|'max'`."
+            self._log(
+                f"{self.model_name}: bathymetry collapsed ({method} → "
+                f"{new_depth:.1f} m).",
+                level='warn',
             )
-            warnings.warn(warning_msg, UserWarning, stacklevel=3)
-            self._log(warning_msg, level='warn')
-            return collapsed
-        return env
+
+        if (env.has_range_dependent_ssp()
+                and not self._supports_range_dependent_ssp):
+            method = self.ssp_collapse_method
+            e.ssp = e.ssp.collapse(method)
+            _w.warn(
+                f"{self.model_name} does not support range-dependent SSP; "
+                f"collapsed to 1-D (ssp_collapse_method={method!r}). "
+                f"For RD SSP use {alts['range_dependent_ssp']}.",
+                UserWarning, stacklevel=3,
+            )
+            self._log(
+                f"{self.model_name}: SSP collapsed ({method}).", level='warn',
+            )
+
+        if (env.has_range_dependent_bottom()
+                and not self._supports_range_dependent_bottom):
+            method = self.bottom_collapse_method
+            e.bottom = e.bottom_rd.collapse(method)
+            e.bottom.depth = e.depth
+            e.bottom_rd = None
+            _w.warn(
+                f"{self.model_name} does not support range-dependent bottom "
+                f"geoacoustics; collapsed to single profile "
+                f"(bottom_collapse_method={method!r}). "
+                f"For RD bottoms use {alts['range_dependent_bottom']}.",
+                UserWarning, stacklevel=3,
+            )
+            self._log(
+                f"{self.model_name}: bottom_rd collapsed ({method}).",
+                level='warn',
+            )
+
+        if (env.has_range_dependent_layered_bottom()
+                and not self._supports_range_dependent_layered_bottom):
+            layered_method = self.rd_layered_collapse_method
+            e.bottom = e.bottom_rd_layered.collapse(
+                layered_method=layered_method, range_method='middle',
+            )
+            e.bottom.depth = e.depth
+            e.bottom_rd_layered = None
+            _w.warn(
+                f"{self.model_name} does not support range-dependent layered "
+                f"bottoms; collapsed to single boundary "
+                f"(rd_layered_collapse_method={layered_method!r}). "
+                f"For RD-layered use "
+                f"{alts['range_dependent_layered_bottom']}.",
+                UserWarning, stacklevel=3,
+            )
+            self._log(
+                f"{self.model_name}: bottom_rd_layered collapsed "
+                f"({layered_method}).",
+                level='warn',
+            )
+
+        if (env.has_layered_bottom()
+                and not self._supports_layered_bottom):
+            method = self.layered_collapse_method
+            e.bottom = e.bottom_layered.collapse(method)
+            e.bottom.depth = e.depth
+            e.bottom_layered = None
+            _w.warn(
+                f"{self.model_name} does not support layered (depth-"
+                f"dependent) bottoms; collapsed to single boundary "
+                f"(layered_collapse_method={method!r}). "
+                f"For layered bottoms use {alts['layered_bottom']}.",
+                UserWarning, stacklevel=3,
+            )
+            self._log(
+                f"{self.model_name}: layered bottom collapsed ({method}).",
+                level='warn',
+            )
+
+        if not self._supports_elastic_media:
+            collapsed_at = []
+            if e.surface is not None and self._has_shear(e.surface):
+                e.surface = self._collapse_elastic_boundary(
+                    e.surface, self.elastic_collapse_method,
+                    default_depth=0.0,
+                )
+                collapsed_at.append('surface')
+            if e.bottom is not None and self._has_shear(e.bottom):
+                e.bottom = self._collapse_elastic_boundary(
+                    e.bottom, self.elastic_collapse_method,
+                    default_depth=e.depth,
+                )
+                collapsed_at.append('bottom')
+            if collapsed_at:
+                method = self.elastic_collapse_method
+                where = '/'.join(collapsed_at)
+                _w.warn(
+                    f"{self.model_name} does not support elastic media; "
+                    f"collapsed shear properties on {where} "
+                    f"(elastic_collapse_method={method!r}). "
+                    f"For elastic media use {alts['elastic_media']}.",
+                    UserWarning, stacklevel=3,
+                )
+                self._log(
+                    f"{self.model_name}: elastic {where} collapsed ({method}).",
+                    level='warn',
+                )
+
+        return e
 
     def _build_base_metadata(
         self,

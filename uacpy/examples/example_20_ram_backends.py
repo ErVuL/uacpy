@@ -71,16 +71,13 @@ def main():
 
     cases = [
         ('mpiramS (fluid + flat)', Environment(
-            name='fluid-flat', depth=waveguide_depth, sound_speed=1500.0,
-            ssp_type='isovelocity', bottom=fluid_halfspace,
+            name='fluid-flat', depth=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace,
         )),
         ('rams0.5 (elastic + flat)', Environment(
-            name='elastic-flat', depth=waveguide_depth, sound_speed=1500.0,
-            ssp_type='isovelocity', bottom=elastic_layered,
+            name='elastic-flat', depth=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered,
         )),
         ('ramsurf1.5 (fluid + rough)', Environment(
-            name='fluid-rough', depth=waveguide_depth, sound_speed=1500.0,
-            ssp_type='isovelocity', bottom=fluid_halfspace, altimetry=surface,
+            name='fluid-rough', depth=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace, altimetry=surface,
         )),
     ]
 
@@ -94,8 +91,7 @@ def main():
     # The elastic + altimetry combination is the documented gap.
     print("\nGap demonstration:")
     bad_env = Environment(
-        name='elastic-rough', depth=waveguide_depth, sound_speed=1500.0,
-        ssp_type='isovelocity', bottom=elastic_layered, altimetry=surface,
+        name='elastic-rough', depth=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered, altimetry=surface,
     )
     try:
         ram.select_backend(bad_env)

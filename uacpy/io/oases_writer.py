@@ -277,11 +277,7 @@ def write_oast_input(
     alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
 
     # Sound speed profile
-    ssp_data = env.ssp_data
-    if ssp_data is None or len(ssp_data) == 0:
-        # Fallback to simple isovelocity
-        c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
-        ssp_data = np.array([[0.0, c], [depth, c]])
+    ssp_data = env.ssp.to_pairs()
 
     # Source and receiver parameters (receiver depth bookkeeping now lives in
     # ``_receiver_block_lines`` which handles equidistant/explicit cases).
@@ -556,11 +552,7 @@ def write_oasn_input(
     alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
 
     # Sound speed profile
-    ssp_data = env.ssp_data
-    if ssp_data is None or len(ssp_data) == 0:
-        # Fallback to simple isovelocity
-        c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
-        ssp_data = np.array([[0.0, c], [depth, c]])
+    ssp_data = env.ssp.to_pairs()
 
     # Noise/source parameters
     surface_noise_level = kwargs.get('surface_noise_level', 0)
@@ -798,11 +790,7 @@ def write_oasp_input(
     alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
 
     # Sound speed profile
-    ssp_data = env.ssp_data
-    if ssp_data is None or len(ssp_data) == 0:
-        # Fallback to simple isovelocity
-        c = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
-        ssp_data = np.array([[0.0, c], [depth, c]])
+    ssp_data = env.ssp.to_pairs()
 
     # Source parameter (receiver depth bookkeeping handled by
     # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
@@ -1036,12 +1024,8 @@ def write_oasr_input(
     # layer 1 is treated as the upper halfspace carrying the incident wave.
     # A full stratified water column has no meaning here — OASR only sees the
     # (homogeneous) medium immediately above the reflecting interface.
-    ssp_data = env.ssp_data
-    if ssp_data is None or len(ssp_data) == 0:
-        c_water = env.sound_speed if env.sound_speed else DEFAULT_SOUND_SPEED
-    else:
-        # Sound speed right above the seabed interface.
-        c_water = float(ssp_data[-1, 1])
+    # Sound speed right above the seabed interface.
+    c_water = float(env.ssp.to_pairs()[-1, 1])
 
     # Multi-frequency support (B17) — OASR sweep parameters.
     freqs_arr = np.atleast_1d(source.frequency)

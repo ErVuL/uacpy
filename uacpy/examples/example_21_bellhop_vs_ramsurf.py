@@ -46,7 +46,7 @@ def main():
     ]
     env = Environment(
         name='altimetry-rough',
-        depth=100.0, sound_speed=1500.0, ssp_type='isovelocity',
+        depth=100.0, sound_speed=1500.0,
         bottom=fluid_bottom, altimetry=surface,
     )
     src = Source(depth=50.0, frequency=200.0)
@@ -55,7 +55,7 @@ def main():
         ranges=np.linspace(500.0, 6000.0, 200),
     )
 
-    print(f"Env: {env.depth:.0f} m Pekeris, isovelocity {env.sound_speed:.0f}, "
+    print(f"Env: {env.depth:.0f} m Pekeris, isovelocity {float(env.ssp.data[0, 0]):.0f}, "
           f"fluid bottom (c=1700, ρ=1.7, α=0.5)")
     print(f"Surface: {len(surface)} altimetry breakpoints, two -1.5 m depressions")
     print(f"Source: depth={src.depth[0]:.0f} m, frequency={src.frequency[0]:.0f} Hz")

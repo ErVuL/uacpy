@@ -9,7 +9,7 @@ import uacpy
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, BoundaryProperties,
+    RangeDependentLayeredBottom, BoundaryProperties, SoundSpeedProfile,
 )
 
 
@@ -27,7 +27,6 @@ class TestRangeDependentEnvironment:
             name="Sloping Bottom",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bathymetry=bathymetry
         )
 
@@ -56,7 +55,6 @@ class TestRangeDependentEnvironment:
             name="RD Bottom",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom_rd
         )
 
@@ -83,14 +81,14 @@ class TestRangeDependentEnvironment:
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
-            ssp_data=np.column_stack([depths, ssp_matrix[:, 0]]),  # Base profile
-            ssp_type='pchip',
-            ssp_2d_ranges=ranges_km,
-            ssp_2d_matrix=ssp_matrix
+            ssp=SoundSpeedProfile.from_2d(
+                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                interp='pchip',
+            ),
         )
 
         assert env.has_range_dependent_ssp()
-        assert env.ssp_2d_matrix.shape == (21, 3)
+        assert env.ssp.data.shape == (21, 3)
 
     def test_combined_range_dependencies(self):
         """Test environment with both RD bathymetry and RD SSP."""
@@ -107,11 +105,11 @@ class TestRangeDependentEnvironment:
         env = uacpy.Environment(
             name="Combined RD",
             depth=100.0,
-            ssp_data=np.column_stack([depths_ssp, ssp_matrix[:, 0]]),
-            ssp_type='pchip',
+            ssp=SoundSpeedProfile.from_2d(
+                depths=depths_ssp, ranges_km=ranges_km, matrix=ssp_matrix,
+                interp='pchip',
+            ),
             bathymetry=bathymetry,
-            ssp_2d_ranges=ranges_km,
-            ssp_2d_matrix=ssp_matrix
         )
 
         assert env.is_range_dependent
@@ -126,12 +124,11 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Isovelocity",
             depth=100.0,
-            sound_speed=1500.0,
-            ssp_type='isovelocity'
+            sound_speed=1500.0
         )
 
         # All sound speeds should be the same
-        assert np.all(env.ssp_data[:, 1] == 1500.0)
+        assert np.all(env.ssp.to_pairs()[:, 1] == 1500.0)
 
     def test_linear_gradient(self):
         """Test linear sound speed gradient."""
@@ -141,12 +138,11 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Linear Gradient",
             depth=100.0,
-            ssp_data=np.column_stack([depths, sound_speeds]),
-            ssp_type='linear'
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='linear')
         )
 
-        assert env.ssp_data[0, 1] == 1480.0
-        assert env.ssp_data[-1, 1] == 1520.0
+        assert env.ssp.to_pairs()[0, 1] == 1480.0
+        assert env.ssp.to_pairs()[-1, 1] == 1520.0
 
     def test_munk_profile(self):
         """Test Munk sound speed profile."""
@@ -162,13 +158,12 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Munk Profile",
             depth=100.0,
-            ssp_data=np.column_stack([depths, sound_speeds]),
-            ssp_type='pchip'
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='pchip')
         )
 
         # Check that sound speed minimum is near axis depth
-        min_idx = np.argmin(env.ssp_data[:, 1])
-        min_depth = env.ssp_data[min_idx, 0]
+        min_idx = np.argmin(env.ssp.to_pairs()[:, 1])
+        min_depth = env.ssp.to_pairs()[min_idx, 0]
         assert abs(min_depth - axis_depth) < 5.0  # Within 5m of axis
 
     def test_negative_gradient(self):
@@ -179,11 +174,10 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Negative Gradient",
             depth=100.0,
-            ssp_data=np.column_stack([depths, sound_speeds]),
-            ssp_type='linear'
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='linear')
         )
 
-        assert env.ssp_data[0, 1] > env.ssp_data[-1, 1]
+        assert env.ssp.to_pairs()[0, 1] > env.ssp.to_pairs()[-1, 1]
 
 
 class TestModelWithRangeDependence:
@@ -201,7 +195,6 @@ class TestModelWithRangeDependence:
             name="Slope",
             depth=90.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bathymetry=bathymetry
         )
 
@@ -232,10 +225,10 @@ class TestModelWithRangeDependence:
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
-            ssp_data=np.column_stack([depths, ssp_matrix[:, 0]]),
-            ssp_type='linear',
-            ssp_2d_ranges=ranges_km,
-            ssp_2d_matrix=ssp_matrix
+            ssp=SoundSpeedProfile.from_2d(
+                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                interp='linear',
+            ),
         )
 
         source = uacpy.Source(depth=50.0, frequency=100.0)
@@ -275,7 +268,6 @@ class TestModelWithRangeDependence:
             name="RD Bottom",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom_rd
         )
 
@@ -304,7 +296,6 @@ class TestRangeDependentConsistency:
             name="Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bathymetry=bathymetry
         )
 
@@ -334,7 +325,6 @@ class TestRangeDependentConsistency:
             name="Test",
             depth=100.0,
             sound_speed=1500.0,
-            ssp_type='isovelocity',
             bottom=bottom_rd
         )
 
@@ -354,14 +344,14 @@ class TestRangeDependentConsistency:
         env = uacpy.Environment(
             name="Test",
             depth=100.0,
-            ssp_data=np.column_stack([depths, ssp_matrix[:, 0]]),
-            ssp_type='pchip',
-            ssp_2d_ranges=ranges_km,
-            ssp_2d_matrix=ssp_matrix
+            ssp=SoundSpeedProfile.from_2d(
+                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                interp='pchip',
+            ),
         )
 
-        assert env.ssp_2d_matrix.shape == (21, 3)  # 21 depths, 3 ranges
-        assert len(env.ssp_2d_ranges) == 3
+        assert env.ssp.data.shape == (21, 3)  # 21 depths, 3 ranges
+        assert len(env.ssp.ranges_km) == 3
 
 
 class TestSedimentLayer:
@@ -530,8 +520,7 @@ class TestRangeDependentLayeredBottom:
     def test_ram_with_rdl(self):
         """RAM should handle RangeDependentLayeredBottom."""
         rdl = self._make_rdl()
-        env = uacpy.Environment(name='rdl_test', depth=300,
-                                ssp_type='isovelocity', sound_speed=1500.0,
+        env = uacpy.Environment(name='rdl_test', depth=300, sound_speed=1500.0,
                                 bottom=rdl)
         source = uacpy.Source(frequency=100.0, depth=30.0)
         receiver = uacpy.Receiver(
@@ -548,8 +537,9 @@ class TestRangeDependentLayeredBottom:
 class TestWarnings:
     """Test that models warn for unsupported features."""
 
-    def test_bellhop_warns_bottom_rd(self):
-        """Bellhop should warn about range-dependent bottom."""
+    def test_bellhop_accepts_bottom_rd(self):
+        """Bellhop honours range-dependent bottom geoacoustics natively
+        through the long .bty format — no warning expected."""
         rd_bottom = RangeDependentBottom(
             ranges_km=np.array([0, 10]),
             depths=np.array([100, 100]),
@@ -562,11 +552,12 @@ class TestWarnings:
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bellhop = Bellhop(verbose=False)
-        with pytest.warns(UserWarning, match="range-dependent bottom"):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
             try:
                 bellhop.run(env, source, receiver)
             except (FileNotFoundError, RuntimeError):
-                pass  # Binary may not be available
+                pass
 
     def test_bellhop_warns_layered_bottom(self):
         """Bellhop should warn about layered bottom."""
@@ -616,8 +607,7 @@ class TestIntegrationLayeredBottom:
                 acoustic_type='half-space', sound_speed=2000.0, density=2.2, attenuation=0.1
             )
         )
-        return uacpy.Environment(name='layered_test', depth=200.0,
-                                 ssp_type='isovelocity', sound_speed=1500.0, bottom=lb)
+        return uacpy.Environment(name='layered_test', depth=200.0, sound_speed=1500.0, bottom=lb)
 
     @pytest.fixture
     def source(self):
@@ -671,8 +661,7 @@ class TestIntegrationRunWithBounce:
             sound_speed=1700.0, shear_speed=400.0, density=1.9,
             attenuation=0.5, shear_attenuation=1.0,
         )
-        env = uacpy.Environment(name='bounce_test', depth=100,
-                                ssp_type='isovelocity', sound_speed=1500.0, bottom=bottom)
+        env = uacpy.Environment(name='bounce_test', depth=100, sound_speed=1500.0, bottom=bottom)
         source = uacpy.Source(frequency=500.0, depth=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),
@@ -701,8 +690,7 @@ class TestIntegrationRAMRangeDependent:
             attenuation=np.array([1.0, 0.5, 0.3]),
             acoustic_type='half-space',
         )
-        env = uacpy.Environment(name='ram_rd', depth=100.0,
-                                ssp_type='isovelocity', sound_speed=1500.0, bottom=bottom_rd)
+        env = uacpy.Environment(name='ram_rd', depth=100.0, sound_speed=1500.0, bottom=bottom_rd)
         source = uacpy.Source(frequency=100.0, depth=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),

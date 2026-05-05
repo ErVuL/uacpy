@@ -101,6 +101,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop
 from uacpy.models import RunMode
 from plotting_utils import plot_bathymetry_overlay
@@ -121,7 +122,7 @@ def scenario_a_tl_modes():
     env = uacpy.Environment(
         name="Munk Profile - TL Mode Comparison",
         depth=5000.0,
-        ssp_type='munk'
+        ssp=SoundSpeedProfile.from_munk(5000.0),
     )
 
     source = uacpy.Source(
@@ -271,7 +272,7 @@ def scenario_b_ray_tracing():
     env = uacpy.Environment(
         name="Munk Profile - Ray Tracing",
         depth=5000.0,
-        ssp_type='munk'
+        ssp=SoundSpeedProfile.from_munk(5000.0),
     )
 
     source = uacpy.Source(
@@ -334,8 +335,9 @@ def scenario_c_eigenrays_arrivals():
     env = uacpy.Environment(
         name="Shallow Water - Eigenrays",
         depth=100.0,
-        ssp_type='linear',
-        ssp_data=[(0, 1500), (100, 1520)]  # Slight positive gradient
+        ssp=SoundSpeedProfile.from_pairs(
+            [(0, 1500), (100, 1520)], interp='linear',
+        ),  # Slight positive gradient
     )
 
     source = uacpy.Source(

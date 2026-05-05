@@ -299,7 +299,6 @@ env = uacpy.Environment(
     name="Pekeris Waveguide",
     depth=100.0,
     sound_speed=1500.0,
-    ssp_type='isovelocity',
     bottom=BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1600.0,
@@ -340,8 +339,8 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 22 example scripts numbered
-sequentially (`example_01_*.py` through `example_22_*.py`); the full
+Inside `uacpy/examples/` you will find 23 example scripts numbered
+sequentially (`example_01_*.py` through `example_23_*.py`); the full
 suite runs in under 5 minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.

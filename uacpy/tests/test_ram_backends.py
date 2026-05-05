@@ -51,7 +51,6 @@ def _rough_altimetry():
 def _env(*, bottom, altimetry=None):
     return Environment(
         name='test', depth=100.0, sound_speed=1500.0,
-        ssp_type='isovelocity',
         bottom=bottom, altimetry=altimetry,
     )
 
