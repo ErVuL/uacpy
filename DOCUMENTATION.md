@@ -478,18 +478,18 @@ rx = uacpy.Receiver(depths=[20, 40, 60], ranges=[1000, 2000, 3000],
 
 | Model        | Coh TL | Incoh TL | Rays | Eigen | Arrivals | Modes | Time series | Transfer fn | Reflection | Altimetry | Notes |
 |--------------|:------:|:--------:|:----:|:-----:|:--------:|:-----:|:-----------:|:-----------:|:----------:|:---------:|-------|
-| Bellhop      | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | — | ✓ | Ray/beam tracing |
-| BellhopCUDA  | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | — | ✓ | C++/CUDA port |
+| Bellhop      | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | ✓ | Ray/beam tracing |
+| BellhopCUDA  | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | ✓ | C++/CUDA port |
 | Kraken       | — | — | — | — | — | ✓ | — | — | — | — | Real modes |
 | KrakenC      | — | — | — | — | — | ✓ | — | — | — | — | Complex modes |
 | KrakenField  | ✓ | — | — | — | — | — | ✓ | ✓ | — | — | kraken→field pipeline |
 | Scooter      | ✓ | — | — | — | — | — | ✓ | ✓ | — | — | Wavenumber integration |
-| RAM          | ✓ | — | — | — | — | — | ✓ | — | — | — | Split-step Padé PE; dispatcher → mpiramS / rams0.5 / ramsurf1.5 |
+| RAM          | ✓ | — | — | — | — | — | ✓ | ✓ | — | — | Split-step Padé PE; dispatcher → mpiramS / rams0.5 / ramsurf1.5 |
 | SPARC        | ✓ | — | — | — | — | — | ✓ | — | — | — | Time-domain PE |
 | OAST         | ✓ | — | — | — | — | — | — | — | — | — | OASES TL |
 | OASN         | — | — | — | — | — | — | — | — | — | — | OASES covariance / replicas (RunMode.COVARIANCE / RunMode.REPLICA) |
 | OASR         | — | — | — | — | — | — | — | — | ✓ | — | OASES reflection coefficients |
-| OASP         | ✓ | — | — | — | — | — | ✓ | — | — | — | OASES wideband (wavenumber-int) |
+| OASP         | ✓ | — | — | — | — | — | ✓ | ✓ | — | — | OASES wideband (wavenumber-int) |
 | Bounce       | — | — | — | — | — | — | — | — | ✓ | — | Writes .brc / .irc reflection files |
 
 `Time series` lists models whose output is genuinely a time-domain
@@ -503,13 +503,13 @@ representation reachable through `RunMode.BROADBAND`.
 | Environment feature             | Bellhop | RAM | Kraken / KrakenC | KrakenField | Scooter | SPARC | OASES | Bounce |
 |---------------------------------|:-------:|:---:|:----------------:|:-----------:|:-------:|:-----:|:-----:|:------:|
 | 1-D SSP                         | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 2-D (range-dep) SSP             | ✓ | ✓ via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
-| Range-dep bathymetry            | ✓ | ✓ (all three RAM backends honour multi-point bathymetry) | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | — |
+| 2-D (range-dep) SSP             | ✓ (with `ssp.interp='quad'`) | ✓ via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | warn+collapse |
+| Range-dep bathymetry            | ✓ | ✓ (all three RAM backends honour multi-point bathymetry) | warn+collapse | **native** (segments) | warn+collapse | warn+collapse | warn+collapse | warn+collapse |
 | Halfspace bottom                | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `RangeDependentBottom`          | **native** (long .bty geoacoustics) | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | — |
-| `LayeredBottom` (multi-layer)   | warn+halfspace | **native** (mpiramS samples nzs depths; Collins backends use `to_piecewise_breakpoints`) | **native** | **native** | **native** | **native** | **native** | — |
-| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | — |
-| Elastic bottom (shear)          | via BOUNCE | ✓ (auto → rams0.5) | KrakenC only (Kraken rejects) | ✓ (via KrakenC) | ✓ | ✓ | ✓ | ✓ |
+| `RangeDependentBottom`          | **native** (long .bty geoacoustics) | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse |
+| `LayeredBottom` (multi-layer)   | warn+halfspace | **native** (mpiramS samples nzs depths; Collins backends use `to_piecewise_breakpoints`) | **native** | **native** | **native** | **native** | **native** | **native** |
+| `RangeDependentLayeredBottom`   | warn+halfspace | **native** via mpiramS / warn+collapse via rams0.5 / ramsurf1.5 | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse | warn+collapse |
+| Elastic bottom (shear)          | ✓ (or ``run_with_bounce()``) | ✓ (auto → rams0.5) | ✓ (Kraken auto-routes to krakenc.exe; KrakenC native) | ✓ (via krakenc.exe) | ✓ | warn+rigid | ✓ | ✓ |
 | Reflection file (.brc / .trc)   | ✓ | — | ✓ | ✓ | ✓ | — | — | **output** |
 | Altimetry (rough surface)       | ✓ | ✓ (auto → ramsurf1.5) | — | — | — | — | — | — |
 
