@@ -14,11 +14,14 @@ import pytest
 import uacpy
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, SoundSpeedProfile,
+    RangeDependentLayeredBottom, SoundSpeedProfile, Environment,
 )
+from uacpy.core import Source, Receiver
 from uacpy.models.ram import RAM
 from uacpy.models.kraken import Kraken
 from uacpy.models.scooter import Scooter
+from uacpy.models import Bellhop
+from uacpy.models.base import RunMode
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -115,8 +118,7 @@ def rd_layered_bottom():
         ),
     )
     return RangeDependentLayeredBottom(
-        ranges_km=np.array([0.0, 10.0]),
-        depths=np.array([100.0, 100.0]),
+        ranges=np.array([0, 10000]),
         profiles=[near, far],
     )
 
@@ -270,11 +272,11 @@ class TestATModelsBoundaries:
     def test_kraken_env_file_has_layers(self, source, receiver,
                                          multi_layer_bottom, tmp_path):
         """Kraken .env file includes sediment layer sections."""
-        from uacpy.io.at_env_writer import ATEnvWriter
+        from uacpy.io.oalib_writer import write_header, write_fg_params, write_bio_layers, write_broadband_freqs, write_ssp_section, write_layer_sections, write_bottom_section, write_source_depths, write_receiver_depths, write_receiver_ranges, write_multi_profile_env
         env = _make_env(multi_layer_bottom)
         fpath = tmp_path / "test.env"
         with open(fpath, 'w') as f:
-            ATEnvWriter.write_layer_sections(f, env, env.depth)
+            write_layer_sections(f, env, env.depth)
         content = fpath.read_text()
         # Should have layer entries (3 layers = 3 blocks)
         assert content.strip() != ''
@@ -285,11 +287,11 @@ class TestATModelsBoundaries:
     def test_scooter_env_file_has_layers(self, source, receiver,
                                           single_layer_bottom, tmp_path):
         """Scooter env file includes single sediment layer."""
-        from uacpy.io.at_env_writer import ATEnvWriter
+        from uacpy.io.oalib_writer import write_header, write_fg_params, write_bio_layers, write_broadband_freqs, write_ssp_section, write_layer_sections, write_bottom_section, write_source_depths, write_receiver_depths, write_receiver_ranges, write_multi_profile_env
         env = _make_env(single_layer_bottom)
         fpath = tmp_path / "test.env"
         with open(fpath, 'w') as f:
-            ATEnvWriter.write_layer_sections(f, env, env.depth)
+            write_layer_sections(f, env, env.depth)
         content = fpath.read_text()
         lines = [l for l in content.strip().split('\n') if l.strip()]
         assert len(lines) == 3  # 1 layer * 3 lines
@@ -409,3 +411,87 @@ class TestOASESWriterIntegration:
         write_oasp_input(fpath, env, source, receiver)
         content = fpath.read_text()
         assert "3500" in content
+
+
+class TestBoundaryTypes:
+    """Test different boundary condition types."""
+
+
+    @pytest.fixture
+    def receiver(self):
+        return Receiver(
+            depths=np.array([25.0, 50.0, 75.0]),
+            ranges=np.array([1000.0, 3000.0])
+        )
+
+    @pytest.mark.requires_binary
+    def test_boundary_vacuum(self, source, receiver):
+        """Test vacuum boundary condition."""
+        bottom = BoundaryProperties(acoustic_type='vacuum')
+        env = Environment(
+            name="vacuum_test",
+            depth=100.0,
+            sound_speed=1500.0,
+            bottom=bottom
+        )
+
+        bellhop = Bellhop(verbose=False)
+        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        assert result.field_type == 'tl'
+
+    @pytest.mark.requires_binary
+    def test_boundary_rigid(self, source, receiver):
+        """Test rigid boundary condition."""
+        bottom = BoundaryProperties(acoustic_type='rigid')
+        env = Environment(
+            name="rigid_test",
+            depth=100.0,
+            sound_speed=1500.0,
+            bottom=bottom
+        )
+
+        bellhop = Bellhop(verbose=False)
+        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        assert result.field_type == 'tl'
+
+    @pytest.mark.requires_binary
+    def test_boundary_halfspace(self, source, receiver):
+        """Test half-space boundary condition."""
+        bottom = BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600.0,
+            density=1.5,
+            attenuation=0.5
+        )
+        env = Environment(
+            name="halfspace_test",
+            depth=100.0,
+            sound_speed=1500.0,
+            bottom=bottom
+        )
+
+        bellhop = Bellhop(verbose=False)
+        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        assert result.field_type == 'tl'
+
+    @pytest.mark.requires_binary
+    def test_boundary_elastic(self, source, receiver):
+        """Test elastic boundary with shear waves."""
+        bottom = BoundaryProperties(
+            acoustic_type='elastic',
+            sound_speed=1700.0,
+            shear_speed=400.0,
+            density=1.8,
+            attenuation=0.5,
+            shear_attenuation=1.0
+        )
+        env = Environment(
+            name="elastic_test",
+            depth=100.0,
+            sound_speed=1500.0,
+            bottom=bottom
+        )
+
+        bellhop = Bellhop(verbose=False)
+        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        assert result.field_type == 'tl'

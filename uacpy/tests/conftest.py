@@ -85,15 +85,74 @@ def receiver_small():
     )
 
 
-# Pytest configuration
-def pytest_configure(config):
-    """Configure pytest with custom markers."""
-    config.addinivalue_line(
-        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+@pytest.fixture
+def receiver():
+    """Default receiver grid (alias for ``receiver_grid``)."""
+    return uacpy.Receiver(
+        depths=np.linspace(10, 90, 9),
+        ranges=np.linspace(100, 5000, 11),
     )
-    config.addinivalue_line(
-        "markers", "requires_binary: marks tests requiring compiled native binaries (Fortran/C)"
+
+
+@pytest.fixture
+def halfspace_bottom():
+    """Standard fluid half-space sediment used by Pekeris-style tests."""
+    from uacpy.core.environment import BoundaryProperties
+    return BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1700.0,
+        density=1.8,
+        attenuation=0.5,
     )
-    config.addinivalue_line(
-        "markers", "requires_oases: marks tests requiring compiled OASES binaries"
+
+
+@pytest.fixture
+def elastic_bottom():
+    """Half-space with shear (used by elastic-bottom Pekeris cases)."""
+    from uacpy.core.environment import BoundaryProperties
+    return BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1700.0,
+        shear_speed=400.0,
+        density=1.8,
+        attenuation=0.5,
+        shear_attenuation=0.8,
     )
+
+
+@pytest.fixture
+def ice_surface():
+    """Elastic ice top boundary (cp ≫ water, so most modes reflect)."""
+    from uacpy.core.environment import BoundaryProperties
+    return BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=3500.0,
+        shear_speed=1800.0,
+        density=0.9,
+        attenuation=1.0,
+        shear_attenuation=2.0,
+    )
+
+
+@pytest.fixture
+def pekeris_env(halfspace_bottom):
+    """Classic 100-m Pekeris waveguide with a fluid half-space bottom."""
+    return uacpy.Environment(
+        name="Pekeris (fluid bottom)",
+        depth=100.0,
+        sound_speed=1500.0,
+        bottom=halfspace_bottom,
+    )
+
+
+@pytest.fixture
+def elastic_env(elastic_bottom):
+    """Pekeris waveguide with an elastic half-space bottom (shear=400 m/s)."""
+    return uacpy.Environment(
+        name="Pekeris (elastic bottom)",
+        depth=100.0,
+        sound_speed=1500.0,
+        bottom=elastic_bottom,
+    )
+
+

@@ -238,9 +238,17 @@ class PropagationModel(ABC):
            for the duration of this call. This lets you reuse one
            configured instance with localised tweaks.
 
-        Mode-specific kwargs (e.g. ``source_waveform`` and ``sample_rate``
-        for ``RunMode.TIME_SERIES``) are also accepted via ``**kwargs``;
-        each model documents its own.
+        Mode-specific kwargs follow a fixed convention: every
+        TIME_SERIES-capable wrapper accepts ``source_waveform=`` and
+        ``sample_rate=`` as explicit keyword arguments on ``run()``
+        (Bellhop, Scooter, KrakenField, OASP, RAM); SPARC computes
+        p(t) from its native source pulse and ignores both. Models with
+        a broadband transfer-function path also accept ``frequencies=``
+        as an explicit override for ``source.frequency``.
+
+        Any kwarg not consumed by an explicit signature arg, an override,
+        or a documented writer/mode pass-through is reported via
+        ``_warn_unknown_kwargs`` (typo guard).
 
         Parameters
         ----------
@@ -276,6 +284,27 @@ class PropagationModel(ABC):
         (where the ``_resolve_overrides`` context manager doesn't apply).
         """
         return getattr(self, attr) if value is _UNSET else value
+
+    def _warn_unknown_kwargs(self, kwargs: dict, allowed: tuple = ()):
+        """Emit a ``UserWarning`` for any kwarg not consumed by ``run()``.
+
+        Catches typos like ``Bellhop().run(env, src, rcv, n_beam=10)``
+        (missing 's') that would otherwise silently use the default.
+
+        ``kwargs`` is the leftover ``**kwargs`` dict from a model's
+        ``run()`` after explicit named args have been peeled off.
+        ``allowed`` is the tuple of writer- or mode-specific kwarg names
+        the model legitimately forwards downstream (e.g. Bellhop's
+        Cerveny beam params); these are silently passed through.
+        """
+        unknown = sorted(k for k in kwargs if k not in allowed)
+        if unknown:
+            warnings.warn(
+                f"{self.model_name}.run received unknown kwargs (ignored): "
+                f"{unknown}",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _setup_file_manager(self) -> FileManager:
         """
@@ -572,9 +601,6 @@ class PropagationModel(ABC):
         ------
         UnsupportedFeatureError
             If the model does not support mode computation.
-        EnvironmentError
-            If the environment is range-dependent and the model does not
-            support it.
 
         Examples
         --------
@@ -583,7 +609,7 @@ class PropagationModel(ABC):
         >>> wavenumbers = modes.metadata['k']
         >>> mode_shapes = modes.metadata['phi']
         """
-        from uacpy.core.exceptions import UnsupportedFeatureError, EnvironmentError
+        from uacpy.core.exceptions import UnsupportedFeatureError
 
         if not self.supports_mode(RunMode.MODES):
             raise UnsupportedFeatureError(
@@ -1017,9 +1043,10 @@ class PropagationModel(ABC):
         ``frequencies``     : ndarray — frequency vector, when broadband.
         ``phase_reference`` : str, optional — describes the phase convention
                               of the stored complex pressure (e.g.
-                              ``'travelling_wave'``, ``'porter_negated'``,
-                              ``'psif_envelope'``). Lets ``synthesize_time_series``
-                              and downstream consumers correctly interpret H(f).
+                              ``'travelling_wave'``, ``'psif_envelope'``,
+                              ``'time_domain_native'``). Lets
+                              ``synthesize_time_series`` and downstream
+                              consumers correctly interpret H(f).
 
         Extra model-specific keys are merged via ``**extra``; existing
         per-model keys (``Q``, ``Nsam``, ``mode_coupling``, etc.) keep

@@ -279,7 +279,3 @@ class TestSPARCPerformance:
         # We expect: time(2 depths) < 2.5 * time(1 depth)
         if times[0] > 0.1:  # Only check if runs take meaningful time
             assert times[1] < 2.5 * times[0], "Scaling worse than expected"
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

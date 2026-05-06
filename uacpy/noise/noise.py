@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def compute_windnoise(f, u, water_depth='deep', sumOnly=False):
+def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     """
     Wind-driven ambient noise level (dB re 1 µPa²/Hz), with the
     Piggott (1964) shallow-water adjustment.
@@ -39,15 +39,17 @@ def compute_windnoise(f, u, water_depth='deep', sumOnly=False):
         Wind speed in knots.
     water_depth : {'deep', 'shallow'}
         Coefficient family. Default 'deep'.
-    sumOnly : bool
-        If True, integrate over the (variable) bandwidth set by the
-        midpoints between input frequencies.
+    band_integrate : bool
+        If True, return the band-integrated SPL (dB re 1 µPa²) where each
+        band's bandwidth is set by the midpoints between consecutive
+        input frequencies. Default False — return the spectral level
+        (dB re 1 µPa²/Hz).
 
     Returns
     -------
     NL : ndarray
         Wind noise spectral level (dB re 1 µPa²/Hz), or band-integrated
-        level if ``sumOnly=True``.
+        SPL (dB re 1 µPa²) if ``band_integrate=True``.
 
     Notes
     -----
@@ -61,8 +63,8 @@ def compute_windnoise(f, u, water_depth='deep', sumOnly=False):
     else:
         n2 = f.size
         f = _np.array(f).flatten()  # Make sure f is a 1D array
-        if sumOnly:
-            f2 = _np.concatenate(([0], f, 2 * f[-1] - f[-2]))
+        if band_integrate:
+            f2 = _np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
             df = (f2[2:] - f2[:-2]) / 2
         else:
             df = _np.ones_like(f)
@@ -227,7 +229,10 @@ class WenzNoise:
         else:
             shipping = _np.zeros_like(f)
 
-        # Turbulence (Nichols & Bradley 2016).
+        # Turbulence (Nichols & Bradley 2016 — same coefficients as the
+        # MATLAB ``calc_noise_level.m`` appendix in WenzCurves.pdf p.12).
+        # NB: the prose in WenzCurves.pdf §2.1 quotes 107 − 33.2·log10(f)
+        # instead; the appendix code uses the values below.
         turbulence = 108.5 - 32.5 * _np.log10(f)
         turbulence[turbulence <= 0] = 1
 
@@ -241,9 +246,11 @@ class WenzNoise:
             + _RAIN_R3[ir] * fk ** 3
         )
         slope        = -5.0 * (0.1 / _np.log10(2))
-        ind          = _np.where(f < 7000)[0][-1]
-        prop_const   = 10 ** (rain[ind] / 10) / f[ind] ** slope
-        rain[f > 7000] = 10 * _np.log10(prop_const * f[f > 7000] ** slope)
+        idxs_below_7k = _np.where(f < 7000)[0]
+        if idxs_below_7k.size and (f > 7000).any():
+            ind          = int(idxs_below_7k[-1])
+            prop_const   = 10 ** (rain[ind] / 10) / f[ind] ** slope
+            rain[f > 7000] = 10 * _np.log10(prop_const * f[f > 7000] ** slope)
 
         self.thermal    = thermal
         self.wind       = wind

@@ -42,9 +42,6 @@ class TestOAST:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver(self):
@@ -120,9 +117,6 @@ class TestOASN:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver(self):
@@ -191,9 +185,6 @@ class TestOASR:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver(self):

@@ -21,8 +21,8 @@ from uacpy.core.constants import (
 )
 from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
-from uacpy.io.rts_reader import read_rts_file, rts_to_tl
-from uacpy.io.at_env_writer import ATEnvWriter
+from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
+from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
@@ -274,6 +274,8 @@ class SPARC(PropagationModel):
         roughness=_UNSET,
         volume_attenuation=_UNSET,
         timeout=_UNSET,
+        source_waveform=None,
+        sample_rate=None,
         **kwargs
     ) -> Result:
         """
@@ -319,6 +321,19 @@ class SPARC(PropagationModel):
 
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
+
+        if source_waveform is not None or sample_rate is not None:
+            raise ValueError(
+                "SPARC drives the source pulse via the constructor "
+                "``pulse_type`` argument, not via run() kwargs. Set "
+                "``SPARC(pulse_type=…)`` (e.g. 'PN+B' for a Hanning-windowed "
+                "pulse) and let SPARC compute p(t) natively. "
+                "``source_waveform`` / ``sample_rate`` are accepted on the "
+                "run() signature only for API uniformity with the other "
+                "TIME_SERIES-capable models."
+            )
+
+        self._warn_unknown_kwargs(kwargs)
 
         # Apply per-call overrides (temporarily sets self.* for internal methods)
         _overrides = _resolve_overrides(
@@ -691,19 +706,19 @@ class SPARC(PropagationModel):
             # before SSP). ReadTopOpt in AT reads these immediately when
             # TopOpt(4)='F'/'B'.
             if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                ATEnvWriter.write_fg_params(f, self.francois_garrison_params)
+                write_fg_params(f, self.francois_garrison_params)
             elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                ATEnvWriter.write_bio_layers(f, self.bio_layers)
+                write_bio_layers(f, self.bio_layers)
 
             # Write SSP section
-            ATEnvWriter.write_ssp_section(
+            write_ssp_section(
                 f, env, env.depth,
                 n_mesh=self.n_mesh,
                 roughness=self.roughness
             )
 
             # Write sediment layers if layered bottom
-            ATEnvWriter.write_layer_sections(f, env, env.depth)
+            write_layer_sections(f, env, env.depth)
 
             # Write bottom section (SPARC only supports V and R)
             bottom_code = bottom_type.to_acoustics_toolbox_code()
@@ -732,14 +747,14 @@ class SPARC(PropagationModel):
             # non-uniform arrays are written verbatim rather than collapsed
             # to "min max /" (which the Fortran reader expands to a
             # uniformly-spaced vector).
-            ATEnvWriter.write_source_depths(f, source)
+            write_source_depths(f, source)
             if len(receiver.depths) == 1:
                 # Single depth — SPARC interpolates a depth vector from
                 # (first, last); repeat the value so it stays constant.
                 f.write(f"1\n")
                 f.write(f"{receiver.depths[0]:.6f} {receiver.depths[0]:.6f} /\n")
             else:
-                ATEnvWriter.write_receiver_depths(f, receiver)
+                write_receiver_depths(f, receiver)
 
             # Time-domain pulse parameters (SPARC-specific, come BEFORE ranges!)
             f.write(f"'{self.pulse_type}'\n")

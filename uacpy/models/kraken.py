@@ -61,7 +61,7 @@ from uacpy.core.constants import (
     C_LOW_FACTOR, C_HIGH_FACTOR,
 )
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.io.at_env_writer import ATEnvWriter
+from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section
 from uacpy.models.coupled_modes import segment_environment_by_range
 
 
@@ -266,7 +266,7 @@ class _KrakenBase(PropagationModel):
 
         with open(filepath, 'w') as f:
             # Write standard ENV sections using ATEnvWriter
-            ATEnvWriter.write_header(
+            write_header(
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
@@ -277,22 +277,22 @@ class _KrakenBase(PropagationModel):
 
             # Francois-Garrison / Biological follow-up lines (after TopOpt)
             if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                ATEnvWriter.write_fg_params(f, self.francois_garrison_params)
+                write_fg_params(f, self.francois_garrison_params)
             elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                ATEnvWriter.write_bio_layers(f, self.bio_layers)
+                write_bio_layers(f, self.bio_layers)
 
-            ATEnvWriter.write_ssp_section(
+            write_ssp_section(
                 f, env, env.depth,
                 n_mesh=self.n_mesh,
                 roughness=self.roughness
             )
 
             # Write sediment layers if layered bottom
-            ATEnvWriter.write_layer_sections(
+            write_layer_sections(
                 f, env, env.depth
             )
 
-            ATEnvWriter.write_bottom_section(
+            write_bottom_section(
                 f, env,
                 bottom_type=bottom_type
             )
@@ -311,12 +311,12 @@ class _KrakenBase(PropagationModel):
             f.write(f"{rmax_km:.1f}\n")
 
             # Source depths (use ATEnvWriter helper for full non-uniform support)
-            ATEnvWriter.write_source_depths(f, source)
+            write_source_depths(f, source)
 
             # Receiver depths (use full list via ATEnvWriter; receiver_obj has
             # priority so non-uniform arrays survive verbatim).
             if receiver_obj is not None:
-                ATEnvWriter.write_receiver_depths(f, receiver_obj)
+                write_receiver_depths(f, receiver_obj)
             else:
                 rd = np.asarray(receiver_depths, dtype=float)
                 f.write(f"{len(rd)}\n")
@@ -325,7 +325,7 @@ class _KrakenBase(PropagationModel):
 
             # Broadband frequency vector (read by ReadfreqVec AFTER SD/RD)
             if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
-                ATEnvWriter.write_broadband_freqs(f, np.asarray(frequencies))
+                write_broadband_freqs(f, np.asarray(frequencies))
 
     def _run_kraken_executable(self, base_name: str, work_dir: Path):
         """Execute Kraken/KrakenC via base-class subprocess runner."""
@@ -592,6 +592,8 @@ class Kraken(_KrakenBase):
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
 
+        self._warn_unknown_kwargs(kwargs)
+
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
@@ -712,6 +714,9 @@ class KrakenC(_KrakenBase):
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
             )
+
+        self._warn_unknown_kwargs(kwargs)
+
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver)
 
@@ -925,7 +930,7 @@ class KrakenField(_KrakenBase):
     def _total_media_depth(env):
         """Return total depth through ocean + sediment layers."""
         depth = env.depth
-        if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
+        if env.bottom_layered is not None:
             for layer in env.bottom_layered.layers:
                 depth += layer.thickness
         return depth
@@ -1008,6 +1013,8 @@ class KrakenField(_KrakenBase):
                 f"got {mode_coupling!r}"
             )
 
+        self._warn_unknown_kwargs(kwargs)
+
         with _resolve_overrides(
             self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
             roughness=roughness, volume_attenuation=volume_attenuation,
@@ -1087,8 +1094,8 @@ class KrakenField(_KrakenBase):
             runs once with TopOpt(6)='B' producing a multi-freq .mod file
             that field.exe handles natively.
         """
-        from uacpy.io.at_env_writer import ATEnvWriter
-        from uacpy.io.flp_writer import write_fieldflp
+        from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section
+        from uacpy.io.oalib_writer import write_fieldflp
         from uacpy.io.output_reader import read_shd_file, read_shd_bin
 
         fm = self._setup_file_manager()
@@ -1104,7 +1111,7 @@ class KrakenField(_KrakenBase):
         try:
             is_rd = env.is_range_dependent
             segments = None
-            profile_ranges_km = None
+            profile_ranges_m = None
             n_profiles = 1
 
             if is_rd:
@@ -1130,7 +1137,7 @@ class KrakenField(_KrakenBase):
                     for _, seg_env in segments
                 )
 
-                profile_ranges_km = np.array([s[0] for s in segments])
+                profile_ranges_m = np.array([s[0] for s in segments])
                 self._log(f"Range-dependent: {n_profiles} profiles, "
                           f"mode_coupling={self.mode_coupling}", level='info')
             else:
@@ -1172,7 +1179,7 @@ class KrakenField(_KrakenBase):
                         "the environment range-independent."
                     )
 
-                ATEnvWriter.write_multi_profile_env(
+                write_multi_profile_env(
                     filepath=env_file,
                     segments=segments,
                     source=source,
@@ -1212,7 +1219,9 @@ class KrakenField(_KrakenBase):
             flp_kwargs = dict(
                 title=getattr(env, 'name', ''),
                 n_profiles=n_profiles,
-                profile_ranges_km=profile_ranges_km,
+                profile_ranges_km=(
+                    profile_ranges_m / 1000.0 if profile_ranges_m is not None else None
+                ),
             )
             if n_modes is not None:
                 flp_kwargs['M_limit'] = int(n_modes)
@@ -1279,12 +1288,15 @@ class KrakenField(_KrakenBase):
                 )
                 for i_freq, fr in enumerate(freqs_read):
                     shd_i = read_shd_bin(str(shd_file), freq=float(fr))
+                    # field.exe convention: exp(-ikr) with i*sqrt(2pi)*exp(i*pi/4),
+                    # opposite polarity vs Scooter's Hankel transform. Negate to
+                    # match Scooter / Bellhop / RAM travelling-wave convention.
                     p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
                 field = TransferFunction(
                     data=p_stack,
                     depths=receiver.depths,
                     ranges=receiver.ranges,
-                    phase_reference='porter_negated',
+                    phase_reference='travelling_wave',
                     **self._result_kwargs(
                         source,
                         backend='field.exe',
@@ -1316,12 +1328,14 @@ class KrakenField(_KrakenBase):
                 )
             else:
                 field = read_shd_file(shd_file)
-                field.model = 'KrakenField'
-                field.backend = 'field.exe'
-                field.metadata['model'] = 'KrakenField'
-                field.metadata['backend'] = 'field.exe'
-                field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
-                field.metadata['n_profiles'] = n_profiles
+                field.tag(
+                    model='KrakenField',
+                    backend='field.exe',
+                    source_depths=source.depth,
+                    frequency=float(np.atleast_1d(source.frequency)[0]),
+                    mode_coupling=self.mode_coupling if is_rd else 'none',
+                    n_profiles=n_profiles,
+                )
 
             self._log("KrakenField simulation complete", level='info')
             return field

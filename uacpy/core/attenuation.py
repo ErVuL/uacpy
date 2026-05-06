@@ -8,36 +8,14 @@ Notes
 -----
 This module is a user/example helper. The core uacpy library wires
 frequency-dependent volume attenuation inside the individual model writers
-(see ``uacpy.io.at_env_writer`` and each model's ``volume_attenuation``
+(see ``uacpy.io.oalib_writer`` and each model's ``volume_attenuation``
 kwarg). Nothing in ``uacpy.core`` or ``uacpy.models`` imports from here;
 it is used by ``example_17_attenuation_models.py`` and by users who need
 to compute attenuation curves directly.
 """
 
 import numpy as np
-from typing import Union, Optional
-from dataclasses import dataclass
-
-
-@dataclass
-class AttenuationParameters:
-    """Parameters for frequency-dependent attenuation calculations.
-
-    Attributes
-    ----------
-    temperature : float
-        Water temperature in degrees Celsius.
-    salinity : float
-        Salinity in parts per thousand (ppt).
-    pH : float
-        Water pH value.
-    depth : float
-        Water depth in meters.
-    """
-    temperature: float = 10.0
-    salinity: float = 35.0
-    pH: float = 8.0
-    depth: float = 1000.0
+from typing import Union
 
 
 def thorp_attenuation(frequency: Union[float, np.ndarray]) -> np.ndarray:
@@ -241,92 +219,6 @@ def ainslie_mccolm(
     alpha *= (1.0 + 0.05 * depth_km)
 
     return np.squeeze(alpha)
-
-
-class AttenuationModel:
-    """
-    Attenuation model handler
-
-    Provides unified interface to various attenuation models.
-
-    Parameters
-    ----------
-    model_type : str
-        Attenuation model: 'thorp', 'francois-garrison', 'fisher-simmons',
-        'ainslie-mccolm', or 'custom'
-    params : AttenuationParameters, optional
-        Parameters for the model
-    custom_function : callable, optional
-        Custom attenuation function(frequency) -> attenuation_db_per_km
-
-    Examples
-    --------
-    >>> model = AttenuationModel('francois-garrison',
-    ...                           params=AttenuationParameters(temperature=15))
-    >>> alpha = model.calculate(1000.0)  # At 1 kHz
-    """
-
-    def __init__(
-        self,
-        model_type: str = 'thorp',
-        params: Optional[AttenuationParameters] = None,
-        custom_function: Optional[callable] = None
-    ):
-        self.model_type = model_type.lower()
-        self.params = params if params is not None else AttenuationParameters()
-        self.custom_function = custom_function
-
-        valid_models = ['thorp', 'francois-garrison', 'fisher-simmons',
-                       'ainslie-mccolm', 'custom']
-        if self.model_type not in valid_models:
-            raise ValueError(f"model_type must be one of {valid_models}")
-
-        if self.model_type == 'custom' and custom_function is None:
-            raise ValueError("custom_function required for model_type='custom'")
-
-    def calculate(self, frequency: Union[float, np.ndarray]) -> np.ndarray:
-        """
-        Calculate attenuation at given frequency/frequencies
-
-        Parameters
-        ----------
-        frequency : float or array
-            Frequency in Hz
-
-        Returns
-        -------
-        alpha : float or array
-            Attenuation in dB/km
-        """
-        if self.model_type == 'thorp':
-            return thorp_attenuation(frequency)
-
-        elif self.model_type == 'francois-garrison':
-            return francois_garrison(
-                frequency,
-                temperature=self.params.temperature,
-                salinity=self.params.salinity,
-                pH=self.params.pH,
-                depth=self.params.depth
-            )
-
-        elif self.model_type == 'fisher-simmons':
-            return fisher_simmons(frequency, depth=self.params.depth)
-
-        elif self.model_type == 'ainslie-mccolm':
-            return ainslie_mccolm(
-                frequency,
-                temperature=self.params.temperature,
-                salinity=self.params.salinity,
-                pH=self.params.pH,
-                depth=self.params.depth
-            )
-
-        elif self.model_type == 'custom':
-            return self.custom_function(frequency)
-
-    def __repr__(self) -> str:
-        return f"AttenuationModel(type='{self.model_type}')"
 
 
 def convert_attenuation_units(

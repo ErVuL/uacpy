@@ -218,7 +218,7 @@ def demo_range_dependent_bottom():
 
     # Create RD bottom: mud transitioning to sand over 15 km
     bottom_rd = RangeDependentBottom(
-        ranges_km=np.array([0, 3, 6, 9, 12, 15]),
+        ranges=np.array([0, 3000, 6000, 9000, 12000, 15000]),
         depths=np.array([150, 160, 180, 200, 220, 250]),
         sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
         density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
@@ -243,10 +243,10 @@ def demo_range_dependent_bottom():
         name='Shelf Break: Mud to Sand',
         depth=250.0,
         ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_1d[:, 0], ranges_km=ranges_ssp, matrix=ssp_2d,
+            depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
             interp='pchip',
         ),
-        bathymetry=np.column_stack([bottom_rd.ranges_km * 1000, bottom_rd.depths]),
+        bathymetry=np.column_stack([bottom_rd.ranges / 1000.0 * 1000, bottom_rd.depths]),
         bottom=bottom_rd,
     )
 
@@ -339,21 +339,25 @@ def demo_rd_layered_bottom():
     )
 
     rdl = RangeDependentLayeredBottom(
-        ranges_km=np.array([0, 7.5, 15]),
-        depths=np.array([120, 180, 280]),
+        ranges=np.array([0, 7500, 15000]),
         profiles=[near, mid, far],
     )
+    rdl_bathymetry = np.column_stack([
+        np.array([0.0, 7500.0, 15000.0]),
+        np.array([120.0, 180.0, 280.0]),
+    ])
 
     print(f"Max sediment thickness: {rdl.max_total_thickness():.1f} m")
-    print(f"Ranges: {rdl.ranges_km} km")
+    print(f"Ranges: {rdl.ranges / 1000.0} km")
     for i, lb in enumerate(rdl.profiles):
-        print(f"  r={rdl.ranges_km[i]:.1f} km: {len(lb.layers)} layers, "
+        print(f"  r={(rdl.ranges / 1000.0)[i]:.1f} km: {len(lb.layers)} layers, "
               f"total {lb.total_thickness():.0f} m")
 
     env = uacpy.Environment(
         name='Shelf: Mud/Clay to Sand/Rock',
         depth=280.0,
         sound_speed=1500.0,
+        bathymetry=rdl_bathymetry,
         bottom=rdl,
     )
 

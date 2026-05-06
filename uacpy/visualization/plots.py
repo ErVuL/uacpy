@@ -17,10 +17,6 @@ from uacpy.core.results import (
     TimeSeriesField, TimeTrace, Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
 )
-# Legacy type-hint name kept as an alias for ``Result`` so older code that
-# uses ``Field`` for type hints still resolves. The discriminated union is
-# now the typed Result hierarchy.
-Field = Result
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.visualization.style import (
     get_cmap_for_field,
@@ -123,7 +119,7 @@ def plot_time_trace(trace: TimeTrace, ax=None, figsize: Tuple[float, float] = (1
 
 
 def plot_transmission_loss(
-    field: Field,
+    field: Result,
     env: Optional[Environment] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -143,7 +139,7 @@ def plot_transmission_loss(
 
     Parameters
     ----------
-    field : Field
+    field : Result
         Transmission loss field
     env : Environment, optional
         Environment for bathymetry overlay
@@ -353,7 +349,7 @@ def plot_transmission_loss(
 
 
 def plot_rays(
-    field: Field,
+    field: Result,
     env: Optional[Environment] = None,
     source: Optional[object] = None,
     receiver: Optional[object] = None,
@@ -722,7 +718,7 @@ def plot_bathymetry(
 
 
 def plot_arrivals(
-    field: Field,
+    field: Result,
     figsize: Tuple[float, float] = (10, 6),
     ax: Optional[Axes] = None,
     color_by_bounces: bool = True,
@@ -940,7 +936,7 @@ def plot_environment(
 
 
 def plot_modes(
-    modes: Field,
+    modes: Result,
     n_modes: Optional[int] = None,
     figsize: Tuple[float, float] = (14, 6),
     show_imaginary: bool = True,
@@ -950,8 +946,8 @@ def plot_modes(
 
     Parameters
     ----------
-    modes : Field
-        Mode Field object from compute_modes()
+    modes : Result
+        Mode Result object from compute_modes()
     n_modes : int, optional
         Number of modes to plot. If None, plots first 6 modes.
     figsize : tuple, optional
@@ -970,7 +966,7 @@ def plot_modes(
     >>> fig, axes = plot_modes(modes)
     >>> plt.show()
 
-    >>> # Or even simpler with Field.plot()
+    >>> # Or even simpler with Result.plot()
     >>> modes = kraken.compute_modes(env, source)
     >>> fig, axes = modes.plot(n_modes=10)
     >>> plt.show()
@@ -1054,7 +1050,7 @@ def plot_modes(
 
 
 def plot_mode_functions(
-    modes: Field,
+    modes: Result,
     mode_indices: Optional[list] = None,
     figsize: Tuple[float, float] = (10, 8),
 ) -> Tuple[Figure, Axes]:
@@ -1063,8 +1059,8 @@ def plot_mode_functions(
 
     Parameters
     ----------
-    modes : Field
-        Mode Field object from compute_modes()
+    modes : Result
+        Mode Result object from compute_modes()
     mode_indices : list of int, optional
         Specific mode indices to plot. If None, plots first 4.
     figsize : tuple, optional
@@ -1150,7 +1146,7 @@ def plot_mode_functions(
 
 
 def plot_mode_wavenumbers(
-    modes: Field,
+    modes: Result,
     figsize: Tuple[float, float] = (10, 8),
     annotate_modes: bool = True,
     max_annotations: int = 20,
@@ -1165,8 +1161,8 @@ def plot_mode_wavenumbers(
 
     Parameters
     ----------
-    modes : Field
-        Mode Field object from compute_modes()
+    modes : Result
+        Mode Result object from compute_modes()
     figsize : tuple, optional
         Figure size. Default is (10, 8).
     annotate_modes : bool, optional
@@ -1271,7 +1267,7 @@ def compare_models(
     Parameters
     ----------
     results : dict
-        Dictionary with model names as keys and Field objects as values.
+        Dictionary with model names as keys and Result objects as values.
         Example: {'RAM': field1, 'Bellhop': field2}
     env : Environment
         Environment for reference
@@ -1477,7 +1473,7 @@ def plot_dispersion_curves(
 
 
 def plot_range_cut(
-    field: Field,
+    field: Result,
     depth: float,
     figsize: Tuple[float, float] = (10, 5),
     ax: Optional[Axes] = None,
@@ -1488,7 +1484,7 @@ def plot_range_cut(
 
     Parameters
     ----------
-    field : Field
+    field : Result
         Transmission loss field
     depth : float
         Depth at which to extract range cut (m)
@@ -1539,7 +1535,7 @@ def plot_range_cut(
 
 
 def plot_depth_cut(
-    field: Field,
+    field: Result,
     range_m: float,
     figsize: Tuple[float, float] = (6, 8),
     ax: Optional[Axes] = None,
@@ -1550,7 +1546,7 @@ def plot_depth_cut(
 
     Parameters
     ----------
-    field : Field
+    field : Result
         Transmission loss field
     range_m : float
         Range at which to extract depth cut (m)
@@ -1611,7 +1607,7 @@ def compare_range_cuts(
     Parameters
     ----------
     results : dict
-        Dictionary with model names as keys and Field objects as values
+        Dictionary with model names as keys and Result objects as values
     depth : float
         Depth at which to extract range cuts (m)
     figsize : tuple, optional
@@ -1677,7 +1673,7 @@ def plot_model_statistics(
     Parameters
     ----------
     results : dict
-        Dictionary with model names as keys and Field objects as values
+        Dictionary with model names as keys and Result objects as values
     compute_times : dict
         Dictionary with model names as keys and computation times (s) as values
     figsize : tuple, optional
@@ -1791,7 +1787,7 @@ def plot_model_comparison_matrix(
     Parameters
     ----------
     results : dict
-        Dictionary with model names as keys and Field objects as values
+        Dictionary with model names as keys and Result objects as values
     comparison_metric : str, optional
         Metric for comparison: 'rms' (RMS error), 'correlation', 'max_diff'.
         Default is 'rms'.
@@ -1994,7 +1990,7 @@ def plot_comparison_curves(
     Parameters
     ----------
     results : dict
-        Dictionary with model names as keys and Field objects as values
+        Dictionary with model names as keys and Result objects as values
     source_depth : float
         Depth in meters for TL vs range plot
     mid_range_km : float, optional
@@ -2139,7 +2135,7 @@ def plot_ssp_2d(
     if cmap is None:
         cmap = get_cmap_for_field('ssp')
 
-    ranges_km = env.ssp.ranges_km
+    ranges_km = env.ssp.ranges / 1000.0
     ssp_matrix = env.ssp.data
     depths = env.ssp.depths
 
@@ -2218,7 +2214,7 @@ def plot_bottom_properties(
     axes = axes.flatten()
 
     bottom_rd = env.bottom_rd
-    ranges_km = bottom_rd.ranges_km
+    ranges_km = bottom_rd.ranges / 1000.0
 
     # Plot 1: Depth (Bathymetry)
     axes[0].plot(ranges_km, bottom_rd.depths, 'o-', linewidth=2, markersize=8, color='brown')
@@ -2378,7 +2374,12 @@ def plot_rd_layered_bottom(
         raise ValueError("Environment must have a RangeDependentLayeredBottom")
 
     rdl = env.bottom_rd_layered
-    n_ranges = len(rdl.ranges_km)
+    rdl_km = rdl.ranges / 1000.0
+    n_ranges = len(rdl.ranges)
+    seafloor_at_profile = np.array([
+        float(np.asarray(env.get_bathymetry_depth(r)).flat[0])
+        for r in rdl.ranges
+    ])
 
     fig, axes = plt.subplots(1, 2, figsize=figsize,
                              gridspec_kw={'width_ratios': [3.2, 1]})
@@ -2396,19 +2397,19 @@ def plot_rd_layered_bottom(
     def _color(c):
         return cm(0.20 + 0.65 * (c - cs_min) / cs_span)
 
-    boundaries = [rdl.ranges_km[0]]
+    boundaries = [rdl_km[0]]
     for i in range(n_ranges - 1):
-        boundaries.append(0.5 * (rdl.ranges_km[i] + rdl.ranges_km[i + 1]))
-    boundaries.append(rdl.ranges_km[-1])
+        boundaries.append(0.5 * (rdl_km[i] + rdl_km[i + 1]))
+    boundaries.append(rdl_km[-1])
 
-    total_span = rdl.ranges_km[-1] - rdl.ranges_km[0]
+    total_span = rdl_km[-1] - rdl_km[0]
     seg_seafloor_bot = []
     seg_x = []
     for i_r, lb in enumerate(rdl.profiles):
         r_lo, r_hi = boundaries[i_r], boundaries[i_r + 1]
         n_pts = max(20, int(401 * (r_hi - r_lo) / total_span))
         x_bin = np.linspace(r_lo, r_hi, n_pts)
-        top = np.interp(x_bin, rdl.ranges_km, rdl.depths)
+        top = np.interp(x_bin, rdl_km, seafloor_at_profile)
         seg_x.append(x_bin)
         for layer in lb.layers:
             bot = top + layer.thickness
@@ -2432,8 +2433,8 @@ def plot_rd_layered_bottom(
             linewidth=0.4, zorder=ZORDER_SEDIMENT - 1, hatch='///',
         )
 
-    range_dense = np.linspace(rdl.ranges_km[0], rdl.ranges_km[-1], 401)
-    seafloor_dense = np.interp(range_dense, rdl.ranges_km, rdl.depths)
+    range_dense = np.linspace(rdl_km[0], rdl_km[-1], 401)
+    seafloor_dense = np.interp(range_dense, rdl_km, seafloor_at_profile)
     ax_main.fill_between(range_dense, 0, seafloor_dense,
                          color='lightblue', alpha=0.30,
                          zorder=ZORDER_SEDIMENT - 2, edgecolor='none')
@@ -2444,15 +2445,15 @@ def plot_rd_layered_bottom(
         ax_main.axvline(b, color='black', linewidth=1.2, alpha=0.7,
                         zorder=ZORDER_SEDIMENT + 5)
     for i_r in range(n_ranges):
-        ax_main.axvline(rdl.ranges_km[i_r], color='gray', linewidth=0.6,
+        ax_main.axvline(rdl_km[i_r], color='gray', linewidth=0.6,
                         linestyle='--', alpha=0.5,
                         zorder=ZORDER_SEDIMENT + 4)
-        ax_main.text(rdl.ranges_km[i_r], -halfspace_depth * 0.02,
+        ax_main.text(rdl_km[i_r], -halfspace_depth * 0.02,
                      f'P{i_r + 1}', ha='center', va='bottom',
                      fontsize=9, fontweight='bold', color='dimgray')
 
     ax_main.set_ylim(halfspace_depth * 1.04, -halfspace_depth * 0.07)
-    ax_main.set_xlim(rdl.ranges_km[0], rdl.ranges_km[-1])
+    ax_main.set_xlim(rdl_km[0], rdl_km[-1])
     ax_main.set_xlabel('Range (km)', fontsize=11)
     ax_main.set_ylabel('Depth (m)', fontsize=11)
     ax_main.set_title(f'Range-Dependent Layered Bottom — {env.name}',
@@ -2469,8 +2470,8 @@ def plot_rd_layered_bottom(
     ax_legend.axis('off')
     lines = []
     for i_r, lb in enumerate(rdl.profiles):
-        lines.append(f'P{i_r + 1}  r={rdl.ranges_km[i_r]:.1f} km  '
-                     f'z={rdl.depths[i_r]:.0f} m')
+        lines.append(f'P{i_r + 1}  r={rdl_km[i_r]:.1f} km  '
+                     f'z={seafloor_at_profile[i_r]:.0f} m')
         for j, layer in enumerate(lb.layers):
             lines.append(
                 f'   L{j + 1}: h={layer.thickness:.0f}m  '
@@ -2513,7 +2514,7 @@ def plot_rd_bottom(
     if not env.has_range_dependent_bottom():
         raise ValueError("Environment must have a RangeDependentBottom")
     rd = env.bottom_rd
-    ranges_km = np.asarray(rd.ranges_km)
+    ranges_km = np.asarray(rd.ranges / 1000.0)
     seafloor_nodes = np.asarray(rd.depths)
 
     fig, axes = plt.subplots(1, 2, figsize=figsize,
@@ -2663,7 +2664,7 @@ def plot_environment_advanced(
         ax_atten = fig.add_subplot(gs[1, 2])
 
         bottom_rd = env.bottom_rd
-        ranges_km = bottom_rd.ranges_km
+        ranges_km = bottom_rd.ranges / 1000.0
 
         ax_cs.plot(ranges_km, bottom_rd.sound_speed, 'o-', linewidth=2, color='darkblue')
         ax_cs.set_xlabel('Range (km)', fontsize=10)
@@ -2751,7 +2752,7 @@ def plot_environment_advanced(
 
 
 def plot_transmission_loss_polar(
-    field: Field,
+    field: Result,
     receiver_depth: Optional[float] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -2768,7 +2769,7 @@ def plot_transmission_loss_polar(
 
     Parameters
     ----------
-    field : Field
+    field : Result
         TL field with theta data in metadata['theta']
     receiver_depth : float, optional
         Receiver depth to extract (m). If None, uses first depth.
@@ -2817,14 +2818,14 @@ def plot_transmission_loss_polar(
     # Extract theta from metadata
     theta = field.metadata.get('theta', None)
     if theta is None:
-        raise ValueError("Field must have 'theta' in metadata for polar plots. "
+        raise ValueError("Result must have 'theta' in metadata for polar plots. "
                         "This requires models with bearing/azimuth output (e.g., Bellhop3D).")
 
     # Extract pressure data (shape depends on model)
     # Typically: pressure[theta, source_depth, receiver_depth, range]
     pressure = field.metadata.get('pressure', None)
     if pressure is None:
-        raise ValueError("Field must have complex 'pressure' in metadata for polar plots.")
+        raise ValueError("Result must have complex 'pressure' in metadata for polar plots.")
 
     # Get receiver depths
     receiver_depths = field.depths
@@ -2917,7 +2918,7 @@ def plot_transmission_loss_polar(
 
 
 def plot_transfer_function(
-    field: Union[Field, Dict[str, Field]],
+    field: Union[Result, Dict[str, Result]],
     depth_idx: Optional[int] = None,
     range_idx: int = 0,
     figsize: Optional[Tuple[float, float]] = None,
@@ -2938,7 +2939,7 @@ def plot_transfer_function(
        grid at the nearest frequency. Mirrors :func:`plot_transmission_loss`
        for broadband ``TLField``. Returns ``(fig, ax)`` only.
 
-    Field data shape may be ``(n_depths, n_freqs, n_ranges)`` (RAM /
+    Result data shape may be ``(n_depths, n_freqs, n_ranges)`` (RAM /
     KrakenField / OASP convention) or ``(n_depths, n_ranges, n_freqs)``
     (Bellhop). Layout is detected automatically.
     """
@@ -3080,7 +3081,7 @@ def plot_transfer_function(
 
 
 def plot_time_series(
-    field: Optional[Field] = None,
+    field: Optional[Result] = None,
     time_series_data: Optional[Dict] = None,
     receiver_depths: Optional[np.ndarray] = None,
     stacked: bool = True,
@@ -3097,8 +3098,8 @@ def plot_time_series(
 
     Parameters
     ----------
-    field : Field, optional
-        Field with time series data in metadata['time_series'].
+    field : Result, optional
+        Result with time series data in metadata['time_series'].
         Either field or time_series_data must be provided.
     time_series_data : dict, optional
         Direct time series data dict with keys 'time', 'pressure', 'receiver_depth'.
@@ -3151,7 +3152,7 @@ def plot_time_series(
     >>> fig, ax = plot_time_series(result, color=None)  # Use color cycle
 
     >>> # From direct time series data
-    >>> from uacpy.io.ts_reader import read_ts
+    >>> from uacpy.io.oalib_reader import read_ts
     >>> ts_data = read_ts('timeseries.txt')
     >>> fig, ax = plot_time_series(time_series_data=ts_data)
 
@@ -3195,7 +3196,7 @@ def plot_time_series(
             ts_data = field.metadata.get('time_series', None)
             if ts_data is None:
                 raise ValueError(
-                    "Field must be ``field_type='time_series'`` (e.g. from "
+                    "Result must be ``field_type='time_series'`` (e.g. from "
                     "``SPARC.run(run_mode=RunMode.TIME_SERIES)``)."
                 )
     elif time_series_data is not None:
@@ -3364,7 +3365,7 @@ def plot_time_series(
 
 
 def plot_modes_heatmap(
-    modes: Field,
+    modes: Result,
     mode_range: Optional[Tuple[int, int]] = None,
     figsize: Tuple[float, float] = (12, 8),
     cmap: Optional[str] = None,
@@ -3379,8 +3380,8 @@ def plot_modes_heatmap(
 
     Parameters
     ----------
-    modes : Field
-        Mode Field object from compute_modes()
+    modes : Result
+        Mode Result object from compute_modes()
     mode_range : tuple of int, optional
         (start, end) mode indices to plot. If None, plots all modes.
     figsize : tuple, optional
@@ -3512,7 +3513,7 @@ def plot_modes_heatmap(
     return fig, ax
 
 def plot_reflection_coefficient(
-    field: 'Field',
+    field: 'Result',
     figsize: Tuple[float, float] = (10, 6),
     ax: Optional[Axes] = None,
     show_magnitude: bool = True,
@@ -3525,8 +3526,8 @@ def plot_reflection_coefficient(
 
     Parameters
     ----------
-    field : Field
-        Field object from BOUNCE with reflection coefficient data
+    field : Result
+        Result object from BOUNCE with reflection coefficient data
     figsize : tuple, optional
         Figure size. Default is (10, 6).
     ax : Axes, optional
@@ -3573,7 +3574,7 @@ def plot_reflection_coefficient(
         raise ValueError("plot_reflection_coefficient requires a ReflectionCoefficient Result")
 
     if 'theta' not in field.metadata or 'R' not in field.metadata:
-        raise ValueError("Field metadata must contain 'theta' (angles) and 'R' (magnitude)")
+        raise ValueError("Result metadata must contain 'theta' (angles) and 'R' (magnitude)")
 
     angles = field.metadata['theta']  # Grazing angles (degrees)
     R_mag = field.metadata['R']       # Magnitude
@@ -3653,8 +3654,8 @@ def plot_reflection_coefficient(
 
 
 def plot_tl_difference(
-    field_a: Field,
-    field_b: Field,
+    field_a: Result,
+    field_b: Result,
     env: Optional[Environment] = None,
     label: str = "ΔTL",
     diff_vmax: Optional[float] = None,

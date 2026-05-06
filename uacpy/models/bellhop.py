@@ -27,7 +27,7 @@ from uacpy.core.results import Result, TimeSeriesField, TransferFunction
 from uacpy.core.constants import (
     AttenuationUnits, DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
-from uacpy.io.bellhop_writer import BellhopEnvWriter
+from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.output_reader import read_shd_file, read_arr_file, read_ray_file
 
 
@@ -414,6 +414,9 @@ class Bellhop(PropagationModel):
         bty_interp_type=_UNSET,
         source_beam_pattern_file=_UNSET,
         arrivals_format=_UNSET,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         **kwargs
     ) -> Result:
         """
@@ -462,10 +465,26 @@ class Bellhop(PropagationModel):
         from uacpy.core.model_utils import ParameterMapper
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
+
+        self._warn_unknown_kwargs(
+            kwargs,
+            allowed=(
+                'beam_width_type', 'beam_curvature', 'eps_multiplier',
+                'r_loop', 'n_image', 'ib_win', 'component',
+                'time_window', 't_start', 'n_freqs', 'bandwidth_factor',
+            ),
+        )
+
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
             # source_waveform → TransferFunction; with it → TimeSeriesField (1×1 grid).
-            return self._run_broadband(env, source, receiver, **kwargs)
+            return self._run_broadband(
+                env, source, receiver,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                **kwargs,
+            )
         run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
 
         # ── arrivals_format: 'A' (ASCII) vs 'a' (binary) ────────────────
@@ -564,7 +583,7 @@ class Bellhop(PropagationModel):
                         shutil.copy(src, sbp_dest)
                     else:
                         # Array-like: expect shape (N, 2) [angle_deg, level_dB]
-                        from uacpy.io.env_writer import write_source_beam_pattern
+                        from uacpy.io.boundary_io import write_source_beam_pattern
                         arr = np.asarray(sbp_spec, dtype=float)
                         if arr.ndim != 2 or arr.shape[1] != 2:
                             raise ValueError(
@@ -593,7 +612,7 @@ class Bellhop(PropagationModel):
                 for k_, v_ in beam_kw.items():
                     kwargs.setdefault(k_, v_)
 
-                BellhopEnvWriter.write_env_file(
+                write_bellhop_env_file(
                     filepath=env_file,
                     env=env,
                     source=source,
@@ -639,6 +658,13 @@ class Bellhop(PropagationModel):
                     self._log(f"Output file not found: {output_file}", level='error')
                     raise FileNotFoundError(f"Output file not found: {output_file}")
                 result = reader(output_file)
+                result.tag(
+                    model=self.model_name,
+                    backend=self.model_name.lower(),
+                    source_depths=source.depth,
+                    frequency=float(np.atleast_1d(source.frequency)[0]),
+                    phase_reference='travelling_wave',
+                )
 
                 self._log("Simulation complete", level='info')
                 return result
@@ -869,56 +895,64 @@ class Bellhop(PropagationModel):
                     "sample_rate is required when source_waveform is provided"
                 )
 
-            # Find the single receiver position
-            rcv_depth = kwargs.pop('depth', None)
-            rcv_range = kwargs.pop('range_m', None)
+            # Pop the legacy single-cell selectors but ignore them — the
+            # full receiver grid is always populated for shape uniformity
+            # with RAM / Scooter / KrakenField / OASP.
+            kwargs.pop('depth', None)
+            kwargs.pop('range_m', None)
 
-            if rcv_depth is None:
-                ird = 0
-                rcv_depth = float(rz[0])
-            else:
-                ird = int(np.argmin(np.abs(rz - rcv_depth)))
-                rcv_depth = float(rz[ird])
+            self._log(
+                f"Broadband: delay-and-sum over {nrd}×{nrr} receiver grid",
+                level='info',
+            )
 
-            if rcv_range is None:
-                irr = 0
-                rcv_range = float(rr[0])
-            else:
-                irr = int(np.argmin(np.abs(rr - rcv_range)))
-                rcv_range = float(rr[irr])
-
-            self._log(f"Broadband: delay-and-sum at depth={rcv_depth:.1f} m, "
-                      f"range={rcv_range:.1f} m", level='info')
-
-            rcv_arr = arrivals_by_rcv[0][ird][irr]
-            rts, t_vec = delayandsum(
-                rcv_arrivals=rcv_arr,
+            # Lock the time window using the first cell so all traces share
+            # a clock; reuse it for every subsequent cell via ``t_start``.
+            rts0, t_vec = delayandsum(
+                rcv_arrivals=arrivals_by_rcv[0][0][0],
                 source_timeseries=source_waveform,
                 sample_rate=sample_rate,
                 fc=fc,
                 time_window=time_window,
                 t_start=t_start,
             )
+            t_start_locked = float(t_vec[0])
+            time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
+            n_t = len(rts0)
 
-            dt = 1.0 / sample_rate
+            data = np.zeros((nrd, nrr, n_t), dtype=float)
+            data[0, 0, :] = rts0
+            for ird in range(nrd):
+                for irr in range(nrr):
+                    if ird == 0 and irr == 0:
+                        continue
+                    rts, _ = delayandsum(
+                        rcv_arrivals=arrivals_by_rcv[0][ird][irr],
+                        source_timeseries=source_waveform,
+                        sample_rate=sample_rate,
+                        fc=fc,
+                        time_window=time_window_locked,
+                        t_start=t_start_locked,
+                    )
+                    # delayandsum may return a slightly different length on
+                    # cells with no arrivals — pad/truncate to n_t.
+                    m = min(len(rts), n_t)
+                    data[ird, irr, :m] = np.asarray(rts[:m], dtype=float)
 
-            # Wrap as a 1×1 grid so users get the same TimeSeriesField type
-            # SPARC/RAM hand back. Use ``.get_trace(depth, range)`` (or just
-            # ``ts.data[0, 0, :]``) to recover the 1-D waveform.
             return TimeSeriesField(
-                data=np.asarray(rts, dtype=float).reshape(1, 1, -1),
-                depths=np.array([rcv_depth], dtype=float),
-                ranges=np.array([rcv_range], dtype=float),
+                data=data,
+                depths=np.asarray(rz, dtype=float),
+                ranges=np.asarray(rr, dtype=float),
                 time=t_vec,
                 model=self.model_name,
                 backend='bellhop',
                 source_depths=sz,
                 frequency=fc,
                 metadata={
-                    'dt': dt,
+                    'dt': 1.0 / sample_rate,
                     'fs': sample_rate,
-                    'nt': len(rts),
-                    't_start': float(t_vec[0]),
+                    'nt': n_t,
+                    't_start': t_start_locked,
                     'center_frequency': fc,
                 },
             )
@@ -1156,7 +1190,7 @@ class Bellhop3D(Bellhop):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             "Bellhop3D wrapper is pending — the uacpy writer currently "
-            "emits 2D env blocks only (BellhopEnvWriter hardcodes "
+            "emits 2D env blocks only (write_bellhop_env_file hardcodes "
             "position 6 to '2'). Contributions welcome; see "
             "third_party/Acoustics-Toolbox/doc/bellhop3d.htm for the 3D "
             "env-file specification and bellhop3D.f90 for the Fortran "

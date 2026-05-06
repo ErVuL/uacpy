@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 import uacpy
 from uacpy.core.exceptions import (
-    UACPYError, ModelError, ExecutableNotFoundError,
-    EnvironmentError, InvalidDepthError, UnsupportedFeatureError,
+    UACPYError, ExecutableNotFoundError,
+    InvalidDepthError, UnsupportedFeatureError,
 )
 from uacpy.models import Bellhop, Kraken
 

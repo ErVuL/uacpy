@@ -3,7 +3,6 @@ Utility functions for IO operations
 """
 
 import numpy as np
-from typing import Union
 
 
 def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:

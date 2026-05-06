@@ -47,7 +47,7 @@ def build_rd_environment() -> uacpy.Environment:
     bathymetry = np.column_stack([bathy_ranges_m, bathy_depths_m])
 
     ssp_depths = np.linspace(0.0, 200.0, 21)
-    ssp_ranges_km = np.array([0.0, 10.0, 20.0])
+    ssp_ranges_m = np.array([0.0, 10000.0, 20000.0])
 
     near = 1525.0 + (1480.0 - 1525.0) * np.tanh(ssp_depths / 30.0)
     far = 1480.0 + (ssp_depths / 200.0) * 35.0
@@ -58,7 +58,7 @@ def build_rd_environment() -> uacpy.Environment:
         name='Continental shelf — RD demo',
         depth=200.0,
         ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_depths, ranges_km=ssp_ranges_km, matrix=ssp_2d,
+            depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
             interp='pchip',
         ),
         bathymetry=bathymetry,

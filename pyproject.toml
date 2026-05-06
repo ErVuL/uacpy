@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.1.1"
+version = "0.1.2"
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.8"
@@ -68,4 +68,13 @@ uacpy = [
     "bin/bellhopcuda/*",
     "bin/mpirams/*",
     "bin/oases/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["uacpy/tests"]
+markers = [
+    "slow: long-running tests (excluded by `-m 'not slow'`)",
+    "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
+    "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
+    "integration: end-to-end tests that exercise multiple subsystems",
 ]

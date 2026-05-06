@@ -457,7 +457,7 @@ class RAM(PropagationModel):
         if c0 is None:
             c0 = self._resolve_c0(env)
         # Maximum seafloor depth across all ranges
-        if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
+        if env.bathymetry is not None and len(env.bathymetry) > 0:
             max_depth = float(np.max(env.bathymetry[:, 1]))
         else:
             max_depth = env.depth
@@ -499,11 +499,11 @@ class RAM(PropagationModel):
 
         if env.ssp.is_range_dependent:
             self._log("Using 2D SSP matrix", level='info')
-            ranges_km = env.ssp.ranges_km.copy()
+            ranges_m = env.ssp.ranges.copy()
             ssp_depths = env.ssp.depths
 
-            speeds_2d = np.zeros((len(depths), len(ranges_km)))
-            for i in range(len(ranges_km)):
+            speeds_2d = np.zeros((len(depths), len(ranges_m)))
+            for i in range(len(ranges_m)):
                 profile = env.ssp.data[:, i]
                 interp_func = scipy.interpolate.interp1d(
                     ssp_depths, profile, kind='linear',
@@ -512,7 +512,8 @@ class RAM(PropagationModel):
                 )
                 speeds_2d[:, i] = interp_func(depths)
 
-            write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_km)
+            # write_ssp_file (mpiramS .ssp format) expects ranges in km.
+            write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_m / 1000.0)
         else:
             write_ssp_file(work_dir / ssp_filename, depths, base_speeds)
 
@@ -524,7 +525,7 @@ class RAM(PropagationModel):
         """
         bth_filename = 'bathy.dat'
 
-        if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
+        if env.bathymetry is not None and len(env.bathymetry) > 0:
             bathy = env.bathymetry.copy()
             # Anchor at r=0 if first sample is at r>0
             if bathy[0, 0] > 0.0:
@@ -586,10 +587,10 @@ class RAM(PropagationModel):
         # Use thin sediment layer for sharp interface (≈ half-space)
         sedlayer = self._effective_dz(env)
 
-        if hasattr(env, 'bottom_rd_layered') and env.bottom_rd_layered is not None and work_dir is not None:
+        if env.bottom_rd_layered is not None and work_dir is not None:
             # Range-dependent layered bottom
             rdl = env.bottom_rd_layered
-            n_ranges = len(rdl.ranges_km)
+            n_ranges = len(rdl.ranges)
             sedlayer_rdl = max(rdl.max_total_thickness(), self._effective_dz(env))
 
             cs_profiles = np.zeros((nzs, n_ranges))
@@ -605,12 +606,15 @@ class RAM(PropagationModel):
                 rho_samp[-1] = lb.halfspace.density
                 attn_samp[-1] = lb.halfspace.attenuation
 
+                seafloor_i = float(np.asarray(
+                    env.get_bathymetry_depth(rdl.ranges[i])
+                ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.get_ssp_at_range(rdl.ranges_km[i] * 1000.0)
-                    cwg_local = float(np.interp(rdl.depths[i],
+                    ssp_at_range = env.get_ssp_at_range(rdl.ranges[i])
+                    cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
-                    cwg_local = float(np.interp(rdl.depths[i],
+                    cwg_local = float(np.interp(seafloor_i,
                                                 env.ssp.depths, env.ssp.data[:, 0]))
 
                 # Points 0,1 = water (zero perturbation), rest = sediment
@@ -624,9 +628,10 @@ class RAM(PropagationModel):
 
             from uacpy.io.mpirams_writer import write_sediment_file
             sed_filename = 'sediment.sed'
+            # write_sediment_file (mpiramS .sed format) expects ranges in km.
             write_sediment_file(
                 work_dir / sed_filename,
-                rdl.ranges_km,
+                rdl.ranges / 1000.0,
                 cs_profiles, rho_profiles, attn_profiles
             )
 
@@ -638,7 +643,7 @@ class RAM(PropagationModel):
             attn_arr = attn_profiles[:, 0].copy()
             return sedlayer_rdl, nzs, cs, rho_arr, attn_arr, 1, sed_filename
 
-        if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
+        if env.bottom_layered is not None:
             # Range-independent layered bottom: sample at nzs depths
             layered = env.bottom_layered
             total_thick = layered.total_thickness()
@@ -666,10 +671,10 @@ class RAM(PropagationModel):
 
             return sedlayer_lay, nzs, cs, rho_arr, attn_arr, 0, ''
 
-        if hasattr(env, 'bottom_rd') and env.bottom_rd is not None and work_dir is not None:
+        if env.bottom_rd is not None and work_dir is not None:
             # Range-dependent halfspace bottom
             bottom_rd = env.bottom_rd
-            n_ranges = len(bottom_rd.ranges_km)
+            n_ranges = len(bottom_rd.ranges)
 
             cs_profiles = np.zeros((nzs, n_ranges))
             rho_profiles = np.zeros((nzs, n_ranges))
@@ -678,7 +683,7 @@ class RAM(PropagationModel):
             for i in range(n_ranges):
                 cb = bottom_rd.sound_speed[i]
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.get_ssp_at_range(bottom_rd.ranges_km[i] * 1000.0)
+                    ssp_at_range = env.get_ssp_at_range(bottom_rd.ranges[i])
                     cwg_local = float(np.interp(bottom_rd.depths[i],
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -697,9 +702,10 @@ class RAM(PropagationModel):
 
             from uacpy.io.mpirams_writer import write_sediment_file
             sed_filename = 'sediment.sed'
+            # write_sediment_file (mpiramS .sed format) expects ranges in km.
             write_sediment_file(
                 work_dir / sed_filename,
-                bottom_rd.ranges_km,
+                bottom_rd.ranges / 1000.0,
                 cs_profiles, rho_profiles, attn_profiles
             )
 
@@ -715,7 +721,7 @@ class RAM(PropagationModel):
         rho_val = 1.2
         attn_val = 0.5
 
-        if hasattr(env, 'bottom') and env.bottom is not None:
+        if env.bottom is not None:
             bottom = env.bottom
             cb_val = getattr(bottom, 'sound_speed', 1600.0) or 1600.0
             rho_val = getattr(bottom, 'density', 1.2) or 1.2
@@ -832,12 +838,7 @@ class RAM(PropagationModel):
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
 
-        if kwargs:
-            warnings.warn(
-                f"RAM.run received unknown kwargs (ignored): {sorted(kwargs)}",
-                UserWarning,
-                stacklevel=2,
-            )
+        self._warn_unknown_kwargs(kwargs)
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -1082,9 +1083,13 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=3,
             )
         tl_clamped = np.where(np.isfinite(raw['tl']), raw['tl'], TL_MAX_DB)
+        # Receivers outside the PE output grid get NaN so pcolormesh and
+        # downstream consumers render them transparent rather than as a
+        # saturated edge band. Use ``fill_value=TL_MAX_DB`` only inside
+        # the grid via the np.where above for non-finite samples.
         interp = RegularGridInterpolator(
             (raw['depths'], raw['ranges']), tl_clamped,
-            bounds_error=False, fill_value=TL_MAX_DB,
+            bounds_error=False, fill_value=np.nan,
         )
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
         rcv_r = np.atleast_1d(receiver.ranges).astype(float)
@@ -1466,15 +1471,18 @@ class RAM(PropagationModel):
             dr_first = dr_first or raw['dr']
             dz_first = dz_first or raw['dz']
 
+            # Out-of-grid receivers → NaN so the resulting H(f) cell is
+            # NaN (transparent in plots) instead of 0 (which clips TL to
+            # TL_MAX_DB and saturates the heatmap edges).
             interp_re = RegularGridInterpolator(
                 (raw['depths'], raw['ranges']),
                 np.real(raw['pcomplex']),
-                bounds_error=False, fill_value=0.0,
+                bounds_error=False, fill_value=np.nan,
             )
             interp_im = RegularGridInterpolator(
                 (raw['depths'], raw['ranges']),
                 np.imag(raw['pcomplex']),
-                bounds_error=False, fill_value=0.0,
+                bounds_error=False, fill_value=np.nan,
             )
             pts = np.stack([DD.ravel(), RR.ravel()], axis=-1)
             re = interp_re(pts).reshape(DD.shape)
@@ -2035,15 +2043,18 @@ class RAM(PropagationModel):
                     f"for interpolation. Inspect the result before use.",
                     UserWarning, stacklevel=2,
                 )
+            # Receivers outside the PE output domain return NaN pressure
+            # so the resulting TL row is NaN (transparent in pcolormesh)
+            # instead of saturating to ``TL_MAX_DB`` via PRESSURE_FLOOR.
             interp_re = RegularGridInterpolator(
                 (zg.astype(np.float64), rout.astype(np.float64)),
                 np.nan_to_num(pressure.real).astype(np.float64),
-                method='linear', bounds_error=False, fill_value=0.0
+                method='linear', bounds_error=False, fill_value=np.nan,
             )
             interp_im = RegularGridInterpolator(
                 (zg.astype(np.float64), rout.astype(np.float64)),
                 np.nan_to_num(pressure.imag).astype(np.float64),
-                method='linear', bounds_error=False, fill_value=0.0
+                method='linear', bounds_error=False, fill_value=np.nan,
             )
 
             range_mesh, depth_mesh = np.meshgrid(rcv_ranges, rcv_depths)
@@ -2082,7 +2093,7 @@ class RAM(PropagationModel):
             # Mask TL values below the seafloor at each range.
             # RAM computes valid field in the sediment, but for plotting
             # consistency with other models, set sub-bottom values to NaN.
-            if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
+            if env.bathymetry is not None and len(env.bathymetry) > 0:
                 bathy = env.bathymetry
                 bathy_depths = np.interp(receiver.ranges, bathy[:, 0], bathy[:, 1])
             else:
@@ -2225,7 +2236,7 @@ class RAM(PropagationModel):
             # Mask sub-bottom samples with NaN for consistency with _run_tl.
             # RAM computes valid fields in the sediment, but other uacpy
             # models return NaN below the seafloor.
-            if hasattr(env, 'bathymetry') and env.bathymetry is not None and len(env.bathymetry) > 0:
+            if env.bathymetry is not None and len(env.bathymetry) > 0:
                 bathy = env.bathymetry
                 bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
             else:

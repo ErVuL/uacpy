@@ -12,15 +12,12 @@ from uacpy.core.results import (
     Result, PhaseReference,
     TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, ModalResult, Modes,
+    Arrivals, Rays, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
 )
 
-try:
-    from uacpy.core import acoustics
-except ImportError:
-    pass
+from uacpy.core import acoustics
 
 __all__ = [
     'Source',
@@ -34,7 +31,7 @@ __all__ = [
     'Result', 'PhaseReference',
     'TLField', 'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
-    'Arrivals', 'Rays', 'ModalResult', 'Modes',
+    'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
     'acoustics',

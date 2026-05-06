@@ -61,9 +61,6 @@ class TestElasticBoundaryAutoDetection:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver_small(self):
@@ -134,9 +131,6 @@ class TestBounceReflectionCoefficients:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver_bounce(self):
@@ -233,9 +227,6 @@ class TestBounceToScooterWorkflow:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver_small(self):
@@ -314,9 +305,6 @@ class TestWorkflowComparison:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def source(self):
-        return Source(depth=50.0, frequency=100.0)
 
     @pytest.fixture
     def receiver_small(self):
@@ -377,7 +365,3 @@ class TestWorkflowComparison:
         # Both workflows should produce reasonable TL fields
         # Allow larger tolerance since methods are fundamentally different
         assert mean_diff < 15.0, f"Mean difference {mean_diff:.2f} dB between workflows"
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

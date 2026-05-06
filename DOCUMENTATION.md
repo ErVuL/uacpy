@@ -78,7 +78,7 @@ from uacpy import (
 from uacpy import (
     Result, TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, ModalResult, Modes,
+    Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
 )
 
@@ -191,8 +191,26 @@ in `models/base.py`.
 
 Most models add their own tuning parameters on top of these (e.g. `dr`, `dz`,
 `beam_type`, `cmin`, `cmax`, `volume_attenuation`). Every constructor
-parameter is also accepted as a per-call override on `run()` via `_UNSET`
-sentinel pattern — see each model for specifics.
+parameter is also accepted as a per-call override on `run()` via the
+`_UNSET` sentinel pattern: pass `n_beams=600` (or any other constructor
+attr) directly to `model.run(...)` and it is temporarily applied for one
+call only, then restored on exit. The mechanism lives in `models/base.py`:
+the `_resolve_overrides(self, **overrides)` context manager handles the
+common case; a per-arg `self._resolve(value, attr)` helper exists for
+writers that need the *resolved* value before the context is entered.
+
+**Mode-specific kwargs.** Every `RunMode.TIME_SERIES`-capable wrapper
+(Bellhop, Scooter, KrakenField, OASP, RAM) accepts `source_waveform=` and
+`sample_rate=` as **explicit keyword arguments on `run()`** — same name,
+same role across models. Models with a broadband H(f) path also accept
+`frequencies=` for an explicit override of `source.frequency`. SPARC
+computes p(t) from its native source pulse and ignores both.
+
+**Typo guard.** Any kwarg passed to `run()` that doesn't match an
+explicit signature arg, a constructor attribute, or a documented writer
+pass-through triggers a `UserWarning` via `self._warn_unknown_kwargs`.
+A typo like `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`)
+is reported instead of being silently dropped.
 
 ---
 
@@ -242,13 +260,13 @@ env = uacpy.Environment(
 )
 
 # 4. Range-dependent — c(depth, range)
-ranges_km = np.array([0, 10, 20, 30])
+ranges_m  = np.array([0, 10000, 20000, 30000])  # metres
 depths_m  = np.linspace(0, 1000, 50)
 ssp_2d    = np.zeros((50, 4))  # fill in…
 env = uacpy.Environment(
     name="rd", depth=1000,
     ssp=SoundSpeedProfile.from_2d(
-        depths=depths_m, ranges_km=ranges_km, matrix=ssp_2d,
+        depths=depths_m, ranges=ranges_m, matrix=ssp_2d,
         interp='quad',  # required for Bellhop to honour the 2-D form
     ),
 )
@@ -308,13 +326,14 @@ bot  = BoundaryProperties(acoustic_type='file', reflection_file='bottom.brc')
 from uacpy import RangeDependentBottom
 
 bot = RangeDependentBottom(
-    ranges_km    = np.array([0, 5, 10, 15]),
-    depths       = np.array([100, 150, 200, 180]),
-    sound_speed  = np.array([1600, 1650, 1700, 1750]),
-    density      = np.array([1.5, 1.7, 1.9, 2.1]),
-    attenuation  = np.array([0.8, 0.6, 0.4, 0.3]),
-    shear_speed  = np.zeros(4),
-    acoustic_type='half-space',              # default is 'vacuum'
+    ranges           = np.array([0, 5000, 10000, 15000]),  # metres
+    depths           = np.array([100, 150, 200, 180]),
+    sound_speed      = np.array([1600, 1650, 1700, 1750]),
+    density          = np.array([1.5, 1.7, 1.9, 2.1]),
+    attenuation      = np.array([0.8, 0.6, 0.4, 0.3]),
+    shear_speed      = np.zeros(4),
+    shear_attenuation= np.zeros(4),
+    acoustic_type    = 'half-space',         # default is 'vacuum'
 )
 ```
 
@@ -326,9 +345,6 @@ RD-bottom through the Fortran natively. The Collins backends (rams0.5,
 ramsurf1.5) use the range-0 profile only and warn on the dropped data.
 Models that don't natively support RD bottoms collapse via
 `bottom_collapse_method` (default `'r0'` — see §5.2).
-`shear_attenuation` and `roughness` are NOT accepted by
-`RangeDependentBottom` — no writer consumes them; use a per-range
-`BoundaryProperties` list if you need per-range shear attenuation.
 
 ### Layered bottom (varies with depth only)
 
@@ -368,17 +384,21 @@ layers to a single halfspace and warn.
 from uacpy import RangeDependentLayeredBottom
 
 rdl = RangeDependentLayeredBottom(
-    ranges_km=np.array([0, 20]),
-    depths   =np.array([100, 300]),
-    profiles =[near_profile, far_profile],   # each is a LayeredBottom
+    ranges  = np.array([0, 20000]),          # metres
+    profiles=[near_profile, far_profile],    # each is a LayeredBottom
 )
 
+# Bathymetry lives on the Environment, not on the RDL.
+bathy = np.array([[0, 100], [20000, 300]])   # (range_m, seafloor_depth_m)
 env = uacpy.Environment(name="shelf", depth=300, sound_speed=1500,
-                        bottom=rdl)
+                        bathymetry=bathy, bottom=rdl)
 ```
 
 Only RAM supports this natively (via its 4-point per-range sediment
-profile). Everything else collapses it.
+profile). Everything else collapses it. The RDL carries only the
+sediment-stack range axis; if you need a sloped seafloor, supply
+`bathymetry=` to `Environment` — models that need the seafloor depth
+at one of the RDL ranges interpolate it from `env.bathymetry`.
 
 ### Bathymetry & altimetry
 
@@ -625,10 +645,9 @@ environment field for the BETA exponent. Grid-type `'I'` requires
 
 **Time series via `RunMode.TIME_SERIES`.** Bellhop runs in arrivals
 mode (`'A'`) under the hood and then convolves the per-receiver
-arrivals with a user-supplied `source_waveform`. The receiver is
-selected from the supplied `Receiver` grid by `depth=` and `range_m=`
-kwargs (defaulting to the first depth and first range when omitted —
-`np.argmin` picks the nearest gridpoint):
+arrivals with a user-supplied `source_waveform`. The full receiver
+grid is populated, matching the `(n_d, n_r, n_t)` shape that RAM /
+Scooter / KrakenField / OASP return:
 
 ```python
 ts = bh.run(
@@ -636,11 +655,9 @@ ts = bh.run(
     run_mode=RunMode.TIME_SERIES,
     source_waveform=s,           # 1-D ndarray (the transmitted pulse)
     sample_rate=fs,              # required when source_waveform is given
-    depth=50.0, range_m=2000.0,  # which receiver of the grid to pick
     time_window=None, t_start=None,
 )
-# ts is a TimeSeriesField over a 1×1 grid:
-trace = ts.get_trace(depth=50.0, range_m=2000.0)   # → TimeTrace
+trace = ts.get_trace(depth=50.0, range_m=2000.0)   # → TimeTrace at one cell
 ```
 
 Without `source_waveform` you get a `TransferFunction` covering the full
@@ -1090,7 +1107,6 @@ oases = OASES(use_tmpfs=False, verbose=False)
 
 field  = oases.compute_tl(env, source, receiver)                      # → OAST
 field  = oases.compute_tl(env, source, receiver, broadband=True)      # → OASP
-cov    = oases.compute_modes(env, source, receiver)                   # → OASN
 refl   = oases.compute_reflection(env, source, receiver)              # → OASR
 trf    = oases.compute_transfer_function(env, source, receiver)       # → OASP
 ```
@@ -1100,6 +1116,12 @@ convenience. Pass `broadband=True` to route a TL request through OASP
 (wideband transfer function) instead of OAST — needed for
 range-dependent environments where OAST's range-independent kernel is
 inappropriate.
+
+OASES does not compute explicit normal-mode eigenfunctions; for those
+use `Kraken` or `KrakenC`. Calling `OASES.run(run_mode=RunMode.MODES)`
+raises `UnsupportedFeatureError` and points at OASN's hydrophone-array
+products: `RunMode.COVARIANCE` (covariance matrix) or `RunMode.REPLICA`
+(replica field at array elements).
 
 ---
 
@@ -1114,7 +1136,7 @@ from uacpy.core.results import (
     Result, PhaseReference,
     TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, ModalResult, Modes,
+    Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
 )
 
@@ -1133,12 +1155,16 @@ Result                              identification + metadata
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
 ├── Arrivals                        per-(isd, ird, irr) arrival lists
 ├── Rays                            list of ray paths
-├── ModalResult (ABC)               base for results decomposed into modes
-│   └── Modes                       Kraken normal modes (k, phi, z)
+├── Modes                           Kraken normal modes (k, phi, z)
 ├── Covariance                      OASN spatial covariance C(f, i, j)
 ├── Replicas                        OASN MFP replica fields (n_f, n_z, n_x, n_y, n_rcv)
 └── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_freq)
 ```
+
+Every ``Result`` carries a ``tag(model=…, backend=…, source_depths=…,
+frequency=…, phase_reference=…, **extra)`` method used by model wrappers
+to attach harmonised identification onto a result returned by a reader.
+Mutates the typed attributes and the mirrored ``metadata`` dict in lockstep.
 
 ### Rays helpers
 
@@ -1231,8 +1257,7 @@ and `to_time_trace` honour each value transparently.
 
 | Value | Models that emit it | Meaning |
 |---|---|---|
-| `'travelling_wave'` | Bellhop (broadband), Scooter, OASP | H(f) carries the full propagation phase $e^{-i 2\pi f r/c}$. A direct IFFT aligns arrivals at $t = r/c$. |
-| `'porter_negated'` | KrakenField (`field.exe`) | Same as `travelling_wave`, but the pressure is negated to match the sign convention used by Scooter/Bellhop/RAM (Porter's `field.exe` outputs $-p$). The phase convention is otherwise identical. |
+| `'travelling_wave'` | Bellhop (broadband), Scooter, OASP, KrakenField (broadband — emitted after the wrapper negates `field.exe`'s output to match the Scooter/Bellhop/RAM polarity convention) | H(f) carries the full propagation phase $e^{-i 2\pi f r/c}$. A direct IFFT aligns arrivals at $t = r/c$. |
 | `'psif_envelope'` | RAM (mpiramS broadband, rams0.5 broadband, ramsurf1.5 broadband) | Each broadband path hands `Field.to_time_domain` the canonical quantity $\mathrm{conj}(\psi)\,e^{-i k_0 r}$ (modulo amplitude factors) so the downstream IFFT pipeline lands the peak at physical time $r/c_0$. The conjugation flips numpy's $e^{+i\omega t}$ IFFT convention to physics $e^{-i\omega t}$ per JKPS *Computational Ocean Acoustics* §8.2 eq. (8.1)–(8.4); the negative carrier is restored to $+i k_0 r$ by the `t_start` spectrum-shift in `field.py`. The three Collins-derived backends store DIFFERENT raw quantities, so each needs its own conversion: (1) **mpiramS** stores $\psi\,e^{+i(k_0 r+\pi/4)}/(4\pi)$ — carrier embedded — and applies `np.conj(psif) * 4π·e^{-iπ/4}/\sqrt{r}` (`ram.py:1673`). (2) **rams0.5** has `solve(... g0)` multiply by $g_0=e^{i k_0 \Delta r}$ at every range step (`rams0.5.f:830-831`), so its $u$ accumulates the full $e^{+i k_0 r}$ carrier — the broadband path applies just `np.conj(H)` (no extra carrier removal). (3) **ramsurf1.5** has no `g0` argument in `solve` (`ramsurf1.5.f:310`); the carrier is subtracted out of the matrix coefficients via the operator-function `g(x) = (1-νx)²·exp(α·log(1+x) + i σ (\sqrt{1+x}-1))` (`ramsurf1.5.f:564`), so $u$ is the bare envelope and the broadband path applies `np.conj(H) * exp(-i k_0(ω) r)`. After this convention bookkeeping all three backends align with Bellhop's geometric arrival to within ~20 ms on a Pekeris reference (real waveguide modal dispersion), with no calibration constants required. |
 | `'time_domain_native'` | SPARC | Field is real pressure $p(t)$ produced directly by the solver; no phase reconstruction needed. |
 
@@ -1773,9 +1798,10 @@ fig, ax = ppsd.plot()
 
 See `examples/example_09_ambient_noise.py` for the full pipeline.
 
-References: Tollefsen & Pecknold (2018); Wenz (1962); Mellen (1952);
-Piggott (1964); Merklinger (1979); Torres & Costa (2019); Nichols &
-Bradley (2016).
+References: Tollefsen & Pecknold, *Wenz curves for predicting ambient
+noise*, DRDC-RDDC-2022-D051 (Annex A: canonical MATLAB implementation —
+see `docs/WenzCurves.pdf`); Wenz (1962); Mellen (1952); Piggott (1964);
+Merklinger (1979); Torres & Costa (2019); Nichols & Bradley (2016).
 
 ---
 

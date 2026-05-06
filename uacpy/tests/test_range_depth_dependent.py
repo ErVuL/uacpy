@@ -37,14 +37,14 @@ class TestRangeDependentEnvironment:
 
     def test_range_dependent_bottom_properties(self):
         """Test range-dependent bottom properties."""
-        ranges_km = np.array([0, 5, 10])
+        ranges = np.array([0.0, 5000.0, 10000.0])
         depths = np.array([100, 110, 120])
         sound_speeds = np.array([1600, 1650, 1700])
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
         bottom_rd = RangeDependentBottom(
-            ranges_km=ranges_km,
+            ranges=ranges,
             depths=depths,
             sound_speed=sound_speeds,
             density=densities,
@@ -59,7 +59,7 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.has_range_dependent_bottom()
-        assert len(env.bottom_rd.ranges_km) == 3
+        assert len(env.bottom_rd.ranges) == 3
 
         # Test getting bottom at specific range
         bottom_at_2km = env.get_bottom_at_range(2000)
@@ -70,19 +70,19 @@ class TestRangeDependentEnvironment:
         """Test range-dependent sound speed profile."""
         # Create 2D SSP matrix: depth x range
         depths = np.linspace(0, 100, 21)
-        ranges_km = np.array([0, 5, 10])
+        ranges = np.array([0.0, 5000.0, 10000.0])
 
         # SSP varies with range (warming trend)
-        ssp_matrix = np.zeros((len(depths), len(ranges_km)))
-        for i, r in enumerate(ranges_km):
-            # Warmer water at longer ranges
-            ssp_matrix[:, i] = 1500 + r * 0.5
+        ssp_matrix = np.zeros((len(depths), len(ranges)))
+        for i, r_m in enumerate(ranges):
+            # Warmer water at longer ranges (drift in m/s per km)
+            ssp_matrix[:, i] = 1500 + (r_m / 1000.0) * 0.5
 
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
             ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='pchip',
             ),
         )
@@ -99,14 +99,14 @@ class TestRangeDependentEnvironment:
 
         # SSP
         depths_ssp = np.linspace(0, 100, 21)
-        ranges_km = np.array([0, 5, 10])
+        ranges_ssp = np.array([0.0, 5000.0, 10000.0])
         ssp_matrix = np.tile(np.linspace(1480, 1520, 21)[:, None], (1, 3))
 
         env = uacpy.Environment(
             name="Combined RD",
             depth=100.0,
             ssp=SoundSpeedProfile.from_2d(
-                depths=depths_ssp, ranges_km=ranges_km, matrix=ssp_matrix,
+                depths=depths_ssp, ranges=ranges_ssp, matrix=ssp_matrix,
                 interp='pchip',
             ),
             bathymetry=bathymetry,
@@ -215,18 +215,18 @@ class TestModelWithRangeDependence:
         """Test RAM with range-dependent SSP."""
         # Create range-dependent SSP
         depths = np.linspace(0, 100, 21)
-        ranges_km = np.array([0, 2.5, 5])
+        ranges = np.array([0.0, 2500.0, 5000.0])
 
-        ssp_matrix = np.zeros((len(depths), len(ranges_km)))
-        for i, r_km in enumerate(ranges_km):
-            # Temperature increases with range
-            ssp_matrix[:, i] = 1500 + r_km * 2
+        ssp_matrix = np.zeros((len(depths), len(ranges)))
+        for i, r_m in enumerate(ranges):
+            # Temperature increases with range (m/s per km)
+            ssp_matrix[:, i] = 1500 + (r_m / 1000.0) * 2
 
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
             ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='linear',
             ),
         )
@@ -250,14 +250,14 @@ class TestModelWithRangeDependence:
     def test_bellhop_range_dependent_bottom(self):
         """Test Bellhop with range-dependent bottom properties."""
         # Create range-dependent bottom
-        ranges_km = np.array([0, 2.5, 5])
+        ranges = np.array([0.0, 2500.0, 5000.0])
         depths = np.array([100, 105, 110])
         sound_speeds = np.array([1600, 1650, 1700])
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
         bottom_rd = RangeDependentBottom(
-            ranges_km=ranges_km,
+            ranges=ranges,
             depths=depths,
             sound_speed=sound_speeds,
             density=densities,
@@ -309,12 +309,12 @@ class TestRangeDependentConsistency:
 
     def test_bottom_properties_at_range(self):
         """Test getting bottom properties at specific range."""
-        ranges_km = np.array([0, 5, 10])
+        ranges = np.array([0.0, 5000.0, 10000.0])
         depths = np.array([100, 110, 120])
         sound_speeds = np.array([1600, 1650, 1700])
 
         bottom_rd = RangeDependentBottom(
-            ranges_km=ranges_km,
+            ranges=ranges,
             depths=depths,
             sound_speed=sound_speeds,
             density=np.array([1.5, 1.5, 1.5]),
@@ -337,7 +337,7 @@ class TestRangeDependentConsistency:
     def test_ssp_2d_matrix_shape(self):
         """Test that 2D SSP matrix has correct shape."""
         depths = np.linspace(0, 100, 21)
-        ranges_km = np.array([0, 5, 10])
+        ranges = np.array([0.0, 5000.0, 10000.0])
 
         ssp_matrix = np.tile(np.linspace(1480, 1520, 21)[:, None], (1, 3))
 
@@ -345,13 +345,13 @@ class TestRangeDependentConsistency:
             name="Test",
             depth=100.0,
             ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges_km=ranges_km, matrix=ssp_matrix,
+                depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='pchip',
             ),
         )
 
         assert env.ssp.data.shape == (21, 3)  # 21 depths, 3 ranges
-        assert len(env.ssp.ranges_km) == 3
+        assert len(env.ssp.ranges) == 3
 
 
 class TestSedimentLayer:
@@ -463,8 +463,7 @@ class TestRangeDependentLayeredBottom:
                                          sound_speed=2200, density=2.5, attenuation=0.05),
         )
         return RangeDependentLayeredBottom(
-            ranges_km=np.array([0, 20]),
-            depths=np.array([100, 300]),
+            ranges=np.array([0, 20000]),
             profiles=[near, far],
         )
 
@@ -499,19 +498,23 @@ class TestRangeDependentLayeredBottom:
         )
         with pytest.raises(ValueError, match="profiles length"):
             RangeDependentLayeredBottom(
-                ranges_km=np.array([0, 10, 20]),
-                depths=np.array([100, 200, 300]),
+                ranges=np.array([0, 10000, 20000]),
                 profiles=[lb, lb],  # 2 profiles for 3 ranges
             )
 
     def test_environment_accepts_rdl(self):
         rdl = self._make_rdl()
-        env = uacpy.Environment(name='test', depth=300, bottom=rdl)
+        bathymetry = np.column_stack([
+            rdl.ranges,
+            np.array([100.0, 300.0]),
+        ])
+        env = uacpy.Environment(
+            name='test', depth=300, bottom=rdl, bathymetry=bathymetry,
+        )
         assert env.has_range_dependent_layered_bottom()
         assert not env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
         assert env.is_range_dependent
-        # Bathymetry should be set from depths
         assert len(env.bathymetry) == 2
         assert env.bathymetry[0, 1] == 100
         assert env.bathymetry[1, 1] == 300
@@ -520,8 +523,12 @@ class TestRangeDependentLayeredBottom:
     def test_ram_with_rdl(self):
         """RAM should handle RangeDependentLayeredBottom."""
         rdl = self._make_rdl()
+        bathymetry = np.column_stack([
+            rdl.ranges,
+            np.array([100.0, 300.0]),
+        ])
         env = uacpy.Environment(name='rdl_test', depth=300, sound_speed=1500.0,
-                                bottom=rdl)
+                                bottom=rdl, bathymetry=bathymetry)
         source = uacpy.Source(frequency=100.0, depth=30.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(5, 290, 10),
@@ -541,7 +548,7 @@ class TestWarnings:
         """Bellhop honours range-dependent bottom geoacoustics natively
         through the long .bty format — no warning expected."""
         rd_bottom = RangeDependentBottom(
-            ranges_km=np.array([0, 10]),
+            ranges=np.array([0, 10000]),
             depths=np.array([100, 100]),
             sound_speed=np.array([1600, 1700]),
             density=np.array([1.5, 1.7]),
@@ -683,7 +690,7 @@ class TestIntegrationRAMRangeDependent:
     def test_ram_rd_bottom_produces_tl(self):
         """RAM with RD bottom should produce valid TL."""
         bottom_rd = RangeDependentBottom(
-            ranges_km=np.array([0, 5, 10]),
+            ranges=np.array([0, 5000, 10000]),
             depths=np.array([100, 100, 100]),
             sound_speed=np.array([1500, 1600, 1700]),
             density=np.array([1.2, 1.5, 2.0]),
@@ -709,7 +716,7 @@ class TestATEnvWriterLayered:
     def test_nmedia_with_layers(self):
         """AT env writer should set NMEDIA > 1 for layered bottom."""
         import io
-        from uacpy.io.at_env_writer import ATEnvWriter
+        from uacpy.io.oalib_writer import write_header, write_fg_params, write_bio_layers, write_broadband_freqs, write_ssp_section, write_layer_sections, write_bottom_section, write_source_depths, write_receiver_depths, write_receiver_ranges, write_multi_profile_env
         from uacpy.core.constants import SSPType, BoundaryType
 
         lb = LayeredBottom(
@@ -723,7 +730,7 @@ class TestATEnvWriterLayered:
         source = uacpy.Source(frequency=100, depth=25)
 
         buf = io.StringIO()
-        ATEnvWriter.write_header(buf, env, source,
+        write_header(buf, env, source,
                                  ssp_type=SSPType.ISOVELOCITY,
                                  surface_type=BoundaryType.VACUUM)
         content = buf.getvalue()
@@ -736,7 +743,7 @@ class TestATEnvWriterLayered:
     def test_layer_sections_written(self):
         """Layer sections should be written between SSP and bottom."""
         import io
-        from uacpy.io.at_env_writer import ATEnvWriter
+        from uacpy.io.oalib_writer import write_header, write_fg_params, write_bio_layers, write_broadband_freqs, write_ssp_section, write_layer_sections, write_bottom_section, write_source_depths, write_receiver_depths, write_receiver_ranges, write_multi_profile_env
 
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5)],
@@ -745,7 +752,7 @@ class TestATEnvWriterLayered:
         env = uacpy.Environment(name='test', depth=100, sound_speed=1500, bottom=lb)
 
         buf = io.StringIO()
-        depth_after = ATEnvWriter.write_layer_sections(buf, env, 100)
+        depth_after = write_layer_sections(buf, env, 100)
         content = buf.getvalue()
 
         assert depth_after == 110  # 100 + 10m layer
@@ -754,7 +761,7 @@ class TestATEnvWriterLayered:
     def test_halfspace_depth_below_layers(self):
         """Halfspace depth should be below all layers."""
         import io
-        from uacpy.io.at_env_writer import ATEnvWriter
+        from uacpy.io.oalib_writer import write_header, write_fg_params, write_bio_layers, write_broadband_freqs, write_ssp_section, write_layer_sections, write_bottom_section, write_source_depths, write_receiver_depths, write_receiver_ranges, write_multi_profile_env
         from uacpy.core.constants import BoundaryType
 
         lb = LayeredBottom(
@@ -767,7 +774,7 @@ class TestATEnvWriterLayered:
         env = uacpy.Environment(name='test', depth=200, sound_speed=1500, bottom=lb)
 
         buf = io.StringIO()
-        ATEnvWriter.write_bottom_section(buf, env)
+        write_bottom_section(buf, env)
         content = buf.getvalue()
 
         # Halfspace should be at 260m (200 + 10 + 50)

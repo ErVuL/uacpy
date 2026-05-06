@@ -20,12 +20,7 @@ class UACPYError(Exception):
         return msg
 
 
-class ModelError(UACPYError):
-    """Base class for model-specific errors."""
-    pass
-
-
-class ExecutableNotFoundError(ModelError):
+class ExecutableNotFoundError(UACPYError):
     """Raised when a compiled model executable cannot be located."""
 
     def __init__(self, model_name: str, executable: str, search_paths: list = None):
@@ -46,7 +41,7 @@ class ExecutableNotFoundError(ModelError):
         self.executable = executable
 
 
-class ModelExecutionError(ModelError):
+class ModelExecutionError(UACPYError):
     """Raised when a model subprocess exits with a non-zero code."""
 
     def __init__(self, model_name: str, return_code: int, stdout: str = None, stderr: str = None):
@@ -74,12 +69,7 @@ class ModelExecutionError(ModelError):
         self.stderr = stderr
 
 
-class EnvironmentError(UACPYError):
-    """Base class for environment-configuration errors."""
-    pass
-
-
-class InvalidDepthError(EnvironmentError):
+class InvalidDepthError(UACPYError):
     """Raised when a source or receiver depth exceeds the environment depth."""
 
     def __init__(self, depth: float, max_depth: float, context: str):

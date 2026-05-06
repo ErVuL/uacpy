@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bellhop, RAM, Kraken, KrakenField
 from uacpy.visualization import plots, quickplot
-from uacpy.core.results import Result as Field  # legacy name → typed base
 
 # Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
 pytestmark = pytest.mark.requires_binary
@@ -186,10 +185,10 @@ class TestRangeDepthCuts:
 
 
 class TestFieldPlotMethod:
-    """Tests for Field.plot() method."""
+    """Tests for Result.plot() method."""
 
     def test_field_plot_tl(self, basic_setup):
-        """Test Field.plot() for TL field."""
+        """Test Result.plot() for TL field."""
         env, source, result = basic_setup
 
         fig, ax = result.plot(env=env)
@@ -198,7 +197,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_rays(self, basic_setup):
-        """Test Field.plot() for ray field."""
+        """Test Result.plot() for ray field."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
@@ -209,7 +208,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_modes(self, basic_setup):
-        """Test Field.plot() for mode field."""
+        """Test Result.plot() for mode field."""
         env, source, _ = basic_setup
 
         kraken = Kraken(verbose=False)
@@ -220,7 +219,7 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
     def test_field_plot_custom_params(self, basic_setup):
-        """Test Field.plot() with custom parameters."""
+        """Test Result.plot() with custom parameters."""
         env, source, result = basic_setup
 
         fig, ax = result.plot(env=env, vmin=30, vmax=90, cmap='jet')
@@ -304,7 +303,7 @@ class TestPlottingEdgeCases:
             plots.compare_models({}, env)
 
     def test_plot_invalid_field_type(self, basic_setup):
-        """Test Field.plot() with unsupported field type."""
+        """Test Result.plot() with unsupported field type."""
         env, source, _ = basic_setup
 
         # Create a field with unsupported type
@@ -369,7 +368,3 @@ class TestPlottingIntegration:
         fig = quickplot.quick_report(results, env, save=str(save_path))
         assert fig is not None and save_path.exists()
         plt.close(fig)
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

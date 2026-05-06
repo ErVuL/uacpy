@@ -5,7 +5,6 @@ Eliminates code duplication across model implementations.
 """
 
 import numpy as np
-from typing import Optional
 
 from uacpy.core.exceptions import InvalidDepthError
 from uacpy.models.base import RunMode
@@ -17,40 +16,6 @@ class ParameterMapper:
 
     Provides consistent parameter naming across models.
     """
-
-    VOLUME_ATTEN_MAP = {
-        'thorp': 'T',
-        't': 'T',
-        'francois': 'F',
-        'francois-garrison': 'F',
-        'f': 'F',
-        'biological': 'B',
-        'bio': 'B',
-        'b': 'B',
-        'none': None,
-        '': None,
-    }
-
-    @classmethod
-    def map_volume_attenuation(cls, value: Optional[str]) -> Optional[str]:
-        """
-        Standardize volume attenuation parameter.
-
-        Parameters
-        ----------
-        value : str or None
-            User-friendly name ('thorp', 'francois', 'biological', ...).
-
-        Returns
-        -------
-        mapped : str or None
-            Acoustics Toolbox format ('T', 'F', 'B', or None).
-        """
-        if value is None:
-            return None
-
-        normalized = value.lower().strip()
-        return cls.VOLUME_ATTEN_MAP.get(normalized, value)
 
     @classmethod
     def map_run_mode_to_bellhop(cls, run_mode: RunMode) -> str:

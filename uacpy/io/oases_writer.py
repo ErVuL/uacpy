@@ -4,7 +4,8 @@ OASES Input File Writers
 This module provides functions for writing input files for OASES models:
 - OAST: Transmission loss module (wavenumber integration)
 - OASN: Noise/covariance module (also used for normal mode computation)
-- OASR: Range-dependent model (stub for future implementation)
+- OASR: Plane-wave reflection-coefficient module
+- OASP: Pulse / broadband transfer-function module
 
 OASES (Ocean Acoustics and Seismic Exploration Synthesis) was developed by
 Henrik Schmidt at MIT.
@@ -22,7 +23,6 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 

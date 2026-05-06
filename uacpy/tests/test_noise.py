@@ -42,6 +42,22 @@ def test_compute_windnoise_shallow_louder_than_deep(freqs):
     assert np.mean(shallow[band]) > np.mean(deep[band])
 
 
+def test_compute_windnoise_band_integrate(freqs):
+    """``band_integrate=True`` integrates each spectral band — must not crash."""
+    pointwise = compute_windnoise(freqs, u=10, water_depth='deep')
+    integrated = compute_windnoise(freqs, u=10, water_depth='deep', band_integrate=True)
+    assert pointwise.shape == freqs.shape
+    assert integrated.shape == freqs.shape
+    assert np.all(np.isfinite(integrated))
+
+
+def test_wenznoise_high_freq_only_no_rain_meld_crash():
+    """Rain melding only fires when both <7kHz and >7kHz frequencies exist."""
+    f_high = np.logspace(4.0, 5.0, 30)  # all > 7 kHz
+    wenz = WenzNoise(f_high, wind_speed=10, rain_rate='moderate')
+    assert np.all(np.isfinite(wenz.rain))
+
+
 # ─── WenzNoise — invariants ─────────────────────────────────────────────────
 
 
