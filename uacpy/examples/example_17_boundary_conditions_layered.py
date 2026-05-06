@@ -177,8 +177,7 @@ def example_range_dependent_layered():
         ),
     )
     rdl = RangeDependentLayeredBottom(
-        ranges_km=np.array([0.0, 10.0]),
-        depths=np.array([100.0, 100.0]),
+        ranges=np.array([0, 10000]),
         profiles=[near, far],
     )
     env = uacpy.Environment(

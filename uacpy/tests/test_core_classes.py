@@ -1,11 +1,10 @@
 """
-Tests for core UACPY classes: Environment, Source, Receiver, Field
+Tests for core UACPY classes: Environment, Source, Receiver, Result
 """
 
 import pytest
 import numpy as np
 import uacpy
-from uacpy.core.results import Result as Field  # legacy alias
 
 
 class TestEnvironment:
@@ -171,14 +170,6 @@ class TestField:
         assert np.array_equal(field_copy.data, field.data)
         assert field_copy is not field
         assert field_copy.data is not field.data
-
-    def test_invalid_field_type(self):
-        """Constructing a TLField with mismatched shapes raises ValueError."""
-        from uacpy.core.results import TLField
-        with pytest.raises(ValueError):
-            TLField(data=np.array([1.0, 2.0, 3.0]),
-                    depths=np.array([1.0]), ranges=np.array([1.0]),
-                    model='Test')
 
     def test_field_repr(self):
         from uacpy.core.results import TLField

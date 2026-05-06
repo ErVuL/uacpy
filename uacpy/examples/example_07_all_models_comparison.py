@@ -62,12 +62,13 @@ def main():
     print("\n[Setup 1/3] Creating 2D range-dependent SSP...")
 
     depths = np.linspace(0, 200, 21)
-    ranges_km = np.array([0, 2, 4, 6, 8])
+    ranges_m = np.array([0.0, 2000.0, 4000.0, 6000.0, 8000.0])
 
     # Thermal front: warm shallow water on shelf, cold deep water offshore
-    ssp_2d_matrix = np.zeros((len(depths), len(ranges_km)))
+    ssp_2d_matrix = np.zeros((len(depths), len(ranges_m)))
 
-    for i_range, r_km in enumerate(ranges_km):
+    for i_range, r_m in enumerate(ranges_m):
+        r_km = r_m / 1000.0
         # Temperature decreases with range (frontal zone)
         T_surface = 18 - r_km * 0.3  # 18°C → 10.5°C
         T_bottom = 8 - r_km * 0.1    # 8°C → 5.5°C
@@ -100,7 +101,7 @@ def main():
     ])
 
     bottom_rd = RangeDependentBottom(
-        ranges_km=bathymetry[:, 0] / 1000.0,
+        ranges=bathymetry[:, 0],
         depths=bathymetry[:, 1],
         sound_speed=np.array([1550, 1600, 1640, 1680, 1720]),
         density=np.array([1.4, 1.55, 1.7, 1.85, 2.0]),
@@ -121,7 +122,7 @@ def main():
         name="Continental Margin - Frontal Zone",
         depth=200.0,
         ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_1d[:, 0], ranges_km=ranges_km, matrix=ssp_2d_matrix,
+            depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
             interp='pchip',
         ),
         bathymetry=bathymetry,

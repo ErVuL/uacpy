@@ -82,7 +82,7 @@ def main():
 
     # Bottom: soft mud → hard sand
     bottom_rd = RangeDependentBottom(
-        ranges_km=np.array([0, 1, 2, 3]),
+        ranges=np.array([0, 1000, 2000, 3000]),
         depths=bathymetry[:, 1],
         sound_speed=np.array([1500, 1580, 1640, 1700]),
         density=np.array([1.2, 1.5, 1.8, 2.0]),

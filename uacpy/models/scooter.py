@@ -28,7 +28,7 @@ from uacpy.core.constants import (
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.output_reader import read_shd_file
-from uacpy.io.at_env_writer import ATEnvWriter
+from uacpy.io.oalib_writer import write_bio_layers, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
 
 
 class Scooter(PropagationModel):
@@ -286,6 +286,8 @@ class Scooter(PropagationModel):
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
 
+        self._warn_unknown_kwargs(kwargs)
+
         if run_mode == RunMode.TIME_SERIES and (
             source_waveform is None or sample_rate is None
         ):
@@ -383,15 +385,16 @@ class Scooter(PropagationModel):
                         )
                     self._log("Reading SHD file...")
                     result = read_shd_file(shd_file)
-                    result.metadata.update(self._build_base_metadata(
-                        source,
+                    result.tag(
+                        model=self.model_name,
                         backend='scooter.exe+fields.exe',
+                        source_depths=source.depth,
                         frequency=float(source.frequency[0]),
                         phase_reference='travelling_wave',
                         source_type=self.source_type,
                         spectrum=self.spectrum,
                         post_processor='fields.exe',
-                    ))
+                    )
                 else:
                     self._log("Reading Green's function...", level='info')
                     grn_data = read_grn_file(grn_file)
@@ -423,13 +426,14 @@ class Scooter(PropagationModel):
                             grn_data, receiver.ranges, method='fft_hankel',
                             **transform_kwargs,
                         )
-                    result.metadata.update(self._build_base_metadata(
-                        source,
+                    result.tag(
+                        model=self.model_name,
                         backend='scooter.exe',
+                        source_depths=source.depth,
                         frequency=float(source.frequency[0]),
                         phase_reference='travelling_wave',
                         post_processor='in_tree_hankel',
-                    ))
+                    )
 
                 self._log("Simulation complete")
                 if run_mode == RunMode.TIME_SERIES:
@@ -473,7 +477,7 @@ class Scooter(PropagationModel):
 
         with open(filepath, 'w') as f:
             # Write standard ENV sections using ATEnvWriter
-            ATEnvWriter.write_header(
+            write_header(
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
@@ -487,25 +491,25 @@ class Scooter(PropagationModel):
             # before SSP). ReadTopOpt in AT reads these immediately when
             # TopOpt(4)='F'/'B'.
             if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                ATEnvWriter.write_fg_params(f, self.francois_garrison_params)
+                write_fg_params(f, self.francois_garrison_params)
             elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                ATEnvWriter.write_bio_layers(f, self.bio_layers)
+                write_bio_layers(f, self.bio_layers)
 
-            ATEnvWriter.write_ssp_section(
+            write_ssp_section(
                 f, env, env.depth,
                 n_mesh=self.n_mesh,
                 roughness=self.roughness
             )
 
             # Write sediment layers if layered bottom
-            ATEnvWriter.write_layer_sections(f, env, env.depth)
+            write_layer_sections(f, env, env.depth)
 
             # Bottom section with shear wave support for Scooter
             bottom_code = bottom_type.to_acoustics_toolbox_code()
             sigma = getattr(env.bottom, 'roughness', 0.0)
 
             # Check for range-dependent bathymetry
-            if hasattr(env, 'bathymetry') and len(env.bathymetry) > 1:
+            if len(env.bathymetry) > 1:
                 f.write(f"'{bottom_code}~' {sigma:.1f}\n")
             else:
                 f.write(f"'{bottom_code}' {sigma:.1f}\n")
@@ -576,12 +580,12 @@ class Scooter(PropagationModel):
             # arbitrary-length depth arrays are written verbatim rather than
             # collapsed to "min max /" (which the Fortran reader expands to a
             # uniformly-spaced vector — losing user-specified samples).
-            ATEnvWriter.write_source_depths(f, source)
-            ATEnvWriter.write_receiver_depths(f, receiver)
+            write_source_depths(f, source)
+            write_receiver_depths(f, receiver)
 
             # Broadband frequency vector (ReadfreqVec reads after source/receiver depths)
             if frequencies is not None and len(frequencies) > 1:
-                ATEnvWriter.write_broadband_freqs(f, frequencies)
+                write_broadband_freqs(f, frequencies)
 
     def _write_fields_flp(
         self,

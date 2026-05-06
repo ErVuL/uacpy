@@ -9,12 +9,11 @@ For more control, use the full plotting API in uacpy.visualization.plots
 
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import Optional, Union, Dict
+from typing import Optional, Dict
 
 from uacpy.core.results import Result as Field
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
-from uacpy.core.receiver import Receiver
 from uacpy.visualization import plots
 
 

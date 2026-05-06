@@ -15,12 +15,13 @@ Note: SPARC does not support reflection coefficient files.
 
 import shutil
 import tempfile
+import warnings
 import weakref
 import numpy as np
 from pathlib import Path
 from typing import Optional
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET
+from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -32,7 +33,7 @@ from uacpy.core.constants import (
 )
 from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError
 from uacpy.io.output_reader import read_reflection_coefficient
-from uacpy.io.at_env_writer import ATEnvWriter
+from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
 
 
 class Bounce(PropagationModel):
@@ -266,169 +267,149 @@ class Bounce(PropagationModel):
                 alternatives=["RunMode.REFLECTION"],
             )
 
-        # Resolve per-call overrides
-        cmin = cmin if cmin is not _UNSET else self.cmin
-        cmax = cmax if cmax is not _UNSET else self.cmax
-        rmax_km = rmax_km if rmax_km is not _UNSET else self.rmax_km
-        volume_attenuation = (
-            volume_attenuation
-            if volume_attenuation is not _UNSET
-            else self.volume_attenuation
+        self._warn_unknown_kwargs(
+            kwargs, allowed=('francois_garrison_params', 'bio_layers'),
         )
-        n_angles = n_angles if n_angles is not _UNSET else self.n_angles
 
-        # Re-validate in case a caller mutated cmin/cmax between __init__
-        # and run, or passed per-call overrides through cmin=/cmax=.
-        if cmin <= 0:
-            raise ConfigurationError(
-                f"Bounce requires cmin > 0 strictly (got {cmin})."
-            )
-        if cmax <= cmin:
-            raise ConfigurationError(
-                f"cmax ({cmax}) must be strictly greater than cmin ({cmin})."
-            )
-
-        # n_angles override: AT's bounce derives NkTab from rmax_km and
-        # frequency; we invert that to get an equivalent rmax_km. See
-        # bounce.f90: NkTab = INT(1000 * RMax * OMEGA / (2*PI * DeltaKInv))
-        # — in practice uacpy just scales rmax_km linearly with n_angles.
-        if n_angles is not None:
-            if n_angles <= 0:
+        with _resolve_overrides(
+            self,
+            cmin=cmin,
+            cmax=cmax,
+            rmax_km=rmax_km,
+            volume_attenuation=volume_attenuation,
+            n_angles=n_angles,
+        ):
+            if self.cmin <= 0:
                 raise ConfigurationError(
-                    f"n_angles must be > 0 (got {n_angles})."
+                    f"Bounce requires cmin > 0 strictly (got {self.cmin})."
                 )
-            # Very rough inversion: each km of range gives ~bounce's
-            # default density of angles. Just pass rmax_km = n_angles/100
-            # which matches the default rmax_km=10 giving ~1000 angles.
-            # If user set both, n_angles wins.
-            rmax_km = float(n_angles) / 100.0
-            if rmax_km <= 0:
-                import warnings
-                warnings.warn(
-                    f"Computed rmax_km={rmax_km} from n_angles={n_angles} is "
-                    "not positive; using 0.1 km fallback.",
-                    RuntimeWarning,
-                )
-                rmax_km = 0.1
-
-        env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
-
-        # Use the standard FileManager path so cleanup is always consistent.
-        fm = self._setup_file_manager()
-
-        try:
-            base_name = 'bounce_run'
-            input_file = fm.get_path(f'{base_name}.env')
-
-            # Write ENV file (BOUNCE uses KRAKEN format)
-            self._log(f"Writing BOUNCE input file: {input_file}", level='info')
-            self._write_bounce_input(
-                filepath=input_file,
-                env=env,
-                source=source,
-                receiver=receiver,
-                cmin=cmin,
-                cmax=cmax,
-                rmax_km=rmax_km,
-                volume_attenuation=volume_attenuation,
-                **kwargs
-            )
-
-            # Run BOUNCE executable
-            self._log("Running BOUNCE...", level='info')
-            self._execute(input_file, fm.work_dir)
-
-            # Read output
-            brc_file = fm.get_path(f'{base_name}.brc')
-            irc_file = fm.get_path(f'{base_name}.irc')
-
-            if not brc_file.exists():
-                raise FileNotFoundError(
-                    f"BOUNCE output file not found: {brc_file}\n"
-                    "BOUNCE execution may have failed."
+            if self.cmax <= self.cmin:
+                raise ConfigurationError(
+                    f"cmax ({self.cmax}) must be strictly greater than "
+                    f"cmin ({self.cmin})."
                 )
 
-            # BOUNCE tabulates angles from phase velocities (kx = omega/c),
-            # and its angular discretisation can produce duplicate angles
-            # near 0 deg (multiple high-c samples all round to the same
-            # tiny angle). bellhopcuda validates the .brc with a strict
-            # "monotonically increasing" check and aborts on duplicates.
-            # Rewrite both files with a strictly-increasing angle axis
-            # before they are consumed downstream. See
-            # bellhopcuda/bhc::setup() "Bottom reflection coefficients
-            # must be monotonically increasing".
-            self._dedupe_reflection_file(brc_file)
-            if irc_file.exists():
-                self._dedupe_reflection_file(irc_file)
+            # n_angles → rmax_km: bounce.f90 derives NkTab from rmax_km and
+            # frequency (NkTab = INT(1000 * RMax * OMEGA / (2*PI * DeltaKInv))),
+            # uacpy inverts linearly: rmax_km = n_angles / 100.
+            if self.n_angles is not None:
+                if self.n_angles <= 0:
+                    raise ConfigurationError(
+                        f"n_angles must be > 0 (got {self.n_angles})."
+                    )
+                rmax_from_angles = float(self.n_angles) / 100.0
+                if rmax_from_angles <= 0:
+                    warnings.warn(
+                        f"Computed rmax_km={rmax_from_angles} from "
+                        f"n_angles={self.n_angles} is not positive; using "
+                        "0.1 km fallback.",
+                        RuntimeWarning,
+                    )
+                    rmax_from_angles = 0.1
+                self.rmax_km = rmax_from_angles
 
-            self._log(f"Reading BOUNCE output: {brc_file}", level='info')
-            result = read_reflection_coefficient(str(brc_file), boundary='bottom')
+            env = self._project_environment(env)
+            self.validate_inputs(env, source, receiver)
 
-            # Reflection-coefficient files must outlive the work dir because
-            # downstream models (Bellhop, Scooter, Kraken) consume them.
-            # If the caller passed ``output_dir``, persist there (user-owned
-            # lifetime). Otherwise copy to a private tempdir and tie its
-            # cleanup to the garbage collection of the returned Field via
-            # weakref.finalize — no indefinite leak.
-            if output_dir is not None:
-                persist_dir = Path(output_dir)
-                persist_dir.mkdir(parents=True, exist_ok=True)
-                field_finalizer = None
-            else:
-                persist_dir = Path(tempfile.mkdtemp(prefix='bounce_persist_'))
-                field_finalizer = persist_dir
+            fm = self._setup_file_manager()
 
-            persisted_brc = persist_dir / brc_file.name
-            shutil.copy(brc_file, persisted_brc)
-            persisted_irc = None
-            if irc_file.exists():
-                persisted_irc = persist_dir / irc_file.name
-                shutil.copy(irc_file, persisted_irc)
+            try:
+                base_name = 'bounce_run'
+                input_file = fm.get_path(f'{base_name}.env')
 
-            result['brc_file'] = str(persisted_brc)
-            if persisted_irc is not None:
-                result['irc_file'] = str(persisted_irc)
-
-            # Build a typed ReflectionCoefficient result.
-            from uacpy.core.results import ReflectionCoefficient
-            frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
-
-            field = ReflectionCoefficient(
-                theta=result.get('theta', np.array([])),
-                R=result.get('R', np.array([])),
-                phi=result.get('phi', np.array([])),
-                model='Bounce',
-                backend='bounce',
-                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
-                frequency=frequency,
-                metadata={
-                    'brc_file': result.get('brc_file'),
-                    'irc_file': result.get('irc_file'),
-                    'n_pts': result.get('n_pts', 0),
-                    # Store parameters for later use in Bellhop/Kraken/Scooter.
-                    'cmin': cmin,
-                    'cmax': cmax,
-                    'rmax_km': rmax_km,
-                    'volume_attenuation': volume_attenuation,
-                    'full_result': result,
-                },
-            )
-
-            # Tie the private tempdir lifetime to the Field (if no
-            # user-owned output_dir).
-            if field_finalizer is not None:
-                weakref.finalize(
-                    field, shutil.rmtree, str(field_finalizer),
-                    ignore_errors=True,
+                self._log(f"Writing BOUNCE input file: {input_file}", level='info')
+                self._write_bounce_input(
+                    filepath=input_file,
+                    env=env,
+                    source=source,
+                    receiver=receiver,
+                    cmin=self.cmin,
+                    cmax=self.cmax,
+                    rmax_km=self.rmax_km,
+                    volume_attenuation=self.volume_attenuation,
+                    **kwargs
                 )
 
-            self._log("BOUNCE simulation complete", level='info')
-            return field
+                self._log("Running BOUNCE...", level='info')
+                self._execute(input_file, fm.work_dir)
 
-        finally:
-            if not self.work_dir:
-                fm.cleanup_work_dir()
+                brc_file = fm.get_path(f'{base_name}.brc')
+                irc_file = fm.get_path(f'{base_name}.irc')
+
+                if not brc_file.exists():
+                    raise FileNotFoundError(
+                        f"BOUNCE output file not found: {brc_file}\n"
+                        "BOUNCE execution may have failed."
+                    )
+
+                # bellhopcuda's strict monotonicity check on .brc/.irc rejects
+                # the duplicate near-zero angles bounce.f90 emits when many
+                # high-c samples round to the same kx — rewrite both files
+                # with a strictly-increasing angle axis.
+                self._dedupe_reflection_file(brc_file)
+                if irc_file.exists():
+                    self._dedupe_reflection_file(irc_file)
+
+                self._log(f"Reading BOUNCE output: {brc_file}", level='info')
+                result = read_reflection_coefficient(str(brc_file), boundary='bottom')
+
+                # Reflection-coefficient files must outlive the work dir
+                # because Bellhop/Scooter/Kraken consume them downstream. If
+                # ``output_dir`` was passed, persist there (user-owned lifetime);
+                # otherwise copy to a private tempdir tied to the Field via
+                # weakref.finalize.
+                if output_dir is not None:
+                    persist_dir = Path(output_dir)
+                    persist_dir.mkdir(parents=True, exist_ok=True)
+                    field_finalizer = None
+                else:
+                    persist_dir = Path(tempfile.mkdtemp(prefix='bounce_persist_'))
+                    field_finalizer = persist_dir
+
+                persisted_brc = persist_dir / brc_file.name
+                shutil.copy(brc_file, persisted_brc)
+                persisted_irc = None
+                if irc_file.exists():
+                    persisted_irc = persist_dir / irc_file.name
+                    shutil.copy(irc_file, persisted_irc)
+
+                result['brc_file'] = str(persisted_brc)
+                if persisted_irc is not None:
+                    result['irc_file'] = str(persisted_irc)
+
+                from uacpy.core.results import ReflectionCoefficient
+                frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
+
+                field = ReflectionCoefficient(
+                    theta=result.get('theta', np.array([])),
+                    R=result.get('R', np.array([])),
+                    phi=result.get('phi', np.array([])),
+                    **self._result_kwargs(
+                        source,
+                        frequency=frequency,
+                        brc_file=result.get('brc_file'),
+                        irc_file=result.get('irc_file'),
+                        n_pts=result.get('n_pts', 0),
+                        cmin=self.cmin,
+                        cmax=self.cmax,
+                        rmax_km=self.rmax_km,
+                        volume_attenuation=self.volume_attenuation,
+                        full_result=result,
+                    ),
+                )
+
+                if field_finalizer is not None:
+                    weakref.finalize(
+                        field, shutil.rmtree, str(field_finalizer),
+                        ignore_errors=True,
+                    )
+
+                self._log("BOUNCE simulation complete", level='info')
+                return field
+
+            finally:
+                if not self.work_dir:
+                    fm.cleanup_work_dir()
 
     def _write_bounce_input(
         self,
@@ -473,7 +454,7 @@ class Bounce(PropagationModel):
 
         with open(filepath, 'w') as f:
             # Write standard ENV sections using ATEnvWriter
-            ATEnvWriter.write_header(
+            write_header(
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
@@ -489,22 +470,22 @@ class Bounce(PropagationModel):
                         "volume_attenuation='F' requires "
                         "francois_garrison_params=(T, S, pH, z_bar)",
                     )
-                ATEnvWriter.write_fg_params(f, francois_garrison_params)
+                write_fg_params(f, francois_garrison_params)
             elif vol_atten == VolumeAttenuation.BIOLOGICAL:
                 if not bio_layers:
                     from uacpy.core.exceptions import ConfigurationError
                     raise ConfigurationError(
                         "volume_attenuation='B' requires bio_layers",
                     )
-                ATEnvWriter.write_bio_layers(f, bio_layers)
+                write_bio_layers(f, bio_layers)
 
-            ATEnvWriter.write_ssp_section(
+            write_ssp_section(
                 f, env, env.depth,
                 n_mesh=n_mesh,
                 roughness=0.0
             )
 
-            ATEnvWriter.write_bottom_section(
+            write_bottom_section(
                 f, env,
                 bottom_type=bottom_type,
                 filepath=filepath,

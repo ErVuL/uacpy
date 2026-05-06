@@ -188,14 +188,14 @@ class TestPekerisWaveguide:
         assert max_diff < 10.0, f"Max TL difference should be < 10 dB, got {max_diff:.1f} dB"
 
 
-class TestRangeDependentEnvironment:
+class TestRangeDependentPhysicalSanity:
     """
-    Test models with range-dependent bathymetry
+    Physical-sanity checks against range-dependent bathymetry.
 
-    Range-dependent environments are critical for realistic scenarios:
-    - Continental shelf transitions
-    - Seamounts
-    - Coastal environments
+    Continental-shelf transitions, seamounts, coastal environments —
+    asserts realistic TL behaviour, not constructor mechanics. The
+    constructor / Environment-attribute checks live in
+    ``test_range_depth_dependent.py::TestRangeDependentEnvironment``.
     """
 
     @pytest.fixture
@@ -434,7 +434,3 @@ class TestNumericalStability:
         assert np.all(np.isfinite(result.data))
         # High frequency should have higher TL due to absorption
         assert np.all(result.data > 20)  # Expect significant loss
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

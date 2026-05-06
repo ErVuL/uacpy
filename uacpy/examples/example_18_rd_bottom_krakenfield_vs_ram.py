@@ -41,14 +41,14 @@ def make_base_env(bottom):
     ssp_depths = np.array([0, 50, 100, 150, 200.0])
     ssp_near = np.array([1510, 1505, 1500, 1500, 1500.0])
     ssp_far = np.array([1500, 1495, 1490, 1492, 1495.0])
-    ssp_ranges_km = np.array([0.0, 20.0])
+    ssp_ranges_m = np.array([0.0, 20000.0])
     ssp_2d = np.column_stack([ssp_near, ssp_far])
 
     env = uacpy.Environment(
         name='rd_comparison',
         depth=200,
         ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_depths, ranges_km=ssp_ranges_km, matrix=ssp_2d,
+            depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
             interp='linear',
         ),
         bathymetry=bathymetry,
@@ -82,8 +82,7 @@ def make_hard_bottom():
         ),
     )
     return RangeDependentLayeredBottom(
-        ranges_km=np.array([0.0, 20.0]),
-        depths=np.array([100.0, 200.0]),
+        ranges=np.array([0, 20000]),
         profiles=[near, far],
     )
 
@@ -113,8 +112,7 @@ def make_soft_bottom():
         ),
     )
     return RangeDependentLayeredBottom(
-        ranges_km=np.array([0.0, 20.0]),
-        depths=np.array([100.0, 200.0]),
+        ranges=np.array([0, 20000]),
         profiles=[near, far],
     )
 

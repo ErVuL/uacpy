@@ -5,7 +5,6 @@ Provides clean, timestamped logging with levels (INFO, WARN, ERROR)
 """
 
 from datetime import datetime, timezone
-from typing import Optional
 from enum import Enum
 
 
@@ -95,27 +94,3 @@ class Logger:
     def debug(self, message: str):
         """Log a debug-level message (only shown when ``min_level=DEBUG``)."""
         self._log(LogLevel.DEBUG, message)
-
-
-def create_logger(name: str, verbose: bool = False) -> Logger:
-    """
-    Create a logger for a model.
-
-    Parameters
-    ----------
-    name : str
-        Model name.
-    verbose : bool, optional
-        Enable verbose output. Default is False.
-
-    Returns
-    -------
-    logger : Logger
-        Configured logger instance.
-
-    Examples
-    --------
-    >>> logger = create_logger("Bellhop", verbose=True)
-    >>> logger.info("Model initialized")
-    """
-    return Logger(name, verbose=verbose)

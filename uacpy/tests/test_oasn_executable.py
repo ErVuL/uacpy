@@ -1,11 +1,12 @@
 """
 Tests specific to OASN executable resolution and error paths.
 
-OASN instantiation and run-time tests live in test_oases_comprehensive.py;
-this file covers only the things unique to the OASN wrapper:
+OASN instantiation and run-time tests (covariance + replicas) live in
+test_oases_comprehensive.py; this file covers only the things unique to
+the OASN wrapper:
   - the missing-executable error message
-  - the _oasn_available probe used by the wrapper to decide whether to
-    expose mode computation.
+  - the ``_oasn_available`` probe used by the wrapper to decide whether
+    to expose its hydrophone-array products.
 """
 
 from pathlib import Path

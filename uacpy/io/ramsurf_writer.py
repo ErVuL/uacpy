@@ -19,7 +19,7 @@ after row 5.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 
 _TERM = "-1 -1\n"
@@ -38,7 +38,7 @@ def _write_block(
 
 
 def write_ramin(
-    filepath: str,
+    filepath: Union[str, Path],
     *,
     kind: str,
     fc: float,

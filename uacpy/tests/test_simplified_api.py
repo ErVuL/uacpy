@@ -3,6 +3,8 @@ Tests for the simplified UACPY API
 """
 
 import pytest
+
+pytestmark = pytest.mark.requires_binary
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -16,7 +18,6 @@ from uacpy.models import RunMode
 class TestComputeAPI:
     """Tests for compute_tl(), compute_modes(), etc."""
 
-    @pytest.mark.requires_binary
     def test_compute_tl_with_auto_receiver(self, simple_env, source):
         """Test compute_tl with automatic receiver grid."""
         bellhop = Bellhop(verbose=False)
@@ -26,7 +27,6 @@ class TestComputeAPI:
         assert result.n_depths > 10  # Should auto-generate reasonable grid
         assert result.n_ranges > 10
 
-    @pytest.mark.requires_binary
     def test_compute_tl_with_explicit_receiver(self, simple_env, source, receiver_small):
         """Test compute_tl with explicit receiver."""
         bellhop = Bellhop(verbose=False)
@@ -36,7 +36,6 @@ class TestComputeAPI:
         assert result.n_depths == len(receiver_small.depths)
         assert result.n_ranges == len(receiver_small.ranges)
 
-    @pytest.mark.requires_binary
     def test_compute_modes_returns_field(self, simple_env, source):
         """Test that compute_modes returns Field object."""
         kraken = Kraken(verbose=False)
@@ -47,7 +46,6 @@ class TestComputeAPI:
         assert 'k' in modes.metadata
         assert 'phi' in modes.metadata
 
-    @pytest.mark.requires_binary
     def test_multiple_models_same_api(self, simple_env, source):
         """Test that multiple models use same API."""
         bellhop = Bellhop(verbose=False)
@@ -67,7 +65,6 @@ class TestComputeAPI:
 class TestPlottingAPI:
     """Tests for result.plot() and plotting functions."""
 
-    @pytest.mark.requires_binary
     def test_field_plot_method_exists(self, simple_env, source):
         """Test that Field has plot() method."""
         bellhop = Bellhop(verbose=False)
@@ -76,7 +73,6 @@ class TestPlottingAPI:
         assert hasattr(result, 'plot')
         assert callable(result.plot)
 
-    @pytest.mark.requires_binary
     def test_plot_tl_field(self, simple_env, source):
         """Test plotting TL field."""
         bellhop = Bellhop(verbose=False)
@@ -88,7 +84,6 @@ class TestPlottingAPI:
         assert ax is not None
         plt.close(fig)
 
-    @pytest.mark.requires_binary
     def test_plot_modes(self, simple_env, source):
         """Test plotting modes."""
         kraken = Kraken(verbose=False)
@@ -101,7 +96,6 @@ class TestPlottingAPI:
         assert len(axes) == 2  # mode shapes and wavenumber spectrum
         plt.close(fig)
 
-    @pytest.mark.requires_binary
     def test_plot_with_custom_parameters(self, simple_env, source):
         """Test plotting with custom parameters."""
         bellhop = Bellhop(verbose=False)
@@ -112,7 +106,6 @@ class TestPlottingAPI:
         assert fig is not None
         plt.close(fig)
 
-    @pytest.mark.requires_binary
     def test_plot_comparison(self, simple_env, source):
         """Test Field.plot_comparison() static method."""
         bellhop = Bellhop(verbose=False)
@@ -133,7 +126,6 @@ class TestPlottingAPI:
 class TestFieldMethods:
     """Tests for Field convenience methods."""
 
-    @pytest.mark.requires_binary
     def test_field_get_methods(self, simple_env, source, receiver_small):
         """Test Field get_value, get_at_range, get_at_depth."""
         bellhop = Bellhop(verbose=False)
@@ -151,7 +143,6 @@ class TestFieldMethods:
         values_at_depth = result.get_at_depth(50)
         assert len(values_at_depth) == len(receiver_small.ranges)
 
-    @pytest.mark.requires_binary
     def test_field_properties(self, simple_env, source, receiver_small):
         """Test Field properties."""
         bellhop = Bellhop(verbose=False)
@@ -165,7 +156,6 @@ class TestFieldMethods:
 class TestRunModeAndComputeTl:
     """run(run_mode=...) and compute_tl() should be interchangeable for TL."""
 
-    @pytest.mark.requires_binary
     def test_run_with_coherent_tl_mode(self, simple_env, source, receiver_small):
         """run(run_mode=RunMode.COHERENT_TL) returns a TL field."""
         bellhop = Bellhop(verbose=False)
@@ -174,7 +164,6 @@ class TestRunModeAndComputeTl:
         assert result.field_type == 'tl'
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
-    @pytest.mark.requires_binary
     def test_run_and_compute_tl_agree(self, simple_env, source, receiver_small):
         """compute_tl and run(run_mode=COHERENT_TL) produce the same field."""
         bellhop = Bellhop(verbose=False)

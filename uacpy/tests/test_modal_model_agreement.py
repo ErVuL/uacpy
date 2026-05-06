@@ -191,7 +191,3 @@ class TestModalModelAgreement:
             f"Mode count varies more than ±1 across resolutions: {mode_counts}. "
             "Should be stable to within one marginally-trapped mode."
         )
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

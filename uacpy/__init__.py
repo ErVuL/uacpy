@@ -12,7 +12,11 @@ downward; sea-surface altimetry height is positive upward (z=0 at the
 mean sea surface).
 """
 
-__version__ = '0.0.1'
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version('uacpy')
+except Exception:
+    __version__ = 'unknown'
 __author__ = 'ErVuL'
 
 from uacpy.core.source import Source
@@ -26,7 +30,7 @@ from uacpy.core.results import (
     Result, PhaseReference,
     TLField, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
-    Arrivals, Rays, ModalResult, Modes,
+    Arrivals, Rays, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
 )
@@ -60,7 +64,7 @@ __all__ = [
     'Result', 'PhaseReference',
     'TLField', 'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
-    'Arrivals', 'Rays', 'ModalResult', 'Modes',
+    'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
     'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',

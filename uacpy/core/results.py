@@ -33,8 +33,7 @@ Hierarchy
     ├── TimeTrace                   (single point, no spatial grid)
     ├── Arrivals                    (per-receiver list of arrivals)
     ├── Rays                        (per-source list of ray paths)
-    ├── ModalResult (ABC)
-    │   └── Modes                   (Kraken normal modes — depth eigenfunctions)
+    ├── Modes                       (Kraken normal modes — depth eigenfunctions)
     ├── Covariance                  (OASN hydrophone × hydrophone covariance)
     ├── Replicas                    (OASN MFP frequency-domain Green's-function templates)
     └── ReflectionCoefficient       (R(theta) at a boundary)
@@ -46,12 +45,11 @@ callers can use either typed attributes or dict-style access.
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
+from uacpy.core.constants import PRESSURE_FLOOR
 
 
 class PhaseReference(str, Enum):
@@ -59,27 +57,22 @@ class PhaseReference(str, Enum):
 
     Each model writes its native phase convention into
     :class:`TransferFunction`; downstream consumers (IFFT, time-series
-    synthesis) branch on this value. Adding a new value requires updating
-    ``core/field._ifft_to_trace`` so the IFFT path interprets the spectrum
-    correctly. Inheriting from ``str`` keeps backward-compatible string
-    comparison (``ref == 'travelling_wave'`` still works).
+    synthesis) branch on this value when needed. Inherits from ``str`` so
+    ``ref == 'travelling_wave'`` works directly.
 
     Members
     -------
     TRAVELLING_WAVE
         Receiver phase **includes** the propagator ``exp(-i k0 r)``. IFFT
         directly yields the causal pulse arrival time — no carrier
-        re-injection needed. Used by Bellhop, Scooter, OASES OAST/OASP.
-    PORTER_NEGATED
-        Kraken/KrakenField convention: the modal sum is written with a
-        sign flip on the carrier so the IFFT must negate the imaginary
-        axis (``np.conj(H)``) before iFFT to recover the same pulse
-        arrival time as TRAVELLING_WAVE.
+        re-injection needed. Used by Bellhop, Scooter, OASES OAST/OASP,
+        and KrakenField (which negates field.exe's polarity to match this
+        convention at the wrapper).
     PSIF_ENVELOPE
         RAM (mpiramS / Collins backends): the broadband payload is the
         complex envelope ``ψ(r,z; f)`` with the carrier ``exp(+i k0 r)``
-        already factored out. To recover the travelling-wave pulse the
-        IFFT must multiply by ``exp(+i k0 r)`` before transforming.
+        already factored out. The IFFT path multiplies by ``exp(+i k0 r)``
+        before transforming to recover the travelling-wave pulse.
     TIME_DOMAIN_NATIVE
         SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
         already-time-domain trace; consumers that want a time series
@@ -90,7 +83,6 @@ class PhaseReference(str, Enum):
     uacpy.core.field._ifft_to_trace : honours these conventions.
     """
     TRAVELLING_WAVE = 'travelling_wave'
-    PORTER_NEGATED = 'porter_negated'
     PSIF_ENVELOPE = 'psif_envelope'
     TIME_DOMAIN_NATIVE = 'time_domain_native'
 
@@ -191,6 +183,46 @@ class Result:
         import copy as _copy
         return _copy.deepcopy(self)
 
+    def tag(
+        self,
+        *,
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
+        source_depths: Optional[np.ndarray] = None,
+        frequency: Optional[float] = None,
+        frequencies: Optional[np.ndarray] = None,
+        phase_reference: Optional[str] = None,
+        **extra_metadata,
+    ) -> 'Result':
+        """Attach harmonized identification to a Result built by a reader.
+
+        Each model wrapper calls ``result.tag(model=…, backend=…,
+        source_depths=…, frequency=…, phase_reference=…, **extras)`` after
+        the I/O reader returns. Updates both the typed attributes and the
+        mirrored ``metadata`` dict so dict-style consumers see the same
+        values. Returns ``self`` for chaining.
+        """
+        if model is not None:
+            self.model = model
+            self.metadata['model'] = model
+        if backend is not None:
+            self.backend = backend
+            self.metadata['backend'] = backend
+        if source_depths is not None:
+            self.source_depths = np.atleast_1d(np.asarray(source_depths, dtype=float))
+            self.metadata['source_depths'] = self.source_depths
+        if frequency is not None:
+            self.frequency = float(frequency)
+            self.metadata['frequency'] = self.frequency
+        if frequencies is not None:
+            self.frequencies = np.asarray(frequencies, dtype=float)
+            self.metadata['frequencies'] = self.frequencies
+        if phase_reference is not None:
+            self.metadata['phase_reference'] = phase_reference
+        for k, v in extra_metadata.items():
+            self.metadata[k] = v
+        return self
+
     # Stub plot() — concrete subclasses override.
     def plot(self, **kwargs):
         from uacpy.visualization import plots
@@ -212,7 +244,6 @@ class _GridResult(Result):
     """
 
     # Filled in by subclasses to give clearer error messages.
-    _data_role: str = "data"
 
     def __init__(
         self,
@@ -328,7 +359,6 @@ class TLField(_GridResult):
       * broadband : ``(n_depths, n_ranges, n_frequencies)``
     """
     field_type = "tl"
-    _data_role = "TL (dB)"
 
     @property
     def is_broadband(self) -> bool:
@@ -361,7 +391,6 @@ class PressureField(_GridResult):
     Use :meth:`to_tl` to obtain the dB transmission-loss view.
     """
     field_type = "pressure"
-    _data_role = "complex pressure"
 
     def to_tl(self) -> TLField:
         """Convert to ``TLField`` via ``-20·log10(|p|)``."""
@@ -396,7 +425,6 @@ class TransferFunction(_GridResult):
     the stored phase. See ``DOCUMENTATION.md §5.13``.
     """
     field_type = "transfer_function"
-    _data_role = "complex transfer function"
 
     def __init__(
         self,
@@ -522,7 +550,6 @@ class TimeSeriesField(_GridResult):
     ``dt``, ``fs``, ``nt``, ``t_start``).
     """
     field_type = "time_series"
-    _data_role = "p(t)"
 
     def __init__(
         self,
@@ -910,24 +937,8 @@ class Rays(Result):
                     metadata=meta)
 
 
-class ModalResult(Result):
-    """Abstract base for results that decompose a field into discrete modes.
-
-    A concrete subclass must expose ``n_modes`` (count) and the depth grid
-    on which mode shapes are sampled.
-
-    Subclasses set ``field_type = "modes"`` so visualization helpers route
-    to :func:`uacpy.visualization.plots.plot_modes`.
-    """
+class Modes(Result):
     field_type = "modes"
-
-    @property
-    @abstractmethod
-    def n_modes(self) -> int:           # noqa: D401 — abstract property
-        """Number of modes contained in this result."""
-
-
-class Modes(ModalResult):
     """Kraken normal modes — depth eigenfunctions of the Helmholtz operator.
 
     Attributes
@@ -1274,7 +1285,7 @@ __all__ = [
     # Time-domain
     "TimeSeriesField", "TimeTrace",
     # Sparse / non-grid
-    "Arrivals", "Rays", "ModalResult", "Modes",
+    "Arrivals", "Rays", "Modes",
     "Covariance", "Replicas",
     "ReflectionCoefficient",
 ]

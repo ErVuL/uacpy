@@ -3,6 +3,8 @@ Tests for all UACPY propagation models
 """
 
 import pytest
+
+pytestmark = pytest.mark.requires_binary
 import numpy as np
 import uacpy
 from uacpy.models import (
@@ -16,14 +18,12 @@ from uacpy.core.receiver import Receiver
 class TestBellhop:
     """Tests for Bellhop model."""
 
-    @pytest.mark.requires_binary
     def test_bellhop_instantiation(self):
         """Test creating Bellhop instance."""
         bellhop = Bellhop(verbose=False)
         assert bellhop.model_name == 'Bellhop'
         assert not bellhop.verbose
 
-    @pytest.mark.requires_binary
     def test_bellhop_supported_modes(self):
         """Test Bellhop supported modes."""
         bellhop = Bellhop(verbose=False)
@@ -32,7 +32,6 @@ class TestBellhop:
         assert bellhop.supports_mode(RunMode.ARRIVALS)
         assert not bellhop.supports_mode(RunMode.MODES)
 
-    @pytest.mark.requires_binary
     def test_bellhop_compute_tl(self, simple_env, source, receiver_small):
         """Test Bellhop TL computation."""
         bellhop = Bellhop(verbose=False)
@@ -43,7 +42,6 @@ class TestBellhop:
         assert np.all(np.isfinite(result.data))
         assert np.all(result.data > 0)  # TL should be positive
 
-    @pytest.mark.requires_binary
     def test_bellhop_auto_receiver_grid(self, simple_env, source):
         """Test Bellhop with automatic receiver grid generation."""
         bellhop = Bellhop(verbose=False)
@@ -53,7 +51,6 @@ class TestBellhop:
         assert result.n_depths > 0
         assert result.n_ranges > 0
 
-    @pytest.mark.requires_binary
     def test_bellhop_range_dependent(self, range_dependent_env, source, receiver_small):
         """Test Bellhop with range-dependent environment."""
         bellhop = Bellhop(verbose=False)
@@ -74,14 +71,12 @@ class TestBellhopCUDA:
     install.sh built — so these tests run unchanged on GPU and CPU machines.
     """
 
-    @pytest.mark.requires_binary
     def test_bellhopcuda_instantiation(self):
         """Test creating BellhopCUDA instance."""
         bhcuda = BellhopCUDA(verbose=False)
         assert bhcuda.model_name in ('BellhopCUDA', 'bellhopcuda')
         assert not bhcuda.verbose
 
-    @pytest.mark.requires_binary
     def test_bellhopcuda_supported_modes(self):
         """BellhopCUDA should support the same run modes Bellhop does (TL/rays/arrivals)."""
         bhcuda = BellhopCUDA(verbose=False)
@@ -93,13 +88,11 @@ class TestBellhopCUDA:
 class TestKraken:
     """Tests for Kraken model."""
 
-    @pytest.mark.requires_binary
     def test_kraken_instantiation(self):
         """Test creating Kraken instance."""
         kraken = Kraken(verbose=False)
         assert kraken.model_name == 'Kraken'
 
-    @pytest.mark.requires_binary
     def test_kraken_supported_modes(self):
         """Test Kraken supported modes."""
         kraken = Kraken(verbose=False)
@@ -108,7 +101,6 @@ class TestKraken:
         assert not kraken.supports_mode(RunMode.COHERENT_TL)
         assert not kraken.supports_mode(RunMode.RAYS)
 
-    @pytest.mark.requires_binary
     def test_kraken_compute_modes(self, simple_env, source):
         """Test Kraken mode computation.
 
@@ -123,7 +115,6 @@ class TestKraken:
         assert 'phi' in modes.metadata
         assert len(modes.metadata['k']) > 0
 
-    @pytest.mark.requires_binary
     def test_kraken_n_modes_clips_output(self, simple_env, source):
         """``n_modes`` caps the number of returned modes from Kraken."""
         kraken = Kraken(verbose=False)
@@ -131,7 +122,6 @@ class TestKraken:
         assert len(capped.metadata['k']) <= 3
         assert capped.metadata.get('n_modes_requested') == 3
 
-    @pytest.mark.requires_binary
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
         """Test that computed modes have valid wavenumbers."""
         kraken = Kraken(verbose=False)
@@ -151,13 +141,11 @@ class TestKraken:
 class TestKrakenField:
     """Tests for KrakenField model."""
 
-    @pytest.mark.requires_binary
     def test_krakenfield_instantiation(self):
         """Test creating KrakenField instance."""
         kf = KrakenField(verbose=False)
         assert kf.model_name == 'KrakenField'
 
-    @pytest.mark.requires_binary
     def test_krakenfield_supported_modes(self):
         """Test KrakenField supported modes."""
         kf = KrakenField(verbose=False)
@@ -166,7 +154,6 @@ class TestKrakenField:
         assert not kf.supports_mode(RunMode.MODES)  # Use Kraken for mode computation
         assert not kf.supports_mode(RunMode.RAYS)
 
-    @pytest.mark.requires_binary
     def test_krakenfield_compute_tl(self, simple_env, source, receiver_small):
         """Test KrakenField TL computation."""
         kf = KrakenField(verbose=False)
@@ -179,13 +166,11 @@ class TestKrakenField:
 class TestBounce:
     """Tests for Bounce model."""
 
-    @pytest.mark.requires_binary
     def test_bounce_instantiation(self):
         """Test creating Bounce instance."""
         bounce = Bounce(verbose=False)
         assert bounce.model_name == 'Bounce'
 
-    @pytest.mark.requires_binary
     def test_bounce_supported_modes(self):
         """Test Bounce supported modes."""
         bounce = Bounce(verbose=False)
@@ -195,7 +180,6 @@ class TestBounce:
         assert not bounce.supports_mode(RunMode.RAYS)
         assert not bounce.supports_mode(RunMode.MODES)
 
-    @pytest.mark.requires_binary
     def test_bounce_compute_reflection_coefficient(self, simple_env, source, receiver_small, tmp_path):
         """Test Bounce reflection coefficient computation.
 
@@ -246,13 +230,11 @@ class TestBounce:
 class TestRAM:
     """Tests for RAM model (mpiramS backend)."""
 
-    @pytest.mark.requires_binary
     def test_ram_instantiation(self):
         """Test creating RAM instance."""
         ram = RAM(verbose=False)
         assert ram.model_name == 'RAM'
 
-    @pytest.mark.requires_binary
     def test_ram_supported_modes(self):
         """Test RAM supported modes."""
         ram = RAM(verbose=False)
@@ -263,7 +245,6 @@ class TestRAM:
         assert not ram.supports_mode(RunMode.RAYS)
         assert not ram.supports_mode(RunMode.MODES)
 
-    @pytest.mark.requires_binary
     def test_ram_compute_tl(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
         ram = RAM(verbose=False)
@@ -274,7 +255,6 @@ class TestRAM:
         assert result.shape[1] > 0  # Has range dimension
         assert np.all(np.isfinite(result.data))
 
-    @pytest.mark.requires_binary
     def test_ram_broadband_mode(self, simple_env, source):
         """RAM BROADBAND returns the H(f) transfer function."""
         ram = RAM(Q=2.0, T=2.0, verbose=False)
@@ -294,7 +274,6 @@ class TestRAM:
         assert result.data.shape[1] > 0  # range
         assert result.data.shape[2] > 0  # frequency
 
-    @pytest.mark.requires_binary
     def test_ram_time_series_requires_waveform(self, simple_env, source):
         """TIME_SERIES without source_waveform must raise."""
         ram = RAM(Q=2.0, T=2.0, verbose=False)
@@ -310,7 +289,6 @@ class TestRAM:
 class TestScooter:
     """Tests for Scooter model."""
 
-    @pytest.mark.requires_binary
     def test_scooter_instantiation(self):
         """Test creating Scooter instance."""
         scooter = Scooter(verbose=False)
@@ -320,7 +298,6 @@ class TestScooter:
 class TestSPARC:
     """Tests for SPARC model."""
 
-    @pytest.mark.requires_binary
     def test_sparc_instantiation(self):
         """Test creating SPARC instance."""
         sparc = SPARC(verbose=False)
@@ -334,7 +311,6 @@ class TestSPARC:
 class TestModelConsistency:
     """Tests for consistency between different models."""
 
-    @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_tl_consistency_bellhop_kraken(self, simple_env, source, receiver_small):
         """Test TL consistency between Bellhop and KrakenField."""
@@ -354,7 +330,6 @@ class TestModelConsistency:
             mean_diff = abs(np.mean(valid_bellhop) - np.mean(valid_kraken))
             assert mean_diff < 30, f"Mean TL difference too large: {mean_diff:.1f} dB"
 
-    @pytest.mark.requires_binary
     @pytest.mark.slow
     @pytest.mark.parametrize(
         "downstream",
