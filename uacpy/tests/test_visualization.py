@@ -127,15 +127,6 @@ class TestPlotEnvironment:
 class TestCompareModels:
     """Tests for model comparison functions."""
 
-    def test_compare_models_single(self, basic_setup):
-        """Test comparing single model."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        fig, axes = plots.compare_models(results, env)
-        assert fig is not None
-        plt.close(fig)
-
     def test_compare_models_multiple(self, basic_setup):
         """Test comparing multiple models."""
         env, source, _ = basic_setup

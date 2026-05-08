@@ -130,7 +130,7 @@ def main():
     source = uacpy.Source(frequencies=100, depths=30)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 195, 30),
-        ranges=np.linspace(1000, 6000, 40),
+        ranges=np.linspace(1000, 6000, 300),
     )
 
     bathy_ranges_m = np.array([0, 5000, 10000, 15000, 20000.0])
