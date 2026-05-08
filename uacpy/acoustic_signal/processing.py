@@ -8,6 +8,8 @@ This module contains signal processing computations including:
 - Noise incorporation
 """
 
+import warnings
+
 import numpy as np
 from typing import Union, Tuple, Optional
 from scipy.signal.windows import hann
@@ -247,24 +249,32 @@ def add_noise(
     # Convert dB to linear scale
     SL = 10.0 ** (source_level_db / 20.0)
 
-    # Calculate noise amplitude
-    # A is the amplitude corresponding to the PSD
-    # Factor of sqrt(2) accounts for real signal
-    # sqrt(bandwidth) converts PSD to total power
+    # Target noise RMS for a one-sided PSD level ``noise_level_db`` (dB
+    # re Pa²/Hz) over bandwidth ``bandwidth``:
+    #     P_total = S_target · BW = 10^(L/10) · BW   (Pa²)
+    #     RMS     = √P_total                          (Pa)
+    # ``make_bandlimited_noise`` returns unit-RMS noise, so multiplying
+    # by ``A = RMS`` gives a realisation with the requested PSD level.
     flow = fc - bandwidth / 2
     fhigh = fc + bandwidth / 2
-    A = np.sqrt(2) * np.sqrt(fhigh - flow) * 10.0 ** (noise_level_db / 20.0)
+    bw = fhigh - flow
+    A = np.sqrt(bw * 10.0 ** (noise_level_db / 10.0))
 
-    # Generate band-limited noise
+    # Generate band-limited noise — independent realisation per receiver
+    # so cross-channel correlation is zero (required for beamforming and
+    # array-gain assertions).
     T = len(timeseries) / sample_rate
-    noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate) * A
 
-    # Scale signal by source level and add noise
     if timeseries.ndim == 1:
+        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate) * A
         rts = timeseries * SL + noise_ts
     else:
-        # Multiple receivers
-        rts = timeseries * SL + noise_ts.reshape(-1, 1)
+        n_rcv = timeseries.shape[1]
+        noise_block = np.column_stack([
+            make_bandlimited_noise(fc, bandwidth, T, sample_rate)
+            for _ in range(n_rcv)
+        ]) * A
+        rts = timeseries * SL + noise_block
 
     return rts
 
@@ -334,6 +344,14 @@ def make_bandlimited_noise(
 
     # Apply filter
     filtered_noise = filtfilt(b, a, noise)
+
+    # Normalise to unit RMS so callers can scale by the target RMS
+    # directly (e.g. RMS = √(BW · 10^(PSD_dB/10)) for a target one-sided
+    # PSD level). Filtfilt's double-pass + Butterworth rolloff make the
+    # post-filter variance filter-shape-dependent; unit-RMS removes that.
+    rms = float(np.std(filtered_noise))
+    if rms > 0:
+        filtered_noise = filtered_noise / rms
 
     return filtered_noise
 
@@ -417,6 +435,15 @@ def fourier_synthesis(
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
                                      np.exp(1j * 2 * np.pi * Tstart * freq_vec))
+    elif len(freq_vec) > 0 and freq_vec[0] > 0:
+        warnings.warn(
+            f"fourier_synthesis: freq_vec[0]={freq_vec[0]:.3g} Hz > 0 with "
+            "Tstart=0. The IFFT treats input as starting from DC, which "
+            "introduces a phase ramp in the synthesised time series. Pass "
+            "Tstart matching the physical arrival time (e.g. r/c0) to align "
+            "the trace with travel time.",
+            UserWarning, stacklevel=2,
+        )
 
     # Weight by source spectrum if provided
     if source_spectrum is not None:

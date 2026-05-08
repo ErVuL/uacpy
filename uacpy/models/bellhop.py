@@ -1062,8 +1062,9 @@ class Bellhop(PropagationModel):
         Subclasses (BellhopCUDA) may override this to add flags.
         """
         if self.version in ('cuda', 'cxx'):
-            # bellhopcxx/cuda require a dimensionality flag
-            return [str(self.executable), '--2D', base_name]
+            # bellhopcxx/cuda require a dimensionality flag.
+            dim = getattr(self, 'dimensionality', '2D')
+            return [str(self.executable), f'--{dim}', base_name]
         return [str(self.executable), base_name]
 
     def _run_bellhop(self, base_name: str, work_dir: Path):

@@ -286,24 +286,30 @@ class Bounce(PropagationModel):
                     f"c_low ({self.c_low})."
                 )
 
-            # n_angles → rmax_m: bounce.f90 derives NkTab from rmax in km
-            # and frequency (NkTab = INT(1000 * RMax_km * OMEGA / (2*PI *
-            # DeltaKInv))); uacpy inverts linearly:
-            #     rmax_m = (n_angles / 100) * 1000 = n_angles * 10.
+            # n_angles → rmax_m: bounce.f90:49 sets
+            #     NkTab = INT(1000 * RMax_km * (kMax - kMin) / (2*pi))
+            # with kMax = omega/cLow, kMin = omega/cHigh (or 0 if cHigh
+            # is "infinity"). Inverting:
+            #     RMax_m = NkTab * 2*pi / (omega * (1/cLow - 1/cHigh))
             if self.n_angles is not None:
                 if self.n_angles <= 0:
                     raise ConfigurationError(
                         f"n_angles must be > 0 (got {self.n_angles})."
                     )
-                rmax_from_angles_m = float(self.n_angles) * 10.0
-                if rmax_from_angles_m <= 0:
-                    warnings.warn(
-                        f"Computed rmax_m={rmax_from_angles_m} from "
-                        f"n_angles={self.n_angles} is not positive; using "
-                        "100 m fallback.",
-                        RuntimeWarning,
+                f_hz = float(np.atleast_1d(source.frequencies)[0])
+                omega = 2.0 * np.pi * f_hz
+                inv_c_diff = 1.0 / float(self.c_low)
+                if self.c_high is not None and self.c_high < 1e8:
+                    inv_c_diff -= 1.0 / float(self.c_high)
+                if omega * inv_c_diff <= 0:
+                    raise ConfigurationError(
+                        f"Cannot derive rmax_m from n_angles={self.n_angles}: "
+                        f"omega·(1/cLow - 1/cHigh) is non-positive "
+                        f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
                     )
-                    rmax_from_angles_m = 100.0
+                rmax_from_angles_m = (
+                    float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
+                )
                 self.rmax_m = rmax_from_angles_m
 
             env = self._project_environment(env)

@@ -1009,7 +1009,7 @@ sp = SPARC(
     c_low=None, c_high=None,
     n_mesh=0, roughness=0.0,
     output_mode='R',                # 'R' horizontal array | 'D' vertical array | 'S' snapshot
-    pulse_type='PN+B',
+    pulse_type='PN+B',              # 4-character code (see below)
     n_t_out=501,
     t_max=None,                     # None auto: 2.5 × travel time
     t_start=-0.1,
@@ -1037,6 +1037,23 @@ as ``TransferFunction.synthesize_time_series``:
 
 There is no run-time receiver-picking kwarg — the output covers every
 receiver in the supplied grid.
+
+#### `pulse_type` 4-character code
+
+SPARC's source pulse is selected by a 4-character string per
+`tslib/sourceMod.f90` and `cans.f90`. uacpy validates the alphabet
+column-by-column and pads to 4 characters with spaces.
+
+| pos | meaning | accepted letters |
+|---|---|---|
+| 1 | Pulse shape | `P` Pekeris, `R` Ricker, `A` analytic, `S` sinc, `H` Hanning, `N` N-wave, `G` Gaussian, `F` flat, `B` Berlage, `M` "miracle" wave, `T` tone, `C` sinc-windowed |
+| 2 | Post-process | `' '` none, `N` none, `H` pre-envelope (\|analytic signal\|), `Q` Hilbert transform |
+| 3 | Sign | `' '` keep, `+` keep, `-` invert |
+| 4 | Window | `' '` none, `N` none, `L` Tukey-low, `H` Tukey-high, `B` Blackman |
+
+Common combinations: `'PN+B'` (Pekeris pulse, no post-process, positive
+sign, Blackman window), `'RN+ '` (Ricker, plain), `'GH-L'` (Gaussian
+analytic-envelope, inverted, Tukey-low window).
 
 #### `output_mode='S'` (snapshot) caveat
 
@@ -1714,7 +1731,10 @@ s = sig.ricker_wavelet(time=t, F=500.0)
 s = sig.bpsk_modulate(s_bipolar=bits, fc=12000.0, fs=48000.0,
                       chips_per_sec=3000.0)
 
-# Bandlimited Gaussian noise centred at fc with given bandwidth
+# Bandlimited Gaussian noise centred at fc with given bandwidth.
+# Returns a unit-RMS realisation (np.std(n) == 1) — multiply by
+# √(BW · 10^(L_PSD/10)) to hit a target one-sided PSD level L_PSD
+# (dB re Pa²/Hz). ``add_noise`` does that scaling automatically.
 n = sig.make_bandlimited_noise(fc=1000.0, bandwidth=200.0,
                                duration=1.0, sample_rate=48000)
 
@@ -1744,7 +1764,7 @@ y = sig.add_noise(timeseries, sample_rate=fs,
                   fc=1000.0, bandwidth=200.0)
 
 # Fourier-synthesize a time series from a frequency-domain pressure response.
-# `pressure_freq` shape (..., n_frequenciess); `freq_vec` is the frequency axis (Hz).
+# `pressure_freq` shape (..., n_frequencies); `freq_vec` is the frequency axis (Hz).
 # `source_spectrum` lets you weight by an arbitrary source spectrum; Tstart
 # shifts the time origin. Returns (time, signal).
 t, s = sig.fourier_synthesis(pressure_freq, freq_vec,

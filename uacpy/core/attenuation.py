@@ -44,7 +44,7 @@ def thorp_attenuation(frequency: Union[float, np.ndarray]) -> np.ndarray:
     """
     f = np.atleast_1d(frequency) / 1000.0
     f2 = f**2
-    alpha = 0.1 * f2 / (1 + f2) + 40 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003
+    alpha = 0.11 * f2 / (1 + f2) + 44 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003
 
     return np.squeeze(alpha)
 
@@ -136,12 +136,17 @@ def francois_garrison(
     return np.squeeze(alpha)
 
 
-def fisher_simmons(
+def thorp_with_depth_correction(
     frequency: Union[float, np.ndarray],
     depth: float = 100.0
 ) -> np.ndarray:
     """
-    Fisher-Simmons attenuation (simplified shallow water formula)
+    Thorp 1967 attenuation with a linear depth-correction factor.
+
+    Returns the canonical Thorp formula multiplied by ``(1 + depth/5000)``
+    — a heuristic shallow-vs-deep adjustment for engineering estimates.
+    For physics-grade depth/temperature/salinity treatment use
+    :func:`francois_garrison`.
 
     Parameters
     ----------
@@ -154,25 +159,14 @@ def fisher_simmons(
     -------
     alpha : float or array
         Attenuation in dB/km
-
-    References
-    ----------
-    Fisher, F. H. and Simmons, V. P. (1977). "Sound absorption in sea water".
-    JASA, 62(3), 558-564.
     """
     f = np.atleast_1d(frequency) / 1000.0  # kHz
-
-    # Simplified formula for shallow water
     alpha = 0.11 * f**2 / (1.0 + f**2) + 44.0 * f**2 / (4100.0 + f**2) + 2.75e-4 * f**2 + 0.003
-
-    # Depth correction
-    depth_factor = 1.0 + depth / 5000.0
-    alpha *= depth_factor
-
+    alpha *= 1.0 + depth / 5000.0
     return np.squeeze(alpha)
 
 
-def ainslie_mccolm(
+def empirical_attenuation(
     frequency: Union[float, np.ndarray],
     temperature: float = 10.0,
     salinity: float = 35.0,
@@ -180,7 +174,13 @@ def ainslie_mccolm(
     depth: float = 1000.0
 ) -> np.ndarray:
     """
-    Ainslie & McColm simplified formula
+    Empirical Thorp-like attenuation with temperature/salinity/depth knobs.
+
+    Single-relaxation form with a temperature-dependent relaxation
+    frequency, plus linear salinity and depth scaling — a quick
+    sensitivity-study tool. The ``pH`` argument is a placeholder and is
+    not consumed by the formula. For physics-grade attenuation use
+    :func:`francois_garrison`.
 
     Parameters
     ----------
@@ -191,7 +191,8 @@ def ainslie_mccolm(
     salinity : float, optional
         Salinity in ppt. Default is 35.0.
     pH : float, optional
-        pH value. Default is 8.0.
+        pH value. Accepted for signature symmetry; not used in the
+        empirical formula.
     depth : float, optional
         Depth in meters. Default is 1000.0.
 
@@ -201,23 +202,14 @@ def ainslie_mccolm(
         Attenuation in dB/km
     """
     f = np.atleast_1d(frequency) / 1000.0  # kHz
-
-    # Simplified combination of Thorp-like formula with temperature dependence
     T = temperature
 
-    # Relaxation frequency (temperature dependent)
+    # Single temperature-dependent relaxation frequency.
     f_relax = 21.0 * np.exp(T / 15.0)
 
-    # Attenuation
-    alpha = 0.1 * f**2 / (1.0 + f**2) + 40.0 * f**2 / (f_relax**2 + f**2) + 2.5e-4 * f**2
-
-    # Salinity correction
-    alpha *= (1.0 + 0.01 * (salinity - 35.0))
-
-    # Depth correction
-    depth_km = depth / 1000.0
-    alpha *= (1.0 + 0.05 * depth_km)
-
+    alpha = 0.11 * f**2 / (1.0 + f**2) + 44.0 * f**2 / (f_relax**2 + f**2) + 2.5e-4 * f**2
+    alpha *= 1.0 + 0.01 * (salinity - 35.0)
+    alpha *= 1.0 + 0.05 * (depth / 1000.0)
     return np.squeeze(alpha)
 
 

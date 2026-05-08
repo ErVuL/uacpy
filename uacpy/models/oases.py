@@ -1083,7 +1083,13 @@ class OASP(_OASESBase):
                 else float(freqs_arr[0])
             )
             if df_user > 0:
-                n_time_samples = max(int(n_time_samples or 0), int(np.ceil(2.0 * freq_max / df_user)))
+                # OASP requires NT = 2^M (oasp.tex:129); round up.
+                target = max(int(n_time_samples or 0),
+                             int(np.ceil(2.0 * freq_max / df_user)))
+                if target > 1:
+                    n_time_samples = 1 << (target - 1).bit_length()
+                else:
+                    n_time_samples = 2
 
         if run_mode == RunMode.TIME_SERIES and (
             source_waveform is None or sample_rate is None

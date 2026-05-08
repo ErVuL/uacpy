@@ -31,7 +31,7 @@ from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
 # Pos 1: pulse shape (strictly validated in sparc.f90 SELECT CASE).
-_PULSE_TYPE_POS1 = set('PRASHNGFBM')
+_PULSE_TYPE_POS1 = set('PRASHNGFBMTC')
 # Pos 2: post-processing applied to the pulse samples.
 #   'H' = pre-envelope (|analytic signal|), 'Q' = Hilbert transform.
 #   Any other character (including ' ' or 'N') means "no transform".

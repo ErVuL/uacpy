@@ -1087,6 +1087,30 @@ class KrakenField(_KrakenBase):
                     "mode_coupling='coupled' with coherent=True."
                 )
 
+            # field.f90's Comp selector at line 169 calls Extract(...) per
+            # ReadModes.f90:315-324, which has no default branch for
+            # ELASTIC media when Comp ∈ {'*', 'O', ' '} (the wrapper's
+            # only options). Receivers in elastic layers therefore see
+            # uninitialised Phi(j). Refuse loudly.
+            if (
+                env.bottom_layered is not None
+                and any(
+                    (getattr(layer, 'shear_speed', 0) or 0) > 0
+                    for layer in env.bottom_layered.layers
+                )
+            ):
+                rcv_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+                if rcv_depths.max() > env.depth:
+                    raise ConfigurationError(
+                        "KrakenField: receiver depth exceeds water depth and "
+                        "an elastic layer is present in the bottom. AT's "
+                        "field.f90 elastic-component selector (Comp) only "
+                        "supports {'*','O',' '} which fall through "
+                        "uninitialised in elastic media (ReadModes.f90:315-324). "
+                        "Constrain receiver to the water column or use a "
+                        "fluid bottom."
+                    )
+
             if run_mode is None:
                 # Default run mode: BROADBAND if a freq vector is provided,
                 # else single-frequency coherent TL.

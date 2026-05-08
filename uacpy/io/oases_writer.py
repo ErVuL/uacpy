@@ -16,6 +16,7 @@ References:
     distribution ships with the 2.1 source tree — per the bundled README.
 """
 
+import warnings
 from pathlib import Path
 from typing import Callable, List, Optional, TextIO, Union
 import numpy as np
@@ -188,8 +189,18 @@ def _format_upper_halfspace(env: Environment) -> str:
     rho = getattr(surface, 'density', 0.0) or 0.0
 
     if 'rigid' in atype:
-        # Rigid: very high impedance — use large density, zero speed
-        return "0 0 0 0 0 0 0"
+        # OASES has no native "rigid" upper-halfspace token; the closest
+        # representation is a high-impedance halfspace. Emit one and warn
+        # so the user knows the BC is not strictly rigid.
+        warnings.warn(
+            "OASES does not natively support a rigid upper halfspace; "
+            "emitting a high-impedance fluid halfspace (cp=4000, rho=2.5) "
+            "as a substitute. Acoustic match is partial — pressure-release "
+            "(vacuum) and acoustic-half-space surfaces are the only "
+            "physically exact OASES top BCs.",
+            UserWarning, stacklevel=3,
+        )
+        return "0 4000.0 0.0 0.000 0.000 2.50 0"
 
     return (f"0 {c_p:.2f} {c_s:.2f} {alpha_p:.3f} "
             f"{alpha_s:.3f} {rho:.2f} 0")
@@ -461,8 +472,13 @@ def write_oast_input(
         cmax = max(c_p * 1.1, 1e8)
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
-        # NW IC1 IC2 (use -1 for automatic sampling)
-        f.write(f"{nw_samples} 1 2000\n")
+        # NW IC1 IC2 — automatic sampling (NW=-1) ignores IC1/IC2 per
+        # oast.tex:541-549. When NW>0 the constraint IC2 ≤ NW (oast.tex:74)
+        # must hold, so clamp.
+        if nw_samples is None or nw_samples <= 0:
+            f.write(f"{nw_samples} 1 1\n")
+        else:
+            f.write(f"{nw_samples} 1 {nw_samples}\n")
 
         # Block VIII: Range axes (for plots) — OASES expects km on disk.
         # RMIN RMAX RLEN RINC
