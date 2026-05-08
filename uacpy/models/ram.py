@@ -834,10 +834,11 @@ class RAM(PropagationModel):
             Receiver array
         run_mode : RunMode, optional
             ``COHERENT_TL`` (default) — narrowband TL grid.
-            ``BROADBAND`` — complex H(f) over
-            (depth, frequency, range). The returned pressure is the PE
-            envelope: the ``exp(+i k0 r)`` travelling-wave factor is
-            removed (``metadata['phase_reference']='psif_envelope'``).
+            ``BROADBAND`` — complex H(f) over (depth, range, frequency).
+            The wrapper converts the PE envelope ψ to engineering
+            travelling-wave pressure ``p ∝ conj(ψ)·exp(-i k0 r)/√r``
+            before tagging (``metadata['phase_reference']
+            ='travelling_wave'``).
             ``TIME_SERIES`` — real pressure p(t); requires
             ``source_waveform`` and ``sample_rate``.
         frequencies : ndarray, optional
@@ -1402,9 +1403,9 @@ class RAM(PropagationModel):
         resolution ``df = 1/T``. Each frequency runs the Collins binary
         once; the patched binary writes a complex envelope (see
         ``third_party/MODIFICATIONS.md``) which the loop stacks into
-        ``(n_d, n_f, n_r)``. Phase convention is ``'psif_envelope'``,
-        identical to mpiramS, so ``TransferFunction.synthesize_time_series`` works
-        without further fix-up.
+        ``(n_d, n_r, n_f)``. The carrier ``exp(-i k0 r)`` is baked in
+        below before tagging, so the result is the same engineering
+        travelling-wave H(f) as every other broadband-capable model.
 
         ``rams_theta`` may be a callable; when it is, ``theta`` is
         resolved per frequency by ``_theta_for_freq`` — useful when the
@@ -1512,37 +1513,24 @@ class RAM(PropagationModel):
             im = interp_im(pts).reshape(DD.shape)
             H[:, :, k] = re + 1j * im
 
-        # Match mpiramS' Field convention so TransferFunction.to_time_trace treats
-        # all backends identically. The downstream pipeline expects
-        # conj(ψ)·exp(−i k₀ r) (the conjugation flips numpy's e^{+iωt} IFFT
-        # convention to physics e^{−iωt} per JKPS eq. (8.1); the negative
-        # carrier is restored to + by field.py's t_start spectrum-shift).
+        # Bake the engineering travelling-wave carrier into H so every
+        # broadband-capable model hands the IFFT pipeline the same shape
+        # of complex pressure. The two Collins binaries write DIFFERENT
+        # quantities:
         #
-        # The two Collins binaries store DIFFERENT quantities, however:
+        # * rams0.5 multiplies its march variable by g0 = exp(+i k0 dr)
+        #   each step (rams0.5.f:830-831), so the file already carries
+        #   ψ·exp(+i k0 r); a single conj(·) flips it to ψ̄·exp(-i k0 r).
         #
-        # * ramsurf1.5 (`solve` has no g0 arg, ramsurf1.5.f:310): u = ψ
-        #   — the bare envelope, no carrier. To reach the target form we
-        #   apply conj(·) AND multiply by exp(−i k₀ r).
-        #
-        # * rams0.5 (`solve(... g0)` multiplies u by g0=exp(ik₀dr) every
-        #   range step at rams0.5.f:830-831): u = ψ·exp(+i k₀ r) — the
-        #   carrier is already baked in, exactly like mpiramS' psif. So
-        #   conjugation alone produces conj(ψ)·exp(−i k₀ r); applying an
-        #   extra exp(−i k₀ r) would double-count the carrier and shift
-        #   the IFFT peak by +r/c₀.
-        #
-        # mpiramS handles this correctly already at ram.py:1673 (just
-        # np.conj(psif), no extra carrier removal); we mirror that for
-        # rams here.
-        # Must match the c0 written into ram.in / rams.in by
-        # ``_run_collins_one_freq`` — the carrier the binary marched at.
+        # * ramsurf1.5 has no g0 (ramsurf1.5.f:310), so the file is the
+        #   bare envelope ψ; conj(·) then explicit exp(-i k0 r) multiply
+        #   produces the same target form.
         c0 = self._resolve_c0(env)
         if kind == 'rams':
             H = np.conj(H)
         else:
             omega = 2.0 * np.pi * frequencies
             k0 = omega / c0
-            # New (n_d, n_r, n_f) layout: broadcast carrier as (1, n_r, n_f).
             carrier = np.exp(
                 -1j * k0[None, None, :] * rcv_r[None, :, None]
             )
@@ -1552,15 +1540,11 @@ class RAM(PropagationModel):
             data=H,
             depths=rcv_d,
             ranges=rcv_r,
-            phase_reference='psif_envelope',
+            phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
                 backend=kind,
                 frequencies=frequencies,
-                # Same convention as mpiramS — the travelling-wave factor
-                # exp(+i k0 r) is factored out by the Collins PE march.
-                # TransferFunction.synthesize_time_series re-applies it
-                # before IFFT.
                 Q=Q_used, T=T_used,
                 bw=bw, df=df,
                 dr=dr_first, dz=dz_first, zmax=zmax_used,
@@ -2189,18 +2173,12 @@ class RAM(PropagationModel):
 
             result = read_psif(work_dir)
 
-            # Convert mpiramS psif to actual pressure spectrum.
-            #
-            # mpiramS stores: psif = psi * exp(i*(k0*r + pi/4)) / (4*pi)
-            # Collins' PE: p(f,r,z) = psi(f,r,z) * exp(i*k0*r) / sqrt(r)
-            # Therefore:  p = psif * 4*pi * exp(-i*pi/4) / sqrt(r)
-            #
-            # The k0*r phase terms cancel: exp(-i*k0*r) * exp(+i*k0*r) = 1.
-            # The conversion factor is constant (not frequency-dependent).
-            #
-            # mpiramS uses exp(+i*omega*t) convention (opposite standard).
-            # Conjugation converts to exp(-i*omega*t) consistent with other
-            # models (Bellhop, Scooter, KrakenField).
+            # mpiramS stores psif = ψ·exp(+i(k0 r + π/4)) / (4π) under the
+            # exp(+iωt) (engineering) carrier sign opposite to the
+            # outgoing-wave convention every other uacpy model uses.
+            # Conjugating flips the carrier sign and the constant scale
+            # 4π·exp(-iπ/4)/√r recovers Collins' p(f,r,z) = ψ·exp(+ik0 r)/√r
+            # in the engineering travelling-wave form p ∝ ψ̄·exp(-ik0 r)/√r.
             psif = result['psif']  # (nzo, nf, nr)
             rout = result['rout']  # (nr,)
             zg = result['zg']
@@ -2260,15 +2238,11 @@ class RAM(PropagationModel):
                 data=pressure,
                 ranges=rout,
                 depths=out_depths,
-                phase_reference='psif_envelope',
+                phase_reference='travelling_wave',
                 **self._result_kwargs(
                     source,
                     backend='mpiramS',
                     frequencies=result['frq'],
-                    # mpiramS stores psif (envelope of the PE field) with
-                    # the travelling-wave factor exp(+i k0 r) factored out.
-                    # TransferFunction.synthesize_time_series honours this
-                    # convention.
                     dr=float(dr), dz=float(dz),
                     Nsam=result['Nsam'],
                     fs=result['fs'],

@@ -282,13 +282,13 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
 
     Same Pekeris-elastic env as ``_pekeris_elastic`` but exercises the
     full BROADBAND path: ``rams0.5`` is driven in a Python frequency
-    loop reading the patched ``pcomplex.bin``, yielding a complex H(f)
-    with ``phase_reference='psif_envelope'``. The agreement is checked
-    on the TL slice at the centre frequency — that's where ``rams_theta``
-    has been tuned and where KrakenField's modal sum is best resolved.
-    Per-frequency RMSE across the full band is naturally looser
-    (~5 dB) due to RAMS' theta sensitivity vs. frequency; the
-    centre-frequency agreement is the meaningful regression anchor.
+    loop reading the patched ``pcomplex.bin``, yielding an engineering
+    travelling-wave H(f). The agreement is checked on the TL slice at
+    the centre frequency — that's where ``rams_theta`` has been tuned
+    and where KrakenField's modal sum is best resolved. Per-frequency
+    RMSE across the full band is naturally looser (~5 dB) due to RAMS'
+    theta sensitivity vs. frequency; the centre-frequency agreement is
+    the meaningful regression anchor.
     """
     elastic_layered = LayeredBottom(
         layers=[SedimentLayer(
@@ -367,10 +367,10 @@ def _altimetry_broadband_at_fc() -> Scenario:
     Same Pekeris+altimetry env as ``_altimetry_consistency`` but
     exercises the full BROADBAND path: ``ramsurf1.5`` is driven in a
     Python frequency loop reading the patched ``pcomplex.bin``,
-    yielding a complex H(f) with ``phase_reference='psif_envelope'``.
-    The agreement is checked on the centre-frequency TL slice; full
-    broadband ray-vs-PE on a rough surface drifts more across the
-    band so the fc slice is the meaningful regression anchor.
+    yielding an engineering travelling-wave H(f). The agreement is
+    checked on the centre-frequency TL slice; full broadband ray-vs-PE
+    on a rough surface drifts more across the band so the fc slice is
+    the meaningful regression anchor.
     """
     fluid = BoundaryProperties(
         acoustic_type='half-space',

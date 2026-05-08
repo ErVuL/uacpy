@@ -247,7 +247,9 @@ c
       j=j+1
       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
 c     UACPY: same envelope as tlg uses, with cylindrical-spreading
-c     factor included. phase_reference = 'psif_envelope'.
+c     factor included. Carrier exp(+i k0 r) is still factored out
+c     here; the Python wrapper bakes the engineering travelling-wave
+c     carrier exp(-i k0 r) in before tagging.
       urg(j)=ur/sqrt(r+eps)
 c
 c     Mark the ocean bottom.

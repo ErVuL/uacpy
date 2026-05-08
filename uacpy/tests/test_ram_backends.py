@@ -258,8 +258,9 @@ class TestCollinsBinaries:
 
     def test_collins_backend_broadband_returns_transfer_function(self):
         """ramsurf BROADBAND emits the patched complex envelope and the
-        wrapper assembles a transfer-function Field (phase_reference =
-        psif_envelope, same convention as mpiramS)."""
+        wrapper assembles an engineering travelling-wave H(f), tagged
+        identically to mpiramS so synthesize_time_series treats both
+        backends the same."""
         env = _env(bottom=_fluid_bottom(), altimetry=_rough_altimetry())
         src, rcv = self._src_rcv()
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
@@ -267,7 +268,7 @@ class TestCollinsBinaries:
         f = ram.run(env, src, rcv, run_mode=RunMode.BROADBAND)
         assert f.field_type == 'transfer_function'
         assert f.metadata['backend'] == 'ramsurf'
-        assert f.metadata['phase_reference'] == 'psif_envelope'
+        assert f.metadata['phase_reference'] == 'travelling_wave'
         # Shape: (n_d, n_r, n_f) — trailing axis is variable.
         assert f.data.ndim == 3
         assert f.data.shape[0] == len(rcv.depths)

@@ -950,9 +950,11 @@ fluid + flat-surface case. The Collins backends produce broadband by
 running the binary once per frequency on the Python side; uacpy's local
 Fortran patch (see ``third_party/MODIFICATIONS.md``) makes them dump the
 complex PE envelope alongside ``tl.grid`` so the per-frequency results
-can be assembled into a transfer function. The phase convention is the
-same as mpiramS (``phase_reference='psif_envelope'``), so
-``TransferFunction.synthesize_time_series`` works uniformly.
+can be assembled into a transfer function. The wrapper bakes the
+engineering carrier ``exp(-i k0 r)`` into the data and tags it
+``phase_reference='travelling_wave'`` — identical to every other
+broadband-capable model — so ``TransferFunction.synthesize_time_series``
+works uniformly.
 
 For elastic broadband, ``rams_theta`` may be a callable
 ``theta_fn(freq_hz) -> float`` to vary the elastic stability angle
@@ -990,11 +992,14 @@ grid. To get a time-domain waveform at one `(depth, range)`, call
 or `tf.synthesize_time_series(source_waveform=…, sample_rate=…)`
 (full grid → `TimeSeriesField`).
 
-Phase convention gotcha (mpiramS only): `tf.phase_reference == 'psif_envelope'`.
-The travelling-wave factor `exp(+i·k0·r)` is **not** re-applied by RAM, so a
-naive IFFT does not align arrivals at `t = r/c` without re-adding it;
-`synthesize_time_series` and `to_time_trace`
-handle this correctly.
+RAM tags the result `phase_reference='travelling_wave'` — the wrapper
+already converts the PE envelope ψ to engineering travelling-wave
+pressure ``p ∝ conj(ψ)·exp(-i k0 r)/√r`` before handing it off, so
+``to_time_trace`` and ``synthesize_time_series`` align arrivals at
+``t = r/c`` without any caller-side bookkeeping. The metadata key
+``cmin`` carries the slowest-mode anchor speed; the IFFT pipeline uses
+it (in preference to ``c0``) to size the default ``t_start`` so the
+earliest mode arrival is never clipped.
 
 **TL formula inside UACPY's RAM wrapper (mpiramS):**
 `TL = -20·log10(|psif| · 4π) + 10·log10(r)`. Keep this in mind when
@@ -1364,8 +1369,7 @@ and `to_time_trace` honour each value transparently.
 
 | Value | Models that emit it | Meaning |
 |---|---|---|
-| `'travelling_wave'` | Bellhop (broadband), Scooter, OASP, KrakenField (broadband — emitted after the wrapper negates `field.exe`'s output to match the Scooter/Bellhop/RAM polarity convention) | H(f) carries the full propagation phase $e^{-i 2\pi f r/c}$. A direct IFFT aligns arrivals at $t = r/c$. |
-| `'psif_envelope'` | RAM (mpiramS broadband, rams0.5 broadband, ramsurf1.5 broadband) | Each broadband path hands `TransferFunction.synthesize_time_series` the canonical quantity $\mathrm{conj}(\psi)\,e^{-i k_0 r}$ (modulo amplitude factors) so the downstream IFFT pipeline lands the peak at physical time $r/c_0$. The conjugation flips numpy's $e^{+i\omega t}$ IFFT convention to physics $e^{-i\omega t}$ per JKPS *Computational Ocean Acoustics* §8.2 eq. (8.1)–(8.4); the negative carrier is restored to $+i k_0 r$ by the `t_start` spectrum-shift in `field.py`. The three Collins-derived backends store DIFFERENT raw quantities, so each needs its own conversion: (1) **mpiramS** stores $\psi\,e^{+i(k_0 r+\pi/4)}/(4\pi)$ — carrier embedded — and applies `np.conj(psif) * 4π·e^{-iπ/4}/\sqrt{r}` (`ram.py:1673`). (2) **rams0.5** has `solve(... g0)` multiply by $g_0=e^{i k_0 \Delta r}$ at every range step (`rams0.5.f:830-831`), so its $u$ accumulates the full $e^{+i k_0 r}$ carrier — the broadband path applies just `np.conj(H)` (no extra carrier removal). (3) **ramsurf1.5** has no `g0` argument in `solve` (`ramsurf1.5.f:310`); the carrier is subtracted out of the matrix coefficients via the operator-function `g(x) = (1-νx)²·exp(α·log(1+x) + i σ (\sqrt{1+x}-1))` (`ramsurf1.5.f:564`), so $u$ is the bare envelope and the broadband path applies `np.conj(H) * exp(-i k_0(ω) r)`. After this convention bookkeeping all three backends align with Bellhop's geometric arrival to within ~20 ms on a Pekeris reference (real waveguide modal dispersion), with no calibration constants required. |
+| `'travelling_wave'` | Bellhop (broadband), Scooter, OASP, KrakenField (broadband), RAM (mpiramS / rams0.5 / ramsurf1.5 broadband) | $H(f)$ carries the engineering propagator $e^{-i 2\pi f r/c}$ already; a direct IFFT aligns arrivals at $t = r/c$. KrakenField negates `field.exe`'s output to match Scooter's polarity (the two solvers have leading prefactors that differ by an overall $-1$, not by a conjugation). RAM's three backends each store a different raw quantity, and the wrapper bakes the engineering carrier in before tagging: (1) **mpiramS** stores $\psi\,e^{+i(k_0 r+\pi/4)}/(4\pi)$ and applies $\mathrm{conj}(\psi_f)\cdot 4\pi\,e^{-i\pi/4}/\sqrt{r}$ (`ram.py:_run_broadband`). (2) **rams0.5** accumulates $u = \psi\,e^{+ik_0 r}$ via `solve(... g0)` multiplying by $g_0 = e^{i k_0 \Delta r}$ each range step (`rams0.5.f:830-831`); a single $\mathrm{conj}(\cdot)$ flips it to $\bar\psi\,e^{-ik_0 r}$. (3) **ramsurf1.5** has no `g0` (`ramsurf1.5.f:310`): the carrier is subtracted out of the matrix coefficients via $g(x) = (1-\nu x)^2 \exp(\alpha\,\log(1+x) + i\sigma(\sqrt{1+x}-1))$, so $u$ is the bare envelope and the wrapper applies $\mathrm{conj}(\cdot)\cdot e^{-i k_0 r}$. After this conversion all four broadband families agree with Scooter's wavenumber integration to within ~6 dB on a Pekeris reference, and their IFFT'd envelope peaks cluster within 100 ms — see `tests/test_cross_model_broadband.py`. |
 | `'time_domain_native'` | SPARC | Result data is real pressure $p(t)$ produced directly by the solver; no phase reconstruction needed. |
 
 Common access patterns:

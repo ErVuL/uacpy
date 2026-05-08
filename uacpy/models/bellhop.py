@@ -48,6 +48,7 @@ def delayandsum(
     time_window: Optional[float] = None,
     t_start: Optional[float] = None,
     c0: float = DEFAULT_SOUND_SPEED,
+    normalize_source: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convolve source waveform with channel impulse response from Bellhop arrivals.
@@ -64,7 +65,8 @@ def delayandsum(
         ``metadata['arrivals_by_receiver'][isd][ird][irr]``) with keys:
         amplitudes, phases, delays, delay_imag, n_arrivals.
     source_timeseries : ndarray
-        Source waveform (1-D).  Normalized internally to 0 dB.
+        Source waveform (1-D). Used as-is unless ``normalize_source`` is
+        set.
     sample_rate : float
         Sample rate in Hz.
     fc : float
@@ -77,6 +79,11 @@ def delayandsum(
         earliest arrival.
     c0 : float, optional
         Reference sound speed in m/s.
+    normalize_source : bool, optional
+        When ``True`` rescale the source waveform to peak ``|s| = 1``
+        before convolution. Default ``False`` so the absolute amplitude
+        calibration of the user-supplied waveform is preserved
+        end-to-end.
 
     Returns
     -------
@@ -100,11 +107,11 @@ def delayandsum(
     delays = rcv_arrivals['delays']
     delay_imag = rcv_arrivals['delay_imag']
 
-    # Normalize source waveform
     sts = np.asarray(source_timeseries, dtype=float)
-    sts_max = np.max(np.abs(sts))
-    if sts_max > 0:
-        sts = sts / sts_max
+    if normalize_source:
+        sts_max = np.max(np.abs(sts))
+        if sts_max > 0:
+            sts = sts / sts_max
     nsts = len(sts)
 
     # Compute analytic signal via Hilbert transform
@@ -126,16 +133,14 @@ def delayandsum(
     nrts = int(np.ceil(time_window * sample_rate))
     rts = np.zeros(nrts)
 
-    omega_c = 2.0 * np.pi * fc
-
     for ia in range(n_arr):
         phase_rad = np.deg2rad(phases_deg[ia])
         phase_factor = np.exp(1j * phase_rad)
 
-        if delay_imag[ia] != 0.0:
-            atten = np.exp(-delay_imag[ia] * omega_c / (2.0 * np.pi * fc))
-        else:
-            atten = 1.0
+        # Volume attenuation evaluated at fc (narrowband approximation).
+        # delay_imag is τ_i with α(fc)·r ≡ τ_i; H(f)→IFFT path applies the
+        # full ω-linear scaling.
+        atten = np.exp(-delay_imag[ia]) if delay_imag[ia] != 0.0 else 1.0
 
         scaled_amp = amps[ia] * atten
 

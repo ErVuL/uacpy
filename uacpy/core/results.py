@@ -55,35 +55,27 @@ from uacpy.core.constants import PRESSURE_FLOOR, DEFAULT_SOUND_SPEED
 class PhaseReference(str, Enum):
     """Phase convention of a complex transfer function ``H(f)``.
 
-    Each model writes its native phase convention into
-    :class:`TransferFunction`; downstream consumers (IFFT, time-series
-    synthesis) branch on this value when needed. Inherits from ``str`` so
+    Every uacpy wrapper normalises its native phase convention before
+    handing data to :class:`TransferFunction`; downstream consumers
+    (IFFT, time-series synthesis) only need to know whether the payload
+    is in the engineering travelling-wave form or whether it lives in
+    the time domain already. Inherits from ``str`` so
     ``ref == 'travelling_wave'`` works directly.
 
     Members
     -------
     TRAVELLING_WAVE
-        Receiver phase **includes** the propagator ``exp(-i k0 r)``. IFFT
-        directly yields the causal pulse arrival time — no carrier
-        re-injection needed. Used by Bellhop, Scooter, OASES OAST/OASP,
-        and KrakenField (which negates field.exe's polarity to match this
-        convention at the wrapper).
-    PSIF_ENVELOPE
-        RAM (mpiramS / Collins backends): the broadband payload is the
-        complex envelope ``ψ(r,z; f)`` with the carrier ``exp(+i k0 r)``
-        already factored out. The IFFT path multiplies by ``exp(+i k0 r)``
-        before transforming to recover the travelling-wave pulse.
+        ``H(f)`` carries the engineering propagator ``exp(-i k0 r)``;
+        ``2*Re[ifft(H)]`` lands the causal arrival at ``t = r/c0``.
+        Used by Bellhop, Scooter, OASES OAST/OASP, KrakenField, and RAM
+        (mpiramS / Collins backends; the wrapper bakes the carrier into
+        the data before tagging).
     TIME_DOMAIN_NATIVE
         SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
         already-time-domain trace; consumers that want a time series
         should take it from ``TimeSeriesField`` instead.
-
-    See Also
-    --------
-    _ifft_to_trace : honours these conventions.
     """
     TRAVELLING_WAVE = 'travelling_wave'
-    PSIF_ENVELOPE = 'psif_envelope'
     TIME_DOMAIN_NATIVE = 'time_domain_native'
 
 
@@ -1327,14 +1319,16 @@ def _ifft_to_trace(
     window: str,
     nfft: Optional[int],
     t_start: Optional[float],
+    sample_rate: Optional[float] = None,
 ) -> "TimeTrace":
     """IFFT one (depth, range) cell of a TransferFunction → TimeTrace.
 
-    Implements frequency-aware bin placement (each ``f_k`` lands at
-    ``round(f_k/df)`` rather than at index ``k``), complex spectrum
-    interpolation when the FFT bin spacing is finer than the data spacing
-    (suppresses periodic ghost echoes), and the ``psif_envelope``
-    re-modulation that lands the arrival at physical time ``r/c``.
+    Places each model frequency at bin ``round(f/df)`` (with df capped at
+    1 Hz for a ≥ 1-second window); when ``df`` is finer than the data
+    spacing, demodulates by ``r/c0`` so the spectrum can be interpolated
+    in baseband without ghost echoes, then re-modulates to land the
+    arrival at the requested ``t_start``. Always sizes ``nfft`` so the
+    largest frequency bin sits below Nyquist.
     """
     data = tf.data                                # (n_d, n_r, n_f)
     freqs = np.asarray(tf.frequencies, dtype=float)
@@ -1368,21 +1362,19 @@ def _ifft_to_trace(
     df_data = float(freqs[1] - freqs[0])
     df = min(df_data, 1.0)               # cap at 1 Hz for ≥ 1-second window
 
-    bin_indices = np.round(freqs / df).astype(int)
+    bin_indices = np.floor(freqs / df + 0.5).astype(int)
     max_bin = int(bin_indices[-1])
 
-    is_envelope = (tf.phase_reference == 'psif_envelope')
-
     if nfft is None:
-        if is_envelope and 'Nsam' in tf.metadata:
-            nfft_min = int(tf.metadata.get('Nsam', 4 * n_freq))
-        else:
-            nfft_min = 4 * n_freq
-        nfft = max(nfft_min, max_bin + 1)
-        nfft_pow2 = 1
-        while nfft_pow2 < nfft:
-            nfft_pow2 *= 2
-        nfft = nfft_pow2
+        nfft_min = max(int(tf.metadata.get('Nsam', 0)) or 0, 4 * n_freq)
+        # fs >= 2*fmax → nfft*df >= 2*max_bin*df, so nfft >= 2*max_bin+2
+        # so the highest populated bin sits strictly below Nyquist.
+        nfft_target = max(nfft_min, 2 * max_bin + 2)
+        if sample_rate is not None:
+            nfft_target = max(nfft_target, int(np.ceil(sample_rate / df)))
+        nfft = 1
+        while nfft < nfft_target:
+            nfft *= 2
 
     if window == 'hann':
         win = np.hanning(n_freq)
@@ -1403,12 +1395,14 @@ def _ifft_to_trace(
     if t_start is None:
         T_window = nfft * dt
         lead = min(0.5 * T_window, 0.25)
-        if is_envelope:
-            cmin = tf.metadata.get('cmin', tf.metadata.get('c0', DEFAULT_SOUND_SPEED))
-            t_start = max(0.0, actual_range / cmin - lead)
-        else:
-            c0 = tf.metadata.get('c0', DEFAULT_SOUND_SPEED)
-            t_start = max(0.0, actual_range / c0 - lead)
+        # Slowest mode (cmin) when a model knows it; otherwise reference
+        # speed c0; otherwise the package default. Anchors the IFFT
+        # window so the earliest arrival isn't clipped by the lead-in.
+        anchor_speed = float(tf.metadata.get(
+            'cmin',
+            tf.metadata.get('c0', DEFAULT_SOUND_SPEED),
+        ))
+        t_start = max(0.0, actual_range / anchor_speed - lead)
 
     spectrum = spectrum * win
     if source_spectrum is not None:
@@ -1469,12 +1463,16 @@ def _synthesize_time_series(
 ) -> "TimeSeriesField":
     """Convolve every grid cell of a TransferFunction with a source waveform.
 
-    Output shape: ``(n_d, n_r, n_t)``.
+    Output shape: ``(n_d, n_r, n_t)``. ``nfft`` is sized so the IFFT
+    sample rate equals ``sample_rate`` (rounded up to a power of two), so
+    the returned trace is on the same sampling grid as the source pulse.
     """
     wf = np.asarray(source_waveform, dtype=float).ravel()
     n_src = len(wf)
     if n_src < 2:
         raise ValueError("source_waveform must have at least 2 samples")
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
 
     src_fft = np.fft.rfft(wf)
     src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)
@@ -1493,6 +1491,7 @@ def _synthesize_time_series(
             tf, depth=float(depths[0]), range_m=float(ranges[0]),
             source_spectrum=source_spectrum,
             window=window, nfft=nfft, t_start=None,
+            sample_rate=sample_rate,
         )
         t_start = float(t0_trace.metadata['t_start'])
 
@@ -1504,6 +1503,7 @@ def _synthesize_time_series(
                 tf, depth=float(depths[di]), range_m=float(ranges[ri]),
                 source_spectrum=source_spectrum,
                 window=window, nfft=nfft, t_start=t_start,
+                sample_rate=sample_rate,
             )
             if out is None:
                 time_vec = tr.time
