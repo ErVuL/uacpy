@@ -67,7 +67,7 @@ class TestModalModelAgreement:
         # Check that we have modes
         assert len(k) > 0, "No modes computed"
 
-        # Check that Mode 1 is non-zero (this was the bug that was fixed)
+        # Mode 1 must have non-zero wavenumber.
         assert np.abs(k[0]) > 0.1, f"Mode 1 wavenumber is zero or near-zero: {k[0]}"
 
         # Count valid modes (non-zero with non-positive imaginary part)

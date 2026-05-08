@@ -7,7 +7,8 @@ import scipy.io
 
 
 def merge_shd_files(shd_files_in: List[Union[str, Path]],
-                    shd_file_out: Union[str, Path]) -> None:
+                    shd_file_out: Union[str, Path],
+                    verbose: bool = False) -> None:
     """
     Merge multiple broadband .shd files into a single output file.
 
@@ -76,8 +77,8 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
 
     num_files = len(shd_files_in)
 
-    # Load all input files and verify consistency
-    print(f"Loading {num_files} input files...")
+    if verbose:
+        print(f"Loading {num_files} input files...")
     shd_structs = []
     sizePressure = None
 
@@ -134,8 +135,8 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
         if PlotType != shd_structs[j]['PlotType']:
             raise ValueError(f"PlotType fields do not agree (file {j})")
 
-    # Collate all frequencies
-    print("Collating frequencies...")
+    if verbose:
+        print("Collating frequencies...")
     all_freqs = []
     for shd in shd_structs:
         all_freqs.extend(shd['freqVec'].tolist())
@@ -147,31 +148,32 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
     if len(unique_freqs) != len(freqVec):
         raise ValueError("Duplicate frequencies found in input files")
 
-    # Collate pressure fields
-    print("Collating pressure fields...")
-    num_freqs = len(freqVec)
+    if verbose:
+        print("Collating pressure fields...")
+    n_frequencies = len(freqVec)
 
     # Create output pressure array
     new_shape = list(sizePressure)
-    new_shape[0] = num_freqs
+    new_shape[0] = n_frequencies
     pressure = np.zeros(new_shape, dtype=complex)
 
     # Fill pressure array
     j_pnt = 0
     for shd in shd_structs:
-        n_freq = len(shd['freqVec'])
-        pressure[j_pnt:j_pnt+n_freq, ...] = shd['pressure']
-        j_pnt += n_freq
+        n_frequencies = len(shd['freqVec'])
+        pressure[j_pnt:j_pnt+n_frequencies, ...] = shd['pressure']
+        j_pnt += n_frequencies
 
     # Sort by frequency if needed
     sort_idx = np.argsort(freqVec)
     if not np.array_equal(sort_idx, np.arange(len(sort_idx))):
-        print("Reordering by frequency...")
+        if verbose:
+            print("Reordering by frequency...")
         freqVec = freqVec[sort_idx]
         pressure = pressure[sort_idx, ...]
 
-    # Save merged file
-    print(f"Writing merged file to {shd_file_out}...")
+    if verbose:
+        print(f"Writing merged file to {shd_file_out}...")
 
     save_dict = {
         'PlotTitle': PlotTitle,
@@ -185,4 +187,5 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
 
     scipy.io.savemat(str(shd_file_out), save_dict, format='5')
 
-    print(f"✅ Merged {num_files} files ({num_freqs} frequencies total)")
+    if verbose:
+        print(f"Merged {num_files} files ({n_frequencies} frequencies total)")

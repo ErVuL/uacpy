@@ -13,6 +13,20 @@ from typing import Union, List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
 
+def _sanitize_title(name: str) -> str:
+    """Strip newlines/control chars and escape single quotes in a Fortran
+    title field. Acoustics-Toolbox `.env` titles are quote-delimited and
+    column-sensitive; an unsanitized name with a newline silently corrupts
+    the file and the binary parses garbage downstream.
+    """
+    if name is None:
+        return 'unnamed'
+    s = str(name)
+    s = ''.join(ch if (ord(ch) >= 32 and ch != '\x7f') else ' ' for ch in s)
+    s = s.replace("'", "''")
+    return s.strip() or 'unnamed'
+
+
 @dataclass
 class SedimentLayer:
     """
@@ -1032,7 +1046,7 @@ class Environment:
         *,
         name: str = 'unnamed',
     ):
-        self.name = name
+        self.name = _sanitize_title(name)
         self.depth = float(depth)
         self.volume_attenuation = volume_attenuation
 

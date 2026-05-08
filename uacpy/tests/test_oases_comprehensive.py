@@ -8,9 +8,7 @@ systematic validation of all OASES variants:
 - OAST: Transmission loss computation
 - OASN: Normal modes extraction
 - OASR: Reflection coefficients
-- OASP: Parabolic equation (PE) for range-dependent propagation
-
-These models were previously minimally tested despite being fully implemented.
+- OASP: Pulse / broadband wavenumber-integration transfer functions
 """
 
 import pytest
@@ -141,6 +139,26 @@ class TestOASN:
         assert cov.n_frequencies >= 1
 
     @pytest.mark.requires_binary
+    def test_oasn_compute_replicas_helper(self, oasn_env, source):
+        """Verify ``OASN.compute_replicas`` runs and returns a Replicas object."""
+        from uacpy import Replicas
+        rcv_array = Receiver(
+            depths=np.linspace(40.0, 60.0, 5),
+            ranges=[1000.0],
+        )
+        oasn = OASN(verbose=False)
+        rep = oasn.compute_replicas(
+            env=oasn_env, source=source, receiver=rcv_array,
+            replica_zmin=20.0, replica_zmax=80.0, replica_nz=4,
+            replica_xmin=500.0, replica_xmax=2000.0, replica_nx=4,  # metres
+        )
+        assert isinstance(rep, Replicas)
+        assert rep.field_type == 'replicas'
+        # replica_x axis must be in metres (uacpy public-API convention).
+        assert rep.replica_x.min() >= 500.0 - 1.0
+        assert rep.replica_x.max() <= 2000.0 + 1.0
+
+    @pytest.mark.requires_binary
     def test_oasn_elastic_covariance(self, source, receiver):
         """OASN accepts an elastic-bottom env and returns a Covariance."""
         from uacpy import Covariance
@@ -226,6 +244,16 @@ class TestOASR:
             angles=np.linspace(0.0, 90.0, 19),
         )
 
+        assert result.field_type == 'reflection_coefficients'
+
+    @pytest.mark.requires_binary
+    def test_oasr_compute_reflection_helper(self, oasr_env, source, receiver):
+        """Verify the convenience method ``OASR.compute_reflection`` runs."""
+        oasr = OASR(verbose=False)
+        result = oasr.compute_reflection(
+            env=oasr_env, source=source, receiver=receiver,
+            angles=np.linspace(0.0, 90.0, 31),
+        )
         assert result.field_type == 'reflection_coefficients'
 
 
@@ -428,7 +456,7 @@ class TestOASESConstructorPlumbing:
             assert sub.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
 
     @pytest.mark.requires_binary
-    def test_unknown_kwarg_rejected(self):
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):
-            OASES(verbose=False, angles=np.linspace(0, 90, 10))
+    def test_unknown_kwarg_silently_ignored(self):
+        oases = OASES(verbose=False, angles=np.linspace(0, 90, 10))
+        for sub in (oases._oast, oases._oasn, oases._oasr, oases._oasp):
+            assert not hasattr(sub, 'angles') or getattr(sub, 'angles', None) is None

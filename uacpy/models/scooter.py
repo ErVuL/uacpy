@@ -7,10 +7,9 @@ TL field via the in-tree Python Hankel transform in
 :mod:`uacpy.io.grn_reader`. Supports coherent TL, broadband ``H(f)``,
 and broadband time-series output.
 
-The upstream Acoustic Toolbox discontinued the Fortran ``fields.exe``
-post-processor in 2020; ``install.sh`` no longer builds it. The
-``use_fields_exe`` constructor flag is retained for legacy installs that
-have it on disk but defaults to ``False``.
+The ``use_fields_exe`` constructor flag opts into a local ``fields.exe``
+binary if present; the in-tree Python Hankel transform is the default
+path and the only one ``install.sh`` provisions.
 """
 
 import shutil
@@ -19,7 +18,9 @@ from typing import Optional
 
 import numpy as np
 
-from uacpy.core.exceptions import ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -129,13 +130,12 @@ class Scooter(PropagationModel):
             ``fields.f90:82-90``.
         use_fields_exe : bool, optional
             Default ``False`` — uses the in-tree Python Hankel transform
-            in :mod:`uacpy.io.grn_reader`. The upstream Acoustic Toolbox
-            discontinued ``fields.exe`` in 2020 and ``install.sh`` no
-            longer builds it; setting ``True`` is supported for legacy
-            installs that have it on disk and silently falls back to
-            the Python transform otherwise. Broadband runs (BROADBAND /
-            TIME_SERIES) always use the Python transform regardless
-            (``fields.exe`` is single-frequency only).
+            in :mod:`uacpy.io.grn_reader`. Set ``True`` to use a local
+            ``fields.exe`` binary if one is on disk; the wrapper silently
+            falls back to the Python transform when it is not. Broadband
+            runs (BROADBAND / TIME_SERIES) always use the Python
+            transform regardless (``fields.exe`` is single-frequency
+            only).
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -153,14 +153,14 @@ class Scooter(PropagationModel):
         self.bio_layers = bio_layers
 
         if source_type not in ('R', 'X'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid source_type '{source_type}'. Use 'R' (cylindrical) or 'X' (Cartesian)."
             )
         self.source_type = source_type
 
         spectrum_map = {'positive': 'P', 'negative': 'N', 'both': 'B'}
         if spectrum not in spectrum_map:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid spectrum '{spectrum}'. Use 'positive', 'negative', or 'both'."
             )
         self.spectrum = spectrum
@@ -169,7 +169,7 @@ class Scooter(PropagationModel):
         self.stabilizing_attenuation_off = bool(stabilizing_attenuation_off)
 
         if field_interp not in ('O', 'P'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid field_interp '{field_interp}'. Use 'O' (polynomial) "
                 f"or 'P' (Pade) — see fields.f90:82-90."
             )
@@ -216,12 +216,9 @@ class Scooter(PropagationModel):
         """
         Locate ``fields.exe`` (Scooter post-processor); cache the result.
 
-        Returns ``None`` if the binary cannot be found. Unlike ``scooter.exe``
-        the ``fields.exe`` post-processor is optional — the in-tree Python
-        Hankel transform in :mod:`uacpy.io.grn_reader` is used as a fallback.
-        Upstream Acoustics-Toolbox has flagged Fortran ``fields.exe`` as
-        deprecated (see ``Scooter/Makefile`` header), so many installations
-        simply don't ship it.
+        Returns ``None`` if the binary cannot be found. ``fields.exe`` is
+        optional — the in-tree Python Hankel transform in
+        :mod:`uacpy.io.grn_reader` is the fallback when it is missing.
         """
         if self._fields_executable is None:
             try:
@@ -371,7 +368,13 @@ class Scooter(PropagationModel):
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
                     self._log(f"Green's function file not found: {grn_file}", level='error')
-                    raise FileNotFoundError(f"Green's function file not found: {grn_file}")
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"Scooter did not produce {grn_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
+                    )
 
                 if use_fields:
                     # Write FLP and invoke fields.exe -> .shd
@@ -384,9 +387,12 @@ class Scooter(PropagationModel):
 
                     shd_file = fm.get_path(f'{base_name}.shd')
                     if not shd_file.exists():
-                        raise FileNotFoundError(
-                            f"fields.exe did not produce {shd_file}; "
-                            f"check {fm.work_dir}/fields.prt for diagnostics."
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=(
+                                f"fields.exe did not produce {shd_file}; "
+                                f"check {fm.work_dir}/fields.prt for diagnostics."
+                            ),
                         )
                     self._log("Reading SHD file...")
                     result = read_shd_file(shd_file)
@@ -406,7 +412,11 @@ class Scooter(PropagationModel):
 
                     if grn_data['nk'] == 0:
                         self._log("Scooter produced empty Green's function (nk=0)", level='error')
-                        raise RuntimeError("Scooter produced empty Green's function (nk=0)")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0,
+                            stdout=None,
+                            stderr="Scooter produced empty Green's function (nk=0)",
+                        )
 
                     if grn_data['nsd'] > 1:
                         self._log(
@@ -645,10 +655,14 @@ class Scooter(PropagationModel):
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared ``_run_subprocess`` helper."""
-        result = self._run_subprocess(
-            [self.executable, base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [self.executable, base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"Scooter output:\n{result.stdout}", level='debug')
 
@@ -656,11 +670,14 @@ class Scooter(PropagationModel):
         """Execute ``fields.exe`` to transform ``<base>.grn`` -> ``<base>.shd``."""
         fields_exe = self._get_fields_executable()
         if fields_exe is None:
-            # Caller is expected to check availability before invoking this.
             raise ExecutableNotFoundError(self.model_name, 'fields.exe')
-        result = self._run_subprocess(
-            [fields_exe, base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [fields_exe, base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, 'fields')
+            raise
         if self.verbose and result.stdout:
             self._log(f"fields.exe output:\n{result.stdout}", level='debug')

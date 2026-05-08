@@ -19,7 +19,10 @@ from uacpy.core.constants import (
     parse_ssp_type, parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
-from uacpy.core.exceptions import ModelExecutionError, UnsupportedFeatureError, ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
+)
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
@@ -28,7 +31,7 @@ from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
 # Pos 1: pulse shape (strictly validated in sparc.f90 SELECT CASE).
-_PULSE_TYPE_POS1 = set('PRASHNGFBM')
+_PULSE_TYPE_POS1 = set('PRASHNGFBMTC')
 # Pos 2: post-processing applied to the pulse samples.
 #   'H' = pre-envelope (|analytic signal|), 'Q' = Hilbert transform.
 #   Any other character (including ' ' or 'N') means "no transform".
@@ -62,17 +65,17 @@ def _validate_pulse_type(pulse_type: str) -> str:
         ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
     """
     if not isinstance(pulse_type, str):
-        raise ValueError(
+        raise ConfigurationError(
             f"pulse_type must be a string, got {type(pulse_type).__name__}"
         )
     if len(pulse_type) > 4:
-        raise ValueError(
+        raise ConfigurationError(
             f"pulse_type must be at most 4 characters, got {pulse_type!r}"
         )
     pulse_type = pulse_type.ljust(4)
 
     def _bad(pos, char, allowed):
-        return ValueError(
+        return ConfigurationError(
             f"Invalid pulse_type character {char!r} at position {pos} "
             f"(must be one of {sorted(allowed)!r}). "
             f"See Acoustics-Toolbox/Scooter/sparc.f90."
@@ -217,7 +220,7 @@ class SPARC(PropagationModel):
         self.n_mesh = n_mesh
         self.roughness = roughness
         if output_mode not in ('R', 'D', 'S'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid output mode '{output_mode}'. "
                 f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
             )
@@ -314,7 +317,7 @@ class SPARC(PropagationModel):
         """
         # Validate output_mode override if provided
         if output_mode is not _UNSET and output_mode not in ('R', 'D', 'S'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid output mode '{output_mode}'. "
                 f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
             )
@@ -327,7 +330,7 @@ class SPARC(PropagationModel):
             run_mode = RunMode.COHERENT_TL
 
         if source_waveform is not None or sample_rate is not None:
-            raise ValueError(
+            raise ConfigurationError(
                 "SPARC drives the source pulse via the constructor "
                 "``pulse_type`` argument, not via run() kwargs. Set "
                 "``SPARC(pulse_type=…)`` (e.g. 'PN+B' for a Hanning-windowed "
@@ -402,7 +405,10 @@ class SPARC(PropagationModel):
                     # Read output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                     rts_data = read_rts_file(rts_file)
 
@@ -462,7 +468,10 @@ class SPARC(PropagationModel):
                         rts_file = fm.get_path(f'{depth_base}.rts')
                         if not rts_file.exists():
                             self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                            raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                         rts_data = read_rts_file(rts_file)
                         if time_grid is None:
@@ -538,7 +547,10 @@ class SPARC(PropagationModel):
                     # Read vertical array output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                     rts_data = read_rts_file(rts_file)
                     # In vertical mode, 'ranges' in RTS file actually contains depths
@@ -566,7 +578,10 @@ class SPARC(PropagationModel):
                         rts_file = fm.get_path(f'{range_base}.rts')
                         if not rts_file.exists():
                             self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                            raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                         rts_data = read_rts_file(rts_file)
                         tl_single, _ = rts_to_tl(rts_data, freq, method='fft')
@@ -606,18 +621,23 @@ class SPARC(PropagationModel):
                 # Read Green's function file
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
-                    raise FileNotFoundError(
-                        f"GRN file not found: {grn_file}\n"
-                        "SPARC snapshot mode should produce a .grn file.\n"
-                        "Check SPARC output for errors."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"SPARC snapshot mode did not produce {grn_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
                     )
 
                 self._log("Reading snapshot Green's function and extracting source-freq TL...")
                 grn_data = read_grn_file(grn_file)
                 if not grn_data['is_sparc']:
-                    raise RuntimeError(
-                        "GRN title does not start with 'SPARC' — snapshot path "
-                        "expects a SPARC-produced file."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            "GRN title does not start with 'SPARC' — snapshot path "
+                            "expects a SPARC-produced file."
+                        ),
                     )
 
                 # Time-FFT along the snapshot's tout axis, pick the source
@@ -637,7 +657,7 @@ class SPARC(PropagationModel):
                 )
 
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     f"Invalid output mode '{self.output_mode}'. "
                     f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
                 )
@@ -682,7 +702,7 @@ class SPARC(PropagationModel):
         elif bottom_acoustic_type == 'rigid':
             bottom_type = BoundaryType.RIGID
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid bottom boundary type '{env.bottom.acoustic_type}' for SPARC. "
                 f"Only 'vacuum' and 'rigid' are supported."
             )
@@ -767,11 +787,11 @@ class SPARC(PropagationModel):
             # Pulse frequency band [f_min, f_max] (Hz).
             #
             # SPARC's work scales with Nk ≈ 1000 * Rmax_km * (k_max-k_min) /
-            # (2π). A ±2% band (old default) makes the pulse near-CW and
-            # the FFT at the analysis frequency picks up almost nothing. A
-            # 10× band (100-10000 Hz for a 1 kHz source) is tractable for
-            # small Rmax but blows Nk up to many-thousands for 10-20 km
-            # ranges, which routinely times out.
+            # (2π). A ±2% band makes the pulse near-CW and the FFT at the
+            # analysis frequency picks up almost nothing. A 10× band
+            # (100-10000 Hz for a 1 kHz source) is tractable for small Rmax
+            # but blows Nk up to many-thousands for 10-20 km ranges, which
+            # routinely times out.
             #
             # One-octave (freq/2 to freq*2) is the sweet spot: enough
             # bandwidth that the pulse retains structure, yet bounded Nk.

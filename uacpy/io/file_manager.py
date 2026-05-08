@@ -130,9 +130,15 @@ class FileManager:
         return self.work_dir / filename
 
     def cleanup_work_dir(self):
-        """Remove the working directory and all of its contents."""
+        """Remove the working directory and all of its contents.
+
+        Cleanup failures (stale NFS lock, Windows file-handle held by a
+        Fortran subprocess that hasn't reaped, etc.) are swallowed: a
+        failed cleanup must never mask the original ``run()`` exception
+        a caller is trying to surface.
+        """
         if self.work_dir is not None and self.work_dir.exists():
-            shutil.rmtree(self.work_dir)
+            shutil.rmtree(self.work_dir, ignore_errors=True)
             self.work_dir = None
             self._temp_dir = None
 

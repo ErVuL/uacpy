@@ -15,7 +15,7 @@ from typing import Optional, Union
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.io.boundary_io import (
+from uacpy.io.bathy_io import (
     write_bty_file,
     write_bty_long_format,
     write_ati_file,
@@ -331,7 +331,11 @@ def write_bellhop_env_file(
             ssp_data_extended = np.vstack([[z_min, first_c], ssp_data_extended])
 
         n_ssp = len(ssp_data_extended)
-        f.write(f"{n_ssp}  {z_min:.1f}  {z_max:.1f},\n")
+        # Bellhop reads this line as (NPts, Sigma, Depth) per
+        # ReadEnvironmentBell.f90:73 — Sigma is the top-boundary RMS
+        # roughness, NOT z_min. Always emit Sigma=0.0; altimetry crests
+        # are handled via the .ati file, not via this slot.
+        f.write(f"{n_ssp}  0.0  {z_max:.1f},\n")
 
         # Bellhop SSP format: z alphaR betaR rhoR alphaI betaI /
         # When top BC is elastic halfspace, Fortran READ keeps previous

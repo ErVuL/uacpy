@@ -1,5 +1,5 @@
 """
-Example 27: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM
+Example 18: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM
 ========================================================================
 
 Compares transmission loss from KrakenField in adiabatic and coupled mode
@@ -124,13 +124,13 @@ def main():
         plot_transmission_loss, plot_rd_layered_bottom, plot_tl_difference,
     )
 
-    print("Example 27: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
+    print("Example 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
     print("=" * 65)
 
     source = uacpy.Source(frequencies=100, depths=30)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 195, 30),
-        ranges=np.linspace(1000, 6000, 40),
+        ranges=np.linspace(1000, 6000, 300),
     )
 
     bathy_ranges_m = np.array([0, 5000, 10000, 15000, 20000.0])
@@ -276,7 +276,7 @@ def main():
                 ax.set_ylabel('')
 
     fig.suptitle(
-        'Example 27: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM\n'
+        'Example 18: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM\n'
         f'f={source.frequencies[0]:.0f} Hz, z_s={source.depths[0]:.0f} m, '
         f'bathy {bathy_depths_m[0]:.0f}-{bathy_depths_m[-1]:.0f} m',
         fontsize=13, fontweight='bold', y=0.995)

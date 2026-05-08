@@ -220,14 +220,32 @@ writers that need the *resolved* value before the context is entered.
 (Bellhop, Scooter, KrakenField, OASP, RAM) accepts `source_waveform=` and
 `sample_rate=` as **explicit keyword arguments on `run()`** — same name,
 same role across models. Models with a broadband H(f) path also accept
-`frequencies=` for an explicit override of `source.frequency`. SPARC
+`frequencies=` for an explicit override of `source.frequencies`. SPARC
 computes p(t) from its native source pulse and ignores both.
 
-**Typo guard.** Any kwarg passed to `run()` that doesn't match an
-explicit signature arg, a constructor attribute, or a documented writer
-pass-through triggers a `UserWarning` via `self._warn_unknown_kwargs`.
-A typo like `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`)
-is reported instead of being silently dropped.
+**Irrelevant kwargs are silently ignored.** Any kwarg passed to `run()`
+that doesn't match an explicit signature arg, a constructor attribute,
+or a documented writer pass-through is dropped without a warning — same
+contract as Python's standard `dict()` constructor with an unknown
+keyword. A typo like `Bellhop().run(env, src, rcv, n_beam=10)` (missing
+the `s`) silently uses the default `n_beams`.
+
+**Typed exceptions.** Constructor and `run()` failures raise:
+
+| Exception | When |
+|---|---|
+| `ConfigurationError` | bad input parameters (out-of-range, wrong type, mode/freq mismatch) |
+| `UnsupportedFeatureError` | model can't honour a requested `RunMode` or `Environment` axis |
+| `ExecutableNotFoundError` | Fortran/C binary missing at the resolved path |
+| `ModelExecutionError` | binary ran but failed (non-zero exit, empty output, truncated file). The captured `.prt` log tail is appended to the message for Acoustics-Toolbox models. |
+
+All four inherit from `uacpy.core.exceptions.UACPYError`; catch the base
+class to handle "anything went wrong with this model" uniformly.
+
+**Thread safety.** Model instances mutate `self.file_manager` per
+`run()` and are **not safe to share across threads**. For parameter
+sweeps, instantiate one model per worker (or use `concurrent.futures`
+with `ProcessPoolExecutor`).
 
 ---
 
@@ -292,9 +310,10 @@ env = uacpy.Environment(
 ```
 
 The class exposes `at_range(r_m)` (1-D slice), `collapse(method)` (used
-by the per-feature collapse pipeline), `to_pairs()` (legacy `(N, 2)` view
-of the range-0 column), and `extend_to(z_max)` (constant-extrapolation
-to a deeper bathymetry level).
+by the per-feature collapse pipeline), `to_pairs()` (`(N, 2)` view of
+the range-0 column for callers expecting the flat depth/speed layout),
+and `extend_to(z_max)` (constant-extrapolation to a deeper bathymetry
+level).
 
 ### BoundaryProperties (surface or bottom)
 
@@ -446,11 +465,11 @@ env.has_range_dependent_bottom()
 env.has_layered_bottom()
 env.has_range_dependent_layered_bottom()
 
-# Per-feature collapse is the canonical path now: pass *_collapse_method
+# Per-feature collapse is the canonical path: pass *_collapse_method
 # kwargs to the model constructor (see §2). The whole-env shortcut below
-# still exists but only collapses bathymetry + truncates SSP — it does
-# not honour the per-feature methods.
-env_ri = env.get_range_independent_approximation(method='median')  # legacy
+# only collapses bathymetry + truncates SSP — it does not honour the
+# per-feature methods.
+env_ri = env.get_range_independent_approximation(method='median')
 ```
 
 ---
@@ -461,17 +480,17 @@ env_ri = env.get_range_independent_approximation(method='median')  # legacy
 
 ```python
 uacpy.Source(
-    depth,                      # float or array — positive, down from surface (m)
-    frequency,                  # float or array — Hz (multiple values give a broadband sweep)
+    depths,                     # float or array — positive, down from surface (m)
+    frequencies,                # float or array — Hz (multiple values give a broadband sweep)
     angles=None,                # launch angles (deg). Default: linspace(-80, 80, 361)
     source_type='point',        # 'point' | 'line'
 )
 ```
 
-For broadband simulations, pass a frequency vector (`frequency=np.linspace(50, 250, 41)`)
+For broadband simulations, pass a frequency vector (`frequencies=np.linspace(50, 250, 41)`)
 rather than a separate bandwidth parameter.
 
-Useful properties: `source.n_sources`, `source.n_frequencies`,
+Useful properties: `source.n_sources`, `source.n_frequenciesuencies`,
 `source.n_angles`.
 
 ### Receiver
@@ -686,13 +705,12 @@ receiver grid; call `tf.to_time_trace(depth=, range_m=)` to extract a
 
 **Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but its
 constructor raises `NotImplementedError`. Partial 3D support is already
-in-tree (`write_bty_3d` in `io/bty_writer.py`; `read_boundary_3d` and 3D
-`.shd` parsing in `io/output_reader.py`), but **the .env writer is
-hardcoded to 2D** (`io/bellhop_writer.py:484-487`, position 6 of TopOpt
-forced to `'2'`). Wiring up Bellhop3D therefore requires both finishing
-the .env writer (NSx/NSy source grid, Ntheta/Nbeta bearing fan, 3D SSP)
-and adding 3D arrivals parsing
-(`output_reader.py:413` raises `NotImplementedError`). See
+in-tree (`write_bty_3d` and `read_boundary_3d` in `io/bathy_io.py`),
+but the `.env` writer is 2D-only and 3D arrivals parsing is not
+implemented (`io/oalib_reader.py:769` raises `NotImplementedError`).
+Wiring up Bellhop3D therefore requires finishing the `.env` writer
+(NSx/NSy source grid, Ntheta/Nbeta bearing fan, 3D SSP) and the 3D
+arrivals reader. See
 `third_party/Acoustics-Toolbox/doc/bellhop3d.htm` for the file format.
 
 **Bellhop + BOUNCE for elastic bottoms.** When the bottom has significant
@@ -830,11 +848,9 @@ sc = Scooter(
                                         # (the stabiliser prevents pole-on-contour blow-ups)
     field_interp='O',               # FLP Option(3): 'O' polynomial (default) | 'P' Padé
     use_fields_exe=False,           # default: in-tree Python Hankel on .grn.
-                                     # Upstream Acoustic Toolbox discontinued
-                                     # fields.exe in 2020; install.sh no longer
-                                     # builds it. Set True to opt into a legacy
-                                     # local install (silently falls back to
-                                     # Python if the binary is missing).
+                                     # Set True to use a local fields.exe
+                                     # binary if present (silently falls back
+                                     # to the Python transform when missing).
     use_tmpfs=False, verbose=False, work_dir=None,
 )
 field = sc.run(env, source, receiver)
@@ -993,7 +1009,7 @@ sp = SPARC(
     c_low=None, c_high=None,
     n_mesh=0, roughness=0.0,
     output_mode='R',                # 'R' horizontal array | 'D' vertical array | 'S' snapshot
-    pulse_type='PN+B',
+    pulse_type='PN+B',              # 4-character code (see below)
     n_t_out=501,
     t_max=None,                     # None auto: 2.5 × travel time
     t_start=-0.1,
@@ -1021,6 +1037,23 @@ as ``TransferFunction.synthesize_time_series``:
 
 There is no run-time receiver-picking kwarg — the output covers every
 receiver in the supplied grid.
+
+#### `pulse_type` 4-character code
+
+SPARC's source pulse is selected by a 4-character string per
+`tslib/sourceMod.f90` and `cans.f90`. uacpy validates the alphabet
+column-by-column and pads to 4 characters with spaces.
+
+| pos | meaning | accepted letters |
+|---|---|---|
+| 1 | Pulse shape | `P` Pekeris, `R` Ricker, `A` analytic, `S` sinc, `H` Hanning, `N` N-wave, `G` Gaussian, `F` flat, `B` Berlage, `M` "miracle" wave, `T` tone, `C` sinc-windowed |
+| 2 | Post-process | `' '` none, `N` none, `H` pre-envelope (\|analytic signal\|), `Q` Hilbert transform |
+| 3 | Sign | `' '` keep, `+` keep, `-` invert |
+| 4 | Window | `' '` none, `N` none, `L` Tukey-low, `H` Tukey-high, `B` Blackman |
+
+Common combinations: `'PN+B'` (Pekeris pulse, no post-process, positive
+sign, Blackman window), `'RN+ '` (Ricker, plain), `'GH-L'` (Gaussian
+analytic-envelope, inverted, Tukey-low window).
 
 #### `output_mode='S'` (snapshot) caveat
 
@@ -1088,8 +1121,8 @@ cov = oasn.compute_covariance(env, source, receiver)   # Covariance result
 # Replicas need Block-X grid kwargs (replica_zmin/zmax/nz, …):
 rep = oasn.compute_replicas(
     env, source, receiver,
-    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
-    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+    replica_zmin=10.0,  replica_zmax=90.0,    replica_nz=20,   # depths in m
+    replica_xmin=500.0, replica_xmax=10000.0, replica_nx=40,   # ranges in m
 )                                                       # Replicas result
 
 # Reflection coefficients — RunMode.REFLECTION
@@ -1101,10 +1134,10 @@ oasr = OASR(
     francois_garrison_params=None, bio_layers=None,
 )
 refl = oasr.run(env, source, receiver)     # ReflectionCoefficient
-# Broadband sweep: pass freq_min / freq_max / n_frequencies via kwargs:
+# Broadband sweep: pass freq_min / freq_max / n_frequenciesuencies via kwargs:
 broad = oasr.run(env, source, receiver,
-                 freq_min=50.0, freq_max=200.0, n_frequencies=16)
-assert broad.is_broadband                           # R/phi shape (n_angles, n_freq)
+                 freq_min=50.0, freq_max=200.0, n_frequenciesuencies=16)
+assert broad.is_broadband                           # R/phi shape (n_angles, n_frequencies)
 
 # Broadband / pulse transfer function (NOT parabolic-equation — see note)
 oasp = OASP(
@@ -1194,7 +1227,7 @@ Result                              identification + metadata
 ├── Modes                           Kraken normal modes (k, phi, z)
 ├── Covariance                      OASN spatial covariance C(f, i, j)
 ├── Replicas                        OASN MFP replica fields (n_f, n_z, n_x, n_y, n_rcv)
-└── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_freq)
+└── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_frequencies)
 ```
 
 Every ``Result`` carries a ``tag(model=…, backend=…, source_depths=…,
@@ -1313,7 +1346,7 @@ Every model populates these on every Result:
 | `model` | `str` | Wrapper class name (`'Bellhop'`, `'KrakenField'`, `'RAM'`, …). |
 | `backend` | `str` | Concrete binary that actually ran (`'bellhop'`, `'kraken.exe'`, `'field.exe'`, `'mpiramS'`, `'rams0.5'`, `'ramsurf1.5'`, `'oasp'`, …). When the wrapper is not a dispatcher, `backend == model` (lower-cased). |
 | `source_depths` | `ndarray` | Every source depth in the run, even if a single scalar was passed in. |
-| `frequency` *or* `frequencies` | `float` / `ndarray` | Single (centre) frequency for narrowband fields; vector for broadband. |
+| `frequencies` | `ndarray` | Always 1-D, plural — even single-frequency results store a 1-element array. Use `result.f0` for the convenience scalar. |
 | `phase_reference` | `str`, optional | Describes the phase convention of complex H(f) outputs — see below. |
 
 ### Phase convention (`TransferFunction.phase_reference`)
@@ -1358,18 +1391,18 @@ modes.depths                     # depth grid
 
 # OASN spatial covariance — Covariance Result.
 cov = oasn.compute_covariance(env, source, receiver)
-cov.covariance                   # shape (n_freq, n_rcv, n_rcv) complex
-cov.frequencies                  # (n_freq,) Hz
+cov.covariance                   # shape (n_frequencies, n_rcv, n_rcv) complex
+cov.frequencies                  # (n_frequencies,) Hz
 cov.receiver_positions           # (n_rcv, 3) (x, y, z) in metres
 
 # OASN matched-field replicas — Replicas Result.
 rep = oasn.compute_replicas(
     env, source, receiver,
-    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
-    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+    replica_zmin=10.0,  replica_zmax=90.0,    replica_nz=20,   # depths in m
+    replica_xmin=500.0, replica_xmax=10000.0, replica_nx=40,   # ranges in m
 )
-rep.replicas                     # shape (n_freq, n_z, n_x, n_y, n_rcv) complex
-rep.replica_z, rep.replica_x, rep.replica_y
+rep.replicas                     # shape (n_frequencies, n_z, n_x, n_y, n_rcv) complex
+rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)
@@ -1399,7 +1432,7 @@ ts.time         # (n_t,) seconds
 ts.fs           # sample rate, Hz
 trace = ts.get_trace(depth=50.0, range_m=1000.0)   # → TimeTrace
 freqs, X = ts.get_spectrum()                       # rfft along time axis
-                                                    # X shape (n_d, n_r, n_freq)
+                                                    # X shape (n_d, n_r, n_frequencies)
 ```
 
 There is no separate "point" receiver type. To get a single-position
@@ -1698,7 +1731,10 @@ s = sig.ricker_wavelet(time=t, F=500.0)
 s = sig.bpsk_modulate(s_bipolar=bits, fc=12000.0, fs=48000.0,
                       chips_per_sec=3000.0)
 
-# Bandlimited Gaussian noise centred at fc with given bandwidth
+# Bandlimited Gaussian noise centred at fc with given bandwidth.
+# Returns a unit-RMS realisation (np.std(n) == 1) — multiply by
+# √(BW · 10^(L_PSD/10)) to hit a target one-sided PSD level L_PSD
+# (dB re Pa²/Hz). ``add_noise`` does that scaling automatically.
 n = sig.make_bandlimited_noise(fc=1000.0, bandwidth=200.0,
                                duration=1.0, sample_rate=48000)
 
@@ -1728,7 +1764,7 @@ y = sig.add_noise(timeseries, sample_rate=fs,
                   fc=1000.0, bandwidth=200.0)
 
 # Fourier-synthesize a time series from a frequency-domain pressure response.
-# `pressure_freq` shape (..., n_freqs); `freq_vec` is the frequency axis (Hz).
+# `pressure_freq` shape (..., n_frequencies); `freq_vec` is the frequency axis (Hz).
 # `source_spectrum` lets you weight by an arbitrary source spectrum; Tstart
 # shifts the time origin. Returns (time, signal).
 t, s = sig.fourier_synthesis(pressure_freq, freq_vec,

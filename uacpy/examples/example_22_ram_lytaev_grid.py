@@ -1,5 +1,5 @@
 """
-Example 33: RAM Padé-error grid optimizer (Lytaev 2023)
+Example 22: RAM Padé-error grid optimizer (Lytaev 2023)
 ========================================================
 
 Compares the two grid-selection modes of the ``RAM`` wrapper on a

@@ -801,7 +801,7 @@ def _read_oasp_trf_ascii(filepath: Path) -> Dict:
         f"ASCII TRF reader not implemented for {filepath}. "
         "OASES must be run with binary (Fortran-unformatted) TRF output — "
         "that is the default; do not pass any ASCII conversion option. "
-        "If you have a mixed-format legacy file, use the binary reader."
+        "ASCII TRF payload parsing is not implemented; pass a binary TRF file."
     )
 
 

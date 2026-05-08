@@ -17,7 +17,7 @@ Merklinger, H. M. (1979). *JASA* 65(4), 949–957.
 Torres, F. & Costa, P. (2019). *J. Mar. Sci. Eng.* 7(11), 392.
 Nichols, S. M. & Bradley, D. L. (2016). *JASA* 139(4), EL114.
 """
-import numpy as _np
+import numpy as np
 import matplotlib.pyplot as plt
 
 
@@ -59,15 +59,15 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
 
     # This all breaks down if u == 0 so account for that
     if u == 0:
-        NL = _np.zeros_like(f)
+        NL = np.zeros_like(f)
     else:
         n2 = f.size
-        f = _np.array(f).flatten()  # Make sure f is a 1D array
+        f = np.array(f).flatten()  # Make sure f is a 1D array
         if band_integrate:
-            f2 = _np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
+            f2 = np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
             df = (f2[2:] - f2[:-2]) / 2
         else:
-            df = _np.ones_like(f)
+            df = np.ones_like(f)
 
         # Bookkeeping:
         # Some constants
@@ -75,8 +75,8 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
         s1w    = 1.5   # Constant in wind calcs
         s2w    = -5.0  # Constant in wind calc
         a      = -25   # Curve melding exponent
-        slope  = s2w * (0.1 / _np.log10(2))  # Slope at high freq
-        NL     = _np.zeros_like(f)
+        slope  = s2w * (0.1 / np.log10(2))  # Slope at high freq
+        NL     = np.zeros_like(f)
 
         # Do the wind part for f <= 2000 Hz
         if water_depth == 'shallow':
@@ -88,25 +88,25 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
 
         i_wind = f <= f_wind
         # so it doesn't crash if only f > 2000 are entered (arbitrary fallback):
-        f_temp = f[i_wind] if _np.any(i_wind) else _np.array([2000])
+        f_temp = f[i_wind] if np.any(i_wind) else np.array([2000])
 
-        # These confusing letters were taken directly from the old code
-        f0w             = 770 - 100 * _np.log10(u)
-        L0w             = cst + 20 * _np.log10(u) - 17 * _np.log10(f0w / 770)
-        L1w             = L0w + (s1w / _np.log10(2)) * _np.log10(f_temp / f0w)
-        L2w             = L0w + (s2w / _np.log10(2)) * _np.log10(f_temp / f0w)
+        # Variable letters mirror the original Wenz/Coppens MATLAB script.
+        f0w             = 770 - 100 * np.log10(u)
+        L0w             = cst + 20 * np.log10(u) - 17 * np.log10(f0w / 770)
+        L1w             = L0w + (s1w / np.log10(2)) * np.log10(f_temp / f0w)
+        L2w             = L0w + (s2w / np.log10(2)) * np.log10(f_temp / f0w)
         Lw              = L1w * (1 + (L1w / L2w) ** (-a)) ** (1 / a)
         temp_noise_dist = 10 ** (Lw / 10)
 
-        if _np.any(i_wind):
+        if np.any(i_wind):
             NL[i_wind] = temp_noise_dist * df[i_wind]
 
         # Meld with a sensible line at freqs greater than 2000 Hz
-        if _np.any(~i_wind):
+        if np.any(~i_wind):
             prop_const  = temp_noise_dist[-1] / f_temp[-1] ** slope
             NL[~i_wind] = prop_const * f[~i_wind] ** slope * df[~i_wind]
 
-        NL = 10 * _np.log10(NL)
+        NL = 10 * np.log10(NL)
 
         if n2 != 1:
             NL = NL.reshape((n2,))
@@ -203,7 +203,7 @@ class WenzNoise:
                 f"got {rain_rate!r}"
             )
 
-        self.frequencies    = _np.asarray(frequencies, dtype=float).flatten()
+        self.frequencies    = np.asarray(frequencies, dtype=float).flatten()
         self.wind_speed     = float(wind_speed)
         self.rain_rate      = rain_rate
         self.water_depth    = water_depth
@@ -212,7 +212,7 @@ class WenzNoise:
         f = self.frequencies
 
         # Thermal (Mellen 1952) — deep-sea molecular contribution.
-        thermal = -75.0 + 20.0 * _np.log10(f)
+        thermal = -75.0 + 20.0 * np.log10(f)
         thermal[thermal <= 0] = 1
 
         # Wind (Merklinger 1979 + Piggott 1964 shallow correction).
@@ -224,16 +224,16 @@ class WenzNoise:
         c1 = 30 if water_depth == 'deep' else 65
         c2 = _SHIPPING_C2[shipping_level]
         if shipping_level != 'no':
-            shipping = 76 - 20 * (_np.log10(f) - _np.log10(c1)) ** 2 + 5 * (c2 - 4)
+            shipping = 76 - 20 * (np.log10(f) - np.log10(c1)) ** 2 + 5 * (c2 - 4)
             shipping[shipping <= 0] = 1
         else:
-            shipping = _np.zeros_like(f)
+            shipping = np.zeros_like(f)
 
         # Turbulence (Nichols & Bradley 2016 — same coefficients as the
         # MATLAB ``calc_noise_level.m`` appendix in WenzCurves.pdf p.12).
         # NB: the prose in WenzCurves.pdf §2.1 quotes 107 − 33.2·log10(f)
         # instead; the appendix code uses the values below.
-        turbulence = 108.5 - 32.5 * _np.log10(f)
+        turbulence = 108.5 - 32.5 * np.log10(f)
         turbulence[turbulence <= 0] = 1
 
         # Rain (Torres & Costa 2019, valid up to ~7 kHz; melded above).
@@ -245,12 +245,12 @@ class WenzNoise:
             + _RAIN_R2[ir] * fk ** 2
             + _RAIN_R3[ir] * fk ** 3
         )
-        slope        = -5.0 * (0.1 / _np.log10(2))
-        idxs_below_7k = _np.where(f < 7000)[0]
+        slope        = -5.0 * (0.1 / np.log10(2))
+        idxs_below_7k = np.where(f < 7000)[0]
         if idxs_below_7k.size and (f > 7000).any():
             ind          = int(idxs_below_7k[-1])
             prop_const   = 10 ** (rain[ind] / 10) / f[ind] ** slope
-            rain[f > 7000] = 10 * _np.log10(prop_const * f[f > 7000] ** slope)
+            rain[f > 7000] = 10 * np.log10(prop_const * f[f > 7000] ** slope)
 
         self.thermal    = thermal
         self.wind       = wind
@@ -259,16 +259,16 @@ class WenzNoise:
         self.rain       = rain
         # Sum incoherent dB sources via logsumexp to avoid 10**(x/10) overflow
         # on very loud components (e.g. heavy rain at high frequency).
-        ln10 = _np.log(10.0)
-        stack = _np.stack([thermal, wind, shipping, turbulence, rain])
-        self.total = (10.0 / ln10) * _np.logaddexp.reduce(stack * (ln10 / 10.0), axis=0)
+        ln10 = np.log(10.0)
+        stack = np.stack([thermal, wind, shipping, turbulence, rain])
+        self.total = (10.0 / ln10) * np.logaddexp.reduce(stack * (ln10 / 10.0), axis=0)
 
     # ── Convenience ────────────────────────────────────────────────────
 
     @property
     def components(self):
         """``(N, 6)`` ndarray with columns ``[total, shipping, wind, rain, thermal, turbulence]``."""
-        return _np.column_stack(
+        return np.column_stack(
             (self.total, self.shipping, self.wind,
              self.rain, self.thermal, self.turbulence)
         )
@@ -287,7 +287,7 @@ class WenzNoise:
 
     def __repr__(self):
         return (
-            f"WenzNoise(n_freq={self.frequencies.size}, "
+            f"WenzNoise(n_frequencies={self.frequencies.size}, "
             f"wind={self.wind_speed:g} kn, "
             f"depth={self.water_depth!r}, "
             f"shipping={self.shipping_level!r}, "
@@ -360,7 +360,7 @@ class WenzNoise:
 
 
 if __name__ == '__main__':
-    f = _np.linspace(1.0, 1e5, int(1e5 - 1))
+    f = np.linspace(1.0, 1e5, int(1e5 - 1))
     wenz = WenzNoise(
         f, wind_speed=24,
         water_depth='deep', shipping_level='high', rain_rate='heavy',

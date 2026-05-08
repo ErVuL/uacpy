@@ -26,140 +26,44 @@ from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
 
 
 def read_shd_file(filepath: Union[str, Path]) -> TLField:
-    """
-    Read shade file (.shd) - binary TL output from Bellhop/Kraken/Scooter
+    """Read a single-frequency ``.shd`` file as a typed :class:`TLField`.
 
-    Based on Acoustics Toolbox read_shd_bin.m format
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to .shd file
-
-    Returns
-    -------
-    field : Field
-        Field object with TL data
+    Thin wrapper around :func:`read_shd_bin` that converts the dict
+    return into a TLField. Multi-frequency ``.shd`` files raise
+    ``ValueError`` — call ``read_shd_bin`` directly and build a
+    :class:`TransferFunction` from its complex pressure cube instead.
     """
     filepath = Path(filepath)
+    shd = read_shd_bin(str(filepath))
 
-    with open(filepath, "rb") as f:
-        # Record 1: Title
-        recl = struct.unpack("i", f.read(4))[0]  # record length in 4-byte words
-        title = f.read(80).decode("utf-8", errors="ignore").strip()
+    freqs = np.asarray(shd['freqVec'], dtype=float)
+    nfreq = len(freqs)
+    if nfreq > 1:
+        raise ValueError(
+            f"read_shd_file: {filepath} contains {nfreq} frequencies; "
+            "use read_shd_bin(filepath) for the full broadband payload "
+            "and construct a TransferFunction from it."
+        )
 
-        # Record 2: PlotType
-        f.seek(4 * recl, 0)
-        plot_type = f.read(10).decode("utf-8", errors="ignore").strip()
+    pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
+    p = pressure[0, 0, :, :]                 # first bearing, first source
+    p_abs = np.maximum(np.abs(p), PRESSURE_FLOOR)
+    tl_data = np.clip(-20.0 * np.log10(p_abs), None, TL_MAX_DB)
 
-        # Record 3: Dimensions
-        f.seek(2 * 4 * recl, 0)
-        nfreq = struct.unpack("i", f.read(4))[0]
-        ntheta = struct.unpack("i", f.read(4))[0]
-        nsx = struct.unpack("i", f.read(4))[0]
-        nsy = struct.unpack("i", f.read(4))[0]
-        nsz = struct.unpack("i", f.read(4))[0]
-        nrz = struct.unpack("i", f.read(4))[0]
-        nrr = struct.unpack("i", f.read(4))[0]
-        freq0 = struct.unpack("d", f.read(8))[0]
-        atten = struct.unpack("d", f.read(8))[0]
-
-        # Record 4: Frequency vector
-        f.seek(3 * 4 * recl, 0)
-        freqs = np.array([struct.unpack("d", f.read(8))[0] for _ in range(nfreq)])
-
-        # ``read_shd_file`` returns a single-frequency ``TLField``. For
-        # broadband ``.shd`` files (``nfreq > 1``) the caller should use
-        # ``read_shd_bin`` (returns the full complex pressure cube as a
-        # dict) and build a ``TransferFunction`` from it explicitly.
-        if nfreq > 1:
-            raise ValueError(
-                f"read_shd_file: {filepath} contains {nfreq} frequencies; "
-                "use read_shd_bin(filepath) for the full broadband payload "
-                "and construct a TransferFunction from it."
-            )
-
-        # Record 5: Theta
-        f.seek(4 * 4 * recl, 0)
-        theta = np.array([struct.unpack("d", f.read(8))[0] for _ in range(ntheta)])
-
-        # Records 6-7: Source x,y (skip for now)
-        # Record 8: Source depths
-        f.seek(7 * 4 * recl, 0)
-        sz = np.array([struct.unpack("f", f.read(4))[0] for _ in range(nsz)])
-
-        # Record 9: Receiver depths
-        f.seek(8 * 4 * recl, 0)
-        rz = np.array([struct.unpack("f", f.read(4))[0] for _ in range(nrz)])
-
-        # Record 10: Receiver ranges
-        # NOTE: field.exe outputs ranges in METERS (not km as documented)
-        # Bellhop/Scooter may output in km - need to detect and handle
-        f.seek(9 * 4 * recl, 0)
-        rr = np.array([struct.unpack("d", f.read(8))[0] for _ in range(nrr)])
-
-        # Auto-detect units: if ranges are < 100, assume km and convert to m
-        # This heuristic works for typical scenarios (ranges > 100m)
-        if len(rr) > 0 and rr.max() < 100.0:
-            rr = rr * 1000.0  # Convert km to m
-
-        # Allocate pressure array
-        # For rectilinear: pressure(ntheta, nsz, nrz, nrr)
-        if "irregular" in plot_type.lower():
-            nrcvrs_per_range = 1
-        else:
-            nrcvrs_per_range = nrz
-
-        pressure = np.zeros((ntheta, nsz, nrcvrs_per_range, nrr), dtype=complex)
-
-        # Read pressure data (Record 10+)
-        # For first frequency, all theta, all source depths, all receiver depths
-        ifreq = 0  # Read first frequency
-        for itheta in range(ntheta):
-            for isz in range(nsz):
-                for irz in range(nrcvrs_per_range):
-                    recnum = (
-                        10
-                        + (ifreq) * ntheta * nsz * nrcvrs_per_range
-                        + (itheta) * nsz * nrcvrs_per_range
-                        + (isz) * nrcvrs_per_range
-                        + irz
-                    )
-
-                    f.seek(recnum * 4 * recl, 0)
-                    temp = np.array(
-                        [struct.unpack("f", f.read(4))[0] for _ in range(2 * nrr)]
-                    )
-                    # Interleaved real/imag
-                    pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
-
-        # Extract first source depth, all receiver depths
-        # pressure shape: (ntheta, nsz, nrz, nrr) -> (nrz, nrr) for first theta, first source
-        p = pressure[0, 0, :, :]
-
-        # Convert to transmission loss with proper handling of shadow zones
-        p_abs = np.abs(p)
-        p_abs = np.maximum(p_abs, PRESSURE_FLOOR)
-        tl_data = -20 * np.log10(p_abs)
-        tl_data = np.clip(tl_data, None, TL_MAX_DB)
-
-    # Plural-only: always pass an ndarray (length 1 for narrowband).
-    freqs_arr = np.atleast_1d(np.asarray(freqs, dtype=float))
-    result_freqs = freqs_arr if len(freqs_arr) else None
-
+    pos = shd['Pos']
     return TLField(
         data=tl_data,
-        ranges=rr,
-        depths=rz,
+        ranges=pos['r']['r'],
+        depths=pos['r']['z'],
         model='', backend='',
-        source_depths=sz,
-        frequencies=result_freqs,
+        source_depths=pos['s']['z'],
+        frequencies=np.atleast_1d(freqs) if nfreq else None,
         metadata={
-            "title": title,
-            "plot_type": plot_type,
-            "source_file": str(filepath),
-            "freq0": freq0,
-            "atten": atten,
+            'title': shd['title'],
+            'plot_type': shd['PlotType'],
+            'source_file': str(filepath),
+            'freq0': shd['freq0'],
+            'atten': shd['atten'],
         },
     )
 
@@ -207,7 +111,9 @@ def read_shd_bin(
                 - 'z' : ndarray - Depths in meters
             - 'r' : dict - Receiver positions
                 - 'z' : ndarray - Depths in meters
-                - 'r' : ndarray - Ranges in km
+                - 'r' : ndarray - Ranges in meters (Acoustics-Toolbox
+                  converts km → m before WriteHeader; see
+                  SourceReceiverPositions.f90:277)
         - 'pressure' : ndarray - Complex pressure field
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
@@ -218,7 +124,7 @@ def read_shd_bin(
     - Record length (recl) is read from first 4 bytes
     - Pressure is stored as interleaved real/imaginary pairs
     - For TL files from FIELD3D, source positions use compressed format
-    - Coordinates: x,y in meters, z in meters, r in km, theta in degrees
+    - Coordinates: x,y in meters, z in meters, r in meters, theta in degrees
 
     References
     ----------
@@ -919,7 +825,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
         # Skip header info
         f.seek(recl * 4)
 
-        # Read rays
+        truncated_after = None
         try:
             while True:
                 n_points = struct.unpack("i", f.read(4))[0]
@@ -945,8 +851,16 @@ def _read_ray_file_binary(filepath: Path) -> list:
                 )
 
         except struct.error:
-            pass  # End of file
+            truncated_after = len(rays)
 
+    if truncated_after is not None:
+        warnings.warn(
+            f"Ray file {filepath} appears truncated; recovered "
+            f"{truncated_after} ray(s) before EOF. The producing model "
+            "may have crashed mid-write — check its .prt log.",
+            UserWarning,
+            stacklevel=2,
+        )
     return rays
 
 
@@ -1109,7 +1023,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
-def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
+def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
     """
     Read field parameters file (.flp) for KRAKEN/FIELD programs.
 
@@ -1193,7 +1107,8 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
             start = title.find("'") + 1
             end = title.find("'", start)
             title = title[start:end]
-        print(f"Title: {title}")
+        if verbose:
+            print(f"Title: {title}")
 
         # Read options
         opt = f.readline().strip()
@@ -1201,7 +1116,8 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
             start = opt.find("'") + 1
             end = opt.find("'", start)
             opt = opt[start:end]
-        print(f"Options: {opt}")
+        if verbose:
+            print(f"Options: {opt}")
 
         # Fill missing option columns with reasonable placeholders.
         # pos 3 is the elastic-component / beam-pattern column; we fill
@@ -1220,17 +1136,19 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
 
         # Read MLimit
         M_limit = int(f.readline().strip())
-        print(f"MLimit = {M_limit}\n")
+        if verbose:
+            print(f"MLimit = {M_limit}\n")
 
         # Read profile ranges using _read_vector
         r_prof, N_prof = _read_vector(f)
-        print(f"\nNumber of profiles, NProf = {N_prof}")
-        print("Profile ranges, rProf (km)")
-        if N_prof < 10:
-            for r in r_prof:
-                print(f"{r:8.2f}")
-        else:
-            print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
+        if verbose:
+            print(f"\nNumber of profiles, NProf = {N_prof}")
+            print("Profile ranges, rProf (km)")
+            if N_prof < 10:
+                for r in r_prof:
+                    print(f"{r:8.2f}")
+            else:
+                print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
 
         # Read receiver ranges
         r_rcv, _ = _read_vector(f)
@@ -1242,16 +1160,21 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
         # Read receiver range offsets (array tilt)
         r_offsets, N_offsets = _read_vector(f)
 
-        print(f"\nNumber of receiver range offsets = {N_offsets}")
-        print("Receiver range offsets, Rro (m)")
-        if N_offsets < 10:
-            for ro in r_offsets:
-                print(f"{ro:8.2f}")
-        else:
-            print(f"{r_offsets[0]:8.2f} ... {r_offsets[-1]:8.2f}")
+        if verbose:
+            print(f"\nNumber of receiver range offsets = {N_offsets}")
+            print("Receiver range offsets, Rro (m)")
+            if N_offsets < 10:
+                for ro in r_offsets:
+                    print(f"{ro:8.2f}")
+            else:
+                print(f"{r_offsets[0]:8.2f} ... {r_offsets[-1]:8.2f}")
 
         if np.max(np.abs(r_offsets)) > 0.0:
-            print("Warning: Receiver range offsets are not zero")
+            warnings.warn(
+                "read_flp: receiver range offsets are not zero — "
+                "result includes array-tilt geometry.",
+                UserWarning, stacklevel=2,
+            )
 
     return {
         "title": title,

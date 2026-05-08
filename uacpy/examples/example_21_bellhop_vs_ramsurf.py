@@ -1,5 +1,5 @@
 """
-Example 31: Bellhop vs RAM(ramsurf) on identical altimetry env
+Example 21: Bellhop vs RAM(ramsurf) on identical altimetry env
 ================================================================
 
 Same env, same source, same receiver — different physics (ray tracing vs

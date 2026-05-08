@@ -507,7 +507,7 @@ class TransferFunction(_GridResult):
             model=getattr(self, 'model', None),
             backend=getattr(self, 'backend', None),
             source_depths=getattr(self, 'source_depths', None),
-            frequency=float(freqs[i_f]),
+            frequencies=float(freqs[i_f]),
             metadata=dict(self.metadata),
         )
 
@@ -725,7 +725,7 @@ class Arrivals(Result):
         self.metadata.setdefault('receiver_depths', self.receiver_depths)
         self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
 
-    # Legacy accessors expected by visualization.plots.plot_arrivals -------
+    # Plotting-helper accessors used by visualization.plots.plot_arrivals.
     @property
     def depths(self) -> np.ndarray:
         return self.receiver_depths
@@ -1342,6 +1342,14 @@ def _ifft_to_trace(
 
     if n_freq < 2:
         raise ValueError("need at least 2 frequencies for IFFT")
+
+    if tf.phase_reference == 'time_domain_native':
+        raise ValueError(
+            "TransferFunction.phase_reference='time_domain_native' is not a "
+            "frequency-domain transfer function; the producing model "
+            "(SPARC) returned p(t) directly. Use the TimeSeriesField result "
+            "from RunMode.TIME_SERIES instead of synthesising via IFFT."
+        )
 
     d_idx = (
         int(np.argmin(np.abs(tf.depths - depth))) if depth is not None

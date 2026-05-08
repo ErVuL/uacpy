@@ -31,8 +31,8 @@ from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError
-from uacpy.io.boundary_io import read_reflection_coefficient
+from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError, ModelExecutionError
+from uacpy.io.refl_io import read_reflection_coefficient
 from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
 
 
@@ -286,24 +286,30 @@ class Bounce(PropagationModel):
                     f"c_low ({self.c_low})."
                 )
 
-            # n_angles → rmax_m: bounce.f90 derives NkTab from rmax in km
-            # and frequency (NkTab = INT(1000 * RMax_km * OMEGA / (2*PI *
-            # DeltaKInv))); uacpy inverts linearly:
-            #     rmax_m = (n_angles / 100) * 1000 = n_angles * 10.
+            # n_angles → rmax_m: bounce.f90:49 sets
+            #     NkTab = INT(1000 * RMax_km * (kMax - kMin) / (2*pi))
+            # with kMax = omega/cLow, kMin = omega/cHigh (or 0 if cHigh
+            # is "infinity"). Inverting:
+            #     RMax_m = NkTab * 2*pi / (omega * (1/cLow - 1/cHigh))
             if self.n_angles is not None:
                 if self.n_angles <= 0:
                     raise ConfigurationError(
                         f"n_angles must be > 0 (got {self.n_angles})."
                     )
-                rmax_from_angles_m = float(self.n_angles) * 10.0
-                if rmax_from_angles_m <= 0:
-                    warnings.warn(
-                        f"Computed rmax_m={rmax_from_angles_m} from "
-                        f"n_angles={self.n_angles} is not positive; using "
-                        "100 m fallback.",
-                        RuntimeWarning,
+                f_hz = float(np.atleast_1d(source.frequencies)[0])
+                omega = 2.0 * np.pi * f_hz
+                inv_c_diff = 1.0 / float(self.c_low)
+                if self.c_high is not None and self.c_high < 1e8:
+                    inv_c_diff -= 1.0 / float(self.c_high)
+                if omega * inv_c_diff <= 0:
+                    raise ConfigurationError(
+                        f"Cannot derive rmax_m from n_angles={self.n_angles}: "
+                        f"omega·(1/cLow - 1/cHigh) is non-positive "
+                        f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
                     )
-                    rmax_from_angles_m = 100.0
+                rmax_from_angles_m = (
+                    float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
+                )
                 self.rmax_m = rmax_from_angles_m
 
             env = self._project_environment(env)
@@ -342,9 +348,12 @@ class Bounce(PropagationModel):
                 irc_file = fm.get_path(f'{base_name}.irc')
 
                 if not brc_file.exists():
-                    raise FileNotFoundError(
-                        f"BOUNCE output file not found: {brc_file}\n"
-                        "BOUNCE execution may have failed."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"BOUNCE did not produce {brc_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
                     )
 
                 # bellhopcuda's strict monotonicity check on .brc/.irc rejects
@@ -419,7 +428,7 @@ class Bounce(PropagationModel):
                 return field
 
             finally:
-                if not self.work_dir:
+                if fm.cleanup:
                     fm.cleanup_work_dir()
 
     def _write_bounce_input(
@@ -515,10 +524,14 @@ class Bounce(PropagationModel):
     def _execute(self, input_file: Path, work_dir: Path):
         """Execute BOUNCE binary via base-class subprocess helper."""
         base_name = input_file.stem
-        result = self._run_subprocess(
-            [str(self.executable), base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable), base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"Bounce output:\n{result.stdout}", level='debug')
 

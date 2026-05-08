@@ -602,7 +602,7 @@ class Bellhop(PropagationModel):
                         shutil.copy(src, sbp_dest)
                     else:
                         # Array-like: expect shape (N, 2) [angle_deg, level_dB]
-                        from uacpy.io.boundary_io import write_source_beam_pattern
+                        from uacpy.io.refl_io import write_source_beam_pattern
                         arr = np.asarray(sbp_spec, dtype=float)
                         if arr.ndim != 2 or arr.shape[1] != 2:
                             raise ValueError(
@@ -675,7 +675,13 @@ class Bellhop(PropagationModel):
 
                 if not output_file.exists():
                     self._log(f"Output file not found: {output_file}", level='error')
-                    raise FileNotFoundError(f"Output file not found: {output_file}")
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"Bellhop did not produce {output_file}; "
+                            f"check {output_file.with_suffix('.prt')} for diagnostics."
+                        ),
+                    )
                 result = reader(output_file)
                 if rt in ('R', 'E'):
                     # The .ray file format is identical for fan and
@@ -762,7 +768,10 @@ class Bellhop(PropagationModel):
 
         brc_file = bounce_result.metadata.get('brc_file')
         if not brc_file:
-            raise RuntimeError("BOUNCE did not produce a .brc file")
+            raise ModelExecutionError(
+                "Bounce", return_code=-1, stdout=None,
+                stderr="BOUNCE did not produce a .brc file",
+            )
 
         # Create environment copy with reflection file bottom
         env_bounce = copy.deepcopy(env)
@@ -1053,8 +1062,9 @@ class Bellhop(PropagationModel):
         Subclasses (BellhopCUDA) may override this to add flags.
         """
         if self.version in ('cuda', 'cxx'):
-            # bellhopcxx/cuda require a dimensionality flag
-            return [str(self.executable), '--2D', base_name]
+            # bellhopcxx/cuda require a dimensionality flag.
+            dim = getattr(self, 'dimensionality', '2D')
+            return [str(self.executable), f'--{dim}', base_name]
         return [str(self.executable), base_name]
 
     def _run_bellhop(self, base_name: str, work_dir: Path):

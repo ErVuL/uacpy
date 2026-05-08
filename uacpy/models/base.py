@@ -1,13 +1,36 @@
 """Base class for acoustic propagation models."""
 
 import copy as _copy
+import os
 import shutil
+import signal
+import subprocess
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List, Dict, Set, Union
+from typing import Optional, List, Dict, Union
 from enum import Enum
 import warnings
+
+
+def _raise_stack_limit_at_import() -> None:
+    """Raise the parent's RLIMIT_STACK to its hard limit so children inherit
+    a generous stack — SPARC-class Fortran binaries can blow a default
+    8 MiB stack on first large alloc.
+    """
+    try:
+        import resource
+        _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        target = (
+            resource.RLIM_INFINITY
+            if hard == resource.RLIM_INFINITY else hard
+        )
+        resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
+_raise_stack_limit_at_import()
 
 import numpy as np
 
@@ -311,25 +334,11 @@ class PropagationModel(ABC):
     _supports_multi_source_depth: bool = False
 
     def _warn_unknown_kwargs(self, kwargs: dict, allowed: tuple = ()):
-        """Emit a ``UserWarning`` for any kwarg not consumed by ``run()``.
-
-        Catches typos like ``Bellhop().run(env, src, rcv, n_beam=10)``
-        (missing 's') that would otherwise silently use the default.
-
-        ``kwargs`` is the leftover ``**kwargs`` dict from a model's
-        ``run()`` after explicit named args have been peeled off.
-        ``allowed`` is the tuple of writer- or mode-specific kwarg names
-        the model legitimately forwards downstream (e.g. Bellhop's
-        Cerveny beam params); these are silently passed through.
+        """No-op. Unknown ``run()`` kwargs are silently ignored per uacpy
+        convention; model wrappers still invoke this helper after peeling
+        off explicit args.
         """
-        unknown = sorted(k for k in kwargs if k not in allowed)
-        if unknown:
-            warnings.warn(
-                f"{self.model_name}.run received unknown kwargs (ignored): "
-                f"{unknown}",
-                UserWarning,
-                stacklevel=3,
-            )
+        return
 
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
@@ -457,11 +466,11 @@ class PropagationModel(ABC):
 
         if np.any(source.depths < 0):
             self._log("Source depths must be positive", level='error')
-            raise ValueError("Source depths must be positive")
+            raise ConfigurationError("Source depths must be positive")
 
         if receiver.depth_min < 0:
             self._log("Receiver depths must be positive", level='error')
-            raise ValueError("Receiver depths must be positive")
+            raise ConfigurationError("Receiver depths must be positive")
 
     def compute_tl(
         self,
@@ -509,7 +518,7 @@ class PropagationModel(ABC):
         if run_mode not in (
             RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
         ):
-            raise ValueError(
+            raise ConfigurationError(
                 f"compute_tl() got run_mode={run_mode}; only COHERENT_TL / "
                 f"INCOHERENT_TL / SEMICOHERENT_TL are accepted. Call "
                 f"{self.model_name}.run(run_mode=…) for other modes."
@@ -631,11 +640,11 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "normal mode computation",
-                alternatives=['Kraken', 'OASN']
+                alternatives=['Kraken', 'KrakenC', 'KrakenField']
             )
 
         if env.is_range_dependent and self.model_name != 'KrakenField':
-            # Range-independent mode solvers (Kraken, KrakenC, OASN) collapse
+            # Range-independent mode solvers (Kraken, KrakenC) collapse
             # the environment via ``bathymetry_collapse_method`` and warn,
             # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
@@ -710,7 +719,7 @@ class PropagationModel(ABC):
         single_point = range_m is not None and depth_m is not None
         if receiver is None:
             if not single_point:
-                raise ValueError(
+                raise ConfigurationError(
                     "compute_eigenrays requires either receiver=… or both "
                     "range_m=… and depth_m=…"
                 )
@@ -719,7 +728,7 @@ class PropagationModel(ABC):
                 ranges=np.array([float(range_m)]),
             )
         elif single_point:
-            raise ValueError(
+            raise ConfigurationError(
                 "Pass either receiver=… OR (range_m, depth_m), not both."
             )
 
@@ -976,8 +985,6 @@ class PropagationModel(ABC):
         env: Optional[dict] = None,
         check: bool = True,
     ):
-        if timeout is None:
-            timeout = getattr(self, 'timeout', 600.0)
         """
         Run an external binary and raise ModelExecutionError on failure.
 
@@ -1007,40 +1014,28 @@ class PropagationModel(ABC):
         -------
         subprocess.CompletedProcess
         """
-        import subprocess
-
+        if timeout is None:
+            timeout = getattr(self, 'timeout', 600.0)
         cmd_str = ' '.join(str(c) for c in cmd)
         self._log(f"Running: {cmd_str}", level='debug')
 
-        def _raise_stack_limit():
-            # Raise the child's stack to the hard limit. If this fails the
-            # SPARC-class binaries segfault on first large alloc, so surface
-            # the failure rather than swallow it.
-            try:
-                import resource
-                _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-                target = (
-                    resource.RLIM_INFINITY
-                    if hard == resource.RLIM_INFINITY else hard
-                )
-                resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
-            except (ImportError, ValueError, OSError) as exc:
-                warnings.warn(
-                    f"Could not raise child stack limit ({exc}); "
-                    f"large-stack binaries may segfault.",
-                    RuntimeWarning, stacklevel=2,
-                )
-
+        # start_new_session puts the child in its own process group so a
+        # timeout can SIGTERM the whole tree, not just the direct child.
+        proc = None
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [str(c) for c in cmd],
                 cwd=str(cwd),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE if stdin_input is not None else None,
                 text=True,
-                timeout=timeout,
-                input=stdin_input,
                 env=env,
-                preexec_fn=_raise_stack_limit,
+                start_new_session=(os.name == 'posix'),
+            )
+            stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+            result = subprocess.CompletedProcess(
+                proc.args, proc.returncode, stdout, stderr,
             )
         except FileNotFoundError as e:
             raise ModelExecutionError(
@@ -1048,6 +1043,22 @@ class PropagationModel(ABC):
                 stdout=None, stderr=f"Executable not found: {e}",
             ) from e
         except subprocess.TimeoutExpired as e:
+            # Kill the whole process group, not just the direct child.
+            if proc is not None and os.name == 'posix':
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(pgid, signal.SIGKILL)
+                        proc.wait()
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                    proc.wait()
+            elif proc is not None:
+                proc.kill()
+                proc.wait()
             raise ModelExecutionError(
                 self.model_name, return_code=-1,
                 stdout=(e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout),
@@ -1108,7 +1119,7 @@ class PropagationModel(ABC):
             return BoundaryProperties(
                 acoustic_type='vacuum', depth=float(default_depth),
             )
-        raise ValueError(
+        raise ConfigurationError(
             f"Unknown elastic collapse method {method!r}. Use "
             "'fluid' or 'vacuum'."
         )
@@ -1143,7 +1154,7 @@ class PropagationModel(ABC):
 
     def _collapse_altimetry(self, env_in, e, method, alts):
         if method != 'drop':
-            raise ValueError(
+            raise ConfigurationError(
                 f"Unknown altimetry_collapse_method {method!r}. "
                 "Currently only 'drop' is supported."
             )

@@ -139,20 +139,6 @@ def elastic_bottom():
 
 
 @pytest.fixture
-def ice_surface():
-    """Elastic ice top boundary (cp ≫ water, so most modes reflect)."""
-    from uacpy.core.environment import BoundaryProperties
-    return BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=3500.0,
-        shear_speed=1800.0,
-        density=0.9,
-        attenuation=1.0,
-        shear_attenuation=2.0,
-    )
-
-
-@pytest.fixture
 def pekeris_env(halfspace_bottom):
     """Classic 100-m Pekeris waveguide with a fluid half-space bottom."""
     return uacpy.Environment(

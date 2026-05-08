@@ -394,9 +394,9 @@ def main():
     print("  ✓ Thermocline: Surface duct traps energy when source is in duct")
     print("  ✓ SSP shape profoundly affects propagation physics")
     print("\nNext Steps:")
-    print("  → Example 03: Range-dependent bathymetry (sloping, shelf break)")
-    print("  → Example 06: Multi-frequency analysis")
-    print("  → Example 09: Kraken advanced (mode analysis)")
+    print("  → Example 03: Multi-frequency / broadband")
+    print("  → Example 06: Kraken advanced (mode analysis)")
+    print("  → Example 23: Range-dependent collapse methods")
     print("\n" + "═"*80 + "\n")
 
     return 0

@@ -104,7 +104,6 @@ import uacpy
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Bellhop
 from uacpy.models import RunMode
-from plotting_utils import plot_bathymetry_overlay
 import os
 
 
