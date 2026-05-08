@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel superseded runs on the same branch / PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build native binaries + run tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gfortran make cmake g++ curl tar
+
+      - name: Install Python package (editable + dev extras)
+        run: pip install -e ".[dev]"
+
+      # Builds oalib + bellhopcxx + mpiramS + ramsurf locally, downloads
+      # OASES from MIT (acoustics.mit.edu) and builds it.
+      - name: Build native binaries
+        run: ./install.sh -y --bellhop cxx --oases yes
+
+      - name: Lint (flake8 — real bugs only)
+        run: |
+          flake8 uacpy/ \
+            --exclude=uacpy/third_party,uacpy/uacpy/third_party \
+            --count --select=E9,F63,F7,F82 \
+            --show-source --statistics
+
+      - name: Run test suite
+        env:
+          # Avoid /dev/shm size limits on GH-hosted runners.
+          TMPDIR: ${{ runner.temp }}
+        run: pytest uacpy/tests/
