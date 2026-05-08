@@ -268,7 +268,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
         }
 
     except Exception as e:
-        raise IOError(f"Failed to parse OAST .plp file: {e}")
+        raise IOError(f"Failed to parse OAST .plp file: {e}") from e
 
 
 def read_oasn_covariance(
@@ -383,7 +383,7 @@ def read_oasn_covariance(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASN covariance file {filepath}: {e}")
+        raise IOError(f"Failed to read OASN covariance file {filepath}: {e}") from e
 
 
 def read_oasn_replicas(
@@ -518,7 +518,7 @@ def read_oasn_replicas(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASN replica file {filepath}: {e}")
+        raise IOError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
 def _read_fortran_record_marker(f) -> int:
@@ -937,7 +937,7 @@ def read_oasr_reflection_coefficients(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASR reflection coefficient file {filepath}: {e}")
+        raise IOError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
 
 
 def _trf_regression_selftest(tmp_path=None):

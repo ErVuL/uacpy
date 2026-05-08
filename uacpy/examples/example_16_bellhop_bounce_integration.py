@@ -1,6 +1,6 @@
 """
 ===============================================================================
-EXAMPLE 25: Bellhop + BOUNCE Integration, Layered Bottom, Range-Dependent Bottom
+EXAMPLE 16: Bellhop + BOUNCE Integration, Layered Bottom, Range-Dependent Bottom
 ===============================================================================
 
 OBJECTIVE:
@@ -71,7 +71,7 @@ def demo_bellhop_bounce():
         bottom=bottom,
     )
 
-    source = uacpy.Source(frequency=500.0, depth=25.0)
+    source = uacpy.Source(frequencies=500.0, depths=25.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(1, 99, 30),
         ranges=np.linspace(100, 3000, 40),
@@ -88,7 +88,7 @@ def demo_bellhop_bounce():
     result_bounce = bellhop.run_with_bounce(
         env, source, receiver,
         run_mode=RunMode.COHERENT_TL,
-        cmin=1400.0, cmax=10000.0, rmax_km=10.0,
+        cmin=1400.0, cmax=10000.0, rmax_m=10000.0,
     )
 
     # Compare
@@ -115,7 +115,7 @@ def demo_bellhop_bounce():
     axes[2].set_title('BOUNCE − half-space', fontsize=11, fontweight='bold')
     axes[2].set_ylabel('')
 
-    fig.suptitle(f'Bellhop + BOUNCE: f={source.frequency[0]:.0f} Hz, '
+    fig.suptitle(f'Bellhop + BOUNCE: f={source.frequencies[0]:.0f} Hz, '
                  f'elastic sandy bottom (cp={bottom.sound_speed}, '
                  f'cs={bottom.shear_speed} m/s)',
                  fontsize=12, fontweight='bold', y=0.995)
@@ -173,7 +173,7 @@ def demo_layered_bottom():
     )
     print(f"has_layered_bottom: {env.has_layered_bottom()}")
 
-    source = uacpy.Source(frequency=100.0, depth=50.0)
+    source = uacpy.Source(frequencies=100.0, depths=50.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(1, 199, 30),
         ranges=np.linspace(100, 5000, 40),
@@ -242,15 +242,14 @@ def demo_range_dependent_bottom():
     env = uacpy.Environment(
         name='Shelf Break: Mud to Sand',
         depth=250.0,
-        ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
+        ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
             interp='pchip',
         ),
         bathymetry=np.column_stack([bottom_rd.ranges / 1000.0 * 1000, bottom_rd.depths]),
         bottom=bottom_rd,
     )
 
-    source = uacpy.Source(frequency=100.0, depth=30.0)
+    source = uacpy.Source(frequencies=100.0, depths=30.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 240, 30),
         ranges=np.linspace(100, 5000, 40),
@@ -364,7 +363,7 @@ def demo_rd_layered_bottom():
     print(f"has_range_dependent_layered_bottom: "
           f"{env.has_range_dependent_layered_bottom()}")
 
-    source = uacpy.Source(frequency=100.0, depth=30.0)
+    source = uacpy.Source(frequencies=100.0, depths=30.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 270, 30),
         ranges=np.linspace(100, 8000, 40),
@@ -399,7 +398,7 @@ def demo_rd_layered_bottom():
 
 def main():
     print("\n" + "=" * 80)
-    print("EXAMPLE 25: Range/Depth-Dependent Features + Bellhop+BOUNCE")
+    print("EXAMPLE 16: Range/Depth-Dependent Features + Bellhop+BOUNCE")
     print("=" * 80)
 
     demo_bellhop_bounce()
@@ -408,7 +407,7 @@ def main():
     demo_rd_layered_bottom()
 
     print("\n" + "=" * 80)
-    print("EXAMPLE 25 COMPLETE")
+    print("EXAMPLE 16 COMPLETE")
     print("=" * 80)
     print("\nFeatures demonstrated:")
     print("  - Bellhop.run_with_bounce() for elastic bottom")

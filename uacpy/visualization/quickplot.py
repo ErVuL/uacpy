@@ -32,7 +32,9 @@ def quick_tl(field: Field, env: Optional[Environment] = None, save: Optional[str
 
     Examples
     --------
-    >>> result = bellhop.compute_tl(env, source, max_range=10000)
+    >>> rcv = uacpy.Receiver(depths=np.linspace(0, env.depth, 50),
+    ...                      ranges=np.linspace(100, 10_000, 100))
+    >>> result = bellhop.compute_tl(env, source, rcv)
     >>> quick_tl(result, env)
 
     >>> # Save directly
@@ -41,10 +43,8 @@ def quick_tl(field: Field, env: Optional[Environment] = None, save: Optional[str
     fig, ax = field.plot(env=env, vmin=30, vmax=100)
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -65,19 +65,19 @@ def quick_compare(results: Dict[str, Field], env: Optional[Environment] = None,
 
     Examples
     --------
+    >>> rcv = uacpy.Receiver(depths=np.linspace(0, env.depth, 50),
+    ...                      ranges=np.linspace(100, 10_000, 100))
     >>> results = {
-    ...     'Bellhop': bellhop.compute_tl(env, source, max_range=10000),
-    ...     'RAM': ram.compute_tl(env, source, max_range=10000),
+    ...     'Bellhop': bellhop.compute_tl(env, source, rcv),
+    ...     'RAM': ram.compute_tl(env, source, rcv),
     ... }
     >>> quick_compare(results, env)
     """
     fig, axes = plots.compare_models(results, env=env)
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -100,16 +100,15 @@ def quick_rays(field: Field, env: Optional[Environment] = None,
 
     Examples
     --------
-    >>> rays = bellhop.compute_rays(env, source, max_range=5000)
+    >>> rcv = uacpy.Receiver(depths=[50], ranges=np.linspace(100, 5_000, 50))
+    >>> rays = bellhop.compute_rays(env, source, rcv)
     >>> quick_rays(rays, env, n_rays=100)
     """
     fig, ax = field.plot(env=env, max_rays=n_rays)
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -135,10 +134,8 @@ def quick_env(env: Environment, source: Optional[Source] = None,
     fig, axes = plots.plot_environment(env, source)
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -164,10 +161,8 @@ def quick_modes(field: Field, n_modes: int = 6, save: Optional[str] = None):
     fig, axes = field.plot(n_modes=n_modes)
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -213,10 +208,8 @@ def quick_cut(field: Field, depth: Optional[float] = None,
         print(f"Auto-selected depth: {depth}m")
 
     if save:
-        plt.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved to {save}")
-    else:
-        plt.show()
+        fig.savefig(save, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -243,7 +236,9 @@ def quick_analysis(field: Field, env: Optional[Environment] = None,
 
     Examples
     --------
-    >>> result = bellhop.compute_tl(env, source, max_range=10000)
+    >>> rcv = uacpy.Receiver(depths=np.linspace(0, env.depth, 50),
+    ...                      ranges=np.linspace(100, 10_000, 100))
+    >>> result = bellhop.compute_tl(env, source, rcv)
     >>> quick_analysis(result, env)
 
     >>> # Save all plots
@@ -274,10 +269,8 @@ def quick_analysis(field: Field, env: Optional[Environment] = None,
 
     if save_prefix:
         filename = f'{save_prefix}_analysis.png'
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"✓ Saved comprehensive analysis to {filename}")
-    else:
-        plt.show()
+        fig.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"Saved comprehensive analysis to {filename}")
 
     return fig
 
@@ -303,10 +296,12 @@ def quick_report(results: Dict[str, Field], env: Environment,
 
     Examples
     --------
+    >>> rcv = uacpy.Receiver(depths=np.linspace(0, env.depth, 50),
+    ...                      ranges=np.linspace(100, 10_000, 100))
     >>> results = {
-    ...     'Bellhop': bellhop.compute_tl(env, source, max_range=10000),
-    ...     'RAM': ram.compute_tl(env, source, max_range=10000),
-    ...     'KrakenField': krakenfield.compute_tl(env, source, max_range=10000),
+    ...     'Bellhop': bellhop.compute_tl(env, source, rcv),
+    ...     'RAM': ram.compute_tl(env, source, rcv),
+    ...     'KrakenField': krakenfield.compute_tl(env, source, rcv),
     ... }
     >>> quick_report(results, env, save='model_comparison_report.png')
     """
@@ -360,8 +355,8 @@ def quick_report(results: Dict[str, Field], env: Environment,
 
     fig.suptitle('Model Comparison Report', fontsize=16, fontweight='bold')
 
-    plt.savefig(save, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved comprehensive report to {save}")
+    fig.savefig(save, dpi=150, bbox_inches='tight')
+    print(f"Saved comprehensive report to {save}")
 
     return fig
 

@@ -53,7 +53,7 @@ class TestPekerisWaveguide:
     @pytest.fixture
     def pekeris_source(self):
         """Source at mid-depth."""
-        return uacpy.Source(depth=50.0, frequency=100.0)
+        return uacpy.Source(depths=50.0, frequencies=100.0)
 
     @pytest.fixture
     def pekeris_receiver(self):
@@ -224,7 +224,7 @@ class TestRangeDependentPhysicalSanity:
 
     @pytest.fixture
     def slope_source(self):
-        return uacpy.Source(depth=50.0, frequency=100.0)
+        return uacpy.Source(depths=50.0, frequencies=100.0)
 
     @pytest.fixture
     def slope_receiver(self):
@@ -293,7 +293,7 @@ class TestMunkProfile:
     @pytest.fixture
     def munk_source(self):
         """Source at depth (in sound channel)."""
-        return uacpy.Source(depth=1000.0, frequency=100.0)
+        return uacpy.Source(depths=1000.0, frequencies=100.0)
 
     @pytest.fixture
     def munk_receiver(self):
@@ -398,7 +398,7 @@ class TestNumericalStability:
             )
         )
 
-        source = uacpy.Source(depth=5.0, frequency=1000.0)
+        source = uacpy.Source(depths=5.0, frequencies=1000.0)
         receiver = uacpy.Receiver(
             depths=np.array([2.0, 5.0, 8.0]),
             ranges=np.array([100.0, 500.0, 1000.0])
@@ -423,7 +423,7 @@ class TestNumericalStability:
             )
         )
 
-        source = uacpy.Source(depth=50.0, frequency=10000.0)  # 10 kHz
+        source = uacpy.Source(depths=50.0, frequencies=10000.0)  # 10 kHz
         receiver = uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([100.0, 500.0, 1000.0])

@@ -88,8 +88,8 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     source = uacpy.Source(
-        depth=75.0,      # Upper water column
-        frequency=100.0  # 100 Hz
+        depths=75.0,      # Upper water column
+        frequencies=100.0  # 100 Hz
     )
 
     receiver = uacpy.Receiver(

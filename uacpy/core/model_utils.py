@@ -1,168 +1,79 @@
-"""
-Shared utilities for propagation models.
+"""User-facing helpers for building model inputs.
 
-Eliminates code duplication across model implementations.
+Exposes utilities for assembling receiver grids and validating source /
+receiver depths against an environment. Models do their own validation
+inside ``PropagationModel.validate_inputs``; these helpers exist for
+user code that builds inputs programmatically.
 """
 
 import numpy as np
 
 from uacpy.core.exceptions import InvalidDepthError
-from uacpy.models.base import RunMode
-
-
-class ParameterMapper:
-    """
-    Map user-friendly parameters to model-specific formats.
-
-    Provides consistent parameter naming across models.
-    """
-
-    @classmethod
-    def map_run_mode_to_bellhop(cls, run_mode: RunMode) -> str:
-        """
-        Map a ``RunMode`` enum to the Bellhop ``run_type`` letter.
-
-        Returns
-        -------
-        run_type : str
-            Bellhop ``run_type`` ('C', 'I', 'S', 'R', 'E', 'A').
-        """
-        mapping = {
-            RunMode.COHERENT_TL: 'C',
-            RunMode.INCOHERENT_TL: 'I',
-            RunMode.SEMICOHERENT_TL: 'S',
-            RunMode.RAYS: 'R',
-            RunMode.EIGENRAYS: 'E',
-            RunMode.ARRIVALS: 'A',
-            # Time-series synthesis is built from arrival data.
-            RunMode.TIME_SERIES: 'A',
-        }
-        return mapping[run_mode]
 
 
 class ReceiverGridBuilder:
-    """
-    Build standard receiver grids for common scenarios.
-
-    Eliminates the need for users to manually construct receiver grids.
-    """
+    """Build common receiver-grid layouts for propagation runs."""
 
     @staticmethod
-    def build_tl_grid(
-        env_depth: float,
-        max_range: float,
-        n_depths: int = 50,
-        n_ranges: int = 100,
-        depth_margin: float = 5.0
+    def linear_grid(
+        depth_min: float, depth_max: float, n_depths: int,
+        range_min: float, range_max: float, n_ranges: int,
     ):
-        """
-        Build a standard TL computation grid.
-
-        Parameters
-        ----------
-        env_depth : float
-            Environment depth in meters.
-        max_range : float
-            Maximum range in meters.
-        n_depths : int
-            Number of depth points.
-        n_ranges : int
-            Number of range points.
-        depth_margin : float
-            Margin from surface/bottom in meters.
+        """Linearly-spaced rectangular receiver grid.
 
         Returns
         -------
-        depths : ndarray
-            Depth grid.
-        ranges : ndarray
-            Range grid (starts at max(1% of max_range, 10m) to avoid r=0).
+        depths, ranges : ndarray
+            1-D arrays of depths (m) and ranges (m).
         """
-        depths = np.linspace(
-            depth_margin,
-            env_depth - depth_margin,
-            n_depths
-        )
-
-        ranges = np.linspace(
-            max(max_range * 0.01, 10.0),
-            max_range,
-            n_ranges
-        )
-
+        depths = np.linspace(depth_min, depth_max, n_depths)
+        ranges = np.linspace(range_min, range_max, n_ranges)
         return depths, ranges
 
     @staticmethod
-    def build_ray_grid(env_depth: float, max_range: float):
-        """
-        Build a 200×200 grid suitable for ray visualization.
+    def log_range_grid(
+        depths: np.ndarray, range_min: float, range_max: float, n_ranges: int,
+    ):
+        """Log-spaced ranges with user-supplied depth array."""
+        ranges = np.geomspace(max(range_min, 1.0), range_max, n_ranges)
+        return np.asarray(depths, dtype=float), ranges
 
-        Parameters
-        ----------
-        env_depth : float
-            Maximum environment depth in meters.
-        max_range : float
-            Maximum range in meters.
+    @staticmethod
+    def vertical_array(
+        depth_min: float, depth_max: float, n_depths: int, range_m: float,
+    ):
+        """Single-range vertical receiver array."""
+        return np.linspace(depth_min, depth_max, n_depths), np.array([range_m])
 
-        Returns
-        -------
-        depths : ndarray
-            Depth grid (200 points).
-        ranges : ndarray
-            Range grid (200 points).
-        """
-        depths = np.linspace(0, env_depth, 200)
-        ranges = np.linspace(0, max_range, 200)
-        return depths, ranges
+    @staticmethod
+    def horizontal_array(
+        depth_m: float, range_min: float, range_max: float, n_ranges: int,
+    ):
+        """Single-depth horizontal receiver array."""
+        return np.array([depth_m]), np.linspace(range_min, range_max, n_ranges)
 
 
 def validate_source_depth(source_depth: float, env_depth: float, margin: float = 1.0):
+    """Raise ``InvalidDepthError`` if ``source_depth`` is outside the water column.
+
+    ``margin`` (m) lets the user accept sources within the bottom layer
+    or above the surface by that much; default 1 m.
     """
-    Validate source depth against the environment.
-
-    Parameters
-    ----------
-    source_depth : float
-        Source depth in meters.
-    env_depth : float
-        Environment depth in meters.
-    margin : float
-        Safety margin in meters.
-
-    Raises
-    ------
-    InvalidDepthError
-        If the source depth is negative or within ``margin`` of the bottom.
-    """
-    if source_depth < 0:
-        raise InvalidDepthError(source_depth, env_depth, "Source")
-
-    if source_depth > env_depth - margin:
-        raise InvalidDepthError(source_depth, env_depth, "Source")
+    if source_depth < -margin or source_depth > env_depth + margin:
+        raise InvalidDepthError(
+            f"Source depth {source_depth:.1f} m outside water column "
+            f"[0, {env_depth:.1f}] m (margin {margin} m)."
+        )
 
 
-def validate_receiver_depths(receiver_depths: np.ndarray, env_depth: float, margin: float = 1.0):
-    """
-    Validate receiver depths against the environment.
-
-    Parameters
-    ----------
-    receiver_depths : ndarray
-        Receiver depths in meters.
-    env_depth : float
-        Environment depth in meters.
-    margin : float
-        Safety margin in meters.
-
-    Raises
-    ------
-    InvalidDepthError
-        If any receiver depth is negative or within ``margin`` of the bottom.
-    """
-    if np.any(receiver_depths < 0):
-        bad_depth = receiver_depths[receiver_depths < 0][0]
-        raise InvalidDepthError(bad_depth, env_depth, "Receiver")
-
-    if np.any(receiver_depths > env_depth - margin):
-        bad_depth = receiver_depths[receiver_depths > env_depth - margin][0]
-        raise InvalidDepthError(bad_depth, env_depth, "Receiver")
+def validate_receiver_depths(
+    receiver_depths: np.ndarray, env_depth: float, margin: float = 1.0,
+):
+    """Raise ``InvalidDepthError`` if any receiver depth is outside the water column."""
+    arr = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
+    bad = arr[(arr < -margin) | (arr > env_depth + margin)]
+    if len(bad):
+        raise InvalidDepthError(
+            f"Receiver depth(s) {list(bad)} outside water column "
+            f"[0, {env_depth:.1f}] m (margin {margin} m)."
+        )

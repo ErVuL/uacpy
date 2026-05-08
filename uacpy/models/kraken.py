@@ -46,6 +46,7 @@ result = field_model.run(env, source, receiver)
 
 import os
 import re
+import warnings
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict
@@ -58,10 +59,16 @@ from uacpy.core.results import Result, Modes, PressureField, TransferFunction
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR,
+    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section
+import inspect
+import shutil
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
+)
+from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section, write_fieldflp
+from uacpy.io.oalib_reader import read_shd_file, read_shd_bin
 from uacpy.models.coupled_modes import segment_environment_by_range
 
 
@@ -87,6 +94,11 @@ class _KrakenBase(PropagationModel):
     volume_attenuation : str, optional
         Volume attenuation formula: 'T' (Thorp), 'F' (Francois-Garrison),
         'B' (Biological), or None (no volume attenuation). Default: None.
+    attenuation_unit : AttenuationUnits or str, optional
+        Units for the SSP attenuation column written into the .env header
+        (TopOpt position 3). Default: ``DB_PER_WAVELENGTH``. Accepts the
+        same string aliases as ``AttenuationUnits.from_string`` (``'W'``,
+        ``'M'``, ``'F'``, ``'N'``, ``'Q'``, ``'L'``).
     francois_garrison_params : tuple, optional
         (T, S, pH, z_bar) required when ``volume_attenuation='F'``:
         temperature (degC), salinity (psu), pH, mean depth (m).
@@ -109,18 +121,25 @@ class _KrakenBase(PropagationModel):
         n_mesh: int = 0,
         roughness: float = 0.0,
         volume_attenuation: Optional[str] = None,
+        attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
+        use_tmpfs: bool = False,
+        verbose: bool = False,
+        work_dir: Optional[Path] = None,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+        )
         self.c_low = c_low
         self.c_high = c_high
         self.n_mesh = n_mesh
         self.roughness = roughness
         self.volume_attenuation = volume_attenuation
+        self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
         self.leaky_modes = leaky_modes
@@ -186,34 +205,34 @@ class _KrakenBase(PropagationModel):
         return Modes(
             k=k_arr,
             phi=phi_arr,
-            z=z_arr,
+            depths=z_arr,
             n_modes=len(k_arr),
             **self._result_kwargs(
                 source,
                 backend=Path(self.executable).name if self.executable else self.model_name.lower(),
-                frequency=float(source.frequency[0]),
+                frequencies=float(source.frequencies[0]),
                 n_modes_requested=n_modes,
                 leaky_modes=self.leaky_modes,
             ),
         )
 
     @staticmethod
-    def _compute_rmax_km(receiver, fallback_km: float = 100.0) -> float:
-        """Derive field-computation RMax (km) from receiver ranges.
+    def _compute_rmax_m(receiver, fallback_m: float = 100_000.0) -> float:
+        """Derive field-computation RMax (m) from receiver ranges.
 
         Adds a 5 % buffer so field.exe doesn't clip the outermost ranges.
-        Falls back to ``fallback_km`` if the receiver has no explicit range
+        Falls back to ``fallback_m`` if the receiver has no explicit range
         vector (e.g. mode-only Kraken runs).
         """
         if receiver is None:
-            return float(fallback_km)
+            return float(fallback_m)
         ranges = getattr(receiver, 'ranges', None)
         if ranges is None or len(np.atleast_1d(ranges)) == 0:
-            return float(fallback_km)
+            return float(fallback_m)
         rmax_m = float(np.max(np.asarray(ranges, dtype=float)))
         if rmax_m <= 0:
-            return float(fallback_km)
-        return rmax_m / 1000.0 * 1.05
+            return float(fallback_m)
+        return rmax_m * 1.05
 
     def _write_kraken_env(self, filepath, env, source, **kwargs):
         """
@@ -241,7 +260,6 @@ class _KrakenBase(PropagationModel):
         top_reflection_file = getattr(self, 'top_reflection_file', None)
         if top_reflection_file is not None:
             from uacpy.core.constants import BoundaryType
-            import shutil
             src = Path(top_reflection_file)
             if not src.exists():
                 raise ConfigurationError(
@@ -259,9 +277,9 @@ class _KrakenBase(PropagationModel):
         # Use instance attributes for model tuning parameters
         receiver_obj = kwargs.get('receiver_obj', None)
         receiver_depths = kwargs.get('receiver_depths', [100.0])
-        rmax_km = kwargs.get('rmax_km', None)
-        if rmax_km is None:
-            rmax_km = self._compute_rmax_km(receiver_obj, fallback_km=100.0)
+        rmax_m = kwargs.get('rmax_m', None)
+        if rmax_m is None:
+            rmax_m = self._compute_rmax_m(receiver_obj, fallback_m=100_000.0)
         frequencies = kwargs.get('frequencies', None)
 
         with open(filepath, 'w') as f:
@@ -270,7 +288,7 @@ class _KrakenBase(PropagationModel):
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
-                attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
+                attenuation_unit=self.attenuation_unit,
                 volume_attenuation=vol_atten,
                 frequencies=frequencies,
             )
@@ -307,21 +325,17 @@ class _KrakenBase(PropagationModel):
             c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
             f.write(f"{c_low:.1f} {c_high:.1f}\n")
 
-            # Maximum range (km) - used for field computation
-            f.write(f"{rmax_km:.1f}\n")
+            # Maximum range — Kraken expects km on disk; the wrapper carries m.
+            f.write(f"{rmax_m / 1000.0:.1f}\n")
 
             # Source depths (use ATEnvWriter helper for full non-uniform support)
             write_source_depths(f, source)
 
-            # Receiver depths (use full list via ATEnvWriter; receiver_obj has
-            # priority so non-uniform arrays survive verbatim).
-            if receiver_obj is not None:
-                write_receiver_depths(f, receiver_obj)
-            else:
-                rd = np.asarray(receiver_depths, dtype=float)
-                f.write(f"{len(rd)}\n")
-                depths_str = " ".join([f"{d:.6f}" for d in rd])
-                f.write(f"{depths_str} /\n")
+            # Receiver depths: receiver_obj (if present) preserves a non-
+            # uniform array verbatim; otherwise fall back to the depths array.
+            write_receiver_depths(
+                f, receiver_obj if receiver_obj is not None else receiver_depths,
+            )
 
             # Broadband frequency vector (read by ReadfreqVec AFTER SD/RD)
             if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
@@ -348,8 +362,9 @@ class _KrakenBase(PropagationModel):
         ----------
         env, source, n_modes : see PropagationModel.compute_modes
         mode_depth_grid : array-like, optional (kwarg)
-            User-supplied mode sampling depths. If omitted, a 100-point
-            linspace from 0 to total media depth is used.
+            User-supplied mode sampling depths. If omitted the grid is
+            ``max(100, total_depth * mode_points_per_meter)`` points
+            linearly spaced from 0 to the total media depth.
         """
         from uacpy.core.receiver import Receiver as _Receiver
 
@@ -364,12 +379,13 @@ class _KrakenBase(PropagationModel):
             ):
                 for layer in env.bottom_layered.layers:
                     total_depth += layer.thickness
-            mode_depths = np.linspace(0.0, float(total_depth), 100)
+            ppm = float(getattr(self, 'mode_points_per_meter', 0.0) or 0.0)
+            n_pts = max(100, int(round(float(total_depth) * ppm)))
+            mode_depths = np.linspace(0.0, float(total_depth), n_pts)
 
         dense_receiver = _Receiver(depths=mode_depths, ranges=[0.0])
         # Kraken/KrakenC.run ignore run_mode (they only compute modes); only
         # pass it if the concrete class advertises the kwarg (KrakenField).
-        import inspect
         sig = inspect.signature(self.run)
         if 'run_mode' in sig.parameters:
             return self.run(
@@ -383,7 +399,7 @@ class _KrakenBase(PropagationModel):
 
     def _read_modes_file(self, filepath: Path) -> Dict:
         """Read a Kraken ``.mod`` file using the binary reader."""
-        from uacpy.io.output_reader import read_modes_bin
+        from uacpy.io.modes_reader import read_modes_bin
 
         # read_modes_bin expects the filename without extension and appends
         # its own ('.moA'); strip '.mod' before handing it over.
@@ -395,7 +411,6 @@ class _KrakenBase(PropagationModel):
 
         # read_modes_bin will add .moA, but Kraken produces .mod
         # So we need to rename the file first
-        import shutil
         mod_file = basename + '.mod'
         moa_file = basename + '.moA'
 
@@ -518,8 +533,8 @@ class Kraken(_KrakenBase):
 
         These keys are NOT the same as the broadband keys produced by
         ``KrakenField`` with a frequency vector (which returns a
-        ``field_type='transfer_function'`` field with ``frequencies``,
-        ``depths``, ``ranges`` axes on ``.data`` and no 'k'/'phi' entries).
+        :class:`TransferFunction` with ``frequencies``, ``depths``,
+        ``ranges`` axes on ``.data`` and no 'k'/'phi' entries).
 
     Examples
     --------
@@ -528,8 +543,14 @@ class Kraken(_KrakenBase):
     >>> print(f"Computed {len(modes.metadata['k'])} modes")
     """
 
-    def __init__(self, executable: Optional[Path] = None, **kwargs):
+    def __init__(
+        self,
+        executable: Optional[Path] = None,
+        mode_points_per_meter: float = 1.5,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
+        self.mode_points_per_meter = float(mode_points_per_meter)
         self._supported_modes = [RunMode.MODES]
         # Elastic media auto-route to krakenc.exe via _select_kraken_exe.
         self._supports_layered_bottom = True
@@ -542,6 +563,9 @@ class Kraken(_KrakenBase):
             )
         else:
             self.executable = Path(executable)
+
+        if not self.executable.exists():
+            raise ExecutableNotFoundError(self.model_name, str(self.executable))
 
     def run(
         self,
@@ -586,7 +610,6 @@ class Kraken(_KrakenBase):
             Mode data in metadata dict
         """
         if run_mode is not None and run_mode != RunMode.MODES:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
@@ -595,7 +618,7 @@ class Kraken(_KrakenBase):
         self._warn_unknown_kwargs(kwargs)
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
                                 roughness=roughness, volume_attenuation=volume_attenuation):
@@ -652,8 +675,14 @@ class KrakenC(_KrakenBase):
     >>> modes = krakenc.run(env_with_elastic_bottom, source, receiver)
     """
 
-    def __init__(self, executable: Optional[Path] = None, **kwargs):
+    def __init__(
+        self,
+        executable: Optional[Path] = None,
+        mode_points_per_meter: float = 1.5,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
+        self.mode_points_per_meter = float(mode_points_per_meter)
         self._supported_modes = [RunMode.MODES]
         self._supports_layered_bottom = True
         self._supports_elastic_media = True
@@ -665,6 +694,9 @@ class KrakenC(_KrakenBase):
             )
         else:
             self.executable = Path(executable)
+
+        if not self.executable.exists():
+            raise ExecutableNotFoundError(self.model_name, str(self.executable))
 
     def run(
         self,
@@ -709,7 +741,6 @@ class KrakenC(_KrakenBase):
             Typed modal result with ``k``, ``phi``, ``z``, ``n_modes``.
         """
         if run_mode is not None and run_mode != RunMode.MODES:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.MODES", "KrakenField for TL fields"],
@@ -718,7 +749,7 @@ class KrakenC(_KrakenBase):
         self._warn_unknown_kwargs(kwargs)
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         with _resolve_overrides(self, c_low=c_low, c_high=c_high, n_mesh=n_mesh,
                                 roughness=roughness, volume_attenuation=volume_attenuation):
@@ -867,6 +898,9 @@ class KrakenField(_KrakenBase):
         else:
             self.executable = Path(executable)
 
+        if not self.executable.exists():
+            raise ExecutableNotFoundError(self.model_name, str(self.executable))
+
         if field_executable is None:
             self._field_exe = self._find_executable_in_paths(
                 'field.exe',
@@ -875,6 +909,11 @@ class KrakenField(_KrakenBase):
             )
         else:
             self._field_exe = Path(field_executable)
+
+        if not self._field_exe.exists():
+            raise ExecutableNotFoundError(
+                f"{self.model_name} (field.exe)", str(self._field_exe),
+            )
 
         self.mode_points_per_meter = mode_points_per_meter
         self.mode_coupling = mode_coupling
@@ -1068,7 +1107,7 @@ class KrakenField(_KrakenBase):
                 return tf
 
             env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
             return self._compute_field_via_exe(
                 env, source, receiver, n_modes=n_modes, **kwargs
             )
@@ -1094,10 +1133,6 @@ class KrakenField(_KrakenBase):
             runs once with TopOpt(6)='B' producing a multi-freq .mod file
             that field.exe handles natively.
         """
-        from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section
-        from uacpy.io.oalib_writer import write_fieldflp
-        from uacpy.io.output_reader import read_shd_file, read_shd_bin
-
         fm = self._setup_file_manager()
         self.file_manager = fm
         base_name = 'kfield'
@@ -1153,19 +1188,19 @@ class KrakenField(_KrakenBase):
             receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
 
             if is_rd and segments is not None:
-                rmax_km = float(np.max(receiver.ranges)) / 1000.0
+                rmax_m = float(np.max(receiver.ranges))
 
                 # Compute fixed mesh N for all profiles to ensure
                 # consistent .mod record length (LRecordLength must not
                 # increase between profiles — krakenc.f90 line 629).
                 # Use 20 pts/wavelength based on max depth, like AT convention.
-                freq = float(source.frequency[0])
+                freq = float(source.frequencies[0])
                 all_c = []
                 for _, seg in segments:
                     all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
                     if hasattr(seg, 'bottom') and seg.bottom is not None:
                         all_c.append(seg.bottom.sound_speed)
-                min_c = min(all_c) if all_c else 1500.0
+                min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
                 n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
 
                 if broadband:
@@ -1189,14 +1224,14 @@ class KrakenField(_KrakenBase):
                     roughness=self.roughness,
                     c_low=self.c_low,
                     c_high=self.c_high,
-                    rmax_km=rmax_km,
+                    rmax_m=rmax_m,
                 )
             else:
                 self._write_kraken_env(
                     env_file, env, source,
                     receiver_obj=receiver_for_modes,
                     receiver_depths=mode_depths,
-                    rmax_km=float(np.max(receiver.ranges)) / 1000.0,
+                    rmax_m=float(np.max(receiver.ranges)),
                     frequencies=freq_vec if broadband else None,
                     **kwargs
                 )
@@ -1213,7 +1248,7 @@ class KrakenField(_KrakenBase):
             flp_file = fm.get_path(f'{base_name}.flp')
             option = self._build_field_option(is_rd)
             pos = {
-                's': {'z': source.depth},
+                's': {'z': source.depths},
                 'r': {'z': receiver.depths, 'r': receiver.ranges},
             }
             flp_kwargs = dict(
@@ -1232,7 +1267,6 @@ class KrakenField(_KrakenBase):
             # _build_field_option above.
             sbp_path = getattr(self, 'source_beam_pattern_file', None)
             if sbp_path is not None:
-                import shutil
                 src = Path(sbp_path)
                 if not src.exists():
                     raise ConfigurationError(
@@ -1241,18 +1275,25 @@ class KrakenField(_KrakenBase):
                 shutil.copy(src, fm.get_path(f'{base_name}.sbp'))
 
             # 4. Run field.exe → .shd
-            # field.exe may exit with non-zero (Fortran cleanup issues) even
-            # when computation succeeds, so we inspect the .shd file below
-            # rather than trusting the return code.
+            # field.exe may exit non-zero on a successful run because of a
+            # known Fortran teardown bug; the .shd file is still valid.
+            # Catch only ``ModelExecutionError`` and warn so any wider
+            # failure (e.g. ``FileNotFoundError`` for the binary itself)
+            # still propagates.
             self._log(f"Running field.exe (option='{option}')...", level='info')
             try:
                 self._run_subprocess(
                     [str(self._field_exe), base_name],
                     cwd=fm.work_dir,
                 )
-            except Exception:
-                # Swallow — checked via .shd existence below.
-                pass
+            except ModelExecutionError as exc:
+                warnings.warn(
+                    f"field.exe exited with non-zero status "
+                    f"({exc}); attempting to read the .shd output anyway "
+                    "(known Fortran cleanup issue).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
             # 5. Read .shd output
             # field.exe may exit with non-zero (memory cleanup issues in
@@ -1265,20 +1306,6 @@ class KrakenField(_KrakenBase):
                 )
 
             if broadband:
-                # Broadband runs currently only support ONE source depth.
-                # read_shd_bin returns pressure shape (Ntheta, Nsz, Nrz, Nrr);
-                # collapsing on Nsz via ``[0, 0]`` would silently drop the
-                # other source depths. Fail loudly instead of producing
-                # a misleading single-source-depth transfer function.
-                sd = np.atleast_1d(source.depth)
-                if len(sd) > 1:
-                    raise ConfigurationError(
-                        "KrakenField broadband/transfer-function mode "
-                        "currently supports only a single source depth "
-                        f"(got {len(sd)}). Loop over source depths "
-                        "externally, or use a single depth."
-                    )
-
                 shd0 = read_shd_bin(str(shd_file))
                 freqs_read = np.asarray(shd0['freqVec'], dtype=float)
                 # New layout: (n_d, n_r, n_f).
@@ -1321,7 +1348,7 @@ class KrakenField(_KrakenBase):
                     **self._result_kwargs(
                         source,
                         backend='field.exe',
-                        frequency=float(np.atleast_1d(source.frequency)[0]),
+                        frequencies=float(np.atleast_1d(source.frequencies)[0]),
                         mode_coupling=self.mode_coupling if is_rd else 'none',
                         n_profiles=n_profiles,
                     ),
@@ -1331,8 +1358,8 @@ class KrakenField(_KrakenBase):
                 field.tag(
                     model='KrakenField',
                     backend='field.exe',
-                    source_depths=source.depth,
-                    frequency=float(np.atleast_1d(source.frequency)[0]),
+                    source_depths=source.depths,
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
                     mode_coupling=self.mode_coupling if is_rd else 'none',
                     n_profiles=n_profiles,
                 )
@@ -1364,7 +1391,7 @@ class KrakenField(_KrakenBase):
             Transfer function field with shape ``(n_depths, n_freqs, n_ranges)``
             containing complex pressure. Axis order matches Bellhop/RAM/Scooter.
         """
-        fc = float(source.frequency[0])
+        fc = float(source.frequencies[0])
         if frequencies is None:
             frequencies = np.linspace(fc * 0.5, fc * 2.0, 64)
         frequencies = np.asarray(frequencies, dtype=float)
@@ -1373,7 +1400,7 @@ class KrakenField(_KrakenBase):
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=RunMode.BROADBAND)
         return self._compute_field_via_exe(
             env, source, receiver,
             frequencies=frequencies,

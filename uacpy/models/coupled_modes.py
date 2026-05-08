@@ -86,10 +86,10 @@ def segment_environment_by_range(
 
     segments = []
     for range_m in segment_ranges_m:
-        depth_at_range = float(np.asarray(env.get_bathymetry_depth(range_m)).flat[0])
+        depth_at_range = float(np.asarray(env.bathymetry_at_range(range_m)).flat[0])
 
-        bottom_segment = env.get_bottom_at_range(range_m)
-        ssp_at_range = env.get_ssp_at_range(range_m)
+        bottom_segment = env.bottom_at_range(range_m)
+        ssp_at_range = env.ssp_at_range(range_m)
 
         # Kraken .env writer uses .1f for the bottom depth on the mesh
         # line, so the deepest SSP point must match that rounded value.

@@ -53,27 +53,27 @@ class TestSource:
 
     def test_create_source(self, source):
         """Test creating a source."""
-        assert source.depth[0] == 50.0
-        assert source.frequency[0] == 100.0
+        assert source.depths[0] == 50.0
+        assert source.frequencies[0] == 100.0
 
     def test_source_array_conversion(self):
         """Test that single values are converted to arrays."""
-        source = uacpy.Source(depth=30.0, frequency=200.0)
-        assert isinstance(source.depth, np.ndarray)
-        assert isinstance(source.frequency, np.ndarray)
-        assert len(source.depth) == 1
-        assert len(source.frequency) == 1
+        source = uacpy.Source(depths=30.0, frequencies=200.0)
+        assert isinstance(source.depths, np.ndarray)
+        assert isinstance(source.frequencies, np.ndarray)
+        assert len(source.depths) == 1
+        assert len(source.frequencies) == 1
 
     def test_multiple_sources(self):
         """Test multiple source depths."""
-        source = uacpy.Source(depth=[10.0, 20.0, 30.0], frequency=100.0)
-        assert len(source.depth) == 3
-        assert np.allclose(source.depth, [10, 20, 30])
+        source = uacpy.Source(depths=[10.0, 20.0, 30.0], frequencies=100.0)
+        assert len(source.depths) == 3
+        assert np.allclose(source.depths, [10, 20, 30])
 
     def test_multiple_frequencies(self):
         """Test multiple frequencies."""
-        source = uacpy.Source(depth=50.0, frequency=[50.0, 100.0, 200.0])
-        assert len(source.frequency) == 3
+        source = uacpy.Source(depths=50.0, frequencies=[50.0, 100.0, 200.0])
+        assert len(source.frequencies) == 3
 
 
 class TestReceiver:
@@ -114,7 +114,7 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
 
         assert field.field_type == 'tl'
         assert field.shape == (10, 20)
@@ -128,7 +128,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
         value = field.get_value(range_m=4500, depth=45)
         assert 44 <= value <= 55
 
@@ -139,7 +139,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
         values = field.get_at_range(4500)
         assert len(values) == 10
         assert 50 <= values[5] <= 59
@@ -151,7 +151,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
         values = field.get_at_depth(45)
         assert len(values) == 10
         assert 40 <= values[5] <= 49
@@ -163,7 +163,7 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
         field_copy = field.copy()
 
         assert type(field_copy) is type(field)
@@ -178,9 +178,74 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = TLField(data=data, ranges=ranges, depths=depths,
-                        model='Test', frequency=100.0)
+                        model='Test', frequencies=100.0)
         repr_str = repr(field)
         assert 'TLField' in repr_str
         assert field.shape == (10, 20)
         assert field.n_ranges == 20
         assert field.n_depths == 10
+
+
+class TestPublicReexports:
+    """Top-level re-exports added for the API audit."""
+
+    def test_environment_helpers_at_top_level(self):
+        from uacpy import SoundSpeedProfile, generate_sea_surface
+        assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
+        assert generate_sea_surface is uacpy.core.environment.generate_sea_surface
+
+    def test_environment_helpers_at_core(self):
+        from uacpy.core import SoundSpeedProfile, generate_sea_surface
+        assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
+        assert generate_sea_surface is uacpy.core.environment.generate_sea_surface
+
+    def test_signal_analysis_classes_at_top_level(self):
+        sig = uacpy.signal
+        for name in ('PPSD', 'PSD', 'FRF', 'SEL', 'FKTransform', 'Spectrogram'):
+            assert hasattr(sig, name), f"uacpy.signal.{name} not reachable"
+        assert 'PSD' in sig.__all__
+        assert 'FRF' in sig.__all__
+        assert 'SEL' in sig.__all__
+        assert 'FKTransform' in sig.__all__
+
+
+class TestModesFieldType:
+    """Single canonical ``field_type`` declaration on Modes."""
+
+    def test_modes_field_type_value(self):
+        from uacpy.core.results import Modes
+        assert Modes.field_type == "modes"
+
+
+class TestArrivalsToTableKeys:
+    """``Arrivals.to_table()`` emits writer-aligned bounce keys."""
+
+    def test_to_table_uses_n_bounce_keys(self):
+        from uacpy.core.results import Arrivals
+        # Build a minimal payload with the canonical IO key naming.
+        payload = [[[{
+            "delays": np.array([0.1, 0.2]),
+            "amplitudes": np.array([1.0, 0.5]),
+            "phases": np.array([0.0, 0.1]),
+            "n_top_bounces": np.array([0, 1], dtype=int),
+            "n_bot_bounces": np.array([1, 2], dtype=int),
+            "src_angles": np.array([0.0, 5.0]),
+            "rcv_angles": np.array([0.0, -5.0]),
+            "n_arrivals": 2,
+        }]]]
+        arr = Arrivals(
+            by_receiver=payload,
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([1000.0]),
+            model='Test',
+            frequencies=100.0,
+        )
+        table = arr.to_table()
+        assert len(table) == 2
+        for row in table:
+            assert 'n_top_bounces' in row
+            assert 'n_bot_bounces' in row
+        assert table[0]['kind'] == 'bottom'
+        assert table[1]['kind'] == 'both'
+        assert table[0]['n_bot_bounces'] == 1
+        assert table[1]['n_top_bounces'] == 1

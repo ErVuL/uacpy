@@ -8,7 +8,10 @@ Pipeline:
      (deep water, Beaufort-6 wind, heavy shipping + rain).
   2. Synthesise a time-domain realisation with :func:`uacpy.signal.ssrp`
      (spectral synthesis of random processes).
-  3. Round-trip the realisation through :class:`uacpy.signal.PPSD` to
+  3. Visualise the time–frequency content with
+     :class:`uacpy.signal.Spectrogram` — a stationary process should show
+     a uniform spectral pattern across time.
+  4. Round-trip the realisation through :class:`uacpy.signal.PPSD` to
      verify the synthesis recovers the input spectrum and to visualise
      the level distribution across time segments.
 
@@ -16,6 +19,7 @@ Outputs
 -------
 output/example_09_wenz_components.png  — Wenz components (per-source).
 output/example_09_ssrp_timeseries.png  — synthesised noise waveform snapshot.
+output/example_09_ssrp_spectrogram.png — time–frequency content of the noise.
 output/example_09_ppsd.png             — PPSD with analytic Wenz overlay.
 """
 
@@ -96,7 +100,22 @@ def main():
     plt.close(fig)
     print("  ✓ Saved: output/example_09_ssrp_timeseries.png")
 
-    # ── 3. PPSD of the synthesised noise ────────────────────────────────
+    # ── 3. Spectrogram of the synthesised noise ─────────────────────────
+    spec = uacpy.signal.Spectrogram(ref=UPA, nperseg=4096, noverlap=2048)
+    spec.compute(x, fs)
+    fig, ax = spec.plot(
+        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+               f'{wenz_ssrp.shipping_level} shipping / '
+               f'{wenz_ssrp.rain_rate} rain'),
+        ymin=10, ymax=fs / 2,
+        vmin=20, vmax=120,
+    )
+    fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
+                dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
+
+    # ── 4. PPSD of the synthesised noise ────────────────────────────────
     ppsd = uacpy.signal.PPSD(
         ref=UPA,
         seg_duration=1.0,

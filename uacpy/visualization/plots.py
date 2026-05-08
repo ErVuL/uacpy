@@ -27,6 +27,9 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_COLOR,
     BOTTOM_FILL_STYLE,
     BOTTOM_HALFSPACE_COLOR,
+    BOTTOM_LINE_STYLE,
+    SOURCE_MARKER_STYLE,
+    RECEIVER_MARKER_STYLE,
 )
 
 # Z-order constants for consistent layering (Acoustic Toolbox standard)
@@ -39,6 +42,83 @@ ZORDER_SURFACE = 4
 ZORDER_RECEIVERS = 5
 ZORDER_SOURCE = 6
 ZORDER_ANNOTATIONS = 7
+
+
+def _auto_tl_limits(
+    data2d: np.ndarray,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    tl_span: float = 50.0,
+    tl_round: float = 10.0,
+):
+    """Acoustic-Toolbox-style auto-scale for TL data.
+
+    ``vmax = median + 0.75·std`` rounded to ``tl_round`` dB; ``vmin =
+    vmax - tl_span``. Either bound may be supplied to skip its
+    computation. Falls back to ``(30, 80)`` if ``data2d`` has no
+    finite samples. Always returns ``vmin < vmax``.
+    """
+    if vmin is not None and vmax is not None:
+        return (vmin, vmax) if vmin < vmax else (vmax - tl_span, vmax)
+
+    valid = data2d[np.isfinite(data2d)]
+    if not len(valid):
+        return (30.0, 80.0)
+    if vmax is None:
+        vmax = float(tl_round * np.round(
+            (np.median(valid) + 0.75 * np.std(valid)) / tl_round
+        ))
+    if vmin is None:
+        vmin = vmax - tl_span
+    if vmin >= vmax:
+        vmin = vmax - tl_span
+    return (vmin, vmax)
+
+
+def _overlay_bathymetry(
+    ax,
+    env: 'Environment',
+    ranges_km: np.ndarray,
+    max_depth: float,
+    *,
+    label: Optional[str] = 'Bathymetry',
+    fill_to: Optional[float] = None,
+):
+    """Draw the seafloor over a TL/ray field axis.
+
+    Returns the (possibly extended) ``max_depth`` so callers can use it
+    for ylim. ``fill_to`` controls the lower edge of the sediment
+    rectangle (defaults to ``max_depth * 1.05``). When the env has
+    range-dependent bathymetry, ``max_depth`` is widened to include the
+    deepest seafloor sample inside ``ranges_km``.
+    """
+    if env is None:
+        return max_depth
+    if env.has_range_dependent_bathymetry():
+        bathy_r = env.bathymetry[:, 0] / 1000.0
+        bathy_z = env.bathymetry[:, 1]
+        in_range = (bathy_r >= ranges_km[0]) & (bathy_r <= ranges_km[-1])
+        if np.any(in_range):
+            max_depth = max(max_depth, float(bathy_z[in_range].max()))
+        fill_bottom = max_depth * 1.05 if fill_to is None else fill_to
+        ax.fill_between(
+            bathy_r, bathy_z, fill_bottom,
+            **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5,
+        )
+        line_kw = dict(BOTTOM_LINE_STYLE)
+        if label:
+            line_kw['label'] = label
+        ax.plot(bathy_r, bathy_z, zorder=ZORDER_SEDIMENT + 6, **line_kw)
+    else:
+        max_depth = max(max_depth, env.depth)
+        fill_bottom = max_depth * 1.05 if fill_to is None else fill_to
+        ax.fill_between(
+            ranges_km, env.depth, fill_bottom,
+            **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5,
+        )
+        ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
+                   zorder=ZORDER_SEDIMENT + 6)
+    return max_depth
 
 
 def _select_2d_slice(field, frequency: Optional[float] = None) -> np.ndarray:
@@ -131,7 +211,6 @@ def plot_transmission_loss(
     ax: Optional[Axes] = None,
     tl_span: float = 50.0,
     tl_round: int = 10,
-    seafloor_alpha: float = 1.0,
     frequency: Optional[float] = None,
 ):
     """
@@ -165,9 +244,6 @@ def plot_transmission_loss(
         TL span in dB when auto-computing limits. Default is 50 dB (standard).
     tl_round : int, optional
         Round vmax to nearest multiple of this value. Default is 10 dB.
-    seafloor_alpha : float, optional
-        Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
-        Default is 1.0 (no transparency).
     frequency : float, optional
         For broadband fields (``field.data.ndim == 3`` with shape
         ``(n_depths, n_freqs, n_ranges)``), the frequency at which to
@@ -179,24 +255,21 @@ def plot_transmission_loss(
         Matplotlib figure
     ax : Axes
         Matplotlib axes
-    cbar : Colorbar or None
-        Colorbar object if show_colorbar=True, None otherwise
 
     Examples
     --------
-    >>> fig, ax, cbar = plot_transmission_loss(result, env)
+    >>> fig, ax = plot_transmission_loss(result, env)
     >>> plt.show()
 
     >>> # With contour lines at 70, 80, 90 dB
-    >>> fig, ax, cbar = plot_transmission_loss(result, env, contours=[70, 80, 90])
+    >>> fig, ax = plot_transmission_loss(result, env, contours=[70, 80, 90])
     >>> plt.show()
 
     >>> # For subplots, disable colorbar
     >>> fig, axes = plt.subplots(1, 2)
-    >>> fig1, ax1, _ = plot_transmission_loss(result1, env, ax=axes[0], show_colorbar=False)
-    >>> fig2, ax2, _ = plot_transmission_loss(result2, env, ax=axes[1], show_colorbar=False)
+    >>> fig1, ax1 = plot_transmission_loss(result1, env, ax=axes[0], show_colorbar=False)
+    >>> fig2, ax2 = plot_transmission_loss(result2, env, ax=axes[1], show_colorbar=False)
     """
-    # Handle None (failed model)
     if field is None:
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
@@ -205,7 +278,7 @@ def plot_transmission_loss(
         ax.text(0.5, 0.5, 'Model Failed', ha='center', va='center',
                transform=ax.transAxes, fontsize=14, color='red')
         ax.axis('off')
-        return fig, ax, None
+        return fig, ax
 
     if isinstance(field, PressureField):
         field = field.to_tl()
@@ -229,30 +302,7 @@ def plot_transmission_loss(
     # Create meshgrid
     R, Z = np.meshgrid(ranges_km, depths)
 
-    # Auto-scale using Acoustic Toolbox method (median + 0.75*std, rounded)
-    if vmin is None or vmax is None:
-        valid_data = data2d[np.isfinite(data2d)]
-
-        if len(valid_data) > 0:
-            # Acoustic Toolbox standard: median + 0.75 * std
-            tl_median = np.median(valid_data)
-            tl_std = np.std(valid_data)
-
-            if vmax is None:
-                # Max = median + 0.75 * std, rounded to nearest tl_round dB
-                vmax = tl_median + 0.75 * tl_std
-                vmax = tl_round * np.round(vmax / tl_round)
-
-            if vmin is None:
-                # Min = max - span (standard 50 dB)
-                vmin = vmax - tl_span
-        else:
-            # Fallback if no valid data
-            vmin, vmax = 30.0, 80.0
-
-    # Ensure vmin < vmax
-    if vmin >= vmax:
-        vmin = vmax - tl_span
+    vmin, vmax = _auto_tl_limits(data2d, vmin, vmax, tl_span, tl_round)
 
     im = ax.pcolormesh(
         R, Z, data2d,
@@ -305,25 +355,9 @@ def plot_transmission_loss(
         cbar.ax.tick_params(labelsize=10)
         cbar.outline.set_linewidth(1.0)
 
-    # Bathymetry overlay - MUST BE BEFORE CONTOURS to mask data below seafloor
+    # Bathymetry overlay (drawn before contours so seafloor masks them).
     if show_bathymetry and env is not None:
-        if env.has_range_dependent_bathymetry():
-            bathy_ranges = env.bathymetry[:, 0] / 1000.0
-            bathy_depths = env.bathymetry[:, 1]
-            ax.fill_between(
-                bathy_ranges, bathy_depths, max_depth * 1.05,
-                **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5
-            )
-            ax.plot(bathy_ranges, bathy_depths, 'k-', linewidth=2.5,
-                    label='Bathymetry', zorder=ZORDER_SEDIMENT + 6)
-        else:
-            # Flat bottom — dashed line to signal "constant depth"
-            ax.fill_between(
-                ranges_km, env.depth, max_depth * 1.05,
-                **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5
-            )
-            ax.axhline(env.depth, color='k', linewidth=2.5, linestyle='--',
-                       zorder=ZORDER_SEDIMENT + 6)
+        max_depth = _overlay_bathymetry(ax, env, ranges_km, max_depth)
 
     # Contour overlay (AT standard: black lines with labels)
     # Contours drawn BEFORE bathymetry so seafloor masks them
@@ -358,7 +392,6 @@ def plot_rays(
     ax: Optional[Axes] = None,
     color_by_bounces: bool = True,
     ray_colors: Optional[Dict[str, str]] = None,
-    seafloor_alpha: float = 1.0,
     linewidth: float = 1.0,
     alpha: float = 0.55,
     xlim: Optional[Tuple[float, float]] = None,
@@ -376,8 +409,8 @@ def plot_rays(
     Supplying ``source``/``receiver`` overlays markers; ``xlim`` accepts
     km values and is used to zoom into a convergence zone or sub-region.
     """
-    if not isinstance(field, Rays) and getattr(field, 'field_type', None) not in ('rays', 'eigenrays'):
-        raise ValueError("plot_rays requires a Rays / eigenrays Result")
+    if not isinstance(field, Rays):
+        raise ValueError("plot_rays requires a Rays Result")
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -424,13 +457,23 @@ def plot_rays(
     max_ray_depth = 0.0
     max_ray_range = 0.0
 
-    is_eigenrays = (getattr(field, 'field_type', None) == 'eigenrays')
+    is_eigenrays = bool(getattr(field, 'is_eigen', False))
     if truncate_at_receiver is None:
         truncate_at_receiver = is_eigenrays
+
+    # Receiver targets: prefer the explicit kwarg, fall back to the
+    # geometry stored on the Rays result so ``rays.plot(env=env)`` works
+    # without re-passing the receiver that produced the run.
     rcv_targets = []
-    if truncate_at_receiver and receiver is not None:
-        rr = np.atleast_1d(getattr(receiver, 'ranges', [])) / 1000.0
-        rd = np.atleast_1d(getattr(receiver, 'depths', []))
+    if truncate_at_receiver:
+        if receiver is not None:
+            rr = np.atleast_1d(getattr(receiver, 'ranges', [])) / 1000.0
+            rd = np.atleast_1d(getattr(receiver, 'depths', []))
+        else:
+            rr = getattr(field, 'receiver_ranges', None)
+            rd = getattr(field, 'receiver_depths', None)
+            rr = np.atleast_1d(rr) / 1000.0 if rr is not None else np.array([])
+            rd = np.atleast_1d(rd) if rd is not None else np.array([])
         for r in rr:
             for d in rd:
                 rcv_targets.append((float(r), float(d)))
@@ -466,8 +509,8 @@ def plot_rays(
             max_ray_range = max(max_ray_range, float(np.max(r_km)))
 
         if color_by_bounces:
-            n_top = int(ray.get('num_top_bounces', 0) or 0)
-            n_bot = int(ray.get('num_bottom_bounces', 0) or 0)
+            n_top = int(ray.get('n_top_bounces', 0) or 0)
+            n_bot = int(ray.get('n_bot_bounces', 0) or 0)
             if n_top >= 1 and n_bot >= 1:
                 kind = 'both'
             elif n_bot >= 1:
@@ -502,42 +545,41 @@ def plot_rays(
     if env is not None:
         ax.axhline(0, color='steelblue', linewidth=1.5, linestyle='-',
                    alpha=0.55, zorder=ZORDER_RAYS - 1)
-        if len(env.bathymetry) > 1:
-            bathy_r = env.bathymetry[:, 0] / 1000.0
-            bathy_z = env.bathymetry[:, 1]
-            ax.plot(bathy_r, bathy_z, 'k-', linewidth=2.0,
-                    zorder=ZORDER_SEDIMENT + 6)
-            ylims = ax.get_ylim()
-            ax.fill_between(bathy_r, bathy_z, ylims[0],
-                            **BOTTOM_FILL_STYLE,
-                            zorder=ZORDER_SEDIMENT + 5, )
-        else:
-            ax.axhline(env.depth, color='k', linewidth=2.0, linestyle='-',
-                       zorder=ZORDER_SEDIMENT + 6)
-            ylims = ax.get_ylim()
-            xlims_now = ax.get_xlim() if xlim is None else xlim
-            ax.fill_between(xlims_now, env.depth, ylims[0],
-                            **BOTTOM_FILL_STYLE,
-                            zorder=ZORDER_SEDIMENT + 5, )
+        ranges_km_axis = np.asarray(
+            [ax.get_xlim()[0], ax.get_xlim()[1]] if xlim is None else xlim,
+            dtype=float,
+        )
+        _overlay_bathymetry(
+            ax, env, ranges_km_axis, max_depth=env.depth,
+            label=None, fill_to=ax.get_ylim()[0],
+        )
 
     src_handle = None
     rcv_handle = None
     if source is not None:
         sd = np.atleast_1d(getattr(source, 'depth', []))
-        if len(sd):
-            src_handle = ax.plot(0.0, float(sd[0]), marker='*', color='red',
-                                  markersize=15, markeredgecolor='black',
-                                  markeredgewidth=0.5, linestyle='none',
-                                  zorder=ZORDER_RAYS + 10, label='Source')[0]
+    else:
+        sd = np.atleast_1d(getattr(field, 'source_depths', []))
+    if len(sd):
+        src_handle = ax.plot(0.0, float(sd[0]), **SOURCE_MARKER_STYLE,
+                              zorder=ZORDER_RAYS + 10, label='Source')[0]
+
     if receiver is not None:
         rd = np.atleast_1d(getattr(receiver, 'depths', []))
         rr = np.atleast_1d(getattr(receiver, 'ranges', []))
-        if len(rd) and len(rr):
-            rcv_handle = ax.plot(rr / 1000.0, rd, marker='o',
-                                  color='limegreen',
-                                  markersize=8, markeredgecolor='black',
-                                  markeredgewidth=0.5, linestyle='none',
-                                  zorder=ZORDER_RAYS + 10, label='Receiver')[0]
+    elif is_eigenrays:
+        rd_attr = getattr(field, 'receiver_depths', None)
+        rr_attr = getattr(field, 'receiver_ranges', None)
+        rd = np.atleast_1d(rd_attr) if rd_attr is not None else np.array([])
+        rr = np.atleast_1d(rr_attr) if rr_attr is not None else np.array([])
+    else:
+        rd = np.array([])
+        rr = np.array([])
+    if len(rd) and len(rr):
+        R, D = np.meshgrid(rr, rd)
+        rcv_handle = ax.plot(R.ravel() / 1000.0, D.ravel(),
+                              **RECEIVER_MARKER_STYLE,
+                              zorder=ZORDER_RAYS + 10, label='Receiver')[0]
 
     if xlim is not None:
         ax.set_xlim(xlim)
@@ -669,7 +711,6 @@ def plot_bathymetry(
     env: Environment,
     figsize: Tuple[float, float] = (12, 4),
     ax: Optional[Axes] = None,
-    seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
     """
     Plot bathymetry profile
@@ -682,9 +723,6 @@ def plot_bathymetry(
         Figure size. Default is (12, 4).
     ax : Axes, optional
         Matplotlib axes
-    seafloor_alpha : float, optional
-        Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
-        Default is 1.0 (no transparency).
 
     Returns
     -------
@@ -702,7 +740,7 @@ def plot_bathymetry(
     ranges_km = env.bathymetry[:, 0] / 1000.0
     depths = env.bathymetry[:, 1]
 
-    ax.plot(ranges_km, depths, 'k-', linewidth=2.5)
+    ax.plot(ranges_km, depths, **BOTTOM_LINE_STYLE)
     ax.fill_between(ranges_km, depths, depths.max() * 1.2, **BOTTOM_FILL_STYLE)
 
     # Invert y-axis
@@ -735,7 +773,7 @@ def plot_arrivals(
     whose payload sits at ``by_receiver`` or, when broadband, in nested
     ``arrivals_data[i][j]`` dicts.
     """
-    if not isinstance(field, Arrivals) and getattr(field, 'field_type', None) != 'arrivals':
+    if not isinstance(field, Arrivals):
         raise ValueError("plot_arrivals requires arrivals-type field")
 
     if ax is None:
@@ -829,7 +867,6 @@ def plot_environment(
     source: Optional[Source] = None,
     receiver: Optional[Receiver] = None,
     figsize: Tuple[float, float] = (14, 8),
-    seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
     """
     Plot complete environment overview
@@ -844,9 +881,6 @@ def plot_environment(
         Receivers to overlay
     figsize : tuple, optional
         Figure size. Default is (14, 8).
-    seafloor_alpha : float, optional
-        Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
-        Default is 1.0 (no transparency).
 
     Returns
     -------
@@ -884,34 +918,30 @@ def plot_environment(
     if len(env.bathymetry) > 1:
         ranges_km = env.bathymetry[:, 0] / 1000.0
         depths = env.bathymetry[:, 1]
-        ax_env.plot(ranges_km, depths, 'k-', linewidth=2.5, zorder=3)
+        ax_env.plot(ranges_km, depths, **BOTTOM_LINE_STYLE, zorder=3)
         ax_env.fill_between(
             ranges_km, depths, max_depth * 1.15,
             **BOTTOM_FILL_STYLE, zorder=1
         )
     else:
-        # Flat bottom: draw a horizontal line across the full axes
-        ax_env.axhline(env.depth, color='k', linewidth=2.5, zorder=3, label='Bottom')
+        ax_env.axhline(env.depth, **BOTTOM_LINE_STYLE, zorder=3, label='Bottom')
         # Fill is applied below, after xlim is established by source/receiver.
 
-    # Plot source
     if source is not None:
-        for sd in source.depth:
-            ax_env.plot(0, sd, 'r*', markersize=18, label='Source', zorder=5, markeredgecolor='darkred', markeredgewidth=1.5)
+        for sd in source.depths:
+            ax_env.plot(0, sd, **SOURCE_MARKER_STYLE, label='Source',
+                        zorder=5)
 
-    # Plot receivers
     if receiver is not None:
         r_km = receiver.ranges / 1000.0
         if receiver.receiver_type == 'grid':
-            # For grid receivers, plot subset for visualization
             R_km, D = np.meshgrid(r_km, receiver.depths)
-            # Plot subset (every 5th point to avoid clutter)
-            ax_env.scatter(R_km[::5, ::5].flatten(), D[::5, ::5].flatten(),
-                          c='b', marker='v', s=20, alpha=0.5, label='Receivers', zorder=4)
+            ax_env.plot(R_km[::5, ::5].flatten(), D[::5, ::5].flatten(),
+                        **RECEIVER_MARKER_STYLE, alpha=0.5,
+                        label='Receivers', zorder=4)
         else:
-            # For line receivers, plot all points
-            ax_env.scatter(r_km, receiver.depths, c='b', marker='v',
-                          s=30, alpha=0.6, label='Receivers', zorder=4)
+            ax_env.plot(r_km, receiver.depths, **RECEIVER_MARKER_STYLE,
+                        alpha=0.6, label='Receivers', zorder=4)
 
     # Now add flat bottom fill if needed (after xlim is established)
     if len(env.bathymetry) == 1:
@@ -971,7 +1001,7 @@ def plot_modes(
     >>> fig, axes = modes.plot(n_modes=10)
     >>> plt.show()
     """
-    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+    if not isinstance(modes, Modes):
         raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
     # Accept either typed Modes attributes or a dict-style
@@ -987,7 +1017,7 @@ def plot_modes(
         k = modes.metadata.get('k', np.array([]))
     M = len(k)
     freq = (
-        modes.frequency if getattr(modes, 'frequency', None) is not None
+        modes.f0 if modes.f0 is not None
         else modes.metadata.get('frequency', 0.0)
     )
 
@@ -1044,7 +1074,7 @@ def plot_modes(
     if M <= 6:
         ax2.legend(loc='best', fontsize=9)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, (ax1, ax2)
 
@@ -1079,7 +1109,7 @@ def plot_mode_functions(
     >>> fig, axes = plot_mode_functions(modes, mode_indices=[0, 1, 2])
     >>> plt.show()
     """
-    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+    if not isinstance(modes, Modes):
         raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
     # Accept either typed Modes attributes or a dict-style
@@ -1095,7 +1125,7 @@ def plot_mode_functions(
         k = modes.metadata.get('k', np.array([]))
     M = len(k)
     freq = (
-        modes.frequency if getattr(modes, 'frequency', None) is not None
+        modes.f0 if modes.f0 is not None
         else modes.metadata.get('frequency', 0.0)
     )
 
@@ -1140,7 +1170,7 @@ def plot_mode_functions(
 
     fig.suptitle(f'Mode Functions at f = {freq:.1f} Hz',
                  fontsize=14, fontweight='bold')
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, axes
 
@@ -1190,13 +1220,13 @@ def plot_mode_wavenumbers(
     - The pattern reveals the modal structure of the waveguide
     - Follows Acoustic Toolbox plotmode.m standard
     """
-    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+    if not isinstance(modes, Modes):
         raise ValueError("plot_mode_wavenumbers requires a Modes Result")
     k = getattr(modes, 'k', None)
     if k is None or (hasattr(k, '__len__') and len(k) == 0):
         k = modes.metadata.get('k', np.array([]))
     freq = (
-        modes.frequency if getattr(modes, 'frequency', None) is not None
+        modes.f0 if modes.f0 is not None
         else modes.metadata.get('frequency', 0.0)
     )
     M = len(k)
@@ -1246,7 +1276,7 @@ def plot_mode_wavenumbers(
     ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
             verticalalignment='top', bbox=props, zorder=ZORDER_ANNOTATIONS)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, ax
 
@@ -1314,8 +1344,15 @@ def compare_models(
             ax.axis('off')
             continue
 
-        if not isinstance(field, TLField):
-            field = field.to_db()
+        if isinstance(field, TLField):
+            pass
+        elif isinstance(field, (PressureField, TransferFunction)):
+            field = field.to_tl()
+        else:
+            raise TypeError(
+                f"compare_models: '{model_name}' is a {type(field).__name__}; "
+                "expected TLField, PressureField, or TransferFunction."
+            )
 
         ranges_km = field.ranges / 1000.0
         depths = field.depths
@@ -1335,19 +1372,6 @@ def compare_models(
         ax.set_xlim(ranges_km[0], ranges_km[-1])
 
         max_depth = depths.max()
-        bathy_r, bathy_d = None, None
-        if env is not None:
-            if len(env.bathymetry) > 1:
-                in_range = ((env.bathymetry[:, 0] / 1000.0 >= ranges_km[0]) &
-                            (env.bathymetry[:, 0] / 1000.0 <= ranges_km[-1]))
-                if np.any(in_range):
-                    max_depth = max(max_depth, env.bathymetry[in_range, 1].max())
-                bathy_r = env.bathymetry[:, 0] / 1000.0
-                bathy_d = env.bathymetry[:, 1]
-            else:
-                max_depth = max(max_depth, env.depth)
-        ax.set_ylim([max_depth * 1.05, 0])
-
         ax.set_xlabel('Range (km)', fontsize=12)
         ax.set_title(f'{model_name}\nTL (dB)', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3, zorder=0)
@@ -1358,18 +1382,9 @@ def compare_models(
                             alpha=0.7, zorder=ZORDER_SEDIMENT + 1)
             ax.clabel(CS, inline=True, fontsize=8, fmt='%d')
 
-        if bathy_r is not None:
-            ax.fill_between(bathy_r, bathy_d, max_depth * 1.05,
-                            **BOTTOM_FILL_STYLE,
-                            zorder=ZORDER_SEDIMENT + 5, )
-            ax.plot(bathy_r, bathy_d, 'k-', linewidth=2,
-                    zorder=ZORDER_SEDIMENT + 6)
-        else:
-            ax.axhline(env.depth, color='k', linewidth=2.5, linestyle='--',
-                       alpha=0.8, zorder=ZORDER_SEDIMENT + 6)
-            ax.fill_between(ranges_km, env.depth, max_depth * 1.05,
-                            **BOTTOM_FILL_STYLE,
-                            zorder=ZORDER_SEDIMENT + 5, )
+        if env is not None:
+            max_depth = _overlay_bathymetry(ax, env, ranges_km, max_depth, label=None)
+        ax.set_ylim([max_depth * 1.05, 0])
 
         if idx % ncols == 0:
             ax.set_ylabel('Depth (m)', fontsize=12)
@@ -1394,13 +1409,13 @@ def plot_dispersion_curves(
     figsize: Tuple[float, float] = (12, 8),
 ) -> Tuple[Figure, Axes]:
     """
-    Plot dispersion curves (phase speed vs frequency) for multiple frequencies.
+    Plot dispersion curves (phase speed vs frequency) for multiple frequencies
 
     Parameters
     ----------
     modes_dict : dict
-        Either ``{freq: Modes_instance}`` (preferred) or the legacy raw form
-        ``{freq: {'M': n_modes, 'k': complex_k_array}}``.
+        Dictionary with frequencies as keys and mode data as values
+        Example: {50: modes_50hz, 100: modes_100hz, ...}
     figsize : tuple, optional
         Figure size. Default is (12, 8).
 
@@ -1413,30 +1428,33 @@ def plot_dispersion_curves(
 
     Examples
     --------
-    >>> modes_dict = {50: kraken.compute_modes(env, src_50),
-    ...               100: kraken.compute_modes(env, src_100)}
+    >>> modes_dict = {50: kraken.compute_modes(env, source_50),
+    ...               100: kraken.compute_modes(env, source_100)}
     >>> fig, axes = plot_dispersion_curves(modes_dict)
+    >>> plt.show()
     """
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=figsize)
 
-    def _unpack(entry):
-        """Return (n_modes, k_array) regardless of dict vs Modes input."""
-        if isinstance(entry, Modes):
-            return entry.n_modes, np.asarray(entry.k)
-        return entry['M'], np.asarray(entry['k'])
-
     frequencies = sorted(modes_dict.keys())
-    max_modes = max(_unpack(modes_dict[f])[0] for f in frequencies)
+
+    # Collect data for each mode across frequencies
+    max_modes = max(modes['M'] for modes in modes_dict.values())
+
+    # Plot dispersion curves (phase speed vs frequency)
     colors = plt.cm.tab10(np.linspace(0, 1, min(10, max_modes)))
 
     for mode_idx in range(max_modes):
-        freqs, phase_speeds, attenuations = [], [], []
+        freqs = []
+        phase_speeds = []
+        attenuations = []
+
         for freq in frequencies:
-            n_modes, k_arr = _unpack(modes_dict[freq])
-            if mode_idx < n_modes:
-                k = k_arr[mode_idx]
-                cp = 2 * np.pi * freq / k.real if k.real != 0 else np.nan
-                alpha = -8.686 * k.imag  # dB/m
+            modes = modes_dict[freq]
+            if mode_idx < modes['M']:
+                k = modes['k'][mode_idx]
+                cp = 2 * np.pi * freq / k.real
+                alpha = -8.686 * k.imag  # Convert to dB/m
+
                 freqs.append(freq)
                 phase_speeds.append(cp)
                 attenuations.append(alpha)
@@ -1449,7 +1467,7 @@ def plot_dispersion_curves(
                         color=color)
 
     # Plot number of modes vs frequency
-    mode_counts = [_unpack(modes_dict[f])[0] for f in frequencies]
+    mode_counts = [modes_dict[f]['M'] for f in frequencies]
     ax3.plot(frequencies, mode_counts, 'ko-', linewidth=2, markersize=8)
 
     # Labels
@@ -1470,6 +1488,8 @@ def plot_dispersion_curves(
     plt.tight_layout()
 
     return fig, (ax1, ax2, ax3)
+
+
 
 
 def plot_range_cut(
@@ -1764,7 +1784,7 @@ def plot_model_statistics(
     ax4.legend(loc='best', fontsize=9)
     ax4.invert_yaxis()
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, axes
 
@@ -1968,7 +1988,7 @@ def plot_model_comparison_matrix(
     ax.set_yticks(np.arange(n_models) - 0.5, minor=True)
     ax.grid(which='minor', color='white', linestyle='-', linewidth=2)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, ax
 
@@ -2079,7 +2099,7 @@ def plot_comparison_curves(
     ax_depth.legend(fontsize=10, loc='best', framealpha=0.9)
     ax_depth.grid(True, alpha=0.3, linestyle='--')
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, axes
 
@@ -2089,7 +2109,6 @@ def plot_ssp_2d(
     figsize: Tuple[float, float] = (12, 8),
     cmap: Optional[str] = None,
     ax: Optional[Axes] = None,
-    seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
     """
     Plot 2D range-dependent sound speed profile
@@ -2106,9 +2125,6 @@ def plot_ssp_2d(
         Colormap. Default is 'RdYlBu_r' (red=warm, blue=cold).
     ax : Axes, optional
         Matplotlib axes
-    seafloor_alpha : float, optional
-        Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
-        Default is 1.0 (no transparency).
 
     Returns
     -------
@@ -2149,7 +2165,8 @@ def plot_ssp_2d(
     if len(env.bathymetry) > 1:
         bathy_ranges = env.bathymetry[:, 0] / 1000.0
         bathy_depths = env.bathymetry[:, 1]
-        ax.plot(bathy_ranges, bathy_depths, 'k-', linewidth=3, label='Bathymetry', zorder=5)
+        ax.plot(bathy_ranges, bathy_depths, **BOTTOM_LINE_STYLE,
+                label='Bathymetry', zorder=5)
         ax.fill_between(
             bathy_ranges, bathy_depths, depths.max() * 1.1,
             **BOTTOM_FILL_STYLE, zorder=4
@@ -2177,7 +2194,6 @@ def plot_ssp_2d(
 def plot_bottom_properties(
     env: Environment,
     figsize: Tuple[float, float] = (14, 10),
-    seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
     """
     Plot range-dependent bottom properties
@@ -2190,9 +2206,6 @@ def plot_bottom_properties(
         Environment with range-dependent bottom (bottom_rd)
     figsize : tuple, optional
         Figure size. Default is (14, 10).
-    seafloor_alpha : float, optional
-        Transparency of seafloor/ground fill (0.0 = fully transparent, 1.0 = opaque).
-        Default is 1.0 (no transparency).
 
     Returns
     -------
@@ -2252,7 +2265,7 @@ def plot_bottom_properties(
 
     fig.suptitle(f'Range-Dependent Bottom Properties\n{env.name}',
                  fontsize=16, fontweight='bold')
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, axes
 
@@ -2350,7 +2363,7 @@ def plot_layered_bottom(
     ax.set_xticks([])
     ax.grid(True, axis='y', alpha=0.3)
 
-    plt.tight_layout()
+    fig.tight_layout()
     return fig, ax
 
 
@@ -2377,7 +2390,7 @@ def plot_rd_layered_bottom(
     rdl_km = rdl.ranges / 1000.0
     n_ranges = len(rdl.ranges)
     seafloor_at_profile = np.array([
-        float(np.asarray(env.get_bathymetry_depth(r)).flat[0])
+        float(np.asarray(env.bathymetry_at_range(r)).flat[0])
         for r in rdl.ranges
     ])
 
@@ -2492,7 +2505,7 @@ def plot_rd_layered_bottom(
                    bbox=dict(boxstyle='round,pad=0.4',
                              facecolor='#fdf6e3', alpha=0.85))
 
-    plt.tight_layout()
+    fig.tight_layout()
     return fig, axes
 
 
@@ -2606,7 +2619,7 @@ def plot_rd_bottom(
                    bbox=dict(boxstyle='round,pad=0.4',
                              facecolor='#fdf6e3', alpha=0.85))
 
-    plt.tight_layout()
+    fig.tight_layout()
     return fig, axes
 
 
@@ -2615,7 +2628,6 @@ def plot_environment_advanced(
     source: Optional[Source] = None,
     receiver: Optional[Receiver] = None,
     figsize: Tuple[float, float] = (16, 12),
-    seafloor_alpha: float = 1.0,
 ) -> Tuple[Figure, Axes]:
     """
     Advanced environment visualization with all features
@@ -2691,26 +2703,28 @@ def plot_environment_advanced(
         if len(env.bathymetry) > 1:
             bathy_ranges = env.bathymetry[:, 0] / 1000.0
             bathy_depths = env.bathymetry[:, 1]
-            ax_setup.plot(bathy_ranges, bathy_depths, 'k-', linewidth=2.5, label='Bathymetry')
+            ax_setup.plot(bathy_ranges, bathy_depths, **BOTTOM_LINE_STYLE,
+                          label='Bathymetry')
             ax_setup.fill_between(
                 bathy_ranges, bathy_depths, bathy_depths.max() * 1.2,
-                color=BOTTOM_HALFSPACE_COLOR, alpha=0.3, edgecolor='black'
+                **BOTTOM_FILL_STYLE
             )
 
-        # Plot source and receivers
         if source is not None:
-            for sd in source.depth:
-                ax_setup.plot(0, sd, 'r*', markersize=18, label='Source', zorder=10)
+            for sd in source.depths:
+                ax_setup.plot(0, sd, **SOURCE_MARKER_STYLE,
+                              label='Source', zorder=10)
 
         if receiver is not None:
             r_km = receiver.ranges / 1000.0
             if receiver.receiver_type == 'grid':
                 R_km, D = np.meshgrid(r_km, receiver.depths)
-                ax_setup.scatter(R_km[::3, ::3].flatten(), D[::3, ::3].flatten(),
-                                c='blue', marker='v', s=25, alpha=0.6, label='Receivers')
+                ax_setup.plot(R_km[::3, ::3].flatten(), D[::3, ::3].flatten(),
+                              **RECEIVER_MARKER_STYLE, alpha=0.6,
+                              label='Receivers')
             else:
-                ax_setup.scatter(r_km, receiver.depths, c='blue', marker='v',
-                                s=40, alpha=0.7, label='Receivers')
+                ax_setup.plot(r_km, receiver.depths, **RECEIVER_MARKER_STYLE,
+                              alpha=0.7, label='Receivers')
 
         ax_setup.invert_yaxis()
         ax_setup.set_xlabel('Range (km)', fontsize=12)
@@ -2746,9 +2760,10 @@ def plot_environment_advanced(
         return plot_environment(env, source, receiver, figsize=figsize)
 
     fig.suptitle(f'Advanced Environment: {env.name}', fontsize=16, fontweight='bold')
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, axes
+
 
 
 def plot_transmission_loss_polar(
@@ -2769,7 +2784,7 @@ def plot_transmission_loss_polar(
 
     Parameters
     ----------
-    field : Result
+    field : Field
         TL field with theta data in metadata['theta']
     receiver_depth : float, optional
         Receiver depth to extract (m). If None, uses first depth.
@@ -2812,20 +2827,20 @@ def plot_transmission_loss_polar(
     --------
     plot_transmission_loss : Standard 2D rectangular TL plot
     """
-    if not isinstance(field, (TLField, PressureField)):
-        raise ValueError(f"Polar TL plot requires TLField/PressureField; got {type(field).__name__}")
+    if field.field_type not in ['tl', 'pressure']:
+        raise ValueError(f"Polar TL plot requires TL or pressure field, got {field.field_type}")
 
     # Extract theta from metadata
     theta = field.metadata.get('theta', None)
     if theta is None:
-        raise ValueError("Result must have 'theta' in metadata for polar plots. "
+        raise ValueError("Field must have 'theta' in metadata for polar plots. "
                         "This requires models with bearing/azimuth output (e.g., Bellhop3D).")
 
     # Extract pressure data (shape depends on model)
     # Typically: pressure[theta, source_depth, receiver_depth, range]
     pressure = field.metadata.get('pressure', None)
     if pressure is None:
-        raise ValueError("Result must have complex 'pressure' in metadata for polar plots.")
+        raise ValueError("Field must have complex 'pressure' in metadata for polar plots.")
 
     # Get receiver depths
     receiver_depths = field.depths
@@ -2897,7 +2912,7 @@ def plot_transmission_loss_polar(
 
     # Select colormap (match standard TL plots)
     if cmap is None:
-        cmap = get_cmap_for_field('tl')
+        cmap = 'jet_r'
 
     # Plot
     im = ax.pcolormesh(Theta, R, tl, shading='auto', cmap=cmap, vmin=vmin, vmax=vmax)
@@ -2914,7 +2929,9 @@ def plot_transmission_loss_polar(
     if show_colorbar:
         cbar = create_professional_colorbar(fig, im, ax, label='TL (dB)')
 
-    return fig, ax
+    return fig, ax, cbar
+
+
 
 
 def plot_transfer_function(
@@ -2932,10 +2949,10 @@ def plot_transfer_function(
 
     Two modes:
 
-    1. Default (``frequency=None``): magnitude — and optionally phase — vs
+    1. Default (``frequencies=None``): magnitude — and optionally phase — vs
        frequency at one ``(depth, range)`` cell. Pass ``field`` as a single
        result or a mapping ``{model_name: field}`` to overlay several.
-    2. ``frequency=<Hz>``: 2-D ``|H(f)|`` heatmap on the ``(depth, range)``
+    2. ``frequencies=<Hz>``: 2-D ``|H(f)|`` heatmap on the ``(depth, range)``
        grid at the nearest frequency. Mirrors :func:`plot_transmission_loss`
        for broadband ``TLField``. Returns ``(fig, ax)`` only.
 
@@ -2947,14 +2964,14 @@ def plot_transfer_function(
     if frequency is not None:
         if isinstance(field, dict):
             raise ValueError(
-                "plot_transfer_function(frequency=…) does not support a "
+                "plot_transfer_function(frequencies=…) does not support a "
                 "dict of fields; pass a single TransferFunction."
             )
         data = np.asarray(field.data)
         freqs = np.asarray(field.frequencies)
         if data.ndim != 3 or len(freqs) == 0:
             raise ValueError(
-                "frequency= requires a 3-D broadband transfer function "
+                "frequencies= requires a 3-D broadband transfer function "
                 "with `frequencies` populated."
             )
         if data.shape[-1] == len(freqs):
@@ -3080,6 +3097,61 @@ def plot_transfer_function(
     return fig, tuple(axes)
 
 
+def plot_transfer_function_slice(
+    field: Result,
+    frequency: float,
+    *,
+    figsize: Tuple[float, float] = (10, 6),
+    cmap: Optional[str] = None,
+    ax: Optional[Axes] = None,
+    title: Optional[str] = None,
+):
+    """``|H(f₀)|`` 2-D heatmap on the ``(depth, range)`` grid.
+
+    Picks the bin closest to ``frequency`` and renders ``20·log₁₀|H|``
+    over the receiver grid. Mirrors :func:`plot_transmission_loss` for
+    a broadband ``TransferFunction``.
+    """
+    data = np.asarray(field.data)
+    freqs = np.asarray(field.frequencies)
+    if data.ndim != 3 or len(freqs) == 0:
+        raise ValueError(
+            "plot_transfer_function_slice requires a 3-D broadband "
+            "TransferFunction with `frequencies` populated."
+        )
+    if data.shape[-1] == len(freqs):
+        spectrum_axis = -1
+    elif data.shape[1] == len(freqs):
+        spectrum_axis = 1
+    else:
+        raise ValueError(
+            f"Cannot locate frequency axis in shape {data.shape} "
+            f"(n_freqs={len(freqs)})."
+        )
+    k = int(np.argmin(np.abs(freqs - frequency)))
+    slab = data[..., k] if spectrum_axis == -1 else data[:, k, :]
+    mag_db = 20.0 * np.log10(np.abs(slab) + 1e-30)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    im = ax.pcolormesh(
+        np.asarray(field.ranges) / 1000.0, np.asarray(field.depths),
+        mag_db, shading='auto', cmap=cmap or get_cmap_for_field('tl'),
+    )
+    ax.set_xlim(field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0)
+    ax.set_ylim(np.max(field.depths), 0)
+    ax.set_xlabel('Range (km)')
+    ax.set_ylabel('Depth (m)')
+    ax.set_title(
+        title or f'|H(f)| (dB) @ {freqs[k]:.2f} Hz',
+        fontsize=12, fontweight='bold',
+    )
+    fig.colorbar(im, ax=ax, label='|H| (dB)')
+    return fig, ax
+
+
 def plot_time_series(
     field: Optional[Result] = None,
     time_series_data: Optional[Dict] = None,
@@ -3167,7 +3239,7 @@ def plot_time_series(
     """
     # Extract time series data
     if field is not None:
-        if isinstance(field, (TimeSeriesField, TimeTrace)) or (getattr(field, 'field_type', None) == 'time_series' and 'time' in field.metadata):
+        if isinstance(field, (TimeSeriesField, TimeTrace)):
             # Direct time_series field (e.g., SPARC TIME_SERIES mode).
             # SPARC's TIME_SERIES path returns:
             #   single-depth → (1, nt, nr) so it matches the multi-depth shape.
@@ -3196,7 +3268,7 @@ def plot_time_series(
             ts_data = field.metadata.get('time_series', None)
             if ts_data is None:
                 raise ValueError(
-                    "Result must be ``field_type='time_series'`` (e.g. from "
+                    "Result must be a TimeSeriesField or TimeTrace (e.g. from "
                     "``SPARC.run(run_mode=RunMode.TIME_SERIES)``)."
                 )
     elif time_series_data is not None:
@@ -3210,25 +3282,25 @@ def plot_time_series(
         time = ts_data['time']
         pressure = ts_data['pressure']  # shape: (nt, nr) where nr = num_ranges
 
-        # Check if we have receiver_depth (single) or receiver_range info
-        if 'receiver_depth' in ts_data:
-            receiver_depth = ts_data['receiver_depth']
-        elif 'pos' in ts_data and 'r' in ts_data['pos'] and 'z' in ts_data['pos']['r']:
-            rd = ts_data['pos']['r']['z']
-        else:
-            rd = np.array([30.0])  # Default depth
+        # Resolve a single receiver_depth scalar from any supported key.
+        receiver_depth = ts_data.get('receiver_depth', None)
+        if receiver_depth is None:
+            pos_z = ts_data.get('pos', {}).get('r', {}).get('z', None)
+            if pos_z is not None:
+                pos_z_arr = np.atleast_1d(pos_z)
+                if pos_z_arr.size:
+                    receiver_depth = float(pos_z_arr[0])
 
-        # For SPARC single-depth runs, pressure columns are for different RANGES
-        # We need to treat this properly
         if 'receiver_ranges' in ts_data:
+            # Single depth, columns are different ranges.
             ranges = ts_data['receiver_ranges']
-            rd = np.full(len(ranges), receiver_depth)  # Same depth, different ranges
+            depth_value = receiver_depth if receiver_depth is not None else 30.0
+            rd = np.full(len(ranges), depth_value)
+            receiver_depth = depth_value
+        elif receiver_depth is not None:
+            rd = np.atleast_1d(np.asarray(receiver_depth, dtype=float))
         else:
-            # Assume columns are for different depths (standard case)
-            if 'receiver_depth' in ts_data:
-                rd = np.array([receiver_depth])
-            else:
-                rd = np.arange(pressure.shape[1])  # Default indices
+            rd = np.arange(pressure.shape[1])
 
     elif 'tout' in ts_data and 'RTS' in ts_data:
         # ASCII TS format
@@ -3359,7 +3431,7 @@ def plot_time_series(
         ax.legend(loc='best', fontsize=9, title=legend_title)
 
     format_axes_professional(ax)
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, ax
 
@@ -3425,7 +3497,7 @@ def plot_modes_heatmap(
     plot_modes : Standard mode plotting with line plots
     plot_mode_functions : Detailed individual mode function plots
     """
-    if not isinstance(modes, (Modes,)) and getattr(modes, 'field_type', None) != 'modes':
+    if not isinstance(modes, Modes):
         raise ValueError("plot_modes_heatmap requires a Modes Result")
 
     if cmap is None:
@@ -3442,7 +3514,7 @@ def plot_modes_heatmap(
         k = modes.metadata.get('k', np.array([]))
     M = len(k)
     freq = (
-        modes.frequency if getattr(modes, 'frequency', None) is not None
+        modes.f0 if modes.f0 is not None
         else modes.metadata.get('frequency', 0.0)
     )
 
@@ -3508,7 +3580,7 @@ def plot_modes_heatmap(
     ax.grid(True, alpha=0.2, axis='x')
 
     format_axes_professional(ax)
-    plt.tight_layout()
+    fig.tight_layout()
 
     return fig, ax
 
@@ -3570,7 +3642,7 @@ def plot_reflection_coefficient(
     import numpy as np
 
     # Extract reflection coefficient data from field metadata
-    if not isinstance(field, ReflectionCoefficient) and getattr(field, 'field_type', None) != 'reflection_coefficients':
+    if not isinstance(field, ReflectionCoefficient):
         raise ValueError("plot_reflection_coefficient requires a ReflectionCoefficient Result")
 
     if 'theta' not in field.metadata or 'R' not in field.metadata:
@@ -3646,7 +3718,7 @@ def plot_reflection_coefficient(
                 crit_angle = angles[critical_idx[0]]
                 ax2.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if show_phase and show_magnitude:
         return fig, (ax1, ax2)
@@ -3719,14 +3791,14 @@ def plot_tl_difference(
             ax.fill_between(bathy_r, bathy_d, max_depth * 1.05,
                             **BOTTOM_FILL_STYLE,
                             zorder=ZORDER_SEDIMENT + 5, )
-            ax.plot(bathy_r, bathy_d, 'k-', linewidth=2,
+            ax.plot(bathy_r, bathy_d, **BOTTOM_LINE_STYLE,
                     zorder=ZORDER_SEDIMENT + 6)
         else:
             ax.fill_between([ranges_km[0], ranges_km[-1]],
                             env.depth, max_depth * 1.05,
                             **BOTTOM_FILL_STYLE,
                             zorder=ZORDER_SEDIMENT + 5, )
-            ax.axhline(env.depth, color='k', linewidth=2, linestyle='--',
+            ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
                        zorder=ZORDER_SEDIMENT + 6)
 
     cbar = None
@@ -3742,52 +3814,41 @@ def plot_tl_difference(
 
 def plot_phase_field(
     field,
-    *,
-    frequency: Optional[float] = None,
-    figsize: Tuple[float, float] = (10, 6),
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = (10, 5),
     cmap: str = 'twilight',
     show_colorbar: bool = True,
-    title: Optional[str] = None,
 ):
-    """Phase heatmap on the (depth, range) grid for a complex field.
+    """Plot the phase ``arg(p)`` of a complex pressure field.
 
-    Accepts a :class:`PressureField` (single-frequency) or a
-    :class:`TransferFunction` (broadband — pass ``frequency=`` to choose
-    the slice). The phase is wrapped to ``(-π, π]``; use a cyclic colormap
-    (default ``twilight``) to avoid the ±π discontinuity artefact.
+    Accepts a ``PressureField`` or a single-frequency ``TransferFunction``.
+    For broadband ``TransferFunction`` (3-D data), the middle frequency
+    bin is shown.
     """
-    data = np.asarray(field.data)
-    if isinstance(field, PressureField):
-        if data.ndim != 2:
-            raise ValueError(
-                f"PressureField.data must be 2-D for phase plot, got {data.shape}"
-            )
-        slab = data
-        f_label = field.frequency
-    elif isinstance(field, TransferFunction):
-        if frequency is None:
-            frequency = float(field.frequencies[len(field.frequencies) // 2])
-        k = int(np.argmin(np.abs(field.frequencies - frequency)))
-        slab = data[..., k]
-        f_label = float(field.frequencies[k])
-    else:
+    if not isinstance(field, (PressureField, TransferFunction)):
         raise TypeError(
-            "plot_phase_field requires a PressureField or TransferFunction"
+            "plot_phase_field requires a PressureField or TransferFunction; "
+            f"got {type(field).__name__}"
         )
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.pcolormesh(
-        np.asarray(field.ranges) / 1000.0, np.asarray(field.depths),
-        np.angle(slab), shading='auto', cmap=cmap, vmin=-np.pi, vmax=np.pi,
-    )
-    ax.set_xlim(field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0)
-    ax.set_ylim(np.max(field.depths), 0)
+    data = field.data
+    if data.ndim == 3:
+        data = data[:, :, data.shape[2] // 2]
+    phase = np.angle(data)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    extent = [
+        field.ranges[0] / 1000.0, field.ranges[-1] / 1000.0,
+        field.depths[-1], field.depths[0],
+    ]
+    im = ax.imshow(phase, aspect='auto', cmap=cmap, extent=extent,
+                   vmin=-np.pi, vmax=np.pi)
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
-    if title is None:
-        title = '∠p (rad)' if f_label is None else f'∠p (rad) @ {f_label:.2f} Hz'
-    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.set_title(f"Phase (rad) — {field.model or type(field).__name__}")
     if show_colorbar:
-        fig.colorbar(im, ax=ax, label='radians')
+        plt.colorbar(im, ax=ax, label='arg(p) (rad)')
     return fig, ax
 
 

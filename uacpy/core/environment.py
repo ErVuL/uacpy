@@ -47,11 +47,11 @@ class SedimentLayer:
 
     def __post_init__(self):
         if self.thickness <= 0:
-            raise ValueError(f"Layer thickness must be positive, got {self.thickness}")
+            raise ValueError(f"layer thickness must be positive (m), got {self.thickness}")
         if self.sound_speed <= 0:
-            raise ValueError(f"Layer sound_speed must be positive, got {self.sound_speed}")
+            raise ValueError(f"layer sound_speed must be positive (m/s), got {self.sound_speed}")
         if self.density <= 0:
-            raise ValueError(f"Layer density must be positive, got {self.density}")
+            raise ValueError(f"layer density must be positive (g/cm^3), got {self.density}")
 
 
 @dataclass
@@ -88,9 +88,9 @@ class BoundaryProperties:
     reflection_cmax : float, optional
         Maximum phase velocity (m/s) for reflection coefficient table.
         Used when acoustic_type='file'. Default: 10000.0
-    reflection_rmax_km : float, optional
-        Maximum range (km) for reflection coefficient sampling.
-        Used when acoustic_type='file'. Default: 10.0
+    reflection_rmax_m : float, optional
+        Maximum range (m) for reflection coefficient sampling.
+        Used when acoustic_type='file'. Default: 10000.0
 
     Examples
     --------
@@ -122,7 +122,19 @@ class BoundaryProperties:
     reflection_file: Optional[str] = None
     reflection_cmin: float = 1400.0
     reflection_cmax: float = 10000.0
-    reflection_rmax_km: float = 10.0
+    reflection_rmax_m: float = 10000.0
+
+    def __post_init__(self):
+        if self.density <= 0:
+            raise ValueError(f"density must be positive (g/cm^3), got {self.density}")
+        if self.sound_speed < 0:
+            raise ValueError(f"sound_speed must be non-negative (m/s), got {self.sound_speed}")
+        if self.attenuation < 0:
+            raise ValueError(f"attenuation must be non-negative, got {self.attenuation}")
+        if self.shear_speed < 0:
+            raise ValueError(f"shear_speed must be non-negative (m/s), got {self.shear_speed}")
+        if self.shear_attenuation < 0:
+            raise ValueError(f"shear_attenuation must be non-negative, got {self.shear_attenuation}")
 
 
 @dataclass
@@ -197,7 +209,7 @@ class RangeDependentBottom:
         if self.shear_attenuation is None:
             self.shear_attenuation = np.zeros(n)
 
-    def get_at_range(self, range_m: float) -> BoundaryProperties:
+    def at_range(self, range_m: float) -> BoundaryProperties:
         """Interpolated ``BoundaryProperties`` at a single range (m)."""
         ranges = self.ranges
 
@@ -230,9 +242,9 @@ class RangeDependentBottom:
         ``'median'`` : per-property median across ranges.
         """
         if method == 'r0':
-            return self.get_at_range(float(self.ranges[0]))
+            return self.at_range(float(self.ranges[0]))
         if method == 'rmax':
-            return self.get_at_range(float(self.ranges[-1]))
+            return self.at_range(float(self.ranges[-1]))
         if method == 'mean':
             reduce = np.mean
         elif method == 'median':
@@ -291,7 +303,7 @@ class LayeredBottom:
 
     def __post_init__(self):
         if not self.layers:
-            raise ValueError("LayeredBottom requires at least one SedimentLayer")
+            raise ValueError("layered bottom requires at least one SedimentLayer, got 0")
 
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m)."""
@@ -541,7 +553,7 @@ class RangeDependentLayeredBottom:
         """Maximum total sediment thickness across all range points."""
         return max(p.total_thickness() for p in self.profiles)
 
-    def get_at_range(self, range_m: float) -> 'LayeredBottom':
+    def at_range(self, range_m: float) -> 'LayeredBottom':
         """Return the nearest LayeredBottom profile for a given range (m)."""
         idx = int(np.argmin(np.abs(self.ranges - range_m)))
         return self.profiles[idx]
@@ -966,7 +978,10 @@ class Environment:
         Surface altimetry as ``[(range_m, height_m), …]`` (height
         positive up). Default ``None`` (flat surface).
     bottom : BoundaryProperties, RangeDependentBottom, LayeredBottom, or RangeDependentLayeredBottom, optional
-        Bottom acoustic properties. Default rigid half-space.
+        Bottom acoustic properties. Default is a fluid sand-like half-space
+        (``sound_speed=1600`` m/s, ``density=1.5`` g/cm³,
+        ``attenuation=0.5`` dB/wavelength). For a perfectly reflecting bottom,
+        pass ``BoundaryProperties(acoustic_type='rigid')``.
     surface : BoundaryProperties, optional
         Surface boundary properties. Default vacuum (pressure release).
     volume_attenuation : float, optional
@@ -998,7 +1013,7 @@ class Environment:
     >>> env = Environment(
     ...     name='wedge', depth=200,
     ...     ssp=SoundSpeedProfile.from_2d(
-    ...         depths=[0, 200], ranges=[0, 10000],
+    ...         depth=[0, 200], ranges=[0, 10000],
     ...         matrix=[[1520, 1530], [1480, 1490]],
     ...         interp='quad'),
     ... )
@@ -1006,7 +1021,6 @@ class Environment:
 
     def __init__(
         self,
-        name: str,
         depth: float,
         ssp: Optional[SoundSpeedProfile] = None,
         sound_speed: float = 1500.0,
@@ -1015,13 +1029,15 @@ class Environment:
         bottom: Optional[Union[BoundaryProperties, RangeDependentBottom, 'LayeredBottom', 'RangeDependentLayeredBottom']] = None,
         surface: Optional[BoundaryProperties] = None,
         volume_attenuation: float = 0.0,
+        *,
+        name: str = 'unnamed',
     ):
         self.name = name
         self.depth = float(depth)
         self.volume_attenuation = volume_attenuation
 
         if self.depth <= 0:
-            raise ValueError(f"Environment depth must be positive, got {self.depth}")
+            raise ValueError(f"environment depth must be positive (m), got {self.depth}")
 
         if ssp is None:
             self.ssp = SoundSpeedProfile.from_isovelocity(self.depth, sound_speed)
@@ -1034,8 +1050,11 @@ class Environment:
 
         if bathymetry is not None:
             self.bathymetry = np.array(bathymetry, dtype=np.float64)
-            if self.bathymetry.shape[1] != 2:
-                raise ValueError("bathymetry must have shape (N, 2) as (range, depth)")
+            if self.bathymetry.ndim != 2 or self.bathymetry.shape[1] != 2:
+                raise ValueError(
+                    f"bathymetry must have shape (N, 2) as [(range_m, depth_m), ...], "
+                    f"got shape {self.bathymetry.shape}; example: [(0, 100), (5000, 200)]"
+                )
         else:
             self.bathymetry = np.array([[0.0, depth]], dtype=np.float64)
 
@@ -1079,7 +1098,7 @@ class Environment:
             # models that read env.bottom pick a representative profile. Using
             # range=0 would pick one extreme (e.g., soft mud) and skew TL.
             median_range_m = float(np.median(bottom.ranges))
-            self.bottom = bottom.get_at_range(median_range_m)
+            self.bottom = bottom.at_range(median_range_m)
         elif isinstance(bottom, RangeDependentLayeredBottom):
             # Range-AND-depth-dependent bottom
             self.bottom_rd_layered = bottom
@@ -1111,7 +1130,7 @@ class Environment:
         """Sound speed at given depth(s), at ``range_m`` for 2-D profiles."""
         return self.ssp.sound_speed_at(np.atleast_1d(depth), range_m=range_m)
 
-    def get_bathymetry_depth(self, range_m: Union[float, np.ndarray]) -> np.ndarray:
+    def bathymetry_at_range(self, range_m: Union[float, np.ndarray]) -> np.ndarray:
         """
         Get bathymetry depth at specified range(s)
 
@@ -1134,11 +1153,11 @@ class Environment:
         # Interpolate bathymetry
         return np.interp(range_m, self.bathymetry[:, 0], self.bathymetry[:, 1])
 
-    def get_ssp_at_range(self, range_m: float) -> np.ndarray:
+    def ssp_at_range(self, range_m: float) -> np.ndarray:
         """Return the 1-D SSP at ``range_m`` as ``(N, 2)`` ``(depth, c)`` pairs."""
         return self.ssp.at_range(range_m).to_pairs()
 
-    def get_bottom_at_range(self, range_m: float):
+    def bottom_at_range(self, range_m: float):
         """
         Get bottom properties at specified range.
 
@@ -1156,15 +1175,15 @@ class Environment:
             Bottom properties at this range
         """
         if self.bottom_rd_layered is not None:
-            return self.bottom_rd_layered.get_at_range(range_m)
+            return self.bottom_rd_layered.at_range(range_m)
         if self.bottom_layered is not None:
             return self.bottom_layered
         if self.bottom_rd is not None:
-            return self.bottom_rd.get_at_range(range_m)
+            return self.bottom_rd.at_range(range_m)
         # Range-independent: return copy of standard bottom
         # Update depth from bathymetry if range-dependent bathy
         if len(self.bathymetry) > 1:
-            depth_at_range = float(np.asarray(self.get_bathymetry_depth(range_m)).flat[0])
+            depth_at_range = float(np.asarray(self.bathymetry_at_range(range_m)).flat[0])
             from copy import deepcopy
             bottom_copy = deepcopy(self.bottom)
             bottom_copy.depth = depth_at_range
@@ -1209,7 +1228,7 @@ class Environment:
         return (f"Environment(name='{self.name}', depth={self.depth:.1f}m, "
                 f"ssp='{self.ssp.interp}', {range_dep})")
 
-    def get_representative_depth(self, method: str = 'median') -> float:
+    def get_representative_depth(self, method: str = 'max') -> float:
         """
         Get representative depth from range-dependent bathymetry
 
@@ -1220,10 +1239,11 @@ class Environment:
         ----------
         method : str, optional
             Method for computing representative value:
-            - 'median': Median depth (default, most robust)
+            - 'max': Maximum depth (deepest, default — matches the
+              project-wide ``bathymetry_collapse_method='max'``)
+            - 'median': Median depth
             - 'mean': Mean depth
             - 'min': Minimum depth (shallowest)
-            - 'max': Maximum depth (deepest)
             - 'initial': Initial depth at range=0
 
         Returns
@@ -1255,9 +1275,12 @@ class Environment:
         elif method == 'initial':
             return float(depths[0])
         else:
-            raise ValueError(f"Unknown method '{method}'. Use 'median', 'mean', 'min', 'max', or 'initial'")
+            raise ValueError(
+                f"unknown representative-depth method {method!r}; use "
+                "'max', 'median', 'mean', 'min', or 'initial'"
+            )
 
-    def get_range_independent_approximation(self, method: str = 'median'):
+    def get_range_independent_approximation(self, method: str = 'max'):
         """Create a range-independent approximation of this environment.
 
         Bathymetry collapses to a single depth via ``method`` (see

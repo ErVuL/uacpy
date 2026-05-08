@@ -17,6 +17,7 @@ Provides:
 
 import numpy as np
 import struct
+import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, List, Any, Optional
 
@@ -142,15 +143,9 @@ def read_shd_file(filepath: Union[str, Path]) -> TLField:
         tl_data = -20 * np.log10(p_abs)
         tl_data = np.clip(tl_data, None, TL_MAX_DB)
 
-    # ``freqs`` may be the broadband freqVec (multi-entry) or a single
-    # nominal frequency. Pick the right Result-constructor argument.
+    # Plural-only: always pass an ndarray (length 1 for narrowband).
     freqs_arr = np.atleast_1d(np.asarray(freqs, dtype=float))
-    if len(freqs_arr) > 1:
-        result_freq = None
-        result_freqs = freqs_arr
-    else:
-        result_freq = float(freqs_arr[0]) if len(freqs_arr) else None
-        result_freqs = None
+    result_freqs = freqs_arr if len(freqs_arr) else None
 
     return TLField(
         data=tl_data,
@@ -158,7 +153,6 @@ def read_shd_file(filepath: Union[str, Path]) -> TLField:
         depths=rz,
         model='', backend='',
         source_depths=sz,
-        frequency=result_freq,
         frequencies=result_freqs,
         metadata={
             "title": title,
@@ -784,7 +778,7 @@ def read_arr_file(filepath: Union[str, Path]):
         receiver_ranges=rr,
         model='', backend='',
         source_depths=sz,
-        frequency=float(freq),
+        frequencies=float(freq),
         metadata={},
     )
 
@@ -885,14 +879,19 @@ def read_ray_file(filepath: Union[str, Path]):
                             "r": np.array(ray_r),
                             "z": np.array(ray_z),
                             "alpha": alpha,
-                            "num_top_bounces": n_top_bounces,
-                            "num_bottom_bounces": n_bot_bounces,
+                            "n_top_bounces": n_top_bounces,
+                            "n_bot_bounces": n_bot_bounces,
                         }
                     )
 
-    except Exception as e:
-        print(f"Warning: Error reading ray file: {e}")
-        # Try binary format
+    except (UnicodeDecodeError, ValueError) as e:
+        # File is not valid ASCII or has malformed numeric content;
+        # the binary reader is the legitimate fallback for these.
+        warnings.warn(
+            f"read_ray_file: ASCII parse failed ({type(e).__name__}: {e}); "
+            f"falling back to binary reader for {filepath}",
+            stacklevel=2,
+        )
         rays = _read_ray_file_binary(filepath)
 
     return Rays(rays=rays, model='', backend='')

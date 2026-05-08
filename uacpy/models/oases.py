@@ -39,13 +39,17 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET
+from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, TLField, TransferFunction,
     Modes, Covariance, Replicas, ReflectionCoefficient,
+)
+from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError,
 )
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
 from uacpy.io.oases_reader import (
@@ -217,10 +221,7 @@ class OAST(_OASESBase):
             self.executable = Path(executable)
 
         if not self.executable.exists():
-            raise FileNotFoundError(
-                f"OAST executable not found: {self.executable}\n"
-                "Please compile OASES using the installation scripts."
-            )
+            raise ExecutableNotFoundError('OAST', str(self.executable))
 
     def run(
         self,
@@ -262,116 +263,108 @@ class OAST(_OASESBase):
         """
         # OAST emits coherent TL only — guard against other modes.
         if run_mode is not None and run_mode != RunMode.COHERENT_TL:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.COHERENT_TL", "OASP for broadband"],
             )
 
-        # Resolve per-call overrides
-        volume_attenuation = self._resolve(volume_attenuation, 'volume_attenuation')
-        compute_contour = (
-            self._resolve(compute_contour, 'compute_contour')
-        )
-        compute_depth_average = (
-            compute_depth_average if compute_depth_average is not _UNSET
-            else self.compute_depth_average
-        )
-        complex_contour = (
-            self._resolve(complex_contour, 'complex_contour')
-        )
-
         # ``broadband`` is only meaningful on the unified OASES wrapper (where
         # it routes to OASP for range-dependent broadband TRF). If OAST is used
         # directly, fail loudly rather than silently dropping.
         if kwargs.pop('broadband', False):
-            from uacpy.core.exceptions import ConfigurationError
             raise ConfigurationError(
                 "OAST does not support broadband TRF; call OASP directly or "
                 "use OASES(compute_tl(broadband=True))."
             )
 
-        self._warn_unknown_kwargs(kwargs)
+        self._warn_unknown_kwargs(kwargs, allowed=('options',))
 
-        env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
-        fm = self._setup_file_manager()
+        with _resolve_overrides(
+            self,
+            volume_attenuation=volume_attenuation,
+            compute_contour=compute_contour,
+            compute_depth_average=compute_depth_average,
+            complex_contour=complex_contour,
+        ):
+            env = self._project_environment(env)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
+            fm = self._setup_file_manager()
 
-        try:
-            base_name = 'oast_run'
-            input_file = fm.get_path(f'{base_name}.dat')
+            try:
+                base_name = 'oast_run'
+                input_file = fm.get_path(f'{base_name}.dat')
 
-            # Translate the typed kwargs into OAST option letters. The user
-            # can still pass a raw `options=` string (e.g. 'N J T C') via
-            # **kwargs as an escape hatch — it wins over the typed flags.
-            user_options = kwargs.pop('options', None)
-            if user_options is None:
-                opt = ['N', 'T']                            # Normal stress + TL table
-                if complex_contour:
-                    opt.append('J')
-                if compute_contour:
-                    opt.append('C')
-                if compute_depth_average:
-                    opt.append('A')
-                user_options = ' '.join(opt)
+                # Translate the typed kwargs into OAST option letters. The user
+                # can still pass a raw `options=` string (e.g. 'N J T C') via
+                # **kwargs as an escape hatch — it wins over the typed flags.
+                user_options = kwargs.pop('options', None)
+                if user_options is None:
+                    opt = ['N', 'T']                            # Normal stress + TL table
+                    if self.complex_contour:
+                        opt.append('J')
+                    if self.compute_contour:
+                        opt.append('C')
+                    if self.compute_depth_average:
+                        opt.append('A')
+                    user_options = ' '.join(opt)
 
-            self._log(f"Writing OAST input file: {input_file} (options={user_options})")
-            write_oast_input(
-                filepath=input_file,
-                env=env,
-                source=source,
-                receiver=receiver,
-                volume_attenuation=volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
-                options=user_options,
-                **kwargs,
-            )
-
-            # Run executable
-            self._execute(input_file, fm.work_dir)
-
-            # Read output - OAST creates .plt (data) and .plp (metadata) files
-            # Per OASES documentation: FOR019 -> .plp, FOR020 -> .plt
-            plt_file = fm.get_path(f'{base_name}.plt')
-
-            # Check if output files exist
-            if not plt_file.exists():
-                raise FileNotFoundError(
-                    f"OAST plot data file not found: {plt_file}\n"
-                    f"OAST should create .plt file via FOR020 environment variable.\n"
-                    "Check input file and compare with examples in third_party/oases/tloss/"
+                self._log(f"Writing OAST input file: {input_file} (options={user_options})")
+                write_oast_input(
+                    filepath=input_file,
+                    env=env,
+                    source=source,
+                    receiver=receiver,
+                    volume_attenuation=self.volume_attenuation,
+                    francois_garrison_params=self.francois_garrison_params,
+                    bio_layers=self.bio_layers,
+                    options=user_options,
+                    **kwargs,
                 )
 
-            output_file = plt_file
+            # Run executable
+                self._execute(input_file, fm.work_dir)
 
-            self._log(f"Reading OAST output: {output_file}")
-            tl_data, metadata = read_oast_tl(
-                filepath=output_file,
-                receiver_depths=receiver.depths,
-                receiver_ranges=receiver.ranges
-            )
+                # Read output - OAST creates .plt (data) and .plp (metadata) files
+                # Per OASES documentation: FOR019 -> .plp, FOR020 -> .plt
+                plt_file = fm.get_path(f'{base_name}.plt')
 
-            # Build a typed TLField. OAST stashes the rest in metadata.
-            metadata.pop('model', None)
-            metadata.pop('backend', None)
-            result = TLField(
-                data=tl_data,
-                depths=receiver.depths,
-                ranges=receiver.ranges,
-                model='OAST',
-                backend='oast',
-                source_depths=np.atleast_1d(np.asarray(source.depth, dtype=float)),
-                frequency=float(np.atleast_1d(source.frequency)[0]),
-                metadata=metadata,
-            )
+                # Check if output files exist
+                if not plt_file.exists():
+                    raise FileNotFoundError(
+                        f"OAST plot data file not found: {plt_file}\n"
+                        f"OAST should create .plt file via FOR020 environment variable.\n"
+                        "Check input file and compare with examples in third_party/oases/tloss/"
+                    )
 
-            self._log("OAST simulation complete")
-            return result
+                output_file = plt_file
 
-        finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
+                self._log(f"Reading OAST output: {output_file}")
+                tl_data, metadata = read_oast_tl(
+                    filepath=output_file,
+                    receiver_depths=receiver.depths,
+                    receiver_ranges=receiver.ranges
+                )
+
+                # Build a typed TLField. OAST stashes the rest in metadata.
+                metadata.pop('model', None)
+                metadata.pop('backend', None)
+                result = TLField(
+                    data=tl_data,
+                    depths=receiver.depths,
+                    ranges=receiver.ranges,
+                    model='OAST',
+                    backend='oast',
+                    source_depths=np.atleast_1d(np.asarray(source.depths, dtype=float)),
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
+                    metadata=metadata,
+                )
+
+                self._log("OAST simulation complete")
+                return result
+
+            finally:
+                if fm.cleanup:
+                    fm.cleanup_work_dir()
 
     def _execute(self, input_file: Path, work_dir: Path):
         """Execute OAST binary. FOR005 stays as stdin per OASES docs."""
@@ -381,7 +374,7 @@ class OAST(_OASESBase):
             FOR023='trc',  # Optional reflection-coef table
         )
         result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, timeout=300, env=env,
+            [str(self.executable)], cwd=work_dir, env=env,
         )
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -452,10 +445,7 @@ class OASN(_OASESBase):
             self.executable = Path(executable)
 
         if not self.executable.exists():
-            raise FileNotFoundError(
-                f"OASN executable not found: {self.executable}\n"
-                "Please compile OASES using the installation scripts."
-            )
+            raise ExecutableNotFoundError('OASN', str(self.executable))
 
     def run(
         self,
@@ -490,148 +480,126 @@ class OASN(_OASESBase):
         if run_mode is None:
             run_mode = RunMode.COVARIANCE
         if run_mode not in (RunMode.COVARIANCE, RunMode.REPLICA):
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.COVARIANCE", "RunMode.REPLICA"],
             )
 
-        volume_attenuation = (
-            self._resolve(volume_attenuation, 'volume_attenuation')
-        )
-        self._warn_unknown_kwargs(kwargs)
+        self._warn_unknown_kwargs(kwargs, allowed=(
+            'options',
+            'surface_noise_level', 'white_noise_level', 'deep_noise_level',
+            'discrete_sources', 'n_modes', 'integration_offset',
+            'replica_zmin', 'replica_zmax', 'replica_nz',
+            'replica_xmin', 'replica_xmax', 'replica_nx',
+            'replica_ymin', 'replica_ymax', 'replica_ny',
+        ))
 
-        env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        with _resolve_overrides(self, volume_attenuation=volume_attenuation):
+            env = self._project_environment(env)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-        # Force the OASN options block to include the file output we need.
-        # The user can pass a custom 'options' to add other letters (J, F, …),
-        # but N (covariance) or R (replica) is added automatically based on
-        # run_mode so the wrapper's contract (return type) is honoured.
-        user_options = kwargs.pop('options', None) or 'J'
-        opt_tokens = set(user_options.split())
-        if run_mode == RunMode.COVARIANCE:
-            opt_tokens.add('N')
-        else:
-            opt_tokens.add('R')
-        options = ' '.join(sorted(opt_tokens))
-
-        fm = self._setup_file_manager()
-        try:
-            base_name = 'oasn_run'
-            input_file = fm.get_path(f'{base_name}.dat')
-            self._log(f"Writing OASN input file: {input_file} (options={options})")
-            write_oasn_input(
-                filepath=input_file,
-                env=env,
-                source=source,
-                receiver=receiver,
-                volume_attenuation=volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
-                options=options,
-                **kwargs,
-            )
-            self._execute(base_name, fm.work_dir)
-
+            # Force the OASN options block to include the file output we need.
+            # The user can pass a custom 'options' to add other letters (J, F, …),
+            # but N (covariance) or R (replica) is added automatically based on
+            # run_mode so the wrapper's contract (return type) is honoured.
+            user_options = kwargs.pop('options', None) or 'J'
+            opt_tokens = set(user_options.split())
             if run_mode == RunMode.COVARIANCE:
-                xsm_file = fm.get_path(f'{base_name}.xsm')
-                fort16_file = fm.get_path('fort.16')
-                cov_path = xsm_file if xsm_file.exists() else fort16_file
-                if not cov_path.exists():
-                    raise FileNotFoundError(
-                        f"OASN covariance file not found. Checked: "
-                        f"{xsm_file}, {fort16_file}"
+                opt_tokens.add('N')
+            else:
+                opt_tokens.add('R')
+            options = ' '.join(sorted(opt_tokens))
+
+            fm = self._setup_file_manager()
+            try:
+                base_name = 'oasn_run'
+                input_file = fm.get_path(f'{base_name}.dat')
+                self._log(f"Writing OASN input file: {input_file} (options={options})")
+                write_oasn_input(
+                    filepath=input_file,
+                    env=env,
+                    source=source,
+                    receiver=receiver,
+                    volume_attenuation=self.volume_attenuation,
+                    francois_garrison_params=self.francois_garrison_params,
+                    bio_layers=self.bio_layers,
+                    options=options,
+                    **kwargs,
+                )
+                self._execute(base_name, fm.work_dir)
+
+                if run_mode == RunMode.COVARIANCE:
+                    xsm_file = fm.get_path(f'{base_name}.xsm')
+                    fort16_file = fm.get_path('fort.16')
+                    cov_path = xsm_file if xsm_file.exists() else fort16_file
+                    if not cov_path.exists():
+                        raise FileNotFoundError(
+                            f"OASN covariance file not found. Checked: "
+                            f"{xsm_file}, {fort16_file}"
+                        )
+                    self._log(f"Reading OASN covariance file: {cov_path}")
+                    cov_data = read_oasn_covariance(cov_path)
+
+                    rcv_pos = None
+                    rcv_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+                    if rcv_depths.size == cov_data['covariance'].shape[1]:
+                        # OASES OASN config places receivers along the array;
+                        # only depth varies in the typical uacpy usage.
+                        rcv_pos = np.zeros((rcv_depths.size, 3), dtype=float)
+                        rcv_pos[:, 2] = rcv_depths
+
+                    freqs = _oasn_freq_axis(cov_data)
+                    kw = self._result_kwargs(
+                        source,
+                        backend='oasn',
+                        frequencies=freqs,
+                        n_receivers=cov_data['n_receivers'],
+                        title=cov_data.get('title', ''),
                     )
-                self._log(f"Reading OASN covariance file: {cov_path}")
-                cov_data = read_oasn_covariance(cov_path)
+                    return Covariance(
+                        covariance=cov_data['covariance'],
+                        receiver_positions=rcv_pos,
+                        **kw,
+                    )
 
-                rcv_pos = None
-                rcv_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
-                if rcv_depths.size == cov_data['covariance'].shape[1]:
-                    # OASES OASN config places receivers along the array;
-                    # only depth varies in the typical uacpy usage.
-                    rcv_pos = np.zeros((rcv_depths.size, 3), dtype=float)
-                    rcv_pos[:, 2] = rcv_depths
-
-                freqs = _oasn_freq_axis(cov_data)
+                # RunMode.REPLICA
+                rpo_file = fm.get_path(f'{base_name}.rpo')
+                fort14_file = fm.get_path('fort.14')
+                rep_path = rpo_file if rpo_file.exists() else fort14_file
+                if not rep_path.exists():
+                    raise FileNotFoundError(
+                        f"OASN replica file not found. Checked: "
+                        f"{rpo_file}, {fort14_file}\n"
+                        "Pass replica_zmin/zmax/nz and replica_xmin/xmax/nx kwargs."
+                    )
+                self._log(f"Reading OASN replica file: {rep_path}")
+                rep_data = read_oasn_replicas(rep_path)
+                replica_z = np.linspace(rep_data['z_min'], rep_data['z_max'], rep_data['n_z'])
+                replica_x = np.linspace(rep_data['x_min'], rep_data['x_max'], rep_data['n_x'])
+                replica_y = np.linspace(rep_data['y_min'], rep_data['y_max'], rep_data['n_y'])
+                freqs = _oasn_freq_axis(rep_data)
                 kw = self._result_kwargs(
                     source,
                     backend='oasn',
                     frequencies=freqs,
-                    n_receivers=cov_data['n_receivers'],
-                    title=cov_data.get('title', ''),
+                    n_receivers=rep_data['n_receivers'],
+                    title=rep_data.get('title', ''),
                 )
-                return Covariance(
-                    covariance=cov_data['covariance'],
-                    receiver_positions=rcv_pos,
+                return Replicas(
+                    replicas=rep_data['replicas'],
+                    replica_z=replica_z,
+                    replica_x=replica_x,
+                    replica_y=replica_y,
+                    receiver_positions=rep_data.get('receiver_positions'),
                     **kw,
                 )
 
-            # RunMode.REPLICA
-            rpo_file = fm.get_path(f'{base_name}.rpo')
-            fort14_file = fm.get_path('fort.14')
-            rep_path = rpo_file if rpo_file.exists() else fort14_file
-            if not rep_path.exists():
-                raise FileNotFoundError(
-                    f"OASN replica file not found. Checked: "
-                    f"{rpo_file}, {fort14_file}\n"
-                    "Pass replica_zmin/zmax/nz and replica_xmin/xmax/nx kwargs."
-                )
-            self._log(f"Reading OASN replica file: {rep_path}")
-            rep_data = read_oasn_replicas(rep_path)
-            replica_z = np.linspace(rep_data['z_min'], rep_data['z_max'], rep_data['n_z'])
-            replica_x = np.linspace(rep_data['x_min'], rep_data['x_max'], rep_data['n_x'])
-            replica_y = np.linspace(rep_data['y_min'], rep_data['y_max'], rep_data['n_y'])
-            freqs = _oasn_freq_axis(rep_data)
-            kw = self._result_kwargs(
-                source,
-                backend='oasn',
-                frequencies=freqs,
-                n_receivers=rep_data['n_receivers'],
-                title=rep_data.get('title', ''),
-            )
-            return Replicas(
-                replicas=rep_data['replicas'],
-                replica_z=replica_z,
-                replica_x=replica_x,
-                replica_y=replica_y,
-                receiver_positions=rep_data.get('receiver_positions'),
-                **kw,
-            )
+            finally:
+                if fm.cleanup:
+                    fm.cleanup_work_dir()
 
-        finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
-
-    # Convenience methods ---------------------------------------------------
-
-    def compute_covariance(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        **kwargs,
-    ) -> Covariance:
-        """Run OASN with option ``N`` and return the :class:`Covariance`."""
-        return self.run(env, source, receiver, run_mode=RunMode.COVARIANCE, **kwargs)
-
-    def compute_replicas(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        **kwargs,
-    ) -> Replicas:
-        """Run OASN with option ``R`` and return the :class:`Replicas`.
-
-        Block X kwargs (replica grid) must be provided via ``**kwargs``:
-        ``replica_zmin``, ``replica_zmax``, ``replica_nz``,
-        ``replica_xmin``, ``replica_xmax``, ``replica_nx``,
-        ``replica_ymin``, ``replica_ymax``, ``replica_ny`` (defaults are
-        applied by :func:`write_oasn_input`).
-        """
-        return self.run(env, source, receiver, run_mode=RunMode.REPLICA, **kwargs)
+    # ``compute_covariance`` / ``compute_replicas`` come from the base class
+    # (RunMode.COVARIANCE / RunMode.REPLICA dispatch).
 
     def _execute(self, base_name: str, work_dir: Path):
         """Execute OASN binary. FOR005 stays as stdin per OASES docs."""
@@ -642,7 +610,7 @@ class OASN(_OASESBase):
             FOR026='chk',  # Checkpoint file (per oasn wrapper)
         )
         result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, timeout=300, env=env,
+            [str(self.executable)], cwd=work_dir, env=env,
         )
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -737,10 +705,7 @@ class OASR(_OASESBase):
             self.executable = Path(executable)
 
         if not self.executable.exists():
-            raise FileNotFoundError(
-                f"OASR executable not found: {self.executable}\n"
-                "Please compile OASES using the installation scripts."
-            )
+            raise ExecutableNotFoundError('OASR', str(self.executable))
 
     def run(
         self,
@@ -753,6 +718,7 @@ class OASR(_OASESBase):
         angle_type=_UNSET,
         reflection_type=_UNSET,
         volume_attenuation=_UNSET,
+        frequencies: Optional[np.ndarray] = None,
         **kwargs
     ) -> Result:
         """Run OASR.
@@ -770,12 +736,16 @@ class OASR(_OASESBase):
         ----------
         angles, angle_type, reflection_type, volume_attenuation : optional
             Per-call overrides for constructor defaults.
+        frequencies : ndarray, optional
+            Explicit frequency vector (Hz) — preferred multi-frequency
+            interface. The min, max and length are forwarded as
+            ``freq_min`` / ``freq_max`` / ``n_frequencies`` to the writer.
         **kwargs
-            Forwarded to :func:`write_oasr_input`. Use ``freq_min``,
-            ``freq_max``, ``n_frequencies`` to sweep frequency.
+            Forwarded to :func:`write_oasr_input`. ``freq_min``,
+            ``freq_max``, ``n_frequencies`` are still accepted as
+            alternatives but ``frequencies=`` is the documented path.
         """
         if run_mode is not None and run_mode != RunMode.REFLECTION:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.REFLECTION"],
@@ -790,10 +760,27 @@ class OASR(_OASESBase):
             self._resolve(volume_attenuation, 'volume_attenuation')
         )
 
+        if frequencies is not None:
+            freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
+            if freqs_arr.size == 0:
+                raise ValueError(
+                    "OASR.run(frequencies=…) requires at least one "
+                    "positive frequency."
+                )
+            for sweep_key in ('freq_min', 'freq_max', 'n_frequencies'):
+                if sweep_key in kwargs:
+                    raise ValueError(
+                        f"OASR.run: pass either frequencies=… or "
+                        f"{sweep_key}=…, not both."
+                    )
+            kwargs['freq_min'] = float(freqs_arr.min())
+            kwargs['freq_max'] = float(freqs_arr.max())
+            kwargs['n_frequencies'] = int(freqs_arr.size)
+
         self._warn_unknown_kwargs(kwargs)
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         # Only synthesize a default angle grid when the user passed neither an
         # explicit ``angles=`` array nor angle_min/angle_max/n_angles via kwargs.
@@ -864,8 +851,7 @@ class OASR(_OASESBase):
                 **self._result_kwargs(
                     source,
                     backend='oasr',
-                    frequency=float(freqs_arr[0]) if len(freqs_arr) == 1 else None,
-                    frequencies=freqs_arr if len(freqs_arr) > 1 else None,
+                    frequencies=freqs_arr if len(freqs_arr) else None,
                     sampling_type=data.get('sampling_type', 'angle'),
                     reflection_type=reflection_type,
                 ),
@@ -888,20 +874,10 @@ class OASR(_OASESBase):
             FOR023='trc',  # Reflection-coef table (angle)
         )
         result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, timeout=300, env=env,
+            [str(self.executable)], cwd=work_dir, env=env,
         )
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
-
-    def _compute_tl_impl(self, env, source, receiver, **kwargs):
-        """OASR does not compute transmission loss — raise UnsupportedFeatureError."""
-        from uacpy.core.exceptions import UnsupportedFeatureError
-        raise UnsupportedFeatureError(
-            model_name='OASR',
-            feature='transmission loss (computes plane-wave reflection coefficients instead)',
-            alternatives=['OAST (wavenumber integration)', 'OASP (parabolic equation)'],
-        )
-
 
 class OASP(_OASESBase):
     """
@@ -995,10 +971,7 @@ class OASP(_OASESBase):
             self.executable = Path(executable)
 
         if not self.executable.exists():
-            raise FileNotFoundError(
-                f"OASP executable not found: {self.executable}\n"
-                "Please compile OASES using the installation scripts."
-            )
+            raise ExecutableNotFoundError('OASP', str(self.executable))
 
     def run(
         self,
@@ -1042,9 +1015,8 @@ class OASP(_OASESBase):
         Returns
         -------
         result : Result
-            ``field_type='tl'`` for COHERENT_TL,
-            ``'transfer_function'`` for BROADBAND,
-            ``'time_series'`` for TIME_SERIES.
+            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
         # Resolve per-call overrides
         n_time_samples = self._resolve(n_time_samples, 'n_time_samples')
@@ -1086,7 +1058,7 @@ class OASP(_OASESBase):
         self._warn_unknown_kwargs(kwargs)
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
         fm = self._setup_file_manager()
 
         try:
@@ -1160,12 +1132,12 @@ class OASP(_OASESBase):
                 # COHERENT_TL: extract TL at source frequency.
                 freq_idx = 0
                 if len(trf_data['freq']) > 1:
-                    freq_diff = np.abs(trf_data['freq'] - source.frequency[0])
+                    freq_diff = np.abs(trf_data['freq'] - source.frequencies[0])
                     freq_idx = np.argmin(freq_diff)
 
                 tl_at_freq = transfer_func[freq_idx, :, :]
                 magnitude = np.abs(tl_at_freq)
-                magnitude[magnitude == 0] = 1e-30
+                magnitude[magnitude == 0] = PRESSURE_FLOOR
                 tl_db = -20 * np.log10(magnitude)
                 # Transpose to (n_depth, n_range).
                 tl_db = tl_db.T
@@ -1177,7 +1149,7 @@ class OASP(_OASESBase):
                     **self._result_kwargs(
                         source,
                         backend='oasp',
-                        frequency=float(trf_data['freq'][freq_idx]),
+                        frequencies=float(trf_data['freq'][freq_idx]),
                         frequencies_available=trf_data['freq'],
                         source_depth=trf_data['source_depth'],
                         center_frequency=trf_data['center_frequency'],
@@ -1200,7 +1172,7 @@ class OASP(_OASESBase):
             FOR002='src',
         )
         result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, timeout=300, env=env,
+            [str(self.executable)], cwd=work_dir, env=env,
         )
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -1231,8 +1203,11 @@ class OASES(PropagationModel):
     >>> # Transmission loss (uses OAST)
     >>> result = oases.compute_tl(env, source, receiver)
     >>>
-    >>> # Normal modes (uses OASN)
-    >>> modes = oases.compute_modes(env, source)
+    >>> # Hydrophone-array covariance (uses OASN)
+    >>> cov = oases.compute_covariance(env, source, receiver)
+    >>>
+    >>> # MFP replica fields (uses OASN)
+    >>> rep = oases.compute_replicas(env, source, receiver)
     >>>
     >>> # Or use run() with run_mode parameter
     >>> from uacpy.models.base import RunMode
@@ -1246,20 +1221,51 @@ class OASES(PropagationModel):
 
     def __init__(
         self,
+        executable: Optional[Path] = None,
+        volume_attenuation: Optional[str] = None,
+        francois_garrison_params: Optional[tuple] = None,
+        bio_layers: Optional[list] = None,
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
         )
 
-        # Create instances of all OASES models
-        self._oast = OAST(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
-        self._oasn = OASN(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
-        self._oasr = OASR(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
-        self._oasp = OASP(use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir)
+        # ``executable`` only makes sense per sub-binary; OASES is a
+        # dispatcher so it cannot accept a single executable path.
+        if executable is not None:
+            raise ConfigurationError(
+                "The unified OASES wrapper does not accept a single "
+                "executable= path; instantiate OAST/OASN/OASR/OASP "
+                "directly to override their binaries."
+            )
+
+        # Sub-model-specific kwargs (e.g. ``angles`` for OASR,
+        # ``n_time_samples`` for OASP) cannot be applied uniformly here —
+        # passing them to all four would break the constructors that don't
+        # accept them. Reject anything outside the standard plumbing set.
+        if kwargs:
+            raise ConfigurationError(
+                f"Unified OASES wrapper received sub-model-specific "
+                f"kwargs {sorted(kwargs)}. Set them on OAST/OASN/OASR/OASP "
+                "directly."
+            )
+
+        common = dict(
+            use_tmpfs=use_tmpfs,
+            verbose=verbose,
+            work_dir=work_dir,
+            volume_attenuation=volume_attenuation,
+            francois_garrison_params=francois_garrison_params,
+            bio_layers=bio_layers,
+        )
+        self._oast = OAST(**common)
+        self._oasn = OASN(**common)
+        self._oasr = OASR(**common)
+        self._oasp = OASP(**common)
 
         # Aggregate supported modes from all submodels
         self._supported_modes = list(set(
@@ -1313,7 +1319,6 @@ class OASES(PropagationModel):
                 return self._oasp.run(env, source, receiver, **kwargs)
             return self._oast.run(env, source, receiver, **kwargs)
         if run_mode == RunMode.MODES:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(RunMode.MODES),
                 alternatives=[
@@ -1324,6 +1329,9 @@ class OASES(PropagationModel):
             )
         if run_mode == RunMode.REFLECTION:
             return self._oasr.run(env, source, receiver, **kwargs)
+        if run_mode in (RunMode.COVARIANCE, RunMode.REPLICA):
+            return self._oasn.run(env, source, receiver,
+                                  run_mode=run_mode, **kwargs)
         if run_mode in (
             RunMode.BROADBAND, RunMode.TIME_SERIES,
         ):
@@ -1335,148 +1343,35 @@ class OASES(PropagationModel):
         self,
         env: Environment,
         source: Source,
-        receiver: Receiver = None,
+        receiver: Receiver,
         broadband: bool = False,
-        **kwargs
+        **kwargs,
     ) -> Result:
-        """
-        Compute transmission loss using OAST (wavenumber integration) or OASP
-        (wideband transfer function) when ``broadband=True``.
+        """Compute transmission loss using OAST (wavenumber integration)
+        for range-independent envs, or OASP for range-dependent envs when
+        ``broadband=True``. Both routes return a single-frequency
+        :class:`TLField` at ``source.frequencies[0]``.
 
         Parameters
         ----------
         env : Environment
-            Ocean environment
+            Ocean environment.
         source : Source
-            Acoustic source
-        receiver : Receiver, optional
-            Receiver array
+            Acoustic source.
+        receiver : Receiver
+            Receiver grid (required).
         broadband : bool, optional
             When True, delegate to OASP instead of OAST. Needed for
             range-dependent environments where OAST's range-independent
             wavenumber-integration kernel is inappropriate. Default False.
         **kwargs
-            Additional OAST / OASP parameters.
-
-        Returns
-        -------
-        result : Result
-            Transmission loss field.
+            Forwarded to OAST / OASP.
         """
-        if receiver is None:
-            from uacpy.core.model_utils import ReceiverGridBuilder
-            max_range = kwargs.pop('max_range', 10000.0)
-            depths, ranges = ReceiverGridBuilder.build_tl_grid(env.depth, max_range)
-            receiver = Receiver(depths=depths, ranges=ranges)
         if broadband:
             return self._oasp.run(env, source, receiver, **kwargs)
         return self._oast.run(env, source, receiver, **kwargs)
 
 
-    def compute_reflection(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        angles: Optional[np.ndarray] = None,
-        angle_type: str = 'grazing',
-        **kwargs
-    ) -> Result:
-        """
-        Compute reflection coefficients using OASR.
-
-        Parameters
-        ----------
-        env : Environment
-            Ocean environment.
-        source : Source
-            Acoustic source.
-        receiver : Receiver
-            Receiver array.
-        angles : array_like, optional
-            Angles to compute (degrees). Interpretation depends on
-            ``angle_type``.
-        angle_type : str, optional
-            'grazing' (OASES native) or 'incidence'. When 'incidence' is
-            passed, ``OASR.run`` converts via ``grazing = 90 - incidence``
-            before writing the OASR input file. Default 'grazing'.
-        **kwargs
-            Additional OASR parameters.
-
-        Returns
-        -------
-        result : Result
-            Reflection coefficients field.
-        """
-        return self._oasr.run(
-            env, source, receiver,
-            angles=angles, angle_type=angle_type, **kwargs,
-        )
-
-    def compute_time_series(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        source_waveform=None,
-        sample_rate=None,
-        **kwargs,
-    ) -> Result:
-        """
-        Compute time-domain pressure p(t) using OASP.
-
-        Internally runs the OASP broadband H(f) and convolves with the
-        given source waveform.
-
-        Parameters
-        ----------
-        env, source, receiver : see :class:`OASP`.
-        source_waveform : ndarray
-            1-D source pulse.
-        sample_rate : float
-            Source-waveform sampling rate (Hz).
-
-        Returns
-        -------
-        result : Result
-            ``field_type='time_series'``.
-        """
-        return self._oasp.run(
-            env, source, receiver,
-            run_mode=RunMode.TIME_SERIES,
-            source_waveform=source_waveform,
-            sample_rate=sample_rate,
-            **kwargs,
-        )
-
-    def compute_transfer_function(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        **kwargs
-    ) -> Result:
-        """
-        Compute broadband transfer function H(f) via OASP.
-
-        Parameters
-        ----------
-        env : Environment
-            Ocean environment.
-        source : Source
-            Acoustic source.
-        receiver : Receiver
-            Receiver array.
-        **kwargs
-            Additional OASP parameters.
-
-        Returns
-        -------
-        result : Result
-            ``field_type='transfer_function'``.
-        """
-        kwargs.pop('run_mode', None)
-        return self._oasp.run(
-            env, source, receiver,
-            run_mode=RunMode.BROADBAND, **kwargs,
-        )
+    # ``compute_reflection`` / ``compute_time_series`` /
+    # ``compute_transfer_function`` come from PropagationModel and route
+    # through OASES.run, which dispatches to OASR / OASP.

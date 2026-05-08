@@ -49,7 +49,7 @@ def main():
         depth=100.0, sound_speed=1500.0,
         bottom=fluid_bottom, altimetry=surface,
     )
-    src = Source(depth=50.0, frequency=200.0)
+    src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
         depths=np.array([50.0]),
         ranges=np.linspace(500.0, 6000.0, 200),
@@ -58,7 +58,7 @@ def main():
     print(f"Env: {env.depth:.0f} m Pekeris, isovelocity {float(env.ssp.data[0, 0]):.0f}, "
           f"fluid bottom (c=1700, ρ=1.7, α=0.5)")
     print(f"Surface: {len(surface)} altimetry breakpoints, two -1.5 m depressions")
-    print(f"Source: depth={src.depth[0]:.0f} m, frequency={src.frequency[0]:.0f} Hz")
+    print(f"Source: depth={src.depths[0]:.0f} m, frequencies={src.frequencies[0]:.0f} Hz")
     print(f"Receiver: depth={rcv.depths[0]:.0f} m, range = "
           f"{rcv.ranges[0]:.0f}-{rcv.ranges[-1]:.0f} m ({len(rcv.ranges)} pts)")
     print()
@@ -113,7 +113,7 @@ def main():
     ax_top.set_ylabel('TL (dB)')
     ax_top.set_title(
         f"Bellhop vs RAM(ramsurf) — identical Pekeris+altimetry env, "
-        f"{src.frequency[0]:.0f} Hz\n"
+        f"{src.frequencies[0]:.0f} Hz\n"
         f"RMSE = {rmse:.2f} dB, bias = {bias:+.2f} dB "
         f"(window {rmin/1000:.0f}-{rmax/1000:.0f} km)"
     )

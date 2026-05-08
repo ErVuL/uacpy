@@ -37,6 +37,14 @@ from uacpy.core.results import (
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation, BoundaryType,
 )
+from uacpy.core.exceptions import (
+    UACPYError,
+    ExecutableNotFoundError,
+    ModelExecutionError,
+    InvalidDepthError,
+    UnsupportedFeatureError,
+    ConfigurationError,
+)
 
 from uacpy import models
 from uacpy.models.base import RunMode
@@ -49,6 +57,7 @@ from uacpy import acoustic_signal as signal
 
 from uacpy import noise
 from uacpy.core import acoustics
+from uacpy.core.metrics import tl_rmse
 
 __all__ = [
     'Source',
@@ -68,6 +77,12 @@ __all__ = [
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
     'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
+    'UACPYError',
+    'ExecutableNotFoundError',
+    'ModelExecutionError',
+    'InvalidDepthError',
+    'UnsupportedFeatureError',
+    'ConfigurationError',
     'RunMode',
     'models',
     'plot',
@@ -75,5 +90,6 @@ __all__ = [
     'signal',
     'noise',
     'acoustics',
+    'tl_rmse',
     '__version__',
 ]

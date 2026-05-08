@@ -68,8 +68,15 @@ class Receiver:
         self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
         self.ranges = np.atleast_1d(np.array(ranges, dtype=np.float64))
 
+        if self.depths.size < 1:
+            raise ValueError("receiver depths must contain at least one value, got empty array")
+        if self.ranges.size < 1:
+            raise ValueError("receiver ranges must contain at least one value, got empty array")
+
         if np.any(self.depths < 0):
-            raise ValueError("Receiver depths must be positive (down from surface)")
+            raise ValueError(
+                f"receiver depths must be non-negative (down from surface), got {self.depths.tolist()}"
+            )
 
         if receiver_type == 'line':
             if len(self.depths) != len(self.ranges):

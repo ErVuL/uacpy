@@ -1,16 +1,25 @@
 """
 Acoustics Toolbox / OALIB environment-file writers.
 
-Module-level helpers for writing the ``.env`` format consumed by the
-Acoustics Toolbox family (Kraken, KrakenC, KrakenField, Scooter, SPARC,
-Bounce, Field), plus the ``.flp`` field-parameter file used by KrakenField.
+Each function writes one logical block of the AT ``.env`` format onto an
+open text handle, plus the ``.flp`` field-parameter writers used by
+KrakenField. ``write_multi_profile_env`` and ``write_fieldflp`` /
+``write_field3dflp`` write the full file.
 
-Bellhop has its own writer (``bellhop_writer.py``) because its env format
-diverges in run-type / beam-parameter handling.
+Adoption across uacpy model wrappers:
 
-Each function writes one logical block onto an open text handle, except
-``write_multi_profile_env`` (full multi-segment env file for KrakenField)
-and ``write_fieldflp`` / ``write_field3dflp`` (full ``.flp`` files).
+- ``write_header``: Kraken, KrakenC, KrakenField, Scooter, Bounce.
+  SPARC writes its own title/freq/NMedia line (`SPARC` has a 5th TopOpt
+  position for ``output_mode``); Bellhop has its own writer entirely.
+- ``write_bottom_section``: Kraken, KrakenC, KrakenField, Bounce.
+  Scooter and SPARC open-code the bottom block because their ``'F'``
+  (BRC) and ``'A'`` halfspace formats slightly differ.
+- ``write_source_depths`` / ``write_receiver_depths`` /
+  ``write_receiver_ranges``: every AT-family wrapper, including Bellhop.
+- ``write_fg_params`` / ``write_bio_layers``: every wrapper that exposes
+  volume_attenuation, including Bellhop.
+- ``_BOUNDARY_TYPE_MAP`` / ``get_top_bc_code`` /
+  ``write_surface_halfspace``: all AT-family wrappers including Bellhop.
 """
 
 import numpy as np
@@ -28,17 +37,17 @@ from uacpy.core.constants import (
 from uacpy.io.utils import equally_spaced
 
 
-_SURFACE_TYPE_MAP = {
+_BOUNDARY_TYPE_MAP = {
     "vacuum": "V", "rigid": "R",
     "halfspace": "A", "half-space": "A",
-    "file": "F",
+    "file": "F", "precalc": "P",
     "grain-size": "G", "grain_size": "G", "grain": "G",
 }
 
 
 def get_top_bc_code(env: Environment) -> str:
     """Return the single-character AT top boundary condition code."""
-    return _SURFACE_TYPE_MAP.get(env.surface.acoustic_type.lower(), "V")
+    return _BOUNDARY_TYPE_MAP.get(env.surface.acoustic_type.lower(), "V")
 
 
 def write_surface_halfspace(f, env: Environment) -> None:
@@ -156,7 +165,7 @@ def write_header(
     f.write(f"'{env.name}'\n")
 
     # Frequency
-    f.write(f"{source.frequency[0]:.6f}\n")
+    f.write(f"{source.frequencies[0]:.6f}\n")
 
     # Number of media: 1 (water column) + N sediment layers if layered bottom
     if n_media_override is not None:
@@ -459,12 +468,13 @@ def write_bottom_section(
             )
 
         # For 'F' type, write phase velocity bounds and rmax (not bottom properties)
-        # These define the range of angles covered by the reflection coefficient table
+        # These define the range of angles covered by the reflection coefficient table.
+        # Bellhop expects rmax in km; the public attribute is in meters.
         cmin = getattr(env.bottom, 'reflection_cmin', 1400.0)
         cmax = getattr(env.bottom, 'reflection_cmax', 10000.0)
-        rmax_km = getattr(env.bottom, 'reflection_rmax_km', 10.0)
+        rmax_m = getattr(env.bottom, 'reflection_rmax_m', 10000.0)
         f.write(f"{cmin:.2f}  {cmax:.2f}\n")
-        f.write(f"{rmax_km:.2f}\n")
+        f.write(f"{rmax_m / 1000.0:.2f}\n")
 
     # Write halfspace parameters (type 'A')
     elif bottom_code == 'A':  # Half-space
@@ -485,17 +495,23 @@ def write_bottom_section(
 
 def write_source_depths(f: TextIO, source: Source) -> None:
     """Write the source-depth section of an Acoustics Toolbox ``.env`` file."""
-    n_sources = len(source.depth)
+    n_sources = len(source.depths)
     f.write(f"{n_sources}\n")
-    depths_str = " ".join([f"{d:.6f}" for d in source.depth])
+    depths_str = " ".join([f"{d:.6f}" for d in source.depths])
     f.write(f"{depths_str} /\n")
 
 
-def write_receiver_depths(f: TextIO, receiver: Receiver) -> None:
-    """Write the receiver-depth section of an Acoustics Toolbox ``.env`` file."""
-    n_rd = len(receiver.depths)
-    f.write(f"{n_rd}\n")
-    depths_str = " ".join([f"{d:.6f}" for d in receiver.depths])
+def write_receiver_depths(f: TextIO, receiver_or_depths) -> None:
+    """Write the receiver-depth section of an Acoustics Toolbox ``.env`` file.
+
+    Accepts either a ``Receiver`` instance or a 1-D depths array.
+    """
+    depths = (
+        receiver_or_depths.depths if isinstance(receiver_or_depths, Receiver)
+        else np.asarray(receiver_or_depths, dtype=float)
+    )
+    f.write(f"{len(depths)}\n")
+    depths_str = " ".join([f"{d:.6f}" for d in depths])
     f.write(f"{depths_str} /\n")
 
 
@@ -548,18 +564,18 @@ def write_multi_profile_env(
     volume_attenuation : VolumeAttenuation, optional
         Volume attenuation formula
     **kwargs
-        n_mesh, roughness, c_low, c_high, rmax_km passed through
+        n_mesh, roughness, c_low, c_high, rmax_m passed through
     """
     n_mesh = kwargs.get('n_mesh', 0)
     roughness = kwargs.get('roughness', 0.0)
     c_low = kwargs.get('c_low', None)
     c_high = kwargs.get('c_high', None)
-    rmax_km = kwargs.get('rmax_km', 100.0)
+    rmax_m = kwargs.get('rmax_m', 100000.0)
 
     # Ensure n_mesh > 0 for consistency across profiles.
     # If caller didn't specify, compute from max depth.
     if n_mesh <= 0:
-        freq = float(source.frequency[0])
+        freq = float(source.frequencies[0])
         max_depth = max(seg.depth for _, seg in segments)
         n_mesh = max(500, int(max_depth * freq / 1500.0 * 20))
 
@@ -732,7 +748,7 @@ def write_multi_profile_env(
             f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
 
             # Maximum range (km) — part of ReadEnvironment
-            f.write(f"{rmax_km:.1f}\n")
+            f.write(f"{rmax_m / 1000.0:.1f}\n")
 
             write_source_depths(f, source)
             write_receiver_depths(f, receiver)

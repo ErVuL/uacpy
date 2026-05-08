@@ -4,6 +4,15 @@ Custom exception hierarchy for UACPY
 Provides structured error handling with helpful remediation messages.
 """
 
+__all__ = [
+    'UACPYError',
+    'ExecutableNotFoundError',
+    'ModelExecutionError',
+    'InvalidDepthError',
+    'UnsupportedFeatureError',
+    'ConfigurationError',
+]
+
 
 class UACPYError(Exception):
     """Base exception for all UACPY errors."""

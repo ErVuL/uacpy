@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 16: Bellhop Run Modes - Comprehensive
+EXAMPLE 11: Bellhop Run Modes - Comprehensive
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -126,8 +126,8 @@ def scenario_a_tl_modes():
     )
 
     source = uacpy.Source(
-        depth=1000.0,      # At channel axis
-        frequency=50.0     # 50 Hz
+        depths=1000.0,      # At channel axis
+        frequencies=50.0     # 50 Hz
     )
 
     receiver = uacpy.Receiver(
@@ -173,7 +173,7 @@ def scenario_a_tl_modes():
                        shading='auto', zorder=1)
     ax.set_xlim([result_coherent.ranges[0]/1000, result_coherent.ranges[-1]/1000])
     ax.set_ylim([result_coherent.depths[-1], result_coherent.depths[0]])
-    ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
+    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
     ax.set_title('Coherent TL (run_mode=RunMode.COHERENT_TL)', fontweight='bold', fontsize=12)
@@ -188,7 +188,7 @@ def scenario_a_tl_modes():
                        shading='auto', zorder=1)
     ax.set_xlim([result_incoherent.ranges[0]/1000, result_incoherent.ranges[-1]/1000])
     ax.set_ylim([result_incoherent.depths[-1], result_incoherent.depths[0]])
-    ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
+    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
     ax.set_title('Incoherent TL (run_mode=RunMode.INCOHERENT_TL)', fontweight='bold', fontsize=12)
@@ -203,7 +203,7 @@ def scenario_a_tl_modes():
                        shading='auto', zorder=1)
     ax.set_xlim([result_semicoherent.ranges[0]/1000, result_semicoherent.ranges[-1]/1000])
     ax.set_ylim([result_semicoherent.depths[-1], result_semicoherent.depths[0]])
-    ax.plot(0, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
+    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
     ax.set_title('Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)', fontweight='bold', fontsize=12)
@@ -226,7 +226,7 @@ def scenario_a_tl_modes():
             'g-', linewidth=2.5, label='Semi-coherent', alpha=0.8)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax.set_title(f'TL Comparison at {source.depth[0]:.0f}m Depth (Channel Axis)',
+    ax.set_title(f'TL Comparison at {source.depths[0]:.0f}m Depth (Channel Axis)',
                  fontweight='bold', fontsize=12)
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
@@ -276,8 +276,8 @@ def scenario_b_ray_tracing():
     )
 
     source = uacpy.Source(
-        depth=1000.0,       # At channel axis
-        frequency=50.0,
+        depths=1000.0,       # At channel axis
+        frequencies=50.0,
         angles=np.linspace(-15, 15, 31)  # 31 rays from -15° to +15°
     )
 
@@ -315,7 +315,7 @@ def scenario_b_ray_tracing():
     print(f"\n  Ray tracing parameters:")
     print(f"    • Number of rays: {len(source.angles)}")
     print(f"    • Launch angles: {source.angles[0]:.1f}° to {source.angles[-1]:.1f}°")
-    print(f"    • Source depth: {source.depth[0]:.0f} m (channel axis)")
+    print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
     print(f"    • Maximum range: 100 km")
 
     print("\n✓ Generated: output/example_11b_ray_tracing.png")
@@ -324,68 +324,74 @@ def scenario_b_ray_tracing():
 def scenario_c_eigenrays_arrivals():
     """
     Scenario C: Eigenrays and arrival structure analysis.
+
+    Uses a dense launch fan (n_beams=2001 over ±20°) so Bellhop's native
+    EIGENRAYS run-mode converges sharply on the receiver — coarse fans
+    return rays that visibly miss because the per-angle vertical spacing
+    at the receiver range exceeds the eigenray miss-distance tolerance.
     """
     print("\n" + "="*80)
-    print("SCENARIO C: Eigenrays & Arrivals (run_mode=RunMode.EIGENRAYS and 'A')")
+    print("SCENARIO C: Eigenrays & Arrivals (run_mode=RunMode.EIGENRAYS and ARRIVALS)")
     print("="*80)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # ENVIRONMENT - Simpler for clear eigenray demonstration
-    # ═══════════════════════════════════════════════════════════════════════
     env = uacpy.Environment(
         name="Shallow Water - Eigenrays",
         depth=100.0,
         ssp=SoundSpeedProfile.from_pairs(
             [(0, 1500), (100, 1520)], interp='linear',
-        ),  # Slight positive gradient
+        ),
     )
 
-    source = uacpy.Source(
-        depth=50.0,
-        frequency=100.0,
-        angles=np.linspace(-25, 25, 41),
-    )
-
+    source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(
         depths=np.array([30.0]),
         ranges=np.array([2000.0]),
     )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUN EIGENRAYS
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n  Finding eigenrays to receiver at (5 km, 30 m)...")
-    print("    • Computing eigenrays...", end=" ", flush=True)
+    print(f"\n  Receiver at (r={receiver.ranges[0]/1000:.1f} km, "
+          f"z={receiver.depths[0]:.0f} m)")
 
-    bellhop_eigen = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=51)
-    result_eigen = bellhop_eigen.run(env, source, receiver, run_mode=RunMode.EIGENRAYS)
+    # RunMode.EIGENRAYS returns every ray Bellhop wrote — the Fortran
+    # eigenray tolerance is loose. Use compute_eigenrays to post-filter
+    # by closest-approach miss distance so only rays that actually land
+    # within λ/4 of the receiver survive.
+    bellhop_eigen = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=2001)
+    wavelength_m = 1500.0 / float(np.atleast_1d(source.frequencies)[0])
+    print(f"    • Filtering eigenrays via compute_eigenrays "
+          f"(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)...",
+          end=" ", flush=True)
+    result_eigen = bellhop_eigen.compute_eigenrays(
+        env, source,
+        range_m=float(receiver.ranges[0]),
+        depth_m=float(receiver.depths[0]),
+        tolerance_m=wavelength_m / 4,
+        max_rays=12,
+    )
     print("✓")
 
-    print("    • Computing full ray fan...", end=" ", flush=True)
-    bellhop_full = Bellhop(verbose=False, alpha=(-15.0, 15.0), n_beams=15)
+    print("    • Computing context ray fan (RunMode.RAYS)...",
+          end=" ", flush=True)
+    bellhop_full = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=21)
     receiver_fan = uacpy.Receiver(
         depths=np.array([receiver.depths[0]]),
         ranges=np.linspace(0, receiver.ranges[0] * 1.1, 50),
     )
     result_rays = bellhop_full.run(env, source, receiver_fan,
-                                    run_mode=RunMode.RAYS)
+                                   run_mode=RunMode.RAYS)
     print("✓")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUN ARRIVALS
-    # ═══════════════════════════════════════════════════════════════════════
-    print("    • Computing arrival structure...", end=" ", flush=True)
+    print("    • Computing arrival structure (RunMode.ARRIVALS)...",
+          end=" ", flush=True)
     try:
-        bellhop_arr = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=51)
-        result_arr = bellhop_arr.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
+        bellhop_arr = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=201)
+        result_arr = bellhop_arr.run(env, source, receiver,
+                                     run_mode=RunMode.ARRIVALS)
         print("✓")
-    except (NotImplementedError, Exception) as e:
-        print(f"⚠ (ASCII format not yet supported - skipped)")
+    except Exception as e:
+        print(f"⚠ ({e})")
         result_arr = None
 
     from uacpy.visualization.plots import plot_rays
-
-    n_eigenrays = len(result_eigen.rays)
 
     arrivals_ok = False
     if result_arr is not None:
@@ -395,76 +401,40 @@ def scenario_c_eigenrays_arrivals():
         if isinstance(node, dict) and len(node.get('delays', [])) > 0:
             arrivals_ok = True
 
-    if arrivals_ok:
-        fig = plt.figure(figsize=(14, 18))
-        gs = fig.add_gridspec(5, 1, height_ratios=[1, 1, 1, 1, 0.9],
-                               hspace=0.55)
-        ax_full = fig.add_subplot(gs[0])
-        ax_eigen = fig.add_subplot(gs[1])
-        ax_all_rcv = fig.add_subplot(gs[2])
-        ax_strict = fig.add_subplot(gs[3])
-        ax_arr = fig.add_subplot(gs[4])
-    else:
-        fig = plt.figure(figsize=(14, 15))
-        gs = fig.add_gridspec(4, 1, height_ratios=[1, 1, 1, 1], hspace=0.55)
-        ax_full = fig.add_subplot(gs[0])
-        ax_eigen = fig.add_subplot(gs[1])
-        ax_all_rcv = fig.add_subplot(gs[2])
-        ax_strict = fig.add_subplot(gs[3])
-        ax_arr = None
+    n_panels = 3 if arrivals_ok else 2
+    fig = plt.figure(figsize=(14, 4 * n_panels + 1))
+    gs = fig.add_gridspec(n_panels, 1, hspace=0.45)
+    ax_full = fig.add_subplot(gs[0])
+    ax_eigen = fig.add_subplot(gs[1])
+    ax_arr = fig.add_subplot(gs[2]) if arrivals_ok else None
 
     plot_rays(result_rays, env=env, source=source, receiver=receiver,
               ax=ax_full, linewidth=1.1, alpha=0.75,
-              title=f'Full ray fan ({len(result_rays.rays)} rays, ±15°)')
+              title=f'Context ray fan ({len(result_rays.rays)} rays, ±20°)')
 
+    n_eigenrays = len(result_eigen.rays)
     if n_eigenrays > 0:
-        n_show = min(n_eigenrays, 12)
         plot_rays(result_eigen, env=env, source=source, receiver=receiver,
-                  ax=ax_eigen, linewidth=1.4, alpha=0.85,
-                  max_rays=n_show,
-                  title=f'Eigenrays from Bellhop ({n_show}/{n_eigenrays})')
-
-        wavelength_m = 1500.0 / float(np.atleast_1d(source.frequency)[0])
-        all_at_rcv = bellhop_eigen.find_eigenrays(
-            env, source,
-            range_m=float(receiver.ranges[0]),
-            depth_m=float(receiver.depths[0]),
-            tolerance_m=wavelength_m,
-        )
-        plot_rays(all_at_rcv, env=env, source=source, receiver=receiver,
-                  ax=ax_all_rcv, linewidth=1.4, alpha=0.85,
+                  ax=ax_eigen, linewidth=1.5, alpha=0.9,
                   truncate_at_receiver=False,
-                  title=f'All {len(all_at_rcv.rays)} rays at receiver '
-                        f'(miss < λ ≈ {wavelength_m:.1f} m)')
-
-        strict_at_rcv = bellhop_eigen.find_eigenrays(
-            env, source,
-            range_m=float(receiver.ranges[0]),
-            depth_m=float(receiver.depths[0]),
-            tolerance_m=wavelength_m * 0.25,
-            max_rays=8,
-        )
-        plot_rays(strict_at_rcv, env=env, source=source, receiver=receiver,
-                  ax=ax_strict, linewidth=2.0, alpha=0.95,
-                  truncate_at_receiver=False,
-                  title=f'{len(strict_at_rcv.rays)} strictest arrivals '
+                  title=f'{n_eigenrays} eigenrays at receiver '
                         f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
     else:
-        for ax in (ax_eigen, ax_all_rcv, ax_strict):
-            ax.text(0.5, 0.5, 'Eigenray data not available',
-                    ha='center', va='center', transform=ax.transAxes)
-            ax.axis('off')
+        ax_eigen.text(0.5, 0.5, 'No eigenrays returned',
+                      ha='center', va='center', transform=ax_eigen.transAxes)
+        ax_eigen.axis('off')
 
     if arrivals_ok:
         from uacpy.visualization.plots import plot_arrivals
         plot_arrivals(result_arr, ax=ax_arr)
-    fig.savefig(OUTPUT_DIR / 'example_11c_eigenrays_arrivals.png', dpi=150)
+
+    fig.savefig(OUTPUT_DIR / 'example_11c_eigenrays_arrivals.png', dpi=150,
+                bbox_inches='tight')
     plt.close(fig)
 
     print(f"\n  Analysis complete:")
-    if result_eigen.rays:
-        print(f"    • Eigenrays found: {len(result_eigen.rays)}")
-    if arrivals_ok and result_arr is not None:
+    print(f"    • Eigenrays found: {n_eigenrays}")
+    if arrivals_ok:
         rec = result_arr.to_table(range_idx=0, depth_idx=0, src_idx=0)
         if rec:
             delays = [r['delay'] for r in rec]
@@ -474,27 +444,82 @@ def scenario_c_eigenrays_arrivals():
     print("\n✓ Generated: output/example_11c_eigenrays_arrivals.png")
 
 
+def scenario_d_compute_eigenrays_pekeris():
+    """
+    Scenario D: focused ``Bellhop.compute_eigenrays`` demo on a Pekeris guide.
+
+    Same API as scenario C uses internally, but on a clean Pekeris waveguide
+    so the multipath structure (direct + surface- and bottom-bounces) is
+    easy to read off the ray plot and the printed (alpha, miss, top, bot)
+    table.
+    """
+    print("\n" + "="*80)
+    print("SCENARIO D: compute_eigenrays() on a Pekeris waveguide")
+    print("="*80)
+
+    from uacpy.core.environment import BoundaryProperties
+
+    bottom = BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1600.0,
+        density=1.5, attenuation=0.5,
+    )
+    env = uacpy.Environment(
+        name='Pekeris', depth=100.0, sound_speed=1500.0, bottom=bottom,
+    )
+    source = uacpy.Source(depths=20.0, frequencies=200.0)
+
+    target_range_m = 3000.0
+    target_depth_m = 80.0
+
+    print(f"\n  Finding eigenrays at "
+          f"(r={target_range_m/1000:.1f} km, z={target_depth_m:.0f} m)...",
+          end=" ", flush=True)
+    bellhop = Bellhop(verbose=False, alpha=(-30, 30), n_beams=2001)
+    rays = bellhop.compute_eigenrays(
+        env, source,
+        range_m=target_range_m, depth_m=target_depth_m,
+        max_rays=8,
+    )
+    print("✓")
+
+    print(f"\n  Found {len(rays.rays)} eigenrays:")
+    print(f"    {'alpha (deg)':>12s} {'miss (m)':>10s} {'top':>4s} {'bot':>4s}")
+    for r in rays.rays:
+        print(f"    {r['alpha']:>12.3f} {r['miss_distance_m']:>10.3f} "
+              f"{r['n_top_bounces']:>4d} {r['n_bot_bounces']:>4d}")
+
+    fig, ax = rays.plot(env=env)
+    ax.plot(target_range_m / 1000.0, target_depth_m, 'ro', markersize=10,
+            markeredgecolor='black', label='Receiver')
+    ax.legend(loc='lower right')
+    fig.savefig(OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png',
+                dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print("\n✓ Generated: output/example_11d_compute_eigenrays_pekeris.png")
+
+
 def main():
     """
     Run all Bellhop run mode demonstrations.
     """
     print("\n" + "═"*80)
-    print("EXAMPLE 16: Bellhop Run Modes - Comprehensive")
+    print("EXAMPLE 11: Bellhop Run Modes - Comprehensive")
     print("═"*80)
     print("\nThis example demonstrates:")
     print("  • Coherent vs Incoherent vs Semi-coherent TL")
     print("  • Ray tracing and visualization")
-    print("  • Eigenray finding")
+    print("  • Eigenray finding (run_mode + compute_eigenrays)")
     print("  • Arrival structure analysis")
 
     # Run all scenarios
     scenario_a_tl_modes()
     scenario_b_ray_tracing()
     scenario_c_eigenrays_arrivals()
+    scenario_d_compute_eigenrays_pekeris()
 
     # Summary
     print("\n" + "═"*80)
-    print("EXAMPLE 16 COMPLETE")
+    print("EXAMPLE 11 COMPLETE")
     print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Coherent TL shows phase interference (modal patterns)")

@@ -22,7 +22,7 @@ from .generation import (
 
 # --- Curated analysis helpers -----------------------------------------------
 # Source: acoustic_signal/analysis.py
-from .analysis import PPSD
+from .analysis import PPSD, PSD, FRF, SEL, FKTransform, Spectrogram
 
 # --- Curated processing helpers ----------------------------------------------
 # Source: acoustic_signal/processing.py
@@ -70,6 +70,11 @@ __all__ = [
     "tone_burst",
     # Analysis
     "PPSD",
+    "PSD",
+    "FRF",
+    "SEL",
+    "FKTransform",
+    "Spectrogram",
     # Processing
     "add_noise",
     "beamform",

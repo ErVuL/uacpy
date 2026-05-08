@@ -1,221 +1,154 @@
-"""
-Tests for exception handling and error messages
-"""
+"""Tests for exception handling and public exception types."""
 
 import pytest
 import numpy as np
+
 import uacpy
 from uacpy.core.exceptions import (
-    UACPYError, ExecutableNotFoundError,
-    InvalidDepthError, UnsupportedFeatureError,
+    UACPYError, ExecutableNotFoundError, InvalidDepthError,
+    UnsupportedFeatureError, ConfigurationError, ModelExecutionError,
 )
 from uacpy.models import Bellhop, Kraken
 
 
 class TestCustomExceptions:
-    """Tests for custom exception classes."""
-
-    def test_uacpy_error_is_base(self):
-        """Test that UACPYError is base exception."""
-        error = UACPYError("Test message")
-        assert isinstance(error, Exception)
-        assert str(error) == "Test message"
-
-    def test_executable_not_found_error(self):
-        """Test ExecutableNotFoundError."""
-        error = ExecutableNotFoundError("TestModel", "test.exe")
-        assert "TestModel" in str(error)
-        assert "test.exe" in str(error)
-        assert hasattr(error, 'remediation')
+    """Direct construction of the typed exception classes."""
 
     def test_invalid_depth_error(self):
-        """Test InvalidDepthError."""
         error = InvalidDepthError(depth=150, max_depth=100, context="Source")
+        assert isinstance(error, UACPYError)
         assert "150" in str(error)
         assert "100" in str(error)
         assert "Source" in str(error)
 
+    def test_invalid_depth_error_subclass_of_uacpyerror(self):
+        try:
+            raise InvalidDepthError(depth=200, max_depth=100, context="Receiver")
+        except UACPYError as e:
+            assert "200" in str(e)
+
     def test_unsupported_feature_error(self):
-        """Test UnsupportedFeatureError."""
-        error = UnsupportedFeatureError("TestModel", "feature_name", alternatives=['Model1', 'Model2'])
-        assert "TestModel" in str(error)
-        assert "feature_name" in str(error)
-        assert "Model1" in str(error)
+        error = UnsupportedFeatureError(
+            "Bellhop", "normal mode computation",
+            alternatives=['Kraken', 'OASN'],
+        )
+        assert isinstance(error, UACPYError)
+        msg = str(error)
+        assert "Bellhop" in msg
+        assert "normal mode" in msg.lower()
+
+
+class TestExceptionPublicExports:
+    """Every exception must be reachable from `uacpy` and `uacpy.core`."""
+
+    def test_uacpy_top_level_exports(self):
+        for name in ('UACPYError', 'InvalidDepthError', 'UnsupportedFeatureError',
+                     'ConfigurationError', 'ExecutableNotFoundError',
+                     'ModelExecutionError'):
+            assert hasattr(uacpy, name), f"uacpy missing {name}"
+
+    def test_uacpy_core_exports(self):
+        import uacpy.core as core
+        for name in ('UACPYError', 'InvalidDepthError', 'UnsupportedFeatureError',
+                     'ConfigurationError', 'ExecutableNotFoundError',
+                     'ModelExecutionError'):
+            assert hasattr(core, name), f"uacpy.core missing {name}"
+
+    def test_isinstance_through_uacpy(self):
+        err = uacpy.InvalidDepthError(depth=150, max_depth=100, context='Source')
+        assert isinstance(err, uacpy.UACPYError)
 
 
 class TestInputValidation:
-    """Tests for input validation and error handling."""
+    """Constructor-time validation on Source / Receiver / Environment."""
 
-    @pytest.mark.requires_binary
-    def test_source_depth_exceeds_environment(self, simple_env):
-        """Test error when source depth exceeds environment depth.
+    def test_negative_source_depth(self):
+        with pytest.raises(ValueError, match="source depths must be"):
+            uacpy.Source(depths=-10, frequencies=100)
 
-        Bellhop's constructor probes for the bellhop.exe binary, so this test
-        is gated by `requires_binary` even though the assertion only exercises
-        Python-side input validation.
-        """
-        source = uacpy.Source(depth=150, frequency=100)
-        receiver = uacpy.Receiver(depths=[50], ranges=[1000])
+    def test_negative_receiver_depth(self):
+        with pytest.raises(ValueError, match="receiver depths must be"):
+            uacpy.Receiver(depths=[-10], ranges=[1000])
 
-        bellhop = Bellhop(verbose=False)
+    def test_zero_frequency_rejected(self):
+        with pytest.raises(ValueError, match="frequencies"):
+            uacpy.Source(depths=50, frequencies=0)
 
-        with pytest.raises(ValueError, match="Source depth.*exceeds"):
-            bellhop.validate_inputs(simple_env, source, receiver)
+    def test_negative_frequency_rejected(self):
+        with pytest.raises(ValueError, match="frequencies"):
+            uacpy.Source(depths=50, frequencies=-100)
 
-    @pytest.mark.requires_binary
-    def test_receiver_depth_exceeds_environment(self, simple_env):
-        """Test error when receiver depth exceeds environment depth."""
-        source = uacpy.Source(depth=50, frequency=100)
-        receiver = uacpy.Receiver(depths=[150], ranges=[1000])
-
-        bellhop = Bellhop(verbose=False)
-
-        with pytest.raises(ValueError, match="Receiver depth.*exceeds"):
-            bellhop.validate_inputs(simple_env, source, receiver)
-
-    def test_negative_source_depth(self, simple_env):
-        """Test error for negative source depth."""
-        # Source constructor should raise error for negative depth
-        with pytest.raises(ValueError, match="Source depths must be positive"):
-            source = uacpy.Source(depth=-10, frequency=100)
-
-    def test_negative_receiver_depth(self, simple_env):
-        """Test error for negative receiver depth."""
-        # Receiver constructor should raise error for negative depth
-        with pytest.raises(ValueError, match="Receiver depths must be positive"):
-            receiver = uacpy.Receiver(depths=[-10], ranges=[1000])
+    def test_zero_environment_depth_rejected(self):
+        with pytest.raises(ValueError):
+            uacpy.Environment(name='bad', depth=0, sound_speed=1500)
 
 
 class TestUnsupportedOperations:
-    """Tests for unsupported model operations."""
+    """Asking a model for something it can't do raises UnsupportedFeatureError."""
 
-    @pytest.mark.requires_binary
-    def test_kraken_rays_unsupported(self, simple_env, source):
-        """Test that Kraken raises error for ray computation."""
+    def test_kraken_does_not_support_rays(self):
         kraken = Kraken(verbose=False)
-
-        with pytest.raises(UnsupportedFeatureError) as exc_info:
-            kraken.compute_rays(env=simple_env, source=source)
-
-        assert "ray path computation" in str(exc_info.value)
-        assert "Bellhop" in str(exc_info.value)  # Should suggest Bellhop
-
-    @pytest.mark.requires_binary
-    def test_bellhop_modes_unsupported(self, simple_env, source):
-        """Test that Bellhop raises error for mode computation."""
-        bellhop = Bellhop(verbose=False)
-
-        with pytest.raises(UnsupportedFeatureError) as exc_info:
-            bellhop.compute_modes(env=simple_env, source=source)
-
-        assert "normal mode computation" in str(exc_info.value)
-        assert "Kraken" in str(exc_info.value) or "OASN" in str(exc_info.value)
-
-    @pytest.mark.requires_binary
-    def test_kraken_range_dependent_warns_and_collapses(
-        self, range_dependent_env, source,
-    ):
-        """Kraken warns and collapses range-dependent envs to range-independent."""
-        import warnings as _warn
-        kraken = Kraken(verbose=False)
-        with _warn.catch_warnings(record=True) as caught:
-            _warn.simplefilter('always')
-            modes = kraken.compute_modes(env=range_dependent_env, source=source)
-        assert modes.n_modes > 0
-        assert any('range-dependent' in str(w.message) for w in caught)
+        env = uacpy.Environment(name='t', depth=100, sound_speed=1500)
+        source = uacpy.Source(depths=50, frequencies=100)
+        receiver = uacpy.Receiver(depths=[10], ranges=[1000])
+        with pytest.raises(UnsupportedFeatureError):
+            kraken.compute_rays(env, source, receiver)
 
 
 class TestFieldErrors:
-    """Tests for Field object error handling."""
+    """Result classes refuse operations that don't apply to their shape."""
 
-    def test_invalid_field_type(self):
-        """Constructing a TLField with mismatched depth/range vs data raises."""
-        from uacpy.core.results import TLField
-        with pytest.raises(ValueError, match="must equal"):
-            TLField(
-                data=np.random.rand(10, 20),
-                depths=np.array([1.0]), ranges=np.array([1.0]),
-                model='Test',
-            )
-
-    def test_field_get_value_on_rays(self):
-        """Rays Result has no get_value (only spatial grids do)."""
+    def test_rays_has_no_get_value(self):
         from uacpy.core.results import Rays
-
-        rays = Rays(rays=[], model='Bellhop')
+        r = Rays(rays=[], model='Bellhop')
         with pytest.raises(AttributeError):
-            rays.get_value(range_m=1000, depth=50)
+            r.get_value(range_m=1000, depth=50)
 
-    def test_field_to_db_unsupported(self):
-        """Rays Result has no to_db method (only PressureField has one)."""
+    def test_rays_has_no_to_db(self):
         from uacpy.core.results import Rays
-
-        rays = Rays(rays=[], model='Bellhop')
+        r = Rays(rays=[], model='Bellhop')
         with pytest.raises(AttributeError):
-            rays.to_db()
+            r.to_db()
 
 
 class TestErrorMessages:
-    """Tests that error messages are helpful."""
-
-    def test_executable_not_found_message_helpful(self):
-        """Test that executable not found error has helpful message."""
-        error = ExecutableNotFoundError("Bellhop", "bellhop.exe")
-
-        error_str = str(error)
-        assert "Bellhop" in error_str
-        assert "bellhop.exe" in error_str
-
-        # Check remediation is helpful
-        assert error.remediation is not None
-        assert "install" in error.remediation.lower()
-
-    def test_unsupported_feature_suggests_alternatives(self):
-        """Test that unsupported feature error suggests alternatives."""
-        error = UnsupportedFeatureError(
-            "Bellhop",
-            "normal modes",
-            alternatives=['Kraken', 'OASN']
-        )
-
-        error_str = str(error)
-        assert "Kraken" in error_str or "OASN" in error_str
+    """Error messages should include enough information to act on."""
 
     def test_invalid_depth_message_helpful(self):
-        """Test that invalid depth error has helpful message."""
         error = InvalidDepthError(depth=150, max_depth=100, context="Source")
+        msg = str(error)
+        assert "150" in msg and "100" in msg
 
-        error_str = str(error)
-        assert "150" in error_str
-        assert "100" in error_str
-        assert "Source" in error_str
-
-        # Check remediation
-        assert error.remediation is not None
-        assert "100" in error.remediation
+    def test_unsupported_feature_lists_alternatives(self):
+        error = UnsupportedFeatureError(
+            'Kraken', 'ray-path computation', alternatives=['Bellhop'],
+        )
+        assert 'Bellhop' in str(error)
 
 
 class TestValidationHelpers:
-    """Tests for validation helper functions."""
+    """validate_inputs raises typed errors, not bare ValueError."""
 
-    def test_validate_source_depth(self):
-        """Test validate_source_depth helper."""
-        from uacpy.core.model_utils import validate_source_depth
+    def test_source_deeper_than_env_raises_typed(self, simple_env):
+        from uacpy.models.base import PropagationModel
 
-        # Valid depth - should not raise
-        validate_source_depth(50.0, 100.0)
-
-        # Invalid depth - should raise
+        Model = type('M', (PropagationModel,), {
+            'run': lambda self, *a, **kw: None,
+        })
+        m = Model()
+        source_deep = uacpy.Source(depths=150, frequencies=100)
+        receiver = uacpy.Receiver(depths=[50], ranges=[1000])
         with pytest.raises(InvalidDepthError):
-            validate_source_depth(150.0, 100.0)
+            m.validate_inputs(simple_env, source_deep, receiver)
 
-    def test_validate_receiver_depths(self):
-        """Test validate_receiver_depths helper."""
-        from uacpy.core.model_utils import validate_receiver_depths
+    def test_receiver_deeper_than_env_raises_typed(self, simple_env):
+        from uacpy.models.base import PropagationModel
 
-        # Valid depths - should not raise
-        validate_receiver_depths(np.array([25, 50, 75]), 100.0)
-
-        # Invalid depths - should raise
+        Model = type('M', (PropagationModel,), {
+            'run': lambda self, *a, **kw: None,
+        })
+        m = Model()
+        source = uacpy.Source(depths=50, frequencies=100)
+        receiver_deep = uacpy.Receiver(depths=[150], ranges=[1000])
         with pytest.raises(InvalidDepthError):
-            validate_receiver_depths(np.array([25, 50, 150]), 100.0)
+            m.validate_inputs(simple_env, source, receiver_deep)

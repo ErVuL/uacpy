@@ -27,12 +27,12 @@ class TestVolumeAttenuation:
     @pytest.fixture
     def high_freq_source(self):
         """High frequency source where attenuation is significant."""
-        return Source(depth=50.0, frequency=10000.0)  # 10 kHz
+        return Source(depths=50.0, frequencies=10000.0)  # 10 kHz
 
     @pytest.fixture
     def low_freq_source(self):
         """Low frequency source where attenuation is minimal."""
-        return Source(depth=50.0, frequency=100.0)  # 100 Hz
+        return Source(depths=50.0, frequencies=100.0)  # 100 Hz
 
     @pytest.fixture
     def receiver(self):
@@ -63,7 +63,7 @@ class TestVolumeAttenuation:
         # Thorp formula at 10 kHz (f in kHz):
         #   alpha = 0.11 f^2/(1+f^2) + 44 f^2/(4100+f^2)
         #         + 2.75e-4 f^2 + 0.003   [dB/km]
-        f_khz = high_freq_source.frequency[0] / 1000.0
+        f_khz = high_freq_source.frequencies[0] / 1000.0
         alpha_db_per_km = (
             0.11 * f_khz**2 / (1 + f_khz**2)
             + 44.0 * f_khz**2 / (4100.0 + f_khz**2)

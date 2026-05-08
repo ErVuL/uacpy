@@ -57,8 +57,7 @@ def build_rd_environment() -> uacpy.Environment:
     return uacpy.Environment(
         name='Continental shelf — RD demo',
         depth=200.0,
-        ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
+        ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
             interp='pchip',
         ),
         bathymetry=bathymetry,
@@ -71,7 +70,7 @@ def build_rd_environment() -> uacpy.Environment:
 
 def main() -> None:
     env = build_rd_environment()
-    source = uacpy.Source(depth=20.0, frequency=200.0)
+    source = uacpy.Source(depths=20.0, frequencies=200.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5.0, 195.0, 39),
         ranges=np.linspace(500.0, 15_000.0, 60),

@@ -2,20 +2,24 @@
 Scooter finite-element FFP (Fast Field Program) model.
 
 Computes the acoustic field in the frequency-wavenumber domain using a
-finite-element discretization, then transforms to range via FFT. Supports
-coherent TL and broadband time-series output.
+finite-element discretization, then transforms ``.grn`` to a range-domain
+TL field via the in-tree Python Hankel transform in
+:mod:`uacpy.io.grn_reader`. Supports coherent TL, broadband ``H(f)``,
+and broadband time-series output.
 
-By default, the Fortran ``fields.exe`` post-processor is invoked on the
-``.grn`` output to produce a ``.shd`` file. Set ``use_fields_exe=False`` to
-fall back to the in-tree Python Hankel transform in
-:mod:`uacpy.io.grn_reader`.
+The upstream Acoustic Toolbox discontinued the Fortran ``fields.exe``
+post-processor in 2020; ``install.sh`` no longer builds it. The
+``use_fields_exe`` constructor flag is retained for legacy installs that
+have it on disk but defaults to ``False``.
 """
 
+import shutil
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
+from uacpy.core.exceptions import ExecutableNotFoundError
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -27,7 +31,7 @@ from uacpy.core.constants import (
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
-from uacpy.io.output_reader import read_shd_file
+from uacpy.io.oalib_reader import read_shd_file
 from uacpy.io.oalib_writer import write_bio_layers, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
 
 
@@ -70,7 +74,7 @@ class Scooter(PropagationModel):
         spectrum: str = 'positive',
         stabilizing_attenuation_off: bool = False,
         field_interp: str = 'O',
-        use_fields_exe: bool = True,
+        use_fields_exe: bool = False,
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
@@ -124,14 +128,14 @@ class Scooter(PropagationModel):
             what Scooter's own sample FLP uses), 'P' = Pade. See
             ``fields.f90:82-90``.
         use_fields_exe : bool, optional
-            If True (default), run ``fields.exe`` on the ``.grn`` file to
-            obtain a ``.shd`` transmission-loss file. If False, use the
-            in-tree Python Hankel transform in ``grn_reader``.
-
-            Broadband runs (TIME_SERIES / BROADBAND) and runs
-            where ``fields.exe`` is not installed transparently fall back
-            to the Python Hankel transform — a warning is emitted in both
-            cases so the override is visible.
+            Default ``False`` — uses the in-tree Python Hankel transform
+            in :mod:`uacpy.io.grn_reader`. The upstream Acoustic Toolbox
+            discontinued ``fields.exe`` in 2020 and ``install.sh`` no
+            longer builds it; setting ``True`` is supported for legacy
+            installs that have it on disk and silently falls back to
+            the Python transform otherwise. Broadband runs (BROADBAND /
+            TIME_SERIES) always use the Python transform regardless
+            (``fields.exe`` is single-frequency only).
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -195,6 +199,9 @@ class Scooter(PropagationModel):
         else:
             self.executable = Path(executable)
 
+        if not self.executable.exists():
+            raise ExecutableNotFoundError('Scooter', str(self.executable))
+
         if fields_executable is None:
             # Auto-detect lazily; allow Scooter to be instantiated even when
             # fields.exe is missing (user may have use_fields_exe=False).
@@ -216,7 +223,6 @@ class Scooter(PropagationModel):
         deprecated (see ``Scooter/Makefile`` header), so many installations
         simply don't ship it.
         """
-        from uacpy.core.exceptions import ExecutableNotFoundError
         if self._fields_executable is None:
             try:
                 self._fields_executable = self._find_executable_in_paths(
@@ -277,9 +283,8 @@ class Scooter(PropagationModel):
         Returns
         -------
         result : Result
-            ``field_type='tl'`` for COHERENT_TL,
-            ``'transfer_function'`` for BROADBAND,
-            ``'time_series'`` for TIME_SERIES.
+            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
         import numpy as np
 
@@ -306,7 +311,7 @@ class Scooter(PropagationModel):
             # Clip receiver depths to environment depth (with safety margin)
             receiver = self._clip_receiver_depths(receiver, env.depth)
 
-            self.validate_inputs(env, source, receiver)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
             # Broadband mode (BROADBAND or TIME_SERIES) requires a
             # frequency vector; fields.exe only supports single-frequency GRNs,
@@ -317,7 +322,7 @@ class Scooter(PropagationModel):
                 if frequencies is not None:
                     broadband_freqs = np.asarray(frequencies, dtype=float)
                 else:
-                    fc = float(source.frequency[0])
+                    fc = float(source.frequencies[0])
                     broadband_freqs = np.linspace(fc * 0.5, fc * 2.0, 64)
                 self._log(f"Broadband mode: {len(broadband_freqs)} frequencies, "
                           f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
@@ -388,8 +393,8 @@ class Scooter(PropagationModel):
                     result.tag(
                         model=self.model_name,
                         backend='scooter.exe+fields.exe',
-                        source_depths=source.depth,
-                        frequency=float(source.frequency[0]),
+                        source_depths=source.depths,
+                        frequencies=float(source.frequencies[0]),
                         phase_reference='travelling_wave',
                         source_type=self.source_type,
                         spectrum=self.spectrum,
@@ -429,8 +434,9 @@ class Scooter(PropagationModel):
                     result.tag(
                         model=self.model_name,
                         backend='scooter.exe',
-                        source_depths=source.depth,
-                        frequency=float(source.frequency[0]),
+                        source_depths=source.depths,
+                        frequencies=(broadband_freqs if broadband_mode
+                                     else float(source.frequencies[0])),
                         phase_reference='travelling_wave',
                         post_processor='in_tree_hankel',
                     )
@@ -518,7 +524,6 @@ class Scooter(PropagationModel):
             if bottom_code == 'F':
                 # Copy reflection file to working directory
                 if env.bottom.reflection_file:
-                    import shutil
                     brc_source = Path(env.bottom.reflection_file)
                     if brc_source.exists():
                         # Copy to same directory as .env file with matching base name
@@ -538,16 +543,11 @@ class Scooter(PropagationModel):
                         "Example: BoundaryProperties(acoustic_type='file', reflection_file='path/to/file.brc')"
                     )
 
-                # For 'F' type, write phase velocity bounds and rmax (not bottom properties)
-                # These define the range of angles covered by the reflection coefficient table
-                cmin = getattr(env.bottom, 'reflection_cmin', DEFAULT_C_MIN)
-                cmax = getattr(env.bottom, 'reflection_cmax', DEFAULT_C_MAX)
-                rmax_km = getattr(env.bottom, 'reflection_rmax_km', 10.0)
-                f.write(f"{cmin:.2f}  {cmax:.2f}\n")
-                f.write(f"{rmax_km:.2f}\n")
+                # 'F': no bottom-property line; cLow/cHigh/RMax follow
+                # below (ReadEnvironmentMod.f90:133-140).
+                pass
 
-            # Write halfspace parameters with shear wave support (type 'A')
-            elif bottom_code == 'A':  # Half-space
+            elif bottom_code == 'A':  # Half-space (with optional shear)
                 z_bottom = env.bottom.depth if hasattr(env.bottom, 'depth') else env.depth
                 cp = env.bottom.sound_speed
                 cs = getattr(env.bottom, 'shear_speed', 0.0)
@@ -557,24 +557,22 @@ class Scooter(PropagationModel):
                 f.write(f"  {z_bottom:.2f}  {cp:.2f}  {cs:.1f}  "
                        f"{rho:.2f}  {alpha_p:.2f}  {alpha_s:.2f} /\n")
 
-            # SCOOTER-SPECIFIC SECTIONS
-
-            # Phase speed limits (cLow, cHigh) and RMax
-            # NOTE: Skip these if using reflection coefficient file ('F' type)
-            # because they were already written as part of the boundary specification
-            if bottom_code != 'F':
-                # Phase speed limits (cLow, cHigh)
+            # cLow/cHigh: BRC-table bounds for 'F'; SSP-derived otherwise.
+            if bottom_code == 'F':
+                c_low = getattr(env.bottom, 'reflection_cmin', DEFAULT_C_MIN)
+                c_high = getattr(env.bottom, 'reflection_cmax', DEFAULT_C_MAX)
+            else:
                 _ssp_pairs = env.ssp.to_pairs()
                 c_min = float(_ssp_pairs[:, 1].min())
                 c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
                 c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
                 c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
-                f.write(f"{c_low:.1f} {c_high:.1f}\n")
+            f.write(f"{c_low:.1f} {c_high:.1f}\n")
 
-                # RMax (km) with multiplier for wavenumber resolution
-                # deltak = pi / RMax, so larger RMax gives finer k-spacing
-                rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_multiplier
-                f.write(f"{rmax:.6f}\n")
+            # RMax (km) sets Scooter's k-grid via deltak = pi/RMax. Derived
+            # from receiver range, not reflection_rmax_m (different concept).
+            rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_multiplier
+            f.write(f"{rmax:.6f}\n")
 
             # Source and receiver depths. Use the shared ATEnvWriter so
             # arbitrary-length depth arrays are written verbatim rather than
@@ -659,7 +657,6 @@ class Scooter(PropagationModel):
         fields_exe = self._get_fields_executable()
         if fields_exe is None:
             # Caller is expected to check availability before invoking this.
-            from uacpy.core.exceptions import ExecutableNotFoundError
             raise ExecutableNotFoundError(self.model_name, 'fields.exe')
         result = self._run_subprocess(
             [fields_exe, base_name],

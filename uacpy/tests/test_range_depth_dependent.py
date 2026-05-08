@@ -62,7 +62,7 @@ class TestRangeDependentEnvironment:
         assert len(env.bottom_rd.ranges) == 3
 
         # Test getting bottom at specific range
-        bottom_at_2km = env.get_bottom_at_range(2000)
+        bottom_at_2km = env.bottom_at_range(2000)
         assert bottom_at_2km.sound_speed > 1600
         assert bottom_at_2km.sound_speed < 1650
 
@@ -81,8 +81,7 @@ class TestRangeDependentEnvironment:
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
-            ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges=ranges, matrix=ssp_matrix,
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='pchip',
             ),
         )
@@ -105,8 +104,7 @@ class TestRangeDependentEnvironment:
         env = uacpy.Environment(
             name="Combined RD",
             depth=100.0,
-            ssp=SoundSpeedProfile.from_2d(
-                depths=depths_ssp, ranges=ranges_ssp, matrix=ssp_matrix,
+            ssp=SoundSpeedProfile.from_2d(depths=depths_ssp, ranges=ranges_ssp, matrix=ssp_matrix,
                 interp='pchip',
             ),
             bathymetry=bathymetry,
@@ -198,7 +196,7 @@ class TestModelWithRangeDependence:
             bathymetry=bathymetry
         )
 
-        source = uacpy.Source(depth=50.0, frequency=100.0)
+        source = uacpy.Source(depths=50.0, frequencies=100.0)
         receiver = uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([1000.0, 3000.0, 5000.0])
@@ -225,13 +223,12 @@ class TestModelWithRangeDependence:
         env = uacpy.Environment(
             name="RD SSP",
             depth=100.0,
-            ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges=ranges, matrix=ssp_matrix,
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='linear',
             ),
         )
 
-        source = uacpy.Source(depth=50.0, frequency=100.0)
+        source = uacpy.Source(depths=50.0, frequencies=100.0)
         receiver = uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([1000.0, 3000.0, 5000.0])
@@ -271,7 +268,7 @@ class TestModelWithRangeDependence:
             bottom=bottom_rd
         )
 
-        source = uacpy.Source(depth=50.0, frequency=100.0)
+        source = uacpy.Source(depths=50.0, frequencies=100.0)
         receiver = uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([1000.0, 3000.0, 5000.0])
@@ -329,7 +326,7 @@ class TestRangeDependentConsistency:
         )
 
         # Get bottom at 2.5 km (should interpolate between first and second)
-        bottom_at_2_5km = env.get_bottom_at_range(2500)
+        bottom_at_2_5km = env.bottom_at_range(2500)
 
         assert 1600 < bottom_at_2_5km.sound_speed < 1650
         assert 100 < bottom_at_2_5km.depth < 110
@@ -344,8 +341,7 @@ class TestRangeDependentConsistency:
         env = uacpy.Environment(
             name="Test",
             depth=100.0,
-            ssp=SoundSpeedProfile.from_2d(
-                depths=depths, ranges=ranges, matrix=ssp_matrix,
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
                 interp='pchip',
             ),
         )
@@ -529,7 +525,7 @@ class TestRangeDependentLayeredBottom:
         ])
         env = uacpy.Environment(name='rdl_test', depth=300, sound_speed=1500.0,
                                 bottom=rdl, bathymetry=bathymetry)
-        source = uacpy.Source(frequency=100.0, depth=30.0)
+        source = uacpy.Source(frequencies=100.0, depths=30.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(5, 290, 10),
             ranges=np.linspace(100, 5000, 8),
@@ -555,7 +551,7 @@ class TestWarnings:
             attenuation=np.array([0.5, 0.3])
         )
         env = uacpy.Environment(name='test', depth=100, bottom=rd_bottom)
-        source = uacpy.Source(frequency=100, depth=25)
+        source = uacpy.Source(frequencies=100, depths=25)
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bellhop = Bellhop(verbose=False)
@@ -573,7 +569,7 @@ class TestWarnings:
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
         env = uacpy.Environment(name='test', depth=100, bottom=lb)
-        source = uacpy.Source(frequency=100, depth=25)
+        source = uacpy.Source(frequencies=100, depths=25)
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bellhop = Bellhop(verbose=False)
@@ -590,7 +586,7 @@ class TestWarnings:
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
         env = uacpy.Environment(name='test', depth=100, bottom=lb)
-        source = uacpy.Source(frequency=100, depth=25)
+        source = uacpy.Source(frequencies=100, depths=25)
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         ram = RAM(verbose=False)
@@ -618,7 +614,7 @@ class TestIntegrationLayeredBottom:
 
     @pytest.fixture
     def source(self):
-        return uacpy.Source(frequency=100.0, depth=50.0)
+        return uacpy.Source(frequencies=100.0, depths=50.0)
 
     @pytest.fixture
     def receiver(self):
@@ -669,7 +665,7 @@ class TestIntegrationRunWithBounce:
             attenuation=0.5, shear_attenuation=1.0,
         )
         env = uacpy.Environment(name='bounce_test', depth=100, sound_speed=1500.0, bottom=bottom)
-        source = uacpy.Source(frequency=500.0, depth=25.0)
+        source = uacpy.Source(frequencies=500.0, depths=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),
             ranges=np.linspace(100, 3000, 10),
@@ -698,7 +694,7 @@ class TestIntegrationRAMRangeDependent:
             acoustic_type='half-space',
         )
         env = uacpy.Environment(name='ram_rd', depth=100.0, sound_speed=1500.0, bottom=bottom_rd)
-        source = uacpy.Source(frequency=100.0, depth=25.0)
+        source = uacpy.Source(frequencies=100.0, depths=25.0)
         receiver = uacpy.Receiver(
             depths=np.linspace(1, 99, 10),
             ranges=np.linspace(100, 5000, 10),
@@ -727,7 +723,7 @@ class TestATEnvWriterLayered:
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.1)
         )
         env = uacpy.Environment(name='test', depth=200, sound_speed=1500, bottom=lb)
-        source = uacpy.Source(frequency=100, depth=25)
+        source = uacpy.Source(frequencies=100, depths=25)
 
         buf = io.StringIO()
         write_header(buf, env, source,

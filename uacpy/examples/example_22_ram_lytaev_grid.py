@@ -39,7 +39,7 @@ def main():
     waveguide_depth = 100.0
     rmax = 10000.0
 
-    src = Source(depth=25.0, frequency=fc)
+    src = Source(depths=25.0, frequencies=fc)
     rcv = Receiver(
         depths=np.linspace(2.0, waveguide_depth - 2.0, 30),
         ranges=np.linspace(200.0, rmax, 40),

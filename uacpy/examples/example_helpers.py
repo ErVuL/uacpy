@@ -82,8 +82,8 @@ def create_example_report(
 
     # Source info
     print(f"\nSource:")
-    print(f"  Depth: {source.depth[0]}m")
-    print(f"  Frequency: {source.frequency[0]}Hz")
+    print(f"  Depth: {source.depths[0]}m")
+    print(f"  Frequency: {source.frequencies[0]}Hz")
 
     # Receiver info
     print(f"\nReceivers:")
@@ -141,7 +141,7 @@ def create_example_report(
 
     # Plot 3: Comparison curves (if multiple models)
     if len(results) >= 2:
-        fig, axes = plot_comparison_curves(results, source_depth=source.depth[0])
+        fig, axes = plot_comparison_curves(results, source_depth=source.depths[0])
         curves_path = OUTPUT_DIR / f'{output_prefix}_curves.png'
         fig.savefig(curves_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -149,7 +149,7 @@ def create_example_report(
 
     # Plot 4: Comparison matrix (if multiple models)
     if len(results) >= 2:
-        fig, ax = plot_model_comparison_matrix(results, comparison_metric='rms', source_depth=source.depth[0])
+        fig, ax = plot_model_comparison_matrix(results, comparison_metric='rms', source_depth=source.depths[0])
         matrix_path = OUTPUT_DIR / f'{output_prefix}_matrix.png'
         fig.savefig(matrix_path, dpi=150, bbox_inches='tight')
         plt.close(fig)

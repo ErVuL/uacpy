@@ -105,7 +105,7 @@ def main():
     # SOURCE & RECEIVER
     # ═══════════════════════════════════════════════════════════════════════
 
-    source = uacpy.Source(depth=50.0, frequency=50.0)  # 50 Hz for good modal propagation
+    source = uacpy.Source(depths=50.0, frequencies=50.0)  # 50 Hz for good modal propagation
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 380, 60),
         ranges=np.linspace(100, 20000, 100)
@@ -128,7 +128,7 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
         ),
-        bottom=bottom_rd.get_at_range(0)
+        bottom=bottom_rd.at_range(0)
     )
 
     modes_shallow = kraken.compute_modes(
@@ -144,7 +144,7 @@ def main():
         name="Slope (400m)",
         depth=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
-        bottom=bottom_rd.get_at_range(20000)
+        bottom=bottom_rd.at_range(20000)
     )
 
     # Deep environment has shear_speed > 0 (rocky bottom); use KrakenC for complex modes.
@@ -217,7 +217,7 @@ def main():
 
         # Shallow water modes
         phi_s = modes_shallow.metadata['phi']
-        z_s = modes_shallow.metadata['z']
+        z_s = modes_shallow.depths
         M_s = phi_s.shape[1]
         n_show = min(5, M_s)
         for i in range(n_show):
@@ -231,7 +231,7 @@ def main():
 
         # Deep water modes
         phi_d = modes_deep.metadata['phi']
-        z_d = modes_deep.metadata['z']
+        z_d = modes_deep.depths
         M_d = phi_d.shape[1]
         n_show = min(5, M_d)
         for i in range(n_show):

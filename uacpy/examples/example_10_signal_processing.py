@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 15: Signal Processing
+EXAMPLE 10: Signal Processing
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE: Demonstrate signal processing capabilities in UACPY
@@ -26,7 +26,7 @@ import os
 
 def main():
     print("\n" + "═"*80)
-    print("EXAMPLE 15: Signal Processing")
+    print("EXAMPLE 10: Signal Processing")
     print("═"*80)
 
     # Generate various signals
@@ -113,7 +113,7 @@ def main():
     plt.close()
 
     print(f"\n✓ Generated: {OUTPUT_DIR / 'example_10_signal_processing.png'}")
-    print("\n" + "═"*80 + "\nEXAMPLE 15 COMPLETE\n" + "═"*80 + "\n")
+    print("\n" + "═"*80 + "\nEXAMPLE 10 COMPLETE\n" + "═"*80 + "\n")
     return 0
 
 if __name__ == "__main__":

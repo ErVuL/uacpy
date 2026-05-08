@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 22: Plotting Features — Stacked Time Series and Mode Heatmaps
+EXAMPLE 14: Plotting Features — Stacked Time Series and Mode Heatmaps
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE: Showcase two visualization helpers driven by real model output:
@@ -53,7 +53,7 @@ def demo_stacked_time_series():
         sound_speed=1500,
         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'),
     )
-    source = uacpy.Source(depth=50, frequency=100)
+    source = uacpy.Source(depths=50, frequencies=100)
 
     receiver = uacpy.Receiver(
         depths=np.array([50.0]),
@@ -70,7 +70,7 @@ def demo_stacked_time_series():
           f"df={frequencies[1]-frequencies[0]:.3f} Hz)")
 
     fs = 1000.0
-    waveform = _ricker(fc=source.frequency[0], fs=fs)
+    waveform = _ricker(fc=source.frequencies[0], fs=fs)
 
     print("  Synthesising time series...", end=" ", flush=True)
     ts = tf.synthesize_time_series(source_waveform=waveform, sample_rate=fs)
@@ -107,7 +107,7 @@ def demo_modes_heatmap():
             attenuation=0.5,
         ),
     )
-    source = uacpy.Source(depth=50, frequency=100)
+    source = uacpy.Source(depths=50, frequencies=100)
 
     receiver = uacpy.Receiver(
         depths=np.linspace(0, env.depth, 200),
@@ -138,14 +138,14 @@ def demo_modes_heatmap():
 
 def main():
     print("\n" + "═" * 70)
-    print("EXAMPLE 22: plot_time_series & plot_modes_heatmap")
+    print("EXAMPLE 14: plot_time_series & plot_modes_heatmap")
     print("═" * 70)
 
     demo_stacked_time_series()
     demo_modes_heatmap()
 
     print("\n" + "═" * 70)
-    print("EXAMPLE 22 COMPLETE")
+    print("EXAMPLE 14 COMPLETE")
     print("═" * 70)
     return 0
 

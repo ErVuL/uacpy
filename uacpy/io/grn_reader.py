@@ -354,7 +354,7 @@ def grn_to_field(
         depths=grn_data["rd"],
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
-        frequency=float(grn_data["freq"]),
+        frequencies=float(grn_data["freq"]),
         metadata={
             "phase_reference": "travelling_wave",
             "transform_method": method,
@@ -451,7 +451,7 @@ def sparc_snapshot_to_field(
         depths=grn_data["rd"],
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
-        frequency=float(frequency),
+        frequencies=float(frequency),
         metadata={
             "phase_reference": "travelling_wave",
             "transform_method": "time_fft+hankel",
@@ -503,7 +503,6 @@ def grn_to_transfer_function(
         phase_reference='travelling_wave',
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
-        frequency=float(freqVec[len(freqVec) // 2]),
         metadata={
             'center_frequency': float(freqVec[len(freqVec) // 2]),
             'nfreq': nfreq,

@@ -6,6 +6,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import tempfile
+
 import numpy as np
 import pytest
 
@@ -16,6 +18,22 @@ import uacpy
 def _seed_numpy():
     """Seed numpy.random before every test to keep fixture data reproducible."""
     np.random.seed(0xACED)
+
+
+@pytest.fixture(autouse=True)
+def _release_matplotlib_figures():
+    """Close every matplotlib figure after each test."""
+    yield
+    import matplotlib.pyplot as plt
+    plt.close('all')
+
+
+@pytest.fixture(autouse=True)
+def _redirect_tempdir(tmp_path, monkeypatch):
+    """Route ``tempfile.gettempdir()`` to per-test ``tmp_path`` so any
+    ``FileManager`` scratch dir is reaped by pytest (xdist-safe, no
+    /dev/shm leakage)."""
+    monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
 
 
 @pytest.fixture
@@ -64,7 +82,7 @@ def range_dependent_env():
 @pytest.fixture
 def source():
     """Standard acoustic source."""
-    return uacpy.Source(depth=50.0, frequency=100.0)
+    return uacpy.Source(depths=50.0, frequencies=100.0)
 
 
 @pytest.fixture

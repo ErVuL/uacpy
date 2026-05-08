@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 24: Elastic Boundaries - Complete Comparison of Both Workflows
+EXAMPLE 15: Elastic Boundaries - Complete Comparison of Both Workflows
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -57,7 +57,7 @@ import time
 
 def main():
     print("\n" + "=" * 80)
-    print("EXAMPLE 24: Elastic Boundaries - Complete Workflow Comparison")
+    print("EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison")
     print("=" * 80)
     print("\nCompares two approaches for modeling elastic boundaries:")
     print("  1. KrakenField Auto-Detection (→ KrakenC)")
@@ -87,7 +87,7 @@ def main():
         bottom=bottom_elastic
     )
 
-    source = uacpy.Source(depth=50.0, frequency=100.0)
+    source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 95, 50),
         ranges=np.linspace(100, 10000, 100)
@@ -95,7 +95,7 @@ def main():
 
     print(f"  ✓ Environment: depth={env.depth}m")
     print(f"  ✓ Bottom: Cp={bottom_elastic.sound_speed} m/s, Cs={bottom_elastic.shear_speed} m/s")
-    print(f"  ✓ Source: {source.depth[0]}m depth, {source.frequency[0]} Hz")
+    print(f"  ✓ Source: {source.depths[0]}m depth, {source.frequencies[0]} Hz")
     print(f"  ✓ Receiver: {len(receiver.depths)} depths, {len(receiver.ranges)} ranges")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -143,9 +143,9 @@ def main():
         env=env,
         source=source,
         receiver=receiver_bounce,
-        cmin=1400.0,
-        cmax=10000.0,
-        rmax_km=10.0
+        c_low=1400.0,
+        c_high=10000.0,
+        rmax_m=10000.0
     )
     t_bounce = time.time() - t_start
 
@@ -167,9 +167,9 @@ def main():
         sound_speed=1600.0,
         density=1.8,
         attenuation=0.2,
-        reflection_cmin=bounce_result.metadata['cmin'],
-        reflection_cmax=bounce_result.metadata['cmax'],
-        reflection_rmax_km=bounce_result.metadata['rmax_km']
+        reflection_cmin=bounce_result.metadata['c_low'],
+        reflection_cmax=bounce_result.metadata['c_high'],
+        reflection_rmax_m=bounce_result.metadata['rmax_m']
     )
 
     env_with_rc = uacpy.Environment(
@@ -328,7 +328,7 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[1, 1])
 
-    depth_idx = np.argmin(np.abs(result_krakenfield.depths - source.depth[0]))
+    depth_idx = np.argmin(np.abs(result_krakenfield.depths - source.depths[0]))
 
     ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.data[depth_idx, :],
             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
@@ -337,7 +337,7 @@ def main():
 
     ax5.set_xlabel('Range (km)', fontweight='bold')
     ax5.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax5.set_title(f'TL Comparison at {source.depth[0]:.0f}m Depth', fontweight='bold')
+    ax5.set_title(f'TL Comparison at {source.depths[0]:.0f}m Depth', fontweight='bold')
     ax5.legend(fontsize=10, framealpha=0.9)
     ax5.grid(True, alpha=0.3)
     ax5.invert_yaxis()
@@ -443,7 +443,7 @@ def main():
             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
 
     # Main title
-    fig.suptitle('EXAMPLE 24: Elastic Boundaries - Complete Workflow Comparison',
+    fig.suptitle('EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison',
                 fontsize=14, fontweight='bold', y=0.995)
 
     # Save
@@ -484,7 +484,7 @@ def main():
     print("  • SPARC does not support reflection files")
 
     print("\n" + "=" * 80)
-    print("EXAMPLE 24 COMPLETE")
+    print("EXAMPLE 15 COMPLETE")
     print("=" * 80 + "\n")
 
     return 0

@@ -78,13 +78,13 @@ def main():
     print("\n[Step 2/4] Defining acoustic source...")
 
     source = uacpy.Source(
-        depth=50.0,       # Mid-water column
-        frequency=100.0   # 100 Hz (typical low-frequency sonar)
+        depths=50.0,       # Mid-water column
+        frequencies=100.0   # 100 Hz (typical low-frequency sonar)
     )
 
     print(f"  ✓ Source configured:")
-    print(f"    - Depth: {source.depth[0]}m")
-    print(f"    - Frequency: {source.frequency[0]} Hz")
+    print(f"    - Depth: {source.depths[0]}m")
+    print(f"    - Frequency: {source.frequencies[0]} Hz")
 
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 3: Define Receiver Grid
@@ -138,12 +138,12 @@ def main():
 
     # Plot 2: TL vs Range (at source depth)
     ax = axes[0, 1]
-    depth_idx = np.argmin(np.abs(result.depths - source.depth[0]))
+    depth_idx = np.argmin(np.abs(result.depths - source.depths[0]))
     tl_vs_range = result.data[depth_idx, :]
     ax.plot(result.ranges/1000, tl_vs_range, 'b-', linewidth=2)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax.set_title(f'TL vs Range (at {source.depth[0]:.0f}m depth)', fontweight='bold', fontsize=12)
+    ax.set_title(f'TL vs Range (at {source.depths[0]:.0f}m depth)', fontweight='bold', fontsize=12)
     ax.grid(True, alpha=0.3)
 
     # Compute ylim from data
@@ -158,7 +158,7 @@ def main():
     tl_vs_depth = result.data[:, range_idx]
     ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
     ax.invert_yaxis()
-    ax.axhline(source.depth[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
+    ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
     ax.axhline(env.depth, color='k', linewidth=2, label='Bottom')
     ax.set_xlabel('Transmission Loss (dB)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
@@ -186,7 +186,7 @@ def main():
     ax.plot([0, 10], [env.depth, env.depth], 'k-', linewidth=3, label='Seafloor')
 
     # Source
-    ax.plot(0.5, source.depth[0], 'r*', markersize=20, label='Source', zorder=10)
+    ax.plot(0.5, source.depths[0], 'r*', markersize=20, label='Source', zorder=10)
 
     # Receiver positions (sample)
     R, Z = np.meshgrid(result.ranges/1000, result.depths)
@@ -205,8 +205,8 @@ def main():
     textstr = (f'Simulation Parameters:\n'
                f'  Water depth: {env.depth}m\n'
                f'  Sound speed: {float(env.ssp.data[0, 0])} m/s\n'
-               f'  Frequency: {source.frequency[0]} Hz\n'
-               f'  Source depth: {source.depth[0]}m\n'
+               f'  Frequency: {source.frequencies[0]} Hz\n'
+               f'  Source depth: {source.depths[0]}m\n'
                f'  Model: Bellhop (Gaussian beams)\n'
                f'  Grid: {len(receiver.depths)}×{len(receiver.ranges)} receivers')
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
