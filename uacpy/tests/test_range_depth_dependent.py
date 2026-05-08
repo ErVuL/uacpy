@@ -37,14 +37,12 @@ class TestRangeDependentEnvironment:
     def test_range_dependent_bottom_properties(self):
         """Test range-dependent bottom properties."""
         ranges = np.array([0.0, 5000.0, 10000.0])
-        depths = np.array([100, 110, 120])
         sound_speeds = np.array([1600, 1650, 1700])
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
         bottom_rd = RangeDependentBottom(
             ranges=ranges,
-            depths=depths,
             sound_speed=sound_speeds,
             density=densities,
             attenuation=attenuations
@@ -243,16 +241,13 @@ class TestModelWithRangeDependence:
     @pytest.mark.requires_binary
     def test_bellhop_range_dependent_bottom(self):
         """Test Bellhop with range-dependent bottom properties."""
-        # Create range-dependent bottom
         ranges = np.array([0.0, 2500.0, 5000.0])
-        depths = np.array([100, 105, 110])
         sound_speeds = np.array([1600, 1650, 1700])
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
         bottom_rd = RangeDependentBottom(
             ranges=ranges,
-            depths=depths,
             sound_speed=sound_speeds,
             density=densities,
             attenuation=attenuations
@@ -303,12 +298,11 @@ class TestRangeDependentConsistency:
     def test_bottom_properties_at_range(self):
         """Test getting bottom properties at specific range."""
         ranges = np.array([0.0, 5000.0, 10000.0])
-        depths = np.array([100, 110, 120])
+        bathymetry = np.column_stack([ranges, np.array([100, 110, 120])])
         sound_speeds = np.array([1600, 1650, 1700])
 
         bottom_rd = RangeDependentBottom(
             ranges=ranges,
-            depths=depths,
             sound_speed=sound_speeds,
             density=np.array([1.5, 1.5, 1.5]),
             attenuation=np.array([0.5, 0.5, 0.5])
@@ -316,16 +310,16 @@ class TestRangeDependentConsistency:
 
         env = uacpy.Environment(
             name="Test",
-            bathymetry=100.0,
+            bathymetry=bathymetry,
             sound_speed=1500.0,
             bottom=bottom_rd
         )
 
-        # Get bottom at 2.5 km (should interpolate between first and second)
         bottom_at_2_5km = env.bottom_at_range(2500)
+        depth_at_2_5km = float(env.bathymetry_at_range(2500)[0])
 
         assert 1600 < bottom_at_2_5km.sound_speed < 1650
-        assert 100 < bottom_at_2_5km.depth < 110
+        assert 100 < depth_at_2_5km < 110
 
     def test_ssp_2d_matrix_shape(self):
         """Test that 2D SSP matrix has correct shape."""
@@ -541,7 +535,6 @@ class TestWarnings:
         through the long .bty format — no warning expected."""
         rd_bottom = RangeDependentBottom(
             ranges=np.array([0, 10000]),
-            depths=np.array([100, 100]),
             sound_speed=np.array([1600, 1700]),
             density=np.array([1.5, 1.7]),
             attenuation=np.array([0.5, 0.3])
@@ -683,7 +676,6 @@ class TestIntegrationRAMRangeDependent:
         """RAM with RD bottom should produce valid TL."""
         bottom_rd = RangeDependentBottom(
             ranges=np.array([0, 5000, 10000]),
-            depths=np.array([100, 100, 100]),
             sound_speed=np.array([1500, 1600, 1700]),
             density=np.array([1.2, 1.5, 2.0]),
             attenuation=np.array([1.0, 0.5, 0.3]),

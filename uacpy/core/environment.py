@@ -71,14 +71,16 @@ class SedimentLayer:
 @dataclass
 class BoundaryProperties:
     """
-    Properties of ocean boundaries (surface or bottom)
+    Properties of ocean boundaries (surface or bottom).
+
+    Carries acoustic properties only — boundary geometry lives on
+    ``Environment.bathymetry`` (bottom) or is fixed at z=0 (surface;
+    rough surfaces use ``Environment.altimetry``).
 
     Attributes
     ----------
     acoustic_type : str
         Boundary type: 'vacuum', 'rigid', 'half-space', 'grain-size', 'file'
-    depth : float
-        Depth of boundary (m)
     density : float
         Density (g/cm³)
     sound_speed : float
@@ -125,7 +127,6 @@ class BoundaryProperties:
     """
 
     acoustic_type: str = 'vacuum'
-    depth: float = 0.0
     density: float = 1.5
     sound_speed: float = 1600.0
     attenuation: float = 0.5
@@ -154,18 +155,20 @@ class BoundaryProperties:
 @dataclass
 class RangeDependentBottom:
     """
-    Range-dependent bottom properties for realistic geoacoustic modeling
+    Range-dependent bottom properties for realistic geoacoustic modeling.
 
     Allows bottom acoustic properties to vary with range, essential for
     continental shelf transitions, sediment type changes, etc.
+
+    Bathymetry is **not** carried here — it lives on
+    ``Environment.bathymetry``. Models that need the seafloor depth at
+    one of these range points interpolate ``env.bathymetry`` at
+    ``ranges[i]``.
 
     Attributes
     ----------
     ranges : ndarray
         Range points in **meters**, shape (N,).
-    depths : ndarray
-        Bottom depth at each range in meters, shape (N,)
-        Should match bathymetry if provided
     sound_speed : ndarray
         Compressional wave speed at each range (m/s), shape (N,)
     density : ndarray
@@ -182,17 +185,15 @@ class RangeDependentBottom:
 
     Examples
     --------
-    Continental shelf transition (shallow to deep with sediment change):
+    Continental shelf transition (sediment hardening with range):
 
     >>> ranges = np.array([0, 10000, 20000, 30000])  # meters
-    >>> depths = np.array([100, 200, 500, 1000])
-    >>> sound_speed = np.array([1600, 1650, 1700, 1750])  # Hardening with depth
+    >>> sound_speed = np.array([1600, 1650, 1700, 1750])
     >>> density = np.array([1.5, 1.7, 1.9, 2.1])
-    >>> attenuation = np.array([0.5, 0.4, 0.3, 0.2])  # Less lossy deeper
+    >>> attenuation = np.array([0.5, 0.4, 0.3, 0.2])
     >>>
     >>> bottom_rd = RangeDependentBottom(
     ...     ranges=ranges,
-    ...     depths=depths,
     ...     sound_speed=sound_speed,
     ...     density=density,
     ...     attenuation=attenuation,
@@ -201,7 +202,6 @@ class RangeDependentBottom:
     ... )
     """
     ranges: np.ndarray
-    depths: np.ndarray
     sound_speed: np.ndarray
     density: np.ndarray
     attenuation: np.ndarray
@@ -213,7 +213,7 @@ class RangeDependentBottom:
         """Validate array lengths and set defaults."""
         n = len(self.ranges)
 
-        for attr_name in ['depths', 'sound_speed', 'density', 'attenuation']:
+        for attr_name in ['sound_speed', 'density', 'attenuation']:
             attr = getattr(self, attr_name)
             if len(attr) != n:
                 raise ValueError(f"{attr_name} must have same length as ranges ({n})")
@@ -227,7 +227,6 @@ class RangeDependentBottom:
         """Interpolated ``BoundaryProperties`` at a single range (m)."""
         ranges = self.ranges
 
-        depth = float(np.interp(range_m, ranges, self.depths))
         c_p = float(np.interp(range_m, ranges, self.sound_speed))
         rho = float(np.interp(range_m, ranges, self.density))
         alpha = float(np.interp(range_m, ranges, self.attenuation))
@@ -236,7 +235,6 @@ class RangeDependentBottom:
 
         return BoundaryProperties(
             acoustic_type=self.acoustic_type,
-            depth=depth,
             sound_speed=c_p,
             density=rho,
             attenuation=alpha,
@@ -270,7 +268,6 @@ class RangeDependentBottom:
             )
         return BoundaryProperties(
             acoustic_type=self.acoustic_type,
-            depth=float(reduce(self.depths)),
             sound_speed=float(reduce(self.sound_speed)),
             density=float(reduce(self.density)),
             attenuation=float(reduce(self.attenuation)),
@@ -428,7 +425,6 @@ class LayeredBottom:
             top = self.layers[0]
             return BoundaryProperties(
                 acoustic_type=self.halfspace.acoustic_type,
-                depth=self.halfspace.depth,
                 density=top.density,
                 sound_speed=top.sound_speed,
                 attenuation=top.attenuation,
@@ -457,7 +453,6 @@ class LayeredBottom:
             )
             return BoundaryProperties(
                 acoustic_type=self.halfspace.acoustic_type,
-                depth=self.halfspace.depth,
                 sound_speed=float(np.average(cs, weights=weights)),
                 density=float(np.average(rho, weights=weights)),
                 attenuation=float(np.average(alpha, weights=weights)),
@@ -1086,12 +1081,8 @@ class Environment:
         if max_bathy_depth > self.ssp.depths[-1]:
             self.ssp = self.ssp.extend_to(max_bathy_depth)
 
-        # Set boundary properties
         if surface is None:
-            self.surface = BoundaryProperties(
-                acoustic_type='vacuum',
-                depth=0.0
-            )
+            self.surface = BoundaryProperties(acoustic_type='vacuum')
         else:
             self.surface = surface
 
@@ -1101,31 +1092,23 @@ class Environment:
         if bottom is None:
             self.bottom = BoundaryProperties(
                 acoustic_type='half-space',
-                depth=max_bathy_depth,
                 density=1.5,
                 sound_speed=1600.0,
-                attenuation=0.5
+                attenuation=0.5,
             )
         elif isinstance(bottom, RangeDependentBottom):
             self.bottom_rd = bottom
-            # Set self.bottom to median-range properties so range-independent
-            # models that read env.bottom pick a representative profile. Using
-            # range=0 would pick one extreme (e.g., soft mud) and skew TL.
             median_range_m = float(np.median(bottom.ranges))
             self.bottom = bottom.at_range(median_range_m)
         elif isinstance(bottom, RangeDependentLayeredBottom):
             self.bottom_rd_layered = bottom
             mid_idx = len(bottom.profiles) // 2
             self.bottom = _copy.deepcopy(bottom.profiles[mid_idx].halfspace)
-            self.bottom.depth = max_bathy_depth
         elif isinstance(bottom, LayeredBottom):
             self.bottom_layered = bottom
             self.bottom = _copy.deepcopy(bottom.halfspace)
-            self.bottom.depth = max_bathy_depth
         else:
             self.bottom = _copy.deepcopy(bottom)
-            if not isinstance(self.bottom, RangeDependentBottom):
-                self.bottom.depth = max_bathy_depth
 
     @property
     def depth(self) -> float:
@@ -1188,14 +1171,6 @@ class Environment:
             return self.bottom_layered
         if self.bottom_rd is not None:
             return self.bottom_rd.at_range(range_m)
-        # Range-independent: return copy of standard bottom
-        # Update depth from bathymetry if range-dependent bathy
-        if len(self.bathymetry) > 1:
-            depth_at_range = float(np.asarray(self.bathymetry_at_range(range_m)).flat[0])
-            from copy import deepcopy
-            bottom_copy = deepcopy(self.bottom)
-            bottom_copy.depth = depth_at_range
-            return bottom_copy
         return self.bottom
 
     def has_range_dependent_bathymetry(self) -> bool:

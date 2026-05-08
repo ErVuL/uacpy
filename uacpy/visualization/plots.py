@@ -2221,10 +2221,10 @@ def plot_bottom_properties(
 
     bottom_rd = env.bottom_rd
     ranges_km = bottom_rd.ranges / 1000.0
+    seafloor = np.asarray(env.bathymetry_at_range(bottom_rd.ranges))
 
-    # Plot 1: Depth (Bathymetry)
-    axes[0].plot(ranges_km, bottom_rd.depths, 'o-', linewidth=2, markersize=8, color='brown')
-    axes[0].fill_between(ranges_km, bottom_rd.depths, bottom_rd.depths.max() * 1.1,
+    axes[0].plot(ranges_km, seafloor, 'o-', linewidth=2, markersize=8, color='brown')
+    axes[0].fill_between(ranges_km, seafloor, seafloor.max() * 1.1,
                          **BOTTOM_FILL_STYLE)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Range (km)', fontsize=11)
@@ -2521,7 +2521,7 @@ def plot_rd_bottom(
         raise ValueError("Environment must have a RangeDependentBottom")
     rd = env.bottom_rd
     ranges_km = np.asarray(rd.ranges / 1000.0)
-    seafloor_nodes = np.asarray(rd.depths)
+    seafloor_nodes = np.asarray(env.bathymetry_at_range(rd.ranges))
 
     fig, axes = plt.subplots(1, 2, figsize=figsize,
                              gridspec_kw={'width_ratios': [3.2, 1]})

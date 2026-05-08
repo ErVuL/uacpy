@@ -77,7 +77,6 @@ def main():
         density=1.8,                # Density (g/cm³)
         attenuation=0.2,            # P-wave attenuation (dB/wavelength)
         shear_attenuation=0.5,      # S-wave attenuation (dB/wavelength)
-        depth=100
     )
 
     env = uacpy.Environment(
@@ -163,7 +162,6 @@ def main():
     bottom_with_file = BoundaryProperties(
         acoustic_type='file',
         reflection_file=bounce_result.metadata['brc_file'],
-        depth=100,
         sound_speed=1600.0,
         density=1.8,
         attenuation=0.2,

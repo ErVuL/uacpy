@@ -337,7 +337,6 @@ class TestModelConsistency:
         bottom_with_rc = BoundaryProperties(
             acoustic_type='file',
             reflection_file=brc_file,
-            depth=100,
             sound_speed=1600,
             density=1.8,
             reflection_cmin=bounce_result.metadata['c_low'],

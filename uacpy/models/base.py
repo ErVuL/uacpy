@@ -1095,7 +1095,7 @@ class PropagationModel(ABC):
         return cs is not None and float(cs) > 0.0
 
     @staticmethod
-    def _collapse_elastic_boundary(boundary, method: str, default_depth: float):
+    def _collapse_elastic_boundary(boundary, method: str):
         """Collapse an elastic ``BoundaryProperties`` per ``method``.
 
         ``'fluid'``  : zero shear_speed and shear_attenuation; keep cp / ρ / α.
@@ -1108,9 +1108,7 @@ class PropagationModel(ABC):
             b.shear_attenuation = 0.0
             return b
         if method == 'vacuum':
-            return BoundaryProperties(
-                acoustic_type='vacuum', depth=float(default_depth),
-            )
+            return BoundaryProperties(acoustic_type='vacuum')
         raise ConfigurationError(
             f"Unknown elastic collapse method {method!r}. Use "
             "'fluid' or 'vacuum'."
@@ -1185,7 +1183,6 @@ class PropagationModel(ABC):
 
     def _collapse_rd_bottom(self, env_in, e, method, alts):
         e.bottom = e.bottom_rd.collapse(method)
-        e.bottom.depth = e.depth
         e.bottom_rd = None
         return (
             f"{self.model_name} does not support range-dependent bottom "
@@ -1198,7 +1195,6 @@ class PropagationModel(ABC):
         e.bottom = e.bottom_rd_layered.collapse(
             layered_method=method, range_method='middle',
         )
-        e.bottom.depth = e.depth
         e.bottom_rd_layered = None
         return (
             f"{self.model_name} does not support range-dependent layered "
@@ -1210,7 +1206,6 @@ class PropagationModel(ABC):
 
     def _collapse_layered(self, env_in, e, method, alts):
         e.bottom = e.bottom_layered.collapse(method)
-        e.bottom.depth = e.depth
         e.bottom_layered = None
         return (
             f"{self.model_name} does not support layered (depth-"
@@ -1278,13 +1273,11 @@ class PropagationModel(ABC):
             if e.surface is not None and self._has_shear(e.surface):
                 e.surface = self._collapse_elastic_boundary(
                     e.surface, self.elastic_collapse_method,
-                    default_depth=0.0,
                 )
                 collapsed_at.append('surface')
             if e.bottom is not None and self._has_shear(e.bottom):
                 e.bottom = self._collapse_elastic_boundary(
                     e.bottom, self.elastic_collapse_method,
-                    default_depth=e.depth,
                 )
                 collapsed_at.append('bottom')
             if collapsed_at:

@@ -66,7 +66,6 @@ def main():
     ranges = np.array([0.0, 10000.0, 20000.0, 30000.0])
     bottom_rd = RangeDependentBottom(
         ranges=ranges,
-        depths=bathymetry[:, 1],  # Match bathymetry
         sound_speed=np.array([1600, 1650, 1700, 1750]),  # Hardening
         density=np.array([1.5, 1.7, 1.9, 2.1]),         # Increasing
         attenuation=np.array([0.8, 0.6, 0.4, 0.3]),     # Less lossy

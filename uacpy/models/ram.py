@@ -698,12 +698,13 @@ class RAM(PropagationModel):
 
             for i in range(n_ranges):
                 cb = bottom_rd.sound_speed[i]
+                seafloor_i = float(env.bathymetry_at_range(bottom_rd.ranges[i])[0])
                 if env.has_range_dependent_ssp():
                     ssp_at_range = env.ssp_at_range(bottom_rd.ranges[i])
-                    cwg_local = float(np.interp(bottom_rd.depths[i],
+                    cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
-                    cwg_local = float(np.interp(bottom_rd.depths[i],
+                    cwg_local = float(np.interp(seafloor_i,
                                                 env.ssp.depths, env.ssp.data[:, 0]))
                 cs_offset = cb - cwg_local
                 cs_profiles[:2, i] = 0.0
@@ -1576,7 +1577,7 @@ class RAM(PropagationModel):
         import warnings as _w
         e = env.copy()
         e.surface = self._collapse_elastic_boundary(
-            e.surface, self.elastic_collapse_method, default_depth=0.0,
+            e.surface, self.elastic_collapse_method,
         )
         _w.warn(
             "RAM: surface shear is not supported by any backend "

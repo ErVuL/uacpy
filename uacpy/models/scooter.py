@@ -558,13 +558,12 @@ class Scooter(PropagationModel):
                 pass
 
             elif bottom_code == 'A':  # Half-space (with optional shear)
-                z_bottom = env.bottom.depth if hasattr(env.bottom, 'depth') else env.depth
                 cp = env.bottom.sound_speed
                 cs = getattr(env.bottom, 'shear_speed', 0.0)
                 rho = env.bottom.density
                 alpha_p = env.bottom.attenuation
                 alpha_s = getattr(env.bottom, 'shear_attenuation', 0.0)
-                f.write(f"  {z_bottom:.2f}  {cp:.2f}  {cs:.1f}  "
+                f.write(f"  {env.depth:.2f}  {cp:.2f}  {cs:.1f}  "
                        f"{rho:.2f}  {alpha_p:.2f}  {alpha_s:.2f} /\n")
 
             # cLow/cHigh: BRC-table bounds for 'F'; SSP-derived otherwise.
