@@ -125,15 +125,16 @@ class TestFieldIO:
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),
             model='Bellhop',
-            frequency=100.0,
+            frequencies=100.0,
             metadata={'source_depth': 50.0, 'custom_param': 'test_value'},
         )
-        # `model` and `frequency` are typed attributes; everything else lives
-        # in metadata. Both are also mirrored into metadata for legacy code.
+        # ``model`` and ``frequencies`` are typed attributes; everything else
+        # lives in metadata. Both are also mirrored into metadata.
         assert field.model == 'Bellhop'
-        assert field.frequency == 100.0
+        assert field.f0 == 100.0
+        assert list(field.frequencies) == [100.0]
         assert field.metadata['model'] == 'Bellhop'
-        assert field.metadata['frequency'] == 100.0
+        assert list(field.metadata['frequencies']) == [100.0]
         assert field.metadata['custom_param'] == 'test_value'
 
     def test_field_copy_preserves_metadata(self):
@@ -144,7 +145,7 @@ class TestFieldIO:
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),
             model='Bellhop',
-            frequency=100.0,
+            frequencies=100.0,
             metadata={'test_key': 'test_value'},
         )
         field_copy = field.copy()
@@ -163,31 +164,28 @@ class TestDataValidation:
     def test_source_receiver_depth_validation(self, simple_env):
         """Test source/receiver depth validation."""
         from uacpy.models.base import PropagationModel
+        from uacpy.core.exceptions import InvalidDepthError
 
         model = type('TestModel', (PropagationModel,), {
             'run': lambda self, *args, **kwargs: None
         })()
 
-        # Source deeper than environment
-        source_deep = uacpy.Source(depth=150, frequency=100)
+        # Source deeper than environment.
+        source_deep = uacpy.Source(depths=150, frequencies=100)
         receiver = uacpy.Receiver(depths=[50], ranges=[1000])
-
-        with pytest.raises(ValueError, match="Source depth.*exceeds"):
+        with pytest.raises(InvalidDepthError):
             model.validate_inputs(simple_env, source_deep, receiver)
 
-        # Receiver deeper than environment
-        source = uacpy.Source(depth=50, frequency=100)
+        # Receiver deeper than environment.
+        source = uacpy.Source(depths=50, frequencies=100)
         receiver_deep = uacpy.Receiver(depths=[150], ranges=[1000])
-
-        with pytest.raises(ValueError, match="Receiver depth.*exceeds"):
+        with pytest.raises(InvalidDepthError):
             model.validate_inputs(simple_env, source, receiver_deep)
 
     def test_negative_depth_validation(self, simple_env):
         """Test negative depth validation."""
-        # Negative source depth - should raise during construction
-        with pytest.raises(ValueError, match="Source depths must be positive"):
-            source_neg = uacpy.Source(depth=-10, frequency=100)
+        with pytest.raises(ValueError, match="source depths must be"):
+            uacpy.Source(depths=-10, frequencies=100)
 
-        # Negative receiver depth - should raise during construction
-        with pytest.raises(ValueError, match="Receiver depths must be positive"):
-            receiver_neg = uacpy.Receiver(depths=[-10], ranges=[1000])
+        with pytest.raises(ValueError, match="receiver depths must be"):
+            uacpy.Receiver(depths=[-10], ranges=[1000])

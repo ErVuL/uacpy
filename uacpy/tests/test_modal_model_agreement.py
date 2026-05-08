@@ -34,7 +34,7 @@ class TestModalModelAgreement:
     @pytest.fixture
     def simple_source(self):
         """Create a simple source."""
-        return uacpy.Source(depth=[50], frequency=[100])
+        return uacpy.Source(depths=[50], frequencies=[100])
 
     @pytest.fixture
     def single_receiver(self):

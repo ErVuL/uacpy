@@ -75,7 +75,7 @@ def main():
         sound_speed=1500
     )
 
-    source = uacpy.Source(depth=36, frequency=100)
+    source = uacpy.Source(depths=36, frequencies=100)
 
     # Single range for broadband comparison (5 km)
     receiver = uacpy.Receiver(
@@ -91,7 +91,7 @@ def main():
 
     print(f"\nEnvironment: {env.name}")
     print(f"  Depth: {env.depth} m, Sound speed: 1500 m/s")
-    print(f"  Source: {source.depth[0]} m depth, {source.frequency[0]} Hz center")
+    print(f"  Source: {source.depths[0]} m depth, {source.frequencies[0]} Hz center")
     print(f"  Receiver: {len(receiver.depths)} depths, range = {receiver.ranges[0]/1000:.0f} km")
     print(f"  Frequencies: {frequencies[0]:.0f} - {frequencies[-1]:.0f} Hz ({len(frequencies)} points)")
     print(f"  Time-series target: depth={target_depth} m, range={target_range/1000:.0f} km")
@@ -311,14 +311,14 @@ def main():
 
     for name, result in tf_models.items():
         freqs = result.frequencies
-        center_idx = np.argmin(np.abs(freqs - source.frequency[0]))
+        center_idx = np.argmin(np.abs(freqs - source.frequencies[0]))
         # New shape (n_d, n_r, n_f) → pick first range, freq slice on axis 2.
         tl_at_fc = -20 * np.log10(np.abs(result.data[:, 0, center_idx]) + 1e-30)
         ax.plot(tl_at_fc, result.depths, label=name, linewidth=1.5)
 
     ax.set_xlabel('Transmission Loss (dB)')
     ax.set_ylabel('Depth (m)')
-    ax.set_title(f'TL vs Depth at {source.frequency[0]:.0f} Hz, '
+    ax.set_title(f'TL vs Depth at {source.frequencies[0]:.0f} Hz, '
                  f'range={target_range/1000:.0f} km')
     ax.invert_yaxis()
     ax.legend()
@@ -411,7 +411,7 @@ def main():
         axes[-1].set_xlabel('Time (ms)')
         fig.suptitle(f'Time-Series Comparison — depth={target_depth:.0f} m, '
                      f'range={target_range/1000:.0f} km\n'
-                     f'fc={source.frequency[0]:.0f} Hz, '
+                     f'fc={source.frequencies[0]:.0f} Hz, '
                      f'Pekeris waveguide {env.depth:.0f} m',
                      fontsize=13)
         fig.tight_layout()

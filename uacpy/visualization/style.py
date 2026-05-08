@@ -161,24 +161,51 @@ def get_model_color(model_name: str) -> str:
 
 
 BOTTOM_CMAP = 'YlOrBr'
-# Sediment fill — opaque sandy-tan with diagonal hatching, matching the
-# *rendered appearance* of saddlebrown @ alpha=0.35 in
-# ``plot_rd_bottom`` / ``plot_layered_bottom``. We use the opaque blend
-# (`saddlebrown × 0.35 + white × 0.65 ≈ #d6beac`) instead of the literal
-# alpha=0.35 because TL plots have a coloured heatmap behind the mask,
-# which would otherwise blend through and darken the visible result.
-# Apply via ``ax.fill_between(..., **BOTTOM_FILL_STYLE)``.
-BOTTOM_FILL_COLOR = '#d6beac'
+BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
 BOTTOM_FILL_HATCH = '///'
+# Sediment fill — opaque sandy-tan with brownish-gray diagonal hatching.
+# Both colours are pre-blended to reproduce the *rendered appearance* of
+# ``saddlebrown × black × alpha=0.35`` from ``plot_rd_bottom`` /
+# ``plot_rd_layered_bottom`` without using a translucent alpha (which
+# would let the TL heatmap below the seafloor bleed through and break
+# the masking). Apply via ``ax.fill_between(..., **BOTTOM_FILL_STYLE)``.
+#   ``#d6beac`` ≈ saddlebrown × 0.35 + white × 0.65  (sandy-tan fill)
+#   ``#8d7a70`` ≈ black × 0.35 + #d6beac × 0.65      (brownish-gray hatch)
+BOTTOM_FILL_COLOR = '#d6beac'
+BOTTOM_HATCH_COLOR = '#8d7a70'
 BOTTOM_FILL_STYLE = {
     'color': BOTTOM_FILL_COLOR,
     'hatch': BOTTOM_FILL_HATCH,
-    'edgecolor': 'black',
+    'edgecolor': BOTTOM_HATCH_COLOR,
     'linewidth': 0.4,
 }
-# Same colour used inside ``plot_rd_bottom`` (with alpha=0.35) for the
-# deep absorbing halfspace beneath the resolved sediment cap.
-BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
+
+# Solid black seafloor edge — applied above ``BOTTOM_FILL_STYLE`` at the
+# water-sediment interface for both flat and range-dependent bathymetries.
+BOTTOM_LINE_STYLE = {
+    'color': 'k',
+    'linewidth': 2.0,
+    'linestyle': '-',
+}
+
+# Source/receiver marker styles — applied via ``ax.plot(..., **STYLE)``.
+SOURCE_MARKER_STYLE = {
+    'marker': '*',
+    'color': 'red',
+    'markersize': 15,
+    'markeredgecolor': 'black',
+    'markeredgewidth': 0.5,
+    'linestyle': 'none',
+}
+
+RECEIVER_MARKER_STYLE = {
+    'marker': 'o',
+    'color': 'limegreen',
+    'markersize': 8,
+    'markeredgecolor': 'black',
+    'markeredgewidth': 0.5,
+    'linestyle': 'none',
+}
 
 
 def get_cmap_for_field(field_type: str) -> str:

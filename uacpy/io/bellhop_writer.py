@@ -20,7 +20,11 @@ from uacpy.io.boundary_io import (
     write_bty_long_format,
     write_ati_file,
 )
-from uacpy.io.oalib_writer import get_top_bc_code, write_surface_halfspace
+from uacpy.io.oalib_writer import (
+    _BOUNDARY_TYPE_MAP, get_top_bc_code, write_bio_layers, write_fg_params,
+    write_receiver_depths, write_receiver_ranges, write_source_depths,
+    write_surface_halfspace,
+)
 
 
 def write_bellhop_env_file(
@@ -173,7 +177,7 @@ def write_bellhop_env_file(
         f.write(f"'{env.name}'\n")
 
         # Frequency
-        f.write(f"{source.frequency[0]:.6f}\n")
+        f.write(f"{source.frequencies[0]:.6f}\n")
 
         # Number of media (1 for simple case)
         f.write("1\n")
@@ -262,23 +266,17 @@ def write_bellhop_env_file(
 
         write_surface_halfspace(f, env)
 
-        # Volume attenuation follow-up lines (consumed by Bellhop right
-        # after the TopOpt/surface halfspace block).
         if vol_atten_char == 'F':
-            T, S, pH, z_bar = francois_garrison_params
-            f.write(f"{T:.3f} {S:.3f} {pH:.3f} {z_bar:.3f}\n")
+            write_fg_params(f, francois_garrison_params)
         elif vol_atten_char == 'B':
-            f.write(f"{len(bio_layers)}\n")
-            for layer in bio_layers:
-                z1, z2, f0, Q, a0 = layer
-                f.write(
-                    f"{z1:.3f} {z2:.3f} {f0:.3f} {Q:.3f} {a0:.6f}\n"
-                )
+            write_bio_layers(f, bio_layers)
 
-        # Write .ati file if altimetry provided
+        # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
             ati_filepath = filepath.with_suffix(".ati")
-            write_ati_file(ati_filepath, env.altimetry, interp_type=bty_interp_type)
+            ati_data = env.altimetry.copy()
+            ati_data[:, 1] = -ati_data[:, 1]
+            write_ati_file(ati_filepath, ati_data, interp_type=bty_interp_type)
             if verbose:
                 print(f"[bellhop_writer] Wrote altimetry file: {ati_filepath}")
 
@@ -314,13 +312,13 @@ def write_bellhop_env_file(
             if verbose:
                 print(f"[bellhop_writer] Wrote range-dependent SSP file: {ssp_file}")
 
-        # SSP depth range and data
-        # For altimetry, extend SSP above surface to cover wave crests
+        # Extend SSP above MSL to cover any wave crests (env.altimetry
+        # positive-up, SSP z-axis positive-down).
         z_min = 0.0
         if has_altimetry:
-            min_alti = env.altimetry[:, 1].min()
-            if min_alti < 0:
-                z_min = min_alti - 0.5  # small margin below lowest wave trough
+            max_alti_above_msl = env.altimetry[:, 1].max()
+            if max_alti_above_msl > 0:
+                z_min = -max_alti_above_msl - 0.5
 
         max_bathy_depth = (
             env.bathymetry[:, 1].max() if len(env.bathymetry) > 0 else env.depth
@@ -347,19 +345,9 @@ def write_bellhop_env_file(
                 f"{env.volume_attenuation:.6f} 0.0 /\n"
             )
 
-        # Bottom properties
-        # Map human-readable names to Bellhop codes
-        bottom_type_map = {
-            "vacuum": "V",
-            "rigid": "R",
-            "half-space": "A",  # Acousto-elastic halfspace
-            "halfspace": "A",
-            "grain-size": "G",  # Grain size (UW-APL HF Handbook)
-            "grain": "G",
-            "file": "F",        # Reflection coefficient from file
-            "precalc": "P",     # Precalculated
-        }
-        bottom_type = bottom_type_map.get(env.bottom.acoustic_type.lower(), "A")
+        bottom_type = _BOUNDARY_TYPE_MAP.get(
+            env.bottom.acoustic_type.lower(), "A",
+        )
 
         # Check if bathymetry is range-dependent (more than 1 point)
         is_range_dependent_bathy = len(env.bathymetry) > 1
@@ -429,25 +417,9 @@ def write_bellhop_env_file(
                 f"{env.bottom.attenuation:.1f} {roughness:.1f} /\n"
             )
 
-        # Source depths
-        n_sources = len(source.depth)
-        f.write(f"{n_sources}\n")
-        depths_str = " ".join([f"{d:.6f}" for d in source.depth])
-        f.write(f"{depths_str} /\n")
-
-        # Receiver depths
-        n_rd = len(receiver.depths)
-        f.write(f"{n_rd}\n")
-        depths_str = " ".join([f"{d:.6f}" for d in receiver.depths])
-        f.write(f"{depths_str} /\n")
-
-        # Receiver ranges
-        n_rr = len(receiver.ranges)
-        f.write(f"{n_rr}\n")
-        ranges_str = " ".join(
-            [f"{r:.6f}" for r in receiver.ranges / 1000.0]
-        )  # Convert to km
-        f.write(f"{ranges_str} /\n")
+        write_source_depths(f, source)
+        write_receiver_depths(f, receiver)
+        write_receiver_ranges(f, receiver)
 
         # Construct full RunType string per AT specification
         # Format: 'XXZZZZZ' (7 chars), positions:

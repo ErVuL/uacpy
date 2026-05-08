@@ -5,9 +5,11 @@
 # 🌊 Underwater Acoustic Propagation for Python 🌊
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python 3.8+"></a>
-  <a href="https://www.gnu.org/licenses/gpl-3.0">  <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="GPLv3 License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Status-Alpha-orange.svg" alt="Alpha"></a>
+  <a href="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml"><img src="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
+  <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="GPLv3 License"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Status-Beta-yellow.svg" alt="Beta"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(WSL)-lightgrey.svg" alt="Platform"></a>
 </p>
 
 ## 🚀 Vision & Motivation
@@ -308,7 +310,7 @@ env = uacpy.Environment(
 )
 
 # 2. Source — 1000 Hz, mid water column
-source = uacpy.Source(depth=50.0, frequency=1000.0)
+source = uacpy.Source(depths=50.0, frequencies=1000.0)
 
 # 3. Receiver grid — 200 depths × 5000 ranges out to 5 km
 receiver = uacpy.Receiver(
@@ -339,8 +341,8 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 23 example scripts numbered
-sequentially (`example_01_*.py` through `example_23_*.py`); the full
+Inside `uacpy/examples/` you will find 24 example scripts numbered
+sequentially (`example_01_*.py` through `example_24_*.py`); the full
 suite runs in under 5 minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
@@ -409,7 +411,7 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 - **📊 Visualization review** — axes / units / orientation, colormap and dynamic‑range defaults, overlay coordinate frames, ray & mode ordering conventions, honest interpolation in comparison helpers, rcParams leakage.
 - **🧪 Test suite audit** — separate smoke from validation; add reference‑case regressions (ASA 1990, Pekeris, Munk, Jensen–Kuperman); audit marker application; verify every `uacpy/examples/` script runs.
 - **📦 Build, install, packaging** — reproduce installs on clean Linux VM / macOS / WSL; keep `install.sh` ↔ `install.bat` in sync; confirm the OASES URL + archive hash; pin a known‑good numpy / scipy / matplotlib set.
-- **🔁 CI / CD** *(currently none; required before tagging a release)* — lint on push; non‑binary tests across Python 3.8 → 3.13; nightly full suite with binaries; Ubuntu / macOS / WSL matrix; release automation; benchmark regression job with TL / arrival tolerances.
+- **🔁 CI / CD** — a minimal GitHub Actions workflow runs on every push to `main` and every PR: builds the native binaries (`oalib`, `bellhop-cxx`, `mpiramS`, `ramsurf`, downloads + builds OASES), runs `flake8` (real bugs only) and the full `pytest` suite on Python 3.12 / Ubuntu (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Still wanted before a tagged release: nightly full suite with binaries, macOS / WSL matrix, release automation, benchmark regression job with TL / arrival tolerances.
 - **🌍 Community & process** — issue template for benchmark deviations; targeted per‑model reviews by domain experts.
 
 > **If you are evaluating UACPY for a project: do not trust any specific

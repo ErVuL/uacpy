@@ -114,8 +114,8 @@ def scenario_a_munk_profile():
     # SOURCE CONFIGURATION - At channel axis
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depth=1000.0,       # Near channel axis (~1000m for Munk profile)
-        frequency=25.0,     # Low frequency for long range
+        depths=1000.0,       # Near channel axis (~1000m for Munk profile)
+        frequencies=25.0,     # Low frequency for long range
         source_type='point'
     )
 
@@ -208,8 +208,8 @@ def scenario_b_pekeris_waveguide():
     # SOURCE CONFIGURATION
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depth=50.0,         # Mid-depth
-        frequency=50.0,     # Medium frequency
+        depths=50.0,         # Mid-depth
+        frequencies=50.0,     # Medium frequency
         source_type='point'
     )
 
@@ -306,8 +306,8 @@ def scenario_c_thermocline():
     # SOURCE CONFIGURATION - In surface duct
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depth=30.0,         # Within surface duct (0-50m)
-        frequency=100.0,    # Higher frequency for coastal environment
+        depths=30.0,         # Within surface duct (0-50m)
+        frequencies=100.0,    # Higher frequency for coastal environment
         source_type='point'
     )
 

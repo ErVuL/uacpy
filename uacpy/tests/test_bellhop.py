@@ -26,7 +26,7 @@ class TestBellhopRunModes:
 
     @pytest.fixture
     def setup_source(self):
-        return Source(depth=50.0, frequency=100.0)
+        return Source(depths=50.0, frequencies=100.0)
 
     @pytest.fixture
     def setup_receiver(self):
@@ -93,14 +93,17 @@ class TestBellhopRunModes:
         )
 
         assert result.field_type == 'rays'
-        assert 'rays' in result.metadata
-        # Rays are stored as list of dicts with 'r' and 'z' arrays
-        rays = result.metadata['rays']
+        assert result.is_eigen is False
+        # Receiver / source geometry attached by the wrapper.
+        assert result.receiver_depths is not None
+        assert result.receiver_ranges is not None
+        assert result.source_depths is not None and len(result.source_depths) > 0
+
+        rays = result.rays
         assert len(rays) > 0, "Should have computed some rays"
-        # Each ray is a dict with 'r' and 'z' arrays
-        assert all(isinstance(ray, dict) for ray in rays), "Each ray should be a dict"
-        assert all('r' in ray and 'z' in ray for ray in rays), "Each ray should have r,z coordinates"
-        assert all(len(ray['r']) >= 2 for ray in rays), "Each ray should have at least 2 points"
+        assert all(isinstance(ray, dict) for ray in rays)
+        assert all('r' in ray and 'z' in ray for ray in rays)
+        assert all(len(ray['r']) >= 2 for ray in rays)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -108,7 +111,6 @@ class TestBellhopRunModes:
         """Test Bellhop eigenrays (run_mode=RunMode.EIGENRAYS)."""
         bellhop = Bellhop(verbose=False)
 
-        # Eigenrays need a specific receiver point
         receiver = Receiver(depths=[50.0], ranges=[3000.0])
 
         result = bellhop.run(
@@ -118,12 +120,73 @@ class TestBellhopRunModes:
             run_mode=RunMode.EIGENRAYS
         )
 
-        # Bellhop returns eigenrays with field_type='rays' (same as regular rays)
         assert result.field_type == 'rays'
-        # Should have ray data in metadata
-        assert 'rays' in result.metadata
-        rays = result.metadata['rays']
-        assert len(rays) > 0, "Should have computed some eigenrays"
+        # Wrapper must mark this as solver-computed eigenrays.
+        assert result.is_eigen is True
+        assert len(result.rays) > 0
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_bellhop_compute_eigenrays(self, setup_env, setup_source):
+        """Test Bellhop.compute_eigenrays one-call API."""
+        bellhop = Bellhop(verbose=False)
+
+        result = bellhop.compute_eigenrays(
+            setup_env, setup_source,
+            range_m=3000.0, depth_m=50.0,
+            max_rays=4,
+        )
+        assert result.field_type == 'rays'
+        assert result.is_eigen is True
+        assert len(result.rays) <= 4
+        # Sorted by miss distance ascending.
+        miss = [r.get('miss_distance_m') for r in result.rays]
+        if len(miss) > 1:
+            assert miss == sorted(miss)
+        # Receiver positions reflect the single target point.
+        assert result.receiver_ranges is not None
+        assert float(result.receiver_ranges[0]) == 3000.0
+        assert float(result.receiver_depths[0]) == 50.0
+
+    @pytest.mark.requires_binary
+    def test_rays_filter_helpers_preserve_is_eigen(self, setup_env, setup_source, setup_receiver):
+        """Rays.filter / filter_by_bounces / filter_by_launch_angle preserve is_eigen."""
+        bellhop = Bellhop(verbose=False)
+        rays = bellhop.run(
+            env=setup_env, source=setup_source, receiver=setup_receiver,
+            run_mode=RunMode.RAYS,
+        )
+        assert rays.is_eigen is False
+
+        custom = rays.filter(lambda r: True)
+        assert custom.is_eigen is False
+        assert len(custom.rays) == len(rays.rays)
+
+        sub = rays.filter_by_launch_angle(min_deg=-5.0, max_deg=5.0)
+        assert sub.is_eigen is False
+        assert all(-5.0 <= r['alpha'] <= 5.0 for r in sub.rays)
+
+        direct = rays.filter_by_bounces(kind='direct')
+        assert direct.is_eigen is False
+        assert all(r.get('n_top_bounces', 0) == 0
+                   and r.get('n_bot_bounces', 0) == 0
+                   for r in direct.rays)
+
+        # Exact-count form: bot=0 is "no bottom bounces".
+        no_bot = rays.filter_by_bounces(bot=0)
+        assert all(r.get('n_bot_bounces', 0) == 0 for r in no_bot.rays)
+
+        # Range form: bot=(1, None) is "at least one bottom bounce".
+        with_bot = rays.filter_by_bounces(bot=(1, None))
+        assert all(r.get('n_bot_bounces', 0) >= 1 for r in with_bot.rays)
+
+        # Closed range: top=(0, 1) is "0 or 1 surface bounces".
+        few_top = rays.filter_by_bounces(top=(0, 1))
+        assert all(0 <= r.get('n_top_bounces', 0) <= 1 for r in few_top.rays)
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError):
+            rays.filter_by_bounces(kind='bogus')
 
     @pytest.mark.requires_binary
     def test_bellhop_arrivals(self, setup_env, setup_source):
@@ -158,7 +221,7 @@ class TestAdvancedBeamTypes:
 
     @pytest.fixture
     def source(self):
-        return Source(depth=50.0, frequency=1000.0)
+        return Source(depths=50.0, frequencies=1000.0)
 
     @pytest.fixture
     def receiver(self):
@@ -203,3 +266,62 @@ class TestAdvancedBeamTypes:
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
         assert np.all(np.isfinite(result.data))
+
+
+class TestRunWithBounceConstructorPlumbing:
+    """Verify Bellhop.run_with_bounce passes through volume-attenuation /
+    c_low / c_high to the spawned Bounce instance."""
+
+    def test_bounce_inherits_parent_volume_attenuation(self, monkeypatch):
+        """Parent Bellhop's volume_attenuation / FG params reach Bounce."""
+        from uacpy.models import bounce as bounce_mod
+
+        captured = {}
+        original_init = bounce_mod.Bounce.__init__
+
+        def spy_init(self_, *args, **kwargs):
+            captured.update(kwargs)
+            original_init(self_, *args, **kwargs)
+            # Stop early so we don't actually run BOUNCE.
+            raise RuntimeError("stop after Bounce __init__")
+
+        monkeypatch.setattr(bounce_mod.Bounce, '__init__', spy_init)
+
+        bellhop = Bellhop(
+            verbose=False,
+            volume_attenuation='F',
+            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+            bio_layers=None,
+        )
+        env = Environment(name='b', depth=100.0, sound_speed=1500.0)
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(RuntimeError, match='stop after Bounce __init__'):
+            bellhop.run_with_bounce(
+                env=env, source=source, receiver=receiver,
+                c_low=1450.0, c_high=20000.0, rmax_m=42000.0,
+            )
+        assert captured.get('volume_attenuation') == 'F'
+        assert captured.get('francois_garrison_params') == (10.0, 35.0, 8.0, 1000.0)
+        assert captured.get('c_low') == 1450.0
+        assert captured.get('c_high') == 20000.0
+        assert captured.get('rmax_m') == 42000.0
+
+
+class TestBounceConstructorAcceptsFGParams:
+    """B2: Bounce.__init__ now accepts francois_garrison_params / bio_layers."""
+
+    def test_bounce_accepts_fg_params_kwarg(self):
+        from uacpy.models import Bounce
+        b = Bounce(
+            volume_attenuation='F',
+            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+        )
+        assert b.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
+        assert b.volume_attenuation == 'F'
+
+    def test_bounce_validates_F_requires_fg(self):
+        from uacpy.models import Bounce
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            Bounce(volume_attenuation='F')

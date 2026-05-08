@@ -115,7 +115,7 @@ def main():
     # SOURCE & RECEIVER
     # ═══════════════════════════════════════════════════════════════════════
 
-    source = uacpy.Source(depth=50.0, frequency=100.0)
+    source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 145, 30),
         ranges=np.linspace(100, 3000, 30)

@@ -156,7 +156,7 @@ def read_boundary_3d(
     except FileNotFoundError:
         raise FileNotFoundError(f"Boundary file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading boundary file {filename}: {e}")
+        raise RuntimeError(f"Error reading boundary file {filename}: {e}") from e
 
     return x_bot, y_bot, z_bot, n_x, n_y
 
@@ -737,7 +737,11 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     altimetry : ndarray
         Altimetry data, shape (N, 2):
         - Column 0: Range in meters
-        - Column 1: Altitude/height in meters (positive up from sea level)
+        - Column 1: Surface position in meters, **positive-down** in
+          Bellhop's z-axis convention (i.e. +2 means the surface is 2 m
+          *below* MSL — a wave trough). Wrappers that own the
+          public positive-up convention (``Environment(altimetry=…)``)
+          must negate column 1 before calling this writer.
     interp_type : str, optional
         Interpolation type (single character, TYPE(1:1)):
         - 'C': Curvilinear (with tangents/normals)
@@ -754,9 +758,10 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
 
     Examples
     --------
-    >>> # Create surface with ice keel
+    >>> # Create surface with a 10 m ice keel between 5 and 10 km
+    >>> # (Bellhop on-disk convention: positive-down).
     >>> rng = np.array([0, 5000, 10000, 15000])  # meters
-    >>> alt = np.array([0, -10, -5, 0])          # meters (negative = below surface)
+    >>> alt = np.array([0, 10, 5, 0])             # meters (positive = below MSL)
     >>> altimetry = np.column_stack([rng, alt])
     >>> write_ati_file('surface.ati', altimetry, interp_type='L')
     """

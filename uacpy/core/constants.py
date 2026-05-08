@@ -68,8 +68,8 @@ class SSPType(Enum):
                 if ssp.value == value.lower():
                     return ssp
             raise ValueError(
-                f"Invalid SSP type: {value}. "
-                f"Valid options: {[s.value for s in cls]}"
+                f"invalid SSP type {value!r}; valid options: "
+                f"{[s.value for s in cls]}"
             )
 
     def to_acoustics_toolbox_code(self) -> str:
@@ -142,7 +142,7 @@ class BoundaryType(Enum):
             for bt in cls:
                 if bt.value == value_lower:
                     return bt
-            raise ValueError(f"Invalid boundary type: {value}")
+            raise ValueError(f"invalid boundary type: {value!r}")
 
     def to_acoustics_toolbox_code(self) -> str:
         """
@@ -190,13 +190,20 @@ class AttenuationUnits(Enum):
         """
         if isinstance(value, AttenuationUnits):
             return value
+        if value == 'm':
+            raise ValueError(
+                "attenuation_unit 'm' (dB/m with power-law BETA/fT) is "
+                "distinct from 'M' (dB/m). The 'm' variant is rejected by "
+                "every uacpy writer and has no enum member; use 'M' for "
+                "plain dB/m or one of 'N', 'F', 'W', 'Q', 'L'"
+            )
         for au in cls:
             if au.value == value.upper():
                 return au
         try:
             return cls[value.upper()]
         except KeyError:
-            raise ValueError(f"Invalid attenuation unit: {value}")
+            raise ValueError(f"invalid attenuation unit: {value!r}")
 
     def to_char(self) -> str:
         """Return the single-character Acoustics Toolbox code."""
@@ -236,7 +243,7 @@ class VolumeAttenuation(Enum):
         try:
             return cls[value.upper()]
         except KeyError:
-            raise ValueError(f"Invalid volume attenuation: {value}")
+            raise ValueError(f"invalid volume attenuation: {value!r}")
 
     def to_char(self) -> str:
         """Return the single-character Acoustics Toolbox code."""

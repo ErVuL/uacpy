@@ -26,7 +26,7 @@ from uacpy.models import OAST, OASN, OASR, OASP
 
 def main():
     print("\n" + "═"*80)
-    print("EXAMPLE 19: OASES Suite Comprehensive")
+    print("EXAMPLE 13: OASES Suite Comprehensive")
     print("═"*80)
 
     # Simple environment for OASES demonstration
@@ -45,7 +45,7 @@ def main():
         )
     )
 
-    source = uacpy.Source(depth=50, frequency=100)
+    source = uacpy.Source(depths=50, frequencies=100)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 95, 40),
         ranges=np.linspace(500, 15000, 60)
@@ -67,7 +67,11 @@ def main():
     print("[2/4] Running OASN (spatial covariance)...", end=" ", flush=True)
     try:
         oasn = OASN(verbose=False)
-        result_oasn = oasn.compute_covariance(env, source, receiver)
+        # Without surface_noise_level the cov collapses to the 0 dB
+        # white-noise floor (identity); 70 dB ≈ Wenz amplitude at 100 Hz.
+        result_oasn = oasn.compute_covariance(
+            env, source, receiver, surface_noise_level=70.0,
+        )
         print("✓")
         oasn_success = True
     except Exception as e:
@@ -84,8 +88,7 @@ def main():
         oasr = OASR(verbose=False)
         # OASR computes reflection coefficients as function of angle
         angles = np.linspace(0, 90, 91)
-        result_oasr = oasr.run(env, source, receiver,
-                               angle_min=0, angle_max=90, n_angles=91)
+        result_oasr = oasr.run(env, source, receiver, angles=angles)
         print("✓")
         oasr_success = True
     except Exception as e:
@@ -142,7 +145,7 @@ def main():
             rc_for_plot, show_phase=True,
             title=(
                 f"OASR {result_oasr.metadata.get('reflection_type', 'P-P')} "
-                f"@ {rc_for_plot.frequency:.1f} Hz"
+                f"@ {rc_for_plot.f0:.1f} Hz"
             ),
         )
         fig2.savefig(OUTPUT_DIR / 'example_13_oasr_reflection.png',
@@ -197,7 +200,7 @@ def main():
             data=TL_centre, depths=depths_h, ranges=ranges_h,
             model='OASP', backend='oasp',
             source_depths=result_oasp.source_depths,
-            frequency=f_center,
+            frequencies=f_center,
         )
         fig4, _ = uacpy.plot.plot_transmission_loss(tl_field, env=env)
         fig4.savefig(OUTPUT_DIR / 'example_13_oasp_tl.png',
@@ -206,7 +209,7 @@ def main():
         print("  ✓ Saved: output/example_13_oasp_tl.png")
 
         # Synthesized time trace at one (depth, range) using a Gaussian pulse.
-        d_pick = float(depths_h[int(np.argmin(np.abs(depths_h - source.depth[0])))])
+        d_pick = float(depths_h[int(np.argmin(np.abs(depths_h - source.depths[0])))])
         r_pick = float(ranges_h[int(np.argmin(np.abs(ranges_h - 5000.0)))])
         fs = 4.0 * float(freqs_h[-1])
         nt_pulse = 64
@@ -237,7 +240,7 @@ def main():
     print("  • Complete elastic modeling (compression + shear)")
     print("  • Range-independent and range-dependent scenarios")
     print("  • Broadband and narrowband analysis")
-    print("\n" + "═"*80 + "\nEXAMPLE 19 COMPLETE\n" + "═"*80 + "\n")
+    print("\n" + "═"*80 + "\nEXAMPLE 13 COMPLETE\n" + "═"*80 + "\n")
     return 0
 
 if __name__ == "__main__":

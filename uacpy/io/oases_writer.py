@@ -26,6 +26,15 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
 
 
+def _write_oases_header(
+    f, env: Environment, options: str, fallback_title: str,
+) -> None:
+    """Write OASES Block I (title) + Block II (options)."""
+    title = env.name if env.name else fallback_title
+    f.write(f"{title}\n")
+    f.write(f"{options}\n")
+
+
 def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) -> str:
     """Append a volume-attenuation marker character to the OASES option string.
 
@@ -57,6 +66,24 @@ def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) 
     if marker in tokens:
         return options
     return options + ' ' + marker
+
+
+def _extract_bottom_props(bottom) -> dict:
+    """Pull the geoacoustic fallback values from a ``BoundaryProperties``-
+    like object. Used by every OAS[TNPR] writer to fill in defaults when an
+    attribute is missing or zero. Defaults match Schmidt's typical "1.5 g/cm³,
+    1600 m/s sand, no shear" base case.
+    """
+    return dict(
+        rho=bottom.density if hasattr(bottom, 'density') else 1.5,
+        c_p=bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0,
+        c_s=bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0,
+        alpha_p=bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5,
+        alpha_s=(
+            bottom.shear_attenuation
+            if hasattr(bottom, 'shear_attenuation') else 0.0
+        ),
+    )
 
 
 def _emit_bottom_layers(
@@ -257,7 +284,7 @@ def write_oast_input(
     Examples
     --------
     >>> env = Environment(depth=100, sound_speed=1500)
-    >>> source = Source(depth=50, frequency=100)
+    >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=np.linspace(10,90,40),
     ...                     ranges=np.linspace(100,10000,100))
     >>> write_oast_input('test.dat', env, source, receiver)
@@ -265,23 +292,21 @@ def write_oast_input(
     filepath = Path(filepath)
 
     # Extract parameters
-    freq = float(source.frequency[0])
+    freq = float(source.frequencies[0])
     depth = env.depth
 
     # Bottom properties
     bottom = env.bottom
-    rho = bottom.density if hasattr(bottom, 'density') else 1.5
-    c_p = bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0
-    c_s = bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0
-    alpha_p = bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5
-    alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
     # Sound speed profile
     ssp_data = env.ssp.to_pairs()
 
     # Source and receiver parameters (receiver depth bookkeeping now lives in
     # ``_receiver_block_lines`` which handles equidistant/explicit cases).
-    src_depth = float(source.depth[0])
+    src_depth = float(source.depths[0])
     r_max = float(receiver.ranges.max())
 
     # Optional parameters
@@ -300,7 +325,7 @@ def write_oast_input(
     options = _inject_volume_attenuation(options, volume_attenuation)
 
     # Multi-frequency sweep support (B17).
-    freqs_arr = np.atleast_1d(source.frequency)
+    freqs_arr = np.atleast_1d(source.frequencies)
     if len(freqs_arr) > 1:
         freq_min = float(freqs_arr.min())
         freq_max = float(freqs_arr.max())
@@ -310,12 +335,7 @@ def write_oast_input(
         nfreq = 1
 
     with open(filepath, 'w') as f:
-        # Block I: Title
-        title = env.name if env.name else "OAST Simulation via UACPY"
-        f.write(f"{title}\n")
-
-        # Block II: OPTIONS
-        f.write(f"{options}\n")
+        _write_oases_header(f, env, options, "OAST Simulation via UACPY")
 
         # Block III: Frequencies
         # FREQ1 FREQ2 NFREQ COFF [VREC]
@@ -532,7 +552,7 @@ def write_oasn_input(
     Examples
     --------
     >>> env = Environment(depth=100, sound_speed=1500)
-    >>> source = Source(depth=50, frequency=100)
+    >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=[30, 50, 70], ranges=[0])
     >>> write_oasn_input('test.dat', env, source, receiver,
     ...                  options='N J', surface_noise_level=70)
@@ -540,16 +560,14 @@ def write_oasn_input(
     filepath = Path(filepath)
 
     # Extract parameters
-    freq = float(source.frequency[0])
+    freq = float(source.frequencies[0])
     depth = env.depth
 
     # Bottom properties
     bottom = env.bottom
-    rho = bottom.density if hasattr(bottom, 'density') else 1.5
-    c_p = bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0
-    c_s = bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0
-    alpha_p = bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5
-    alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
     # Sound speed profile
     ssp_data = env.ssp.to_pairs()
@@ -571,7 +589,7 @@ def write_oasn_input(
     integration_offset = kwargs.get('integration_offset', 0)
 
     # Multi-frequency sweep support (B17).
-    freqs_arr = np.atleast_1d(source.frequency)
+    freqs_arr = np.atleast_1d(source.frequencies)
     if len(freqs_arr) > 1:
         freq_min_b = float(freqs_arr.min())
         freq_max_b = float(freqs_arr.max())
@@ -581,12 +599,7 @@ def write_oasn_input(
         nfreq = 1
 
     with open(filepath, 'w') as f:
-        # Block I: Title
-        title = env.name if env.name else "OASN Simulation via UACPY"
-        f.write(f"{title}\n")
-
-        # Block II: OPTIONS
-        f.write(f"{options}\n")
+        _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
         # Block III: Frequencies
         # FREQ1 FREQ2 NFREQ COFF
@@ -770,7 +783,7 @@ def write_oasp_input(
     Examples
     --------
     >>> env = Environment(depth=100, sound_speed=1500)
-    >>> source = Source(depth=80, frequency=30)
+    >>> source = Source(depths=80, frequencies=30)
     >>> receiver = Receiver(depths=np.linspace(20,100,5),
     ...                     ranges=np.linspace(1000,5000,5))
     >>> write_oasp_input('pulse.dat', env, source, receiver)
@@ -778,23 +791,21 @@ def write_oasp_input(
     filepath = Path(filepath)
 
     # Extract parameters
-    center_freq = kwargs.get('center_frequency', float(source.frequency[0]))
+    center_freq = kwargs.get('center_frequency', float(source.frequencies[0]))
     depth = env.depth
 
     # Bottom properties
     bottom = env.bottom
-    rho = bottom.density if hasattr(bottom, 'density') else 1.5
-    c_p = bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0
-    c_s = bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0
-    alpha_p = bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5
-    alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
     # Sound speed profile
     ssp_data = env.ssp.to_pairs()
 
     # Source parameter (receiver depth bookkeeping handled by
     # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
-    src_depth = float(source.depth[0])
+    src_depth = float(source.depths[0])
 
     # Frequency and time parameters
     n_time = kwargs.get('n_time_samples', 4096)
@@ -839,12 +850,7 @@ def write_oasp_input(
     options = _inject_volume_attenuation(options, volume_attenuation)
 
     with open(filepath, 'w') as f:
-        # Block I: Title
-        title = env.name if env.name else "OASP Simulation via UACPY"
-        f.write(f"{title}\n")
-
-        # Block II: OPTIONS
-        f.write(f"{options}\n")
+        _write_oases_header(f, env, options, "OASP Simulation via UACPY")
 
         # Block III: Source frequency and integration offset
         # FRC COFF [IT VS VR for Doppler]
@@ -969,9 +975,9 @@ def write_oasr_input(
         - n_angles : int
             Number of angles (default: 181)
         - freq_min : float
-            Minimum frequency in Hz (default: source.frequency)
+            Minimum frequency in Hz (default: source.frequencies)
         - freq_max : float
-            Maximum frequency in Hz (default: source.frequency)
+            Maximum frequency in Hz (default: source.frequencies)
         - n_frequencies : int
             Number of frequencies (default: 1)
 
@@ -999,7 +1005,7 @@ def write_oasr_input(
     >>> env = Environment(depth=100, sound_speed=1500)
     >>> env.bottom.sound_speed = 1600
     >>> env.bottom.shear_speed = 400
-    >>> source = Source(depth=50, frequency=100)
+    >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=[50], ranges=[1000])
     >>> write_oasr_input('test.dat', env, source, receiver,
     ...                  angle_min=0, angle_max=90, n_angles=91)
@@ -1007,16 +1013,14 @@ def write_oasr_input(
     filepath = Path(filepath)
 
     # Extract parameters
-    freq = float(source.frequency[0])
+    freq = float(source.frequencies[0])
     depth = env.depth
 
     # Bottom properties
     bottom = env.bottom
-    rho = bottom.density if hasattr(bottom, 'density') else 1.5
-    c_p = bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0
-    c_s = bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0
-    alpha_p = bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5
-    alpha_s = bottom.shear_attenuation if hasattr(bottom, 'shear_attenuation') else 0.0
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
     # Sound speed profile - for OASR we only need a single representative
     # water sound speed: OASR is a *local* interface reflection solver, the
@@ -1028,7 +1032,7 @@ def write_oasr_input(
     c_water = float(env.ssp.to_pairs()[-1, 1])
 
     # Multi-frequency support (B17) — OASR sweep parameters.
-    freqs_arr = np.atleast_1d(source.frequency)
+    freqs_arr = np.atleast_1d(source.frequencies)
     if len(freqs_arr) > 1:
         freq_min = float(freqs_arr.min())
         freq_max = float(freqs_arr.max())
@@ -1108,12 +1112,7 @@ def write_oasr_input(
         return f" {-abs(float(rg)):.4f} {float(cl):.4f} {float(m):.4f}"
 
     with open(filepath, 'w') as f:
-        # Block I: Title
-        title = env.name if env.name else "OASR Simulation via UACPY"
-        f.write(f"{title}\n")
-
-        # Block II: OPTIONS
-        f.write(f"{options}\n")
+        _write_oases_header(f, env, options, "OASR Simulation via UACPY")
 
         # Block III: Environment (B13)
         # OASR convention: layer 1 IS the upper halfspace in which the source

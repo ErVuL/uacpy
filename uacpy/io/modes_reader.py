@@ -282,7 +282,7 @@ def read_modes_asc(
     except FileNotFoundError:
         raise FileNotFoundError(f"Mode file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading mode file {filename}: {e}")
+        raise RuntimeError(f"Error reading mode file {filename}: {e}") from e
 
     # Return as dictionary
     return {

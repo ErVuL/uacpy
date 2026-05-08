@@ -123,7 +123,7 @@ def plot_source_receiver_config(env, source, receiver):
     # Plot 1: Sound Speed Profile
     ax = axes[0]
     ax.plot(env.ssp.to_pairs()[:,1], env.ssp.to_pairs()[:,0], 'b-', linewidth=2)
-    ax.axhline(source.depth[0], color='r', linestyle='--', linewidth=2, label='Source', alpha=0.7)
+    ax.axhline(source.depths[0], color='r', linestyle='--', linewidth=2, label='Source', alpha=0.7)
     for rd in receiver.depths[::len(receiver.depths)//5]:  # Show 5 receiver depths
         ax.axhline(rd, color='g', linestyle=':', linewidth=1, alpha=0.5)
     ax.axhline(receiver.depths[0], color='g', linestyle=':', linewidth=1, label='Receivers')
@@ -145,7 +145,7 @@ def plot_source_receiver_config(env, source, receiver):
         ax.fill_between([0, np.max(receiver.ranges)/1000], env.depth, env.depth*1.2,
                         color='#8B4513', alpha=0.5)
 
-    ax.plot(0, source.depth[0], 'r*', markersize=20, label='Source', zorder=10)
+    ax.plot(0, source.depths[0], 'r*', markersize=20, label='Source', zorder=10)
     ax.invert_yaxis()
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Depth (m)', fontweight='bold')
@@ -159,7 +159,7 @@ def plot_source_receiver_config(env, source, receiver):
     # Create 2D receiver grid visualization
     R, Z = np.meshgrid(receiver.ranges/1000, receiver.depths)
     ax.scatter(R.flatten()[::10], Z.flatten()[::10], c='green', s=5, alpha=0.3, label='Receiver grid')
-    ax.plot(0, source.depth[0], 'r*', markersize=20, label='Source')
+    ax.plot(0, source.depths[0], 'r*', markersize=20, label='Source')
 
     if env.bathymetry is not None and len(env.bathymetry) > 1:
         ax.plot(env.bathymetry[:,0]/1000, env.bathymetry[:,1], 'k-', linewidth=2, label='Seafloor')
@@ -269,7 +269,7 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
         plot_bathymetry_overlay(ax, env, result, range_min_km, range_max_km)
 
         # Source marker - at minimum range
-        ax.plot(range_min_km, source.depth[0], 'r*', markersize=15, label='Source', zorder=12)
+        ax.plot(range_min_km, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
 
         # Formatting
         ax.set_xlabel('Range (km)', fontweight='bold')
@@ -460,8 +460,8 @@ def create_example_report(example_num: int, title: str, description: str,
 
     # Source info
     print(f"\nSource:")
-    print(f"  Depth: {source.depth[0]}m")
-    print(f"  Frequency: {source.frequency[0]}Hz")
+    print(f"  Depth: {source.depths[0]}m")
+    print(f"  Frequency: {source.frequencies[0]}Hz")
 
     # Receiver info
     print(f"\nReceivers:")
@@ -494,14 +494,14 @@ def create_example_report(example_num: int, title: str, description: str,
     print(f"  ✓ {fields_path}")
 
     # Plot 3: TL curves
-    fig = plot_tl_comparison_curves(results, source.depth[0])
+    fig = plot_tl_comparison_curves(results, source.depths[0])
     curves_path = output_dir / f'{output_prefix}_curves.png'
     fig.savefig(curves_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  ✓ {curves_path}")
 
     # Plot 4: Statistics
-    fig = plot_model_statistics(results, source.depth[0])
+    fig = plot_model_statistics(results, source.depths[0])
     stats_path = output_dir / f'{output_prefix}_stats.png'
     fig.savefig(stats_path, dpi=150, bbox_inches='tight')
     plt.close(fig)

@@ -138,7 +138,24 @@ _EXPECTED = {
 }
 
 
-@pytest.mark.parametrize('model_name', list(_EXPECTED.keys()))
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
+
+
+def _model_param(name):
+    """Wrap parametrize values so OASES models carry the requires_oases marker.
+
+    This lets ``pytest -m 'not requires_oases'`` deselect at collection
+    time when the OASES binaries are absent, instead of relying on the
+    in-test ``FileNotFoundError`` fallback.
+    """
+    marks = [pytest.mark.requires_oases] if name in _OASES_MODELS else []
+    return pytest.param(name, marks=marks, id=name)
+
+
+_MODEL_PARAMS = [_model_param(n) for n in _EXPECTED.keys()]
+
+
+@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 @pytest.mark.parametrize('feature', _FEATURES)
 def test_capability_flag(model_name, feature):
     factory, expected = _EXPECTED[model_name]
@@ -153,7 +170,7 @@ def test_capability_flag(model_name, feature):
     )
 
 
-@pytest.mark.parametrize('model_name', list(_EXPECTED.keys()))
+@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_alternatives_dict_complete(model_name):
     """Every model exposes a dict with one entry per feature axis."""
     factory, _ = _EXPECTED[model_name]

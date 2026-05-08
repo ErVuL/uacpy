@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 13: Deep Water Long Range - 100+ km Propagation
+EXAMPLE 08: Deep Water Long Range - 100+ km Propagation
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -86,8 +86,8 @@ def main():
     # SOURCE CONFIGURATION
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depth=1000.0,    # Channel axis
-        frequency=20.0   # Very low frequency for long range
+        depths=1000.0,    # Channel axis
+        frequencies=20.0   # Very low frequency for long range
     )
 
     # ═══════════════════════════════════════════════════════════════════════

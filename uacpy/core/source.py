@@ -15,9 +15,9 @@ class Source:
 
     Parameters
     ----------
-    depth : float or array-like
+    depths : float or array-like
         Source depth(s) in meters. Positive down from surface.
-    frequency : float or array-like
+    frequencies : float or array-like
         Source frequency or frequencies in Hz
     angles : array-like, optional
         Launch angles in degrees. Used for ray-tracing models.
@@ -28,9 +28,9 @@ class Source:
 
     Attributes
     ----------
-    depth : ndarray
+    depths : ndarray
         Source depth(s)
-    frequency : ndarray
+    frequencies : ndarray
         Source frequency/frequencies
     angles : ndarray
         Launch angles for ray tracing
@@ -41,30 +41,37 @@ class Source:
     --------
     Single source at 50m depth, 100 Hz:
 
-    >>> source = Source(depth=50, frequency=100)
+    >>> source = Source(depths=50, frequencies=100)
 
     Vertical source array:
 
-    >>> source = Source(depth=[10, 20, 30], frequency=200)
+    >>> source = Source(depths=[10, 20, 30], frequencies=200)
 
     Custom launch angles:
 
-    >>> source = Source(depth=50, frequency=100,
+    >>> source = Source(depths=50, frequencies=100,
     ...                 angles=np.linspace(-45, 45, 91))
     """
 
     def __init__(
         self,
-        depth: Union[float, List[float], np.ndarray],
-        frequency: Union[float, List[float], np.ndarray],
+        depths: Union[float, List[float], np.ndarray],
+        frequencies: Union[float, List[float], np.ndarray],
         angles: Optional[Union[List[float], np.ndarray]] = None,
         source_type: str = 'point',
     ):
-        self.depth = np.atleast_1d(np.array(depth, dtype=np.float64))
-        self.frequency = np.atleast_1d(np.array(frequency, dtype=np.float64))
+        self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
+        self.frequencies = np.atleast_1d(np.array(frequencies, dtype=np.float64))
 
-        if np.any(self.depth < 0):
-            raise ValueError("Source depths must be positive (down from surface)")
+        if np.any(self.depths < 0):
+            raise ValueError(
+                f"source depths must be non-negative (down from surface), got {self.depths.tolist()}"
+            )
+
+        if np.any(self.frequencies <= 0):
+            raise ValueError(
+                f"source frequencies must be strictly positive (Hz), got {self.frequencies.tolist()}"
+            )
 
         if angles is None:
             self.angles = np.linspace(-80, 80, 361)
@@ -80,12 +87,12 @@ class Source:
     @property
     def n_sources(self) -> int:
         """Number of sources."""
-        return len(self.depth)
+        return len(self.depths)
 
     @property
     def n_frequencies(self) -> int:
         """Number of frequencies."""
-        return len(self.frequency)
+        return len(self.frequencies)
 
     @property
     def n_angles(self) -> int:
@@ -94,12 +101,12 @@ class Source:
 
     def __repr__(self) -> str:
         if self.n_sources == 1:
-            depth_str = f"{self.depth[0]:.1f}m"
+            depth_str = f"{self.depths[0]:.1f}m"
         else:
             depth_str = f"{self.n_sources} sources"
 
         if self.n_frequencies == 1:
-            freq_str = f"{self.frequency[0]:.1f}Hz"
+            freq_str = f"{self.frequencies[0]:.1f}Hz"
         else:
             freq_str = f"{self.n_frequencies} frequencies"
 
@@ -109,8 +116,8 @@ class Source:
     def copy(self):
         """Return a deep copy of the source."""
         return Source(
-            depth=self.depth.copy(),
-            frequency=self.frequency.copy(),
+            depths=self.depths.copy(),
+            frequencies=self.frequencies.copy(),
             angles=self.angles.copy(),
             source_type=self.source_type,
         )

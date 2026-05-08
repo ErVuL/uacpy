@@ -187,13 +187,6 @@ class FileManager:
         if self.cleanup:
             self.cleanup_work_dir()
 
-    def __del__(self):
-        if self.cleanup and hasattr(self, 'work_dir'):
-            try:
-                self.cleanup_work_dir()
-            except Exception:
-                pass
-
     def __repr__(self) -> str:
         tmpfs_str = "tmpfs" if self.use_tmpfs else "disk"
         work_str = str(self.work_dir) if self.work_dir else "not created"

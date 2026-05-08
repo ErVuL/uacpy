@@ -15,6 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.requires_oases
 
+from uacpy.core.exceptions import ExecutableNotFoundError
 from uacpy.models.oases import OASN
 
 
@@ -30,8 +31,8 @@ class TestOASNExecutableResolution:
             assert oasn.oasn_executable.exists()
 
     def test_oasn_missing_executable(self):
-        """Pointing OASN at a nonexistent path raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError, match="OASN executable not found"):
+        """Pointing OASN at a nonexistent path raises ExecutableNotFoundError."""
+        with pytest.raises(ExecutableNotFoundError, match="OASN executable not found"):
             OASN(executable=Path("/nonexistent/oast"))
 
 

@@ -14,22 +14,22 @@ from uacpy.visualization import plots, quickplot
 pytestmark = pytest.mark.requires_binary
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture
 def basic_setup():
-    """Create basic environment, source, and result for testing.
-
-    Module-scoped: the Bellhop subprocess runs once per file, not once per test.
-    Tests that mutate ``result.data`` must operate on a deep copy.
-    """
+    """Build env / source / TL result for one test."""
     env = uacpy.Environment(
         name='test',
         depth=100,
         sound_speed=1500
     )
-    source = uacpy.Source(depth=50, frequency=100)
+    source = uacpy.Source(depths=50, frequencies=100)
+    receiver = uacpy.Receiver(
+        depths=np.linspace(0, 100, 50),
+        ranges=np.linspace(100, 5000, 100),
+    )
 
     bellhop = Bellhop(verbose=False)
-    result = bellhop.compute_tl(env, source, max_range=5000)
+    result = bellhop.compute_tl(env, source, receiver)
 
     return env, source, result
 
@@ -139,13 +139,17 @@ class TestCompareModels:
     def test_compare_models_multiple(self, basic_setup):
         """Test comparing multiple models."""
         env, source, _ = basic_setup
+        receiver = uacpy.Receiver(
+            depths=np.linspace(0, 100, 50),
+            ranges=np.linspace(100, 5000, 100),
+        )
 
         bellhop = Bellhop(verbose=False)
         ram = RAM(verbose=False)
 
         results = {
-            'Bellhop': bellhop.compute_tl(env, source, max_range=5000),
-            'RAM': ram.compute_tl(env, source, max_range=5000),
+            'Bellhop': bellhop.compute_tl(env, source, receiver),
+            'RAM': ram.compute_tl(env, source, receiver),
         }
 
         fig, axes = plots.compare_models(results, env)
@@ -317,7 +321,6 @@ class TestPlottingEdgeCases:
         import copy
         env, source, result = basic_setup
 
-        # Mutate a deep copy — basic_setup is module-scoped and shared.
         result_with_nan = copy.deepcopy(result)
         result_with_nan.data[0, 0] = np.nan
 
@@ -368,3 +371,114 @@ class TestPlottingIntegration:
         fig = quickplot.quick_report(results, env, save=str(save_path))
         assert fig is not None and save_path.exists()
         plt.close(fig)
+
+
+# ─── Synthetic-input tests (no binary needed) ────────────────────────────
+
+
+class TestPlotTimeSeriesReceiverRanges:
+    """Regression tests for plot_time_series receiver_ranges branch."""
+
+    pytestmark = []
+
+    def test_receiver_ranges_without_receiver_depth(self):
+        """``receiver_ranges`` present but no ``receiver_depth`` must not NameError."""
+        from uacpy.core.results import TimeSeriesField
+        from uacpy.visualization.plots import plot_time_series
+
+        n_d, n_r, n_t = 1, 4, 64
+        time = np.linspace(0, 0.5, n_t)
+        data = np.zeros((n_d, n_r, n_t))
+        for ir in range(n_r):
+            data[0, ir] = np.sin(2 * np.pi * 50 * time) * np.exp(-time * 5)
+
+        field = TimeSeriesField(
+            data=data,
+            depths=np.array([30.0]),
+            ranges=np.linspace(100.0, 4000.0, n_r),
+            time=time,
+            model='SPARC',
+            metadata={
+                # The buggy branch: receiver_ranges set, receiver_depth absent.
+                'receiver_ranges': np.linspace(100.0, 4000.0, n_r),
+            },
+        )
+
+        fig, ax = plot_time_series(field)
+        assert fig is not None and ax is not None
+        plt.close(fig)
+
+
+class TestCompareModelsTypeDispatch:
+    """A2: compare_models must dispatch on field type, not call .to_db()."""
+
+    pytestmark = []
+
+    def test_pressure_field_routes_via_to_tl(self):
+        from uacpy.core.results import PressureField, TLField
+
+        depths = np.linspace(5, 95, 10)
+        ranges = np.linspace(100, 5000, 20)
+        p = (np.random.default_rng(0).standard_normal((10, 20))
+             + 1j * np.random.default_rng(1).standard_normal((10, 20))) * 1e-3
+
+        pfield = PressureField(
+            data=p, depths=depths, ranges=ranges,
+            model='Bellhop', frequencies=100.0,
+        )
+        env = uacpy.Environment(name='t', depth=100, sound_speed=1500)
+        fig, axes = plots.compare_models({'Bellhop': pfield}, env=env)
+        assert fig is not None
+        plt.close(fig)
+
+    def test_unsupported_field_type_raises(self):
+        env = uacpy.Environment(name='t', depth=100, sound_speed=1500)
+        with pytest.raises(TypeError, match="expected TLField"):
+            plots.compare_models({'bogus': object()}, env=env)
+
+
+class TestTLRmse:
+    """C8: tl_rmse public helper."""
+
+    pytestmark = []
+
+    def test_identical_fields_zero_rmse(self):
+        from uacpy.core.results import TLField
+
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 5000, 20)
+        data = 60 + 10 * np.log10(np.maximum(r, 1.0)[None, :])
+        data = np.broadcast_to(data, (10, 20)).copy()
+        a = TLField(data=data, depths=d, ranges=r, model='A')
+        b = TLField(data=data.copy(), depths=d, ranges=r, model='B')
+        assert uacpy.tl_rmse(a, b) == pytest.approx(0.0)
+
+    def test_constant_offset(self):
+        from uacpy.core.results import TLField
+
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 5000, 20)
+        base = np.zeros((10, 20))
+        a = TLField(data=base, depths=d, ranges=r)
+        b = TLField(data=base + 3.0, depths=d, ranges=r)
+        assert uacpy.tl_rmse(a, b) == pytest.approx(3.0)
+
+    def test_window_selects_subregion(self):
+        from uacpy.core.results import TLField
+        from uacpy.core.metrics import tl_rmse
+
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 5000, 20)
+        a = TLField(data=np.zeros((10, 20)), depths=d, ranges=r)
+        b_data = np.zeros((10, 20))
+        b_data[:, :5] = 10.0
+        b = TLField(data=b_data, depths=d, ranges=r)
+        # Inside the noisy band, RMSE = 10. Excluding it, RMSE = 0.
+        assert tl_rmse(a, b, range_window=(r[0], r[4])) == pytest.approx(10.0)
+        assert tl_rmse(a, b, range_window=(r[5], r[-1])) == pytest.approx(0.0)
+
+    def test_type_error_on_non_tlfield(self):
+        from uacpy.core.results import TLField
+        a = TLField(data=np.zeros((4, 4)), depths=np.arange(4), ranges=np.arange(4))
+        with pytest.raises(TypeError):
+            uacpy.tl_rmse(a, object())

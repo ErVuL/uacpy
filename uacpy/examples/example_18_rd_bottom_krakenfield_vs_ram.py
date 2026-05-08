@@ -47,8 +47,7 @@ def make_base_env(bottom):
     env = uacpy.Environment(
         name='rd_comparison',
         depth=200,
-        ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
+        ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
             interp='linear',
         ),
         bathymetry=bathymetry,
@@ -128,7 +127,7 @@ def main():
     print("Example 27: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
     print("=" * 65)
 
-    source = uacpy.Source(frequency=100, depth=30)
+    source = uacpy.Source(frequencies=100, depths=30)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 195, 30),
         ranges=np.linspace(1000, 6000, 40),
@@ -278,7 +277,7 @@ def main():
 
     fig.suptitle(
         'Example 27: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM\n'
-        f'f={source.frequency[0]:.0f} Hz, z_s={source.depth[0]:.0f} m, '
+        f'f={source.frequencies[0]:.0f} Hz, z_s={source.depths[0]:.0f} m, '
         f'bathy {bathy_depths_m[0]:.0f}-{bathy_depths_m[-1]:.0f} m',
         fontsize=13, fontweight='bold', y=0.995)
     fig.subplots_adjust(left=0.05, right=0.93, top=0.92, bottom=0.06,

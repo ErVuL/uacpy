@@ -30,6 +30,7 @@ a rigid Neumann floor.
 
 import numpy as np
 import os
+import time
 import warnings
 from pathlib import Path
 from typing import Optional, List
@@ -41,8 +42,26 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, TLField, TransferFunction
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, TL_MAX_DB
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
+from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.io.ramsurf_reader import read_tl_grid, read_pcomplex_grid
+
+
+# Collins-family PE numerics constants.
+#
+# LAMBDA_PER_DZ_FLOOR — minimum acoustic wavelengths per dz step for the
+#   Collins finite-difference march. Below this the seafloor interface is
+#   smeared between adjacent grid points and accuracy collapses (Collins
+#   1993 / Lytaev 2023 §4).
+# RAMS_DR_LAMBDA_CAP — empirical upper stability bound on dr for rams0.5's
+#   rotated Padé elastic march, expressed as a divisor of c_min/freq.
+#   ``dr ≤ c_min / (RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ per step.
+LAMBDA_PER_DZ_FLOOR = 16.0
+RAMS_DR_LAMBDA_CAP = 5.0
 
 
 class RAM(PropagationModel):
@@ -125,14 +144,17 @@ class RAM(PropagationModel):
         Stability range in meters. Default: max output range.
         **[mpiramS, ramsurf1.5]**
     Q : float, optional
-        Q value for broadband mode (bandwidth = fc/Q). Default: 2.0.
-        Ignored in COHERENT_TL mode (set internally to large value).
+        Q value for broadband mode (bandwidth = fc/Q). Default: ``None``,
+        which resolves to ``2.0`` for broadband paths and to ``1e6`` for
+        COHERENT_TL (effectively single-frequency — wide Q collapses
+        bandwidth so mpiramS doesn't sweep ~500 frequencies per call).
         Used by every backend's broadband mode to derive the frequency
         vector — mpiramS internally, Collins backends as the Python-side
         frequency-loop grid.
     T : float, optional
         Time window width in seconds (broadband resolution df = 1/T).
-        Default: 10.0. Ignored in COHERENT_TL mode.
+        Default: ``None``, which resolves to ``10.0`` for broadband paths
+        and to ``1.0`` for COHERENT_TL.
     depth_decimation : int, optional
         Output depth decimation factor. Default: 1 (no decimation).
         **[all backends]**
@@ -180,8 +202,8 @@ class RAM(PropagationModel):
         np_pade: int = 6,
         ns_stability: int = 1,
         rs_stability: Optional[float] = None,
-        Q: float = 2.0,
-        T: float = 10.0,
+        Q: Optional[float] = None,
+        T: Optional[float] = None,
         depth_decimation: int = 1,
         flat_earth: bool = True,
         absorbing_layer_width: float = 20.0,
@@ -278,7 +300,8 @@ class RAM(PropagationModel):
             to disable, raise for unusually noisy long-range runs.
         """
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            timeout=timeout, **kwargs,
         )
 
         self._supported_modes = [
@@ -310,6 +333,9 @@ class RAM(PropagationModel):
                 's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS'
             )
 
+        if not self.executable.exists():
+            raise ExecutableNotFoundError('RAM:mpiramS', str(self.executable))
+
         if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
             raise ValueError(
                 f"np_pade must be an integer in [2, 8] (mpiramS limit); "
@@ -326,8 +352,11 @@ class RAM(PropagationModel):
         if c0 is not None and (not np.isfinite(c0) or c0 <= 0):
             raise ValueError(f"c0 must be positive and finite if set; "
                              f"got {c0!r}.")
-        for name, val in (('Q', Q), ('T', T),
-                          ('timeout', timeout),
+        for name, val in (('Q', Q), ('T', T)):
+            if val is not None and (not np.isfinite(val) or val <= 0):
+                raise ValueError(f"{name} must be positive and finite if "
+                                 f"set; got {val!r}.")
+        for name, val in (('timeout', timeout),
                           ('absorbing_layer_width', absorbing_layer_width),
                           ('absorbing_layer_attn', absorbing_layer_attn)):
             if not np.isfinite(val) or val <= 0:
@@ -362,7 +391,6 @@ class RAM(PropagationModel):
         self.absorbing_layer_attn = absorbing_layer_attn
         self.n_sed_points = n_sed_points
         self.c0 = c0
-        self.timeout = timeout
 
         self.accuracy = float(accuracy)
         self.theta_max = float(theta_max)
@@ -561,7 +589,7 @@ class RAM(PropagationModel):
         if env.has_range_dependent_ssp():
             if range_m is None:
                 range_m = 0.0
-            ssp = env.get_ssp_at_range(range_m)
+            ssp = env.ssp_at_range(range_m)
         else:
             ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
@@ -607,10 +635,10 @@ class RAM(PropagationModel):
                 attn_samp[-1] = lb.halfspace.attenuation
 
                 seafloor_i = float(np.asarray(
-                    env.get_bathymetry_depth(rdl.ranges[i])
+                    env.bathymetry_at_range(rdl.ranges[i])
                 ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.get_ssp_at_range(rdl.ranges[i])
+                    ssp_at_range = env.ssp_at_range(rdl.ranges[i])
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -683,7 +711,7 @@ class RAM(PropagationModel):
             for i in range(n_ranges):
                 cb = bottom_rd.sound_speed[i]
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.get_ssp_at_range(bottom_rd.ranges[i])
+                    ssp_at_range = env.ssp_at_range(bottom_rd.ranges[i])
                     cwg_local = float(np.interp(bottom_rd.depths[i],
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -814,9 +842,9 @@ class RAM(PropagationModel):
             ``source_waveform`` and ``sample_rate``.
         frequencies : ndarray, optional
             Frequency vector (Hz) for ``BROADBAND`` / ``TIME_SERIES``.
-            When provided, overrides ``source.frequency`` for the duration
+            When provided, overrides ``source.frequencies`` for the duration
             of this call (mirrors Bellhop / Kraken / Scooter). When
-            ``None``, RAM uses ``source.frequency`` as the frequency grid.
+            ``None``, RAM uses ``source.frequencies`` as the frequency grid.
         source_waveform : ndarray, optional
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
@@ -831,9 +859,8 @@ class RAM(PropagationModel):
         Returns
         -------
         result : Result
-            ``field_type='tl'`` for COHERENT_TL,
-            ``'transfer_function'`` for BROADBAND,
-            ``'time_series'`` for TIME_SERIES.
+            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
@@ -847,7 +874,7 @@ class RAM(PropagationModel):
                     "RAM.run(frequencies=…) requires at least one positive "
                     "frequency"
                 )
-            source = Source(depth=source.depth, frequency=freqs_arr)
+            source = Source(depths=source.depths, frequencies=freqs_arr)
 
         with _resolve_overrides(
             self,
@@ -869,7 +896,7 @@ class RAM(PropagationModel):
             timeout=timeout,
         ):
             env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
             backend = self.select_backend(env)
             self._log(f"RAM dispatch → {backend} backend", level='info')
@@ -1062,11 +1089,11 @@ class RAM(PropagationModel):
         source's centre frequency and return a TL Field.
 
         Wraps :meth:`_run_collins_one_freq` and converts the binary's
-        ``tl.grid`` to a ``field_type='tl'`` Field interpolated onto the
+        ``tl.grid`` to a :class:`TLField` interpolated onto the
         requested receiver grid.
         """
-        fc = float(np.atleast_1d(source.frequency)[0])
-        zs = float(np.atleast_1d(source.depth)[0])
+        fc = float(np.atleast_1d(source.frequencies)[0])
+        zs = float(np.atleast_1d(source.depths)[0])
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc,
             theta=self._theta_for_freq(fc),
@@ -1103,7 +1130,7 @@ class RAM(PropagationModel):
             **self._result_kwargs(
                 source,
                 backend=kind,
-                frequency=fc,
+                frequencies=fc,
                 dr=raw['dr'], dz=raw['dz'], zmax=raw['zmax'],
                 c0=self._resolve_c0(env),
             ),
@@ -1130,15 +1157,11 @@ class RAM(PropagationModel):
         (binary output grid), ``dr`` / ``dz`` / ``zmax`` (the values
         actually used).
         """
-        from uacpy.io.ramsurf_writer import write_ramin
-        from uacpy.io.ramsurf_reader import read_tl_grid, read_pcomplex_grid
-
         binary = self._collins_binary(kind)
 
         # The Collins binaries handle one (zs, fc) per call; mpiramS does
-        # the same. Anything beyond source.depth[0] / source.frequency[0]
+        # the same. Anything beyond source.depths[0] / source.frequencies[0]
         # is silently dropped without these warnings.
-        self._warn_on_multi_source_or_freq(source)
 
         # Range-dependent inputs that the Collins path doesn't (yet) thread
         # through. Loud warning rather than silent drop — proper RD support
@@ -1159,7 +1182,7 @@ class RAM(PropagationModel):
             )
 
         fc = float(freq)
-        zs = float(np.atleast_1d(source.depth)[0])
+        zs = float(np.atleast_1d(source.depths)[0])
 
         max_range = float(np.max(np.atleast_1d(receiver.ranges)))
         # Numerics resolution: explicit overrides (from broadband loop, which
@@ -1324,7 +1347,6 @@ class RAM(PropagationModel):
 
             tlgrid = fm.work_dir / 'tl.grid'
             if not tlgrid.exists():
-                from uacpy.core.exceptions import ModelExecutionError
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
@@ -1339,7 +1361,6 @@ class RAM(PropagationModel):
             # + MODIFICATIONS.md) writes pcomplex.bin alongside tl.grid.
             pcgrid = fm.work_dir / 'pcomplex.bin'
             if not pcgrid.exists():
-                from uacpy.core.exceptions import ModelExecutionError
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
@@ -1377,7 +1398,7 @@ class RAM(PropagationModel):
         assemble a transfer-function Field.
 
         The frequency vector matches mpiramS's convention: centred on
-        ``source.frequency[0]`` with bandwidth ``fc/Q`` and frequency
+        ``source.frequencies[0]`` with bandwidth ``fc/Q`` and frequency
         resolution ``df = 1/T``. Each frequency runs the Collins binary
         once; the patched binary writes a complex envelope (see
         ``third_party/MODIFICATIONS.md``) which the loop stacks into
@@ -1391,10 +1412,12 @@ class RAM(PropagationModel):
         """
         from scipy.interpolate import RegularGridInterpolator
 
-        fc = float(np.atleast_1d(source.frequency)[0])
+        fc = float(np.atleast_1d(source.frequencies)[0])
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
-        bw = fc / float(self.Q)
-        df = 1.0 / float(self.T)
+        Q_used = 2.0 if self.Q is None else float(self.Q)
+        T_used = 10.0 if self.T is None else float(self.T)
+        bw = fc / Q_used
+        df = 1.0 / T_used
         nf1 = max(1, int(np.floor((bw - df) / df)))
         # Symmetric grid centred on fc, like mpiramS' peramx.f90.
         frequencies = np.array(
@@ -1538,7 +1561,7 @@ class RAM(PropagationModel):
                 # exp(+i k0 r) is factored out by the Collins PE march.
                 # TransferFunction.synthesize_time_series re-applies it
                 # before IFFT.
-                Q=float(self.Q), T=float(self.T),
+                Q=Q_used, T=T_used,
                 bw=bw, df=df,
                 dr=dr_first, dz=dz_first, zmax=zmax_used,
                 c0=c0,
@@ -1611,37 +1634,6 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=4,
             )
 
-    @staticmethod
-    def _warn_on_multi_source_or_freq(source: Source) -> None:
-        """
-        Warn when ``source`` contains more than one depth or frequency.
-
-        mpiramS accepts a single source depth and a single centre frequency
-        per run; RAM silently uses ``source.depth[0]`` / ``source.frequency[0]``
-        and discards the rest. Emit a visible warning so callers are aware.
-        """
-        depths = getattr(source, 'depth', None)
-        freqs = getattr(source, 'frequency', None)
-        if depths is not None and len(depths) > 1:
-            warnings.warn(
-                f"RAM (mpiramS) accepts only one source depth per run; "
-                f"using source.depth[0]={float(depths[0])} and ignoring "
-                f"the remaining {len(depths) - 1} depth(s). Loop over "
-                f"Sources externally for multi-source runs.",
-                UserWarning,
-                stacklevel=3,
-            )
-        if freqs is not None and len(freqs) > 1:
-            warnings.warn(
-                f"RAM (mpiramS) accepts only one centre frequency per run; "
-                f"using source.frequency[0]={float(freqs[0])} and ignoring "
-                f"the remaining {len(freqs) - 1} frequency(ies). Use "
-                f"RunMode.BROADBAND (broadband via Q/T) or loop over "
-                f"Sources externally.",
-                UserWarning,
-                stacklevel=3,
-            )
-
     def _compute_grid_lytaev(
         self, env: 'Environment', freq: float,
         *, max_range: float, kind: str,
@@ -1679,20 +1671,16 @@ class RAM(PropagationModel):
         c_min = float(min(speeds))
         c_max = float(max(speeds))
 
-        # Collins-backend dz floor — applied AFTER the optimizer because
-        # the Lytaev accuracy model doesn't know about Collins-march
-        # stability. Both ``rams0.5`` and ``ramsurf1.5`` use a finite-
-        # difference march that destabilises when dz is much smaller
-        # than the conventional acoustic resolution (≈ λ_p/16). The rams
-        # elastic case has an additional shear-mode aliasing constraint
-        # (≳ 0.55·λ_s). mpiramS uses a different scheme and tolerates
-        # arbitrarily fine dz, so no floor.
-        if kind in ('rams', 'ramsurf'):
-            dz_floor_acoustic = c_min / (16.0 * max(freq, 1.0))
+        # Per-backend dz floor: λ_p/16 acoustic stability for Collins
+        # backends + cost cap for mpiramS; 0.55·λ_s shear-mode aliasing
+        # for rams. Override via ``dr=…``/``dz=…``.
+        if kind in ('mpiramS', 'rams', 'ramsurf'):
+            dz_floor_acoustic = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
             cs_min = self._min_shear_speed(env) if kind == 'rams' else 0.0
             dz_floor_shear = rams_dz_floor(cs_min, freq, factor=0.55)
             dz_floor = max(dz_floor_shear, dz_floor_acoustic)
         else:
+            cs_min = 0.0
             dz_floor = 0.0
 
         # Auto-loosen on infeasibility: hard environments (deep ocean,
@@ -1760,7 +1748,7 @@ class RAM(PropagationModel):
         if kind == 'rams':
             dr_pre = dr_opt
             dr_safety = dr_opt / self.rams_dr_safety_factor
-            dr_cap = c_min / (5.0 * freq)
+            dr_cap = c_min / (RAMS_DR_LAMBDA_CAP * freq)
             dr_opt = min(dr_safety, dr_cap)
             limit = 'safety factor' if dr_safety <= dr_cap else 'λ cap'
             self._log(
@@ -1801,8 +1789,6 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=3,
             )
 
-        # Apply the Collins-backend dz floor on top of the snapped dz.
-        # The Lytaev accuracy budget no longer holds — warn the user.
         if dz_floor > 0 and dz_opt < dz_floor:
             dz_pre = dz_opt
             if h > 0:
@@ -1810,8 +1796,12 @@ class RAM(PropagationModel):
                 dz_opt = float(h / n_layers)
             else:
                 dz_opt = dz_floor
-            reason = ('shear-mode stability (λ_s × 0.55)' if cs_min > 0
-                      else 'acoustic stability (λ_p / 16)')
+            if cs_min > 0:
+                reason = 'shear-mode stability (λ_s × 0.55)'
+            elif kind == 'mpiramS':
+                reason = 'mpiramS runtime cap (λ_p / 16)'
+            else:
+                reason = 'acoustic stability (λ_p / 16)'
             warnings.warn(
                 f"RAM:{kind}: raised dz from {dz_pre:.3f} m to "
                 f"{dz_opt:.3f} m for {reason} "
@@ -1893,7 +1883,7 @@ class RAM(PropagationModel):
                 _add(getattr(hs, 'sound_speed', None))
         c_min = min(speeds)
         wavelength = c_min / max(freq, 1.0)
-        target = float(np.clip(wavelength / 16.0, 0.05, 1.0))
+        target = float(np.clip(wavelength / LAMBDA_PER_DZ_FLOOR, 0.05, 1.0))
         # Snap dz so the seafloor lands on a depth grid point. PE
         # accuracy degrades sharply when dz does NOT divide the water
         # depth (the seafloor interface gets smeared between adjacent
@@ -1919,16 +1909,16 @@ class RAM(PropagationModel):
         """
         Run in narrowband TL mode.
 
-        Sets Q to a very large value so bandwidth -> 0 and nf~3.
-        All receiver ranges are passed to mpiramS at once.
+        Honours ``self.Q`` / ``self.T`` (after any per-call ``run(Q=…, T=…)``
+        override applied via ``_resolve_overrides``). For a single-frequency
+        TL grid the conventional choice is a very large Q so the bandwidth
+        collapses, but the user is free to widen it.
         """
-        import time
         start_time = time.time()
 
-        self._warn_on_multi_source_or_freq(source)
 
-        freq = float(source.frequency[0])
-        zsrc = float(source.depth[0])
+        freq = float(source.frequencies[0])
+        zsrc = float(source.depths[0])
         ranges = receiver.ranges
         rmax = float(np.max(ranges))
 
@@ -1945,12 +1935,12 @@ class RAM(PropagationModel):
             if dz is None:
                 dz = dz_auto
 
-        self._log(f"RAM:mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
+        # COHERENT_TL collapses the mpiramS broadband window to ~one bin
+        # (Q→∞, T=1) unless the user widened it via Q=/T=.
+        Q_tl = 1e6 if self.Q is None else float(self.Q)
+        T_tl = 1.0 if self.T is None else float(self.T)
+        self._log(f"RAM:mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s", level='info')
         self._log(f"  Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
-
-        # Use very large Q for narrowband (single frequency)
-        Q_tl = 1e6
-        T_tl = 1.0  # Short time window
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2113,7 +2103,7 @@ class RAM(PropagationModel):
                 **self._result_kwargs(
                     source,
                     backend='mpiramS',
-                    frequency=float(freq),
+                    frequencies=float(freq),
                     dr=float(dr), dz=float(dz),
                     c0=self._resolve_c0(env),
                 ),
@@ -2129,13 +2119,11 @@ class RAM(PropagationModel):
 
         Returns complex transfer function psi(depth, frequency, range).
         """
-        import time
         start_time = time.time()
 
-        self._warn_on_multi_source_or_freq(source)
 
-        freq = float(source.frequency[0])
-        zsrc = float(source.depth[0])
+        freq = float(source.frequencies[0])
+        zsrc = float(source.depths[0])
         ranges = receiver.ranges
         rmax = float(np.max(ranges))
 
@@ -2150,8 +2138,10 @@ class RAM(PropagationModel):
             if dz is None:
                 dz = dz_auto
 
-        self._log(f"RAM:mpiramS (broadband): fc={freq:.1f} Hz, Q={self.Q}, T={self.T}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
-        self._log(f"  Bandwidth: {freq/self.Q:.2f} Hz", level='info')
+        Q_bb = 2.0 if self.Q is None else float(self.Q)
+        T_bb = 10.0 if self.T is None else float(self.T)
+        self._log(f"RAM:mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
+        self._log(f"  Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2171,8 +2161,8 @@ class RAM(PropagationModel):
             write_inpe(
                 filepath=work_dir / 'in.pe',
                 fc=freq,
-                Q=self.Q,
-                T=self.T,
+                Q=Q_bb,
+                T=T_bb,
                 zsrc=zsrc,
                 deltaz=dz,
                 deltar=dr,
@@ -2214,7 +2204,21 @@ class RAM(PropagationModel):
             psif = result['psif']  # (nzo, nf, nr)
             rout = result['rout']  # (nr,)
             zg = result['zg']
-            scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(rout)
+            # ``scale`` divides by sqrt(rout); rout=0 (mpiramS sometimes
+            # emits a zero-range bin) would NaN the entire column. Mirror
+            # the _run_tl clip+warn pattern.
+            rout_safe = np.asarray(rout, dtype=np.float64).copy()
+            if rout_safe.size > 0 and np.any(rout_safe <= 0.0):
+                clip_to = float(dr) if dr and dr > 0 else 1.0
+                warnings.warn(
+                    f"RAM broadband: rout contained non-positive values "
+                    f"(min={float(rout_safe.min())}); clipping to "
+                    f"{clip_to} for the 1/sqrt(r) scaling. The returned "
+                    f"`ranges` array is not modified.",
+                    UserWarning, stacklevel=2,
+                )
+                rout_safe[rout_safe <= 0.0] = clip_to
+            scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(rout_safe)
             # Broadcast: psif is (nzo, nf, nr), scale is (nr,)
             pressure = np.conj(psif) * scale[np.newaxis, np.newaxis, :]
 
@@ -2305,7 +2309,6 @@ class RAM(PropagationModel):
 
         # Verify output exists
         if not (work_dir / 'psif.dat').exists():
-            from uacpy.core.exceptions import ModelExecutionError
             raise ModelExecutionError(
                 self.model_name,
                 return_code=result.returncode,

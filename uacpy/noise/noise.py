@@ -257,13 +257,11 @@ class WenzNoise:
         self.shipping   = shipping
         self.turbulence = turbulence
         self.rain       = rain
-        self.total = 10 * _np.log10(
-            10 ** (thermal / 10)
-            + 10 ** (wind / 10)
-            + 10 ** (shipping / 10)
-            + 10 ** (turbulence / 10)
-            + 10 ** (rain / 10)
-        )
+        # Sum incoherent dB sources via logsumexp to avoid 10**(x/10) overflow
+        # on very loud components (e.g. heavy rain at high frequency).
+        ln10 = _np.log(10.0)
+        stack = _np.stack([thermal, wind, shipping, turbulence, rain])
+        self.total = (10.0 / ln10) * _np.logaddexp.reduce(stack * (ln10 / 10.0), axis=0)
 
     # ── Convenience ────────────────────────────────────────────────────
 

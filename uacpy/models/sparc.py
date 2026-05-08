@@ -19,7 +19,8 @@ from uacpy.core.constants import (
     parse_ssp_type, parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError
+from uacpy.core.exceptions import ModelExecutionError, UnsupportedFeatureError, ExecutableNotFoundError
+from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
 from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
@@ -121,7 +122,7 @@ class SPARC(PropagationModel):
     >>> # Create simple environment
     >>> env = uacpy.Environment(depth=100.0, sound_speed=1500.0)
     >>>
-    >>> source = uacpy.Source(depth=50.0, frequency=100.0)
+    >>> source = uacpy.Source(depths=50.0, frequencies=100.0)
     >>> receiver = uacpy.Receiver(
     ...     depths=[50.0],  # Single depth for SPARC
     ...     ranges=np.linspace(100, 5000, 50)
@@ -146,7 +147,7 @@ class SPARC(PropagationModel):
         t_start: float = -0.1,
         t_mult: float = 0.999,
         max_depths: int = 20,
-        rmax_multiplier: float = 1.0001,
+        rmax_safety_margin: float = 1.0001,
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
@@ -188,11 +189,12 @@ class SPARC(PropagationModel):
             Integration time multiplier. Default: 0.999.
         max_depths : int, optional
             Maximum number of depths before warning. Default: 20.
-        rmax_multiplier : float, optional
-            Multiplicative margin on SPARC's RMax so it strictly exceeds
-            the largest receiver range (absorbs float roundoff when the
-            user asks for ranges equal to the max). Default: 1.0001
-            (0.01% margin).
+        rmax_safety_margin : float, optional
+            Multiplicative round-off margin on SPARC's RMax so it strictly
+            exceeds the largest receiver range (absorbs float roundoff when
+            the user asks for ranges equal to the max). Default: 1.0001
+            (0.01% margin). Distinct from Scooter's ``rmax_multiplier``
+            which doubles the simulated range to absorb wraparound.
         volume_attenuation : str, optional
             'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
         francois_garrison_params : tuple, optional
@@ -207,7 +209,7 @@ class SPARC(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            **kwargs,
+            timeout=timeout, **kwargs,
         )
 
         self.c_low = c_low
@@ -226,11 +228,10 @@ class SPARC(PropagationModel):
         self.t_start = t_start
         self.t_mult = t_mult
         self.max_depths = max_depths
-        self.rmax_multiplier = rmax_multiplier
+        self.rmax_safety_margin = rmax_safety_margin
         self.volume_attenuation = volume_attenuation
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
-        self.timeout = timeout
 
         # Declare supported modes for SPARC
         self._supported_modes = [
@@ -251,6 +252,9 @@ class SPARC(PropagationModel):
         else:
             self.executable = Path(executable)
 
+        if not self.executable.exists():
+            raise ExecutableNotFoundError('SPARC', str(self.executable))
+
         # Inherits base validation (PropagationModel._validate_volume_attenuation_params)
         self._validate_volume_attenuation_params()
 
@@ -267,7 +271,7 @@ class SPARC(PropagationModel):
         t_start=_UNSET,
         t_mult=_UNSET,
         max_depths=_UNSET,
-        rmax_multiplier=_UNSET,
+        rmax_safety_margin=_UNSET,
         c_low=_UNSET,
         c_high=_UNSET,
         n_mesh=_UNSET,
@@ -333,13 +337,15 @@ class SPARC(PropagationModel):
                 "TIME_SERIES-capable models."
             )
 
+        # Mode-mismatch guard: t_max/t_start/n_t_out/rmax_safety_margin
+        # only apply to TIME_SERIES paths.
         self._warn_unknown_kwargs(kwargs)
 
         # Apply per-call overrides (temporarily sets self.* for internal methods)
         _overrides = _resolve_overrides(
             self, output_mode=output_mode, pulse_type=pulse_type,
             n_t_out=n_t_out, t_max=t_max, t_start=t_start, t_mult=t_mult,
-            max_depths=max_depths, rmax_multiplier=rmax_multiplier,
+            max_depths=max_depths, rmax_safety_margin=rmax_safety_margin,
             c_low=c_low, c_high=c_high, n_mesh=n_mesh,
             roughness=roughness, volume_attenuation=volume_attenuation,
             timeout=timeout,
@@ -369,14 +375,14 @@ class SPARC(PropagationModel):
                 ],
             )
 
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         fm = self._setup_file_manager()
         self.file_manager = fm
 
         try:
             base_name = 'model'
-            freq = source.frequency[0]
+            freq = source.frequencies[0]
 
             if self.output_mode == 'R':
                 # SPARC computes horizontal arrays (one depth at a time)
@@ -415,7 +421,7 @@ class SPARC(PropagationModel):
                             **self._result_kwargs(
                                 source,
                                 backend='sparc.exe',
-                                frequency=freq,
+                                frequencies=freq,
                                 phase_reference='time_domain_native',
                                 dt=float(dt),
                                 fs=(1.0 / float(dt)) if dt else float('nan'),
@@ -489,7 +495,7 @@ class SPARC(PropagationModel):
                             **self._result_kwargs(
                                 source,
                                 backend='sparc.exe',
-                                frequency=freq,
+                                frequencies=freq,
                                 phase_reference='time_domain_native',
                                 dt=float(dt),
                                 fs=(1.0 / float(dt)) if dt else float('nan'),
@@ -510,7 +516,7 @@ class SPARC(PropagationModel):
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
-                        frequency=freq,
+                        frequencies=freq,
                         conversion_method='fft',
                         output_mode='R',
                         n_depth_runs=len(receiver.depths),
@@ -576,7 +582,7 @@ class SPARC(PropagationModel):
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
-                        frequency=freq,
+                        frequencies=freq,
                         conversion_method='fft',
                         output_mode='D',
                         n_range_runs=len(receiver.ranges),
@@ -588,8 +594,6 @@ class SPARC(PropagationModel):
                 # SPARC outputs .grn file holding G(itout, irz, ik). To
                 # extract steady-state TL at the source frequency we
                 # time-FFT then Hankel-transform (see grn_reader docstring).
-                from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
-
                 self._log("Computing snapshot (wavenumber domain)...")
 
                 # Write environment file
@@ -622,14 +626,15 @@ class SPARC(PropagationModel):
                 result = sparc_snapshot_to_field(
                     grn_data, receiver.ranges, frequency=freq,
                 )
-                result.metadata.update(self._build_base_metadata(
-                    source,
+                result.tag(
+                    model=self.model_name,
                     backend='sparc.exe',
-                    frequency=freq,
+                    source_depths=source.depths,
+                    frequencies=freq,
                     phase_reference='travelling_wave',
                     output_mode='S',
                     note='Snapshot mode: time-FFT then Hankel transform',
-                ))
+                )
 
             else:
                 raise ValueError(
@@ -691,7 +696,7 @@ class SPARC(PropagationModel):
             # SPARC-specific header with output mode in TopOpt
             # Write title, frequency, media count
             f.write(f"'{env.name}'\n")
-            f.write(f"{source.frequency[0]:.6f}\n")
+            f.write(f"{source.frequencies[0]:.6f}\n")
             f.write("1\n")
 
             # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
@@ -740,7 +745,7 @@ class SPARC(PropagationModel):
             # RMax must strictly exceed the largest receiver range, so pad by
             # a small multiplicative margin (default 1 ppm) to absorb float
             # roundoff when the user requests ranges exactly at the max.
-            rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_multiplier
+            rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_safety_margin
             f.write(f"{rmax:.6f}\n")
 
             # Source and receiver depths. Use the shared ATEnvWriter so
@@ -771,7 +776,7 @@ class SPARC(PropagationModel):
             # One-octave (freq/2 to freq*2) is the sweet spot: enough
             # bandwidth that the pulse retains structure, yet bounded Nk.
             # Callers can override via kwargs for special analyses.
-            freq = source.frequency[0]
+            freq = source.frequencies[0]
             f_min = kwargs.get('f_min', max(freq / 2.0, 0.1))
             f_max = kwargs.get('f_max', freq * 2.0)
             f.write(f"{f_min:.6f} {f_max:.6f}\n")
@@ -811,8 +816,6 @@ class SPARC(PropagationModel):
         appends the ``.prt`` tail to the raised ``ModelExecutionError`` for
         easier diagnosis. Override via the ``timeout`` constructor kwarg.
         """
-        from uacpy.core.exceptions import ModelExecutionError
-
         try:
             result = self._run_subprocess(
                 [str(self.executable), base_name],
@@ -826,15 +829,3 @@ class SPARC(PropagationModel):
         if self.verbose and result.stdout:
             self._log(f"SPARC output:\n{result.stdout}", level='debug')
 
-    @staticmethod
-    def _attach_prt_tail(exc, work_dir, base_name):
-        """Append the last 2000 chars of the .prt file to ``exc``'s message."""
-        prt_file = Path(work_dir) / f"{base_name}.prt"
-        if prt_file.exists():
-            try:
-                tail = prt_file.read_text()[-2000:]
-                exc.args = (
-                    f"{exc.args[0] if exc.args else exc}\n\n.prt tail:\n{tail}",
-                ) + exc.args[1:]
-            except Exception:
-                pass

@@ -25,7 +25,7 @@ class TestRAMAdvancedParameters:
 
     @pytest.fixture
     def ram_source(self):
-        return Source(depth=50.0, frequency=50.0)
+        return Source(depths=50.0, frequencies=50.0)
 
     @pytest.fixture
     def ram_receiver(self):
@@ -71,3 +71,53 @@ class TestRAMAdvancedParameters:
         )
         assert result.field_type == 'tl'
         assert np.all(np.isfinite(result.data))
+
+    def test_ram_tl_honors_constructor_Q_T(
+        self, ram_env, ram_source, ram_receiver, monkeypatch,
+    ):
+        """RAM(Q=…, T=…) values reach the in.pe file written for COHERENT_TL.
+
+        Regression for the hardcoded ``Q_tl=1e6, T_tl=1.0`` in ``_run_tl``.
+        """
+        from uacpy.io import mpirams_writer as mpw
+        from uacpy.models import ram as ram_mod
+        captured = {}
+
+        def fake_write_inpe(*args, **kwargs):
+            captured['Q'] = kwargs['Q']
+            captured['T'] = kwargs['T']
+            raise RuntimeError("stop after writing in.pe")
+
+        monkeypatch.setattr(mpw, 'write_inpe', fake_write_inpe)
+        monkeypatch.setattr(ram_mod, 'write_inpe', fake_write_inpe)
+
+        ram = RAM(Q=4.0, T=20.0, verbose=False)
+        with pytest.raises(RuntimeError, match="stop after writing in.pe"):
+            ram.compute_tl(env=ram_env, source=ram_source, receiver=ram_receiver)
+        assert captured['Q'] == 4.0
+        assert captured['T'] == 20.0
+
+    def test_ram_tl_run_kwargs_override_constructor_Q_T(
+        self, ram_env, ram_source, ram_receiver, monkeypatch,
+    ):
+        """run(Q=…, T=…) overrides constructor values."""
+        from uacpy.io import mpirams_writer as mpw
+        from uacpy.models import ram as ram_mod
+        captured = {}
+
+        def fake_write_inpe(*args, **kwargs):
+            captured['Q'] = kwargs['Q']
+            captured['T'] = kwargs['T']
+            raise RuntimeError("stop after writing in.pe")
+
+        monkeypatch.setattr(mpw, 'write_inpe', fake_write_inpe)
+        monkeypatch.setattr(ram_mod, 'write_inpe', fake_write_inpe)
+
+        ram = RAM(Q=4.0, T=20.0, verbose=False)
+        with pytest.raises(RuntimeError, match="stop after writing in.pe"):
+            ram.run(
+                env=ram_env, source=ram_source, receiver=ram_receiver,
+                Q=99.0, T=33.0,
+            )
+        assert captured['Q'] == 99.0
+        assert captured['T'] == 33.0

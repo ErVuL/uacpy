@@ -25,7 +25,7 @@ from uacpy.core.environment import (
 
 def make_source_receiver():
     """Standard source/receiver for all tests."""
-    source = uacpy.Source(frequency=200, depth=25)
+    source = uacpy.Source(frequencies=200, depths=25)
     receiver = uacpy.Receiver(
         depths=np.linspace(1, 95, 30),
         ranges=np.linspace(500, 5000, 40),

@@ -6,14 +6,14 @@ Available modules:
 - quickplot: Ultra-simple plotting functions for rapid visualization
 - style: Professional matplotlib styling configuration
 
-The uacpy rcParams are applied automatically on import. Call
-``uacpy.visualization.style.apply_professional_style()`` again after your
-own ``mpl.rcParams`` tweaks to reset to the uacpy defaults, or call
-``matplotlib.rcdefaults()`` to revert to matplotlib's defaults.
+The uacpy rcParams are an opt-in. To use them, call
+``uacpy.visualization.style.apply_professional_style()`` yourself once at
+the top of your script. Importing :mod:`uacpy.visualization` does **not**
+mutate ``matplotlib.rcParams``.
 """
 
 from uacpy.visualization import style
-style.apply_professional_style()
+from uacpy.visualization.style import apply_professional_style
 
 from uacpy.visualization.plots import (
     plot_transmission_loss,
@@ -46,6 +46,7 @@ from uacpy.visualization.plots import (
     plot_mode_wavenumbers,
     plot_dispersion_curves,
     plot_transfer_function,
+    plot_transfer_function_slice,
     plot_phase_field,
     plot_covariance,
     plot_replicas,
@@ -85,9 +86,11 @@ __all__ = [
     'plot_mode_wavenumbers',
     'plot_dispersion_curves',
     'plot_transfer_function',
+    'plot_transfer_function_slice',
     'plot_phase_field',
     'plot_covariance',
     'plot_replicas',
     'plot_tl_difference',
     'quickplot',
+    'apply_professional_style',
 ]

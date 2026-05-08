@@ -12,6 +12,8 @@ This is a key advantage of ray/beam models: broadband results from a
 single run, since ray travel times are frequency-independent (geometric).
 """
 
+import copy
+import shutil
 import warnings
 import numpy as np
 from pathlib import Path
@@ -27,8 +29,11 @@ from uacpy.core.results import Result, TimeSeriesField, TransferFunction
 from uacpy.core.constants import (
     AttenuationUnits, DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.io.bellhop_writer import write_bellhop_env_file
-from uacpy.io.output_reader import read_shd_file, read_arr_file, read_ray_file
+from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +151,35 @@ def delayandsum(
 
     time_vector = t_start + np.arange(nrts) * deltat
     return rts, time_vector
+
+
+def _validate_arrivals_format(fmt: str) -> None:
+    """Reject any arrivals_format other than ``'ascii'``.
+
+    Bellhop's ``'binary'`` (FORTRAN unformatted) output is not parseable
+    by uacpy's arrivals reader.
+    """
+    if fmt == 'binary':
+        raise ConfigurationError(
+            "Bellhop's binary arrivals format ('a' / FORTRAN unformatted) "
+            "is not currently parseable by uacpy's arrivals reader. "
+            "Use arrivals_format='ascii' instead."
+        )
+    if fmt != 'ascii':
+        raise ValueError(
+            f"arrivals_format must be 'ascii', got {fmt!r}"
+        )
+
+
+_RUN_MODE_TO_BELLHOP_TYPE = {
+    RunMode.COHERENT_TL: 'C',
+    RunMode.INCOHERENT_TL: 'I',
+    RunMode.SEMICOHERENT_TL: 'S',
+    RunMode.RAYS: 'R',
+    RunMode.EIGENRAYS: 'E',
+    RunMode.ARRIVALS: 'A',
+    RunMode.TIME_SERIES: 'A',  # synthesised from arrivals
+}
 
 
 class Bellhop(PropagationModel):
@@ -311,6 +345,7 @@ class Bellhop(PropagationModel):
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = True
         self._supports_elastic_media = True
+        self._supports_multi_source_depth = True
         # Bellhop users can synthesise a reflection-coefficient table via
         # run_with_bounce() instead of switching models for layered bottoms.
         self._unsupported_env_alternatives['layered_bottom'] = (
@@ -347,11 +382,7 @@ class Bellhop(PropagationModel):
         self.n_image = int(n_image)
         self.ib_win = int(ib_win)
         self.component = component
-        if arrivals_format not in ('ascii', 'binary'):
-            raise ValueError(
-                f"arrivals_format must be 'ascii' or 'binary', got "
-                f"{arrivals_format!r}"
-            )
+        _validate_arrivals_format(arrivals_format)
         self.arrivals_format = arrivals_format
         self.version = "unknown"
 
@@ -362,7 +393,6 @@ class Bellhop(PropagationModel):
             self.version = "custom"
 
         if not self.executable.exists():
-            from uacpy.core.exceptions import ExecutableNotFoundError
             raise ExecutableNotFoundError("Bellhop", str(self.executable))
 
         if verbose and self.version != "custom":
@@ -462,7 +492,6 @@ class Bellhop(PropagationModel):
             Simulation results
         """
         # ── Resolve run_mode → internal single-char Bellhop code ────────
-        from uacpy.core.model_utils import ParameterMapper
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
 
@@ -485,21 +514,13 @@ class Bellhop(PropagationModel):
                 sample_rate=sample_rate,
                 **kwargs,
             )
-        run_type = ParameterMapper.map_run_mode_to_bellhop(run_mode)
+        run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
-        # ── arrivals_format: 'A' (ASCII) vs 'a' (binary) ────────────────
-        # ParameterMapper returns 'A' for RunMode.ARRIVALS; swap to 'a'
-        # when the user requests binary output.
         arr_fmt = (
             arrivals_format if arrivals_format is not _UNSET
             else self.arrivals_format
         )
-        if arr_fmt not in ('ascii', 'binary'):
-            raise ValueError(
-                f"arrivals_format must be 'ascii' or 'binary', got {arr_fmt!r}"
-            )
-        if run_mode == RunMode.ARRIVALS and arr_fmt == 'binary':
-            run_type = 'a'
+        _validate_arrivals_format(arr_fmt)
 
         # ── Per-call overrides (shared primitive) ───────────────────────
         override_kwargs = dict(
@@ -520,7 +541,7 @@ class Bellhop(PropagationModel):
             )
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         # Irregular receiver grid ('I' in RunType position 5) requires the
         # receiver.depths and receiver.ranges arrays to have the same
@@ -533,7 +554,6 @@ class Bellhop(PropagationModel):
             and str(eff_grid_type).upper() == 'I'
             and len(receiver.depths) != len(receiver.ranges)
         ):
-            from uacpy.core.exceptions import ConfigurationError
             raise ConfigurationError(
                 f"Bellhop grid_type='I' (irregular) requires "
                 f"len(receiver.depths) == len(receiver.ranges); got "
@@ -572,7 +592,6 @@ class Bellhop(PropagationModel):
                 # (<base>.sbp) when RunType position 3 is '*'.
                 use_sbp = False
                 if sbp_spec is not None:
-                    import shutil
                     sbp_dest = env_file.with_suffix('.sbp')
                     if isinstance(sbp_spec, (str, Path)):
                         src = Path(sbp_spec)
@@ -658,11 +677,24 @@ class Bellhop(PropagationModel):
                     self._log(f"Output file not found: {output_file}", level='error')
                     raise FileNotFoundError(f"Output file not found: {output_file}")
                 result = reader(output_file)
+                if rt in ('R', 'E'):
+                    # The .ray file format is identical for fan and
+                    # eigenray runs; only the wrapper knows which one
+                    # produced it. Same goes for the receiver geometry.
+                    result.is_eigen = (rt == 'E')
+                    result.receiver_depths = np.atleast_1d(
+                        np.asarray(receiver.depths, dtype=float)
+                    )
+                    result.receiver_ranges = np.atleast_1d(
+                        np.asarray(receiver.ranges, dtype=float)
+                    )
+                    result.metadata['receiver_depths'] = result.receiver_depths
+                    result.metadata['receiver_ranges'] = result.receiver_ranges
                 result.tag(
                     model=self.model_name,
                     backend=self.model_name.lower(),
-                    source_depths=source.depth,
-                    frequency=float(np.atleast_1d(source.frequency)[0]),
+                    source_depths=source.depths,
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
                     phase_reference='travelling_wave',
                 )
 
@@ -673,65 +705,14 @@ class Bellhop(PropagationModel):
                 if fm.cleanup:
                     fm.cleanup_work_dir()
 
-    def _compute_tl_impl(self, env, source, receiver, **kwargs):
-        """Bellhop-specific TL computation.
-
-        ``run_mode`` must be a :class:`RunMode` member. If absent defaults to
-        :attr:`RunMode.COHERENT_TL`; any non-TL mode is rejected.
-        """
-        run_mode = kwargs.pop('run_mode', RunMode.COHERENT_TL)
-        if not isinstance(run_mode, RunMode):
-            raise TypeError(
-                f"run_mode must be a RunMode enum member, got "
-                f"{type(run_mode).__name__}: {run_mode!r}"
-            )
-        if run_mode not in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
-                            RunMode.SEMICOHERENT_TL):
-            raise ValueError(
-                f"compute_tl requires a TL RunMode "
-                f"(COHERENT_TL/INCOHERENT_TL/SEMICOHERENT_TL); got {run_mode}."
-            )
-        return self.run(env, source, receiver, run_mode=run_mode, **kwargs)
-
-    def find_eigenrays(
-        self,
-        env: Environment,
-        source: Source,
-        range_m: float,
-        depth_m: float,
-        tolerance_m: Optional[float] = None,
-        max_rays: Optional[int] = None,
-        truncate: bool = True,
-        **run_kwargs,
-    ):
-        """Run Bellhop in EIGENRAYS mode and return rays arriving at one point.
-
-        Convenience wrapper around ``run(... run_mode=RunMode.EIGENRAYS)``
-        that targets a single ``(range_m, depth_m)`` point and post-filters
-        the result with :meth:`Rays.at_receiver` to keep only rays whose
-        closest-approach distance is within ``tolerance_m`` (default: one
-        acoustic wavelength). Returned rays are sorted by miss distance and
-        truncated at the closest-approach point so they visibly terminate
-        on the receiver. ``max_rays`` caps the count after sorting.
-        """
-        from uacpy.core.receiver import Receiver as _Recv
-        rcv = _Recv(depths=np.array([float(depth_m)]),
-                    ranges=np.array([float(range_m)]))
-        result = self.run(env, source, rcv,
-                          run_mode=RunMode.EIGENRAYS, **run_kwargs)
-        return result.at_receiver(
-            range_m=range_m, depth_m=depth_m,
-            tolerance_m=tolerance_m, max_rays=max_rays, truncate=truncate,
-        )
-
     def run_with_bounce(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        cmin: float = DEFAULT_C_MIN,
-        cmax: float = DEFAULT_C_MAX,
-        rmax_km: float = 10.0,
+        c_low: float = DEFAULT_C_MIN,
+        c_high: float = DEFAULT_C_MAX,
+        rmax_m: float = 10000.0,
         **kwargs
     ) -> Result:
         """
@@ -751,12 +732,12 @@ class Bellhop(PropagationModel):
             Acoustic source
         receiver : Receiver
             Receiver array
-        cmin : float, optional
+        c_low : float, optional
             Minimum phase velocity for reflection table (m/s). Default 1400.
-        cmax : float, optional
+        c_high : float, optional
             Maximum phase velocity for reflection table (m/s). Default 10000.
-        rmax_km : float, optional
-            Maximum range for angular resolution (km). Default 10.
+        rmax_m : float, optional
+            Maximum range for angular resolution (m). Default 10000.
         **kwargs
             Additional parameters passed to Bellhop.run()
 
@@ -766,14 +747,18 @@ class Bellhop(PropagationModel):
             Bellhop simulation results using reflection coefficients
         """
         from uacpy.models.bounce import Bounce
-        import copy
 
         self._log("Running BOUNCE to compute reflection coefficients...", level='info')
-        bounce = Bounce(verbose=self.verbose)
-        bounce_result = bounce.run(
-            env, source, receiver,
-            cmin=cmin, cmax=cmax, rmax_km=rmax_km
+        bounce = Bounce(
+            verbose=self.verbose,
+            c_low=c_low,
+            c_high=c_high,
+            rmax_m=rmax_m,
+            volume_attenuation=self.volume_attenuation,
+            francois_garrison_params=self.francois_garrison_params,
+            bio_layers=self.bio_layers,
         )
+        bounce_result = bounce.run(env, source, receiver)
 
         brc_file = bounce_result.metadata.get('brc_file')
         if not brc_file:
@@ -784,13 +769,14 @@ class Bellhop(PropagationModel):
         env_bounce.bottom = BoundaryProperties(
             acoustic_type='file',
             reflection_file=brc_file,
-            reflection_cmin=cmin,
-            reflection_cmax=cmax,
-            reflection_rmax_km=rmax_km,
+            reflection_cmin=c_low,
+            reflection_cmax=c_high,
+            reflection_rmax_m=rmax_m / 1000.0,
             depth=env.bottom.depth
         )
         env_bounce.bottom_rd = None
         env_bounce.bottom_layered = None
+        env_bounce.bottom_rd_layered = None
 
         self._log("Running Bellhop with BOUNCE reflection coefficients...", level='info')
         return self.run(env_bounce, source, receiver, **kwargs)
@@ -817,12 +803,14 @@ class Bellhop(PropagationModel):
         run arrivals at center frequency, then either:
 
         1. **Without source_waveform**: build frequency-domain transfer function
-           H(f) from arrivals → returns Field(field_type='transfer_function').
-           Use field.to_time_domain() for subsequent IFFT.
+           H(f) from arrivals → returns ``TransferFunction``. Use
+           ``TransferFunction.to_time_trace()`` (raw IFFT) or
+           ``TransferFunction.synthesize_time_series(source_waveform, sample_rate)``
+           (windowed convolution) downstream.
 
         2. **With source_waveform**: perform delay-and-sum convolution of the
            time-domain waveform with each arrival (amplitude, phase, delay)
-           → returns Field(field_type='time_series') directly.
+           → returns :class:`TimeSeriesField` directly.
 
         This is a key advantage of ray tracing: the ray geometry (paths, travel
         times) is frequency-independent, so a single arrivals calculation at fc
@@ -833,7 +821,7 @@ class Bellhop(PropagationModel):
         env : Environment
             Ocean environment
         source : Source
-            Acoustic source (source.frequency is the center frequency)
+            Acoustic source (source.frequencies is the center frequency)
         receiver : Receiver
             Receiver array
         frequencies : ndarray, optional
@@ -867,13 +855,14 @@ class Bellhop(PropagationModel):
         Returns
         -------
         result : Result
-            If source_waveform is None: field_type='transfer_function'
-                (call field.to_time_domain() to get time series)
-            If source_waveform is provided: field_type='time_series'
-                with data shape (n_depths, n_samples, n_ranges) and
+            If source_waveform is None: ``TransferFunction``
+                (call ``.to_time_trace()`` or
+                ``.synthesize_time_series(...)`` to get a time series).
+            If source_waveform is provided: ``TimeSeriesField``
+                with data shape (n_depths, n_ranges, n_samples) and
                 metadata containing 'time', 'dt', 'fs'.
         """
-        fc = float(np.atleast_1d(source.frequency)[0])
+        fc = float(np.atleast_1d(source.frequencies)[0])
 
         # Step 1: Run Bellhop in arrivals mode
         self._log("Broadband mode: running Bellhop in arrivals mode...", level='info')
@@ -894,12 +883,6 @@ class Bellhop(PropagationModel):
                 raise ValueError(
                     "sample_rate is required when source_waveform is provided"
                 )
-
-            # Pop the legacy single-cell selectors but ignore them — the
-            # full receiver grid is always populated for shape uniformity
-            # with RAM / Scooter / KrakenField / OASP.
-            kwargs.pop('depth', None)
-            kwargs.pop('range_m', None)
 
             self._log(
                 f"Broadband: delay-and-sum over {nrd}×{nrr} receiver grid",
@@ -947,7 +930,7 @@ class Bellhop(PropagationModel):
                 model=self.model_name,
                 backend='bellhop',
                 source_depths=sz,
-                frequency=fc,
+                frequencies=fc,
                 metadata={
                     'dt': 1.0 / sample_rate,
                     'fs': sample_rate,
@@ -1082,22 +1065,11 @@ class Bellhop(PropagationModel):
         file (up to 2000 chars) to the raised ``ModelExecutionError`` so the
         diagnostic surface to the user instead of a blank stderr.
         """
-        from uacpy.core.exceptions import ModelExecutionError
-
         cmd = self._build_command(base_name)
         try:
             result = self._run_subprocess(cmd, cwd=work_dir)
         except ModelExecutionError as exc:
-            prt_file = Path(work_dir) / f"{base_name}.prt"
-            if prt_file.exists():
-                try:
-                    tail = prt_file.read_text()[-2000:]
-                    exc.args = (
-                        f"{exc.args[0] if exc.args else exc}\n\n"
-                        f".prt tail:\n{tail}",
-                    ) + exc.args[1:]
-                except Exception:
-                    pass
+            self._attach_prt_tail(exc, work_dir, base_name)
             raise
 
         if self.verbose and result.stdout:

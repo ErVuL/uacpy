@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 17: Attenuation Models Comparison
+EXAMPLE 12: Attenuation Models Comparison
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -22,7 +22,7 @@ SCENARIOS:
     Scenario A: Model Comparison
     ────────────────────────────
     - Compare Thorp and Francois-Garrison over full frequency range
-    - Standard conditions (T=10°C, S=35 ppt, pH=8, depth=100m)
+    - Standard conditions (T=10°C, S=35 ppt, pH=8, depths=100m)
     - Identify applicable frequency ranges
     - Show differences between models
 
@@ -414,7 +414,7 @@ def main():
     Run all attenuation model demonstrations.
     """
     print("\n" + "═"*80)
-    print("EXAMPLE 17: Attenuation Models Comparison")
+    print("EXAMPLE 12: Attenuation Models Comparison")
     print("═"*80)
     print("\nThis example demonstrates:")
     print("  • Attenuation model comparison (Thorp, Francois-Garrison)")
@@ -429,7 +429,7 @@ def main():
 
     # Summary
     print("\n" + "═"*80)
-    print("EXAMPLE 17 COMPLETE")
+    print("EXAMPLE 12 COMPLETE")
     print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Attenuation increases with frequency (roughly f²)")

@@ -203,7 +203,7 @@ class TestOASR:
         oasr = OASR(verbose=False)
         result = oasr.run(
             env=oasr_env, source=source, receiver=receiver,
-            angle_min=0.0, angle_max=90.0, n_angles=91,
+            angles=np.linspace(0.0, 90.0, 91),
         )
 
         assert isinstance(result, ReflectionCoefficient)
@@ -223,9 +223,7 @@ class TestOASR:
             env=oasr_env,
             source=source,
             receiver=receiver,
-            angle_min=0.0,
-            angle_max=90.0,
-            n_angles=19  # 5-degree steps
+            angles=np.linspace(0.0, 90.0, 19),
         )
 
         assert result.field_type == 'reflection_coefficients'
@@ -260,7 +258,7 @@ class TestOASP:
 
     @pytest.fixture
     def source(self):
-        return Source(depth=50.0, frequency=50.0)  # Lower frequency for PE
+        return Source(depths=50.0, frequencies=50.0)  # Lower frequency for PE
 
     @pytest.fixture
     def receiver(self):
@@ -278,13 +276,14 @@ class TestOASP:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oasp_range_dependent(self, oasp_env, source, receiver):
-        """Test OASP range-dependent propagation."""
+        """OASP collapses RD bathymetry; verify the path still produces TL."""
         oasp = OASP(verbose=False)
-        result = oasp.compute_tl(
-            env=oasp_env,
-            source=source,
-            receiver=receiver
-        )
+        with pytest.warns(UserWarning, match="does not support range-dependent bathymetry"):
+            result = oasp.compute_tl(
+                env=oasp_env,
+                source=source,
+                receiver=receiver
+            )
 
         assert result.field_type == 'tl'
         assert result.shape[0] > 0  # Has depth dimension
@@ -297,17 +296,18 @@ class TestOASP:
         """OASP run_mode=BROADBAND returns a populated TransferFunction."""
         from uacpy.core.results import TransferFunction
         source = Source(
-            depth=50.0,
-            frequency=np.array([30.0, 50.0, 70.0]),
+            depths=50.0,
+            frequencies=np.array([30.0, 50.0, 70.0]),
         )
 
         oasp = OASP(verbose=False)
-        result = oasp.run(
-            env=oasp_env,
-            source=source,
-            receiver=receiver,
-            run_mode=RunMode.BROADBAND,
-        )
+        with pytest.warns(UserWarning, match="does not support range-dependent bathymetry"):
+            result = oasp.run(
+                env=oasp_env,
+                source=source,
+                receiver=receiver,
+                run_mode=RunMode.BROADBAND,
+            )
 
         assert isinstance(result, TransferFunction)
         assert result.field_type == 'transfer_function'
@@ -332,7 +332,7 @@ class TestOASESUnified:
             depth=100.0,
             sound_speed=1500.0
         )
-        source = Source(depth=50.0, frequency=100.0)
+        source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=[25.0, 50.0, 75.0],
             ranges=[1000.0, 3000.0]
@@ -363,3 +363,72 @@ def test_all_oases_models_importable():
         assert hasattr(model, 'run'), f"{name} missing run() method"
         assert hasattr(model, 'compute_tl') or name == 'OASN' or name == 'OASR', \
             f"{name} missing compute_tl() method"
+
+
+class TestOASESCovarianceReplicaDispatch:
+    """A4: OASES.run delegates COVARIANCE/REPLICA to OASN."""
+
+    @pytest.mark.requires_binary
+    def test_covariance_routes_to_oasn(self, monkeypatch):
+        oases = OASES(verbose=False)
+        seen = {}
+
+        def spy_run(self_, env, source, receiver, run_mode=None, **kwargs):
+            seen['target'] = self_.__class__.__name__
+            seen['run_mode'] = run_mode
+            raise RuntimeError("stop after dispatch")
+
+        monkeypatch.setattr(OASN, 'run', spy_run)
+
+        env = Environment(
+            name='oases_dispatch', depth=100.0, sound_speed=1500.0,
+        )
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(RuntimeError, match='stop after dispatch'):
+            oases.run(env, source, receiver, run_mode=RunMode.COVARIANCE)
+        assert seen['target'] == 'OASN'
+        assert seen['run_mode'] == RunMode.COVARIANCE
+
+    @pytest.mark.requires_binary
+    def test_replica_routes_to_oasn(self, monkeypatch):
+        oases = OASES(verbose=False)
+        seen = {}
+
+        def spy_run(self_, env, source, receiver, run_mode=None, **kwargs):
+            seen['target'] = self_.__class__.__name__
+            seen['run_mode'] = run_mode
+            raise RuntimeError("stop after dispatch")
+
+        monkeypatch.setattr(OASN, 'run', spy_run)
+
+        env = Environment(
+            name='oases_dispatch', depth=100.0, sound_speed=1500.0,
+        )
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(RuntimeError, match='stop after dispatch'):
+            oases.run(env, source, receiver, run_mode=RunMode.REPLICA)
+        assert seen['target'] == 'OASN'
+        assert seen['run_mode'] == RunMode.REPLICA
+
+
+class TestOASESConstructorPlumbing:
+    """B3: OASES forwards volume_attenuation / FG params to all sub-models."""
+
+    @pytest.mark.requires_binary
+    def test_volume_attenuation_propagates(self):
+        oases = OASES(
+            verbose=False,
+            volume_attenuation='F',
+            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+        )
+        for sub in (oases._oast, oases._oasn, oases._oasr, oases._oasp):
+            assert sub.volume_attenuation == 'F'
+            assert sub.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
+
+    @pytest.mark.requires_binary
+    def test_unknown_kwarg_rejected(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            OASES(verbose=False, angles=np.linspace(0, 90, 10))

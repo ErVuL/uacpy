@@ -31,8 +31,8 @@ from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError
-from uacpy.io.output_reader import read_reflection_coefficient
+from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError
+from uacpy.io.boundary_io import read_reflection_coefficient
 from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
 
 
@@ -78,13 +78,13 @@ class Bounce(PropagationModel):
     ...     shear_attenuation=0.5
     ... )
     >>> env = Environment(name="test", depth=100, bottom=bottom)
-    >>> source = Source(depth=50, frequency=50)
+    >>> source = Source(depths=50, frequencies=50)
     >>> receiver = Receiver(depths=np.array([50]))
     >>>
     >>> # Compute reflection coefficients
     >>> bounce = Bounce()
     >>> result = bounce.run(env, source, receiver,
-    ...                     cmin=1400, cmax=10000, rmax_km=10)
+    ...                     c_low=1400, c_high=10000, rmax_m=10000)
     >>>
     >>> # Output files can be used by different models:
     >>> # - .brc file → Use with BELLHOP, SCOOTER, KRAKENC (experimental)
@@ -105,7 +105,7 @@ class Bounce(PropagationModel):
     - BOUNCE uses the same environmental file format as KRAKEN
     - The reflection coefficient depends on impedance contrast
     - Supports acoustic, elastic, and poro-elastic layers
-    - Tabulated reflection coefficients cover angles from phase velocities [cmin, cmax]
+    - Tabulated reflection coefficients cover angles from phase velocities [c_low, c_high]
     - **Recommended workflow**: BOUNCE -> .brc -> SCOOTER (most reliable)
     - KRAKENC consumes .brc files directly via the standard AT reflection
       coefficient path
@@ -121,10 +121,12 @@ class Bounce(PropagationModel):
     def __init__(
         self,
         executable: Optional[Path] = None,
-        cmin: float = DEFAULT_C_MIN,
-        cmax: float = DEFAULT_C_MAX,
-        rmax_km: float = 10.0,
+        c_low: float = DEFAULT_C_MIN,
+        c_high: float = DEFAULT_C_MAX,
+        rmax_m: float = 10000.0,
         volume_attenuation: Optional[str] = None,
+        francois_garrison_params: Optional[tuple] = None,
+        bio_layers: Optional[list] = None,
         n_angles: Optional[int] = None,
         use_tmpfs: bool = False,
         verbose: bool = False,
@@ -136,48 +138,52 @@ class Bounce(PropagationModel):
         ----------
         executable : Path, optional
             Path to bounce executable. Auto-detected if None.
-        cmin : float, optional
+        c_low : float, optional
             Minimum phase velocity (m/s) for tabulation. Default: 1400.
-            Must be strictly positive (BOUNCE rejects ``cmin <= 0`` — the
+            Must be strictly positive (BOUNCE rejects ``c_low <= 0`` — the
             angular grid is derived from ``kx = omega/c``).
-        cmax : float, optional
+        c_high : float, optional
             Maximum phase velocity (m/s) for tabulation. Default: 10000.
             A value of ``1e9`` is a valid recommendation for full 90-deg
-            coverage (kraken doc: "cmax large => kmin ~ 0 => grazing
-            angles near 0 included"). Must be strictly greater than cmin.
-        rmax_km : float, optional
-            Maximum range (km) for angular sampling. Default: 10. Ignored
-            when ``n_angles`` is provided.
+            coverage (kraken doc: "c_high large => kmin ~ 0 => grazing
+            angles near 0 included"). Must be strictly greater than c_low.
+        rmax_m : float, optional
+            Maximum range (m) for angular sampling. Default: 10000. Ignored
+            when ``n_angles`` is provided. (Internally converted to km
+            because BOUNCE's input format is in km.)
         volume_attenuation : str, optional
             'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
         n_angles : int, optional
             Explicit override for the number of angular samples (``NkTab``
             in AT's bounce). If None (default), bounce computes NkTab
-            internally from ``rmax_km``. When provided, uacpy sets
-            ``rmax_km`` such that bounce's internal formula yields
+            internally from ``rmax_m``. When provided, uacpy sets
+            ``rmax_m`` such that bounce's internal formula yields
             approximately ``n_angles`` samples.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
 
-        self.cmin = cmin
-        self.cmax = cmax
-        self.rmax_km = rmax_km
+        self.c_low = c_low
+        self.c_high = c_high
+        self.rmax_m = rmax_m
         self.volume_attenuation = volume_attenuation
+        self.francois_garrison_params = francois_garrison_params
+        self.bio_layers = bio_layers
         self.n_angles = n_angles
+        self._validate_volume_attenuation_params()
 
         # Validate phase velocity bounds up front
-        if self.cmin <= 0:
+        if self.c_low <= 0:
             raise ConfigurationError(
-                f"Bounce requires cmin > 0 strictly (got {self.cmin}). "
-                "cmin is the smallest phase velocity on the tabulated grid; "
+                f"Bounce requires c_low > 0 strictly (got {self.c_low}). "
+                "c_low is the smallest phase velocity on the tabulated grid; "
                 "0 would give an infinite wavenumber."
             )
-        if self.cmax <= self.cmin:
+        if self.c_high <= self.c_low:
             raise ConfigurationError(
-                f"cmax ({self.cmax}) must be strictly greater than "
-                f"cmin ({self.cmin})."
+                f"c_high ({self.c_high}) must be strictly greater than "
+                f"c_low ({self.c_low})."
             )
 
         # BOUNCE computes plane-wave reflection coefficients, not TL.
@@ -194,16 +200,8 @@ class Bounce(PropagationModel):
         else:
             self.executable = Path(executable)
 
-    def _compute_tl_impl(self, env, source, receiver, **kwargs):
-        """Bounce does not compute transmission loss."""
-        raise UnsupportedFeatureError(
-            self.model_name,
-            "transmission loss computation",
-            alternatives=[
-                "Bellhop", "RAM", "Scooter",
-                "KrakenField (uses .brc/.irc from Bounce as input)",
-            ],
-        )
+        if not self.executable.exists():
+            raise ExecutableNotFoundError('Bounce', str(self.executable))
 
     def run(
         self,
@@ -215,9 +213,9 @@ class Bounce(PropagationModel):
         output_brc: bool = True,
         output_irc: bool = True,
         output_dir: Optional[Path] = None,
-        cmin=_UNSET,
-        cmax=_UNSET,
-        rmax_km=_UNSET,
+        c_low=_UNSET,
+        c_high=_UNSET,
+        rmax_m=_UNSET,
         volume_attenuation=_UNSET,
         n_angles=_UNSET,
         **kwargs
@@ -252,16 +250,15 @@ class Bounce(PropagationModel):
 
         Notes
         -----
-        - For full 90-degree coverage, set cmin=1400, cmax=1e9
-          (cmax=1e9 triggers kmin=0 in the Fortran: see bounce.f90)
-        - Larger rmax_km gives finer angular resolution
+        - For full 90-degree coverage, set c_low=1400, c_high=1e9
+          (c_high=1e9 triggers kmin=0 in the Fortran: see bounce.f90)
+        - Larger rmax_m gives finer angular resolution
         - The output .BRC / .IRC files can be used directly by other
           models. Pass ``output_dir=<path>`` to persist them across cleanup.
         """
         # Bounce only emits reflection coefficients — guard against the
         # caller asking for something else explicitly.
         if run_mode is not None and run_mode != RunMode.REFLECTION:
-            from uacpy.core.exceptions import UnsupportedFeatureError
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=["RunMode.REFLECTION"],
@@ -273,43 +270,44 @@ class Bounce(PropagationModel):
 
         with _resolve_overrides(
             self,
-            cmin=cmin,
-            cmax=cmax,
-            rmax_km=rmax_km,
+            c_low=c_low,
+            c_high=c_high,
+            rmax_m=rmax_m,
             volume_attenuation=volume_attenuation,
             n_angles=n_angles,
         ):
-            if self.cmin <= 0:
+            if self.c_low <= 0:
                 raise ConfigurationError(
-                    f"Bounce requires cmin > 0 strictly (got {self.cmin})."
+                    f"Bounce requires c_low > 0 strictly (got {self.c_low})."
                 )
-            if self.cmax <= self.cmin:
+            if self.c_high <= self.c_low:
                 raise ConfigurationError(
-                    f"cmax ({self.cmax}) must be strictly greater than "
-                    f"cmin ({self.cmin})."
+                    f"c_high ({self.c_high}) must be strictly greater than "
+                    f"c_low ({self.c_low})."
                 )
 
-            # n_angles → rmax_km: bounce.f90 derives NkTab from rmax_km and
-            # frequency (NkTab = INT(1000 * RMax * OMEGA / (2*PI * DeltaKInv))),
-            # uacpy inverts linearly: rmax_km = n_angles / 100.
+            # n_angles → rmax_m: bounce.f90 derives NkTab from rmax in km
+            # and frequency (NkTab = INT(1000 * RMax_km * OMEGA / (2*PI *
+            # DeltaKInv))); uacpy inverts linearly:
+            #     rmax_m = (n_angles / 100) * 1000 = n_angles * 10.
             if self.n_angles is not None:
                 if self.n_angles <= 0:
                     raise ConfigurationError(
                         f"n_angles must be > 0 (got {self.n_angles})."
                     )
-                rmax_from_angles = float(self.n_angles) / 100.0
-                if rmax_from_angles <= 0:
+                rmax_from_angles_m = float(self.n_angles) * 10.0
+                if rmax_from_angles_m <= 0:
                     warnings.warn(
-                        f"Computed rmax_km={rmax_from_angles} from "
+                        f"Computed rmax_m={rmax_from_angles_m} from "
                         f"n_angles={self.n_angles} is not positive; using "
-                        "0.1 km fallback.",
+                        "100 m fallback.",
                         RuntimeWarning,
                     )
-                    rmax_from_angles = 0.1
-                self.rmax_km = rmax_from_angles
+                    rmax_from_angles_m = 100.0
+                self.rmax_m = rmax_from_angles_m
 
             env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver)
+            self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
             fm = self._setup_file_manager()
 
@@ -318,15 +316,22 @@ class Bounce(PropagationModel):
                 input_file = fm.get_path(f'{base_name}.env')
 
                 self._log(f"Writing BOUNCE input file: {input_file}", level='info')
+                # Caller-supplied francois_garrison_params / bio_layers in
+                # run() override the constructor defaults.
+                fg = kwargs.pop('francois_garrison_params',
+                                self.francois_garrison_params)
+                bl = kwargs.pop('bio_layers', self.bio_layers)
                 self._write_bounce_input(
                     filepath=input_file,
                     env=env,
                     source=source,
                     receiver=receiver,
-                    cmin=self.cmin,
-                    cmax=self.cmax,
-                    rmax_km=self.rmax_km,
+                    c_low=self.c_low,
+                    c_high=self.c_high,
+                    rmax_m=self.rmax_m,
                     volume_attenuation=self.volume_attenuation,
+                    francois_garrison_params=fg,
+                    bio_layers=bl,
                     **kwargs
                 )
 
@@ -363,7 +368,13 @@ class Bounce(PropagationModel):
                     persist_dir.mkdir(parents=True, exist_ok=True)
                     field_finalizer = None
                 else:
-                    persist_dir = Path(tempfile.mkdtemp(prefix='bounce_persist_'))
+                    # Honour use_tmpfs (RAM-backed /dev/shm) so the
+                    # persisted .brc/.irc share the same medium as the
+                    # FileManager work_dir.
+                    tmp_root = '/dev/shm' if self.use_tmpfs else None
+                    persist_dir = Path(tempfile.mkdtemp(
+                        prefix='bounce_persist_', dir=tmp_root,
+                    ))
                     field_finalizer = persist_dir
 
                 persisted_brc = persist_dir / brc_file.name
@@ -378,7 +389,7 @@ class Bounce(PropagationModel):
                     result['irc_file'] = str(persisted_irc)
 
                 from uacpy.core.results import ReflectionCoefficient
-                frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
+                frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
 
                 field = ReflectionCoefficient(
                     theta=result.get('theta', np.array([])),
@@ -386,13 +397,13 @@ class Bounce(PropagationModel):
                     phi=result.get('phi', np.array([])),
                     **self._result_kwargs(
                         source,
-                        frequency=frequency,
+                        frequencies=frequency,
                         brc_file=result.get('brc_file'),
                         irc_file=result.get('irc_file'),
                         n_pts=result.get('n_pts', 0),
-                        cmin=self.cmin,
-                        cmax=self.cmax,
-                        rmax_km=self.rmax_km,
+                        c_low=self.c_low,
+                        c_high=self.c_high,
+                        rmax_m=self.rmax_m,
                         volume_attenuation=self.volume_attenuation,
                         full_result=result,
                     ),
@@ -417,9 +428,9 @@ class Bounce(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        cmin: float,
-        cmax: float,
-        rmax_km: float,
+        c_low: float,
+        c_high: float,
+        rmax_m: float,
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
@@ -429,8 +440,8 @@ class Bounce(PropagationModel):
         Write BOUNCE input file using ATEnvWriter
 
         BOUNCE uses ENV format similar to KRAKEN with additional sections:
-        - cmin, cmax (phase velocity bounds)
-        - rmax_km (for angular sampling)
+        - c_low, c_high (phase velocity bounds)
+        - RMax in km (for angular sampling) — converted from ``rmax_m``
 
         BOUNCE does NOT call ``ReadSzRz``; its Fortran driver reads only
         TopOpt, SSP, BotOpt, cLow/cHigh, RMax. We therefore omit the
@@ -447,7 +458,7 @@ class Bounce(PropagationModel):
             vol_atten = VolumeAttenuation.from_string(volume_attenuation)
 
         # Calculate dense mesh for BOUNCE (needs ~20 points per wavelength)
-        frequency = source.frequency[0] if hasattr(source.frequency, '__len__') else source.frequency
+        frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
         c_water = float(env.ssp.to_pairs()[0, 1])
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
@@ -465,7 +476,6 @@ class Bounce(PropagationModel):
             # F/B volume-attenuation parameter blocks (after TopOpt)
             if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
                 if francois_garrison_params is None:
-                    from uacpy.core.exceptions import ConfigurationError
                     raise ConfigurationError(
                         "volume_attenuation='F' requires "
                         "francois_garrison_params=(T, S, pH, z_bar)",
@@ -473,7 +483,6 @@ class Bounce(PropagationModel):
                 write_fg_params(f, francois_garrison_params)
             elif vol_atten == VolumeAttenuation.BIOLOGICAL:
                 if not bio_layers:
-                    from uacpy.core.exceptions import ConfigurationError
                     raise ConfigurationError(
                         "volume_attenuation='B' requires bio_layers",
                     )
@@ -495,10 +504,10 @@ class Bounce(PropagationModel):
             # BOUNCE-SPECIFIC SECTIONS
 
             # Phase velocity bounds (define angular coverage)
-            f.write(f"{cmin:.2f} {cmax:.2f}\n")
+            f.write(f"{c_low:.2f} {c_high:.2f}\n")
 
-            # Maximum range (for angular sampling resolution)
-            f.write(f"{rmax_km:.2f}\n")
+            # Maximum range in km (for angular sampling resolution)
+            f.write(f"{rmax_m / 1000.0:.2f}\n")
 
             # BOUNCE does NOT read source/receiver depths — do NOT emit
             # them. AT's bounce.f90 stops after RMax.
@@ -509,7 +518,6 @@ class Bounce(PropagationModel):
         result = self._run_subprocess(
             [str(self.executable), base_name],
             cwd=work_dir,
-            timeout=300,
         )
         if self.verbose and result.stdout:
             self._log(f"Bounce output:\n{result.stdout}", level='debug')
@@ -519,7 +527,7 @@ class Bounce(PropagationModel):
         """Rewrite a .brc/.irc file with a strictly-increasing angle axis.
 
         BOUNCE's Fortran driver tabulates reflection coefficients by
-        sweeping phase velocity (kx = omega/c), which — for the cmin/cmax
+        sweeping phase velocity (kx = omega/c), which — for the c_low/c_high
         defaults — produces many samples that round to the same grazing
         angle (hundreds of duplicate 0-degree rows are typical). Bellhop
         tolerates non-decreasing angles but bellhopcuda enforces strict

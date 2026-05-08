@@ -49,7 +49,7 @@ from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
-from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core.constants import PRESSURE_FLOOR, DEFAULT_SOUND_SPEED
 
 
 class PhaseReference(str, Enum):
@@ -80,7 +80,7 @@ class PhaseReference(str, Enum):
 
     See Also
     --------
-    uacpy.core.field._ifft_to_trace : honours these conventions.
+    _ifft_to_trace : honours these conventions.
     """
     TRAVELLING_WAVE = 'travelling_wave'
     PSIF_ENVELOPE = 'psif_envelope'
@@ -130,8 +130,7 @@ class Result:
         model: str = "",
         backend: Optional[str] = None,
         source_depths: Optional[np.ndarray] = None,
-        frequency: Optional[float] = None,
-        frequencies: Optional[np.ndarray] = None,
+        frequencies: Optional[Union[float, np.ndarray]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
         self.model = model
@@ -140,26 +139,22 @@ class Result:
             np.atleast_1d(np.asarray(source_depths, dtype=float))
             if source_depths is not None else np.array([], dtype=float)
         )
-        if frequency is not None:
-            self.frequency: Optional[float] = float(frequency)
-        else:
-            self.frequency = None
+        # Plural-only rule: ``frequencies`` is always a 1-D ndarray of length
+        # ≥ 1, or ``None`` for results that have no frequency axis (e.g.
+        # SPARC native time-domain). Scalar input auto-wraps to length 1.
         if frequencies is not None:
-            self.frequencies: Optional[np.ndarray] = np.asarray(frequencies, dtype=float)
+            self.frequencies: Optional[np.ndarray] = np.atleast_1d(
+                np.asarray(frequencies, dtype=float)
+            )
         else:
             self.frequencies = None
         self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
-        # Mirror identification fields into ``metadata`` so users who prefer
-        # dict-style access (``r.metadata['model']`` etc.) get the same
-        # values that the typed attributes carry.
         if self.model:
             self.metadata.setdefault('model', self.model)
         if self.backend:
             self.metadata.setdefault('backend', self.backend)
         if self.source_depths is not None and len(self.source_depths):
             self.metadata.setdefault('source_depths', self.source_depths)
-        if self.frequency is not None:
-            self.metadata.setdefault('frequency', self.frequency)
         if self.frequencies is not None:
             self.metadata.setdefault('frequencies', self.frequencies)
 
@@ -169,13 +164,21 @@ class Result:
     def n_frequencies(self) -> int:
         return 0 if self.frequencies is None else int(len(self.frequencies))
 
+    @property
+    def f0(self) -> Optional[float]:
+        """First / centre frequency in Hz, or ``None`` for time-domain results."""
+        if self.frequencies is None or len(self.frequencies) == 0:
+            return None
+        return float(self.frequencies[0])
+
     def __repr__(self) -> str:
         cls = type(self).__name__
         bits = [f"model={self.model!r}"] if self.model else []
-        if self.frequency is not None:
-            bits.append(f"f={self.frequency:.3g} Hz")
-        elif self.frequencies is not None and len(self.frequencies):
-            bits.append(f"n_f={len(self.frequencies)}")
+        if self.frequencies is not None and len(self.frequencies):
+            if len(self.frequencies) == 1:
+                bits.append(f"f={float(self.frequencies[0]):.3g} Hz")
+            else:
+                bits.append(f"n_f={len(self.frequencies)}")
         return f"{cls}({', '.join(bits)})"
 
     def copy(self):
@@ -189,18 +192,16 @@ class Result:
         model: Optional[str] = None,
         backend: Optional[str] = None,
         source_depths: Optional[np.ndarray] = None,
-        frequency: Optional[float] = None,
-        frequencies: Optional[np.ndarray] = None,
+        frequencies: Optional[Union[float, np.ndarray]] = None,
         phase_reference: Optional[str] = None,
         **extra_metadata,
     ) -> 'Result':
         """Attach harmonized identification to a Result built by a reader.
 
         Each model wrapper calls ``result.tag(model=…, backend=…,
-        source_depths=…, frequency=…, phase_reference=…, **extras)`` after
-        the I/O reader returns. Updates both the typed attributes and the
-        mirrored ``metadata`` dict so dict-style consumers see the same
-        values. Returns ``self`` for chaining.
+        source_depths=…, frequencies=…, phase_reference=…, **extras)`` after
+        the I/O reader returns. Scalar ``frequencies`` auto-wraps to a
+        length-1 ndarray. Returns ``self`` for chaining.
         """
         if model is not None:
             self.model = model
@@ -211,11 +212,8 @@ class Result:
         if source_depths is not None:
             self.source_depths = np.atleast_1d(np.asarray(source_depths, dtype=float))
             self.metadata['source_depths'] = self.source_depths
-        if frequency is not None:
-            self.frequency = float(frequency)
-            self.metadata['frequency'] = self.frequency
         if frequencies is not None:
-            self.frequencies = np.asarray(frequencies, dtype=float)
+            self.frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
             self.metadata['frequencies'] = self.frequencies
         if phase_reference is not None:
             self.metadata['phase_reference'] = phase_reference
@@ -326,7 +324,7 @@ class _GridResult(Result):
             k = int(np.argmin(np.abs(np.asarray(t_axis) - time)))
             return self.data[d_idx, r_idx, k]
         raise ValueError(
-            f"{type(self).__name__} has 3 axes; specify frequency= or time="
+            f"{type(self).__name__} has 3 axes; specify frequencies= or time="
         )
 
     def get_max(self) -> Tuple[float, float, float]:
@@ -340,10 +338,6 @@ class _GridResult(Result):
             float(self.depths[d_idx]),
         )
 
-    # Generic plotting hook (subclasses delegate)
-    def plot(self, env=None, **kwargs):
-        from uacpy.visualization import plots
-        return plots.plot_result(self, env=env, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,22 +358,22 @@ class TLField(_GridResult):
     def is_broadband(self) -> bool:
         return self.data.ndim == 3
 
-    def at_frequency(self, freq: float) -> "TLField":
+    def at_frequency(self, frequency: float) -> "TLField":
         """For broadband ``TLField``, return the narrowband TLField at the
         nearest frequency."""
         if not self.is_broadband:
             raise ValueError("at_frequency() only valid for broadband TLField")
         if self.frequencies is None:
             raise ValueError("broadband TLField missing self.frequencies")
-        k = int(np.argmin(np.abs(self.frequencies - freq)))
+        k = int(np.argmin(np.abs(self.frequencies - frequency)))
         return TLField(
             data=self.data[..., k],
             depths=self.depths,
             ranges=self.ranges,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequency=float(self.frequencies[k]),
-            metadata=self.metadata,
+            frequencies=float(self.frequencies[k]),
+            metadata=dict(self.metadata),
         )
 
 
@@ -402,8 +396,8 @@ class PressureField(_GridResult):
             ranges=self.ranges,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequency=self.frequency,
-            metadata=self.metadata,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
         )
 
     @property
@@ -469,8 +463,6 @@ class TransferFunction(_GridResult):
         self.metadata.setdefault('phase_reference', ref.value)
 
     # Time-domain conversion ------------------------------------------------
-    # Implementation lives in core.field for now (heavy IFFT machinery); we
-    # delegate to it.
     def to_time_trace(
         self,
         depth: Optional[float] = None,
@@ -485,7 +477,6 @@ class TransferFunction(_GridResult):
 
         Returns a :class:`TimeTrace` with ``data`` shape ``(n_t,)``.
         """
-        from uacpy.core.field import _ifft_to_trace
         return _ifft_to_trace(
             self, depth=depth, range_m=range_m,
             source_spectrum=source_spectrum,
@@ -511,15 +502,12 @@ class TransferFunction(_GridResult):
         i_f = int(np.argmin(np.abs(freqs - target)))
         H = self.data[..., i_f]
         tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
-        kw = self._result_kwargs_passthrough()
-        kw.setdefault('frequency', float(freqs[i_f]))
-        return TLField(data=tl, depths=self.depths, ranges=self.ranges, **kw)
-
-    def _result_kwargs_passthrough(self) -> dict:
-        return dict(
+        return TLField(
+            data=tl, depths=self.depths, ranges=self.ranges,
             model=getattr(self, 'model', None),
             backend=getattr(self, 'backend', None),
             source_depths=getattr(self, 'source_depths', None),
+            frequency=float(freqs[i_f]),
             metadata=dict(self.metadata),
         )
 
@@ -534,7 +522,6 @@ class TransferFunction(_GridResult):
     ) -> "TimeSeriesField":
         """Convolve every grid trace with ``source_waveform`` to obtain a
         :class:`TimeSeriesField` shaped ``(n_d, n_r, n_t)``."""
-        from uacpy.core.field import _synthesize_time_series
         return _synthesize_time_series(
             self, source_waveform=source_waveform, sample_rate=sample_rate,
             t_start=t_start, window=window, nfft=nfft,
@@ -617,7 +604,7 @@ class TimeSeriesField(_GridResult):
             range_m=float(self.ranges[r_idx]),
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequency=self.frequency,
+            frequencies=self.frequencies,
             metadata=dict(self.metadata),
         )
 
@@ -632,7 +619,7 @@ class TimeTrace(Result):
 
     ``data`` shape: ``(n_t,)`` real.
     """
-    field_type = "time_series"
+    field_type = "time_trace"
 
     def __init__(
         self,
@@ -690,10 +677,6 @@ class TimeTrace(Result):
         freqs = np.fft.rfftfreq(self.n_t, self.dt)
         return freqs, X
 
-    def plot(self, **kwargs):
-        from uacpy.visualization import plots
-        return plots.plot_time_trace(self, **kwargs)
-
     # 1-element ndarrays for plotting helpers that expect a vector.
     @property
     def depths(self) -> np.ndarray:
@@ -717,7 +700,8 @@ class Arrivals(Result):
     by_receiver : dict
         Nested dict keyed by ``(isz, ird, irr)`` returning a list of arrival
         records (each with ``amplitude``, ``phase``, ``delay``,
-        ``src_angle``, ``rcv_angle``, ``n_top_bounces``, ``n_bot_bounces``).
+        ``src_angle``, ``rcv_angle``, ``n_top_bounces``,
+        ``n_bot_bounces``).
         The structure mirrors what Bellhop's ``.arr`` reader produces.
     receiver_depths, receiver_ranges : ndarray
         Receiver grid.
@@ -750,10 +734,6 @@ class Arrivals(Result):
     def ranges(self) -> np.ndarray:
         return self.receiver_ranges
 
-    def plot(self, **kwargs):
-        from uacpy.visualization import plots
-        return plots.plot_arrivals(self, **kwargs)
-
     # Convenience accessor.
     @property
     def arrivals_data(self) -> Any:
@@ -783,8 +763,8 @@ class Arrivals(Result):
         ``arrivals_data[src][depth][range] -> dict``; with a single-point
         receiver the leading dimensions all have length 1. This walks the
         nesting and returns the dict so users can access ``delays``,
-        ``amplitudes``, ``phases``, ``n_top_bounces``, ``n_bot_bounces``,
-        ``src_angles``, ``rcv_angles`` directly.
+        ``amplitudes``, ``phases``, ``n_top_bounces``,
+        ``n_bot_bounces``, ``src_angles``, ``rcv_angles`` directly.
         """
         node = self.by_receiver
         for idx in (src_idx, depth_idx, range_idx):
@@ -804,8 +784,8 @@ class Arrivals(Result):
         """Return a flat list of per-arrival records (one dict per arrival).
 
         Each record has keys: ``delay``, ``amplitude``, ``phase``,
-        ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
-        ``kind`` ('direct' / 'surface' / 'bottom' / 'both').
+        ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``,
+        ``rcv_angle``, ``kind`` ('direct' / 'surface' / 'bottom' / 'both').
         """
         d = self.at(range_idx=range_idx, depth_idx=depth_idx, src_idx=src_idx)
         if not d:
@@ -844,24 +824,54 @@ class Arrivals(Result):
 class Rays(Result):
     """Ray paths from Bellhop / BellhopCUDA.
 
+    Pure data container: a list of ray polylines plus the geometric
+    context of the run. Filtering helpers return new ``Rays`` objects;
+    none of them call back into a solver. To compute "rays at a
+    receiver" use :meth:`uacpy.models.PropagationModel.compute_eigenrays`, which
+    runs Bellhop's eigenray solver (``RunType='E'``).
+
     Attributes
     ----------
     rays : list
-        List of ray dicts with at least ``r``, ``z`` arrays. Eigenrays are
-        the same shape; ``is_eigen`` indicates which.
+        Ray dicts with ``r``, ``z``, ``alpha``, ``n_top_bounces``,
+        ``n_bot_bounces``.
+    is_eigen : bool
+        ``True`` for output of Bellhop's eigenray solver (``RunType='E'``),
+        ``False`` for a regular ray fan (``RunType='R'``). Set by the
+        wrapper from the run type, not by post-processing.
+    receiver_depths, receiver_ranges : ndarray or None
+        Receiver geometry the run targeted, when available. ``None``
+        when the ``Rays`` came from a standalone reader call without
+        receiver context.
     """
     field_type = "rays"
 
-    def __init__(self, *, rays: List[Any], is_eigen: bool = False, **kwargs):
+    def __init__(
+        self,
+        *,
+        rays: List[Any],
+        is_eigen: bool = False,
+        receiver_depths: Optional[np.ndarray] = None,
+        receiver_ranges: Optional[np.ndarray] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.rays = list(rays)
         self.is_eigen = bool(is_eigen)
+        self.receiver_depths = (
+            np.atleast_1d(np.asarray(receiver_depths, dtype=float))
+            if receiver_depths is not None else None
+        )
+        self.receiver_ranges = (
+            np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
+            if receiver_ranges is not None else None
+        )
         # Mirror into ``metadata`` for dict-style access.
         self.metadata.setdefault('rays', self.rays)
-
-    def plot(self, env=None, **kwargs):
-        from uacpy.visualization import plots
-        return plots.plot_rays(self, env=env, **kwargs)
+        if self.receiver_depths is not None:
+            self.metadata.setdefault('receiver_depths', self.receiver_depths)
+        if self.receiver_ranges is not None:
+            self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
 
     # Convenience accessor.
     @property
@@ -869,85 +879,117 @@ class Rays(Result):
         """The ray list. Same as ``self.rays``."""
         return self.rays
 
-    def at_receiver(
+    # ------------------------------------------------------------------
+    # Filtering helpers — pure data subsets. ``is_eigen`` is preserved
+    # (a subset of a fan stays a fan; a subset of eigenrays stays
+    # eigenrays). None of these accept receiver coordinates: geometric
+    # "rays at a receiver" is what ``PropagationModel.compute_eigenrays`` is for.
+    # ------------------------------------------------------------------
+
+    def filter(self, predicate) -> 'Rays':
+        """Return a new ``Rays`` keeping rays for which ``predicate(ray)`` is true."""
+        kept = [r for r in self.rays if predicate(r)]
+        return self._spawn(kept)
+
+    def filter_by_bounces(
         self,
-        range_m: float,
-        depth_m: float,
-        tolerance_m: Optional[float] = None,
-        max_rays: Optional[int] = None,
-        truncate: bool = True,
+        kind: Optional[str] = None,
+        top: Optional[Union[int, Tuple[Optional[int], Optional[int]]]] = None,
+        bot: Optional[Union[int, Tuple[Optional[int], Optional[int]]]] = None,
     ) -> 'Rays':
-        """Return rays that arrive at the given (range, depth) within tolerance.
+        """Subset by multipath component.
 
-        For every ray, the closest-approach distance to the target point is
-        computed in 2-D (range/depth, with depth in metres). Rays farther
-        than ``tolerance_m`` are dropped; the remainder are sorted by miss
-        distance ascending and trimmed to ``max_rays`` if given. When
-        ``truncate=True`` (default), each kept ray is also truncated at its
-        closest-approach point so it visibly terminates on the receiver
-        instead of continuing past it.
+        ``kind`` ∈ ``{'direct', 'surface', 'bottom', 'both'}`` keeps a
+        qualitative bounce class.
 
-        ``tolerance_m`` defaults to one acoustic wavelength at the source
-        frequency (``c0/f`` with ``c0=1500 m/s``); pass ``None`` to keep
-        every ray (only sort + trim).
+        ``top`` / ``bot`` further constrain the exact bounce count on
+        each boundary:
+
+        * ``None``       — any count
+        * ``int``        — exact match (e.g. ``top=2``)
+        * ``(lo, hi)``   — closed range; ``None`` on either end is
+                           unbounded. ``bot=(1, None)`` keeps rays with
+                           at least one bottom bounce; ``top=(0, 1)``
+                           keeps 0–1 surface bounces.
         """
-        if not self.rays:
-            return Rays(rays=[], is_eigen=self.is_eigen,
-                        model=self.model, backend=self.backend,
-                        metadata=dict(self.metadata))
+        kind_map = {
+            'direct':  lambda r: int(r.get('n_top_bounces', 0) or 0) == 0
+                              and int(r.get('n_bot_bounces', 0) or 0) == 0,
+            'surface': lambda r: int(r.get('n_top_bounces', 0) or 0) > 0
+                              and int(r.get('n_bot_bounces', 0) or 0) == 0,
+            'bottom':  lambda r: int(r.get('n_bot_bounces', 0) or 0) > 0
+                              and int(r.get('n_top_bounces', 0) or 0) == 0,
+            'both':    lambda r: int(r.get('n_top_bounces', 0) or 0) > 0
+                              and int(r.get('n_bot_bounces', 0) or 0) > 0,
+        }
+        if kind is not None and kind not in kind_map:
+            raise ValueError(
+                f"kind must be one of {sorted(kind_map)}; got {kind!r}"
+            )
 
-        if tolerance_m is None:
-            f = float(np.atleast_1d(self.frequency or 0.0)[0])
-            if f > 0:
-                tolerance_m = 1500.0 / f
-            else:
-                tolerance_m = float('inf')
+        def _in_bounds(value, spec):
+            if spec is None:
+                return True
+            if isinstance(spec, int):
+                return value == spec
+            lo, hi = spec
+            if lo is not None and value < lo:
+                return False
+            if hi is not None and value > hi:
+                return False
+            return True
 
-        rr_km = range_m / 1000.0
-        rd_m = depth_m
-        scored = []
-        for ray in self.rays:
-            r_km = np.asarray(ray.get('r', [])) / 1000.0
-            z = np.asarray(ray.get('z', []))
-            if len(r_km) == 0:
-                continue
-            d2 = (r_km - rr_km) ** 2 + ((z - rd_m) / 1000.0) ** 2
-            k = int(np.argmin(d2))
-            miss_m = float(np.sqrt(d2[k]) * 1000.0)
-            if miss_m > tolerance_m:
-                continue
-            if truncate and k + 1 < len(r_km):
-                ray = dict(ray)
-                ray['r'] = np.asarray(ray['r'])[: k + 1]
-                ray['z'] = np.asarray(ray['z'])[: k + 1]
-            ray = dict(ray)
-            ray['miss_distance_m'] = miss_m
-            scored.append((miss_m, ray))
+        def pred(ray):
+            if kind is not None and not kind_map[kind](ray):
+                return False
+            n_top = int(ray.get('n_top_bounces', 0) or 0)
+            n_bot = int(ray.get('n_bot_bounces', 0) or 0)
+            return _in_bounds(n_top, top) and _in_bounds(n_bot, bot)
 
-        scored.sort(key=lambda t: t[0])
-        if max_rays is not None:
-            scored = scored[:max_rays]
+        return self.filter(pred)
 
-        meta = dict(self.metadata)
-        meta['receiver_range_m'] = range_m
-        meta['receiver_depth_m'] = depth_m
-        meta['tolerance_m'] = tolerance_m
-        return Rays(rays=[r for _, r in scored], is_eigen=True,
-                    model=self.model, backend=self.backend,
-                    metadata=meta)
+    def filter_by_launch_angle(
+        self,
+        min_deg: Optional[float] = None,
+        max_deg: Optional[float] = None,
+    ) -> 'Rays':
+        """Keep rays whose launch angle ``alpha`` is within ``[min_deg, max_deg]``."""
+        def pred(ray):
+            a = ray.get('alpha')
+            if a is None:
+                return False
+            if min_deg is not None and a < min_deg:
+                return False
+            if max_deg is not None and a > max_deg:
+                return False
+            return True
+        return self.filter(pred)
+
+    def _spawn(self, rays: List[Any]) -> 'Rays':
+        """Build a new ``Rays`` from a subset, preserving identification."""
+        return Rays(
+            rays=rays,
+            is_eigen=self.is_eigen,
+            receiver_depths=self.receiver_depths,
+            receiver_ranges=self.receiver_ranges,
+            model=self.model,
+            backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
 
 
 class Modes(Result):
-    field_type = "modes"
     """Kraken normal modes — depth eigenfunctions of the Helmholtz operator.
 
     Attributes
     ----------
     k : ndarray, shape ``(n_modes,)`` complex
         Modal horizontal wavenumbers.
-    phi : ndarray, shape ``(n_z, n_modes)``
-        Mode shapes sampled at ``z``.
-    z : ndarray, shape ``(n_z,)``
+    phi : ndarray, shape ``(n_depths, n_modes)``
+        Mode shapes sampled at ``depths``.
+    depths : ndarray, shape ``(n_depths,)``
         Sampling depths.
     """
     field_type = "modes"
@@ -957,19 +999,24 @@ class Modes(Result):
         *,
         k: np.ndarray,
         phi: np.ndarray,
-        z: np.ndarray,
+        depths: np.ndarray,
         n_modes: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.k = np.asarray(k)
         self.phi = np.asarray(phi)
-        self.z = np.atleast_1d(np.asarray(z, dtype=float))
+        self.depths = np.atleast_1d(np.asarray(depths, dtype=float))
+        if self.phi.shape != (len(self.depths), len(self.k)):
+            raise ValueError(
+                f"Modes.phi shape {self.phi.shape} must equal "
+                f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
+            )
         self._n_modes = int(n_modes if n_modes is not None else len(self.k))
         # Mirror modal data into ``metadata`` for dict-style access.
         self.metadata.setdefault('k', self.k)
         self.metadata.setdefault('phi', self.phi)
-        self.metadata.setdefault('z', self.z)
+        self.metadata.setdefault('depths', self.depths)
         self.metadata.setdefault('n_modes', self._n_modes)
 
     @property
@@ -977,18 +1024,14 @@ class Modes(Result):
         return self._n_modes
 
     @property
-    def depths(self) -> np.ndarray:    # scalar (depth, range) → 1-D arrays for the plotting helpers
-        return self.z
-
-    @property
     def data(self) -> np.ndarray:      # alias for plot helpers
         return self.phi
 
-    def phase_speeds(self) -> np.ndarray:
-        omega = 2.0 * np.pi * (self.frequency or 0.0)
+    def compute_phase_speeds(self) -> np.ndarray:
+        omega = 2.0 * np.pi * (self.f0 or 0.0)
         return omega / np.real(self.k)
 
-    def group_velocity(self, other: "Modes") -> np.ndarray:
+    def compute_group_velocity(self, other: "Modes") -> np.ndarray:
         """Approximate group velocity ``v_g = dω/dk`` using a second
         :class:`Modes` instance at a nearby frequency.
 
@@ -1004,25 +1047,23 @@ class Modes(Result):
             one of the two results are dropped (the array is truncated to
             the shared count).
         """
-        if other.frequency is None or self.frequency is None:
+        f0_self, f0_other = self.f0, other.f0
+        if f0_self is None or f0_other is None:
             raise ValueError(
-                "group_velocity requires both Modes instances to have a `.frequency`."
+                "compute_group_velocity requires both Modes instances to have a frequency"
             )
-        if other.frequency == self.frequency:
+        if f0_self == f0_other:
             raise ValueError(
-                "group_velocity needs Modes at two distinct frequencies."
+                "compute_group_velocity needs Modes at two distinct frequencies"
             )
         n = min(self.n_modes, other.n_modes)
         if n == 0:
             return np.array([])
-        domega = 2.0 * np.pi * (other.frequency - self.frequency)
+        domega = 2.0 * np.pi * (f0_other - f0_self)
         dk = np.real(other.k[:n] - self.k[:n])
         with np.errstate(divide='ignore', invalid='ignore'):
             return np.where(dk != 0, domega / dk, np.nan)
 
-    def plot(self, **kwargs):
-        from uacpy.visualization import plots
-        return plots.plot_modes(self, **kwargs)
 
 
 class Covariance(Result):
@@ -1244,18 +1285,18 @@ class ReflectionCoefficient(Result):
     def is_broadband(self) -> bool:
         return self.R.ndim == 2
 
-    def at_frequency(self, freq: float) -> "ReflectionCoefficient":
+    def at_frequency(self, frequency: float) -> "ReflectionCoefficient":
         """Single-frequency slice of a broadband reflection coefficient."""
         if not self.is_broadband:
             raise ValueError("at_frequency() only valid for broadband ReflectionCoefficient")
-        k = int(np.argmin(np.abs(self.frequencies - freq)))
+        k = int(np.argmin(np.abs(self.frequencies - frequency)))
         return ReflectionCoefficient(
             theta=self.theta,
             R=self.R[:, k],
             phi=self.phi[:, k],
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequency=float(self.frequencies[k]),
+            frequencies=float(self.frequencies[k]),
             metadata=dict(self.metadata),
         )
 
@@ -1270,6 +1311,211 @@ class ReflectionCoefficient(Result):
     @property
     def depths(self) -> np.ndarray:
         return np.array([0.0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IFFT helpers used by TransferFunction
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ifft_to_trace(
+    tf: "TransferFunction",
+    *,
+    depth: Optional[float],
+    range_m: Optional[float],
+    source_spectrum: Optional[np.ndarray],
+    window: str,
+    nfft: Optional[int],
+    t_start: Optional[float],
+) -> "TimeTrace":
+    """IFFT one (depth, range) cell of a TransferFunction → TimeTrace.
+
+    Implements frequency-aware bin placement (each ``f_k`` lands at
+    ``round(f_k/df)`` rather than at index ``k``), complex spectrum
+    interpolation when the FFT bin spacing is finer than the data spacing
+    (suppresses periodic ghost echoes), and the ``psif_envelope``
+    re-modulation that lands the arrival at physical time ``r/c``.
+    """
+    data = tf.data                                # (n_d, n_r, n_f)
+    freqs = np.asarray(tf.frequencies, dtype=float)
+    n_d, n_r, n_freq = data.shape
+
+    if n_freq < 2:
+        raise ValueError("need at least 2 frequencies for IFFT")
+
+    d_idx = (
+        int(np.argmin(np.abs(tf.depths - depth))) if depth is not None
+        else n_d // 2
+    )
+    r_idx = (
+        int(np.argmin(np.abs(tf.ranges - range_m))) if range_m is not None
+        else 0
+    )
+    actual_depth = float(tf.depths[d_idx])
+    actual_range = float(tf.ranges[r_idx])
+
+    spectrum = data[d_idx, r_idx, :].copy()
+    spectrum = np.nan_to_num(spectrum, nan=0.0)
+
+    df_data = float(freqs[1] - freqs[0])
+    df = min(df_data, 1.0)               # cap at 1 Hz for ≥ 1-second window
+
+    bin_indices = np.round(freqs / df).astype(int)
+    max_bin = int(bin_indices[-1])
+
+    is_envelope = (tf.phase_reference == 'psif_envelope')
+
+    if nfft is None:
+        if is_envelope and 'Nsam' in tf.metadata:
+            nfft_min = int(tf.metadata.get('Nsam', 4 * n_freq))
+        else:
+            nfft_min = 4 * n_freq
+        nfft = max(nfft_min, max_bin + 1)
+        nfft_pow2 = 1
+        while nfft_pow2 < nfft:
+            nfft_pow2 *= 2
+        nfft = nfft_pow2
+
+    if window == 'hann':
+        win = np.hanning(n_freq)
+    elif window == 'hamming':
+        win = np.hamming(n_freq)
+    elif window == 'blackman':
+        win = np.blackman(n_freq)
+    elif window == 'tukey':
+        from scipy.signal import windows
+        win = windows.tukey(n_freq, alpha=0.5)
+    elif window == 'none':
+        win = np.ones(n_freq)
+    else:
+        raise ValueError(f"unknown window: {window!r}")
+
+    dt = 1.0 / (nfft * df)
+
+    if t_start is None:
+        T_window = nfft * dt
+        lead = min(0.5 * T_window, 0.25)
+        if is_envelope:
+            cmin = tf.metadata.get('cmin', tf.metadata.get('c0', DEFAULT_SOUND_SPEED))
+            t_start = max(0.0, actual_range / cmin - lead)
+        else:
+            c0 = tf.metadata.get('c0', DEFAULT_SOUND_SPEED)
+            t_start = max(0.0, actual_range / c0 - lead)
+
+    spectrum = spectrum * win
+    if source_spectrum is not None:
+        spectrum = spectrum * np.asarray(source_spectrum)
+
+    padded = np.zeros(nfft, dtype=complex)
+    min_bin = int(bin_indices[0])
+    max_bin_fill = int(bin_indices[-1])
+
+    if df < df_data * 0.99 and n_freq >= 4:
+        c0 = tf.metadata.get('c0', DEFAULT_SOUND_SPEED)
+        t_demod = actual_range / c0
+        demod = np.exp(1j * 2.0 * np.pi * freqs * t_demod)
+        spec_demod = spectrum * demod
+
+        from scipy.interpolate import interp1d
+        fill_bins = np.arange(min_bin, min(max_bin_fill + 1, nfft))
+        fill_freqs = fill_bins * df
+        re_interp = interp1d(freqs, spec_demod.real, kind='linear',
+                             bounds_error=False, fill_value=0.0)
+        im_interp = interp1d(freqs, spec_demod.imag, kind='linear',
+                             bounds_error=False, fill_value=0.0)
+        spec_interp = re_interp(fill_freqs) + 1j * im_interp(fill_freqs)
+        remod = np.exp(1j * 2.0 * np.pi * fill_freqs * (t_start - t_demod))
+        padded[fill_bins] = spec_interp * remod
+    else:
+        spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
+        valid = (bin_indices >= 0) & (bin_indices < nfft)
+        padded[bin_indices[valid]] = spectrum[valid]
+
+    result = 2.0 * np.real(np.fft.ifft(padded))
+    time = t_start + np.arange(nfft) * dt
+
+    return TimeTrace(
+        data=result,
+        time=time,
+        depth=actual_depth,
+        range_m=actual_range,
+        model=tf.model,
+        backend=tf.backend,
+        source_depths=tf.source_depths,
+        frequencies=tf.frequencies,
+        metadata={
+            'window': window,
+            'source_model': tf.model,
+        },
+    )
+
+
+def _synthesize_time_series(
+    tf: "TransferFunction",
+    *,
+    source_waveform: np.ndarray,
+    sample_rate: float,
+    t_start: Optional[float],
+    window: str,
+    nfft: Optional[int],
+) -> "TimeSeriesField":
+    """Convolve every grid cell of a TransferFunction with a source waveform.
+
+    Output shape: ``(n_d, n_r, n_t)``.
+    """
+    wf = np.asarray(source_waveform, dtype=float).ravel()
+    n_src = len(wf)
+    if n_src < 2:
+        raise ValueError("source_waveform must have at least 2 samples")
+
+    src_fft = np.fft.rfft(wf)
+    src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)
+
+    from scipy.interpolate import interp1d
+    re_interp = interp1d(src_freqs, src_fft.real, bounds_error=False, fill_value=0.0)
+    im_interp = interp1d(src_freqs, src_fft.imag, bounds_error=False, fill_value=0.0)
+    source_spectrum = re_interp(tf.frequencies) + 1j * im_interp(tf.frequencies)
+
+    n_d, n_r, _ = tf.data.shape
+    depths = np.asarray(tf.depths)
+    ranges = np.asarray(tf.ranges)
+
+    if t_start is None:
+        t0_trace = _ifft_to_trace(
+            tf, depth=float(depths[0]), range_m=float(ranges[0]),
+            source_spectrum=source_spectrum,
+            window=window, nfft=nfft, t_start=None,
+        )
+        t_start = float(t0_trace.metadata['t_start'])
+
+    out = None
+    time_vec = None
+    for di in range(n_d):
+        for ri in range(n_r):
+            tr = _ifft_to_trace(
+                tf, depth=float(depths[di]), range_m=float(ranges[ri]),
+                source_spectrum=source_spectrum,
+                window=window, nfft=nfft, t_start=t_start,
+            )
+            if out is None:
+                time_vec = tr.time
+                out = np.zeros((n_d, n_r, len(tr.data)), dtype=tr.data.dtype)
+            out[di, ri, :] = tr.data
+
+    return TimeSeriesField(
+        data=out,
+        depths=depths,
+        ranges=ranges,
+        time=time_vec,
+        model=tf.model,
+        backend=tf.backend,
+        source_depths=tf.source_depths,
+        frequencies=tf.frequencies,
+        metadata={
+            'source_waveform_fs': sample_rate,
+            'window': window,
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

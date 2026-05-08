@@ -226,7 +226,7 @@ class TestCollinsBinaries:
     Skipped automatically when the binaries are not built."""
 
     def _src_rcv(self):
-        src = Source(depth=50.0, frequency=100.0)
+        src = Source(depths=50.0, frequencies=100.0)
         rcv = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.linspace(500.0, 5000.0, 20),

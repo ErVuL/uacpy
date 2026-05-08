@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 6: Multi-Frequency Analysis - Broadband Propagation
+EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -88,8 +88,8 @@ def main():
     # SOURCE CONFIGURATION - Reference frequency
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depth=15.0,       # In warm mixed layer (surface duct)
-        frequency=100.0   # Mid-band reference
+        depths=15.0,       # In warm mixed layer (surface duct)
+        frequencies=100.0   # Mid-band reference
     )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -145,7 +145,7 @@ def main():
         print("FREQUENCY-DEPENDENT ANALYSIS NOTES:")
         print("="*80)
         print("To perform full multi-frequency analysis:")
-        print("  1. Run this example with frequency=25, 50, 100, 200 Hz")
+        print("  1. Run this example with frequencies=25, 50, 100, 200 Hz")
         print("  2. Compare TL patterns and duct trapping")
         print("  3. Analyze modal content and cutoff frequencies")
         print("  4. Evaluate model performance vs frequency")

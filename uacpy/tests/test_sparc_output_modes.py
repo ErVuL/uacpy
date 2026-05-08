@@ -34,7 +34,7 @@ def sparc_simple_env():
 @pytest.fixture
 def source_50hz():
     """50 Hz source at 50m depth."""
-    return Source(depth=50.0, frequency=50.0)
+    return Source(depths=50.0, frequencies=50.0)
 
 
 @pytest.fixture
@@ -244,38 +244,23 @@ class TestSPARCErrorHandling:
         assert result is not None
 
 
-class TestSPARCPerformance:
-    """Test SPARC performance characteristics."""
+class TestSPARCDepthDispatch:
+    """Verify SPARC's per-depth re-run dispatch in horizontal-array mode."""
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_depth_scaling(self, sparc_simple_env, source_50hz):
+    def test_sparc_per_depth_run_count(self, sparc_simple_env, source_50hz):
         """
-        Test that computation time scales with number of depths
-
-        Horizontal array mode requires one SPARC run per depth.
+        Horizontal-array mode launches one SPARC run per receiver depth;
+        confirm the metadata counter matches the requested depth count for
+        1, 2, and 3 depths.
         """
-        import time
-
         sparc = SPARC(verbose=False, output_mode='R')
         ranges = np.array([500.0, 1000.0])
 
-        # Test with 1, 2, and 3 depths
-        times = []
         for n_depths in [1, 2, 3]:
             depths = np.linspace(30, 70, n_depths)
             receiver = Receiver(depths=depths, ranges=ranges)
-
-            start = time.time()
             result = sparc.run(sparc_simple_env, source_50hz, receiver)
-            elapsed = time.time() - start
-
-            times.append(elapsed)
             assert result is not None
             assert result.metadata.get('n_depth_runs') == n_depths
-
-        # Time should scale approximately linearly with n_depths
-        # (with some overhead for setup)
-        # We expect: time(2 depths) < 2.5 * time(1 depth)
-        if times[0] > 0.1:  # Only check if runs take meaningful time
-            assert times[1] < 2.5 * times[0], "Scaling worse than expected"

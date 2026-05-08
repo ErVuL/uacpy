@@ -18,15 +18,6 @@ from uacpy.models import RunMode
 class TestComputeAPI:
     """Tests for compute_tl(), compute_modes(), etc."""
 
-    def test_compute_tl_with_auto_receiver(self, simple_env, source):
-        """Test compute_tl with automatic receiver grid."""
-        bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, max_range=5000)
-
-        assert result.field_type == 'tl'
-        assert result.n_depths > 10  # Should auto-generate reasonable grid
-        assert result.n_ranges > 10
-
     def test_compute_tl_with_explicit_receiver(self, simple_env, source, receiver_small):
         """Test compute_tl with explicit receiver."""
         bellhop = Bellhop(verbose=False)
@@ -46,16 +37,14 @@ class TestComputeAPI:
         assert 'k' in modes.metadata
         assert 'phi' in modes.metadata
 
-    def test_multiple_models_same_api(self, simple_env, source):
+    def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""
         bellhop = Bellhop(verbose=False)
         krakenfield = KrakenField(verbose=False)
 
-        # Same API call for both models
-        result_bellhop = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
-        result_kraken = krakenfield.compute_tl(env=simple_env, source=source, max_range=3000)
+        result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        # Both should return Field objects with 'tl' type
         assert isinstance(result_bellhop, TLField)
         assert isinstance(result_kraken, TLField)
         assert result_bellhop.field_type == 'tl'
@@ -65,18 +54,18 @@ class TestComputeAPI:
 class TestPlottingAPI:
     """Tests for result.plot() and plotting functions."""
 
-    def test_field_plot_method_exists(self, simple_env, source):
+    def test_field_plot_method_exists(self, simple_env, source, receiver_small):
         """Test that Field has plot() method."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
+        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         assert hasattr(result, 'plot')
         assert callable(result.plot)
 
-    def test_plot_tl_field(self, simple_env, source):
+    def test_plot_tl_field(self, simple_env, source, receiver_small):
         """Test plotting TL field."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
+        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         fig, ax = result.plot(env=simple_env)
 
@@ -96,24 +85,24 @@ class TestPlottingAPI:
         assert len(axes) == 2  # mode shapes and wavenumber spectrum
         plt.close(fig)
 
-    def test_plot_with_custom_parameters(self, simple_env, source):
+    def test_plot_with_custom_parameters(self, simple_env, source, receiver_small):
         """Test plotting with custom parameters."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, max_range=3000)
+        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         fig, ax = result.plot(env=simple_env, vmin=40, vmax=100, cmap='jet')
 
         assert fig is not None
         plt.close(fig)
 
-    def test_plot_comparison(self, simple_env, source):
+    def test_plot_comparison(self, simple_env, source, receiver_small):
         """Test Field.plot_comparison() static method."""
         bellhop = Bellhop(verbose=False)
         krakenfield = KrakenField(verbose=False)
 
         results = {
-            'Bellhop': bellhop.compute_tl(env=simple_env, source=source, max_range=3000),
-            'KrakenField': krakenfield.compute_tl(env=simple_env, source=source, max_range=3000),
+            'Bellhop': bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small),
+            'KrakenField': krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small),
         }
 
         fig, axes = plots.compare_models(results, env=simple_env)

@@ -121,8 +121,7 @@ def main():
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
         depth=200.0,
-        ssp=SoundSpeedProfile.from_2d(
-            depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
+        ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
             interp='pchip',
         ),
         bathymetry=bathymetry,
@@ -133,7 +132,7 @@ def main():
     print(f"  ✓ has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
     print(f"  ✓ has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
 
-    source = uacpy.Source(depth=50.0, frequency=100.0)
+    source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 165, 30),
         ranges=np.linspace(100, 8000, 40)

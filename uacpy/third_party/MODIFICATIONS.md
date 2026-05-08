@@ -968,3 +968,70 @@ Python reader `io/mpirams_reader.py` matches this format.
   print *,'recl.dat has the record length of the direct access file.'
 -print *,'The direct access file with the parameters and results is psif.dat.'
 ```
+
+---
+
+## Wrapper-only patches (no vendored-source change) — 2026-05-08
+
+The following landed in this session as compensations on the Python
+wrapper side; the Fortran/C in `third_party/` was unchanged. Logged
+here so the lineage is in one place.
+
+### mpiramS dz floor (λ_p / 16) — runtime cap
+
+`models/ram.py:_compute_grid_lytaev` now applies the same `λ_p / 16`
+acoustic dz floor to mpiramS that already gated rams0.5 / ramsurf1.5.
+Unlike the Collins backends, mpiramS is numerically stable at any dz
+— the floor is a *runtime cost* cap, not a stability constraint.
+Lytaev's accuracy budget at default ε=1e-3 can demand dz ≈ λ_p/444 at
+100 Hz / 100 m / 5 km, which makes mpiramS unusably slow on small
+problems (>30 min wall-clock).
+
+- `models/ram.py:1712-1716` — `kind in ('mpiramS', 'rams', 'ramsurf')`
+- `models/ram.py:1836-1841` — warning string differentiates the
+  reason: `mpiramS runtime cap (λ_p / 16)` vs `acoustic stability
+  (λ_p / 16)` for Collins backends. The accuracy budget is no longer
+  honoured; users override via `dr=`/`dz=` for accuracy-sensitive runs.
+
+### `RAM(Q, T)` constructor defaults None → resolve-by-mode
+
+`models/ram.py` — `Q` and `T` now default to `None` on the
+constructor. The single-frequency TL path (`_run_tl`) resolves the
+sentinel to `Q=1e6, T=1.0` (single-bin, narrowband); the broadband
+paths (`_compute_qt_for_broadband`, `_run_broadband`) resolve to
+`Q=2.0, T=10.0`. Restores the documented "Ignored in COHERENT_TL mode
+(set internally to large value)" behaviour that had drifted away from
+the docstring. Hardcoded `Q=2.0, T=10.0` had silently forced mpiramS
+to sweep ~500 frequencies per COHERENT_TL call.
+
+- `models/ram.py:200-201` — constructor `Q=None, T=None`
+- `models/ram.py:1947-2002` — `_run_tl` resolves to (1e6, 1.0)
+- `models/ram.py:2180-2202` — broadband resolves to (2.0, 10.0)
+
+### Scooter BRC RMax — wrapper bug fix
+
+`models/scooter.py:_write_scooter_env` previously fed
+`BoundaryProperties.reflection_rmax_m` directly as Scooter's spectral
+RMax for `acoustic_type='file'` bottoms. Those are different concepts:
+`reflection_rmax_m` bounds the BRC tabulation, while Scooter's RMax
+sets the wavenumber-integration grid via `Δk = π / RMax`. With
+`reflection_rmax_m=10` (a typical BRC sampling), Scooter computed
+`Nk=2` and stabilising `atten ≈ 0.3` — the in-tree Hankel transform
+then overflowed `exp(atten · r)` past machine range at any meaningful
+receiver distance.
+
+The writer now derives RMax from `receiver.ranges.max() *
+rmax_multiplier` for all bottom types, matching `ReadEnvironmentMod.f90:
+133-140`. `reflection_cmin/cmax` are still used as the phase-speed
+window when the bottom is `'F'` (BRC tabulation only spans those
+phase speeds).
+
+- `models/scooter.py:565-577` — unconditional spectral RMax derivation
+- `tests/test_elastic_boundaries.py` — regression test gating this
+
+### `output_reader.py` shim removed
+
+`io/output_reader.py` was a backward-compat shim re-exporting symbols
+from `oalib_reader` / `modes_reader` / `boundary_io`. Removed; four
+model wrappers (`bellhop.py`, `kraken.py`, `scooter.py`, `bounce.py`)
+now import directly from the topic modules.
