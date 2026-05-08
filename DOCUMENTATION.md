@@ -1046,14 +1046,18 @@ column-by-column and pads to 4 characters with spaces.
 
 | pos | meaning | accepted letters |
 |---|---|---|
-| 1 | Pulse shape | `P` Pekeris, `R` Ricker, `A` analytic, `S` sinc, `H` Hanning, `N` N-wave, `G` Gaussian, `F` flat, `B` Berlage, `M` "miracle" wave, `T` tone, `C` sinc-windowed |
+| 1 | Pulse shape | `P` pseudo-gaussian, `R` Ricker wavelet, `A` approximate Ricker, `S` single sine, `H` Hanning-weighted 4-sine, `N` N-wave, `G` Gaussian, `M` miracle wave, `T` tone, `C` sinc, `F` from .STS file, `B` from .STS file (time-reversed) |
 | 2 | Post-process | `' '` none, `N` none, `H` pre-envelope (\|analytic signal\|), `Q` Hilbert transform |
 | 3 | Sign | `' '` keep, `+` keep, `-` invert |
-| 4 | Window | `' '` none, `N` none, `L` Tukey-low, `H` Tukey-high, `B` Blackman |
+| 4 | Filter | `' '` apply band-pass, `L` low-cut, `H` high-cut, `B` band-pass (both cuts), `N` no filter |
 
-Common combinations: `'PN+B'` (Pekeris pulse, no post-process, positive
-sign, Blackman window), `'RN+ '` (Ricker, plain), `'GH-L'` (Gaussian
-analytic-envelope, inverted, Tukey-low window).
+The current Fortran (`sourceMod.f90:68`) routes any pos-4 letter other
+than `'N'` to the same `BandPass` routine, so `L`/`H`/`B` are accepted
+but currently behave identically.
+
+Common combinations: `'PN+B'` (pseudo-gaussian, no Hilbert, positive
+sign, band-pass), `'RN+ '` (Ricker, no Hilbert, positive sign,
+band-pass), `'GH- '` (Gaussian, pre-envelope, inverted, band-pass).
 
 #### `output_mode='S'` (snapshot) caveat
 
