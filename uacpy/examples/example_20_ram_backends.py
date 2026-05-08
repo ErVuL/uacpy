@@ -1,5 +1,5 @@
 """
-Example 29: RAM multi-backend dispatch — mpiramS, RAMS (elastic), RAMSurf (rough)
+Example 20: RAM multi-backend dispatch — mpiramS, RAMS (elastic), RAMSurf (rough)
 =================================================================================
 
 The unified ``RAM`` class auto-selects one of three vendored Collins-family PE

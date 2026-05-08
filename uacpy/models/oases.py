@@ -49,7 +49,8 @@ from uacpy.core.results import (
 )
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError,
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
 from uacpy.io.oases_reader import (
@@ -373,9 +374,13 @@ class OAST(_OASESBase):
             FOR002='src',  # Source file
             FOR023='trc',  # Optional reflection-coef table
         )
-        result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, env=env,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable)], cwd=work_dir, env=env,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
 
@@ -494,6 +499,14 @@ class OASN(_OASESBase):
             'replica_ymin', 'replica_ymax', 'replica_ny',
         ))
 
+        # Public API uses metres for ranges; OASES expects km. Convert
+        # the four range-axis kwargs in-place before forwarding to the
+        # writer (z-axis kwargs stay in metres — OASES accepts those).
+        for k in ('replica_xmin', 'replica_xmax',
+                  'replica_ymin', 'replica_ymax'):
+            if k in kwargs:
+                kwargs[k] = float(kwargs[k]) / 1000.0
+
         with _resolve_overrides(self, volume_attenuation=volume_attenuation):
             env = self._project_environment(env)
             self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -507,7 +520,11 @@ class OASN(_OASESBase):
             if run_mode == RunMode.COVARIANCE:
                 opt_tokens.add('N')
             else:
+                # Replica generation reuses OASN's noise-integration kernel,
+                # so 'N' must accompany 'R' even when the user only wants
+                # the replica fields.
                 opt_tokens.add('R')
+                opt_tokens.add('N')
             options = ' '.join(sorted(opt_tokens))
 
             fm = self._setup_file_manager()
@@ -574,9 +591,10 @@ class OASN(_OASESBase):
                     )
                 self._log(f"Reading OASN replica file: {rep_path}")
                 rep_data = read_oasn_replicas(rep_path)
+                # x/y come back in km from the .rpo file; expose metres.
                 replica_z = np.linspace(rep_data['z_min'], rep_data['z_max'], rep_data['n_z'])
-                replica_x = np.linspace(rep_data['x_min'], rep_data['x_max'], rep_data['n_x'])
-                replica_y = np.linspace(rep_data['y_min'], rep_data['y_max'], rep_data['n_y'])
+                replica_x = np.linspace(rep_data['x_min'], rep_data['x_max'], rep_data['n_x']) * 1000.0
+                replica_y = np.linspace(rep_data['y_min'], rep_data['y_max'], rep_data['n_y']) * 1000.0
                 freqs = _oasn_freq_axis(rep_data)
                 kw = self._result_kwargs(
                     source,
@@ -609,9 +627,13 @@ class OASN(_OASESBase):
             FOR016='xsm',  # Covariance matrix (unit 16)
             FOR026='chk',  # Checkpoint file (per oasn wrapper)
         )
-        result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, env=env,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable)], cwd=work_dir, env=env,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
 
@@ -873,9 +895,13 @@ class OASR(_OASESBase):
             FOR022='rco',  # Reflection-coef table (slowness)
             FOR023='trc',  # Reflection-coef table (angle)
         )
-        result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, env=env,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable)], cwd=work_dir, env=env,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
 
@@ -1171,9 +1197,13 @@ class OASP(_OASESBase):
             input_file.stem,
             FOR002='src',
         )
-        result = self._run_subprocess(
-            [str(self.executable)], cwd=work_dir, env=env,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable)], cwd=work_dir, env=env,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
 
@@ -1228,10 +1258,27 @@ class OASES(PropagationModel):
         use_tmpfs: bool = False,
         verbose: bool = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        bathymetry_collapse_method: str = 'max',
+        ssp_collapse_method: str = 'r0',
+        bottom_collapse_method: str = 'r0',
+        layered_collapse_method: str = 'halfspace',
+        rd_layered_collapse_method: str = 'halfspace',
+        altimetry_collapse_method: str = 'drop',
+        elastic_collapse_method: str = 'fluid',
         **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout,
+            bathymetry_collapse_method=bathymetry_collapse_method,
+            ssp_collapse_method=ssp_collapse_method,
+            bottom_collapse_method=bottom_collapse_method,
+            layered_collapse_method=layered_collapse_method,
+            rd_layered_collapse_method=rd_layered_collapse_method,
+            altimetry_collapse_method=altimetry_collapse_method,
+            elastic_collapse_method=elastic_collapse_method,
         )
 
         # ``executable`` only makes sense per sub-binary; OASES is a
@@ -1245,19 +1292,22 @@ class OASES(PropagationModel):
 
         # Sub-model-specific kwargs (e.g. ``angles`` for OASR,
         # ``n_time_samples`` for OASP) cannot be applied uniformly here —
-        # passing them to all four would break the constructors that don't
-        # accept them. Reject anything outside the standard plumbing set.
-        if kwargs:
-            raise ConfigurationError(
-                f"Unified OASES wrapper received sub-model-specific "
-                f"kwargs {sorted(kwargs)}. Set them on OAST/OASN/OASR/OASP "
-                "directly."
-            )
+        # ignored silently per uacpy's "irrelevant kwargs are ignored" rule;
+        # set them on OAST/OASN/OASR/OASP directly when needed.
 
         common = dict(
             use_tmpfs=use_tmpfs,
             verbose=verbose,
             work_dir=work_dir,
+            cleanup=cleanup,
+            timeout=timeout,
+            bathymetry_collapse_method=bathymetry_collapse_method,
+            ssp_collapse_method=ssp_collapse_method,
+            bottom_collapse_method=bottom_collapse_method,
+            layered_collapse_method=layered_collapse_method,
+            rd_layered_collapse_method=rd_layered_collapse_method,
+            altimetry_collapse_method=altimetry_collapse_method,
+            elastic_collapse_method=elastic_collapse_method,
             volume_attenuation=volume_attenuation,
             francois_garrison_params=francois_garrison_params,
             bio_layers=bio_layers,

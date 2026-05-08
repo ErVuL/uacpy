@@ -42,21 +42,21 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
 
 ## ramsurf (Collins-style RAM family)
 
-Vendored verbatim from https://github.com/quiet-oceans/ramsurf — BSD-3
-(Calvo / Guelton). Only the three Fortran solver sources are kept:
+Vendored from https://github.com/quiet-oceans/ramsurf — BSD-3
+(Calvo / Guelton). Files live flat at `third_party/ramsurf/`. The
+Fortran solvers actually built by `install.sh` are:
 
-- `src/ram1.5.f` — fluid PE, flat surface, layered piecewise bottom
-- `src/rams0.5.f` — *elastic* PE (RAMS), flat surface, layered piecewise
+- `rams0.5.f` — *elastic* PE (RAMS), flat surface, layered piecewise
   bottom with shear (cs/attns/Lamé)
-- `src/ramsurf1.5.f` — fluid PE with variable surface zsrf(r) for rough
+- `ramsurf1.5.f` — fluid PE with variable surface zsrf(r) for rough
   surfaces / beach geometry [Collins, JASA 97 (1995)]
 
-Skipped from upstream: `ramclr.f`, `ramsurfclr2.0.f` (PostScript plotters
-— uacpy uses matplotlib), the C reimplementation (`ramsurf.c`,
-`ramsurflib.c` — fluid only, no win over the Fortran), and the autotools
-files (`configure.ac`, `Makefile.am` — replaced by a plain Makefile in
-this directory). LICENSE and `readme.orig` (Calvo's input-format reference)
-are kept verbatim.
+`ram1.5.f` (Collins's original fluid PE) is also vendored as a
+reference but is not built — uacpy's RAM dispatcher uses mpiramS for
+that regime. `ramclr.f` (PostScript plotter) and the autotools
+artefacts (`configure.ac`, `Makefile.am`) are kept untouched alongside
+a plain top-level `Makefile` actually used for the build. LICENSE is
+kept verbatim.
 
 ### `outpt` patch — complex-envelope dump
 

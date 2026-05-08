@@ -762,7 +762,10 @@ class Bellhop(PropagationModel):
 
         brc_file = bounce_result.metadata.get('brc_file')
         if not brc_file:
-            raise RuntimeError("BOUNCE did not produce a .brc file")
+            raise ModelExecutionError(
+                "Bounce", return_code=-1, stdout=None,
+                stderr="BOUNCE did not produce a .brc file",
+            )
 
         # Create environment copy with reflection file bottom
         env_bounce = copy.deepcopy(env)

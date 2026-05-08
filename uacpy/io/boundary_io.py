@@ -493,13 +493,11 @@ def read_reflection_coefficient(
             return {"theta": theta, "R": R, "phi": phi, "n_pts": n_pts}
 
     except FileNotFoundError:
-        # Return zero reflection if file doesn't exist
-        return {
-            "theta": np.array([0.0]),
-            "R": np.array([0.0]),
-            "phi": np.array([0.0]),
-            "n_pts": 0,
-        }
+        raise FileNotFoundError(
+            f"Reflection coefficient file not found: {filepath}. "
+            "Run Bounce or OASR first to generate the .brc/.trc file, "
+            "or pass an explicit reflection_file= path to the model."
+        )
 
 
 def read_source_beam_pattern(filepath: Union[str, Path], sbp_option: str = "O") -> np.ndarray:
@@ -552,7 +550,7 @@ def read_source_beam_pattern(filepath: Union[str, Path], sbp_option: str = "O") 
 
         filepath = Path(filepath)
         sbp_file = str(filepath) + ".sbp"
-        with open(filepath, "r") as fid:
+        with open(sbp_file, "r") as fid:
             # Read number of points
             line = fid.readline()
             NSBPPts = int(line.strip())

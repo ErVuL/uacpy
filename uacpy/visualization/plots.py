@@ -557,7 +557,7 @@ def plot_rays(
     src_handle = None
     rcv_handle = None
     if source is not None:
-        sd = np.atleast_1d(getattr(source, 'depth', []))
+        sd = np.atleast_1d(getattr(source, 'depths', []))
     else:
         sd = np.atleast_1d(getattr(field, 'source_depths', []))
     if len(sd):

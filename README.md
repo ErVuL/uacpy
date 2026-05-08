@@ -268,7 +268,7 @@ Run scripts directly:
 ```bash
 cd ~/uacpy
 source uacpy_venv/bin/activate
-python uacpy/examples/example_01_basic_shallow_water.py
+python uacpy/uacpy/examples/example_01_basic_shallow_water.py
 ```
 
 Plot windows still appear on the Windows desktop (WSLg).
@@ -341,9 +341,9 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/examples/` you will find 24 example scripts numbered
+Inside `uacpy/uacpy/examples/` you will find 24 example scripts numbered
 sequentially (`example_01_*.py` through `example_24_*.py`); the full
-suite runs in under 5 minutes on a laptop. See the
+suite runs in a few minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 

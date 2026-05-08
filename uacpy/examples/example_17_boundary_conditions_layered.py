@@ -1,5 +1,5 @@
 """
-Example 26: Boundary Conditions - Top BC and Layered Bottoms
+Example 17: Boundary Conditions - Top BC and Layered Bottoms
 =============================================================
 
 Demonstrates:
@@ -210,7 +210,7 @@ def main():
         ('Range-dep layered (RAM)',        example_range_dependent_layered, RAM),
     ]
 
-    print("Example 26: Boundary Conditions - Top BC and Layered Bottoms")
+    print("Example 17: Boundary Conditions - Top BC and Layered Bottoms")
     print("=" * 65)
 
     fields = []
@@ -258,7 +258,7 @@ def main():
                     transform=ax.transAxes, fontsize=14, color='red')
         ax.set_title(label, fontsize=11, fontweight='bold')
 
-    fig.suptitle('Example 26: Boundary Conditions — Surface and Bottom',
+    fig.suptitle('Example 17: Boundary Conditions — Surface and Bottom',
                  fontsize=14, fontweight='bold', y=0.995)
     fig.subplots_adjust(left=0.06, right=0.93, top=0.90, bottom=0.07,
                         wspace=0.20, hspace=0.30)

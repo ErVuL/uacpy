@@ -1,13 +1,36 @@
 """Base class for acoustic propagation models."""
 
 import copy as _copy
+import os
 import shutil
+import signal
+import subprocess
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Set, Union
 from enum import Enum
 import warnings
+
+
+def _raise_stack_limit_at_import() -> None:
+    """Raise the parent's RLIMIT_STACK to its hard limit so children inherit
+    a generous stack — SPARC-class Fortran binaries can blow a default
+    8 MiB stack on first large alloc.
+    """
+    try:
+        import resource
+        _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        target = (
+            resource.RLIM_INFINITY
+            if hard == resource.RLIM_INFINITY else hard
+        )
+        resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
+_raise_stack_limit_at_import()
 
 import numpy as np
 
@@ -311,25 +334,14 @@ class PropagationModel(ABC):
     _supports_multi_source_depth: bool = False
 
     def _warn_unknown_kwargs(self, kwargs: dict, allowed: tuple = ()):
-        """Emit a ``UserWarning`` for any kwarg not consumed by ``run()``.
+        """No-op kept for source compatibility with model-side call sites.
 
-        Catches typos like ``Bellhop().run(env, src, rcv, n_beam=10)``
-        (missing 's') that would otherwise silently use the default.
-
-        ``kwargs`` is the leftover ``**kwargs`` dict from a model's
-        ``run()`` after explicit named args have been peeled off.
-        ``allowed`` is the tuple of writer- or mode-specific kwarg names
-        the model legitimately forwards downstream (e.g. Bellhop's
-        Cerveny beam params); these are silently passed through.
+        uacpy's convention is "irrelevant kwargs are silently ignored", so
+        unknown ``run()`` kwargs are not warned about. Callers (typically
+        ``Model.run`` peeling off explicit args) keep invoking this helper
+        but it does nothing.
         """
-        unknown = sorted(k for k in kwargs if k not in allowed)
-        if unknown:
-            warnings.warn(
-                f"{self.model_name}.run received unknown kwargs (ignored): "
-                f"{unknown}",
-                UserWarning,
-                stacklevel=3,
-            )
+        return
 
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
@@ -631,11 +643,11 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "normal mode computation",
-                alternatives=['Kraken', 'OASN']
+                alternatives=['Kraken', 'KrakenC', 'KrakenField']
             )
 
         if env.is_range_dependent and self.model_name != 'KrakenField':
-            # Range-independent mode solvers (Kraken, KrakenC, OASN) collapse
+            # Range-independent mode solvers (Kraken, KrakenC) collapse
             # the environment via ``bathymetry_collapse_method`` and warn,
             # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
@@ -1007,40 +1019,26 @@ class PropagationModel(ABC):
         -------
         subprocess.CompletedProcess
         """
-        import subprocess
-
         cmd_str = ' '.join(str(c) for c in cmd)
         self._log(f"Running: {cmd_str}", level='debug')
 
-        def _raise_stack_limit():
-            # Raise the child's stack to the hard limit. If this fails the
-            # SPARC-class binaries segfault on first large alloc, so surface
-            # the failure rather than swallow it.
-            try:
-                import resource
-                _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-                target = (
-                    resource.RLIM_INFINITY
-                    if hard == resource.RLIM_INFINITY else hard
-                )
-                resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
-            except (ImportError, ValueError, OSError) as exc:
-                warnings.warn(
-                    f"Could not raise child stack limit ({exc}); "
-                    f"large-stack binaries may segfault.",
-                    RuntimeWarning, stacklevel=2,
-                )
-
+        # start_new_session puts the child in its own process group so a
+        # timeout can SIGTERM the whole tree, not just the direct child.
+        proc = None
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [str(c) for c in cmd],
                 cwd=str(cwd),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE if stdin_input is not None else None,
                 text=True,
-                timeout=timeout,
-                input=stdin_input,
                 env=env,
-                preexec_fn=_raise_stack_limit,
+                start_new_session=(os.name == 'posix'),
+            )
+            stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+            result = subprocess.CompletedProcess(
+                proc.args, proc.returncode, stdout, stderr,
             )
         except FileNotFoundError as e:
             raise ModelExecutionError(
@@ -1048,6 +1046,22 @@ class PropagationModel(ABC):
                 stdout=None, stderr=f"Executable not found: {e}",
             ) from e
         except subprocess.TimeoutExpired as e:
+            # Kill the whole process group, not just the direct child.
+            if proc is not None and os.name == 'posix':
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(pgid, signal.SIGKILL)
+                        proc.wait()
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                    proc.wait()
+            elif proc is not None:
+                proc.kill()
+                proc.wait()
             raise ModelExecutionError(
                 self.model_name, return_code=-1,
                 stdout=(e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout),

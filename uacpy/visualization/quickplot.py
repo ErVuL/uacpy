@@ -44,7 +44,6 @@ def quick_tl(field: Field, env: Optional[Environment] = None, save: Optional[str
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -77,7 +76,6 @@ def quick_compare(results: Dict[str, Field], env: Optional[Environment] = None,
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -108,7 +106,6 @@ def quick_rays(field: Field, env: Optional[Environment] = None,
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -135,7 +132,6 @@ def quick_env(env: Environment, source: Optional[Source] = None,
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -162,7 +158,6 @@ def quick_modes(field: Field, n_modes: int = 6, save: Optional[str] = None):
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, axes
 
@@ -205,11 +200,9 @@ def quick_cut(field: Field, depth: Optional[float] = None,
         # Auto-select middle depth
         depth = field.depths[len(field.depths) // 2]
         fig, ax = plots.plot_range_cut(field, depth)
-        print(f"Auto-selected depth: {depth}m")
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
-        print(f"Saved to {save}")
 
     return fig, ax
 
@@ -270,7 +263,6 @@ def quick_analysis(field: Field, env: Optional[Environment] = None,
     if save_prefix:
         filename = f'{save_prefix}_analysis.png'
         fig.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"Saved comprehensive analysis to {filename}")
 
     return fig
 
@@ -356,7 +348,6 @@ def quick_report(results: Dict[str, Field], env: Environment,
     fig.suptitle('Model Comparison Report', fontsize=16, fontweight='bold')
 
     fig.savefig(save, dpi=150, bbox_inches='tight')
-    print(f"Saved comprehensive report to {save}")
 
     return fig
 

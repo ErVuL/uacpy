@@ -92,16 +92,12 @@ def read_shd_file(filepath: Union[str, Path]) -> TLField:
         f.seek(8 * 4 * recl, 0)
         rz = np.array([struct.unpack("f", f.read(4))[0] for _ in range(nrz)])
 
-        # Record 10: Receiver ranges
-        # NOTE: field.exe outputs ranges in METERS (not km as documented)
-        # Bellhop/Scooter may output in km - need to detect and handle
+        # Record 10: Receiver ranges (stored in METRES). Acoustics-Toolbox
+        # converts km→m internally on read (SourceReceiverPositions.f90:277)
+        # before WriteHeader emits Pos%Rr to record 10, so the on-disk units
+        # are always metres regardless of the .env declaration.
         f.seek(9 * 4 * recl, 0)
         rr = np.array([struct.unpack("d", f.read(8))[0] for _ in range(nrr)])
-
-        # Auto-detect units: if ranges are < 100, assume km and convert to m
-        # This heuristic works for typical scenarios (ranges > 100m)
-        if len(rr) > 0 and rr.max() < 100.0:
-            rr = rr * 1000.0  # Convert km to m
 
         # Allocate pressure array
         # For rectilinear: pressure(ntheta, nsz, nrz, nrr)
@@ -919,7 +915,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
         # Skip header info
         f.seek(recl * 4)
 
-        # Read rays
+        truncated_after = None
         try:
             while True:
                 n_points = struct.unpack("i", f.read(4))[0]
@@ -945,8 +941,16 @@ def _read_ray_file_binary(filepath: Path) -> list:
                 )
 
         except struct.error:
-            pass  # End of file
+            truncated_after = len(rays)
 
+    if truncated_after is not None:
+        warnings.warn(
+            f"Ray file {filepath} appears truncated; recovered "
+            f"{truncated_after} ray(s) before EOF. The producing model "
+            "may have crashed mid-write — check its .prt log.",
+            UserWarning,
+            stacklevel=2,
+        )
     return rays
 
 
@@ -1109,7 +1113,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
-def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
+def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
     """
     Read field parameters file (.flp) for KRAKEN/FIELD programs.
 
@@ -1193,7 +1197,8 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
             start = title.find("'") + 1
             end = title.find("'", start)
             title = title[start:end]
-        print(f"Title: {title}")
+        if verbose:
+            print(f"Title: {title}")
 
         # Read options
         opt = f.readline().strip()
@@ -1201,7 +1206,8 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
             start = opt.find("'") + 1
             end = opt.find("'", start)
             opt = opt[start:end]
-        print(f"Options: {opt}")
+        if verbose:
+            print(f"Options: {opt}")
 
         # Fill missing option columns with reasonable placeholders.
         # pos 3 is the elastic-component / beam-pattern column; we fill
@@ -1220,17 +1226,19 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
 
         # Read MLimit
         M_limit = int(f.readline().strip())
-        print(f"MLimit = {M_limit}\n")
+        if verbose:
+            print(f"MLimit = {M_limit}\n")
 
         # Read profile ranges using _read_vector
         r_prof, N_prof = _read_vector(f)
-        print(f"\nNumber of profiles, NProf = {N_prof}")
-        print("Profile ranges, rProf (km)")
-        if N_prof < 10:
-            for r in r_prof:
-                print(f"{r:8.2f}")
-        else:
-            print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
+        if verbose:
+            print(f"\nNumber of profiles, NProf = {N_prof}")
+            print("Profile ranges, rProf (km)")
+            if N_prof < 10:
+                for r in r_prof:
+                    print(f"{r:8.2f}")
+            else:
+                print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
 
         # Read receiver ranges
         r_rcv, _ = _read_vector(f)
@@ -1242,16 +1250,21 @@ def read_flp(fileroot: Union[str, Path]) -> Dict[str, Any]:
         # Read receiver range offsets (array tilt)
         r_offsets, N_offsets = _read_vector(f)
 
-        print(f"\nNumber of receiver range offsets = {N_offsets}")
-        print("Receiver range offsets, Rro (m)")
-        if N_offsets < 10:
-            for ro in r_offsets:
-                print(f"{ro:8.2f}")
-        else:
-            print(f"{r_offsets[0]:8.2f} ... {r_offsets[-1]:8.2f}")
+        if verbose:
+            print(f"\nNumber of receiver range offsets = {N_offsets}")
+            print("Receiver range offsets, Rro (m)")
+            if N_offsets < 10:
+                for ro in r_offsets:
+                    print(f"{ro:8.2f}")
+            else:
+                print(f"{r_offsets[0]:8.2f} ... {r_offsets[-1]:8.2f}")
 
         if np.max(np.abs(r_offsets)) > 0.0:
-            print("Warning: Receiver range offsets are not zero")
+            warnings.warn(
+                "read_flp: receiver range offsets are not zero — "
+                "result includes array-tilt geometry.",
+                UserWarning, stacklevel=2,
+            )
 
     return {
         "title": title,

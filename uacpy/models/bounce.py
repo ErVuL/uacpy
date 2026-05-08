@@ -31,7 +31,7 @@ from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError
+from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError, ModelExecutionError
 from uacpy.io.boundary_io import read_reflection_coefficient
 from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
 
@@ -419,7 +419,7 @@ class Bounce(PropagationModel):
                 return field
 
             finally:
-                if not self.work_dir:
+                if fm.cleanup:
                     fm.cleanup_work_dir()
 
     def _write_bounce_input(
@@ -515,10 +515,14 @@ class Bounce(PropagationModel):
     def _execute(self, input_file: Path, work_dir: Path):
         """Execute BOUNCE binary via base-class subprocess helper."""
         base_name = input_file.stem
-        result = self._run_subprocess(
-            [str(self.executable), base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [str(self.executable), base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"Bounce output:\n{result.stdout}", level='debug')
 

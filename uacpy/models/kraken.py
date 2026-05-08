@@ -343,10 +343,14 @@ class _KrakenBase(PropagationModel):
 
     def _run_kraken_executable(self, base_name: str, work_dir: Path):
         """Execute Kraken/KrakenC via base-class subprocess runner."""
-        self._run_subprocess(
-            [str(self.executable), base_name],
-            cwd=work_dir,
-        )
+        try:
+            self._run_subprocess(
+                [str(self.executable), base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
 
     def _compute_modes_impl(self, env, source, n_modes, **kwargs):
         """Override base class: use a dense depth grid for mode sampling.
@@ -428,13 +432,19 @@ class _KrakenBase(PropagationModel):
                 break
 
         if is_empty:
-            raise RuntimeError(self._modes_error_message(basename))
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=self._modes_error_message(basename),
+            )
 
         # Try to read modes, catch IndexError from reading empty binary files
         try:
             modes_data = read_modes_bin(basename, freq=0.0)
         except IndexError as e:
-            raise RuntimeError(self._modes_error_message(basename, original_error=e))
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=self._modes_error_message(basename, original_error=e),
+            ) from e
 
         return modes_data
 
@@ -650,7 +660,7 @@ class Kraken(_KrakenBase):
                 return self._build_modes_field(modes, n_modes, source)
 
             finally:
-                if not self.work_dir:
+                if fm.cleanup:
                     fm.cleanup_work_dir()
 
 
@@ -781,7 +791,7 @@ class KrakenC(_KrakenBase):
                 return self._build_modes_field(modes, n_modes, source)
 
             finally:
-                if not self.work_dir:
+                if fm.cleanup:
                     fm.cleanup_work_dir()
 
 
@@ -884,7 +894,7 @@ class KrakenField(_KrakenBase):
         self._supports_range_dependent_layered_bottom = False
         self._supports_elastic_media = True
         if mode_coupling not in ('adiabatic', 'coupled'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"mode_coupling must be 'adiabatic' or 'coupled', "
                 f"got {mode_coupling!r}"
             )
@@ -1239,10 +1249,14 @@ class KrakenField(_KrakenBase):
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
             kraken_exe = self._select_kraken_exe(env)
             self._log(f"Running {kraken_exe.name}...", level='info')
-            self._run_subprocess(
-                [str(kraken_exe), base_name],
-                cwd=fm.work_dir,
-            )
+            try:
+                self._run_subprocess(
+                    [str(kraken_exe), base_name],
+                    cwd=fm.work_dir,
+                )
+            except ModelExecutionError as exc:
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise
 
             # 3. Write .flp file
             flp_file = fm.get_path(f'{base_name}.flp')
@@ -1300,9 +1314,12 @@ class KrakenField(_KrakenBase):
             # Fortran) even when computation succeeds, so check for .shd first.
             shd_file = fm.get_path(f'{base_name}.shd')
             if not shd_file.exists():
-                raise RuntimeError(
-                    "field.exe did not produce a .shd file; check the "
-                    f".prt log at {fm.get_path(base_name + '.prt')}"
+                raise ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=(
+                        "field.exe did not produce a .shd file; check the "
+                        f".prt log at {fm.get_path(base_name + '.prt')}"
+                    ),
                 )
 
             if broadband:
@@ -1368,7 +1385,7 @@ class KrakenField(_KrakenBase):
             return field
 
         finally:
-            if not self.work_dir:
+            if fm.cleanup:
                 fm.cleanup_work_dir()
 
     # ── Broadband ───────────────────────────────────────────────────────

@@ -66,7 +66,7 @@ def main():
     # 1. ENVIRONMENT SETUP
     # =========================================================================
     print("=" * 70)
-    print("Example 25: Broadband Model Comparison")
+    print("Example 19: Broadband Model Comparison")
     print("=" * 70)
 
     env = uacpy.Environment(

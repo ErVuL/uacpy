@@ -119,6 +119,20 @@ class TestBellhop:
         assert result.field_type == 'tl'
         assert result.shape[0] == len(receiver_small.depths)
 
+    def test_bellhopcuda_compute_tl(self, simple_env, source, receiver_small):
+        """Smoke test for ``BellhopCUDA``. Skipped when no CUDA/CXX binary
+        is available — instantiation will raise ``ExecutableNotFoundError``.
+        """
+        from uacpy.models import BellhopCUDA
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        try:
+            bhc = BellhopCUDA(verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip("bellhopcuda / bellhopcxx binary not installed")
+        result = bhc.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        assert result.field_type == 'tl'
+        assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
+
 
 @pytest.mark.requires_binary
 class TestKraken:
@@ -224,6 +238,27 @@ class TestBounce:
         assert len(result.metadata['R']) > 0
         assert len(result.metadata['theta']) > 0
 
+    def test_bounce_compute_reflection_helper(self, simple_env, source, receiver_small, tmp_path):
+        """Verify the convenience method ``Bounce.compute_reflection`` runs."""
+        from uacpy.core import Environment, BoundaryProperties
+        bottom = BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600, shear_speed=400, density=1.8,
+            attenuation=0.2, shear_attenuation=0.5,
+        )
+        env_elastic = Environment(
+            name="elastic_test",
+            depth=simple_env.depth,
+            sound_speed=float(simple_env.ssp.data[0, 0]),
+            bottom=bottom,
+        )
+        bounce = Bounce(verbose=False)
+        result = bounce.compute_reflection(
+            env=env_elastic, source=source, receiver=receiver_small,
+            output_dir=tmp_path,
+        )
+        assert result.field_type == 'reflection_coefficients'
+
 
 @pytest.mark.requires_binary
 class TestRAM:
@@ -268,6 +303,27 @@ class TestRAM:
         with pytest.raises(ValueError, match="source_waveform"):
             ram.run(simple_env, source, receiver,
                     run_mode=RunMode.TIME_SERIES)
+
+    @pytest.mark.slow
+    def test_ram_compute_time_series_helper(self, simple_env, source):
+        """Verify the convenience method ``RAM.compute_time_series`` runs."""
+        from uacpy.core.results import TimeSeriesField
+        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+        fs = 4000.0
+        nt = 64
+        t = np.arange(nt) / fs
+        sigma = nt / (8.0 * fs)
+        f0 = float(np.atleast_1d(source.frequencies)[0])
+        wf = (np.sin(2 * np.pi * f0 * (t - t[-1] / 2))
+              * np.exp(-((t - t[-1] / 2) ** 2) / (2 * sigma ** 2)))
+        result = ram.compute_time_series(
+            simple_env, source, receiver,
+            source_waveform=wf, sample_rate=fs,
+        )
+        assert isinstance(result, TimeSeriesField)
+        assert result.data.shape[0] == 1
+        assert result.data.shape[1] == 1
 
 
 # OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;

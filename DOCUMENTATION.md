@@ -220,14 +220,32 @@ writers that need the *resolved* value before the context is entered.
 (Bellhop, Scooter, KrakenField, OASP, RAM) accepts `source_waveform=` and
 `sample_rate=` as **explicit keyword arguments on `run()`** — same name,
 same role across models. Models with a broadband H(f) path also accept
-`frequencies=` for an explicit override of `source.frequency`. SPARC
+`frequencies=` for an explicit override of `source.frequencies`. SPARC
 computes p(t) from its native source pulse and ignores both.
 
-**Typo guard.** Any kwarg passed to `run()` that doesn't match an
-explicit signature arg, a constructor attribute, or a documented writer
-pass-through triggers a `UserWarning` via `self._warn_unknown_kwargs`.
-A typo like `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`)
-is reported instead of being silently dropped.
+**Irrelevant kwargs are silently ignored.** Any kwarg passed to `run()`
+that doesn't match an explicit signature arg, a constructor attribute,
+or a documented writer pass-through is dropped without a warning — same
+contract as Python's standard `dict()` constructor with an unknown
+keyword. A typo like `Bellhop().run(env, src, rcv, n_beam=10)` (missing
+the `s`) silently uses the default `n_beams`.
+
+**Typed exceptions.** Constructor and `run()` failures raise:
+
+| Exception | When |
+|---|---|
+| `ConfigurationError` | bad input parameters (out-of-range, wrong type, mode/freq mismatch) |
+| `UnsupportedFeatureError` | model can't honour a requested `RunMode` or `Environment` axis |
+| `ExecutableNotFoundError` | Fortran/C binary missing at the resolved path |
+| `ModelExecutionError` | binary ran but failed (non-zero exit, empty output, truncated file). The captured `.prt` log tail is appended to the message for Acoustics-Toolbox models. |
+
+All four inherit from `uacpy.core.exceptions.UACPYError`; catch the base
+class to handle "anything went wrong with this model" uniformly.
+
+**Thread safety.** Model instances mutate `self.file_manager` per
+`run()` and are **not safe to share across threads**. For parameter
+sweeps, instantiate one model per worker (or use `concurrent.futures`
+with `ProcessPoolExecutor`).
 
 ---
 
@@ -461,14 +479,14 @@ env_ri = env.get_range_independent_approximation(method='median')  # legacy
 
 ```python
 uacpy.Source(
-    depth,                      # float or array — positive, down from surface (m)
-    frequency,                  # float or array — Hz (multiple values give a broadband sweep)
+    depths,                     # float or array — positive, down from surface (m)
+    frequencies,                # float or array — Hz (multiple values give a broadband sweep)
     angles=None,                # launch angles (deg). Default: linspace(-80, 80, 361)
     source_type='point',        # 'point' | 'line'
 )
 ```
 
-For broadband simulations, pass a frequency vector (`frequency=np.linspace(50, 250, 41)`)
+For broadband simulations, pass a frequency vector (`frequencies=np.linspace(50, 250, 41)`)
 rather than a separate bandwidth parameter.
 
 Useful properties: `source.n_sources`, `source.n_frequencies`,
@@ -686,13 +704,12 @@ receiver grid; call `tf.to_time_trace(depth=, range_m=)` to extract a
 
 **Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but its
 constructor raises `NotImplementedError`. Partial 3D support is already
-in-tree (`write_bty_3d` in `io/bty_writer.py`; `read_boundary_3d` and 3D
-`.shd` parsing in `io/output_reader.py`), but **the .env writer is
-hardcoded to 2D** (`io/bellhop_writer.py:484-487`, position 6 of TopOpt
-forced to `'2'`). Wiring up Bellhop3D therefore requires both finishing
-the .env writer (NSx/NSy source grid, Ntheta/Nbeta bearing fan, 3D SSP)
-and adding 3D arrivals parsing
-(`output_reader.py:413` raises `NotImplementedError`). See
+in-tree (`write_bty_3d` and `read_boundary_3d` in `io/boundary_io.py`),
+but the `.env` writer is 2D-only and 3D arrivals parsing is not
+implemented (`io/oalib_reader.py:769` raises `NotImplementedError`).
+Wiring up Bellhop3D therefore requires finishing the `.env` writer
+(NSx/NSy source grid, Ntheta/Nbeta bearing fan, 3D SSP) and the 3D
+arrivals reader. See
 `third_party/Acoustics-Toolbox/doc/bellhop3d.htm` for the file format.
 
 **Bellhop + BOUNCE for elastic bottoms.** When the bottom has significant
@@ -1088,8 +1105,8 @@ cov = oasn.compute_covariance(env, source, receiver)   # Covariance result
 # Replicas need Block-X grid kwargs (replica_zmin/zmax/nz, …):
 rep = oasn.compute_replicas(
     env, source, receiver,
-    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
-    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+    replica_zmin=10.0,  replica_zmax=90.0,    replica_nz=20,   # depths in m
+    replica_xmin=500.0, replica_xmax=10000.0, replica_nx=40,   # ranges in m
 )                                                       # Replicas result
 
 # Reflection coefficients — RunMode.REFLECTION
@@ -1313,7 +1330,7 @@ Every model populates these on every Result:
 | `model` | `str` | Wrapper class name (`'Bellhop'`, `'KrakenField'`, `'RAM'`, …). |
 | `backend` | `str` | Concrete binary that actually ran (`'bellhop'`, `'kraken.exe'`, `'field.exe'`, `'mpiramS'`, `'rams0.5'`, `'ramsurf1.5'`, `'oasp'`, …). When the wrapper is not a dispatcher, `backend == model` (lower-cased). |
 | `source_depths` | `ndarray` | Every source depth in the run, even if a single scalar was passed in. |
-| `frequency` *or* `frequencies` | `float` / `ndarray` | Single (centre) frequency for narrowband fields; vector for broadband. |
+| `frequencies` | `ndarray` | Always 1-D, plural — even single-frequency results store a 1-element array. Use `result.f0` for the convenience scalar. |
 | `phase_reference` | `str`, optional | Describes the phase convention of complex H(f) outputs — see below. |
 
 ### Phase convention (`TransferFunction.phase_reference`)
@@ -1365,11 +1382,11 @@ cov.receiver_positions           # (n_rcv, 3) (x, y, z) in metres
 # OASN matched-field replicas — Replicas Result.
 rep = oasn.compute_replicas(
     env, source, receiver,
-    replica_zmin=10.0, replica_zmax=90.0, replica_nz=20,
-    replica_xmin=0.5, replica_xmax=10.0, replica_nx=40,
+    replica_zmin=10.0,  replica_zmax=90.0,    replica_nz=20,   # depths in m
+    replica_xmin=500.0, replica_xmax=10000.0, replica_nx=40,   # ranges in m
 )
 rep.replicas                     # shape (n_freq, n_z, n_x, n_y, n_rcv) complex
-rep.replica_z, rep.replica_x, rep.replica_y
+rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)

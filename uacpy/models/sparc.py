@@ -19,7 +19,10 @@ from uacpy.core.constants import (
     parse_ssp_type, parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
-from uacpy.core.exceptions import ModelExecutionError, UnsupportedFeatureError, ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
+)
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
@@ -62,17 +65,17 @@ def _validate_pulse_type(pulse_type: str) -> str:
         ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
     """
     if not isinstance(pulse_type, str):
-        raise ValueError(
+        raise ConfigurationError(
             f"pulse_type must be a string, got {type(pulse_type).__name__}"
         )
     if len(pulse_type) > 4:
-        raise ValueError(
+        raise ConfigurationError(
             f"pulse_type must be at most 4 characters, got {pulse_type!r}"
         )
     pulse_type = pulse_type.ljust(4)
 
     def _bad(pos, char, allowed):
-        return ValueError(
+        return ConfigurationError(
             f"Invalid pulse_type character {char!r} at position {pos} "
             f"(must be one of {sorted(allowed)!r}). "
             f"See Acoustics-Toolbox/Scooter/sparc.f90."
@@ -217,7 +220,7 @@ class SPARC(PropagationModel):
         self.n_mesh = n_mesh
         self.roughness = roughness
         if output_mode not in ('R', 'D', 'S'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid output mode '{output_mode}'. "
                 f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
             )

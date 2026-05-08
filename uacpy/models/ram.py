@@ -337,7 +337,7 @@ class RAM(PropagationModel):
             raise ExecutableNotFoundError('RAM:mpiramS', str(self.executable))
 
         if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
-            raise ValueError(
+            raise ConfigurationError(
                 f"np_pade must be an integer in [2, 8] (mpiramS limit); "
                 f"got {np_pade!r}."
             )
@@ -347,35 +347,35 @@ class RAM(PropagationModel):
         for name, val in (('dr', dr), ('dz', dz), ('zmax', zmax),
                           ('rs_stability', rs_stability)):
             if val is not None and (not np.isfinite(val) or val <= 0):
-                raise ValueError(f"{name} must be positive and finite if "
-                                 f"set; got {val!r}.")
+                raise ConfigurationError(f"{name} must be positive and finite if "
+                                         f"set; got {val!r}.")
         if c0 is not None and (not np.isfinite(c0) or c0 <= 0):
-            raise ValueError(f"c0 must be positive and finite if set; "
-                             f"got {c0!r}.")
+            raise ConfigurationError(f"c0 must be positive and finite if set; "
+                                     f"got {c0!r}.")
         for name, val in (('Q', Q), ('T', T)):
             if val is not None and (not np.isfinite(val) or val <= 0):
-                raise ValueError(f"{name} must be positive and finite if "
-                                 f"set; got {val!r}.")
+                raise ConfigurationError(f"{name} must be positive and finite if "
+                                         f"set; got {val!r}.")
         for name, val in (('timeout', timeout),
                           ('absorbing_layer_width', absorbing_layer_width),
                           ('absorbing_layer_attn', absorbing_layer_attn)):
             if not np.isfinite(val) or val <= 0:
-                raise ValueError(f"{name} must be positive and finite; "
-                                 f"got {val!r}.")
+                raise ConfigurationError(f"{name} must be positive and finite; "
+                                         f"got {val!r}.")
         if not isinstance(n_sed_points, int) or n_sed_points < 2:
-            raise ValueError(f"n_sed_points must be an integer >= 2; "
-                             f"got {n_sed_points!r}.")
+            raise ConfigurationError(f"n_sed_points must be an integer >= 2; "
+                                     f"got {n_sed_points!r}.")
         if not isinstance(depth_decimation, int) or depth_decimation < 1:
-            raise ValueError(f"depth_decimation must be an integer >= 1; "
-                             f"got {depth_decimation!r}.")
+            raise ConfigurationError(f"depth_decimation must be an integer >= 1; "
+                                     f"got {depth_decimation!r}.")
         if not isinstance(ns_stability, int) or ns_stability < 0:
-            raise ValueError(f"ns_stability must be a non-negative integer; "
-                             f"got {ns_stability!r}.")
+            raise ConfigurationError(f"ns_stability must be a non-negative integer; "
+                                     f"got {ns_stability!r}.")
         if not callable(rams_theta):
             theta_val = float(rams_theta)
             if not (0.0 <= theta_val <= 90.0):
-                raise ValueError(f"rams_theta must be in [0, 90] degrees; "
-                                 f"got {theta_val!r}.")
+                raise ConfigurationError(f"rams_theta must be in [0, 90] degrees; "
+                                         f"got {theta_val!r}.")
 
         self.dr = dr
         self.dz = dz

@@ -19,7 +19,9 @@ from typing import Optional
 
 import numpy as np
 
-from uacpy.core.exceptions import ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -153,14 +155,14 @@ class Scooter(PropagationModel):
         self.bio_layers = bio_layers
 
         if source_type not in ('R', 'X'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid source_type '{source_type}'. Use 'R' (cylindrical) or 'X' (Cartesian)."
             )
         self.source_type = source_type
 
         spectrum_map = {'positive': 'P', 'negative': 'N', 'both': 'B'}
         if spectrum not in spectrum_map:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid spectrum '{spectrum}'. Use 'positive', 'negative', or 'both'."
             )
         self.spectrum = spectrum
@@ -169,7 +171,7 @@ class Scooter(PropagationModel):
         self.stabilizing_attenuation_off = bool(stabilizing_attenuation_off)
 
         if field_interp not in ('O', 'P'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid field_interp '{field_interp}'. Use 'O' (polynomial) "
                 f"or 'P' (Pade) — see fields.f90:82-90."
             )
@@ -406,7 +408,11 @@ class Scooter(PropagationModel):
 
                     if grn_data['nk'] == 0:
                         self._log("Scooter produced empty Green's function (nk=0)", level='error')
-                        raise RuntimeError("Scooter produced empty Green's function (nk=0)")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0,
+                            stdout=None,
+                            stderr="Scooter produced empty Green's function (nk=0)",
+                        )
 
                     if grn_data['nsd'] > 1:
                         self._log(
@@ -645,10 +651,14 @@ class Scooter(PropagationModel):
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared ``_run_subprocess`` helper."""
-        result = self._run_subprocess(
-            [self.executable, base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [self.executable, base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
         if self.verbose and result.stdout:
             self._log(f"Scooter output:\n{result.stdout}", level='debug')
 
@@ -656,11 +666,14 @@ class Scooter(PropagationModel):
         """Execute ``fields.exe`` to transform ``<base>.grn`` -> ``<base>.shd``."""
         fields_exe = self._get_fields_executable()
         if fields_exe is None:
-            # Caller is expected to check availability before invoking this.
             raise ExecutableNotFoundError(self.model_name, 'fields.exe')
-        result = self._run_subprocess(
-            [fields_exe, base_name],
-            cwd=work_dir,
-        )
+        try:
+            result = self._run_subprocess(
+                [fields_exe, base_name],
+                cwd=work_dir,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, 'fields')
+            raise
         if self.verbose and result.stdout:
             self._log(f"fields.exe output:\n{result.stdout}", level='debug')

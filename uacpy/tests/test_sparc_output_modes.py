@@ -226,7 +226,8 @@ class TestSPARCErrorHandling:
 
     def test_sparc_invalid_output_mode(self, sparc_simple_env, source_50hz, receiver_grid):
         """Test error handling for invalid output mode."""
-        with pytest.raises(ValueError, match="Invalid output mode"):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match="Invalid output mode"):
             SPARC(output_mode='X')  # Invalid mode
 
     @pytest.mark.requires_binary
