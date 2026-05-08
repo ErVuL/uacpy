@@ -490,7 +490,7 @@ uacpy.Source(
 For broadband simulations, pass a frequency vector (`frequencies=np.linspace(50, 250, 41)`)
 rather than a separate bandwidth parameter.
 
-Useful properties: `source.n_sources`, `source.n_frequencies`,
+Useful properties: `source.n_sources`, `source.n_frequenciesuencies`,
 `source.n_angles`.
 
 ### Receiver
@@ -1117,10 +1117,10 @@ oasr = OASR(
     francois_garrison_params=None, bio_layers=None,
 )
 refl = oasr.run(env, source, receiver)     # ReflectionCoefficient
-# Broadband sweep: pass freq_min / freq_max / n_frequencies via kwargs:
+# Broadband sweep: pass freq_min / freq_max / n_frequenciesuencies via kwargs:
 broad = oasr.run(env, source, receiver,
-                 freq_min=50.0, freq_max=200.0, n_frequencies=16)
-assert broad.is_broadband                           # R/phi shape (n_angles, n_freq)
+                 freq_min=50.0, freq_max=200.0, n_frequenciesuencies=16)
+assert broad.is_broadband                           # R/phi shape (n_angles, n_frequencies)
 
 # Broadband / pulse transfer function (NOT parabolic-equation — see note)
 oasp = OASP(
@@ -1210,7 +1210,7 @@ Result                              identification + metadata
 ├── Modes                           Kraken normal modes (k, phi, z)
 ├── Covariance                      OASN spatial covariance C(f, i, j)
 ├── Replicas                        OASN MFP replica fields (n_f, n_z, n_x, n_y, n_rcv)
-└── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_freq)
+└── ReflectionCoefficient           theta + R/phi shape (n_angles,) or (n_angles, n_frequencies)
 ```
 
 Every ``Result`` carries a ``tag(model=…, backend=…, source_depths=…,
@@ -1374,8 +1374,8 @@ modes.depths                     # depth grid
 
 # OASN spatial covariance — Covariance Result.
 cov = oasn.compute_covariance(env, source, receiver)
-cov.covariance                   # shape (n_freq, n_rcv, n_rcv) complex
-cov.frequencies                  # (n_freq,) Hz
+cov.covariance                   # shape (n_frequencies, n_rcv, n_rcv) complex
+cov.frequencies                  # (n_frequencies,) Hz
 cov.receiver_positions           # (n_rcv, 3) (x, y, z) in metres
 
 # OASN matched-field replicas — Replicas Result.
@@ -1384,7 +1384,7 @@ rep = oasn.compute_replicas(
     replica_zmin=10.0,  replica_zmax=90.0,    replica_nz=20,   # depths in m
     replica_xmin=500.0, replica_xmax=10000.0, replica_nx=40,   # ranges in m
 )
-rep.replicas                     # shape (n_freq, n_z, n_x, n_y, n_rcv) complex
+rep.replicas                     # shape (n_frequencies, n_z, n_x, n_y, n_rcv) complex
 rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
@@ -1415,7 +1415,7 @@ ts.time         # (n_t,) seconds
 ts.fs           # sample rate, Hz
 trace = ts.get_trace(depth=50.0, range_m=1000.0)   # → TimeTrace
 freqs, X = ts.get_spectrum()                       # rfft along time axis
-                                                    # X shape (n_d, n_r, n_freq)
+                                                    # X shape (n_d, n_r, n_frequencies)
 ```
 
 There is no separate "point" receiver type. To get a single-position
@@ -1744,7 +1744,7 @@ y = sig.add_noise(timeseries, sample_rate=fs,
                   fc=1000.0, bandwidth=200.0)
 
 # Fourier-synthesize a time series from a frequency-domain pressure response.
-# `pressure_freq` shape (..., n_freqs); `freq_vec` is the frequency axis (Hz).
+# `pressure_freq` shape (..., n_frequenciess); `freq_vec` is the frequency axis (Hz).
 # `source_spectrum` lets you weight by an arbitrary source spectrum; Tstart
 # shifts the time origin. Returns (time, signal).
 t, s = sig.fourier_synthesis(pressure_freq, freq_vec,

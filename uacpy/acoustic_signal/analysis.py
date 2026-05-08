@@ -238,7 +238,7 @@ class Spectrogram:
             Maximum value for color scaling (dB).
         """
         if (
-            not hasattr(self, "freqs")
+            not hasattr(self, "frequencies")
             or not hasattr(self, "times")
             or not hasattr(self, "Sxx")
         ):
@@ -626,7 +626,7 @@ class PSD:
         **kwargs
             Additional keyword arguments passed to ``ax.semilogx``.
         """
-        if not hasattr(self, "freqs") or not hasattr(self, "psd"):
+        if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
             raise RuntimeError("You must compute the PSD before plotting it.")
 
         # Convert PSD to dB scale
@@ -1335,7 +1335,7 @@ class FRF:
         Coherence is plotted to assess the reliability of the FRF.
         """
 
-        if not hasattr(self, "freqs") or not hasattr(self, "tf"):
+        if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
             raise RuntimeError(
                 "You must compute the Transfer Function before plotting it."
             )
@@ -1564,7 +1564,7 @@ class FKTransform:
         **kwargs
             Additional keyword arguments passed to ``ax.imshow``.
         """
-        if not hasattr(self, "freqs") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
+        if not hasattr(self, "frequencies") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
             raise RuntimeError("You must compute the f–k transform before plotting it.")
 
         fk_db = 10 * np.log10(self.fk / (self.ref ** 2))
