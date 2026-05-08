@@ -188,9 +188,9 @@ def main():
     # Source
     ax.plot(0.5, source.depths[0], 'r*', markersize=20, label='Source', zorder=10)
 
-    # Receiver positions (sample)
-    R, Z = np.meshgrid(result.ranges/1000, result.depths)
-    ax.scatter(R.flatten()[::100], Z.flatten()[::100], c='green', s=10,
+    # Receiver positions (subsample on a 2-D grid)
+    R, Z = np.meshgrid(result.ranges[::10] / 1000, result.depths[::5])
+    ax.scatter(R, Z, c='green', s=10,
                alpha=0.3, label='Receivers', zorder=5)
 
     ax.set_xlim([0, receiver.ranges[-1]/1000])
