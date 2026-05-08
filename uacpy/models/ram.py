@@ -484,11 +484,7 @@ class RAM(PropagationModel):
             return self.zmax
         if c0 is None:
             c0 = self._resolve_c0(env)
-        # Maximum seafloor depth across all ranges
-        if env.bathymetry is not None and len(env.bathymetry) > 0:
-            max_depth = float(np.max(env.bathymetry[:, 1]))
-        else:
-            max_depth = env.depth
+        max_depth = env.depth
         wavelength = c0 / max(freq, 1.0)
         absorbing_width = self.absorbing_layer_width * wavelength
         dz_for_pad = (float(self.dz) if self.dz is not None
@@ -553,21 +549,13 @@ class RAM(PropagationModel):
         """
         bth_filename = 'bathy.dat'
 
-        if env.bathymetry is not None and len(env.bathymetry) > 0:
-            bathy = env.bathymetry.copy()
-            # Anchor at r=0 if first sample is at r>0
-            if bathy[0, 0] > 0.0:
-                bathy = np.vstack([[0.0, bathy[0, 1]], bathy])
-            # Extend to rmax if needed
-            if bathy[-1, 0] < rmax:
-                bathy = np.vstack([bathy, [rmax, bathy[-1, 1]]])
-            write_bth_file(work_dir / bth_filename, bathy[:, 0], bathy[:, 1])
-            return bth_filename, 1
-        else:
-            # No bathymetry file — use default flat bottom
-            depth = env.depth if env.depth > 0 else 100.0
-            write_bth_file(work_dir / bth_filename, np.array([0.0, rmax]), np.array([depth, depth]))
-            return bth_filename, 1
+        bathy = env.bathymetry.copy()
+        if bathy[0, 0] > 0.0:
+            bathy = np.vstack([[0.0, bathy[0, 1]], bathy])
+        if bathy[-1, 0] < rmax:
+            bathy = np.vstack([bathy, [rmax, bathy[-1, 1]]])
+        write_bth_file(work_dir / bth_filename, bathy[:, 0], bathy[:, 1])
+        return bth_filename, 1
 
     def _get_water_speed_at_bottom(
         self, env: Environment, range_m: Optional[float] = None,
@@ -1234,9 +1222,7 @@ class RAM(PropagationModel):
         ndr = max(1, int(np.floor((max_range / dr) / 1000.0)) or 1)
         ndz = max(1, int(self.depth_decimation))
 
-        bathymetry = env.bathymetry.tolist() if env.bathymetry is not None \
-            else [(0.0, env.depth), (max_range, env.depth)]
-        bathymetry = [(float(r), float(d)) for r, d in bathymetry]
+        bathymetry = [(float(r), float(d)) for r, d in env.bathymetry.tolist()]
         if bathymetry[-1][0] < max_range:
             bathymetry.append((float(max_range), bathymetry[-1][1]))
 
@@ -2067,11 +2053,8 @@ class RAM(PropagationModel):
             # Mask TL values below the seafloor at each range.
             # RAM computes valid field in the sediment, but for plotting
             # consistency with other models, set sub-bottom values to NaN.
-            if env.bathymetry is not None and len(env.bathymetry) > 0:
-                bathy = env.bathymetry
-                bathy_depths = np.interp(receiver.ranges, bathy[:, 0], bathy[:, 1])
-            else:
-                bathy_depths = np.full(len(receiver.ranges), env.depth)
+            bathy = env.bathymetry
+            bathy_depths = np.interp(receiver.ranges, bathy[:, 0], bathy[:, 1])
             for j, bd in enumerate(bathy_depths):
                 mask = receiver.depths > bd
                 tl_output[mask, j] = np.nan
@@ -2218,11 +2201,8 @@ class RAM(PropagationModel):
             # Mask sub-bottom samples with NaN for consistency with _run_tl.
             # RAM computes valid fields in the sediment, but other uacpy
             # models return NaN below the seafloor.
-            if env.bathymetry is not None and len(env.bathymetry) > 0:
-                bathy = env.bathymetry
-                bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
-            else:
-                bathy_depths_rout = np.full(len(rout), env.depth)
+            bathy = env.bathymetry
+            bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
             for j, bd in enumerate(bathy_depths_rout):
                 mask = out_depths > bd
                 pressure[mask, :, j] = np.nan

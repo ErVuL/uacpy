@@ -35,7 +35,7 @@ class TestOAST:
         )
         return Environment(
             name="oast_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -85,7 +85,7 @@ class TestOAST:
         )
         env = Environment(
             name="oast_elastic",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -110,7 +110,7 @@ class TestOASN:
         )
         return Environment(
             name="oasn_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -172,7 +172,7 @@ class TestOASN:
         )
         env = Environment(
             name="oasn_elastic",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -198,7 +198,7 @@ class TestOASR:
         )
         return Environment(
             name="oasr_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -278,7 +278,6 @@ class TestOASP:
 
         return Environment(
             name="oasp_test",
-            depth=100.0,
             sound_speed=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
@@ -357,7 +356,7 @@ class TestOASESUnified:
         """Test that OASES automatically selects appropriate sub-model."""
         env = Environment(
             name="oases_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
         source = Source(depths=50.0, frequencies=100.0)
@@ -409,7 +408,7 @@ class TestOASESCovarianceReplicaDispatch:
         monkeypatch.setattr(OASN, 'run', spy_run)
 
         env = Environment(
-            name='oases_dispatch', depth=100.0, sound_speed=1500.0,
+            name='oases_dispatch', bathymetry=100.0, sound_speed=1500.0,
         )
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
@@ -431,7 +430,7 @@ class TestOASESCovarianceReplicaDispatch:
         monkeypatch.setattr(OASN, 'run', spy_run)
 
         env = Environment(
-            name='oases_dispatch', depth=100.0, sound_speed=1500.0,
+            name='oases_dispatch', bathymetry=100.0, sound_speed=1500.0,
         )
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])

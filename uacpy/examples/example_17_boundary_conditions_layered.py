@@ -40,7 +40,7 @@ def example_vacuum_surface():
     source, receiver = make_source_receiver()
     env = uacpy.Environment(
         name='vacuum_surface',
-        depth=100,
+        bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600,
@@ -58,7 +58,7 @@ def example_rough_surface():
     )
     env = uacpy.Environment(
         name='rough_surface',
-        depth=100,
+        bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         altimetry=surface,
         bottom=BoundaryProperties(
@@ -88,7 +88,7 @@ def example_ice_surface():
     )
     env = uacpy.Environment(
         name='ice_surface',
-        depth=100,
+        bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1480), (100, 1480)]),
         surface=ice,
         bottom=BoundaryProperties(
@@ -115,7 +115,7 @@ def example_single_layer_bottom():
         ),
     )
     env = uacpy.Environment(
-        name='single_layer_bottom', depth=100,
+        name='single_layer_bottom', bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=lb,
     )
@@ -140,7 +140,7 @@ def example_multi_layer_bottom():
         ),
     )
     env = uacpy.Environment(
-        name='multi_layer_bottom', depth=100,
+        name='multi_layer_bottom', bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=lb,
     )
@@ -181,7 +181,7 @@ def example_range_dependent_layered():
         profiles=[near, far],
     )
     env = uacpy.Environment(
-        name='rd_layered_bottom', depth=100,
+        name='rd_layered_bottom', bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         bottom=rdl,
     )

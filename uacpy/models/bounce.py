@@ -77,7 +77,7 @@ class Bounce(PropagationModel):
     ...     attenuation=0.2,
     ...     shear_attenuation=0.5
     ... )
-    >>> env = Environment(name="test", depth=100, bottom=bottom)
+    >>> env = Environment(name="test", bathymetry=100, bottom=bottom)
     >>> source = Source(depths=50, frequencies=50)
     >>> receiver = Receiver(depths=np.array([50]))
     >>>
@@ -96,7 +96,7 @@ class Bounce(PropagationModel):
     ...     acoustic_type='file',
     ...     reflection_file=result.metadata['brc_file']
     ... )
-    >>> env_with_rc = Environment(name="test", depth=100, bottom=bottom_with_rc)
+    >>> env_with_rc = Environment(name="test", bathymetry=100, bottom=bottom_with_rc)
     >>> scooter = Scooter()
     >>> tl = scooter.compute_tl(env_with_rc, source, receiver)
 

@@ -21,7 +21,7 @@ class TestScooterBasic:
         """Test basic Scooter TL computation."""
         env = Environment(
             name="scooter_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
         source = Source(depths=50.0, frequencies=100.0)
@@ -44,7 +44,7 @@ class TestScooterBroadband:
     @pytest.mark.slow
     def test_scooter_broadband_returns_transfer_function(self):
         """Scooter BROADBAND returns a populated H(f) TransferFunction."""
-        env = Environment(name="sc_bb", depth=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_bb", bathymetry=100.0, sound_speed=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
@@ -67,7 +67,7 @@ class TestScooterBroadband:
     @pytest.mark.slow
     def test_scooter_time_series_returns_time_series_field(self):
         """Scooter TIME_SERIES with a tonal waveform returns TimeSeriesField."""
-        env = Environment(name="sc_ts", depth=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_ts", bathymetry=100.0, sound_speed=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),
@@ -96,7 +96,7 @@ class TestScooterBroadband:
 
     def test_scooter_time_series_requires_waveform(self):
         """Scooter TIME_SERIES without source_waveform must raise."""
-        env = Environment(name="sc_ts_err", depth=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_ts_err", bathymetry=100.0, sound_speed=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),

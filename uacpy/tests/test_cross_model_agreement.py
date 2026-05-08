@@ -101,7 +101,7 @@ def _ram_tl(env, src, rcv):
 
 def _pekeris_fluid() -> Scenario:
     env = Environment(
-        name='pekeris-fluid', depth=100.0, sound_speed=1500.0,
+        name='pekeris-fluid', bathymetry=100.0, sound_speed=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -156,10 +156,10 @@ def _pekeris_elastic() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-layered', depth=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-halfspace', depth=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -219,7 +219,7 @@ def _altimetry_consistency() -> Scenario:
         sound_speed=1700.0, density=1.7, attenuation=0.5,
     )
     env = Environment(
-        name='altimetry-rough', depth=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
@@ -252,7 +252,7 @@ def _pekeris_fluid_hf() -> Scenario:
     50 Hz scenario gives the framework a frequency-dependence handle.
     """
     env = Environment(
-        name='pekeris-fluid-hf', depth=100.0, sound_speed=1500.0,
+        name='pekeris-fluid-hf', bathymetry=100.0, sound_speed=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -307,10 +307,10 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-bb-layered', depth=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-bb-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-bb-halfspace', depth=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-bb-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -384,7 +384,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         (6000.0, 0.0),
     ]
     env = Environment(
-        name='altimetry-rough-bb', depth=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough-bb', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(

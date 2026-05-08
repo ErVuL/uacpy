@@ -97,7 +97,7 @@ def scenario_a_munk_profile():
     # ═══════════════════════════════════════════════════════════════════════
     env = uacpy.Environment(
         name="Deep Ocean - Munk Profile",
-        depth=5000.0,            # Deep ocean
+        bathymetry=5000.0,            # Deep ocean
         ssp=SoundSpeedProfile.from_munk(5000.0),
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
@@ -196,7 +196,7 @@ def scenario_b_pekeris_waveguide():
 
     env = uacpy.Environment(
         name="Pekeris Waveguide - Elastic Bottom",
-        depth=100.0,             # Shallow water
+        bathymetry=100.0,             # Shallow water
         sound_speed=1500.0,      # Isovelocity water column
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
@@ -289,7 +289,7 @@ def scenario_c_thermocline():
 
     env = uacpy.Environment(
         name="Coastal - Thermocline with Surface Duct",
-        depth=200.0,
+        bathymetry=200.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='bilinear'),
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'

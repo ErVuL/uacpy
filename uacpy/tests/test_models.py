@@ -132,7 +132,7 @@ class TestBounce:
         )
         env_elastic = Environment(
             name="elastic_test",
-            depth=simple_env.depth,
+            bathymetry=simple_env.depth,
             sound_speed=float(simple_env.ssp.data[0, 0]),
             bottom=bottom
         )
@@ -169,7 +169,7 @@ class TestBounce:
         )
         env_elastic = Environment(
             name="elastic_test",
-            depth=simple_env.depth,
+            bathymetry=simple_env.depth,
             sound_speed=float(simple_env.ssp.data[0, 0]),
             bottom=bottom,
         )
@@ -320,7 +320,7 @@ class TestModelConsistency:
         )
         env_elastic = Environment(
             name="elastic_test",
-            depth=simple_env.depth,
+            bathymetry=simple_env.depth,
             sound_speed=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_elastic,
         )
@@ -346,7 +346,7 @@ class TestModelConsistency:
         )
         env_with_rc = Environment(
             name="test_with_rc",
-            depth=simple_env.depth,
+            bathymetry=simple_env.depth,
             sound_speed=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_with_rc,
         )

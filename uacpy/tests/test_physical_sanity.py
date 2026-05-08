@@ -44,7 +44,7 @@ class TestPekerisWaveguide:
 
         env = uacpy.Environment(
             name='Pekeris Waveguide',
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -215,7 +215,7 @@ class TestRangeDependentPhysicalSanity:
 
         env = uacpy.Environment(
             name='Sloping Bottom',
-            depth=100.0,  # Initial depth
+            # Initial depth
             sound_speed=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
@@ -279,7 +279,7 @@ class TestMunkProfile:
         """Deep water environment with Munk profile."""
         env = uacpy.Environment(
             name='Munk Profile',
-            depth=5000.0,
+            bathymetry=5000.0,
             ssp=SoundSpeedProfile.from_munk(5000.0),
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
@@ -346,7 +346,7 @@ class TestInterpolationAccuracy:
 
         env = uacpy.Environment(
             name='Test',
-            depth=100.0,
+            bathymetry=100.0,
             ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
         )
 
@@ -363,7 +363,7 @@ class TestInterpolationAccuracy:
 
         env = uacpy.Environment(
             name='Test',
-            depth=100.0,
+            bathymetry=100.0,
             ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
         )
 
@@ -388,7 +388,7 @@ class TestNumericalStability:
         """Models should handle very shallow water (10m depth)."""
         env = uacpy.Environment(
             name='Very Shallow',
-            depth=10.0,
+            bathymetry=10.0,
             sound_speed=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
@@ -413,7 +413,7 @@ class TestNumericalStability:
         """Models should handle high frequency (10 kHz)."""
         env = uacpy.Environment(
             name='High Frequency',
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',

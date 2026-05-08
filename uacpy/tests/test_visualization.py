@@ -19,7 +19,7 @@ def basic_setup():
     """Build env / source / TL result for one test."""
     env = uacpy.Environment(
         name='test',
-        depth=100,
+        bathymetry=100,
         sound_speed=1500
     )
     source = uacpy.Source(depths=50, frequencies=100)
@@ -292,7 +292,7 @@ class TestPlottingEdgeCases:
 
     def test_plot_empty_results(self):
         """Test plotting with empty results dict."""
-        env = uacpy.Environment(name='test', depth=100, sound_speed=1500)
+        env = uacpy.Environment(name='test', bathymetry=100, sound_speed=1500)
 
         with pytest.raises((ValueError, KeyError, IndexError)):
             plots.compare_models({}, env)
@@ -417,13 +417,13 @@ class TestCompareModelsTypeDispatch:
             data=p, depths=depths, ranges=ranges,
             model='Bellhop', frequencies=100.0,
         )
-        env = uacpy.Environment(name='t', depth=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
         fig, axes = plots.compare_models({'Bellhop': pfield}, env=env)
         assert fig is not None
         plt.close(fig)
 
     def test_unsupported_field_type_raises(self):
-        env = uacpy.Environment(name='t', depth=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
         with pytest.raises(TypeError, match="expected TLField"):
             plots.compare_models({'bogus': object()}, env=env)
 

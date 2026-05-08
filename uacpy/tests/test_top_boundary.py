@@ -29,7 +29,7 @@ def _ice() -> BoundaryProperties:
 
 def _basic_env(surface: BoundaryProperties) -> uacpy.Environment:
     return uacpy.Environment(
-        name='top_bc_test', depth=100.0,
+        name='top_bc_test', bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
         surface=surface,
         bottom=BoundaryProperties(

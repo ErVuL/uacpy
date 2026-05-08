@@ -32,7 +32,7 @@ def main():
     # Simple environment for OASES demonstration
     env = uacpy.Environment(
         name="OASES Demonstration",
-        depth=100,
+        bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs(
             [(0, 1500), (100, 1520)], interp='linear',
         ),

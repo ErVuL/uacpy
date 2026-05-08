@@ -50,7 +50,7 @@ def _rough_altimetry():
 
 def _env(*, bottom, altimetry=None):
     return Environment(
-        name='test', depth=100.0, sound_speed=1500.0,
+        name='test', bathymetry=100.0, sound_speed=1500.0,
         bottom=bottom, altimetry=altimetry,
     )
 

@@ -84,7 +84,6 @@ class TestEnvironmentIO:
 
             env = uacpy.Environment(
                 name="Test",
-                depth=100.0,
                 sound_speed=1500.0,
                 bathymetry=bathymetry
             )
@@ -106,7 +105,7 @@ class TestEnvironmentIO:
 
         env = uacpy.Environment(
             name="Test",
-            depth=100.0,
+            bathymetry=100.0,
             ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip')
         )
 

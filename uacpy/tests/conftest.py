@@ -41,7 +41,7 @@ def simple_env():
     """Simple isovelocity environment."""
     return uacpy.Environment(
         name="Test Environment",
-        depth=100.0,
+        bathymetry=100.0,
         sound_speed=1500.0,
     )
 
@@ -57,7 +57,7 @@ def munk_env():
 
     return uacpy.Environment(
         name="Munk Profile",
-        depth=100.0,
+        bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
             np.column_stack([depths, sound_speeds]), interp='pchip',
         ),
@@ -73,7 +73,6 @@ def range_dependent_env():
 
     return uacpy.Environment(
         name="Range Dependent",
-        depth=100.0,
         sound_speed=1500.0,
         bathymetry=bathymetry,
     )
@@ -143,7 +142,7 @@ def pekeris_env(halfspace_bottom):
     """Classic 100-m Pekeris waveguide with a fluid half-space bottom."""
     return uacpy.Environment(
         name="Pekeris (fluid bottom)",
-        depth=100.0,
+        bathymetry=100.0,
         sound_speed=1500.0,
         bottom=halfspace_bottom,
     )
@@ -154,7 +153,7 @@ def elastic_env(elastic_bottom):
     """Pekeris waveguide with an elastic half-space bottom (shear=400 m/s)."""
     return uacpy.Environment(
         name="Pekeris (elastic bottom)",
-        depth=100.0,
+        bathymetry=100.0,
         sound_speed=1500.0,
         bottom=elastic_bottom,
     )

@@ -121,7 +121,7 @@ class BoundaryProperties:
     ...     acoustic_type='file',
     ...     reflection_file=brc_file
     ... )
-    >>> env = Environment(name="test", depth=100, bottom=bottom)
+    >>> env = Environment(name="test", bathymetry=100, bottom=bottom)
     """
 
     acoustic_type: str = 'vacuum'
@@ -977,17 +977,17 @@ class Environment:
     ----------
     name : str
         Environment identifier.
-    depth : float
-        Maximum water depth in metres.
+    bathymetry : float or array-like
+        Either a scalar water depth in metres (flat bottom), or a
+        range-dependent bathymetry as ``[(range_m, depth_m), …]``.
+        The maximum depth in this argument defines the water column
+        extent; ``env.depth`` exposes it as a read-only property.
     ssp : SoundSpeedProfile, optional
         Sound-speed profile (1-D or 2-D). When ``None``, an isovelocity
         profile is built from ``sound_speed``.
     sound_speed : float, optional
         Reference speed for the default isovelocity profile (m/s).
         Ignored when ``ssp`` is provided. Default 1500.
-    bathymetry : array-like, optional
-        Range-dependent bathymetry as ``[(range_m, depth_m), …]``.
-        Default is flat bottom at ``depth``.
     altimetry : array-like, optional
         Surface altimetry as ``[(range_m, height_m), …]`` (height
         positive up). Default ``None`` (flat surface).
@@ -1005,12 +1005,12 @@ class Environment:
     --------
     Isovelocity:
 
-    >>> env = Environment(name='shallow', depth=100, sound_speed=1500)
+    >>> env = Environment(name='shallow', bathymetry=100, sound_speed=1500)
 
     Linear SSP:
 
     >>> env = Environment(
-    ...     name='test', depth=200,
+    ...     name='test', bathymetry=200,
     ...     ssp=SoundSpeedProfile.from_pairs(
     ...         [(0, 1520), (200, 1480)], interp='linear'),
     ... )
@@ -1018,27 +1018,22 @@ class Environment:
     Munk:
 
     >>> env = Environment(
-    ...     name='deep', depth=5000,
+    ...     name='deep', bathymetry=5000,
     ...     ssp=SoundSpeedProfile.from_munk(5000),
     ... )
 
-    Range-dependent SSP for Bellhop Quad mode:
+    Range-dependent bathymetry:
 
     >>> env = Environment(
-    ...     name='wedge', depth=200,
-    ...     ssp=SoundSpeedProfile.from_2d(
-    ...         depth=[0, 200], ranges=[0, 10000],
-    ...         matrix=[[1520, 1530], [1480, 1490]],
-    ...         interp='quad'),
+    ...     name='wedge', bathymetry=[(0, 100), (10000, 200)],
     ... )
     """
 
     def __init__(
         self,
-        depth: float,
+        bathymetry: Union[float, List[Tuple[float, float]], np.ndarray],
         ssp: Optional[SoundSpeedProfile] = None,
         sound_speed: float = 1500.0,
-        bathymetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
         altimetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
         bottom: Optional[Union[BoundaryProperties, RangeDependentBottom, 'LayeredBottom', 'RangeDependentLayeredBottom']] = None,
         surface: Optional[BoundaryProperties] = None,
@@ -1047,30 +1042,39 @@ class Environment:
         name: str = 'unnamed',
     ):
         self.name = _sanitize_title(name)
-        self.depth = float(depth)
         self.volume_attenuation = volume_attenuation
 
-        if self.depth <= 0:
-            raise ValueError(f"environment depth must be positive (m), got {self.depth}")
+        if np.isscalar(bathymetry):
+            water_depth = float(bathymetry)
+            if water_depth <= 0:
+                raise ValueError(
+                    f"bathymetry depth must be positive (m), got {water_depth}"
+                )
+            self.bathymetry = np.array([[0.0, water_depth]], dtype=np.float64)
+        else:
+            self.bathymetry = np.array(bathymetry, dtype=np.float64)
+            if self.bathymetry.ndim != 2 or self.bathymetry.shape[1] != 2:
+                raise ValueError(
+                    f"bathymetry must be a positive scalar or shape (N, 2) as "
+                    f"[(range_m, depth_m), ...], got shape {self.bathymetry.shape}; "
+                    f"example: [(0, 100), (5000, 200)]"
+                )
+            if np.any(self.bathymetry[:, 1] <= 0):
+                raise ValueError(
+                    f"bathymetry depths must be positive (m), got "
+                    f"{self.bathymetry[:, 1].tolist()}"
+                )
+
+        max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
 
         if ssp is None:
-            self.ssp = SoundSpeedProfile.from_isovelocity(self.depth, sound_speed)
+            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, sound_speed)
         elif isinstance(ssp, SoundSpeedProfile):
             self.ssp = ssp
         else:
             raise TypeError(
                 f"ssp must be a SoundSpeedProfile, got {type(ssp).__name__}"
             )
-
-        if bathymetry is not None:
-            self.bathymetry = np.array(bathymetry, dtype=np.float64)
-            if self.bathymetry.ndim != 2 or self.bathymetry.shape[1] != 2:
-                raise ValueError(
-                    f"bathymetry must have shape (N, 2) as [(range_m, depth_m), ...], "
-                    f"got shape {self.bathymetry.shape}; example: [(0, 100), (5000, 200)]"
-                )
-        else:
-            self.bathymetry = np.array([[0.0, depth]], dtype=np.float64)
 
         if altimetry is not None:
             self.altimetry = np.array(altimetry, dtype=np.float64)
@@ -1079,7 +1083,6 @@ class Environment:
         else:
             self.altimetry = None
 
-        max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
         if max_bathy_depth > self.ssp.depths[-1]:
             self.ssp = self.ssp.extend_to(max_bathy_depth)
 
@@ -1092,21 +1095,18 @@ class Environment:
         else:
             self.surface = surface
 
-        # Set bottom boundary properties
         self.bottom_layered = None
+        self.bottom_rd = None
         self.bottom_rd_layered = None
         if bottom is None:
-            # Default: single range-independent bottom
             self.bottom = BoundaryProperties(
                 acoustic_type='half-space',
-                depth=depth,
+                depth=max_bathy_depth,
                 density=1.5,
                 sound_speed=1600.0,
                 attenuation=0.5
             )
-            self.bottom_rd = None
         elif isinstance(bottom, RangeDependentBottom):
-            # Range-dependent bottom
             self.bottom_rd = bottom
             # Set self.bottom to median-range properties so range-independent
             # models that read env.bottom pick a representative profile. Using
@@ -1114,29 +1114,23 @@ class Environment:
             median_range_m = float(np.median(bottom.ranges))
             self.bottom = bottom.at_range(median_range_m)
         elif isinstance(bottom, RangeDependentLayeredBottom):
-            # Range-AND-depth-dependent bottom
             self.bottom_rd_layered = bottom
-            # Use median-range profile's halfspace as the representative
-            # env.bottom. Deep-copy so we don't mutate the caller's halfspace
-            # object when we overwrite its depth field below.
             mid_idx = len(bottom.profiles) // 2
             self.bottom = _copy.deepcopy(bottom.profiles[mid_idx].halfspace)
-            self.bottom.depth = depth
-            self.bottom_rd = None
+            self.bottom.depth = max_bathy_depth
         elif isinstance(bottom, LayeredBottom):
-            # Layered (depth-dependent) bottom
             self.bottom_layered = bottom
-            # Deep-copy halfspace so we don't mutate caller's object.
             self.bottom = _copy.deepcopy(bottom.halfspace)
-            self.bottom.depth = depth
-            self.bottom_rd = None
+            self.bottom.depth = max_bathy_depth
         else:
-            # Single BoundaryProperties — deep-copy so setting .depth
-            # doesn't leak back into the caller's object.
             self.bottom = _copy.deepcopy(bottom)
             if not isinstance(self.bottom, RangeDependentBottom):
-                self.bottom.depth = depth
-            self.bottom_rd = None
+                self.bottom.depth = max_bathy_depth
+
+    @property
+    def depth(self) -> float:
+        """Maximum water depth in metres (derived from bathymetry)."""
+        return float(np.max(self.bathymetry[:, 1]))
 
     def get_sound_speed(
         self, depth: Union[float, np.ndarray], range_m: float = 0.0
@@ -1267,7 +1261,7 @@ class Environment:
 
         Examples
         --------
-        >>> env = Environment(name='slope', depth=100,
+        >>> env = Environment(name='slope',
         ...                   bathymetry=[(0, 100), (5000, 200), (10000, 300)])
         >>> env.get_representative_depth('median')
         200.0
@@ -1337,9 +1331,8 @@ class Environment:
 
         return Environment(
             name=f"{self.name} (range-independent approx)",
-            depth=representative_depth,
+            bathymetry=representative_depth,
             ssp=adjusted_ssp,
-            bathymetry=None,
             bottom=self.bottom,
             surface=self.surface,
             volume_attenuation=self.volume_attenuation,

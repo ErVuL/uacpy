@@ -28,7 +28,7 @@ class TestSSPInterpolationMethods:
         """Test isovelocity SSP."""
         env = Environment(
             name="iso_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
 
@@ -44,7 +44,7 @@ class TestSSPInterpolationMethods:
 
         env = Environment(
             name="linear_test",
-            depth=100.0,
+            bathymetry=100.0,
             ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='linear')
         )
 
@@ -60,7 +60,7 @@ class TestSSPInterpolationMethods:
 
         env = Environment(
             name="cubic_test",
-            depth=100.0,
+            bathymetry=100.0,
             ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='cubic')
         )
 

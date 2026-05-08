@@ -92,7 +92,6 @@ def main():
 
     env = uacpy.Environment(
         name="Continental Shelf - Mode Coupling",
-        depth=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
         bathymetry=bathymetry,
         bottom=bottom_rd
@@ -124,7 +123,7 @@ def main():
     # Compute modes for first range (shallow water)
     env_shallow = uacpy.Environment(
         name="Shelf (100m)",
-        depth=100.0,
+        bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
         ),
@@ -142,7 +141,7 @@ def main():
     # Compute modes for last range (deep water)
     env_deep = uacpy.Environment(
         name="Slope (400m)",
-        depth=400.0,
+        bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
         bottom=bottom_rd.at_range(20000)
     )

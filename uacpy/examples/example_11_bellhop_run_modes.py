@@ -120,7 +120,7 @@ def scenario_a_tl_modes():
     # ═══════════════════════════════════════════════════════════════════════
     env = uacpy.Environment(
         name="Munk Profile - TL Mode Comparison",
-        depth=5000.0,
+        bathymetry=5000.0,
         ssp=SoundSpeedProfile.from_munk(5000.0),
     )
 
@@ -270,7 +270,7 @@ def scenario_b_ray_tracing():
     # ═══════════════════════════════════════════════════════════════════════
     env = uacpy.Environment(
         name="Munk Profile - Ray Tracing",
-        depth=5000.0,
+        bathymetry=5000.0,
         ssp=SoundSpeedProfile.from_munk(5000.0),
     )
 
@@ -335,7 +335,7 @@ def scenario_c_eigenrays_arrivals():
 
     env = uacpy.Environment(
         name="Shallow Water - Eigenrays",
-        depth=100.0,
+        bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
             [(0, 1500), (100, 1520)], interp='linear',
         ),
@@ -463,7 +463,7 @@ def scenario_d_compute_eigenrays_pekeris():
         density=1.5, attenuation=0.5,
     )
     env = uacpy.Environment(
-        name='Pekeris', depth=100.0, sound_speed=1500.0, bottom=bottom,
+        name='Pekeris', bathymetry=100.0, sound_speed=1500.0, bottom=bottom,
     )
     source = uacpy.Source(depths=20.0, frequencies=200.0)
 

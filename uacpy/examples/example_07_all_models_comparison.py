@@ -120,7 +120,6 @@ def main():
 
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
-        depth=200.0,
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
             interp='pchip',
         ),

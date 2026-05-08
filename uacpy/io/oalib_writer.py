@@ -482,9 +482,8 @@ def write_bottom_section(
             z_bottom = halfspace_depth
         else:
             z_bottom = env.depth
-            # If layered bottom, halfspace starts below all layers
-            # Use env.depth (seafloor), not env.bottom.depth (may be stale)
-            # Round to .1f to match layer section mesh line precision
+            # If layered bottom, halfspace starts below all layers.
+            # Round to .1f to match layer section mesh line precision.
             if env.bottom_layered is not None:
                 z_bottom = float(f"{z_bottom:.1f}")
                 for layer in env.bottom_layered.layers:

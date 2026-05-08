@@ -82,7 +82,7 @@ def main():
 
     env = uacpy.Environment(
         name="Elastic Bottom Test",
-        depth=100.0,
+        bathymetry=100.0,
         sound_speed=1500.0,
         bottom=bottom_elastic
     )
@@ -174,7 +174,7 @@ def main():
 
     env_with_rc = uacpy.Environment(
         name="SCOOTER with BOUNCE RC",
-        depth=100.0,
+        bathymetry=100.0,
         sound_speed=1500.0,
         bottom=bottom_with_file
     )
