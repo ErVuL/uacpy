@@ -39,7 +39,7 @@ class TestElasticBoundaryAutoDetection:
         )
         return Environment(
             name="Elastic Test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -56,7 +56,7 @@ class TestElasticBoundaryAutoDetection:
         )
         return Environment(
             name="Fluid Test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -126,7 +126,7 @@ class TestBounceReflectionCoefficients:
         )
         return Environment(
             name="BOUNCE Test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -222,7 +222,7 @@ class TestBounceToScooterWorkflow:
         )
         return Environment(
             name="Workflow Test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -264,7 +264,7 @@ class TestBounceToScooterWorkflow:
 
         env_with_rc = Environment(
             name="SCOOTER with BRC",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom_with_file
         )
@@ -300,7 +300,7 @@ class TestWorkflowComparison:
         )
         return Environment(
             name="Comparison Test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom
         )
@@ -344,7 +344,7 @@ class TestWorkflowComparison:
 
         env_with_rc = Environment(
             name="SCOOTER with BRC",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
             bottom=bottom_with_file
         )

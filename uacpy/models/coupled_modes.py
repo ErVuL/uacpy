@@ -104,7 +104,6 @@ def segment_environment_by_range(
         )
         env_segment = Environment(
             name=f"{env.name} @ {range_m / 1000.0:.1f}km",
-            depth=depth_at_range,
             ssp=seg_ssp,
             bathymetry=None,
             bottom=bottom_segment,

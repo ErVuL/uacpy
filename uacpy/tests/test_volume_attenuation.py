@@ -20,7 +20,7 @@ class TestVolumeAttenuation:
         """Shallow water environment for attenuation tests."""
         return Environment(
             name="atten_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
 

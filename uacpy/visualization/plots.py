@@ -532,10 +532,7 @@ def plot_rays(
 
     max_depth = max_ray_depth
     if env is not None:
-        if len(env.bathymetry) > 1:
-            max_depth = max(max_depth, float(env.bathymetry[:, 1].max()))
-        else:
-            max_depth = max(max_depth, float(env.depth))
+        max_depth = max(max_depth, float(env.depth))
 
     if ylim is not None:
         ax.set_ylim(ylim)
@@ -908,11 +905,7 @@ def plot_environment(
     # Environment overview
     ax_env = fig.add_subplot(gs[1, 1])
 
-    # Determine max depth for proper plotting
-    if len(env.bathymetry) > 1:
-        max_depth = env.bathymetry[:, 1].max()
-    else:
-        max_depth = env.depth
+    max_depth = env.depth
 
     # Plot bathymetry
     if len(env.bathymetry) > 1:

@@ -130,7 +130,7 @@ def write_bellhop_env_file(
     step : float, optional
         Step size in meters. If 0, uses automatic. Default is 0.
     z_box : float, optional
-        Maximum depth for ray box. If None, uses 1.2 * max(env.depth, bathymetry).
+        Maximum depth for ray box. If None, uses 1.2 * env.depth.
     r_box : float, optional
         Maximum range for ray box. If None, uses 1.2 * receiver.range_max.
     verbose : bool, optional
@@ -160,14 +160,8 @@ def write_bellhop_env_file(
     if n_beams is None:
         n_beams = 0
 
-    # For range-dependent bathymetry, ensure z_box accounts for max depth
-    max_bathy_depth = (
-        env.bathymetry[:, 1].max() if len(env.bathymetry) > 0 else env.depth
-    )
-    max_depth = max(env.depth, max_bathy_depth)
-
     if z_box is None:
-        z_box = 1.2 * max_depth
+        z_box = 1.2 * env.depth
 
     if r_box is None:
         r_box = 1.2 * receiver.range_max if receiver.range_max > 0 else 10000
@@ -320,10 +314,7 @@ def write_bellhop_env_file(
             if max_alti_above_msl > 0:
                 z_min = -max_alti_above_msl - 0.5
 
-        max_bathy_depth = (
-            env.bathymetry[:, 1].max() if len(env.bathymetry) > 0 else env.depth
-        )
-        z_max = max(env.depth, max_bathy_depth)
+        z_max = env.depth
 
         ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
         if z_min < ssp_data_extended[0, 0]:

@@ -19,7 +19,7 @@ class TestRAMAdvancedParameters:
     def ram_env(self):
         return Environment(
             name="ram_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
 

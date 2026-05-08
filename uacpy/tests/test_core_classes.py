@@ -45,7 +45,7 @@ class TestEnvironment:
     def test_invalid_depth(self):
         """Test that negative depth raises error."""
         with pytest.raises(ValueError):
-            uacpy.Environment(name="Test", depth=-10, sound_speed=1500)
+            uacpy.Environment(name="Test", bathymetry=-10, sound_speed=1500)
 
 
 class TestSource:

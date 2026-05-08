@@ -299,7 +299,7 @@ from uacpy.visualization.plots import plot_transmission_loss
 # 1. Environment — isovelocity water over a fluid half-space bottom
 env = uacpy.Environment(
     name="Pekeris Waveguide",
-    depth=100.0,
+    bathymetry=100.0,
     sound_speed=1500.0,
     bottom=BoundaryProperties(
         acoustic_type='half-space',

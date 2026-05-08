@@ -61,7 +61,7 @@ def main():
 
     env = uacpy.Environment(
         name="Pekeris Waveguide",
-        depth=100.0,              # Flat bottom at 100m
+        bathymetry=100.0,              # Flat bottom at 100m
         sound_speed=1500.0,       # Isovelocity water column
         bottom=bottom             # Use BoundaryProperties object
     )

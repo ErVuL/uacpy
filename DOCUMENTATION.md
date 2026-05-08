@@ -51,7 +51,7 @@ import uacpy
 from uacpy.models import Bellhop
 from uacpy.visualization import plot_transmission_loss
 
-env = uacpy.Environment(name="shallow", depth=100.0, sound_speed=1500.0)
+env = uacpy.Environment(name="shallow", bathymetry=100.0, sound_speed=1500.0)
 source = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(
     depths=np.linspace(0, 100, 101),
@@ -255,19 +255,21 @@ with `ProcessPoolExecutor`).
 
 ```python
 uacpy.Environment(
-    name: str,
-    depth: float,                          # max water depth (m)
+    bathymetry,                            # float (flat) or list[(r_m, z_m)] / ndarray (RD)
     ssp = None,                            # SoundSpeedProfile (None → isovelocity)
     sound_speed: float = 1500.0,           # default isovelocity speed when ssp=None
-    bathymetry = None,                     # list[(r_m, z_m)] or ndarray (range-dep)
     altimetry  = None,                     # list[(r_m, h_m)] sea surface (positive up)
     bottom   = None,                       # Boundary / RD / Layered / RDLayered
                                             # (default: fluid half-space
                                             #  c=1600 m/s, ρ=1.5 g/cm³, α=0.5 dB/λ)
     surface  = None,                       # BoundaryProperties (default: vacuum)
     volume_attenuation: float = 0.0,       # water-column volume attenuation (dB/λ)
+    *,
+    name: str = 'unnamed',
 )
 ```
+
+`env.depth` is a read-only property derived from `bathymetry[:,1].max()`.
 
 ### Sound-speed profile (`SoundSpeedProfile`)
 
@@ -281,18 +283,18 @@ classmethods; the `interp` field carries the writer hint
 from uacpy import SoundSpeedProfile
 
 # 1. Constant — also the default when Environment(ssp=None)
-env = uacpy.Environment(name="iso", depth=100, sound_speed=1500.0)
+env = uacpy.Environment(name="iso", bathymetry=100, sound_speed=1500.0)
 
 # 2. Tabulated 1-D profile
 profile = [(0, 1540), (50, 1520), (100, 1510), (200, 1505)]
 env = uacpy.Environment(
-    name="tab", depth=200,
+    name="tab", bathymetry=200,
     ssp=SoundSpeedProfile.from_pairs(profile, interp='linear'),
 )
 
 # 3. Analytic (Munk)
 env = uacpy.Environment(
-    name="munk", depth=5000,
+    name="munk", bathymetry=5000,
     ssp=SoundSpeedProfile.from_munk(5000),
 )
 
@@ -301,7 +303,7 @@ ranges_m  = np.array([0, 10000, 20000, 30000])  # metres
 depths_m  = np.linspace(0, 1000, 50)
 ssp_2d    = np.zeros((50, 4))  # fill in…
 env = uacpy.Environment(
-    name="rd", depth=1000,
+    name="rd", bathymetry=1000,
     ssp=SoundSpeedProfile.from_2d(
         depths=depths_m, ranges=ranges_m, matrix=ssp_2d,
         interp='quad',  # required for Bellhop to honour the 2-D form
@@ -404,7 +406,7 @@ bottom = LayeredBottom(
     ),
 )
 
-env = uacpy.Environment(name="layered", depth=200,
+env = uacpy.Environment(name="layered", bathymetry=200,
                         sound_speed=1500, bottom=bottom)
 
 env.has_layered_bottom()          # True
@@ -428,7 +430,7 @@ rdl = RangeDependentLayeredBottom(
 
 # Bathymetry lives on the Environment, not on the RDL.
 bathy = np.array([[0, 100], [20000, 300]])   # (range_m, seafloor_depth_m)
-env = uacpy.Environment(name="shelf", depth=300, sound_speed=1500,
+env = uacpy.Environment(name="shelf", sound_speed=1500,
                         bathymetry=bathy, bottom=rdl)
 ```
 
@@ -442,7 +444,7 @@ at one of the RDL ranges interpolate it from `env.bathymetry`.
 
 ```python
 bathy = np.array([[0, 100], [5000, 150], [10000, 200]])  # (range_m, depth_m)
-env = uacpy.Environment(name="slope", depth=200, sound_speed=1500,
+env = uacpy.Environment(name="slope", sound_speed=1500,
                         bathymetry=bathy)
 
 # Rough sea surface (Bellhop and RAM ramsurf backend — others drop it)
@@ -451,7 +453,7 @@ env = uacpy.Environment(name="slope", depth=200, sound_speed=1500,
 alt = uacpy.generate_sea_surface(
     max_range_m=10_000, wind_speed_ms=10.0, n_points=500, seed=0xACED,
 )
-env = uacpy.Environment(name="rough", depth=100, sound_speed=1500,
+env = uacpy.Environment(name="rough", bathymetry=100, sound_speed=1500,
                         altimetry=alt)
 ```
 

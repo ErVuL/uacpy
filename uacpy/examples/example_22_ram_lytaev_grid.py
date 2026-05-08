@@ -47,7 +47,7 @@ def main():
 
     env = Environment(
         name='pekeris-100hz',
-        depth=waveguide_depth,
+        bathymetry=waveguide_depth,
         sound_speed=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',

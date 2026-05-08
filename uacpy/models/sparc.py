@@ -123,7 +123,7 @@ class SPARC(PropagationModel):
     >>> from uacpy.models.sparc import SPARC
     >>>
     >>> # Create simple environment
-    >>> env = uacpy.Environment(depth=100.0, sound_speed=1500.0)
+    >>> env = uacpy.Environment(bathymetry=100.0, sound_speed=1500.0)
     >>>
     >>> source = uacpy.Source(depths=50.0, frequencies=100.0)
     >>> receiver = uacpy.Receiver(

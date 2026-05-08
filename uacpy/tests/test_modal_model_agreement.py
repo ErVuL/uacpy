@@ -25,7 +25,7 @@ class TestModalModelAgreement:
         ssp_data = np.array([[0, 1500], [100, 1480]])
         env = uacpy.Environment(
             name='Pekeris',
-            depth=100,
+            bathymetry=100,
             ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear'),
             sound_speed=1500
         )

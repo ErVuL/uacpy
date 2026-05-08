@@ -77,7 +77,6 @@ def main():
     # Munk-like SSP (deep ocean channel)
     env = uacpy.Environment(
         name="Continental Shelf - Munk Profile",
-        depth=500.0,
         ssp=SoundSpeedProfile.from_munk(500.0),
         bathymetry=bathymetry,
         bottom=bottom_rd

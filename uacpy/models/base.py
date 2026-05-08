@@ -434,15 +434,7 @@ class PropagationModel(ABC):
                 f"got {len(source.depths)}: {list(source.depths)}. Loop "
                 f"over Sources externally for multi-depth runs."
             )
-        # For flat environments, env.depth may differ from env.bathymetry[0, 1]
-        # (e.g. Environment(depth=100, bathymetry=[(0, 80)]) reports 100m but
-        # the seafloor is at 80m). Use the deeper of the two to avoid false
-        # depth-violation errors on the shallower side.
-        if env.is_range_dependent and env.bathymetry is not None:
-            max_depth = float(np.max(env.bathymetry[:, 1]))
-        else:
-            bathy_depth = float(env.bathymetry[0, 1]) if env.bathymetry is not None and len(env.bathymetry) > 0 else env.depth
-            max_depth = max(env.depth, bathy_depth)
+        max_depth = env.depth
 
         if np.any(source.depths > max_depth):
             self._log(
@@ -1168,7 +1160,6 @@ class PropagationModel(ABC):
     def _collapse_rd_bathy(self, env_in, e, method, alts):
         new_depth = env_in.get_representative_depth(method)
         e.bathymetry = np.array([[0.0, new_depth]], dtype=np.float64)
-        e.depth = float(new_depth)
         if e.ssp.depths[-1] < new_depth:
             e.ssp = e.ssp.extend_to(new_depth)
         min_d = float(env_in.bathymetry[:, 1].min())

@@ -77,7 +77,7 @@ def main():
 
     env = uacpy.Environment(
         name="Deep Ocean - Long Range SOFAR",
-        depth=5500.0,
+        bathymetry=5500.0,
         ssp=SoundSpeedProfile.from_munk(5500.0),
         bottom=bottom_props
     )

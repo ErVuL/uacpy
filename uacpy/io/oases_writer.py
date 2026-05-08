@@ -312,7 +312,7 @@ def write_oast_input(
 
     Examples
     --------
-    >>> env = Environment(depth=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, sound_speed=1500)
     >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=np.linspace(10,90,40),
     ...                     ranges=np.linspace(100,10000,100))
@@ -585,7 +585,7 @@ def write_oasn_input(
 
     Examples
     --------
-    >>> env = Environment(depth=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, sound_speed=1500)
     >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=[30, 50, 70], ranges=[0])
     >>> write_oasn_input('test.dat', env, source, receiver,
@@ -816,7 +816,7 @@ def write_oasp_input(
 
     Examples
     --------
-    >>> env = Environment(depth=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, sound_speed=1500)
     >>> source = Source(depths=80, frequencies=30)
     >>> receiver = Receiver(depths=np.linspace(20,100,5),
     ...                     ranges=np.linspace(1000,5000,5))
@@ -1035,7 +1035,7 @@ def write_oasr_input(
 
     Examples
     --------
-    >>> env = Environment(depth=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, sound_speed=1500)
     >>> env.bottom.sound_speed = 1600
     >>> env.bottom.shear_speed = 400
     >>> source = Source(depths=50, frequencies=100)

@@ -22,7 +22,7 @@ class TestSPARCBasic:
         """Test basic SPARC TL computation."""
         env = Environment(
             name="sparc_test",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0
         )
         source = Source(depths=50.0, frequencies=50.0)
@@ -47,7 +47,7 @@ class TestSPARCTimeSeries:
         """SPARC TIME_SERIES returns a real-valued TimeSeriesField."""
         env = Environment(
             name="sparc_ts",
-            depth=100.0,
+            bathymetry=100.0,
             sound_speed=1500.0,
         )
         source = Source(depths=50.0, frequencies=50.0)
