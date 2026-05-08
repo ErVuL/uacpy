@@ -12,24 +12,37 @@ import numpy as np
 from typing import Tuple, Literal, Union
 
 
-def ssrp(Pxx, Fxx, duration=1, scale=1):
+def ssrp(Pxx, Fxx, duration=1, scale=1, *,
+         n_fft=None, fs=None, interp='linear'):
     """
     Spectral Synthesis of Random Processes.
 
-    Generate a time-domain noise signal from a given power spectral density.
-    The PSD length should be 2**N for efficient FFT computation.
-    The output signal is sampled at ``Fxx[-1] * 2``.
+    Generate a time-domain noise realisation whose one-sided PSD matches a
+    user-supplied target ``Pxx(Fxx)``. The target is resampled onto the
+    FFT-native frequency grid ``f_k = k * fs / n_fft`` before synthesis,
+    so ``Fxx`` may be uniform, log-spaced, or coarse (e.g. Wenz curves).
 
     Parameters
     ----------
     Pxx : array_like
-        Power spectral density in (U/scale)**2/Hz.
+        One-sided power spectral density in (U/scale)**2/Hz. Length ≥ 2.
     Fxx : array_like
-        Frequency array in Hz.
+        Frequency array in Hz, strictly increasing. Need not be uniform.
     duration : float
         Duration of the generated signal in seconds.
     scale : float
         Scale factor applied to the output signal.
+    n_fft : int, optional
+        IFFT chunk size (must be even, ≥ 4). Defaults to
+        ``2 * (len(Pxx) + 1)``. Larger values give finer frequency
+        resolution at proportionally higher CPU cost.
+    fs : float, optional
+        Output sample rate in Hz. Defaults to ``2 * Fxx[-1]``.
+    interp : {'linear', 'log', 'pchip', 'nearest'}, optional
+        How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
+        interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
+        broadband PSDs spanning many decades. Frequencies outside
+        ``[Fxx[0], Fxx[-1]]`` are set to zero.
 
     Returns
     -------
@@ -37,59 +50,65 @@ def ssrp(Pxx, Fxx, duration=1, scale=1):
         Time array in seconds.
     x : ndarray
         Generated signal array.
-    fs : float
+    fs : int
         Sampling frequency in Hz.
 
     Examples
     --------
     >>> import numpy as np
-    >>> fs = 1000
-    >>> f = np.linspace(0, fs/2, 512)
-    >>> Pxx = np.ones_like(f)
-    >>> t, x, fs = ssrp(Pxx, f, 1, 1)
+    >>> f = np.logspace(0, 4, 64)
+    >>> Pxx = 1e-6 / (1 + (f / 100) ** 2)
+    >>> t, x, fs = ssrp(Pxx, f, duration=10,
+    ...                 n_fft=2**16, fs=40_000, interp='log')
     """
-    dF = Fxx[1] - Fxx[0]
-    Pxx = Pxx * dF
-    fmin = Fxx[0]
-    fmax = Fxx[-1]
-    fs = fmax * 2
-    v = Pxx * fmin / 4
-    N = len(Pxx)
+    Pxx = np.asarray(Pxx, dtype=float)
+    Fxx = np.asarray(Fxx, dtype=float)
+    if Pxx.ndim != 1 or Fxx.shape != Pxx.shape:
+        raise ValueError("Pxx and Fxx must be 1-D arrays of equal length")
+    if Pxx.size < 2:
+        raise ValueError("Pxx must have at least 2 points")
+    if not np.all(np.diff(Fxx) > 0):
+        raise ValueError("Fxx must be strictly increasing")
 
-    # Calculate chunk parameters
-    chunk_size = 2 * (N + 1)  # Size of each chunk
-    overlap_size = chunk_size // 4  # 50% overlap
+    if fs is None:
+        fs = 2.0 * float(Fxx[-1])
+    if n_fft is None:
+        n_fft = 2 * (Pxx.size + 1)
+    if n_fft < 4 or n_fft % 2:
+        raise ValueError("n_fft must be an even integer ≥ 4")
+
+    N = n_fft // 2 - 1
+    dF = fs / n_fft
+    f_grid = np.arange(1, N + 1) * dF
+    Pxx_grid = _resample_psd(Pxx, Fxx, f_grid, interp)
+    v = Pxx_grid * dF / 4
+
+    chunk_size = n_fft
+    overlap_size = chunk_size // 4
     samples_needed = int(duration * fs)
     num_chunks = int(np.ceil(samples_needed / (chunk_size - overlap_size)))
 
-    # Initialize output arrays
     x_total = np.zeros(samples_needed)
     t_total = np.arange(samples_needed) / fs
 
-    # Generate chunks
     for i in range(num_chunks):
-        # Generate chunk
         vi = np.random.randn(N)
         vq = np.random.randn(N)
         w = (vi + 1j * vq) * np.sqrt(v)
-        chunk = np.fft.irfft(np.concatenate(([0], w)), chunk_size)
-        chunk = chunk * chunk_size
+        spectrum = np.concatenate(([0.0], w, [0.0]))
+        chunk = np.fft.irfft(spectrum, chunk_size) * chunk_size
 
-        # Create fade in/out windows
         fade = np.ones(chunk_size)
-        if i > 0:  # Fade in
-            fade[:overlap_size] = np.sin(np.pi / 2 * np.linspace(0, 1, overlap_size))
-        if i < num_chunks - 1:  # Fade out
+        if i > 0:
+            fade[:overlap_size] = np.sin(
+                np.pi / 2 * np.linspace(0, 1, overlap_size))
+        if i < num_chunks - 1:
             fade[-overlap_size:] = np.sin(
-                np.pi / 2 * np.linspace(1, 0, overlap_size)
-            )
+                np.pi / 2 * np.linspace(1, 0, overlap_size))
         chunk = chunk * fade
 
-        # Calculate chunk position
         start_idx = i * (chunk_size - overlap_size)
         end_idx = start_idx + chunk_size
-
-        # Add chunk to output, accounting for final chunk potentially being too long
         if end_idx > samples_needed:
             chunk = chunk[: samples_needed - start_idx]
             end_idx = samples_needed
@@ -97,6 +116,42 @@ def ssrp(Pxx, Fxx, duration=1, scale=1):
         x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * scale
 
     return t_total, x_total, int(fs)
+
+
+def _resample_psd(Pxx, Fxx, f_target, method):
+    """Resample a one-sided PSD onto ``f_target``; out-of-range bins → 0."""
+    if method == 'linear':
+        return np.maximum(
+            np.interp(f_target, Fxx, Pxx, left=0.0, right=0.0), 0.0)
+
+    in_range = (f_target >= Fxx[0]) & (f_target <= Fxx[-1])
+    out = np.zeros_like(f_target)
+
+    if method == 'log':
+        if Fxx[0] <= 0 or np.any(Pxx <= 0):
+            raise ValueError(
+                "interp='log' requires strictly positive Pxx and Fxx")
+        out[in_range] = 10.0 ** np.interp(
+            np.log10(f_target[in_range]),
+            np.log10(Fxx), np.log10(Pxx))
+        return out
+
+    if method == 'pchip':
+        from scipy.interpolate import PchipInterpolator
+        out[in_range] = PchipInterpolator(
+            Fxx, Pxx, extrapolate=False)(f_target[in_range])
+        return np.maximum(np.where(np.isnan(out), 0.0, out), 0.0)
+
+    if method == 'nearest':
+        from scipy.interpolate import interp1d
+        out[in_range] = interp1d(
+            Fxx, Pxx, kind='nearest',
+            bounds_error=False, fill_value=0.0)(f_target[in_range])
+        return np.maximum(out, 0.0)
+
+    raise ValueError(
+        f"Unknown interp method: {method!r}. "
+        "Use 'linear', 'log', 'pchip', or 'nearest'.")
 
 
 def cans(
