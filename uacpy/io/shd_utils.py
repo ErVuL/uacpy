@@ -150,19 +150,19 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
 
     if verbose:
         print("Collating pressure fields...")
-    num_freqs = len(freqVec)
+    n_frequencies = len(freqVec)
 
     # Create output pressure array
     new_shape = list(sizePressure)
-    new_shape[0] = num_freqs
+    new_shape[0] = n_frequencies
     pressure = np.zeros(new_shape, dtype=complex)
 
     # Fill pressure array
     j_pnt = 0
     for shd in shd_structs:
-        n_freq = len(shd['freqVec'])
-        pressure[j_pnt:j_pnt+n_freq, ...] = shd['pressure']
-        j_pnt += n_freq
+        n_frequencies = len(shd['freqVec'])
+        pressure[j_pnt:j_pnt+n_frequencies, ...] = shd['pressure']
+        j_pnt += n_frequencies
 
     # Sort by frequency if needed
     sort_idx = np.argsort(freqVec)
@@ -188,4 +188,4 @@ def merge_shd_files(shd_files_in: List[Union[str, Path]],
     scipy.io.savemat(str(shd_file_out), save_dict, format='5')
 
     if verbose:
-        print(f"Merged {num_files} files ({num_freqs} frequencies total)")
+        print(f"Merged {num_files} files ({n_frequencies} frequencies total)")

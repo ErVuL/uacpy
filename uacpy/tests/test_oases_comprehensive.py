@@ -8,9 +8,7 @@ systematic validation of all OASES variants:
 - OAST: Transmission loss computation
 - OASN: Normal modes extraction
 - OASR: Reflection coefficients
-- OASP: Parabolic equation (PE) for range-dependent propagation
-
-These models were previously minimally tested despite being fully implemented.
+- OASP: Pulse / broadband wavenumber-integration transfer functions
 """
 
 import pytest

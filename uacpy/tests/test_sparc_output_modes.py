@@ -18,8 +18,9 @@ from uacpy.models import SPARC
 def sparc_simple_env():
     """Simple isovelocity environment configured for SPARC (vacuum bottom).
 
-    Renamed from ``simple_env`` to avoid shadowing the shared conftest fixture,
-    which uses a default half-space bottom that SPARC cannot handle.
+    Distinct name from the conftest ``simple_env`` so SPARC's
+    vacuum-bottom requirement does not shadow the shared half-space
+    fixture used by other models.
     """
     env = Environment(
         name="Test Environment",
@@ -177,12 +178,11 @@ class TestSPARCModeComparison:
         """Snapshot ('S') and horizontal-array ('R') TL should agree at one
         receiver depth in an isovelocity vacuum-bottom case.
 
-        Regression for the snapshot wavenumber bug: prior to the fix
-        ``read_grn_file`` used ``freqVec[-1]`` (which actually stores the
-        last output time for SPARC) when computing ``k = 2π·f/cVec``,
-        producing a non-physical wavenumber grid. With the fix the GRN
-        reader detects the SPARC title prefix and uses ``freq0`` (the
-        source frequency) instead.
+        Locks in that ``read_grn_file`` uses ``freq0`` — not
+        ``freqVec[-1]``, which holds the last output time for SPARC —
+        when computing ``k = 2π·f/cVec``. The GRN reader detects the
+        SPARC title prefix and uses ``freq0`` (the source frequency) for
+        the wavenumber grid.
         """
         # Single ground-truth depth — match exactly between modes.
         depth = 50.0

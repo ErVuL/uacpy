@@ -725,7 +725,7 @@ class Arrivals(Result):
         self.metadata.setdefault('receiver_depths', self.receiver_depths)
         self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
 
-    # Legacy accessors expected by visualization.plots.plot_arrivals -------
+    # Plotting-helper accessors used by visualization.plots.plot_arrivals.
     @property
     def depths(self) -> np.ndarray:
         return self.receiver_depths

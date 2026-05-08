@@ -9,8 +9,10 @@ Layout:
   ``oalib_reader`` because of size and self-containment).
 * ``bellhop_writer`` — Bellhop-specific env writer (kept separate; Bellhop's
   run-type and beam-parameter knobs diverge from the AT family).
-* ``boundary_io`` — auxiliary boundary-file I/O (``.bty``, ``.ati``,
-  ``.brc``/``.irc``/``.trc``, ``.sbp``).
+* ``bathy_io`` — bathymetry / altimetry / 3-D boundary blocks
+  (``.bty``, ``.ati``).
+* ``refl_io`` — precomputed reflection coefficients (``.brc``/``.irc``/
+  ``.trc``) and source beam patterns (``.sbp``).
 * ``oases_writer`` / ``oases_reader`` — OASES sub-models (OAST/OASN/OASR/OASP).
 * ``mpirams_writer`` / ``mpirams_reader`` — RAM mpiramS backend.
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
@@ -40,10 +42,12 @@ from uacpy.io.oalib_writer import (
 from uacpy.io.modes_reader import (
     read_modes, read_modes_bin, read_modes_asc, get_component,
 )
-from uacpy.io.boundary_io import (
+from uacpy.io.bathy_io import (
     read_bathymetry, read_altimetry, read_boundary_3d,
-    read_reflection_coefficient, read_source_beam_pattern,
     write_bty_file, write_bty_3d, write_ati_file,
+)
+from uacpy.io.refl_io import (
+    read_reflection_coefficient, read_source_beam_pattern,
     write_reflection_coefficient, write_source_beam_pattern,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file

@@ -1032,6 +1032,7 @@ phase speeds).
 ### `output_reader.py` shim removed
 
 `io/output_reader.py` was a backward-compat shim re-exporting symbols
-from `oalib_reader` / `modes_reader` / `boundary_io`. Removed; four
-model wrappers (`bellhop.py`, `kraken.py`, `scooter.py`, `bounce.py`)
-now import directly from the topic modules.
+from `oalib_reader` / `modes_reader` / the auxiliary boundary I/O
+modules. Removed; four model wrappers (`bellhop.py`, `kraken.py`,
+`scooter.py`, `bounce.py`) now import directly from the topic modules
+(`oalib_reader`, `modes_reader`, `bathy_io`, `refl_io`).

@@ -787,11 +787,11 @@ class SPARC(PropagationModel):
             # Pulse frequency band [f_min, f_max] (Hz).
             #
             # SPARC's work scales with Nk ≈ 1000 * Rmax_km * (k_max-k_min) /
-            # (2π). A ±2% band (old default) makes the pulse near-CW and
-            # the FFT at the analysis frequency picks up almost nothing. A
-            # 10× band (100-10000 Hz for a 1 kHz source) is tractable for
-            # small Rmax but blows Nk up to many-thousands for 10-20 km
-            # ranges, which routinely times out.
+            # (2π). A ±2% band makes the pulse near-CW and the FFT at the
+            # analysis frequency picks up almost nothing. A 10× band
+            # (100-10000 Hz for a 1 kHz source) is tractable for small Rmax
+            # but blows Nk up to many-thousands for 10-20 km ranges, which
+            # routinely times out.
             #
             # One-octave (freq/2 to freq*2) is the sweet spot: enough
             # bandwidth that the pulse retains structure, yet bounded Nk.

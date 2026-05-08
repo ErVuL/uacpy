@@ -7,10 +7,9 @@ TL field via the in-tree Python Hankel transform in
 :mod:`uacpy.io.grn_reader`. Supports coherent TL, broadband ``H(f)``,
 and broadband time-series output.
 
-The upstream Acoustic Toolbox discontinued the Fortran ``fields.exe``
-post-processor in 2020; ``install.sh`` no longer builds it. The
-``use_fields_exe`` constructor flag is retained for legacy installs that
-have it on disk but defaults to ``False``.
+The ``use_fields_exe`` constructor flag opts into a local ``fields.exe``
+binary if present; the in-tree Python Hankel transform is the default
+path and the only one ``install.sh`` provisions.
 """
 
 import shutil
@@ -131,13 +130,12 @@ class Scooter(PropagationModel):
             ``fields.f90:82-90``.
         use_fields_exe : bool, optional
             Default ``False`` — uses the in-tree Python Hankel transform
-            in :mod:`uacpy.io.grn_reader`. The upstream Acoustic Toolbox
-            discontinued ``fields.exe`` in 2020 and ``install.sh`` no
-            longer builds it; setting ``True`` is supported for legacy
-            installs that have it on disk and silently falls back to
-            the Python transform otherwise. Broadband runs (BROADBAND /
-            TIME_SERIES) always use the Python transform regardless
-            (``fields.exe`` is single-frequency only).
+            in :mod:`uacpy.io.grn_reader`. Set ``True`` to use a local
+            ``fields.exe`` binary if one is on disk; the wrapper silently
+            falls back to the Python transform when it is not. Broadband
+            runs (BROADBAND / TIME_SERIES) always use the Python
+            transform regardless (``fields.exe`` is single-frequency
+            only).
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -218,12 +216,9 @@ class Scooter(PropagationModel):
         """
         Locate ``fields.exe`` (Scooter post-processor); cache the result.
 
-        Returns ``None`` if the binary cannot be found. Unlike ``scooter.exe``
-        the ``fields.exe`` post-processor is optional — the in-tree Python
-        Hankel transform in :mod:`uacpy.io.grn_reader` is used as a fallback.
-        Upstream Acoustics-Toolbox has flagged Fortran ``fields.exe`` as
-        deprecated (see ``Scooter/Makefile`` header), so many installations
-        simply don't ship it.
+        Returns ``None`` if the binary cannot be found. ``fields.exe`` is
+        optional — the in-tree Python Hankel transform in
+        :mod:`uacpy.io.grn_reader` is the fallback when it is missing.
         """
         if self._fields_executable is None:
             try:

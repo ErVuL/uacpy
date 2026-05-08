@@ -334,12 +334,9 @@ class PropagationModel(ABC):
     _supports_multi_source_depth: bool = False
 
     def _warn_unknown_kwargs(self, kwargs: dict, allowed: tuple = ()):
-        """No-op kept for source compatibility with model-side call sites.
-
-        uacpy's convention is "irrelevant kwargs are silently ignored", so
-        unknown ``run()`` kwargs are not warned about. Callers (typically
-        ``Model.run`` peeling off explicit args) keep invoking this helper
-        but it does nothing.
+        """No-op. Unknown ``run()`` kwargs are silently ignored per uacpy
+        convention; model wrappers still invoke this helper after peeling
+        off explicit args.
         """
         return
 

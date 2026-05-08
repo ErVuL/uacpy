@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Union
 
 import numpy as np
 
 
-def read_tl_line(filepath: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Read a Collins ``tl.line`` (ASCII range, TL).
 
@@ -45,7 +45,7 @@ def read_tl_line(filepath: str | Path) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def read_tl_grid(
-    filepath: str | Path,
+    filepath: Union[str, Path],
     *,
     dr: float,
     ndr: int,
@@ -126,7 +126,7 @@ def read_tl_grid(
 
 
 def read_pcomplex_grid(
-    filepath: str | Path,
+    filepath: Union[str, Path],
     *,
     dr: float,
     ndr: int,

@@ -69,9 +69,9 @@ def _stack_oasr_data(data: dict):
     Returns
     -------
     theta : ndarray, shape ``(n_angles,)``
-    R : ndarray, shape ``(n_angles,)`` (single freq) or ``(n_angles, n_freq)``
+    R : ndarray, shape ``(n_angles,)`` (single freq) or ``(n_angles, n_frequencies)``
     phi : ndarray, same shape as ``R``  — phase in radians (reader stores degrees)
-    freqs : ndarray, shape ``(n_freq,)``
+    freqs : ndarray, shape ``(n_frequencies,)``
     """
     freqs = np.asarray(data.get('frequencies', []), dtype=float)
     angle_lists = data.get('angles_or_slowness', [])
@@ -81,7 +81,7 @@ def _stack_oasr_data(data: dict):
         raise ValueError("OASR reader returned no frequency samples")
     theta = np.asarray(angle_lists[0], dtype=float)
     n_angles = len(theta)
-    n_freq = len(freqs)
+    n_frequencies = len(freqs)
     for i, (a, m, p) in enumerate(zip(angle_lists, R_lists, phi_lists)):
         if len(a) != n_angles:
             raise ValueError(
@@ -94,7 +94,7 @@ def _stack_oasr_data(data: dict):
                 f"OASR: payload length mismatch at frequency index {i}: "
                 f"angles={len(a)}, magnitude={len(m)}, phase={len(p)}"
             )
-    if n_freq == 1:
+    if n_frequencies == 1:
         R = np.asarray(R_lists[0], dtype=float)
         phi_deg = np.asarray(phi_lists[0], dtype=float)
     else:
@@ -420,7 +420,7 @@ class OASN(_OASESBase):
     >>> from uacpy.models import OASN
     >>> oasn = OASN()
     >>> cov = oasn.compute_covariance(env, source, receiver)
-    >>> # cov.covariance has shape (n_freq, n_rcv, n_rcv)
+    >>> # cov.covariance has shape (n_frequencies, n_rcv, n_rcv)
     """
 
     def __init__(
@@ -759,7 +759,7 @@ class OASR(_OASESBase):
         """Run OASR.
 
         Returns a :class:`ReflectionCoefficient` with ``theta`` (1-D angle
-        grid in degrees) and ``R``/``phi`` shaped ``(n_angles, n_freqs)``
+        grid in degrees) and ``R``/``phi`` shaped ``(n_angles, n_frequencies)``
         when more than one frequency was requested. Single-frequency runs
         return 1-D ``R``/``phi``.
 
@@ -924,10 +924,9 @@ class OASP(_OASESBase):
     OASP - OASES Pulse / Broadband Transfer-Function Model
 
     Computes broadband acoustic transfer functions via wavenumber integration
-    followed by FFT to produce time-series / pulse responses. OASP is NOT a
-    parabolic-equation solver (that was an earlier mislabel in this wrapper);
-    it is the "Pulse" variant of SAFARI, using the same wavenumber-integration
-    kernel as OAST but evaluated across a frequency sweep.
+    followed by FFT to produce time-series / pulse responses. OASP is the
+    "Pulse" variant of SAFARI, using the same wavenumber-integration kernel
+    as OAST but evaluated across a frequency sweep.
 
     Parameters
     ----------
@@ -1143,10 +1142,10 @@ class OASP(_OASESBase):
                     ),
                 )
 
-            transfer_func = trf_data['transfer_function']  # shape: (n_freq, n_range, n_depth)
+            transfer_func = trf_data['transfer_function']  # shape: (n_frequencies, n_range, n_depth)
 
             if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
-                # Convention: (n_depth, n_range, n_freq) — trailing
+                # Convention: (n_depth, n_range, n_frequencies) — trailing
                 # axis is the variable dim. Source axes: (freq, range, depth).
                 tf_reordered = np.transpose(transfer_func, (2, 1, 0))
 

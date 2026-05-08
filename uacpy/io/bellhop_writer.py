@@ -15,7 +15,7 @@ from typing import Optional, Union
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.io.boundary_io import (
+from uacpy.io.bathy_io import (
     write_bty_file,
     write_bty_long_format,
     write_ati_file,

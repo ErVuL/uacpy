@@ -310,9 +310,10 @@ env = uacpy.Environment(
 ```
 
 The class exposes `at_range(r_m)` (1-D slice), `collapse(method)` (used
-by the per-feature collapse pipeline), `to_pairs()` (legacy `(N, 2)` view
-of the range-0 column), and `extend_to(z_max)` (constant-extrapolation
-to a deeper bathymetry level).
+by the per-feature collapse pipeline), `to_pairs()` (`(N, 2)` view of
+the range-0 column for callers expecting the flat depth/speed layout),
+and `extend_to(z_max)` (constant-extrapolation to a deeper bathymetry
+level).
 
 ### BoundaryProperties (surface or bottom)
 
@@ -464,11 +465,11 @@ env.has_range_dependent_bottom()
 env.has_layered_bottom()
 env.has_range_dependent_layered_bottom()
 
-# Per-feature collapse is the canonical path now: pass *_collapse_method
+# Per-feature collapse is the canonical path: pass *_collapse_method
 # kwargs to the model constructor (see §2). The whole-env shortcut below
-# still exists but only collapses bathymetry + truncates SSP — it does
-# not honour the per-feature methods.
-env_ri = env.get_range_independent_approximation(method='median')  # legacy
+# only collapses bathymetry + truncates SSP — it does not honour the
+# per-feature methods.
+env_ri = env.get_range_independent_approximation(method='median')
 ```
 
 ---
@@ -704,7 +705,7 @@ receiver grid; call `tf.to_time_trace(depth=, range_m=)` to extract a
 
 **Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but its
 constructor raises `NotImplementedError`. Partial 3D support is already
-in-tree (`write_bty_3d` and `read_boundary_3d` in `io/boundary_io.py`),
+in-tree (`write_bty_3d` and `read_boundary_3d` in `io/bathy_io.py`),
 but the `.env` writer is 2D-only and 3D arrivals parsing is not
 implemented (`io/oalib_reader.py:769` raises `NotImplementedError`).
 Wiring up Bellhop3D therefore requires finishing the `.env` writer
@@ -847,11 +848,9 @@ sc = Scooter(
                                         # (the stabiliser prevents pole-on-contour blow-ups)
     field_interp='O',               # FLP Option(3): 'O' polynomial (default) | 'P' Padé
     use_fields_exe=False,           # default: in-tree Python Hankel on .grn.
-                                     # Upstream Acoustic Toolbox discontinued
-                                     # fields.exe in 2020; install.sh no longer
-                                     # builds it. Set True to opt into a legacy
-                                     # local install (silently falls back to
-                                     # Python if the binary is missing).
+                                     # Set True to use a local fields.exe
+                                     # binary if present (silently falls back
+                                     # to the Python transform when missing).
     use_tmpfs=False, verbose=False, work_dir=None,
 )
 field = sc.run(env, source, receiver)

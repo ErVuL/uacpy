@@ -602,7 +602,7 @@ class Bellhop(PropagationModel):
                         shutil.copy(src, sbp_dest)
                     else:
                         # Array-like: expect shape (N, 2) [angle_deg, level_dB]
-                        from uacpy.io.boundary_io import write_source_beam_pattern
+                        from uacpy.io.refl_io import write_source_beam_pattern
                         arr = np.asarray(sbp_spec, dtype=float)
                         if arr.ndim != 2 or arr.shape[1] != 2:
                             raise ValueError(

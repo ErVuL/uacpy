@@ -32,7 +32,7 @@ from uacpy.core.constants import (
     parse_ssp_type, parse_boundary_type,
 )
 from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError, ModelExecutionError
-from uacpy.io.boundary_io import read_reflection_coefficient
+from uacpy.io.refl_io import read_reflection_coefficient
 from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
 
 

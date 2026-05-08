@@ -3249,9 +3249,9 @@ def plot_time_series(
             # depth per call when we are in single-depth mode).
             data = np.asarray(field.data)
             if data.ndim == 3:
-                # Shape: (n_d, n_r, n_t). Take the first
-                # depth slice and transpose to the legacy ``(nt, nr)``
-                # layout the rest of this function expects.
+                # Shape: (n_d, n_r, n_t). Take the first depth slice and
+                # transpose to the ``(nt, nr)`` layout the rest of this
+                # function expects.
                 pressure_arr = data[0].T               # (nt, nr)
             else:
                 pressure_arr = data

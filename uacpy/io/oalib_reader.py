@@ -26,136 +26,44 @@ from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
 
 
 def read_shd_file(filepath: Union[str, Path]) -> TLField:
-    """
-    Read shade file (.shd) - binary TL output from Bellhop/Kraken/Scooter
+    """Read a single-frequency ``.shd`` file as a typed :class:`TLField`.
 
-    Based on Acoustics Toolbox read_shd_bin.m format
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to .shd file
-
-    Returns
-    -------
-    field : Field
-        Field object with TL data
+    Thin wrapper around :func:`read_shd_bin` that converts the dict
+    return into a TLField. Multi-frequency ``.shd`` files raise
+    ``ValueError`` — call ``read_shd_bin`` directly and build a
+    :class:`TransferFunction` from its complex pressure cube instead.
     """
     filepath = Path(filepath)
+    shd = read_shd_bin(str(filepath))
 
-    with open(filepath, "rb") as f:
-        # Record 1: Title
-        recl = struct.unpack("i", f.read(4))[0]  # record length in 4-byte words
-        title = f.read(80).decode("utf-8", errors="ignore").strip()
+    freqs = np.asarray(shd['freqVec'], dtype=float)
+    nfreq = len(freqs)
+    if nfreq > 1:
+        raise ValueError(
+            f"read_shd_file: {filepath} contains {nfreq} frequencies; "
+            "use read_shd_bin(filepath) for the full broadband payload "
+            "and construct a TransferFunction from it."
+        )
 
-        # Record 2: PlotType
-        f.seek(4 * recl, 0)
-        plot_type = f.read(10).decode("utf-8", errors="ignore").strip()
+    pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
+    p = pressure[0, 0, :, :]                 # first bearing, first source
+    p_abs = np.maximum(np.abs(p), PRESSURE_FLOOR)
+    tl_data = np.clip(-20.0 * np.log10(p_abs), None, TL_MAX_DB)
 
-        # Record 3: Dimensions
-        f.seek(2 * 4 * recl, 0)
-        nfreq = struct.unpack("i", f.read(4))[0]
-        ntheta = struct.unpack("i", f.read(4))[0]
-        nsx = struct.unpack("i", f.read(4))[0]
-        nsy = struct.unpack("i", f.read(4))[0]
-        nsz = struct.unpack("i", f.read(4))[0]
-        nrz = struct.unpack("i", f.read(4))[0]
-        nrr = struct.unpack("i", f.read(4))[0]
-        freq0 = struct.unpack("d", f.read(8))[0]
-        atten = struct.unpack("d", f.read(8))[0]
-
-        # Record 4: Frequency vector
-        f.seek(3 * 4 * recl, 0)
-        freqs = np.array([struct.unpack("d", f.read(8))[0] for _ in range(nfreq)])
-
-        # ``read_shd_file`` returns a single-frequency ``TLField``. For
-        # broadband ``.shd`` files (``nfreq > 1``) the caller should use
-        # ``read_shd_bin`` (returns the full complex pressure cube as a
-        # dict) and build a ``TransferFunction`` from it explicitly.
-        if nfreq > 1:
-            raise ValueError(
-                f"read_shd_file: {filepath} contains {nfreq} frequencies; "
-                "use read_shd_bin(filepath) for the full broadband payload "
-                "and construct a TransferFunction from it."
-            )
-
-        # Record 5: Theta
-        f.seek(4 * 4 * recl, 0)
-        theta = np.array([struct.unpack("d", f.read(8))[0] for _ in range(ntheta)])
-
-        # Records 6-7: Source x,y (skip for now)
-        # Record 8: Source depths
-        f.seek(7 * 4 * recl, 0)
-        sz = np.array([struct.unpack("f", f.read(4))[0] for _ in range(nsz)])
-
-        # Record 9: Receiver depths
-        f.seek(8 * 4 * recl, 0)
-        rz = np.array([struct.unpack("f", f.read(4))[0] for _ in range(nrz)])
-
-        # Record 10: Receiver ranges (stored in METRES). Acoustics-Toolbox
-        # converts km→m internally on read (SourceReceiverPositions.f90:277)
-        # before WriteHeader emits Pos%Rr to record 10, so the on-disk units
-        # are always metres regardless of the .env declaration.
-        f.seek(9 * 4 * recl, 0)
-        rr = np.array([struct.unpack("d", f.read(8))[0] for _ in range(nrr)])
-
-        # Allocate pressure array
-        # For rectilinear: pressure(ntheta, nsz, nrz, nrr)
-        if "irregular" in plot_type.lower():
-            nrcvrs_per_range = 1
-        else:
-            nrcvrs_per_range = nrz
-
-        pressure = np.zeros((ntheta, nsz, nrcvrs_per_range, nrr), dtype=complex)
-
-        # Read pressure data (Record 10+)
-        # For first frequency, all theta, all source depths, all receiver depths
-        ifreq = 0  # Read first frequency
-        for itheta in range(ntheta):
-            for isz in range(nsz):
-                for irz in range(nrcvrs_per_range):
-                    recnum = (
-                        10
-                        + (ifreq) * ntheta * nsz * nrcvrs_per_range
-                        + (itheta) * nsz * nrcvrs_per_range
-                        + (isz) * nrcvrs_per_range
-                        + irz
-                    )
-
-                    f.seek(recnum * 4 * recl, 0)
-                    temp = np.array(
-                        [struct.unpack("f", f.read(4))[0] for _ in range(2 * nrr)]
-                    )
-                    # Interleaved real/imag
-                    pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
-
-        # Extract first source depth, all receiver depths
-        # pressure shape: (ntheta, nsz, nrz, nrr) -> (nrz, nrr) for first theta, first source
-        p = pressure[0, 0, :, :]
-
-        # Convert to transmission loss with proper handling of shadow zones
-        p_abs = np.abs(p)
-        p_abs = np.maximum(p_abs, PRESSURE_FLOOR)
-        tl_data = -20 * np.log10(p_abs)
-        tl_data = np.clip(tl_data, None, TL_MAX_DB)
-
-    # Plural-only: always pass an ndarray (length 1 for narrowband).
-    freqs_arr = np.atleast_1d(np.asarray(freqs, dtype=float))
-    result_freqs = freqs_arr if len(freqs_arr) else None
-
+    pos = shd['Pos']
     return TLField(
         data=tl_data,
-        ranges=rr,
-        depths=rz,
+        ranges=pos['r']['r'],
+        depths=pos['r']['z'],
         model='', backend='',
-        source_depths=sz,
-        frequencies=result_freqs,
+        source_depths=pos['s']['z'],
+        frequencies=np.atleast_1d(freqs) if nfreq else None,
         metadata={
-            "title": title,
-            "plot_type": plot_type,
-            "source_file": str(filepath),
-            "freq0": freq0,
-            "atten": atten,
+            'title': shd['title'],
+            'plot_type': shd['PlotType'],
+            'source_file': str(filepath),
+            'freq0': shd['freq0'],
+            'atten': shd['atten'],
         },
     )
 
