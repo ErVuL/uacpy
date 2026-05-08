@@ -342,9 +342,12 @@ class Bounce(PropagationModel):
                 irc_file = fm.get_path(f'{base_name}.irc')
 
                 if not brc_file.exists():
-                    raise FileNotFoundError(
-                        f"BOUNCE output file not found: {brc_file}\n"
-                        "BOUNCE execution may have failed."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"BOUNCE did not produce {brc_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
                     )
 
                 # bellhopcuda's strict monotonicity check on .brc/.irc rejects

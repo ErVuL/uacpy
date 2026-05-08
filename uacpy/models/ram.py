@@ -401,10 +401,10 @@ class RAM(PropagationModel):
             rams_theta = float(rams_theta)
         self.rams_theta = rams_theta
         if rams_irot not in (0, 1):
-            raise ValueError(f"rams_irot must be 0 or 1; got {rams_irot!r}.")
+            raise ConfigurationError(f"rams_irot must be 0 or 1; got {rams_irot!r}.")
         self.rams_irot = int(rams_irot)
         if not np.isfinite(rams_dr_safety_factor) or rams_dr_safety_factor < 1.0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"rams_dr_safety_factor must be ≥ 1.0; got "
                 f"{rams_dr_safety_factor!r}. Use 1.0 to disable the "
                 f"noise-accumulation tightening."

@@ -203,7 +203,9 @@ def read_shd_bin(
                 - 'z' : ndarray - Depths in meters
             - 'r' : dict - Receiver positions
                 - 'z' : ndarray - Depths in meters
-                - 'r' : ndarray - Ranges in km
+                - 'r' : ndarray - Ranges in meters (Acoustics-Toolbox
+                  converts km → m before WriteHeader; see
+                  SourceReceiverPositions.f90:277)
         - 'pressure' : ndarray - Complex pressure field
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
@@ -214,7 +216,7 @@ def read_shd_bin(
     - Record length (recl) is read from first 4 bytes
     - Pressure is stored as interleaved real/imaginary pairs
     - For TL files from FIELD3D, source positions use compressed format
-    - Coordinates: x,y in meters, z in meters, r in km, theta in degrees
+    - Coordinates: x,y in meters, z in meters, r in meters, theta in degrees
 
     References
     ----------

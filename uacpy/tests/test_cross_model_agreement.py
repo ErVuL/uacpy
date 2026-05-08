@@ -83,11 +83,6 @@ def _kraken_field_tl(env, src, rcv):
     return KrakenField(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
-def _kraken_tl(env, src, rcv):
-    """Kraken (modes) wrapped as TL via field.exe — handled by Kraken.run with explicit COHERENT_TL."""
-    return Kraken(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-
-
 def _scooter_tl(env, src, rcv):
     return Scooter(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
@@ -440,10 +435,6 @@ if _has_ramsurf():
     SCENARIOS.append(_altimetry_broadband_at_fc())
 if _has_ramsurf():
     SCENARIOS.append(_altimetry_consistency())
-
-
-def _scenario_id(s: Scenario) -> str:
-    return s.name
 
 
 def _comparison_pairs():

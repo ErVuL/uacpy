@@ -261,9 +261,9 @@ def write_oast_input(
         - nw_samples : int
             Number of wavenumber samples (default: -1 for automatic)
         - plot_rmin : float
-            Minimum range for plots in km (default: 0)
+            Minimum range for plots in **metres** (default: 0)
         - plot_rmax : float
-            Maximum range for plots in km (default: max receiver range)
+            Maximum range for plots in **metres** (default: max receiver range)
 
     Notes
     -----
@@ -312,8 +312,8 @@ def write_oast_input(
     # Optional parameters
     integration_offset = kwargs.get('integration_offset', 0)
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
-    plot_rmin = kwargs.get('plot_rmin', 0)
-    plot_rmax = kwargs.get('plot_rmax', r_max / 1000.0)  # Convert m to km
+    plot_rmin = kwargs.get('plot_rmin', 0.0)            # metres (public API)
+    plot_rmax = kwargs.get('plot_rmax', r_max)          # metres (public API)
     volume_attenuation = kwargs.get('volume_attenuation', None)
 
     # Get reference sound speed for plot axes
@@ -446,9 +446,9 @@ def write_oast_input(
         # NW IC1 IC2 (use -1 for automatic sampling)
         f.write(f"{nw_samples} 1 2000\n")
 
-        # Block VIII: Range axes (for plots)
+        # Block VIII: Range axes (for plots) — OASES expects km on disk.
         # RMIN RMAX RLEN RINC
-        f.write(f"{plot_rmin:.1f} {plot_rmax:.1f} 20 1\n")
+        f.write(f"{plot_rmin / 1000.0:.1f} {plot_rmax / 1000.0:.1f} 20 1\n")
 
         # Block IX: Transmission loss axes (only for options A, D, T, I, or
         # the ANSPEC / TLDEP plot flags — see oast.tex Table "BLOCK IX").
@@ -760,9 +760,9 @@ def write_oasp_input(
         - time_step : float
             Time sampling increment in seconds (default: auto)
         - range_start : float
-            First range in km (default: min receiver range)
+            First range in **metres** (default: min receiver range)
         - range_step : float
-            Range increment in km (default: auto)
+            Range increment in **metres** (default: auto)
         - nw_samples : int
             Number of wavenumber samples (default: -1 for automatic)
 
@@ -819,13 +819,13 @@ def write_oasp_input(
         # Nyquist: dt = 1/(2*freq_max)
         dt = 1.0 / (2.0 * freq_max)
 
-    # Range parameters
+    # Range parameters — public API in metres, OASES expects km on disk.
     r_min_m = float(receiver.ranges.min())
     r_max_m = float(receiver.ranges.max())
-    r1_km = kwargs.get('range_start', r_min_m / 1000.0)
+    r1_km = float(kwargs.get('range_start', r_min_m)) / 1000.0
 
     if 'range_step' in kwargs:
-        dr_km = kwargs['range_step']
+        dr_km = float(kwargs['range_step']) / 1000.0
     else:
         # Auto-calculate based on receiver spacing
         n_ranges = len(receiver.ranges)

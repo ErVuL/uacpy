@@ -8,7 +8,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List, Dict, Set, Union
+from typing import Optional, List, Dict, Union
 from enum import Enum
 import warnings
 
@@ -469,11 +469,11 @@ class PropagationModel(ABC):
 
         if np.any(source.depths < 0):
             self._log("Source depths must be positive", level='error')
-            raise ValueError("Source depths must be positive")
+            raise ConfigurationError("Source depths must be positive")
 
         if receiver.depth_min < 0:
             self._log("Receiver depths must be positive", level='error')
-            raise ValueError("Receiver depths must be positive")
+            raise ConfigurationError("Receiver depths must be positive")
 
     def compute_tl(
         self,
@@ -521,7 +521,7 @@ class PropagationModel(ABC):
         if run_mode not in (
             RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
         ):
-            raise ValueError(
+            raise ConfigurationError(
                 f"compute_tl() got run_mode={run_mode}; only COHERENT_TL / "
                 f"INCOHERENT_TL / SEMICOHERENT_TL are accepted. Call "
                 f"{self.model_name}.run(run_mode=…) for other modes."
@@ -722,7 +722,7 @@ class PropagationModel(ABC):
         single_point = range_m is not None and depth_m is not None
         if receiver is None:
             if not single_point:
-                raise ValueError(
+                raise ConfigurationError(
                     "compute_eigenrays requires either receiver=… or both "
                     "range_m=… and depth_m=…"
                 )
@@ -731,7 +731,7 @@ class PropagationModel(ABC):
                 ranges=np.array([float(range_m)]),
             )
         elif single_point:
-            raise ValueError(
+            raise ConfigurationError(
                 "Pass either receiver=… OR (range_m, depth_m), not both."
             )
 
@@ -988,8 +988,6 @@ class PropagationModel(ABC):
         env: Optional[dict] = None,
         check: bool = True,
     ):
-        if timeout is None:
-            timeout = getattr(self, 'timeout', 600.0)
         """
         Run an external binary and raise ModelExecutionError on failure.
 
@@ -1019,6 +1017,8 @@ class PropagationModel(ABC):
         -------
         subprocess.CompletedProcess
         """
+        if timeout is None:
+            timeout = getattr(self, 'timeout', 600.0)
         cmd_str = ' '.join(str(c) for c in cmd)
         self._log(f"Running: {cmd_str}", level='debug')
 
@@ -1122,7 +1122,7 @@ class PropagationModel(ABC):
             return BoundaryProperties(
                 acoustic_type='vacuum', depth=float(default_depth),
             )
-        raise ValueError(
+        raise ConfigurationError(
             f"Unknown elastic collapse method {method!r}. Use "
             "'fluid' or 'vacuum'."
         )
@@ -1157,7 +1157,7 @@ class PropagationModel(ABC):
 
     def _collapse_altimetry(self, env_in, e, method, alts):
         if method != 'drop':
-            raise ValueError(
+            raise ConfigurationError(
                 f"Unknown altimetry_collapse_method {method!r}. "
                 "Currently only 'drop' is supported."
             )

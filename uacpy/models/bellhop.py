@@ -675,7 +675,13 @@ class Bellhop(PropagationModel):
 
                 if not output_file.exists():
                     self._log(f"Output file not found: {output_file}", level='error')
-                    raise FileNotFoundError(f"Output file not found: {output_file}")
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"Bellhop did not produce {output_file}; "
+                            f"check {output_file.with_suffix('.prt')} for diagnostics."
+                        ),
+                    )
                 result = reader(output_file)
                 if rt in ('R', 'E'):
                     # The .ray file format is identical for fan and

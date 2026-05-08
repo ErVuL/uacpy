@@ -373,7 +373,13 @@ class Scooter(PropagationModel):
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
                     self._log(f"Green's function file not found: {grn_file}", level='error')
-                    raise FileNotFoundError(f"Green's function file not found: {grn_file}")
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"Scooter did not produce {grn_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
+                    )
 
                 if use_fields:
                     # Write FLP and invoke fields.exe -> .shd
@@ -386,9 +392,12 @@ class Scooter(PropagationModel):
 
                     shd_file = fm.get_path(f'{base_name}.shd')
                     if not shd_file.exists():
-                        raise FileNotFoundError(
-                            f"fields.exe did not produce {shd_file}; "
-                            f"check {fm.work_dir}/fields.prt for diagnostics."
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=(
+                                f"fields.exe did not produce {shd_file}; "
+                                f"check {fm.work_dir}/fields.prt for diagnostics."
+                            ),
                         )
                     self._log("Reading SHD file...")
                     result = read_shd_file(shd_file)

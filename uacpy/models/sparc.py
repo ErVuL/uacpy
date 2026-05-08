@@ -317,7 +317,7 @@ class SPARC(PropagationModel):
         """
         # Validate output_mode override if provided
         if output_mode is not _UNSET and output_mode not in ('R', 'D', 'S'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid output mode '{output_mode}'. "
                 f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
             )
@@ -330,7 +330,7 @@ class SPARC(PropagationModel):
             run_mode = RunMode.COHERENT_TL
 
         if source_waveform is not None or sample_rate is not None:
-            raise ValueError(
+            raise ConfigurationError(
                 "SPARC drives the source pulse via the constructor "
                 "``pulse_type`` argument, not via run() kwargs. Set "
                 "``SPARC(pulse_type=…)`` (e.g. 'PN+B' for a Hanning-windowed "
@@ -405,7 +405,10 @@ class SPARC(PropagationModel):
                     # Read output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                     rts_data = read_rts_file(rts_file)
 
@@ -465,7 +468,10 @@ class SPARC(PropagationModel):
                         rts_file = fm.get_path(f'{depth_base}.rts')
                         if not rts_file.exists():
                             self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                            raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                         rts_data = read_rts_file(rts_file)
                         if time_grid is None:
@@ -541,7 +547,10 @@ class SPARC(PropagationModel):
                     # Read vertical array output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                     rts_data = read_rts_file(rts_file)
                     # In vertical mode, 'ranges' in RTS file actually contains depths
@@ -569,7 +578,10 @@ class SPARC(PropagationModel):
                         rts_file = fm.get_path(f'{range_base}.rts')
                         if not rts_file.exists():
                             self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise FileNotFoundError(f"RTS file not found: {rts_file}")
+                            raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=f"SPARC did not produce {rts_file}",
+                        )
 
                         rts_data = read_rts_file(rts_file)
                         tl_single, _ = rts_to_tl(rts_data, freq, method='fft')
@@ -609,18 +621,23 @@ class SPARC(PropagationModel):
                 # Read Green's function file
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
-                    raise FileNotFoundError(
-                        f"GRN file not found: {grn_file}\n"
-                        "SPARC snapshot mode should produce a .grn file.\n"
-                        "Check SPARC output for errors."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"SPARC snapshot mode did not produce {grn_file}; "
+                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                        ),
                     )
 
                 self._log("Reading snapshot Green's function and extracting source-freq TL...")
                 grn_data = read_grn_file(grn_file)
                 if not grn_data['is_sparc']:
-                    raise RuntimeError(
-                        "GRN title does not start with 'SPARC' — snapshot path "
-                        "expects a SPARC-produced file."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            "GRN title does not start with 'SPARC' — snapshot path "
+                            "expects a SPARC-produced file."
+                        ),
                     )
 
                 # Time-FFT along the snapshot's tout axis, pick the source
@@ -640,7 +657,7 @@ class SPARC(PropagationModel):
                 )
 
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     f"Invalid output mode '{self.output_mode}'. "
                     f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
                 )
@@ -685,7 +702,7 @@ class SPARC(PropagationModel):
         elif bottom_acoustic_type == 'rigid':
             bottom_type = BoundaryType.RIGID
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Invalid bottom boundary type '{env.bottom.acoustic_type}' for SPARC. "
                 f"Only 'vacuum' and 'rigid' are supported."
             )

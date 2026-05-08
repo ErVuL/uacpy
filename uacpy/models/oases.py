@@ -331,10 +331,13 @@ class OAST(_OASESBase):
 
                 # Check if output files exist
                 if not plt_file.exists():
-                    raise FileNotFoundError(
-                        f"OAST plot data file not found: {plt_file}\n"
-                        f"OAST should create .plt file via FOR020 environment variable.\n"
-                        "Check input file and compare with examples in third_party/oases/tloss/"
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"OAST did not produce {plt_file} (FOR020 .plt). "
+                            f"Check {fm.work_dir}/{base_name}.prt and the "
+                            "examples in third_party/oases/tloss/."
+                        ),
                     )
 
                 output_file = plt_file
@@ -379,7 +382,7 @@ class OAST(_OASESBase):
                 [str(self.executable)], cwd=work_dir, env=env,
             )
         except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            self._attach_prt_tail(exc, work_dir, input_file.stem)
             raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -499,13 +502,16 @@ class OASN(_OASESBase):
             'replica_ymin', 'replica_ymax', 'replica_ny',
         ))
 
-        # Public API uses metres for ranges; OASES expects km. Convert
-        # the four range-axis kwargs in-place before forwarding to the
-        # writer (z-axis kwargs stay in metres — OASES accepts those).
-        for k in ('replica_xmin', 'replica_xmax',
-                  'replica_ymin', 'replica_ymax'):
-            if k in kwargs:
-                kwargs[k] = float(kwargs[k]) / 1000.0
+        # Public API uses metres for ranges; OASES expects km. Build a
+        # shallow copy with the four range-axis kwargs converted so we
+        # don't mutate the caller's dict (z-axis stays metres — OASES
+        # accepts those). Only meaningful for RunMode.REPLICA.
+        if run_mode == RunMode.REPLICA:
+            kwargs = dict(kwargs)
+            for k in ('replica_xmin', 'replica_xmax',
+                      'replica_ymin', 'replica_ymax'):
+                if k in kwargs:
+                    kwargs[k] = float(kwargs[k]) / 1000.0
 
         with _resolve_overrides(self, volume_attenuation=volume_attenuation):
             env = self._project_environment(env)
@@ -550,9 +556,13 @@ class OASN(_OASESBase):
                     fort16_file = fm.get_path('fort.16')
                     cov_path = xsm_file if xsm_file.exists() else fort16_file
                     if not cov_path.exists():
-                        raise FileNotFoundError(
-                            f"OASN covariance file not found. Checked: "
-                            f"{xsm_file}, {fort16_file}"
+                        raise ModelExecutionError(
+                            self.model_name, return_code=0, stdout=None,
+                            stderr=(
+                                f"OASN did not produce a covariance file. "
+                                f"Checked: {xsm_file}, {fort16_file}. "
+                                f"Inspect {fm.work_dir}/{base_name}.prt."
+                            ),
                         )
                     self._log(f"Reading OASN covariance file: {cov_path}")
                     cov_data = read_oasn_covariance(cov_path)
@@ -584,10 +594,13 @@ class OASN(_OASESBase):
                 fort14_file = fm.get_path('fort.14')
                 rep_path = rpo_file if rpo_file.exists() else fort14_file
                 if not rep_path.exists():
-                    raise FileNotFoundError(
-                        f"OASN replica file not found. Checked: "
-                        f"{rpo_file}, {fort14_file}\n"
-                        "Pass replica_zmin/zmax/nz and replica_xmin/xmax/nx kwargs."
+                    raise ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=(
+                            f"OASN did not produce a replica file. Checked: "
+                            f"{rpo_file}, {fort14_file}. Pass "
+                            "replica_zmin/zmax/nz and replica_xmin/xmax/nx kwargs."
+                        ),
                     )
                 self._log(f"Reading OASN replica file: {rep_path}")
                 rep_data = read_oasn_replicas(rep_path)
@@ -632,7 +645,7 @@ class OASN(_OASESBase):
                 [str(self.executable)], cwd=work_dir, env=env,
             )
         except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            self._attach_prt_tail(exc, work_dir, base_name)
             raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -860,8 +873,9 @@ class OASR(_OASESBase):
                     break
 
             if output_file is None:
-                raise FileNotFoundError(
-                    f"OASR output file not found. Checked: {search}"
+                raise ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=f"OASR did not produce an output file. Checked: {search}",
                 )
 
             self._log(f"Reading OASR output: {output_file}")
@@ -900,7 +914,7 @@ class OASR(_OASESBase):
                 [str(self.executable)], cwd=work_dir, env=env,
             )
         except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            self._attach_prt_tail(exc, work_dir, input_file.stem)
             raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -1120,12 +1134,13 @@ class OASP(_OASESBase):
                 self._log(f"Reading OASP output: {plt_file}")
                 trf_data = read_oasp_trf(plt_file)
             else:
-                raise FileNotFoundError(
-                    f"OASP output files not found: {trf_file} or {plt_file}\n\n"
-                    "Consider using RAM for parabolic equation modeling:\n"
-                    "  >>> from uacpy.models import RAM\n"
-                    "  >>> ram = RAM()\n"
-                    "  >>> result = ram.run(env, source, receiver)"
+                raise ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=(
+                        f"OASP did not produce {trf_file} or {plt_file}. "
+                        "Consider using RAM for parabolic equation modeling: "
+                        "RAM().run(env, source, receiver)."
+                    ),
                 )
 
             transfer_func = trf_data['transfer_function']  # shape: (n_freq, n_range, n_depth)
@@ -1202,7 +1217,7 @@ class OASP(_OASESBase):
                 [str(self.executable)], cwd=work_dir, env=env,
             )
         except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem if 'input_file' in locals() else base_name)
+            self._attach_prt_tail(exc, work_dir, input_file.stem)
             raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
@@ -1387,7 +1402,14 @@ class OASES(PropagationModel):
         ):
             return self._oasp.run(env, source, receiver,
                                   run_mode=run_mode, **kwargs)
-        raise ValueError(f"Run mode {run_mode} not supported by OASES")
+        raise UnsupportedFeatureError(
+            self.model_name, str(run_mode),
+            alternatives=[
+                "RunMode.COHERENT_TL", "RunMode.BROADBAND",
+                "RunMode.TIME_SERIES", "RunMode.COVARIANCE",
+                "RunMode.REPLICA", "RunMode.REFLECTION",
+            ],
+        )
 
     def compute_tl(
         self,

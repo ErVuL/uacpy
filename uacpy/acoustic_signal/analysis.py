@@ -12,7 +12,6 @@ import scipy.signal as _sig
 import matplotlib.pyplot as plt
 import math
 from scipy.linalg import toeplitz
-from scipy import fft as _fft
 from matplotlib.gridspec import GridSpec
 
 
