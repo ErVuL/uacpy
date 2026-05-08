@@ -64,11 +64,12 @@ Calvo's original `outpt` writes only real TL to `tl.grid`, which discards
 the phase needed to assemble a broadband transfer function. Both
 `rams0.5.f` and `ramsurf1.5.f` are patched to also dump the complex PE
 envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
-`tl.grid`'s record geometry. The phase convention is the same as mpiramS
-(`phase_reference='psif_envelope'`): the travelling-wave factor
-`exp(+i k0 r)` is factored out by the PE march;
-`Field.synthesize_time_series` re-applies it before IFFT via the
-`t_start = r/cmin` shift.
+`tl.grid`'s record geometry. The travelling-wave factor `exp(+i k0 r)`
+has been factored out by the PE march; the RAM Python wrapper bakes the
+engineering carrier `exp(-i k0 r)` back in (and conjugates ψ) before
+tagging the result `phase_reference='travelling_wave'`, so every
+broadband-capable model presents the IFFT pipeline the same shape of
+H(f).
 
 #### `ramsurf1.5.f` diff
 
@@ -101,7 +102,9 @@ envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
        j=j+1
        tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
 +c     UACPY: same envelope as tlg uses, with cylindrical-spreading
-+c     factor included. phase_reference = 'psif_envelope'.
++c     factor included. Carrier exp(+i k0 r) is still factored out
++c     here; the Python wrapper bakes the engineering travelling-wave
++c     carrier exp(-i k0 r) in before tagging.
 +      urg(j)=ur/sqrt(r+eps)
      1 continue
        write(3)(tlg(j),j=1,lz)

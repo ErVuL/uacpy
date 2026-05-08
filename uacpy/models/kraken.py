@@ -1356,9 +1356,12 @@ class KrakenField(_KrakenBase):
                 )
                 for i_freq, fr in enumerate(freqs_read):
                     shd_i = read_shd_bin(str(shd_file), freq=float(fr))
-                    # field.exe convention: exp(-ikr) with i*sqrt(2pi)*exp(i*pi/4),
-                    # opposite polarity vs Scooter's Hankel transform. Negate to
-                    # match Scooter / Bellhop / RAM travelling-wave convention.
+                    # field.exe (EvaluateMod.f90:34,42) emits the modal sum
+                    # under the engineering carrier exp(-ikr) but with a
+                    # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
+                    # path produces -exp(iπ/4)/√(2πr). The two prefactors
+                    # differ by an overall -1 (NOT a conjugation), so a
+                    # plain negation aligns the two travelling-wave fields.
                     p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
                 field = TransferFunction(
                     data=p_stack,
@@ -1375,11 +1378,8 @@ class KrakenField(_KrakenBase):
                     ),
                 )
             elif return_pressure:
-                # Return complex pressure for broadband/transfer function use.
-                # field.exe uses exp(-ikr) with a factor i*sqrt(2pi)*exp(i*pi/4)
-                # which produces pressure with opposite sign vs. Scooter's
-                # Hankel transform convention. Negate to match the sign used
-                # by Scooter, Bellhop, and RAM for consistent time-series.
+                # Negate to match Scooter / Bellhop / RAM (see broadband
+                # branch above for the prefactor algebra).
                 shd_data = read_shd_bin(str(shd_file))
                 p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
                 field = PressureField(

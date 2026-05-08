@@ -141,8 +141,9 @@ def read_pcomplex_grid(
     (number of stored depth points, identical to the ``tl.grid`` header).
     Records 2..N each hold ``lz`` ``complex*8`` samples — the envelope
     ``u·f3 / sqrt(r)`` evaluated at the same (z, r) grid as ``tl.grid``.
-    The phase convention is ``'psif_envelope'``: the travelling-wave
-    factor ``exp(+i k0 r)`` has been factored out by the PE march.
+    The carrier ``exp(+i k0 r)`` has been factored out by the PE march;
+    the RAM wrapper bakes the engineering travelling-wave carrier
+    ``exp(-i k0 r)`` back in before tagging the result.
 
     Parameters
     ----------

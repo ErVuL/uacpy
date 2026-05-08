@@ -2,20 +2,26 @@
 Ambient-noise model — Tollefsen / Pecknold packaging.
 
 `compute_windnoise` and the :class:`WenzNoise` class follow Tollefsen &
-Pecknold "A simple yet practical ambient noise model" (DRDC-Atlantic
-2018): wind / shipping / rain / thermal / turbulence components summed
-in dB re 1 µPa²/Hz.
+Pecknold "A simple yet practical ambient noise model"
+(DRDC-RDDC-2022-D051, May 2022): wind / shipping / rain / thermal /
+turbulence components summed in dB re 1 µPa²/Hz.
 
-References
-----------
-Tollefsen, C. D. S. & Pecknold, S. (2018). *A simple yet practical
-   ambient noise model.* Proc. UA 2018.
-Wenz, G. M. (1962). *JASA* 34(12), 1936–1956.
-Mellen, R. H. (1952). *JASA* 24(5), 478–480.
-Piggott, C. L. (1964). *JASA* 36(11), 2152–2163.
-Merklinger, H. M. (1979). *JASA* 65(4), 949–957.
-Torres, F. & Costa, P. (2019). *J. Mar. Sci. Eng.* 7(11), 392.
-Nichols, S. M. & Bradley, D. L. (2016). *JASA* 139(4), EL114.
+References (as listed in the DRDC report)
+-----------------------------------------
+Tollefsen, C. D. S. & Pecknold, S. (2022). *A simple yet practical
+   ambient noise model.* DRDC-RDDC-2022-D051, DRDC-Atlantic.
+Wenz, G. M. (1962). Acoustic ambient noise in the ocean: Spectra
+   and sources. (cited via the DRDC report.)
+Mellen, R. H. (1952). The thermal-noise limit. (cited via the report.)
+Piggott, C. L. (1964). Ambient sea noise at low frequencies in shallow
+   water. (cited via the report.)
+Merklinger, H. M. (1979). Formulae for estimation of undersea noise
+   spectra. (cited via the report.)
+Torres, C. & Costa, C. (2019). Underwater ambient noise — an
+   estimation. (cited via the report.)
+Nichols, S. M. & Bradley, D. L. (2016). Global examination of the
+   wind-dependence of low-frequency ambient noise. (cited via the
+   report.)
 """
 import numpy as np
 import matplotlib.pyplot as plt

@@ -1,8 +1,15 @@
 """
 Attenuation models for underwater acoustics.
 
-Implements Thorp, Francois-Garrison, Fisher-Simmons, Ainslie-McColm, and
-custom attenuation formulas.
+Implements:
+
+* :func:`thorp_attenuation` — canonical Thorp 1967 formula.
+* :func:`francois_garrison` — Francois & Garrison 1982 multi-relaxation.
+* :func:`thorp_with_depth_correction` — Thorp scaled by ``(1 + depth/5000)``.
+* :func:`empirical_attenuation` — single-relaxation Thorp-like formula
+  with temperature / salinity / depth knobs (handy for sensitivity
+  studies; not a published reference formula).
+* :func:`convert_attenuation_units` — unit conversion helper.
 
 Notes
 -----
@@ -10,7 +17,7 @@ This module is a user/example helper. The core uacpy library wires
 frequency-dependent volume attenuation inside the individual model writers
 (see ``uacpy.io.oalib_writer`` and each model's ``volume_attenuation``
 kwarg). Nothing in ``uacpy.core`` or ``uacpy.models`` imports from here;
-it is used by ``example_17_attenuation_models.py`` and by users who need
+it is used by ``example_12_attenuation_models.py`` and by users who need
 to compute attenuation curves directly.
 """
 
