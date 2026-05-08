@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, TextIO, Union
 import numpy as np
 
-from uacpy.core.environment import Environment
+from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
@@ -68,7 +68,7 @@ def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) 
     return options + ' ' + marker
 
 
-def _extract_bottom_props(bottom: 'BoundaryProperties') -> dict:
+def _extract_bottom_props(bottom: BoundaryProperties) -> dict:
     """Pull the geoacoustic fallback values from a ``BoundaryProperties``-
     like object. Used by every OAS[TNPR] writer to fill in defaults when an
     attribute is missing or zero. Defaults match Schmidt's typical "1.5 g/cm³,
