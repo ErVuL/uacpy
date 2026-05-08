@@ -217,9 +217,13 @@ def demo_range_dependent_bottom():
     print("=" * 70)
 
     # Create RD bottom: mud transitioning to sand over 15 km
+    bathymetry_rd = np.array([
+        [0, 150], [3000, 160], [6000, 180],
+        [9000, 200], [12000, 220], [15000, 250],
+    ])
+
     bottom_rd = RangeDependentBottom(
-        ranges=np.array([0, 3000, 6000, 9000, 12000, 15000]),
-        depths=np.array([150, 160, 180, 200, 220, 250]),
+        ranges=bathymetry_rd[:, 0].astype(float),
         sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
         density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
         attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4, 0.3]),
@@ -244,7 +248,7 @@ def demo_range_dependent_bottom():
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
             interp='pchip',
         ),
-        bathymetry=np.column_stack([bottom_rd.ranges / 1000.0 * 1000, bottom_rd.depths]),
+        bathymetry=bathymetry_rd,
         bottom=bottom_rd,
     )
 

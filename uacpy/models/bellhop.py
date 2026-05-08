@@ -786,7 +786,6 @@ class Bellhop(PropagationModel):
             reflection_cmin=c_low,
             reflection_cmax=c_high,
             reflection_rmax_m=rmax_m / 1000.0,
-            depth=env.bottom.depth
         )
         env_bounce.bottom_rd = None
         env_bounce.bottom_layered = None

@@ -367,7 +367,6 @@ from uacpy import RangeDependentBottom
 
 bot = RangeDependentBottom(
     ranges           = np.array([0, 5000, 10000, 15000]),  # metres
-    depths           = np.array([100, 150, 200, 180]),
     sound_speed      = np.array([1600, 1650, 1700, 1750]),
     density          = np.array([1.5, 1.7, 1.9, 2.1]),
     attenuation      = np.array([0.8, 0.6, 0.4, 0.3]),
@@ -376,6 +375,10 @@ bot = RangeDependentBottom(
     acoustic_type    = 'half-space',         # default is 'vacuum'
 )
 ```
+
+Geoacoustic ranges are independent of the bathymetry grid — pass any
+sampling that captures the lithology. The seafloor depth at any range
+is read from `env.bathymetry`.
 
 Bellhop honours range-dependent bottom geoacoustics natively through the
 long `.bty` format (per-range `cp / ρ / α / cs` written to the

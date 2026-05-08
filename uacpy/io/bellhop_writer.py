@@ -377,7 +377,7 @@ def write_bellhop_env_file(
         if bottom_type == "G":  # Grain size
             # Format: depth Mz (mean grain size in phi units)
             grain_size = getattr(env.bottom, 'grain_size_phi', 1.0)
-            f.write(f" {env.bottom.depth:.2f}  {grain_size:.2f} /\n")
+            f.write(f" {env.depth:.2f}  {grain_size:.2f} /\n")
         elif bottom_type == "F":  # Reflection coefficient from file
             # Copy reflection file to working directory
             if env.bottom.reflection_file:
@@ -407,7 +407,7 @@ def write_bellhop_env_file(
             shear_speed = getattr(env.bottom, 'shear_speed', 0.0)
             roughness = getattr(env.bottom, "roughness", 0.0)
             f.write(
-                f" {env.bottom.depth:.2f}  {env.bottom.sound_speed:.2f} "
+                f" {env.depth:.2f}  {env.bottom.sound_speed:.2f} "
                 f"{shear_speed:.1f} {env.bottom.density:.1f} "
                 f"{env.bottom.attenuation:.1f} {roughness:.1f} /\n"
             )

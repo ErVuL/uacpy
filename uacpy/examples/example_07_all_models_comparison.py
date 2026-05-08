@@ -102,7 +102,6 @@ def main():
 
     bottom_rd = RangeDependentBottom(
         ranges=bathymetry[:, 0],
-        depths=bathymetry[:, 1],
         sound_speed=np.array([1550, 1600, 1640, 1680, 1720]),
         density=np.array([1.4, 1.55, 1.7, 1.85, 2.0]),
         attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4]),

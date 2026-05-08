@@ -253,7 +253,6 @@ class TestBounceToScooterWorkflow:
         bottom_with_file = BoundaryProperties(
             acoustic_type='file',
             reflection_file=bounce_result.metadata['brc_file'],
-            depth=100,
             sound_speed=1600.0,
             density=1.8,
             attenuation=0.2,
@@ -333,7 +332,6 @@ class TestWorkflowComparison:
         bottom_with_file = BoundaryProperties(
             acoustic_type='file',
             reflection_file=bounce_result.metadata['brc_file'],
-            depth=100,
             sound_speed=1600.0,
             density=1.8,
             attenuation=0.2,

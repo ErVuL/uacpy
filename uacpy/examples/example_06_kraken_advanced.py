@@ -73,7 +73,6 @@ def main():
     # Range-dependent bottom: sand on shelf, rock on slope
     bottom_rd = RangeDependentBottom(
         ranges=bathymetry[:, 0].astype(float),
-        depths=bathymetry[:, 1],
         sound_speed=np.array([1600, 1620, 1650, 1700, 1800]),  # Hardening
         density=np.array([1.5, 1.6, 1.7, 1.9, 2.2]),           # Compacting
         attenuation=np.array([0.8, 0.7, 0.5, 0.4, 0.2]),       # Less lossy
