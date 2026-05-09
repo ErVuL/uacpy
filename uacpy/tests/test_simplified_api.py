@@ -120,12 +120,12 @@ class TestFieldMethods:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        point = result.at(range_m=3000, depth=50)
+        point = result.at(range=3000, depth=50)
         assert isinstance(point, PressureField)
         assert point.tl.ndim == 0
         assert isinstance(float(point.tl), float)
 
-        values_at_range = result.at(range_m=3000).tl
+        values_at_range = result.at(range=3000).tl
         assert len(values_at_range) == len(receiver_small.depths)
 
         values_at_depth = result.at(depth=50).tl

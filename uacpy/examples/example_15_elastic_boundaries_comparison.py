@@ -345,9 +345,9 @@ def main():
 
     mid_range_km = np.median(result_krakenfield.ranges) / 1000
 
-    ax6.plot(result_krakenfield.at(range_m=mid_range_km * 1000.0).tl, result_krakenfield.depths,
+    ax6.plot(result_krakenfield.at(range=mid_range_km * 1000.0).tl, result_krakenfield.depths,
             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
-    ax6.plot(result_scooter.at(range_m=mid_range_km * 1000.0).tl, result_scooter.depths,
+    ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).tl, result_scooter.depths,
             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax6.invert_yaxis()

@@ -359,8 +359,8 @@ def scenario_c_eigenrays_arrivals():
           end=" ", flush=True)
     result_eigen = bellhop_eigen.compute_eigenrays(
         env, source,
-        range_m=float(receiver.ranges[0]),
-        depth_m=float(receiver.depths[0]),
+        range=float(receiver.ranges[0]),
+        depth=float(receiver.depths[0]),
     ).filter_by_miss_distance(wavelength_m / 4).top_n_by_miss(12).truncate_at_receiver()
     print("✓")
 
@@ -423,7 +423,7 @@ def scenario_c_eigenrays_arrivals():
     print(f"\n  Analysis complete:")
     print(f"    • Eigenrays found: {n_eigenrays}")
     if arrivals_ok:
-        rec = result_arr.to_table()
+        rec = result_arr.arrivals
         if rec:
             delays = [r['delay'] for r in rec]
             print(f"    • Arrivals detected: {len(rec)}")
@@ -465,7 +465,7 @@ def scenario_d_compute_eigenrays_pekeris():
     bellhop = Bellhop(verbose=False, alpha=(-30, 30), n_beams=2001)
     rays = bellhop.compute_eigenrays(
         env, source,
-        range_m=target_range_m, depth_m=target_depth_m,
+        range=target_range_m, depth=target_depth_m,
     ).top_n_by_miss(8).truncate_at_receiver()
     print("✓")
 

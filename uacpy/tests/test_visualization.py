@@ -165,7 +165,7 @@ class TestRangeDepthCuts:
         """Test depth cut plotting."""
         env, source, result = basic_setup
 
-        fig, ax = plots.plot_depth_cut(result, range_m=2500)
+        fig, ax = plots.plot_depth_cut(result, range=2500)
         assert fig is not None
         plt.close(fig)
 

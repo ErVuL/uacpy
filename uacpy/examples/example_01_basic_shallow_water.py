@@ -153,7 +153,7 @@ def main():
     # Plot 3: TL vs Depth (at mid-range)
     ax = axes[1, 0]
     mid_range_km = np.median(result.ranges) / 1000
-    tl_vs_depth = result.at(range_m=mid_range_km * 1000.0).tl
+    tl_vs_depth = result.at(range=mid_range_km * 1000.0).tl
     ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
     ax.invert_yaxis()
     ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')

@@ -570,16 +570,16 @@ class SPARC(PropagationModel):
                     tl_field = []
                     depths_out = receiver.depths
 
-                    for idx, range_m in enumerate(receiver.ranges):
+                    for idx, range in enumerate(receiver.ranges):
                         # Create single-range receiver
-                        single_receiver = Receiver(depths=receiver.depths, ranges=np.array([range_m]))
+                        single_receiver = Receiver(depths=receiver.depths, ranges=np.array([range]))
 
                         range_base = f'{base_name}_r{idx}'
                         env_file = fm.get_path(f'{range_base}.env')
                         self._write_sparc_env(env_file, env, source, single_receiver, **kwargs)
 
                         if self.verbose:
-                            self._log(f"  Range {idx+1}/{len(receiver.ranges)}: {range_m:.1f}m")
+                            self._log(f"  Range {idx+1}/{len(receiver.ranges)}: {range:.1f}m")
                         self._run_sparc(range_base, fm.work_dir)
 
                         rts_file = fm.get_path(f'{range_base}.rts')

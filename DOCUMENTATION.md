@@ -137,7 +137,7 @@ All models inherit from `PropagationModel` (`uacpy.models.base`) and expose:
 | `run(env, source, receiver, **kw)`                          | Full-control entry point (required) |
 | `compute_tl(env, source, receiver, **kw)`                   | Coherent-TL convenience wrapper |
 | `compute_rays(env, source, receiver, **kw)`                 | Ray-paths convenience wrapper |
-| `compute_eigenrays(env, source, receiver=None, range_m=, depth_m=, tolerance_m=, max_rays=, truncate=, **kw)` | Eigenrays — single-point or multi-receiver |
+| `compute_eigenrays(env, source, receiver=None, range=, depth=, tolerance_m=, max_rays=, truncate=, **kw)` | Eigenrays — single-point or multi-receiver |
 | `compute_modes(env, source, n_modes=None, **kw)`            | Normal-modes convenience wrapper |
 | `compute_arrivals(env, source, receiver, **kw)`             | Arrivals convenience wrapper |
 | `supports_mode(RunMode.X)`                                  | Capability check |
@@ -439,7 +439,7 @@ rdl = RangeDependentLayeredBottom(
 )
 
 # Bathymetry lives on the Environment, not on the RDL.
-bathy = np.array([[0, 100], [20000, 300]])   # (range_m, seafloor_depth_m)
+bathy = np.array([[0, 100], [20000, 300]])   # (range, seafloor_depth_m)
 env = uacpy.Environment(name="shelf", ssp=1500,
                         bathymetry=bathy, bottom=rdl)
 ```
@@ -453,12 +453,12 @@ at one of the RDL ranges interpolate it from `env.bathymetry`.
 ### Bathymetry & altimetry
 
 ```python
-bathy = np.array([[0, 100], [5000, 150], [10000, 200]])  # (range_m, depth_m)
+bathy = np.array([[0, 100], [5000, 150], [10000, 200]])  # (range, depth)
 env = uacpy.Environment(name="slope", ssp=1500,
                         bathymetry=bathy)
 
 # Rough sea surface (Bellhop and RAM ramsurf backend — others drop it)
-# generate_sea_surface returns (range_m, surface_height_m) pairs from a
+# generate_sea_surface returns (range, surface_height_m) pairs from a
 # Pierson-Moskowitz spectrum parameterised by 10-m wind speed.
 alt = uacpy.generate_sea_surface(
     max_range_m=10_000, wind_speed_ms=10.0, n_points=500, seed=0xACED,
@@ -521,8 +521,8 @@ uacpy.Receiver(
   grid: `Receiver(depths=[d], ranges=[r])`.
 - For time-series / broadband outputs, models always return the full
   receiver grid. Extract a single trace with
-  `TransferFunction.to_time_trace(depth=, range_m=)` or
-  `synthesize_time_series(depth=, range_m=)` on the returned typed
+  `TransferFunction.to_time_trace(depth=, range=)` or
+  `synthesize_time_series(depth=, range=)` on the returned typed
   result; see §6 *Results — typed hierarchy*.
 
 Useful properties: `n_depths`, `n_ranges`, `depth_min/max`, `range_min/max`.
@@ -708,11 +708,11 @@ ts = bh.run(
     sample_rate=fs,              # required when source_waveform is given
     time_window=None, t_start=None,
 )
-trace = ts.get_trace(depth=50.0, range_m=2000.0)   # → TimeTrace at one cell
+trace = ts.get_trace(depth=50.0, range=2000.0)   # → TimeTrace at one cell
 ```
 
 Without `source_waveform` you get a `TransferFunction` covering the full
-receiver grid; call `tf.to_time_trace(depth=, range_m=)` to extract a
+receiver grid; call `tf.to_time_trace(depth=, range=)` to extract a
 `TimeTrace` at one cell.
 
 **Bellhop3D:** a stub `Bellhop3D` class exists in `uacpy.models` but its
@@ -975,7 +975,7 @@ vs. high frequencies on the same problem.
 
 #### Surface convention (env.altimetry)
 
-`env.altimetry` follows uacpy's documented convention: `(range_m,
+`env.altimetry` follows uacpy's documented convention: `(range,
 height_m)` with **height positive UP from sea level** (matches
 Bellhop/.ati). The RAM dispatcher converts to `ramsurf1.5`'s native
 `(range, zsrf)` convention (`zsrf` = depth below z=0, must be ≥ 0)
@@ -1000,7 +1000,7 @@ emits a `UserWarning` flagging the dropped data.
 `run_mode=RunMode.BROADBAND` returns a `TransferFunction` shaped
 `(n_d, n_r, n_f)` — a complex broadband field across the full receiver
 grid. To get a time-domain waveform at one `(depth, range)`, call
-`tf.to_time_trace(depth=…, range_m=…)` (single trace → `TimeTrace`)
+`tf.to_time_trace(depth=…, range=…)` (single trace → `TimeTrace`)
 or `tf.synthesize_time_series(source_waveform=…, sample_rate=…)`
 (full grid → `TimeSeriesField`).
 
@@ -1179,7 +1179,7 @@ problem, OAST warns and uses maximum bathymetry depth.
 `(n_d, n_r, n_f)`. With `run_mode=TIME_SERIES` plus `source_waveform`
 and `sample_rate`, the wrapper internally calls
 `tf.synthesize_time_series(...)` and returns a `TimeSeriesField`. For a
-single-cell trace use `tf.to_time_trace(depth, range_m)` → `TimeTrace`.
+single-cell trace use `tf.to_time_trace(depth, range)` → `TimeTrace`.
 
 OASN produces covariance matrices (`.xsm`) and matched-field replicas
 (`.rpo`), exposed via `RunMode.COVARIANCE` / `RunMode.REPLICA` and
@@ -1256,7 +1256,7 @@ Result                              identification + metadata
 │                                   helpers (synthesize_time_series,
 │                                   to_time_trace, to_tl()).
 │                                   Spatial slicing degrades to a
-│                                   _SlicedPressureField.
+│                                   SlicedPressureField.
 ├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
 ├── Arrivals                        flat list of arrival events
@@ -1314,7 +1314,7 @@ available:
 ```python
 # Single-point query (most common case).
 eig = bellhop.compute_eigenrays(env, source,
-                                 range_m=2000, depth_m=30,
+                                 range=2000, depth=30,
                                  tolerance_m=15, max_rays=8)
 eig.is_eigen               # True
 for ray in eig.rays:
@@ -1326,7 +1326,7 @@ eig_multi = bellhop.compute_eigenrays(env, source, receiver=rcv_array)
 ```
 
 The single-point form internally builds a 1-point `Receiver` from
-`(range_m, depth_m)` and applies the cosmetic post-filter. The multi-
+`(range, depth)` and applies the cosmetic post-filter. The multi-
 receiver form skips the post-filter (no single anchor) and returns the
 raw solver output, with `is_eigen=True` and `receiver_depths` /
 `receiver_ranges` populated so `result.plot(env=env)` renders source
@@ -1429,14 +1429,14 @@ rngs = result.ranges          # m
 zs   = result.depths          # m
 
 # Chain accessors are unified under a single label-based ``.at(...)``
-# method. Pass any subset of ``depth=``, ``range_m=``, ``frequency=``;
+# method. Pass any subset of ``depth=``, ``range=``, ``frequency=``;
 # each picks the nearest grid sample and collapses that axis. The
-# returned ``_SlicedPressureField`` keeps the underlying ``.data.shape``
+# returned ``SlicedPressureField`` keeps the underlying ``.data.shape``
 # but its ``.tl`` / ``.p`` auto-squeeze singleton axes — natural shape
 # at the call site:
 field.at(depth=50.0).tl                       # shape (n_r,) — plt-ready
-field.at(range_m=2000.0).tl                   # shape (n_d,)
-field.at(range_m=2000.0, depth=50.0).tl       # 0-D scalar — float()-able
+field.at(range=2000.0).tl                   # shape (n_d,)
+field.at(range=2000.0, depth=50.0).tl       # 0-D scalar — float()-able
 field.at(frequency=200.0).tl                  # 2-D narrowband (broadband only)
 field.max().tl                                # 0-D scalar at global argmax(|data|)
 # (Indexing is nearest-label via argmin; the returned slice's
@@ -1480,16 +1480,16 @@ assert isinstance(tf, TransferFunction)
 assert not isinstance(tf, PressureField)   # sibling, not a subclass
 H     = tf.p                     # complex, shape (n_d, n_r, n_f) — same as .data
 freqs = tf.frequencies
-trace = tf.to_time_trace(depth=50.0, range_m=2000.0)   # → TimeTrace
+trace = tf.to_time_trace(depth=50.0, range=2000.0)   # → TimeTrace
 ts    = tf.synthesize_time_series(src_pulse, fs)       # → TimeSeriesField
-tl_f  = tf.at(depth=50.0, range_m=2000.0).to_tl().tl    # TL vs frequency, 1-D
+tl_f  = tf.at(depth=50.0, range=2000.0).to_tl().tl    # TL vs frequency, 1-D
 tl_2d = tf.at(frequency=200.0).to_tl().tl               # TL grid at one freq
 
 # Spatial slicing degrades to PressureField — the slice is a sub-field,
 # no longer a transfer function, so the synthesis machinery is only
 # reachable on the full TF object.
-tf.at(depth=50.0)        # _SlicedPressureField (3-D, freq axis kept)
-tf.at(range_m=2000.0)    # _SlicedPressureField (3-D, freq axis kept)
+tf.at(depth=50.0)        # SlicedPressureField (3-D, freq axis kept)
+tf.at(range=2000.0)    # SlicedPressureField (3-D, freq axis kept)
 
 # To go the other way — promote a 3-D complex PressureField (e.g. one
 # built by hand or assembled from outside-source data) into a TF —
@@ -1514,7 +1514,7 @@ assert isinstance(ts, TimeSeriesField)
 ts.data         # (n_d, n_r, n_t)
 ts.time         # (n_t,) seconds
 ts.fs           # sample rate, Hz
-trace = ts.get_trace(depth=50.0, range_m=1000.0)   # → TimeTrace
+trace = ts.get_trace(depth=50.0, range=1000.0)   # → TimeTrace
 freqs, X = ts.get_spectrum()                       # rfft along time axis
                                                     # X shape (n_d, n_r, n_frequencies)
 ```
@@ -1524,7 +1524,7 @@ time series, either:
 
 - Build a 1-element receiver grid (`Receiver(depths=[d], ranges=[r])`),
   which gives a degenerate 1×1 grid; or
-- Pass `depth=…` / `range_m=…` to `TransferFunction.to_time_trace(...)`
+- Pass `depth=…` / `range=…` to `TransferFunction.to_time_trace(...)`
   or `TransferFunction.synthesize_time_series(...)` on the returned
   typed result — both pick the nearest (depth, range) cell from the
   receiver grid by `argmin`.
@@ -1613,7 +1613,7 @@ from uacpy.models import Bellhop
 
 bellhop = Bellhop(verbose=False, alpha=(-20, 20), n_beams=51)
 
-# Runs the eigenray solver (RunType='E') targeting (range_m, depth_m),
+# Runs the eigenray solver (RunType='E') targeting (range, depth),
 # then sorts the returned rays by closest-approach miss distance, drops
 # any beyond `tolerance_m` (default: one acoustic wavelength), caps to
 # `max_rays`, and truncates each kept polyline at its closest-approach
@@ -1621,7 +1621,7 @@ bellhop = Bellhop(verbose=False, alpha=(-20, 20), n_beams=51)
 # to `run()` so any per-model setting (beam type, step size, etc.) is
 # accessible from this one call.
 eig = bellhop.compute_eigenrays(env, source,
-                                 range_m=2000, depth_m=30,
+                                 range=2000, depth=30,
                                  tolerance_m=15, max_rays=8)
 for ray in eig.rays:
     print(ray['miss_distance_m'], ray['num_top_bounces'],
@@ -2044,7 +2044,7 @@ when writing model input files:
 | OASES              | meters throughout                                   | —               |
 
 You always pass **meters** to `Receiver(ranges=…)` and
-`bathymetry=[[range_m, depth_m], …]`. The wrapper handles per-model
+`bathymetry=[[range, depth], …]`. The wrapper handles per-model
 conversions; you should never need to convert manually.
 
 ---

@@ -270,7 +270,7 @@ def main():
             source_waveform=chirp,
             sample_rate=fs,
             depth=target_depth,
-            range_m=target_range,
+            range=target_range,
         )
         print(f"  Output type: {result_das.field_type}")
         print(f"  Shape: {result_das.data.shape}")
@@ -294,11 +294,11 @@ def main():
     if tf_models:
         from uacpy.visualization.plots import plot_transfer_function
         depth_idx = receiver.depths.shape[0] // 2
-        depth_m = receiver.depths[depth_idx]
+        depth = receiver.depths[depth_idx]
         fig, _ = plot_transfer_function(
             tf_models, depth_idx=depth_idx, range_idx=0,
             show_phase=True, unwrap_phase=False,
-            title=f'Transfer functions — depth={depth_m:.0f} m, '
+            title=f'Transfer functions — depth={depth:.0f} m, '
                   f'range={target_range/1000:.0f} km',
         )
         fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
@@ -343,7 +343,7 @@ def main():
     for name, result in tf_models.items():
         try:
             ts = result.to_time_trace(
-                depth=target_depth, range_m=target_range,
+                depth=target_depth, range=target_range,
                 t_start=t_start_common,
             )
             ts_results[name] = (ts.time * 1000, ts.data)
@@ -357,13 +357,13 @@ def main():
     # TimeSeriesField over a 1×1 grid; extract the single trace.
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        trace = r.get_trace(target_depth, target_range).data
+        trace = r.at(depth=target_depth, range=target_range).data
         ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, trace)
 
     # Add SPARC at the first depth and last range.
     if 'SPARC' in results:
         r = results['SPARC']
-        trace = r.get_trace(float(r.depths[0]), float(r.ranges[-1])).data
+        trace = r.at(depth=float(r.depths[0]), range=float(r.ranges[-1])).data
         ts_results['SPARC'] = (r.metadata['time'] * 1000, trace)
 
     if ts_results:
@@ -420,7 +420,7 @@ def main():
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
         t_ms = r.metadata['time'] * 1000
-        data = r.get_trace(target_depth, target_range).data
+        data = r.at(depth=target_depth, range=target_range).data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
 

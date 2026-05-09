@@ -40,6 +40,29 @@ Hierarchy
 Identification fields (``model``, ``backend``, ``source_depths``,
 ``frequency``/``frequencies``) are also mirrored into ``metadata`` so
 callers can use either typed attributes or dict-style access.
+
+Canonical metadata keys
+-----------------------
+``Result.metadata`` is a free-form dict, but writers and readers stick
+to the following keys so dict-style consumers can rely on names:
+
+* All Results — ``'model'``, ``'backend'``, ``'source_depths'``,
+  ``'frequencies'``.
+* :class:`TransferFunction` — ``'phase_reference'`` (the string form
+  of the :class:`PhaseReference` enum).
+* :class:`TimeSeriesField` / :class:`TimeTrace` — ``'time'`` (1-D
+  ndarray), ``'dt'``, ``'fs'``, ``'nt'``, ``'t_start'``.
+* :class:`Arrivals` — ``'arrivals'`` (the flat list itself),
+  ``'arrivals_by_receiver'`` (Bellhop's nested ``[src][depth][range]``
+  raw form, used by the broadband delay-and-sum path),
+  ``'receiver_depths'``, ``'receiver_ranges'``.
+* :class:`Rays` — ``'rays'``, ``'receiver_depths'``, ``'receiver_ranges'``.
+* :class:`Modes` — ``'k'`` (complex wavenumbers), ``'phi'`` (mode
+  shapes), ``'depths'``, ``'n_modes'``.
+
+Adding a new result type? Mirror the typed attributes into
+``metadata`` via ``setdefault`` so a key isn't clobbered when the
+caller built the object with an explicit ``metadata={...}``.
 """
 
 from __future__ import annotations
@@ -339,22 +362,22 @@ class PressureField(_GridResult):
         return self.data.ndim == 3
 
     # Unified label-based selection — xarray-style. Pass any subset of
-    # ``depth``, ``range_m``, ``frequency``; each picks the nearest grid
+    # ``depth``, ``range``, ``frequency``; each picks the nearest grid
     # sample and collapses that axis to size 1. The selected axis stays
-    # in ``.data.shape`` (so the returned ``_SlicedPressureField`` keeps
+    # in ``.data.shape`` (so the returned ``SlicedPressureField`` keeps
     # its declared dimensionality), but ``.tl`` / ``.p`` squeeze size-1
     # axes for plot-friendly shapes.
     def at(
         self,
         *,
         depth: Optional[float] = None,
-        range_m: Optional[float] = None,
+        range: Optional[float] = None,
         frequency: Optional[float] = None,
-    ) -> "_SlicedPressureField":
+    ) -> "SlicedPressureField":
         d_idx = (int(np.argmin(np.abs(self.depths - depth)))
                  if depth is not None else None)
-        r_idx = (int(np.argmin(np.abs(self.ranges - range_m)))
-                 if range_m is not None else None)
+        r_idx = (int(np.argmin(np.abs(self.ranges - range)))
+                 if range is not None else None)
         f_idx = None
         if frequency is not None:
             if self.frequencies is None or self.data.ndim < 3:
@@ -370,7 +393,7 @@ class PressureField(_GridResult):
         depth_idx: Optional[int] = None,
         range_idx: Optional[int] = None,
         frequency_idx: Optional[int] = None,
-    ) -> "_SlicedPressureField":
+    ) -> "SlicedPressureField":
         """Integer-index counterpart to :meth:`at` (xarray-style ``isel``).
 
         Negative indices wrap from the end (``-1`` → last sample); each
@@ -399,7 +422,7 @@ class PressureField(_GridResult):
             f_idx = int(frequency_idx) % len(self.frequencies)
             sliced = sliced[..., f_idx:f_idx + 1]
             new_freqs = np.array([float(self.frequencies[f_idx])])
-        return _SlicedPressureField(
+        return SlicedPressureField(
             data=sliced,
             depths=new_depths,
             ranges=new_ranges,
@@ -410,9 +433,9 @@ class PressureField(_GridResult):
             metadata=dict(self.metadata),
         )
 
-    def max(self) -> "_SlicedPressureField":
+    def max(self) -> "SlicedPressureField":
         """Slice at the global argmax of ``|data|`` across **every** axis.
-        Returns a 1×1 (or 1×1×1) :class:`_SlicedPressureField` — ``.tl`` /
+        Returns a 1×1 (or 1×1×1) :class:`SlicedPressureField` — ``.tl`` /
         ``.p`` are 0-D scalars (``float()``-able). Read ``.depths[0]`` /
         ``.ranges[0]`` / ``.frequencies[0]`` for the location of the max.
         """
@@ -425,7 +448,7 @@ class PressureField(_GridResult):
         else:
             sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
             freqs = self.frequencies
-        return _SlicedPressureField(
+        return SlicedPressureField(
             data=sliced,
             depths=np.array([float(self.depths[d_idx])]),
             ranges=np.array([float(self.ranges[r_idx])]),
@@ -437,12 +460,18 @@ class PressureField(_GridResult):
         )
 
     def to_tl(self) -> "PressureField":
-        """Return a ``units='dB'`` view via ``-20·log10(|p|)``.
+        """Return a new :class:`PressureField` with ``units='dB'`` via
+        ``-20·log10(|p|)`` — a *typed conversion* that lets the chain
+        continue (``.tl`` / ``.p`` / further slicing).
 
+        Distinct from :attr:`tl`, which is the *array accessor* and
+        always returns dB values regardless of underlying units. Use
+        :attr:`tl` for plotting / numerics; use :meth:`to_tl` when you
+        need a dB-units :class:`PressureField` to pass to a function
+        that requires it (or to drop the complex phase irrevocably).
         No-op when ``self.units == 'dB'``. Returns the same concrete
-        subtype as ``self`` (so a ``_SlicedPressureField.to_tl()`` stays a
-        ``_SlicedPressureField`` and the squeezed ``.tl`` accessor is
-        preserved).
+        subtype as ``self`` (so a :class:`SlicedPressureField.to_tl`
+        stays sliced).
         """
         if self.units == 'dB':
             return self
@@ -465,7 +494,7 @@ class PressureField(_GridResult):
         ``self.data`` directly when ``units='dB'``; computed on the fly via
         ``-20·log10(|p|)`` when ``units='complex'``. Slice returns from
         :meth:`sel` / :meth:`max` collapse singleton axes — they're typed
-        :class:`_SlicedPressureField` and override this property.
+        :class:`SlicedPressureField` and override this property.
         """
         if self.units == 'dB':
             return self.data
@@ -478,7 +507,7 @@ class PressureField(_GridResult):
 
         Raises when ``units='dB'`` because phase has been irrecoverably
         discarded by the ``-20·log10|p|`` step. Slice returns squeeze
-        singletons via :class:`_SlicedPressureField`.
+        singletons via :class:`SlicedPressureField`.
         """
         if self.units == 'dB':
             raise AttributeError(
@@ -490,7 +519,7 @@ class PressureField(_GridResult):
     def mask_below_seafloor(self, bathymetry: np.ndarray) -> "PressureField":
         """Return a copy with samples below the seafloor set to NaN.
 
-        ``bathymetry`` is an ``(N, 2)`` array of ``(range_m, depth_m)``
+        ``bathymetry`` is an ``(N, 2)`` array of ``(range, depth)``
         pairs (the same shape carried by ``Environment.bathymetry``). The
         seafloor depth at each receiver range is linearly interpolated from
         the bathymetry; receiver depths exceeding that local depth are
@@ -606,7 +635,7 @@ class PressureField(_GridResult):
         return np.angle(self.data)
 
 
-class _SlicedPressureField(PressureField):
+class SlicedPressureField(PressureField):
     """Returned by :meth:`PressureField.at` / :meth:`PressureField.max`
     (and the same methods on :class:`TransferFunction`). Same as
     :class:`PressureField` except ``.tl`` / ``.p`` apply
@@ -637,7 +666,7 @@ class TransferFunction(_GridResult):
     ``data`` shape: ``(n_depths, n_ranges, n_frequencies)`` complex.
 
     Label-based slicing via :meth:`at` (and reduction via :meth:`max`)
-    returns a :class:`_SlicedPressureField` — the slice is a pressure
+    returns a :class:`SlicedPressureField` — the slice is a pressure
     field, no longer a transfer function, so
     the synthesis machinery is unreachable from a slice.
 
@@ -747,7 +776,7 @@ class TransferFunction(_GridResult):
     def to_time_trace(
         self,
         depth: Optional[float] = None,
-        range_m: Optional[float] = None,
+        range: Optional[float] = None,
         *,
         source_spectrum: Optional[np.ndarray] = None,
         window: str = "hann",
@@ -759,20 +788,20 @@ class TransferFunction(_GridResult):
         Returns a :class:`TimeTrace` with ``data`` shape ``(n_t,)``.
         """
         return _ifft_to_trace(
-            self, depth=depth, range_m=range_m,
+            self, depth=depth, range=range,
             source_spectrum=source_spectrum,
             window=window, nfft=nfft, t_start=t_start,
         )
 
-    def to_tl(self) -> "_SlicedPressureField":
+    def to_tl(self) -> "SlicedPressureField":
         """Return a ``units='dB'`` view of the full TF — magnitude in dB
         at every (depth, range, frequency) bin via ``-20·log10(|H|)``
         clamped to :data:`PRESSURE_FLOOR`. Chain with ``sel(...)`` to
         narrow further (``tf.at(frequency=200).to_tl()`` for one freq,
-        ``tf.at(depth=z, range_m=r).to_tl()`` for TL spectrum at a point).
+        ``tf.at(depth=z, range=r).to_tl()`` for TL spectrum at a point).
         """
         tl = -20.0 * np.log10(np.maximum(np.abs(self.data), PRESSURE_FLOOR))
-        return _SlicedPressureField(
+        return SlicedPressureField(
             data=tl, depths=self.depths, ranges=self.ranges,
             units='dB',
             model=self.model, backend=self.backend,
@@ -805,13 +834,13 @@ class TransferFunction(_GridResult):
         self,
         *,
         depth: Optional[float] = None,
-        range_m: Optional[float] = None,
+        range: Optional[float] = None,
         frequency: Optional[float] = None,
-    ) -> "_SlicedPressureField":
+    ) -> "SlicedPressureField":
         d_idx = (int(np.argmin(np.abs(self.depths - depth)))
                  if depth is not None else None)
-        r_idx = (int(np.argmin(np.abs(self.ranges - range_m)))
-                 if range_m is not None else None)
+        r_idx = (int(np.argmin(np.abs(self.ranges - range)))
+                 if range is not None else None)
         f_idx = (int(np.argmin(np.abs(self.frequencies - frequency)))
                  if frequency is not None else None)
         return self.at_idx(depth_idx=d_idx, range_idx=r_idx, frequency_idx=f_idx)
@@ -822,10 +851,10 @@ class TransferFunction(_GridResult):
         depth_idx: Optional[int] = None,
         range_idx: Optional[int] = None,
         frequency_idx: Optional[int] = None,
-    ) -> "_SlicedPressureField":
+    ) -> "SlicedPressureField":
         """Integer-index counterpart to :meth:`at` (xarray-style ``isel``).
         Negative indices wrap from the end. Slicing degrades type to
-        :class:`_SlicedPressureField` (units='complex')."""
+        :class:`SlicedPressureField` (units='complex')."""
         sliced = self.data
         new_depths = self.depths
         new_ranges = self.ranges
@@ -842,7 +871,7 @@ class TransferFunction(_GridResult):
             f_idx = int(frequency_idx) % len(self.frequencies)
             sliced = sliced[..., f_idx:f_idx + 1]
             new_freqs = np.array([float(self.frequencies[f_idx])])
-        return _SlicedPressureField(
+        return SlicedPressureField(
             data=sliced,
             depths=new_depths, ranges=new_ranges,
             units='complex',
@@ -852,7 +881,7 @@ class TransferFunction(_GridResult):
             metadata=dict(self.metadata),
         )
 
-    def max(self) -> "_SlicedPressureField":
+    def max(self) -> "SlicedPressureField":
         """Slice at the global argmax of ``|H|`` across **every** axis
         — ``.tl`` / ``.p`` are 0-D scalars; the picked frequency lands
         in ``.frequencies[0]`` (and the picked location in
@@ -860,7 +889,7 @@ class TransferFunction(_GridResult):
         idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
         d_idx, r_idx, f_idx = idx[0], idx[1], idx[2]
         sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx:f_idx + 1]
-        return _SlicedPressureField(
+        return SlicedPressureField(
             data=sliced,
             depths=np.array([float(self.depths[d_idx])]),
             ranges=np.array([float(self.ranges[r_idx])]),
@@ -987,20 +1016,95 @@ class TimeSeriesField(_GridResult):
             metadata=dict(self.metadata),
         )
 
-    def get_trace(self, depth: float, range_m: float) -> "TimeTrace":
-        """Extract the single-point :class:`TimeTrace` at the nearest
-        ``(depth, range)``."""
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        return TimeTrace(
-            data=self.data[d_idx, r_idx, :].copy(),
-            time=self.time,
-            depth=float(self.depths[d_idx]),
-            range_m=float(self.ranges[r_idx]),
+    def at(
+        self,
+        *,
+        depth: Optional[float] = None,
+        range: Optional[float] = None,
+        time: Optional[float] = None,
+    ) -> Union["TimeSeriesField", "TimeTrace"]:
+        """Label-based slice along (depth, range, time). When **both**
+        spatial axes are specified the result degrades to :class:`TimeTrace`
+        (the natural "single-point trace"); otherwise returns a sliced
+        :class:`TimeSeriesField` with the same 3-D layout (selected axes
+        collapsed to size 1).
+        """
+        d_idx = (int(np.argmin(np.abs(self.depths - depth)))
+                 if depth is not None else None)
+        r_idx = (int(np.argmin(np.abs(self.ranges - range)))
+                 if range is not None else None)
+        t_idx = (int(np.argmin(np.abs(self.time - time)))
+                 if time is not None else None)
+        return self.at_idx(depth_idx=d_idx, range_idx=r_idx, time_idx=t_idx)
+
+    def at_idx(
+        self,
+        *,
+        depth_idx: Optional[int] = None,
+        range_idx: Optional[int] = None,
+        time_idx: Optional[int] = None,
+    ) -> Union["TimeSeriesField", "TimeTrace"]:
+        """Integer-index counterpart to :meth:`at` (negative wraps).
+        Both spatial indices specified → :class:`TimeTrace`; otherwise
+        returns a sliced :class:`TimeSeriesField`."""
+        sliced = self.data
+        new_depths = self.depths
+        new_ranges = self.ranges
+        new_time = self.time
+        if depth_idx is not None:
+            d_idx = int(depth_idx) % len(self.depths)
+            sliced = sliced[d_idx:d_idx + 1, ...]
+            new_depths = np.array([float(self.depths[d_idx])])
+        if range_idx is not None:
+            r_idx = int(range_idx) % len(self.ranges)
+            sliced = sliced[:, r_idx:r_idx + 1, ...]
+            new_ranges = np.array([float(self.ranges[r_idx])])
+        if time_idx is not None:
+            ti = int(time_idx) % len(self.time)
+            sliced = sliced[..., ti:ti + 1]
+            new_time = np.array([float(self.time[ti])])
+        # Both spatial axes collapsed → degrade to TimeTrace.
+        if depth_idx is not None and range_idx is not None:
+            return TimeTrace(
+                data=sliced[0, 0, :].copy(),
+                time=new_time,
+                depth=float(new_depths[0]),
+                range=float(new_ranges[0]),
+                model=self.model, backend=self.backend,
+                source_depths=self.source_depths,
+                frequencies=self.frequencies,
+                metadata=dict(self.metadata),
+            )
+        return TimeSeriesField(
+            data=sliced,
+            depths=new_depths,
+            ranges=new_ranges,
+            time=new_time,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata=dict(self.metadata),
+            metadata={k: v for k, v in self.metadata.items()
+                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
+        )
+
+    def max(self) -> "TimeTrace":
+        """Slice at the global argmax of ``|data|`` across **every** axis
+        (depth, range, time). Returns a 1-element :class:`TimeTrace`
+        carrying the loudest sample at the loudest spatial cell — the
+        ``(depth, range)`` location lives in ``self.depth`` /
+        ``self.range`` and the time in ``self.time[0]``."""
+        flat = int(np.argmax(np.abs(self.data)))
+        d_idx, r_idx, t_idx = np.unravel_index(flat, self.data.shape)
+        return TimeTrace(
+            data=self.data[d_idx, r_idx, t_idx:t_idx + 1].copy(),
+            time=self.time[t_idx:t_idx + 1],
+            depth=float(self.depths[d_idx]),
+            range=float(self.ranges[r_idx]),
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata={k: v for k, v in self.metadata.items()
+                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
         )
 
 
@@ -1022,7 +1126,7 @@ class TimeTrace(Result):
         data: np.ndarray,
         time: np.ndarray,
         depth: float,
-        range_m: float,
+        range: float,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1040,11 +1144,11 @@ class TimeTrace(Result):
         self.data = data
         self.time = time
         self.depth = float(depth)
-        self.range_m = float(range_m)
+        self.range = float(range)
         self.metadata.setdefault('time', time)
         self.metadata.setdefault('nt', int(len(time)))
         self.metadata.setdefault('depth', self.depth)
-        self.metadata.setdefault('range_m', self.range_m)
+        self.metadata.setdefault('range', self.range)
         if len(time) >= 2:
             self.metadata.setdefault('dt', float(time[1] - time[0]))
             self.metadata.setdefault('fs', 1.0 / float(time[1] - time[0]))
@@ -1072,6 +1176,30 @@ class TimeTrace(Result):
         freqs = np.fft.rfftfreq(self.n_t, self.dt)
         return freqs, X
 
+    def at(self, *, time: Optional[float] = None) -> "TimeTrace":
+        """Label-based slice along the time axis. Returns a 1-element
+        :class:`TimeTrace` carrying the value at the nearest sample."""
+        idx = (int(np.argmin(np.abs(self.time - time)))
+               if time is not None else None)
+        return self.at_idx(time_idx=idx)
+
+    def at_idx(self, *, time_idx: Optional[int] = None) -> "TimeTrace":
+        """Integer-index counterpart to :meth:`at`. Negative indices
+        wrap from the end (``-1`` for the last sample)."""
+        if time_idx is None:
+            return self
+        ti = int(time_idx) % len(self.time)
+        return TimeTrace(
+            data=self.data[ti:ti + 1].copy(),
+            time=self.time[ti:ti + 1],
+            depth=self.depth, range=self.range,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata={k: v for k, v in self.metadata.items()
+                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
+        )
+
     # 1-element ndarrays for plotting helpers that expect a vector.
     @property
     def depths(self) -> np.ndarray:
@@ -1079,7 +1207,7 @@ class TimeTrace(Result):
 
     @property
     def ranges(self) -> np.ndarray:
-        return np.array([self.range_m])
+        return np.array([self.range])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1295,12 +1423,6 @@ class Arrivals(Result):
         return self._spawn(self.sorted_by_amplitude(descending=True)
                            .arrivals[:int(n)])
 
-    def to_table(self) -> List[Dict[str, float]]:
-        """Return the flat list of arrival dicts. Equivalent to
-        ``list(arrivals)`` but kept as an explicit method for symmetry
-        with :meth:`Rays.to_table` style consumers."""
-        return list(self.arrivals)
-
 
 class Rays(Result):
     """Ray paths from Bellhop / BellhopCUDA.
@@ -1408,24 +1530,13 @@ class Rays(Result):
                 f"Arrivals.filter: kind={kind!r} not in {sorted(kind_map)}"
             )
 
-        def _in_bounds(value, spec):
-            if spec is None:
-                return True
-            if isinstance(spec, int):
-                return value == spec
-            lo, hi = spec
-            if lo is not None and value < lo:
-                return False
-            if hi is not None and value > hi:
-                return False
-            return True
-
         def pred(ray):
             if kind is not None and not kind_map[kind](ray):
                 return False
             n_top = int(ray.get('n_top_bounces', 0) or 0)
             n_bot = int(ray.get('n_bot_bounces', 0) or 0)
-            return _in_bounds(n_top, top) and _in_bounds(n_bot, bot)
+            return (_bounce_in_bounds(n_top, top)
+                    and _bounce_in_bounds(n_bot, bot))
 
         return self.filter(pred)
 
@@ -1931,21 +2042,60 @@ class ReflectionCoefficient(Result):
     def is_broadband(self) -> bool:
         return self.R.ndim == 2
 
-    def at_frequency(self, frequency: float) -> "ReflectionCoefficient":
-        """Single-frequency slice of a broadband reflection coefficient."""
-        if not self.is_broadband:
+    def at(
+        self,
+        *,
+        angle: Optional[float] = None,
+        frequency: Optional[float] = None,
+    ) -> "ReflectionCoefficient":
+        """Label-based slice along the angle and/or frequency axis.
+
+        Either kwarg picks the nearest grid sample. ``frequency=`` is
+        valid only for broadband (2-D) reflection coefficients; passing
+        it on a narrowband instance raises ``ValueError``.
+        """
+        a_idx = (int(np.argmin(np.abs(self.theta - angle)))
+                 if angle is not None else None)
+        if frequency is not None and not self.is_broadband:
             raise ValueError(
-                "ReflectionCoefficient.at_frequency: only valid for "
-                "broadband ReflectionCoefficient"
+                "ReflectionCoefficient.at: frequency= requires a broadband "
+                "(2-D) reflection coefficient"
             )
-        k = int(np.argmin(np.abs(self.frequencies - frequency)))
+        f_idx = (int(np.argmin(np.abs(self.frequencies - frequency)))
+                 if frequency is not None else None)
+        return self.at_idx(angle_idx=a_idx, frequency_idx=f_idx)
+
+    def at_idx(
+        self,
+        *,
+        angle_idx: Optional[int] = None,
+        frequency_idx: Optional[int] = None,
+    ) -> "ReflectionCoefficient":
+        """Integer-index counterpart to :meth:`at` (negative wraps)."""
+        R = self.R
+        phi = self.phi
+        theta = self.theta
+        freqs = self.frequencies
+        if angle_idx is not None:
+            ai = int(angle_idx) % len(self.theta)
+            theta = self.theta[ai:ai + 1]
+            R = R[ai:ai + 1, ...] if R.ndim == 2 else R[ai:ai + 1]
+            phi = phi[ai:ai + 1, ...] if phi.ndim == 2 else phi[ai:ai + 1]
+        if frequency_idx is not None:
+            if not self.is_broadband:
+                raise ValueError(
+                    "ReflectionCoefficient.at_idx: frequency_idx= requires "
+                    "a broadband (2-D) reflection coefficient"
+                )
+            fi = int(frequency_idx) % len(self.frequencies)
+            R = R[:, fi]
+            phi = phi[:, fi]
+            freqs = float(self.frequencies[fi])
         return ReflectionCoefficient(
-            theta=self.theta,
-            R=self.R[:, k],
-            phi=self.phi[:, k],
+            theta=theta, R=R, phi=phi,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=float(self.frequencies[k]),
+            frequencies=freqs,
             metadata=dict(self.metadata),
         )
 
@@ -1971,7 +2121,7 @@ def _ifft_to_trace(
     tf: "TransferFunction",
     *,
     depth: Optional[float],
-    range_m: Optional[float],
+    range: Optional[float],
     source_spectrum: Optional[np.ndarray],
     window: str,
     nfft: Optional[int],
@@ -2009,7 +2159,7 @@ def _ifft_to_trace(
         else n_d // 2
     )
     r_idx = (
-        int(np.argmin(np.abs(tf.ranges - range_m))) if range_m is not None
+        int(np.argmin(np.abs(tf.ranges - range))) if range is not None
         else 0
     )
     actual_depth = float(tf.depths[d_idx])
@@ -2102,7 +2252,7 @@ def _ifft_to_trace(
         data=result,
         time=time,
         depth=actual_depth,
-        range_m=actual_range,
+        range=actual_range,
         model=tf.model,
         backend=tf.backend,
         source_depths=tf.source_depths,
@@ -2156,7 +2306,7 @@ def _synthesize_time_series(
 
     if t_start is None:
         t0_trace = _ifft_to_trace(
-            tf, depth=float(depths[0]), range_m=float(ranges[0]),
+            tf, depth=float(depths[0]), range=float(ranges[0]),
             source_spectrum=source_spectrum,
             window=window, nfft=nfft, t_start=None,
             sample_rate=sample_rate,
@@ -2168,7 +2318,7 @@ def _synthesize_time_series(
     for di in range(n_d):
         for ri in range(n_r):
             tr = _ifft_to_trace(
-                tf, depth=float(depths[di]), range_m=float(ranges[ri]),
+                tf, depth=float(depths[di]), range=float(ranges[ri]),
                 source_spectrum=source_spectrum,
                 window=window, nfft=nfft, t_start=t_start,
                 sample_rate=sample_rate,

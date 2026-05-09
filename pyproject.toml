@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.1.7"
+version = "0.1.8"
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -50,7 +50,6 @@ test = [
     "pytest-xdist>=3.0,<4.0",
 ]
 dev = [
-    "uacpy[test]",
     "pytest-cov",
     "black",
     "flake8",
@@ -77,7 +76,7 @@ uacpy = [
 
 [tool.pytest.ini_options]
 testpaths = ["uacpy/tests"]
-addopts = "-n auto --dist=worksteal"
+addopts = "-n logical --dist=worksteal"
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",

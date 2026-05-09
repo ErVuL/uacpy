@@ -310,7 +310,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     ax = axes[1]
     for name, result in results.items():
         mid_range_km = np.median(result.ranges) / 1000
-        tl_vs_depth = result.at(range_m=mid_range_km * 1000.0).tl
+        tl_vs_depth = result.at(range=mid_range_km * 1000.0).tl
         ax.plot(tl_vs_depth, result.depths, linewidth=2.5,
                label=name, color=COLORS.get(name, None), alpha=0.8)
 

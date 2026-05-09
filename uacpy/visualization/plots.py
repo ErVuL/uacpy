@@ -217,7 +217,7 @@ def plot_time_trace(trace: TimeTrace, ax=None, figsize: Tuple[float, float] = (1
     ax.set_xlabel('Time (ms)', fontweight='bold')
     ax.set_ylabel('Pressure (a.u.)', fontweight='bold')
     ax.set_title(
-        f"Time trace at depth={trace.depth:.1f} m, range={trace.range_m:.1f} m",
+        f"Time trace at depth={trace.depth:.1f} m, range={trace.range:.1f} m",
         fontweight='bold',
     )
     ax.grid(True, alpha=0.3)
@@ -1476,7 +1476,7 @@ def plot_range_cut(
 
 def plot_depth_cut(
     field: Result,
-    range_m: float,
+    range: float,
     figsize: Tuple[float, float] = (6, 8),
     ax: Optional[Axes] = None,
     frequency: Optional[float] = None,
@@ -1488,7 +1488,7 @@ def plot_depth_cut(
     ----------
     field : Result
         Transmission loss field
-    range_m : float
+    range : float
         Range at which to extract depth cut (m)
     figsize : tuple, optional
         Figure size. Default is (6, 8).
@@ -1507,7 +1507,7 @@ def plot_depth_cut(
 
     Examples
     --------
-    >>> fig, ax = plot_depth_cut(result, range_m=2000.0)
+    >>> fig, ax = plot_depth_cut(result, range=2000.0)
     >>> plt.show()
     """
     if ax is None:
@@ -1516,7 +1516,7 @@ def plot_depth_cut(
         fig = ax.get_figure()
 
     # Find closest range index
-    range_idx = np.argmin(np.abs(field.ranges - range_m))
+    range_idx = np.argmin(np.abs(field.ranges - range))
     actual_range = field.ranges[range_idx]
 
     # Extract TL at this range (handle 3-D broadband data)

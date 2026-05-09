@@ -646,21 +646,21 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Optional[Receiver] = None,
-        range_m: Optional[float] = None,
-        depth_m: Optional[float] = None,
+        range: Optional[float] = None,
+        depth: Optional[float] = None,
         **kwargs,
     ) -> Result:
         """Compute eigenrays — rays that arrive at the receiver(s).
 
         Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Accepts
         either a ``Receiver`` directly or a single-point shortcut via
-        ``range_m=``/``depth_m=`` (a 1-point Receiver is built
+        ``range=``/``depth=`` (a 1-point Receiver is built
         internally). Returns the raw :class:`Rays` from the solver.
 
         Filtering / sorting / truncation lives on :class:`Rays`. To select
         the closest paths, chain a Rays method:
 
-        >>> rays = bellhop.compute_eigenrays(env, source, range_m=2000, depth_m=30)
+        >>> rays = bellhop.compute_eigenrays(env, source, range=2000, depth=30)
         >>> close = rays.top_n_by_miss(8).truncate_at_receiver()
         >>> direct = rays.filter_by_bounces(kind='direct')
         >>> within = rays.filter_by_miss_distance(max_miss_m=15.0)
@@ -674,20 +674,20 @@ class PropagationModel(ABC):
                 alternatives=['Bellhop'],
             )
 
-        single_point = range_m is not None and depth_m is not None
+        single_point = range is not None and depth is not None
         if receiver is None:
             if not single_point:
                 raise ConfigurationError(
                     "compute_eigenrays requires either receiver=… or both "
-                    "range_m=… and depth_m=…"
+                    "range=… and depth=…"
                 )
             receiver = Receiver(
-                depths=np.array([float(depth_m)]),
-                ranges=np.array([float(range_m)]),
+                depths=np.array([float(depth)]),
+                ranges=np.array([float(range)]),
             )
         elif single_point:
             raise ConfigurationError(
-                "Pass either receiver=… OR (range_m, depth_m), not both."
+                "Pass either receiver=… OR (range, depth), not both."
             )
 
         return self.run(env, source, receiver,

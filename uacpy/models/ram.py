@@ -559,7 +559,7 @@ class RAM(PropagationModel):
         return bth_filename, 1
 
     def _get_water_speed_at_bottom(
-        self, env: Environment, range_m: Optional[float] = None,
+        self, env: Environment, range: Optional[float] = None,
     ) -> float:
         """
         Get the water-column sound speed at the nominal seafloor depth.
@@ -568,17 +568,17 @@ class RAM(PropagationModel):
         Used to convert an absolute bottom sound speed into the perturbation
         that mpiramS expects (``cs = cb - cwg``).
 
-        Range-aware: when ``env`` has a range-dependent SSP and ``range_m``
-        is provided, the profile at that range is used. With no ``range_m``
+        Range-aware: when ``env`` has a range-dependent SSP and ``range``
+        is provided, the profile at that range is used. With no ``range``
         but RD SSP, the profile at range 0 is used (first column). This
         keeps the range-independent callers consistent with the RD-aware
         branches in :meth:`_prepare_bottom_properties`.
         """
         depth = env.depth
         if env.has_range_dependent_ssp():
-            if range_m is None:
-                range_m = 0.0
-            ssp = env.ssp_at_range(range_m)
+            if range is None:
+                range = 0.0
+            ssp = env.ssp.eval(range=range).to_pairs()
         else:
             ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
@@ -627,7 +627,7 @@ class RAM(PropagationModel):
                     env.bathymetry_at_range(rdl.ranges[i])
                 ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp_at_range(rdl.ranges[i])
+                    ssp_at_range = env.ssp.eval(range=rdl.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -701,7 +701,7 @@ class RAM(PropagationModel):
                 cb = bottom_rd.sound_speed[i]
                 seafloor_i = float(env.bathymetry_at_range(bottom_rd.ranges[i])[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp_at_range(bottom_rd.ranges[i])
+                    ssp_at_range = env.ssp.eval(range=bottom_rd.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:

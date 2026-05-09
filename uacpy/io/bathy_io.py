@@ -210,11 +210,11 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
         bty_data = []
         for i in range(n_pts):
             range_km = float(fid.readline().strip())
-            depth_m = float(fid.readline().strip())
-            bty_data.append([range_km, depth_m])
+            depth = float(fid.readline().strip())
+            bty_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth_m:9.5g}")
+                print(f"{range_km:9.5g}    {depth:9.5g}")
             elif verbose and i == 10:
                 print("    ...")
 
@@ -316,11 +316,11 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
         ati_data = []
         for i in range(n_pts):
             range_km = float(fid.readline().strip())
-            depth_m = float(fid.readline().strip())
-            ati_data.append([range_km, depth_m])
+            depth = float(fid.readline().strip())
+            ati_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth_m:9.5g}")
+                print(f"{range_km:9.5g}    {depth:9.5g}")
             elif verbose and i == 10:
                 print("    ...")
 
@@ -458,7 +458,7 @@ def write_bty_long_format(
       geoacoustics). See ATI_BTY_File.htm.
     - Line 2: number of points
     - Following lines:
-      ``range_km depth_m cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
+      ``range_km depth cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
 
     Ranges in ``bottom_rd.ranges`` (metres) are re-sampled onto the
     bathymetry range grid via ``numpy.interp`` so the two lengths match.
@@ -490,7 +490,7 @@ def write_bty_long_format(
         f.write(f"{n_pts}\n")
         for i in range(n_pts):
             # Column order matches bdryMod.f90:200-201:
-            # range_km depth_m cp cs rho alpha_p alpha_s
+            # range_km depth cp cs rho alpha_p alpha_s
             f.write(
                 f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f} "
                 f"{cp[i]:.3f} {cs[i]:.3f} {rho[i]:.3f} "

@@ -126,7 +126,7 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
         ),
-        bottom=bottom_rd.at_range(0)
+        bottom=bottom_rd.at(range=0)
     )
 
     modes_shallow = kraken.compute_modes(
@@ -142,7 +142,7 @@ def main():
         name="Slope (400m)",
         bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
-        bottom=bottom_rd.at_range(20000)
+        bottom=bottom_rd.at(range=20000)
     )
 
     # Deep environment has shear_speed > 0 (rocky bottom); use KrakenC for complex modes.

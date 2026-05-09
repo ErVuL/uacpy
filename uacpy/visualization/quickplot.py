@@ -163,7 +163,7 @@ def quick_modes(field: Field, n_modes: int = 6, save: Optional[str] = None):
 
 
 def quick_cut(field: Field, depth: Optional[float] = None,
-              range_m: Optional[float] = None, save: Optional[str] = None):
+              range: Optional[float] = None, save: Optional[str] = None):
     """
     Quickest way to plot range or depth cut
 
@@ -173,7 +173,7 @@ def quick_cut(field: Field, depth: Optional[float] = None,
         TL field
     depth : float, optional
         Depth for range cut (TL vs range at this depth)
-    range_m : float, optional
+    range : float, optional
         Range for depth cut (TL vs depth at this range)
     save : str, optional
         Filename to save figure
@@ -184,18 +184,18 @@ def quick_cut(field: Field, depth: Optional[float] = None,
     >>> quick_cut(result, depth=50)
 
     >>> # Depth cut at 5km range
-    >>> quick_cut(result, range_m=5000)
+    >>> quick_cut(result, range=5000)
 
     Notes
     -----
-    Provide either depth or range_m, not both
+    Provide either depth or range, not both
     """
-    if depth is not None and range_m is None:
+    if depth is not None and range is None:
         fig, ax = plots.plot_range_cut(field, depth)
-    elif range_m is not None and depth is None:
-        fig, ax = plots.plot_depth_cut(field, range_m)
-    elif depth is not None and range_m is not None:
-        raise ValueError("Provide either depth or range_m, not both")
+    elif range is not None and depth is None:
+        fig, ax = plots.plot_depth_cut(field, range)
+    elif depth is not None and range is not None:
+        raise ValueError("Provide either depth or range, not both")
     else:
         # Auto-select middle depth
         depth = field.depths[len(field.depths) // 2]

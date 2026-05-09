@@ -133,7 +133,7 @@ class TestBellhopRunModes:
 
         rays = bellhop.compute_eigenrays(
             setup_env, setup_source,
-            range_m=3000.0, depth_m=50.0,
+            range=3000.0, depth=50.0,
         )
         assert rays.field_type == 'rays'
         assert rays.is_eigen is True

@@ -129,7 +129,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
-        value = float(field.at(range_m=4500, depth=45).tl)
+        value = float(field.at(range=4500, depth=45).tl)
         assert 44 <= value <= 55
 
     def test_field_at_range(self):
@@ -140,7 +140,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
-        values = field.at(range_m=4500).tl
+        values = field.at(range=4500).tl
         assert len(values) == 10
         assert 50 <= values[5] <= 59
 
@@ -217,10 +217,10 @@ class TestModesFieldType:
         assert Modes.field_type == "modes"
 
 
-class TestArrivalsToTableKeys:
-    """``Arrivals.to_table()`` emits writer-aligned bounce keys."""
+class TestArrivalsFlatListKeys:
+    """``Arrivals.arrivals`` flat list carries writer-aligned bounce keys."""
 
-    def test_to_table_uses_n_bounce_keys(self):
+    def test_arrivals_flat_list_uses_n_bounce_keys(self):
         from uacpy.core.results import Arrivals
         # Build a minimal payload with the canonical IO key naming.
         payload = [[[{
@@ -240,7 +240,7 @@ class TestArrivalsToTableKeys:
             model='Test',
             frequencies=100.0,
         )
-        table = arr.to_table()
+        table = arr.arrivals
         assert len(table) == 2
         for row in table:
             assert 'n_top_bounces' in row
@@ -327,6 +327,188 @@ class TestArrivalsFilterChain:
         assert len(chained) == 1
 
 
+class TestTimeSeriesFieldChainAccessors:
+    """``TimeSeriesField.at`` / ``at_idx`` / ``max`` — label, integer
+    and global-argmax slicing. Both spatial axes collapsed → degrades
+    to :class:`TimeTrace`."""
+
+    def _ts(self):
+        from uacpy.core.results import TimeSeriesField
+        rng = np.random.default_rng(0)
+        data = rng.standard_normal((3, 4, 50))
+        return TimeSeriesField(
+            data=data,
+            depths=np.linspace(10, 90, 3),
+            ranges=np.linspace(100, 1000, 4),
+            time=np.linspace(0, 0.49, 50),
+            model='Test', frequencies=100.0,
+        )
+
+    def test_at_partial_keeps_timeseriesfield(self):
+        from uacpy.core.results import TimeSeriesField
+        ts = self._ts()
+        sliced = ts.at(depth=50.0)
+        assert isinstance(sliced, TimeSeriesField)
+        assert sliced.data.shape == (1, 4, 50)
+
+    def test_at_both_spatial_degrades_to_timetrace(self):
+        from uacpy.core.results import TimeTrace
+        ts = self._ts()
+        trace = ts.at(depth=50.0, range=500.0)
+        assert isinstance(trace, TimeTrace)
+        assert trace.data.shape == (50,)
+        assert trace.depth == ts.depths[1]
+        assert trace.range == ts.ranges[1]
+
+    def test_at_idx_negative_wraps(self):
+        from uacpy.core.results import TimeTrace
+        ts = self._ts()
+        trace = ts.at_idx(depth_idx=-1, range_idx=-1, time_idx=-1)
+        assert isinstance(trace, TimeTrace)
+        assert trace.data.shape == (1,)
+        assert trace.depth == ts.depths[-1]
+        assert trace.range == ts.ranges[-1]
+        assert trace.time[0] == ts.time[-1]
+
+    def test_max_returns_timetrace_at_loudest_sample(self):
+        from uacpy.core.results import TimeSeriesField, TimeTrace
+        rng = np.random.default_rng(0)
+        data = rng.standard_normal((3, 4, 50))
+        # Spike one specific (d, r, t) cell.
+        data[2, 1, 30] = 100.0
+        ts = TimeSeriesField(
+            data=data,
+            depths=np.linspace(10, 90, 3),
+            ranges=np.linspace(100, 1000, 4),
+            time=np.linspace(0, 0.49, 50),
+            model='Test', frequencies=100.0,
+        )
+        m = ts.max()
+        assert isinstance(m, TimeTrace)
+        assert m.data.shape == (1,)
+        assert float(m.data[0]) == pytest.approx(100.0)
+        assert m.depth == ts.depths[2]
+        assert m.range == ts.ranges[1]
+        assert m.time[0] == ts.time[30]
+
+
+class TestTimeTraceChainAccessors:
+    """``TimeTrace.at(time=)`` / ``at_idx(time_idx=)`` — slice the time
+    axis, returning a 1-element :class:`TimeTrace`."""
+
+    def _trace(self):
+        from uacpy.core.results import TimeTrace
+        return TimeTrace(
+            data=np.linspace(0, 1, 50),
+            time=np.linspace(0, 0.49, 50),
+            depth=50.0, range=1000.0,
+            model='Test', frequencies=100.0,
+        )
+
+    def test_at_picks_nearest_time(self):
+        from uacpy.core.results import TimeTrace
+        sliced = self._trace().at(time=0.25)
+        assert isinstance(sliced, TimeTrace)
+        assert sliced.data.shape == (1,)
+        # 0.25 is between samples 25 (0.245) and 26 (0.255)? With
+        # linspace(0, 0.49, 50) the step is 0.01; sample 25 = 0.25.
+        assert sliced.time[0] == pytest.approx(0.25, abs=1e-6)
+
+    def test_at_idx_negative_wraps(self):
+        sliced = self._trace().at_idx(time_idx=-1)
+        assert sliced.data.shape == (1,)
+        assert sliced.time[0] == pytest.approx(0.49, abs=1e-6)
+
+    def test_at_none_returns_self(self):
+        tt = self._trace()
+        assert tt.at_idx(time_idx=None) is tt
+        assert tt.at(time=None) is tt
+
+
+class TestReflectionCoefficientChainAccessors:
+    """``ReflectionCoefficient.at`` / ``at_idx`` — label and integer
+    slicing of the angle and frequency axes; broadband-only kwargs
+    raise on narrowband instances."""
+
+    def _broadband_rc(self):
+        from uacpy.core.results import ReflectionCoefficient
+        theta = np.linspace(0, 90, 91)            # 91 angles
+        freqs = np.array([50.0, 100.0, 200.0])    # 3 frequencies
+        R = np.outer(np.cos(np.deg2rad(theta)), np.ones(3)) ** 2
+        phi = np.zeros_like(R)
+        return ReflectionCoefficient(
+            theta=theta, R=R, phi=phi,
+            frequencies=freqs, model='Test',
+        )
+
+    def test_at_frequency_returns_narrowband(self):
+        from uacpy.core.results import ReflectionCoefficient
+        rc = self._broadband_rc()
+        sliced = rc.at(frequency=100.0)
+        assert isinstance(sliced, ReflectionCoefficient)
+        assert not sliced.is_broadband
+        assert sliced.R.shape == (91,)
+
+    def test_at_angle_keeps_broadband(self):
+        from uacpy.core.results import ReflectionCoefficient
+        rc = self._broadband_rc()
+        sliced = rc.at(angle=45.0)
+        assert isinstance(sliced, ReflectionCoefficient)
+        assert sliced.theta.shape == (1,)
+        assert sliced.R.shape == (1, 3)
+
+    def test_at_both_collapses_to_single_value(self):
+        rc = self._broadband_rc()
+        sliced = rc.at(angle=45.0, frequency=100.0)
+        assert sliced.theta.shape == (1,)
+        assert sliced.R.shape == (1,)
+
+    def test_at_idx_negative_wraps(self):
+        rc = self._broadband_rc()
+        sliced = rc.at_idx(angle_idx=-1, frequency_idx=-1)
+        assert sliced.theta[0] == 90.0
+        assert float(sliced.frequencies[0]) == 200.0
+
+    def test_at_frequency_on_narrowband_raises(self):
+        from uacpy.core.results import ReflectionCoefficient
+        rc = ReflectionCoefficient(
+            theta=np.linspace(0, 90, 5),
+            R=np.linspace(0, 1, 5),
+            phi=np.zeros(5),
+            model='Test', frequencies=100.0,
+        )
+        with pytest.raises(ValueError, match="broadband"):
+            rc.at(frequency=100.0)
+
+
+class TestSoundSpeedProfileNearestVsInterp:
+    """``SoundSpeedProfile.at(...)`` is **nearest**;
+    ``SoundSpeedProfile.interp(...)`` is **linear** — invariant for the
+    whole grid library: ``at`` never fabricates values."""
+
+    def _ssp(self):
+        from uacpy.core.environment import SoundSpeedProfile
+        return SoundSpeedProfile(
+            depths=np.array([0.0, 100.0, 200.0]),
+            data=np.array([[1500.0], [1490.0], [1480.0]]),
+            interp='linear',
+        )
+
+    def test_at_picks_nearest_depth(self):
+        ssp = self._ssp()
+        # depth=51 is closer to 100 than to 0 → returns the 100m sample
+        sliced = ssp.at(depth=51.0)
+        assert sliced.depths[0] == 100.0
+        assert sliced.value == 1490.0
+
+    def test_interp_linear(self):
+        ssp = self._ssp()
+        # depth=50 is halfway between (0, 1500) and (100, 1490) → 1495
+        sliced = ssp.eval(depth=50.0)
+        assert sliced.depths[0] == 50.0
+        assert sliced.value == pytest.approx(1495.0)
+
+
 class TestSoundSpeedProfileExtendTo:
     """``SoundSpeedProfile.extend_to(z_max)`` is the canonical alignment
     hook used by every env writer. Must extend OR truncate so that
@@ -363,7 +545,7 @@ class TestSoundSpeedProfileExtendTo:
 
 
 class TestPressureFieldChainAccessors:
-    """``PressureField`` slicing returns ``_SlicedPressureField`` whose
+    """``PressureField`` slicing returns ``SlicedPressureField`` whose
     ``.tl`` / ``.p`` auto-squeeze singleton axes; full grids preserve
     ``.data.shape``."""
 
@@ -395,34 +577,34 @@ class TestPressureFieldChainAccessors:
             _ = f.p
 
     def test_at_depth_returns_sliced_subtype_with_squeezed_tl(self):
-        from uacpy.core.results import _SlicedPressureField
+        from uacpy.core.results import SlicedPressureField
         f = self._full_grid('complex')
         sliced = f.at(depth=50.0)
-        assert isinstance(sliced, _SlicedPressureField)
+        assert isinstance(sliced, SlicedPressureField)
         assert sliced.tl.shape == (5,)
         assert sliced.data.shape == (1, 5)
 
     def test_at_range_returns_sliced_subtype_with_squeezed_tl(self):
-        from uacpy.core.results import _SlicedPressureField
+        from uacpy.core.results import SlicedPressureField
         f = self._full_grid('complex')
-        sliced = f.at(range_m=500.0)
-        assert isinstance(sliced, _SlicedPressureField)
+        sliced = f.at(range=500.0)
+        assert isinstance(sliced, SlicedPressureField)
         assert sliced.tl.shape == (4,)
         assert sliced.data.shape == (4, 1)
 
     def test_at_point_returns_zero_d_scalar_tl(self):
-        from uacpy.core.results import _SlicedPressureField
+        from uacpy.core.results import SlicedPressureField
         f = self._full_grid('complex')
-        point = f.at(range_m=500.0, depth=50.0)
-        assert isinstance(point, _SlicedPressureField)
+        point = f.at(range=500.0, depth=50.0)
+        assert isinstance(point, SlicedPressureField)
         assert point.tl.shape == ()
         assert isinstance(float(point.tl), float)
 
     def test_max_returns_zero_d_scalar_tl(self):
-        from uacpy.core.results import _SlicedPressureField
+        from uacpy.core.results import SlicedPressureField
         f = self._full_grid('complex')
         m = f.max()
-        assert isinstance(m, _SlicedPressureField)
+        assert isinstance(m, SlicedPressureField)
         assert m.tl.shape == ()
         flat = int(np.argmax(np.abs(f.data)))
         d_idx, r_idx = np.unravel_index(flat, f.data.shape)
@@ -433,7 +615,7 @@ class TestPressureFieldChainAccessors:
         """3-D broadband fields: get_max picks the global argmax across
         all three axes — depth, range AND frequency — and the picked
         frequency lands in .frequencies[0]."""
-        from uacpy.core.results import PressureField, _SlicedPressureField
+        from uacpy.core.results import PressureField, SlicedPressureField
         rng = np.random.default_rng(0)
         data = (rng.standard_normal((3, 4, 5))
                 + 1j * rng.standard_normal((3, 4, 5)))
@@ -448,7 +630,7 @@ class TestPressureFieldChainAccessors:
             model='Test',
         )
         m = pf.max()
-        assert isinstance(m, _SlicedPressureField)
+        assert isinstance(m, SlicedPressureField)
         assert m.tl.shape == ()
         assert m.depths[0] == pf.depths[2]
         assert m.ranges[0] == pf.ranges[1]
@@ -498,7 +680,7 @@ class TestTransferFunction:
 
 class TestTransferFunctionSlicing:
     """Spatial slicing of a TransferFunction degrades to
-    ``_SlicedPressureField`` — the slice is a pressure field, no longer
+    ``SlicedPressureField`` — the slice is a pressure field, no longer
     a transfer function (synthesis machinery only on the full TF)."""
 
     def _tf(self):
@@ -515,10 +697,10 @@ class TestTransferFunctionSlicing:
 
     def test_at_depth_returns_sliced_pressurefield(self):
         from uacpy.core.results import (
-            TransferFunction, _SlicedPressureField,
+            TransferFunction, SlicedPressureField,
         )
         sliced = self._tf().at(depth=15.0)
-        assert isinstance(sliced, _SlicedPressureField)
+        assert isinstance(sliced, SlicedPressureField)
         assert not isinstance(sliced, TransferFunction)
         # synthesis is unreachable from a slice — that's the point.
         assert not hasattr(sliced, 'synthesize_time_series')
@@ -526,16 +708,16 @@ class TestTransferFunctionSlicing:
         assert sliced.tl.shape == (3, 4)
 
     def test_at_range_returns_sliced_pressurefield(self):
-        from uacpy.core.results import _SlicedPressureField
-        sliced = self._tf().at(range_m=200.0)
-        assert isinstance(sliced, _SlicedPressureField)
+        from uacpy.core.results import SlicedPressureField
+        sliced = self._tf().at(range=200.0)
+        assert isinstance(sliced, SlicedPressureField)
         assert sliced.tl.shape == (2, 4)
 
     def test_at_point_to_tl_returns_sliced_pressurefield(self):
-        from uacpy.core.results import _SlicedPressureField
+        from uacpy.core.results import SlicedPressureField
         # tl_at preserves the frequency axis at one (depth, range) cell.
-        view = self._tf().at(depth=15.0, range_m=200.0).to_tl()
-        assert isinstance(view, _SlicedPressureField)
+        view = self._tf().at(depth=15.0, range=200.0).to_tl()
+        assert isinstance(view, SlicedPressureField)
         assert view.tl.shape == (4,)        # squeezed (1, 1, 4) → (4,)
         assert view.units == 'dB'
 

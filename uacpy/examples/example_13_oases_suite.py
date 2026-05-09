@@ -138,7 +138,7 @@ def main():
     # Plot 2: OASR reflection coefficient (1-D R(θ) and phase).
     if oasr_success and result_oasr is not None:
         rc_for_plot = (
-            result_oasr.at_frequency(result_oasr.frequencies[len(result_oasr.frequencies) // 2])
+            result_oasr.at(frequency=result_oasr.frequencies[len(result_oasr.frequencies) // 2])
             if result_oasr.is_broadband else result_oasr
         )
         fig2, _ = uacpy.plot.plot_reflection_coefficient(
@@ -223,7 +223,7 @@ def main():
         )
         try:
             ts = result_oasp.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
-            trace = ts.get_trace(depth=d_pick, range_m=r_pick)
+            trace = ts.at(depth=d_pick, range=r_pick)
             fig5, _ = uacpy.plot.plot_time_trace(trace)
             fig5.savefig(OUTPUT_DIR / 'example_13_oasp_trace.png',
                          dpi=150, bbox_inches='tight')
