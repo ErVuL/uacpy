@@ -94,7 +94,7 @@ def create_example_report(
     print(f"\nModels tested: {len(results)}")
     for name, result in results.items():
         if result is not None:
-            print(f"  {name:15s}: TL range {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+            print(f"  {name:15s}: TL range {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
         else:
             print(f"  {name:15s}: SKIPPED (returned None)")
 

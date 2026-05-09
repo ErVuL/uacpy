@@ -49,7 +49,7 @@ class TestBellhopRunModes:
         assert result.field_type == 'tl'
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
-        assert np.all(result.data > 0), "TL should be positive"
+        assert np.all(result.tl > 0), "TL should be positive"
 
     @pytest.mark.requires_binary
     def test_bellhop_incoherent_tl(self, setup_env, setup_source, setup_receiver):
@@ -131,22 +131,22 @@ class TestBellhopRunModes:
         """Test Bellhop.compute_eigenrays one-call API."""
         bellhop = Bellhop(verbose=False)
 
-        result = bellhop.compute_eigenrays(
+        rays = bellhop.compute_eigenrays(
             setup_env, setup_source,
             range_m=3000.0, depth_m=50.0,
-            max_rays=4,
         )
-        assert result.field_type == 'rays'
-        assert result.is_eigen is True
-        assert len(result.rays) <= 4
-        # Sorted by miss distance ascending.
-        miss = [r.get('miss_distance_m') for r in result.rays]
+        assert rays.field_type == 'rays'
+        assert rays.is_eigen is True
+        # Receiver positions reflect the single target point.
+        assert rays.receiver_ranges is not None
+        assert float(rays.receiver_ranges[0]) == 3000.0
+        assert float(rays.receiver_depths[0]) == 50.0
+        # Filtering happens on Rays, not on the model.
+        top4 = rays.top_n_by_miss(4)
+        assert len(top4.rays) <= 4
+        miss = [r['miss_distance_m'] for r in top4.rays]
         if len(miss) > 1:
             assert miss == sorted(miss)
-        # Receiver positions reflect the single target point.
-        assert result.receiver_ranges is not None
-        assert float(result.receiver_ranges[0]) == 3000.0
-        assert float(result.receiver_depths[0]) == 50.0
 
     @pytest.mark.requires_binary
     def test_rays_filter_helpers_preserve_is_eigen(self, setup_env, setup_source, setup_receiver):

@@ -301,68 +301,54 @@ rm -rf uacpy
 
 ## ▶ Simplest example
 
-A Gaussian seamount in 200 m water → **three range-dependent solvers
-agree, plus Bellhop eigenrays before the obstacle**. Scooter is excluded
-because it is range-independent and would collapse the seamount.
+A Pekeris waveguide — isovelocity water over a fluid half-space — at
+1 kHz, plotted as a transmission-loss field.
 
 ``` python
 import numpy as np
 import matplotlib.pyplot as plt
 
 import uacpy
-from uacpy.models import Bellhop, KrakenField, RAM
+from uacpy.models import Bellhop, RunMode
 from uacpy.core.environment import BoundaryProperties
-from uacpy.visualization.plots import compare_models, plot_model_comparison_matrix
+from uacpy.visualization.plots import plot_transmission_loss
 
-# Gaussian seamount: 200 m water column rises to 80 m at the peak (r=7.5 km)
-ranges_km = np.linspace(0, 15e3, 61)
-seafloor  = 200.0 - 120.0 * np.exp(-((ranges_km - 7500.0) / 2000.0) ** 2)
-seafloor[0] = seafloor[-1] = 200.0   # pin endpoints so max == 200 exactly
-bathymetry = np.column_stack([ranges_km, seafloor])
-
+# 1. Environment — isovelocity water over a fluid half-space bottom
 env = uacpy.Environment(
-    name="Seamount",
-    bathymetry=bathymetry,
-    ssp=[(0, 1530), (200, 1490)],   # downward-refracting profile
+    name="Pekeris Waveguide",
+    bathymetry=100.0,
+    ssp=1500.0,
     bottom=BoundaryProperties(
         acoustic_type='half-space',
-        sound_speed=1700.0, density=1.7, attenuation=0.5,
+        sound_speed=1600.0,
+        density=1.5,
+        attenuation=0.5,
     ),
 )
-source   = uacpy.Source(depths=50.0, frequencies=200.0)
+
+# 2. Source — 1000 Hz, mid water column
+source = uacpy.Source(depths=50.0, frequencies=1000.0)
+
+# 3. Receiver grid — 200 depths × 5000 ranges out to 5 km
 receiver = uacpy.Receiver(
-    depths=np.linspace(0, 195, 200),
-    ranges=np.linspace(100, 15e3, 500),
+    depths=np.linspace(0, 100, 200),
+    ranges=np.linspace(0, 5000, 5000),
 )
 
-# 1. TL field from three range-dependent solvers
-results = {
-    'Bellhop':     Bellhop().compute_tl(env, source, receiver),
-    'KrakenField': KrakenField().compute_tl(env, source, receiver),
-    'RAM':         RAM().compute_tl(env, source, receiver),
-}
-compare_models(results, env=env, vmin=40, vmax=110, ncols=1, figsize=(14, 14))
-plt.savefig('docs/readme_compare_models.png', dpi=150, bbox_inches='tight')
+# 4. Run Bellhop in coherent-TL mode
+result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
+    env, source, receiver, run_mode=RunMode.COHERENT_TL,
+)
 
-# 2. Pairwise model-vs-model TL agreement matrix (RdYlGn_r — green = good)
-plot_model_comparison_matrix(results)
-plt.savefig('docs/readme_agreement_matrix.png', dpi=150, bbox_inches='tight')
-
-# 3. Bellhop eigenrays — keep only the direct paths (no surface/bottom bounces)
-rays = Bellhop().compute_eigenrays(
-    env, source, range_m=12000.0, depth_m=30.0,
-).filter_by_bounces(kind='direct')
-rays.plot(env=env)
-plt.savefig('docs/readme_eigenrays.png', dpi=150, bbox_inches='tight')
+# 5. Plot the TL field
+fig, ax = plt.subplots(figsize=(8, 4))
+plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
+plt.tight_layout()
 plt.show()
 ```
 
 <p align="center">
-  <img src="./docs/readme_compare_models.png" alt="Seamount TL — Bellhop / KrakenField / RAM stacked" width="720">
-  <br>
-  <img src="./docs/readme_agreement_matrix.png" alt="Pairwise TL RMSE between the three solvers" width="480">
-  <br>
-  <img src="./docs/readme_eigenrays.png" alt="Bellhop eigenrays to a receiver before the seamount" width="720">
+  <img src="./docs/readme_tl.png" alt="Pekeris waveguide TL field at 1 kHz" width="720">
 </p>
 
 ## 📚 Documentation & Examples

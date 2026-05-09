@@ -82,14 +82,14 @@ class TestPlotRays:
         assert ax is not None
         plt.close(fig)
 
-    def test_plot_rays_max_rays(self, basic_setup):
-        """Test ray plotting with max_rays limit."""
+    def test_plot_rays_filter_nfirst(self, basic_setup):
+        """Filtering before plotting via Rays.filter_nfirst."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
         rays = bellhop.compute_rays(env, source, uacpy.Receiver(depths=[50], ranges=[5000]))
 
-        fig, ax = plots.plot_rays(rays, env, max_rays=20)
+        fig, ax = plots.plot_rays(rays.filter_nfirst(20), env)
         assert fig is not None
         plt.close(fig)
 
@@ -198,7 +198,7 @@ class TestFieldPlotMethod:
         bellhop = Bellhop(verbose=False)
         rays = bellhop.compute_rays(env, source, uacpy.Receiver(depths=[50], ranges=[5000]))
 
-        fig, ax = rays.plot(env=env, max_rays=20)
+        fig, ax = rays.filter_nfirst(20).plot(env=env)
         assert fig is not None
         plt.close(fig)
 
@@ -428,48 +428,26 @@ class TestCompareModelsTypeDispatch:
             plots.compare_models({'bogus': object()}, env=env)
 
 
-class TestTLRmse:
-    """C8: tl_rmse public helper."""
+class TestAutoTLLimits:
+    """``_auto_tl_limits`` must drop Bellhop's outside-the-fan TL sentinel
+    (~600–740 dB) before computing the median+std auto-scale; otherwise
+    vmax explodes off-scale and the visible field saturates at vmin."""
 
-    pytestmark = []
+    def test_sentinel_removed_from_vmax(self):
+        from uacpy.visualization.plots import _auto_tl_limits
+        rng = np.random.default_rng(0)
+        body = 50.0 + 10.0 * rng.standard_normal((30, 30))
+        sentinels = np.full((10, 10), 600.0)
+        data = np.empty((40, 40))
+        data[:30, :30] = body
+        data[30:, 30:] = sentinels
+        data[:30, 30:] = body[:, :10]
+        data[30:, :30] = body[:10, :]
+        vmin, vmax = _auto_tl_limits(data)
+        assert vmax < 200.0
+        assert vmin < vmax
 
-    def test_identical_fields_zero_rmse(self):
-        from uacpy.core.results import PressureField
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        data = 60 + 10 * np.log10(np.maximum(r, 1.0)[None, :])
-        data = np.broadcast_to(data, (10, 20)).copy()
-        a = PressureField(units="dB", data=data, depths=d, ranges=r, model='A')
-        b = PressureField(units="dB", data=data.copy(), depths=d, ranges=r, model='B')
-        assert uacpy.tl_rmse(a, b) == pytest.approx(0.0)
-
-    def test_constant_offset(self):
-        from uacpy.core.results import PressureField
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        base = np.zeros((10, 20))
-        a = PressureField(units="dB", data=base, depths=d, ranges=r)
-        b = PressureField(units="dB", data=base + 3.0, depths=d, ranges=r)
-        assert uacpy.tl_rmse(a, b) == pytest.approx(3.0)
-
-    def test_window_selects_subregion(self):
-        from uacpy.core.results import PressureField
-        from uacpy.core.metrics import tl_rmse
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        a = PressureField(units="dB", data=np.zeros((10, 20)), depths=d, ranges=r)
-        b_data = np.zeros((10, 20))
-        b_data[:, :5] = 10.0
-        b = PressureField(units="dB", data=b_data, depths=d, ranges=r)
-        # Inside the noisy band, RMSE = 10. Excluding it, RMSE = 0.
-        assert tl_rmse(a, b, range_window=(r[0], r[4])) == pytest.approx(10.0)
-        assert tl_rmse(a, b, range_window=(r[5], r[-1])) == pytest.approx(0.0)
-
-    def test_type_error_on_non_tlfield(self):
-        from uacpy.core.results import PressureField
-        a = PressureField(units="dB", data=np.zeros((4, 4)), depths=np.arange(4), ranges=np.arange(4))
-        with pytest.raises(TypeError):
-            uacpy.tl_rmse(a, object())
+    def test_no_finite_falls_back_to_default(self):
+        from uacpy.visualization.plots import _auto_tl_limits
+        vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
+        assert (vmin, vmax) == (30.0, 80.0)

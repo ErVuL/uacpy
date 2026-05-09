@@ -92,8 +92,8 @@ def demo_bellhop_bounce():
     )
 
     # Compare
-    tl_hs = result_hs.data
-    tl_bn = result_bounce.data
+    tl_hs = result_hs.tl
+    tl_bn = result_bounce.tl
     diff = tl_bn - tl_hs
     print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
     print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
@@ -185,7 +185,7 @@ def demo_layered_bottom():
         from uacpy.models import Scooter
         scooter = Scooter(verbose=True)
         result = scooter.compute_tl(env, source, receiver)
-        print(f"Scooter TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"Scooter TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
         # Plot TL
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 80, 90])
@@ -263,7 +263,7 @@ def demo_range_dependent_bottom():
     try:
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"RAM TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
@@ -376,8 +376,8 @@ def demo_rd_layered_bottom():
     try:
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.data):.1f} to "
-              f"{np.nanmax(result.data):.1f} dB")
+        print(f"RAM TL: {np.nanmin(result.tl):.1f} to "
+              f"{np.nanmax(result.tl):.1f} dB")
 
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Layered Bottom')

@@ -34,14 +34,14 @@ import time
 import warnings
 from pathlib import Path
 from typing import Optional, List
-import scipy.interpolate
+from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.core.environment import Environment, LayeredBottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, PressureField, TransferFunction
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, TL_MAX_DB
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_MAX_DB
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
     UnsupportedFeatureError,
@@ -509,7 +509,7 @@ class RAM(PropagationModel):
         zmax_pe = self._compute_zmax(env, freq)
 
         # Build depth grid from surface to zmax_pe
-        interp_func = scipy.interpolate.interp1d(
+        interp_func = interp1d(
             depths_orig, speeds_orig,
             kind='linear', bounds_error=False,
             fill_value=(speeds_orig[0], speeds_orig[-1])
@@ -530,7 +530,7 @@ class RAM(PropagationModel):
             speeds_2d = np.zeros((len(depths), len(ranges_m)))
             for i in range(len(ranges_m)):
                 profile = env.ssp.data[:, i]
-                interp_func = scipy.interpolate.interp1d(
+                interp_func = interp1d(
                     ssp_depths, profile, kind='linear',
                     bounds_error=False,
                     fill_value=(profile[0], profile[-1])
@@ -1098,7 +1098,6 @@ class RAM(PropagationModel):
             theta=self._theta_for_freq(fc),
         )
 
-        from scipy.interpolate import RegularGridInterpolator
         n_nonfinite = int(np.count_nonzero(~np.isfinite(raw['tl'])))
         if n_nonfinite > 0:
             # expected; not in filterwarnings — emerges to user
@@ -1416,7 +1415,6 @@ class RAM(PropagationModel):
         resolved per frequency by ``_theta_for_freq`` — useful when the
         elastic stability angle has to vary across the band.
         """
-        from scipy.interpolate import RegularGridInterpolator
 
         fc = float(np.atleast_1d(source.frequencies)[0])
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
@@ -1995,7 +1993,6 @@ class RAM(PropagationModel):
             # BEFORE computing TL. Interpolating in dB destroys interference
             # nulls because linear interpolation of log-scale values smooths
             # out the sharp zeros in the field.
-            from scipy.interpolate import RegularGridInterpolator
 
             rcv_depths = receiver.depths
             # Warn if any receiver ranges exceed the PE computed range
@@ -2065,28 +2062,25 @@ class RAM(PropagationModel):
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
+            # Build complex pressure |p| such that
+            #   TL_dB = -20*log10(|p|) = -20*log10(|psi|*4π) - 10*log10(r)
+            # is recovered by PressureField.tl. We bake the cylindrical
+            # 1/sqrt(r) spreading into the magnitude by dividing
+            # |psi|*4π by sqrt(r); since we don't have psi's true phase
+            # at the receiver we keep a phase of 0 (consumers that only
+            # need TL can read field.tl, which depends on |p| only).
+            r_safe = log_ranges.astype(np.float64)
             with np.errstate(divide='ignore', invalid='ignore'):
                 psi_mag = np.abs(pressure_rcv) * 4.0 * np.pi
-                tl_output = -20.0 * np.log10(psi_mag + PRESSURE_FLOOR) + 10.0 * np.log10(log_ranges)[np.newaxis, :]
-
-            tl_output = np.clip(tl_output, 0.0, TL_MAX_DB)
-
-            # Mask TL values below the seafloor at each range.
-            # RAM computes valid field in the sediment, but for plotting
-            # consistency with other models, set sub-bottom values to NaN.
-            bathy = env.bathymetry
-            bathy_depths = np.interp(receiver.ranges, bathy[:, 0], bathy[:, 1])
-            for j, bd in enumerate(bathy_depths):
-                mask = receiver.depths > bd
-                tl_output[mask, j] = np.nan
+                p_mag = psi_mag / np.sqrt(r_safe)[np.newaxis, :]
+            pressure_field = p_mag.astype(np.complex128)
 
             elapsed = time.time() - start_time
             self._log(f"TL completed in {elapsed:.2f}s", level='info')
-            self._log(f"TL range: {np.nanmin(tl_output):.1f} to {np.nanmax(tl_output):.1f} dB", level='info')
 
-            return PressureField(
-            units="dB",
-                data=tl_output,
+            field = PressureField(
+                units="complex",
+                data=pressure_field,
                 ranges=receiver.ranges,
                 depths=receiver.depths,
                 **self._result_kwargs(
@@ -2097,6 +2091,7 @@ class RAM(PropagationModel):
                     c0=self._resolve_c0(env),
                 ),
             )
+            return field.mask_below_seafloor(env.bathymetry)
 
         finally:
             if fm.cleanup:
@@ -2221,15 +2216,6 @@ class RAM(PropagationModel):
             else:
                 out_depths = zg
 
-            # Mask sub-bottom samples with NaN for consistency with _run_tl.
-            # RAM computes valid fields in the sediment, but other uacpy
-            # models return NaN below the seafloor.
-            bathy = env.bathymetry
-            bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
-            for j, bd in enumerate(bathy_depths_rout):
-                mask = out_depths > bd
-                pressure[mask, :, j] = np.nan
-
             elapsed = time.time() - start_time
             self._log(f"Broadband completed in {elapsed:.2f}s", level='info')
             self._log(f"Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
@@ -2237,7 +2223,7 @@ class RAM(PropagationModel):
             # (n_d, n_r, n_f).
             pressure = np.moveaxis(pressure, 1, 2)
 
-            return TransferFunction(
+            tf = TransferFunction(
                 data=pressure,
                 ranges=rout,
                 depths=out_depths,
@@ -2254,6 +2240,15 @@ class RAM(PropagationModel):
                     cmin=result['cmin'],
                 ),
             )
+            # Mask sub-bottom samples with NaN for consistency with _run_tl.
+            # RAM computes valid fields in the sediment, but other uacpy
+            # models return NaN below the seafloor.
+            bathy = np.asarray(env.bathymetry, dtype=float)
+            seafloor = np.interp(rout, bathy[:, 0], bathy[:, 1])
+            for j, bd in enumerate(seafloor):
+                mask = out_depths > bd
+                tf.data[mask, j, :] = np.nan
+            return tf
 
         finally:
             if fm.cleanup:

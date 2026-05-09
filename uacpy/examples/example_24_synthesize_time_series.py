@@ -77,9 +77,8 @@ def main():
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
-    H_trace = H.data[0, 0]
-    TL_dB = -20.0 * np.log10(np.maximum(np.abs(H_trace), 1e-12))
-    axes[0].plot(H.frequencies, TL_dB, 'C0-', lw=1.2)
+    tl_at_pt = H.tl_at(target_depth_m, target_range_m)
+    axes[0].plot(tl_at_pt.frequencies, tl_at_pt.tl, 'C0-', lw=1.2)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Frequency (Hz)')
     axes[0].set_ylabel('TL(f)  (dB)')
@@ -89,7 +88,7 @@ def main():
     )
     axes[0].grid(True, alpha=0.3)
 
-    p_trace = ts.data[0, 0]
+    p_trace = ts.get_trace(target_depth_m, target_range_m).data
     axes[1].plot(ts.time * 1e3, p_trace, 'C1-', lw=1.0)
     axes[1].set_xlabel('Time (ms)')
     axes[1].set_ylabel('p(t)')

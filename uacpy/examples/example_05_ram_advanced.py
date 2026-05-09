@@ -130,7 +130,7 @@ def main():
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
         print("  RAM TL completed successfully")
-        print(f"  TL range: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"  TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
     except Exception as e:
         print(f"  RAM error: {e}")
         import traceback
@@ -153,7 +153,7 @@ def main():
         krakenfield = KrakenField(verbose=False)
         result_krakenfield = krakenfield.compute_tl(env, source, receiver)
         print("  ✓ KrakenField completed (using range-independent approximation)")
-        print(f"  ✓ TL range: {result_krakenfield.data.min():.1f} to {result_krakenfield.data.max():.1f} dB")
+        print(f"  ✓ TL range: {result_krakenfield.tl.min():.1f} to {result_krakenfield.tl.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ KrakenField: {e}")
         result_krakenfield = None
@@ -164,22 +164,22 @@ def main():
         bellhop = Bellhop(verbose=False)
         result_bellhop = bellhop.compute_tl(env, source, receiver)
         print("  ✓ Bellhop completed (full range-dependent capability)")
-        print(f"  ✓ TL range: {result_bellhop.data.min():.1f} to {result_bellhop.data.max():.1f} dB")
+        print(f"  ✓ TL range: {result_bellhop.tl.min():.1f} to {result_bellhop.tl.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ Bellhop: {e}")
         result_bellhop = None
 
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
     if result is not None and result_krakenfield is not None:
-        diff_kf = np.abs(result.data - result_krakenfield.data)
+        diff_kf = np.abs(result.tl - result_krakenfield.tl)
         print(f"\n  RAM vs KrakenField: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
-        diff_bh = np.abs(result.data - result_bellhop.data)
+        diff_bh = np.abs(result.tl - result_bellhop.tl)
         print(f"  RAM vs Bellhop: Mean diff = {np.nanmean(diff_bh):.1f} dB (PE vs ray methods)")
 
     if result_bellhop is not None and result_krakenfield is not None:
-        diff_bk = np.abs(result_bellhop.data - result_krakenfield.data)
+        diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)
         print(f"  Bellhop vs KrakenField: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════

@@ -188,21 +188,17 @@ class _KrakenBase(PropagationModel):
             )
 
     def _build_modes_field(self, modes, n_modes, source):
-        """Clip modes to ``n_modes`` and wrap them in a Field.
+        """Wrap a modes-reader payload as a :class:`Modes` Result.
 
-        Shared by Kraken.run and KrakenC.run.
+        Returns the full mode set the reader produced; callers cap the
+        count via :meth:`Modes.first_n` if they passed an ``n_modes``
+        request. Shared by Kraken.run and KrakenC.run.
         """
         k_arr = modes.get('k', np.array([]))
         phi_arr = modes.get('phi', np.array([]))
         z_arr = modes.get('z', np.array([]))
-        if n_modes is not None and len(k_arr) > n_modes:
-            k_arr = k_arr[:n_modes]
-            # read_modes_bin always returns phi with shape (NMat, M) so
-            # we only need the 2-D clip; a 1-D branch would be dead.
-            if phi_arr.ndim == 2 and phi_arr.shape[1] > n_modes:
-                phi_arr = phi_arr[:, :n_modes]
 
-        return Modes(
+        result = Modes(
             k=k_arr,
             phi=phi_arr,
             depths=z_arr,
@@ -215,6 +211,9 @@ class _KrakenBase(PropagationModel):
                 leaky_modes=self.leaky_modes,
             ),
         )
+        if n_modes is not None:
+            result = result.first_n(int(n_modes))
+        return result
 
     @staticmethod
     def _compute_rmax_m(receiver, fallback_m: float = 100_000.0) -> float:

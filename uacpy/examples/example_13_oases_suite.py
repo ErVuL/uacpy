@@ -211,8 +211,8 @@ def main():
         print("  ✓ Saved: output/example_13_oasp_tl.png")
 
         # Synthesized time trace at one (depth, range) using a Gaussian pulse.
-        d_pick = float(depths_h[int(np.argmin(np.abs(depths_h - source.depths[0])))])
-        r_pick = float(ranges_h[int(np.argmin(np.abs(ranges_h - 5000.0)))])
+        d_pick = float(source.depths[0])
+        r_pick = 5000.0
         fs = 4.0 * float(freqs_h[-1])
         nt_pulse = 64
         t_pulse = np.arange(nt_pulse) / fs

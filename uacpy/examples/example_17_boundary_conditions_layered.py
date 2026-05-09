@@ -231,7 +231,7 @@ def main():
             fields.append(None)
             envs_out.append(env)
 
-    all_tl = [f.data for f in fields if f is not None]
+    all_tl = [f.tl for f in fields if f is not None]
     if all_tl:
         vmin = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))

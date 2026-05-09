@@ -317,8 +317,12 @@ env = uacpy.Environment(
 The class exposes `at_range(r_m)` (1-D slice), `collapse(method)` (used
 by the per-feature collapse pipeline), `to_pairs()` (`(N, 2)` view of
 the range-0 column for callers expecting the flat depth/speed layout),
-and `extend_to(z_max)` (constant-extrapolation to a deeper bathymetry
-level).
+and `extend_to(z_max)` — bidirectional alignment to ``z_max``: extends
+by constant extrapolation when the deepest sample falls short, or
+truncates with linear interpolation when it overshoots. Every uacpy
+env writer (Bellhop / Kraken / Scooter / SPARC / Bounce / OASES) calls
+this so the SSP terminates exactly at ``env.depth`` regardless of how
+the user constructed the profile.
 
 ### BoundaryProperties (surface or bottom)
 
@@ -1241,9 +1245,14 @@ Hierarchy:
 ```
 Result                              identification + metadata
 ├── PressureField                   (n_d, n_r) or (n_d, n_r, n_f);
-│                                   real (dB TL) when units='dB',
-│                                   complex when units='complex'
-├── TransferFunction                (n_d, n_r, n_f) complex
+│   │                               complex pressure (units='complex',
+│   │                               default) or real dB TL (units='dB'
+│   │                               for binaries that emit dB only).
+│   │                               .tl always works; .p only when complex.
+│   └── TransferFunction            (n_d, n_r, n_f) complex; subclass —
+│                                   adds phase_reference + time-domain
+│                                   helpers (synthesize_time_series,
+│                                   to_time_trace, tl_at, to_tl(frequency=))
 ├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
 ├── Arrivals                        per-(isd, ird, irr) arrival lists
@@ -1391,11 +1400,25 @@ Common access patterns:
 ```python
 # TL grid (Bellhop / KrakenField / RAM / Scooter / SPARC / OAST / OASP)
 result = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-assert isinstance(result, PressureField) and result.units == 'dB'
-tl   = result.data            # shape (n_d, n_r), dB
-# (or `result.tl` — works regardless of units)
+assert isinstance(result, PressureField)
+# units defaults to 'complex' so .data is complex pressure; .tl is the
+# canonical accessor and computes -20·log10(|p|) on the fly. A few
+# binaries that emit dB only (OAST .plt, RAM Collins tl.grid) write
+# units='dB' and .data == .tl.
+tl   = result.tl              # shape (n_d, n_r), dB — always works
+p    = result.p               # complex pressure (raises if units='dB')
 rngs = result.ranges          # m
 zs   = result.depths          # m
+
+# Chain accessors return *sliced* PressureField subtypes whose .tl/.p
+# auto-squeeze singleton axes — natural shape at the call site:
+field.get_at_depth(50.0).tl       # shape (n_r,) — ready for plt.plot
+field.get_at_range(2000.0).tl     # shape (n_d,)
+field.get_value(2000.0, 50.0).tl  # 0-D scalar — float()-able
+field.get_max().tl                # 0-D scalar at argmax(|data|)
+# (Indexing is by argmin distance; the returned slice's .ranges[0] /
+# .depths[0] carries the actual grid value picked.) Full grids stay
+# .data.shape — no surprise squeezes.
 
 # Rays — Bellhop run_type='R' / compute_rays returns a Rays Result.
 rays = bellhop.run(env, source, receiver, run_mode=RunMode.RAYS)
@@ -1429,11 +1452,20 @@ rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)
-assert isinstance(tf, TransferFunction)
-H     = tf.data                  # complex, shape (n_d, n_r, n_f)
+assert isinstance(tf, TransferFunction)        # also isinstance(tf, PressureField)
+H     = tf.p                     # complex, shape (n_d, n_r, n_f) — same as .data
 freqs = tf.frequencies
 trace = tf.to_time_trace(depth=50.0, range_m=2000.0)   # → TimeTrace
 ts    = tf.synthesize_time_series(src_pulse, fs)       # → TimeSeriesField
+tl_f  = tf.tl_at(depth=50.0, range_m=2000.0).tl        # TL vs frequency, 1-D
+tl_2d = tf.to_tl(frequency=200.0).tl                    # TL grid at one freq
+
+# TransferFunction is a PressureField subclass — slicing along depth or
+# range preserves TF type (.synthesize_time_series stays available);
+# point queries collapse the frequency axis and return a plain sliced
+# PressureField.
+tf.get_at_depth(50.0)        # _SlicedTransferFunction (3-D, freq axis kept)
+tf.get_value(2000.0, 50.0)   # _SlicedPressureField   (point at picked freq)
 
 # Reflection coefficients — unified Bounce / OASR.
 rc = bounce.run(env, source, receiver, run_mode=RunMode.REFLECTION)

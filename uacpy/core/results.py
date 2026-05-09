@@ -321,13 +321,13 @@ class _GridResult(Result):
             "frequency= or time="
         )
 
-    def get_max(self) -> Tuple[float, float, float]:
-        """Return ``(max_value, range_at_max, depth_at_max)`` over the
-        spatial grid. For 3-D results, max is taken over all axes."""
-        idx = np.unravel_index(np.argmax(self.data), self.data.shape)
+    def get_max(self):
+        """Argmax position. Default returns ``(max_value, range, depth)``;
+        :class:`PressureField` overrides to a chain-able 1×1 slice."""
+        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
         d_idx, r_idx = idx[0], idx[1]
         return (
-            float(self.data[idx]),
+            float(np.abs(self.data[idx])),
             float(self.ranges[r_idx]),
             float(self.depths[d_idx]),
         )
@@ -383,13 +383,96 @@ class PressureField(_GridResult):
             data=data, depths=depths, ranges=ranges, **kwargs,
         )
 
-    @property
-    def field_type(self) -> str:
-        return 'tl' if self.units == 'dB' else 'pressure'
+    field_type = 'tl'
 
     @property
     def is_broadband(self) -> bool:
         return self.data.ndim == 3
+
+    # Override _GridResult slicers so PressureField returns a sliced
+    # PressureField (units preserved). Chain ``.tl`` / ``.p`` / ``.data``
+    # to get the underlying array. ``get_value`` stays scalar (returns
+    # real TL in dB regardless of underlying units).
+    def get_at_range(self, range_m: float) -> "_SlicedPressureField":
+        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
+        return _SlicedPressureField(
+            data=self.data[:, r_idx:r_idx + 1, ...],
+            depths=self.depths,
+            ranges=np.array([float(self.ranges[r_idx])]),
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
+
+    def get_at_depth(self, depth: float) -> "_SlicedPressureField":
+        d_idx = int(np.argmin(np.abs(self.depths - depth)))
+        return _SlicedPressureField(
+            data=self.data[d_idx:d_idx + 1, ...],
+            depths=np.array([float(self.depths[d_idx])]),
+            ranges=self.ranges,
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
+
+    def get_max(self) -> "_SlicedPressureField":
+        """Slice at the argmax of ``|data|``. Returns a 1×1
+        :class:`_SlicedPressureField` — ``.tl`` / ``.p`` are 0-D scalars
+        (``float()``-able). Read ``.ranges[0]`` / ``.depths[0]`` for the
+        location."""
+        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
+        d_idx, r_idx = idx[0], idx[1]
+        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, ...]
+        return _SlicedPressureField(
+            data=sliced,
+            depths=np.array([float(self.depths[d_idx])]),
+            ranges=np.array([float(self.ranges[r_idx])]),
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
+
+    def get_value(self, range_m: float, depth: float, **kwargs) -> "_SlicedPressureField":
+        """Slice at the nearest ``(depth, range)`` point.
+
+        Returns a 1×1 :class:`_SlicedPressureField` whose ``.tl`` / ``.p``
+        squeeze to 0-D scalars (``float()``-able), so callers chain
+        ``field.get_value(r, z).tl`` straight into ``float()``.
+        """
+        d_idx = int(np.argmin(np.abs(self.depths - depth)))
+        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
+        if self.data.ndim == 2:
+            data = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
+            freqs = self.frequencies
+        else:
+            freq = kwargs.get('frequency')
+            if freq is None and self.frequencies is not None and len(self.frequencies):
+                freq = float(self.frequencies[len(self.frequencies) // 2])
+            f_idx = (
+                int(np.argmin(np.abs(self.frequencies - freq)))
+                if (freq is not None and self.frequencies is not None) else 0
+            )
+            data = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx]
+            freqs = (
+                np.array([float(self.frequencies[f_idx])])
+                if self.frequencies is not None else None
+            )
+        return _SlicedPressureField(
+            data=data,
+            depths=np.array([float(self.depths[d_idx])]),
+            ranges=np.array([float(self.ranges[r_idx])]),
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=freqs,
+            metadata=dict(self.metadata),
+        )
 
     def at_frequency(self, frequency: float) -> "PressureField":
         """For a broadband field, return the narrowband slice at the
@@ -435,15 +518,135 @@ class PressureField(_GridResult):
 
     @property
     def tl(self) -> np.ndarray:
-        """Transmission loss in dB.
+        """Transmission loss in dB. Same shape as :attr:`data`.
 
         ``self.data`` directly when ``units='dB'``; computed on the fly via
-        ``-20·log10(|p|)`` when ``units='complex'``.
+        ``-20·log10(|p|)`` when ``units='complex'``. Slice returns from
+        :meth:`get_at_depth` / :meth:`get_at_range` / :meth:`get_value` /
+        :meth:`get_max` collapse singleton axes — they're typed
+        :class:`_SlicedPressureField` and override this property.
         """
         if self.units == 'dB':
             return self.data
         p_abs = np.maximum(np.abs(self.data), PRESSURE_FLOOR)
         return -20.0 * np.log10(p_abs)
+
+    @property
+    def p(self) -> np.ndarray:
+        """Complex pressure. Same shape as :attr:`data`.
+
+        Raises when ``units='dB'`` because phase has been irrecoverably
+        discarded by the ``-20·log10|p|`` step. Slice returns squeeze
+        singletons via :class:`_SlicedPressureField`.
+        """
+        if self.units == 'dB':
+            raise AttributeError(
+                "PressureField.p: only valid when units='complex'. "
+                "dB storage has no phase to return."
+            )
+        return self.data
+
+    def mask_below_seafloor(self, bathymetry: np.ndarray) -> "PressureField":
+        """Return a copy with samples below the seafloor set to NaN.
+
+        ``bathymetry`` is an ``(N, 2)`` array of ``(range_m, depth_m)``
+        pairs (the same shape carried by ``Environment.bathymetry``). The
+        seafloor depth at each receiver range is linearly interpolated from
+        the bathymetry; receiver depths exceeding that local depth are
+        masked.
+        """
+        bathy = np.asarray(bathymetry, dtype=float)
+        if bathy.ndim != 2 or bathy.shape[1] != 2:
+            raise ValueError(
+                f"PressureField.mask_below_seafloor: bathymetry must be "
+                f"shape (N, 2); got {bathy.shape}"
+            )
+        seafloor = np.interp(self.ranges, bathy[:, 0], bathy[:, 1])
+        new_data = self.data.astype(
+            np.complex128 if np.iscomplexobj(self.data) else np.float64,
+            copy=True,
+        )
+        for j, bd in enumerate(seafloor):
+            mask = self.depths > bd
+            new_data[mask, j, ...] = np.nan
+        return PressureField(
+            data=new_data,
+            depths=self.depths,
+            ranges=self.ranges,
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
+
+    def resample_to(
+        self,
+        ranges: np.ndarray,
+        depths: np.ndarray,
+        *,
+        method: str = 'linear',
+    ) -> "PressureField":
+        """Linearly resample onto a new ``(depth, range)`` grid.
+
+        For ``units='complex'`` data, real and imaginary parts are
+        interpolated independently (a complex linear interpolation).
+        Out-of-bound queries return NaN.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+        new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+        new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
+        # Build the same target mesh shape regardless of broadband-ness;
+        # the trailing axis is preserved by interpolating each frequency
+        # slice independently.
+        if self.data.ndim == 2:
+            slices = [self.data]
+        elif self.data.ndim == 3:
+            slices = [self.data[..., k] for k in range(self.data.shape[2])]
+        else:
+            raise ValueError(
+                f"PressureField.resample_to: unsupported ndim={self.data.ndim}"
+            )
+
+        DD, RR = np.meshgrid(new_depths, new_ranges, indexing='ij')
+        query = np.stack([DD.ravel(), RR.ravel()], axis=-1)
+
+        out_slices = []
+        is_complex = np.iscomplexobj(self.data)
+        for sl in slices:
+            if is_complex:
+                interp_re = RegularGridInterpolator(
+                    (self.depths, self.ranges), sl.real,
+                    method=method, bounds_error=False, fill_value=np.nan,
+                )
+                interp_im = RegularGridInterpolator(
+                    (self.depths, self.ranges), sl.imag,
+                    method=method, bounds_error=False, fill_value=np.nan,
+                )
+                vals = interp_re(query) + 1j * interp_im(query)
+            else:
+                interp = RegularGridInterpolator(
+                    (self.depths, self.ranges), sl,
+                    method=method, bounds_error=False, fill_value=np.nan,
+                )
+                vals = interp(query)
+            out_slices.append(vals.reshape(len(new_depths), len(new_ranges)))
+
+        if self.data.ndim == 2:
+            new_data = out_slices[0]
+        else:
+            new_data = np.stack(out_slices, axis=-1)
+
+        return PressureField(
+            data=new_data,
+            depths=new_depths,
+            ranges=new_ranges,
+            units=self.units,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
 
     @property
     def magnitude(self) -> np.ndarray:
@@ -462,14 +665,36 @@ class PressureField(_GridResult):
         return np.angle(self.data)
 
 
-class TransferFunction(_GridResult):
+class _SlicedPressureField(PressureField):
+    """Returned by :meth:`PressureField.get_at_depth` / ``get_at_range`` /
+    ``get_value`` / ``get_max``. Same as :class:`PressureField` except
+    ``.tl`` / ``.p`` apply :func:`numpy.squeeze` so chain calls give
+    plot-friendly shapes (``(N,)`` for line cuts, 0-D scalars for point
+    queries) without manual ``.squeeze()`` / ``.item()`` at the call site.
+    Internal — model wrappers always emit full :class:`PressureField`
+    instances; only slicing produces this subtype.
+    """
+
+    @property
+    def tl(self) -> np.ndarray:
+        return np.squeeze(PressureField.tl.fget(self))
+
+    @property
+    def p(self) -> np.ndarray:
+        return np.squeeze(PressureField.p.fget(self))
+
+
+class TransferFunction(PressureField):
     """Complex broadband transfer function ``H(d, r, f)``.
+
+    A multi-frequency :class:`PressureField` (always ``units='complex'``)
+    with a required ``phase_reference`` and time-domain helpers
+    (:meth:`synthesize_time_series`, :meth:`to_time_trace`, :meth:`tl_at`).
+    Inherits ``.tl`` / ``.p`` / slicing from :class:`PressureField`.
 
     ``data`` shape: ``(n_depths, n_ranges, n_frequencies)`` complex.
 
-    The ``phase_reference`` field is required and tells consumers (notably
-    :meth:`to_time_trace` / :meth:`synthesize_time_series`) how to interpret
-    the stored phase. See ``DOCUMENTATION.md §5.13``.
+    See ``DOCUMENTATION.md §5.13`` for ``phase_reference`` semantics.
     """
     field_type = "transfer_function"
 
@@ -487,9 +712,14 @@ class TransferFunction(_GridResult):
             raise ValueError(
                 "TransferFunction: requires a non-empty frequencies vector"
             )
+        units = kwargs.pop('units', 'complex')
+        if units != 'complex':
+            raise ValueError(
+                f"TransferFunction: units must be 'complex'; got {units!r}"
+            )
         super().__init__(
             data=data, depths=depths, ranges=ranges,
-            frequencies=frequencies, **kwargs,
+            units='complex', frequencies=frequencies, **kwargs,
         )
         if data.ndim != 3:
             raise ValueError(
@@ -568,6 +798,36 @@ class TransferFunction(_GridResult):
             metadata=dict(self.metadata),
         )
 
+    def tl_at(
+        self,
+        depth: float,
+        range_m: float,
+    ) -> "PressureField":
+        """TL vs frequency at one ``(depth, range)`` cell.
+
+        Symmetrical with :meth:`to_tl` (which returns TL on the
+        ``(depth, range)`` grid at one frequency). Returns a 1×1×n_freq
+        :class:`PressureField` (``units='dB'``) — chain ``.tl`` for the
+        dB array along the frequency axis, ``.frequencies`` for the
+        frequency vector.
+        """
+        from uacpy.core.constants import PRESSURE_FLOOR
+        d_idx = int(np.argmin(np.abs(self.depths - depth)))
+        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
+        H = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, :]
+        tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
+        return _SlicedPressureField(
+            data=tl,
+            depths=np.array([float(self.depths[d_idx])]),
+            ranges=np.array([float(self.ranges[r_idx])]),
+            units='dB',
+            model=getattr(self, 'model', None),
+            backend=getattr(self, 'backend', None),
+            source_depths=getattr(self, 'source_depths', None),
+            frequencies=self.frequencies,
+            metadata=dict(self.metadata),
+        )
+
     def synthesize_time_series(
         self,
         source_waveform: np.ndarray,
@@ -583,6 +843,50 @@ class TransferFunction(_GridResult):
             self, source_waveform=source_waveform, sample_rate=sample_rate,
             t_start=t_start, window=window, nfft=nfft,
         )
+
+    def get_at_range(self, range_m: float) -> "_SlicedTransferFunction":
+        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
+        return _SlicedTransferFunction(
+            data=self.data[:, r_idx:r_idx + 1, :],
+            depths=self.depths,
+            ranges=np.array([float(self.ranges[r_idx])]),
+            frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            metadata=dict(self.metadata),
+        )
+
+    def get_at_depth(self, depth: float) -> "_SlicedTransferFunction":
+        d_idx = int(np.argmin(np.abs(self.depths - depth)))
+        return _SlicedTransferFunction(
+            data=self.data[d_idx:d_idx + 1, :, :],
+            depths=np.array([float(self.depths[d_idx])]),
+            ranges=self.ranges,
+            frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            metadata=dict(self.metadata),
+        )
+
+
+class _SlicedTransferFunction(TransferFunction):
+    """Sibling of :class:`_SlicedPressureField` for :class:`TransferFunction`
+    slices. Same squeeze behaviour on ``.tl`` / ``.p``, plus preserves
+    :meth:`synthesize_time_series` / :meth:`tl_at` / :attr:`phase_reference`.
+    Returned by :meth:`TransferFunction.get_at_depth` / ``get_at_range``;
+    point-wise ``get_value`` / ``get_max`` collapse the frequency axis and
+    fall back to :class:`_SlicedPressureField`.
+    """
+
+    @property
+    def tl(self) -> np.ndarray:
+        return np.squeeze(PressureField.tl.fget(self))
+
+    @property
+    def p(self) -> np.ndarray:
+        return np.squeeze(PressureField.p.fget(self))
 
 
 class TimeSeriesField(_GridResult):
@@ -649,6 +953,56 @@ class TimeSeriesField(_GridResult):
         X = np.fft.rfft(self.data, axis=-1)
         freqs = np.fft.rfftfreq(self.n_t, self.dt)
         return freqs, X
+
+    def extract_tone(
+        self,
+        frequency: float,
+        *,
+        window: str = 'hann',
+    ) -> "PressureField":
+        """Extract the steady-state complex pressure at one frequency.
+
+        Applies a window along the time axis to suppress spectral leakage,
+        then takes the rfft and picks the bin nearest ``frequency``. The
+        ``2/sum(window)`` normalisation recovers the full complex
+        amplitude (rfft sees only the +ω side of a real cosine's symmetric
+        Dirac pair).
+
+        Returns a :class:`PressureField` with ``units='complex'`` and shape
+        ``(n_d, n_r)``. The receiver grid is preserved verbatim — this
+        method is the time-domain → narrowband-pressure analogue of
+        :meth:`PressureField.at_frequency`.
+        """
+        if window == 'hann':
+            win = np.hanning(self.n_t)
+        elif window == 'hamming':
+            win = np.hamming(self.n_t)
+        elif window == 'blackman':
+            win = np.blackman(self.n_t)
+        elif window == 'none':
+            win = np.ones(self.n_t)
+        else:
+            raise ValueError(
+                f"TimeSeriesField.extract_tone: unknown window={window!r}"
+            )
+
+        # Windowed rfft along the trailing time axis.
+        windowed = self.data * win
+        spec = np.fft.rfft(windowed, axis=-1)
+        freqs = np.fft.rfftfreq(self.n_t, self.dt)
+        k = int(np.argmin(np.abs(freqs - frequency)))
+        amp = 2.0 * spec[..., k] / np.sum(win)
+
+        return PressureField(
+            data=amp,
+            depths=self.depths,
+            ranges=self.ranges,
+            units='complex',
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=float(freqs[k]),
+            metadata=dict(self.metadata),
+        )
 
     def get_trace(self, depth: float, range_m: float) -> "TimeTrace":
         """Extract the single-point :class:`TimeTrace` at the nearest
@@ -1023,6 +1377,140 @@ class Rays(Result):
             return True
         return self.filter(pred)
 
+    def filter_nfirst(
+        self,
+        n: int = 10
+    ) -> 'Rays':
+        """Keep only the first ``n`` rays."""
+        return self._spawn(self.rays[:n])
+
+    def _miss_distance_to(
+        self, ray, target_range_m: float, target_depth_m: float,
+    ) -> Tuple[float, int]:
+        """Closest-approach miss distance and its index along the polyline."""
+        r = np.asarray(ray.get('r', []))
+        z = np.asarray(ray.get('z', []))
+        if len(r) == 0:
+            return float('inf'), 0
+        # km internally on r — but we accept whatever the polyline carries.
+        # Stay in metres consistently: assume r is metres if all values are
+        # >> 1, else km. Heuristic-free: convert km to m if max(r) < 100
+        # (no realistic ocean ray path is < 100 m).
+        if r.max() < 100.0:
+            r_m = r * 1000.0
+        else:
+            r_m = r
+        d2 = (r_m - target_range_m) ** 2 + (z - target_depth_m) ** 2
+        k = int(np.argmin(d2))
+        return float(np.sqrt(d2[k])), k
+
+    def _resolve_target(
+        self,
+        target_range_m: Optional[float],
+        target_depth_m: Optional[float],
+    ) -> Tuple[float, float]:
+        """Default target to the receiver context when this Rays was built
+        from a single-point eigenray query."""
+        if target_range_m is None:
+            if self.receiver_ranges is None or len(self.receiver_ranges) != 1:
+                raise ValueError(
+                    "Rays.miss-distance helpers: target_range_m must be "
+                    "supplied unless this Rays carries a single-point "
+                    "receiver context."
+                )
+            target_range_m = float(self.receiver_ranges[0])
+        if target_depth_m is None:
+            if self.receiver_depths is None or len(self.receiver_depths) != 1:
+                raise ValueError(
+                    "Rays.miss-distance helpers: target_depth_m must be "
+                    "supplied unless this Rays carries a single-point "
+                    "receiver context."
+                )
+            target_depth_m = float(self.receiver_depths[0])
+        return target_range_m, target_depth_m
+
+    def filter_by_miss_distance(
+        self,
+        max_miss_m: float,
+        target_range_m: Optional[float] = None,
+        target_depth_m: Optional[float] = None,
+    ) -> 'Rays':
+        """Keep rays whose closest approach to the target is ``≤ max_miss_m``.
+
+        Each kept ray gets a ``miss_distance_m`` entry attached. Target
+        defaults to the single-point receiver this ``Rays`` was built for.
+        """
+        tr, td = self._resolve_target(target_range_m, target_depth_m)
+        kept = []
+        for ray in self.rays:
+            miss, _ = self._miss_distance_to(ray, tr, td)
+            if miss <= max_miss_m:
+                ray = dict(ray)
+                ray['miss_distance_m'] = miss
+                kept.append(ray)
+        return self._spawn(kept)
+
+    def sorted_by_miss(
+        self,
+        target_range_m: Optional[float] = None,
+        target_depth_m: Optional[float] = None,
+    ) -> 'Rays':
+        """Return rays sorted by ascending miss-distance to the target.
+
+        Each ray gets ``miss_distance_m`` attached. Target defaults to
+        the single-point receiver this ``Rays`` was built for. Compose
+        with ``filter_nfirst`` to cap, or ``truncate_at_receiver`` to
+        clip polylines.
+        """
+        tr, td = self._resolve_target(target_range_m, target_depth_m)
+        scored = []
+        for ray in self.rays:
+            miss, _ = self._miss_distance_to(ray, tr, td)
+            ray = dict(ray)
+            ray['miss_distance_m'] = miss
+            scored.append((miss, ray))
+        scored.sort(key=lambda t: t[0])
+        return self._spawn([r for _, r in scored])
+
+    def top_n_by_miss(
+        self,
+        n: int,
+        target_range_m: Optional[float] = None,
+        target_depth_m: Optional[float] = None,
+    ) -> 'Rays':
+        """Return the ``n`` rays with smallest miss-distance to the target.
+
+        Equivalent to ``self.sorted_by_miss(...).filter_nfirst(n)``.
+        Target defaults to the single-point receiver this ``Rays`` was
+        built for.
+        """
+        return self.sorted_by_miss(target_range_m, target_depth_m).filter_nfirst(n)
+
+    def truncate_at_receiver(
+        self,
+        target_range_m: Optional[float] = None,
+        target_depth_m: Optional[float] = None,
+    ) -> 'Rays':
+        """Clip each ray polyline at its closest-approach index.
+
+        Target defaults to the single-point receiver this ``Rays`` was
+        built for. Useful before plotting eigenrays so each path stops
+        at the receiver instead of running off to its full extent.
+        """
+        tr, td = self._resolve_target(target_range_m, target_depth_m)
+        clipped = []
+        for ray in self.rays:
+            miss, k = self._miss_distance_to(ray, tr, td)
+            ray = dict(ray)
+            ray['miss_distance_m'] = miss
+            r = np.asarray(ray.get('r', []))
+            z = np.asarray(ray.get('z', []))
+            if k + 1 < len(r):
+                ray['r'] = r[:k + 1]
+                ray['z'] = z[:k + 1]
+            clipped.append(ray)
+        return self._spawn(clipped)
+    
     def _spawn(self, rays: List[Any]) -> 'Rays':
         """Build a new ``Rays`` from a subset, preserving identification."""
         return Rays(
@@ -1084,6 +1572,34 @@ class Modes(Result):
     @property
     def data(self) -> np.ndarray:      # alias for plot helpers
         return self.phi
+
+    def first_n(self, n: int) -> "Modes":
+        """Return a new :class:`Modes` containing only the first ``n`` modes.
+
+        No-op when ``n >= self.n_modes``. ``k`` is sliced as ``k[:n]`` and
+        ``phi`` as ``phi[:, :n]``; depths and identification metadata are
+        preserved.
+        """
+        if n >= len(self.k):
+            return self
+        new_k = self.k[:n]
+        new_phi = self.phi[:, :n]
+        # Drop the parent's mirrored ``k`` / ``phi`` / ``n_modes`` from
+        # metadata so the new Modes' own __init__ writes the sliced
+        # values via setdefault.
+        new_meta = dict(self.metadata)
+        for stale in ('k', 'phi', 'n_modes'):
+            new_meta.pop(stale, None)
+        return Modes(
+            k=new_k,
+            phi=new_phi,
+            depths=self.depths,
+            n_modes=len(new_k),
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata=new_meta,
+        )
 
     def compute_phase_speeds(self) -> np.ndarray:
         omega = 2.0 * np.pi * (self.f0 or 0.0)

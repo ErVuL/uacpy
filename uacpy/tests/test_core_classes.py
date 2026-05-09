@@ -129,7 +129,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
-        value = field.get_value(range_m=4500, depth=45)
+        value = float(field.get_value(range_m=4500, depth=45).tl)
         assert 44 <= value <= 55
 
     def test_field_get_at_range(self):
@@ -140,7 +140,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
-        values = field.get_at_range(4500)
+        values = field.get_at_range(4500).tl
         assert len(values) == 10
         assert 50 <= values[5] <= 59
 
@@ -152,7 +152,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
-        values = field.get_at_depth(45)
+        values = field.get_at_depth(45).tl
         assert len(values) == 10
         assert 40 <= values[5] <= 49
 
@@ -249,3 +249,195 @@ class TestArrivalsToTableKeys:
         assert table[1]['kind'] == 'both'
         assert table[0]['n_bot_bounces'] == 1
         assert table[1]['n_top_bounces'] == 1
+
+
+class TestSoundSpeedProfileExtendTo:
+    """``SoundSpeedProfile.extend_to(z_max)`` is the canonical alignment
+    hook used by every env writer. Must extend OR truncate so that
+    ``ssp.depths[-1] == z_max`` exactly."""
+
+    def _profile(self, depths, speeds):
+        from uacpy.core.environment import SoundSpeedProfile
+        return SoundSpeedProfile(
+            depths=np.asarray(depths, dtype=float),
+            data=np.asarray(speeds, dtype=float).reshape(-1, 1),
+            interp='linear',
+        )
+
+    def test_noop_when_depth_max_equals_deepest(self):
+        ssp = self._profile([0, 100, 200], [1500, 1490, 1485])
+        assert ssp.extend_to(200.0) is ssp
+
+    def test_extend_with_constant_extrapolation(self):
+        out = self._profile([0, 100], [1500, 1490]).extend_to(300.0)
+        assert out.depths[-1] == 300.0
+        assert out.data[-1, 0] == 1490.0
+
+    def test_truncate_with_linear_interpolation(self):
+        out = self._profile([0, 100, 200], [1500, 1490, 1480]).extend_to(150.0)
+        assert out.depths[-1] == 150.0
+        assert out.data[-1, 0] == pytest.approx(1485.0)
+        assert (out.depths <= 150.0).all()
+
+    def test_truncate_then_extend_round_trip(self):
+        ssp = self._profile([0, 100, 200], [1500, 1490, 1480])
+        out = ssp.extend_to(150.0).extend_to(150.0)
+        assert out.depths[-1] == 150.0
+        assert out.data[-1, 0] == pytest.approx(1485.0)
+
+
+class TestPressureFieldChainAccessors:
+    """``PressureField`` slicing returns ``_SlicedPressureField`` whose
+    ``.tl`` / ``.p`` auto-squeeze singleton axes; full grids preserve
+    ``.data.shape``."""
+
+    def _full_grid(self, units='complex'):
+        from uacpy.core.results import PressureField
+        if units == 'complex':
+            data = (np.arange(20).reshape(4, 5) + 1j).astype(complex)
+        else:
+            data = np.arange(20, dtype=float).reshape(4, 5) + 30.0
+        return PressureField(
+            data=data,
+            depths=np.linspace(10, 90, 4),
+            ranges=np.linspace(100, 1000, 5),
+            units=units,
+            model='Test', frequencies=100.0,
+        )
+
+    def test_full_grid_tl_preserves_data_shape(self):
+        f = self._full_grid('complex')
+        assert f.tl.shape == f.data.shape == (4, 5)
+
+    def test_full_grid_p_preserves_data_shape(self):
+        f = self._full_grid('complex')
+        assert f.p.shape == f.data.shape == (4, 5)
+
+    def test_p_raises_on_db_units(self):
+        f = self._full_grid('dB')
+        with pytest.raises(AttributeError):
+            _ = f.p
+
+    def test_get_at_depth_returns_sliced_subtype_with_squeezed_tl(self):
+        from uacpy.core.results import _SlicedPressureField
+        f = self._full_grid('complex')
+        sliced = f.get_at_depth(50.0)
+        assert isinstance(sliced, _SlicedPressureField)
+        assert sliced.tl.shape == (5,)
+        assert sliced.data.shape == (1, 5)
+
+    def test_get_at_range_returns_sliced_subtype_with_squeezed_tl(self):
+        from uacpy.core.results import _SlicedPressureField
+        f = self._full_grid('complex')
+        sliced = f.get_at_range(500.0)
+        assert isinstance(sliced, _SlicedPressureField)
+        assert sliced.tl.shape == (4,)
+        assert sliced.data.shape == (4, 1)
+
+    def test_get_value_returns_zero_d_scalar_tl(self):
+        from uacpy.core.results import _SlicedPressureField
+        f = self._full_grid('complex')
+        point = f.get_value(500.0, 50.0)
+        assert isinstance(point, _SlicedPressureField)
+        assert point.tl.shape == ()
+        assert isinstance(float(point.tl), float)
+
+    def test_get_max_returns_zero_d_scalar_tl(self):
+        from uacpy.core.results import _SlicedPressureField
+        f = self._full_grid('complex')
+        m = f.get_max()
+        assert isinstance(m, _SlicedPressureField)
+        assert m.tl.shape == ()
+        flat = int(np.argmax(np.abs(f.data)))
+        d_idx, r_idx = np.unravel_index(flat, f.data.shape)
+        assert m.depths[0] == f.depths[d_idx]
+        assert m.ranges[0] == f.ranges[r_idx]
+
+
+class TestTransferFunctionInheritance:
+    """``TransferFunction`` is a ``PressureField`` subclass —
+    ``isinstance(tf, PressureField)`` must hold so callers that branch
+    on PressureField also match TFs."""
+
+    def _tf(self):
+        from uacpy.core.results import TransferFunction
+        data = (np.arange(24).reshape(2, 3, 4) + 1j).astype(complex)
+        return TransferFunction(
+            data=data,
+            depths=np.array([10., 20.]),
+            ranges=np.array([100., 200., 300.]),
+            frequencies=np.array([100., 200., 300., 400.]),
+            phase_reference='travelling_wave',
+            model='Test',
+        )
+
+    def test_tf_isinstance_pressurefield(self):
+        from uacpy.core.results import PressureField
+        assert isinstance(self._tf(), PressureField)
+
+    def test_tf_units_is_always_complex(self):
+        assert self._tf().units == 'complex'
+
+    def test_tf_rejects_non_complex_units(self):
+        from uacpy.core.results import TransferFunction
+        data = np.zeros((1, 1, 2), dtype=complex)
+        with pytest.raises(ValueError, match="units must be 'complex'"):
+            TransferFunction(
+                data=data,
+                depths=np.array([0.]),
+                ranges=np.array([0.]),
+                frequencies=np.array([100., 200.]),
+                phase_reference='travelling_wave',
+                units='dB',
+            )
+
+    def test_tf_phase_reference_coerced_to_enum(self):
+        from uacpy.core.results import PhaseReference
+        tf = self._tf()
+        assert isinstance(tf.phase_reference, PhaseReference)
+        assert tf.phase_reference == PhaseReference.TRAVELLING_WAVE
+
+
+class TestTransferFunctionSlicing:
+    """Slicing along a frequency-keeping axis preserves TF type;
+    point queries collapse the frequency axis and drop to
+    ``_SlicedPressureField``."""
+
+    def _tf(self):
+        from uacpy.core.results import TransferFunction
+        data = (np.arange(24).reshape(2, 3, 4) + 1j).astype(complex)
+        return TransferFunction(
+            data=data,
+            depths=np.array([10., 20.]),
+            ranges=np.array([100., 200., 300.]),
+            frequencies=np.array([100., 200., 300., 400.]),
+            phase_reference='travelling_wave',
+            model='Test',
+        )
+
+    def test_get_at_depth_preserves_tf_type(self):
+        from uacpy.core.results import (
+            PhaseReference, TransferFunction, _SlicedTransferFunction,
+        )
+        sliced = self._tf().get_at_depth(15.0)
+        assert isinstance(sliced, _SlicedTransferFunction)
+        assert isinstance(sliced, TransferFunction)
+        assert hasattr(sliced, 'synthesize_time_series')
+        assert hasattr(sliced, 'tl_at')
+        assert sliced.phase_reference == PhaseReference.TRAVELLING_WAVE
+        assert sliced.tl.shape == (3, 4)
+
+    def test_get_at_range_preserves_tf_type(self):
+        from uacpy.core.results import _SlicedTransferFunction
+        sliced = self._tf().get_at_range(200.0)
+        assert isinstance(sliced, _SlicedTransferFunction)
+        assert sliced.tl.shape == (2, 4)
+
+    def test_get_value_drops_to_pressurefield(self):
+        from uacpy.core.results import (
+            TransferFunction, _SlicedPressureField,
+        )
+        point = self._tf().get_value(200.0, 15.0)
+        assert isinstance(point, _SlicedPressureField)
+        assert not isinstance(point, TransferFunction)
+        assert point.tl.shape == ()

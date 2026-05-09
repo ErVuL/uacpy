@@ -44,6 +44,29 @@ ZORDER_SOURCE = 6
 ZORDER_ANNOTATIONS = 7
 
 
+def bounce_class_of(ray) -> str:
+    """Classify a ray-path mapping by its top/bottom bounce counts.
+
+    Returns one of ``'direct'``, ``'surface'``, ``'bottom'``, ``'both'``.
+    Accepts any object that maps ``'n_top_bounces'`` / ``'n_bot_bounces'``
+    via ``__getitem__`` or ``.get`` (Bellhop ray dicts and arrival records
+    both qualify). Missing keys default to zero.
+    """
+    if hasattr(ray, 'get'):
+        n_top = int(ray.get('n_top_bounces', 0) or 0)
+        n_bot = int(ray.get('n_bot_bounces', 0) or 0)
+    else:
+        n_top = int(ray['n_top_bounces']) if 'n_top_bounces' in ray else 0
+        n_bot = int(ray['n_bot_bounces']) if 'n_bot_bounces' in ray else 0
+    if n_top >= 1 and n_bot >= 1:
+        return 'both'
+    if n_bot >= 1:
+        return 'bottom'
+    if n_top >= 1:
+        return 'surface'
+    return 'direct'
+
+
 def _auto_tl_limits(
     data2d: np.ndarray,
     vmin: Optional[float] = None,
@@ -62,6 +85,11 @@ def _auto_tl_limits(
         return (vmin, vmax) if vmin < vmax else (vmax - tl_span, vmax)
 
     valid = data2d[np.isfinite(data2d)]
+    # Bellhop emits a TL sentinel (~600–740 dB) for receiver cells outside
+    # the ray fan; including those in the median+std stat drags vmax up
+    # off-scale and saturates the visible field. 200 dB already exceeds
+    # any physically meaningful underwater TL.
+    valid = valid[valid < 200.0]
     if not len(valid):
         return (30.0, 80.0)
     if vmax is None:
@@ -122,25 +150,27 @@ def _overlay_bathymetry(
 
 
 def _select_2d_slice(field, frequency: Optional[float] = None) -> np.ndarray:
-    """Return a 2-D ``(n_depths, n_ranges)`` view of a gridded Result.
+    """Return a 2-D ``(n_depths, n_ranges)`` TL view (dB) of a gridded Result.
 
-    For 2-D data (``ndim == 2``) the array is returned unchanged.
-    For 3-D broadband data with shape ``(n_depths, n_ranges, n_freqs)``
-    (typed-Result trailing-axis convention) a frequency slice is picked:
+    For 2-D narrowband ``PressureField`` we return ``.tl`` (auto-computes
+    dB from complex storage). For 3-D broadband data the frequency-axis
+    collapse is delegated to the typed Result API:
 
-    * if ``frequency`` is ``None``, the middle frequency is used;
-    * otherwise the nearest frequency in ``field.frequencies``.
+    * :class:`TransferFunction` → ``to_tl(frequency=…)`` returns the
+      magnitude-in-dB slice.
+    * Broadband :class:`PressureField` → ``at_frequency(…).tl``.
     """
+    if isinstance(field, TransferFunction):
+        return field.to_tl(frequency=frequency).tl
+    if isinstance(field, PressureField) and field.is_broadband:
+        sliced = field.at_frequency(frequency if frequency is not None
+                                     else float(field.frequencies[len(field.frequencies) // 2]))
+        return sliced.tl
+    if isinstance(field, PressureField):
+        return field.tl
     data = field.data
     if data.ndim == 2:
         return data
-    if data.ndim == 3:
-        freqs = np.asarray(field.frequencies) if field.frequencies is not None else np.array([])
-        if frequency is None:
-            f_idx = len(freqs) // 2 if len(freqs) else 0
-        else:
-            f_idx = int(np.argmin(np.abs(freqs - frequency))) if len(freqs) else 0
-        return data[:, :, f_idx]
     raise ValueError(
         f"Unsupported gridded-result data ndim={data.ndim}; expected 2 or 3."
     )
@@ -152,10 +182,10 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
     Selects the correct specialised plot function based on the concrete
     ``Result`` subclass. Used by ``Result.plot()``.
     """
-    if isinstance(result, PressureField):
-        return plot_transmission_loss(result.to_tl(), env=env, **kwargs)
     if isinstance(result, TransferFunction):
         return plot_transfer_function(result, **kwargs)
+    if isinstance(result, PressureField):
+        return plot_transmission_loss(result.to_tl(), env=env, **kwargs)
     if isinstance(result, TimeSeriesField):
         return plot_time_series(result, **kwargs)
     if isinstance(result, TimeTrace):
@@ -385,7 +415,6 @@ def plot_rays(
     env: Optional[Environment] = None,
     source: Optional[object] = None,
     receiver: Optional[object] = None,
-    max_rays: Optional[int] = None,
     figsize: Tuple[float, float] = (12, 6),
     ax: Optional[Axes] = None,
     color_by_bounces: bool = True,
@@ -396,11 +425,16 @@ def plot_rays(
     ylim: Optional[Tuple[float, float]] = None,
     title: Optional[str] = None,
     show_legend: bool = True,
-    truncate_at_receiver: Optional[bool] = None,
-    closest_approach_threshold_m: Optional[float] = None,
-    sort_by_miss_distance: bool = False,
 ) -> Tuple[Figure, Axes]:
     """Plot ray paths colored by surface/bottom bounce class.
+
+    The plotter renders whatever rays it is given. To select / sort /
+    truncate before plotting, chain the corresponding ``Rays`` methods:
+
+    >>> rays.filter_by_bounces(kind='direct').plot(env=env)
+    >>> rays.top_n_by_miss(8).truncate_at_receiver().plot(env=env)
+    >>> rays.filter_by_miss_distance(15.0).plot(env=env)
+    >>> rays.filter_nfirst(20).plot(env=env)
 
     Default coloring: muted Acoustic-Toolbox palette
     (direct=crimson, surface=teal, bottom=steel-blue, both=dimgray).
@@ -421,27 +455,7 @@ def plot_rays(
         warnings.warn("No ray data found in field", UserWarning, stacklevel=2)
         return fig, ax
 
-    n_rays = len(rays)
-    if sort_by_miss_distance and receiver is not None and n_rays:
-        rr_km = float(np.atleast_1d(receiver.ranges)[0]) / 1000.0
-        rd_m = float(np.atleast_1d(receiver.depths)[0])
-        def _miss(ray):
-            r = np.asarray(ray.get('r', [])) / 1000.0
-            z = np.asarray(ray.get('z', []))
-            if len(r) == 0:
-                return np.inf
-            d2 = (r - rr_km) ** 2 + ((z - rd_m) / 1000.0) ** 2
-            return float(np.sqrt(d2.min()))
-        rays_sorted = sorted(rays, key=_miss)
-        if max_rays is not None and n_rays > max_rays:
-            rays_to_plot = rays_sorted[:max_rays]
-        else:
-            rays_to_plot = rays_sorted
-    elif max_rays is not None and n_rays > max_rays:
-        indices = np.linspace(0, n_rays - 1, max_rays, dtype=int)
-        rays_to_plot = [rays[i] for i in indices]
-    else:
-        rays_to_plot = rays
+    rays_to_plot = rays
 
     if ray_colors is None:
         ray_colors = {
@@ -455,68 +469,19 @@ def plot_rays(
     max_ray_depth = 0.0
     max_ray_range = 0.0
 
-    is_eigenrays = bool(getattr(field, 'is_eigen', False))
-    if truncate_at_receiver is None:
-        truncate_at_receiver = is_eigenrays
-
-    # Receiver targets: prefer the explicit kwarg, fall back to the
-    # geometry stored on the Rays result so ``rays.plot(env=env)`` works
-    # without re-passing the receiver that produced the run.
-    rcv_targets = []
-    if truncate_at_receiver:
-        if receiver is not None:
-            rr = np.atleast_1d(getattr(receiver, 'ranges', [])) / 1000.0
-            rd = np.atleast_1d(getattr(receiver, 'depths', []))
-        else:
-            rr = getattr(field, 'receiver_ranges', None)
-            rd = getattr(field, 'receiver_depths', None)
-            rr = np.atleast_1d(rr) / 1000.0 if rr is not None else np.array([])
-            rd = np.atleast_1d(rd) if rd is not None else np.array([])
-        for r in rr:
-            for d in rd:
-                rcv_targets.append((float(r), float(d)))
-
     rendered = 0
     for ray in rays_to_plot:
         if 'r' not in ray or 'z' not in ray:
             continue
         r_km = np.asarray(ray['r']) / 1000.0
         z = np.asarray(ray['z'])
-        miss_distance_m = None
-        if rcv_targets and len(r_km) > 1:
-            best_idx = None
-            best_d2_km = np.inf
-            for (rr_km, rz_m) in rcv_targets:
-                d2 = (r_km - rr_km) ** 2 + ((z - rz_m) / 1000.0) ** 2
-                k = int(np.argmin(d2))
-                if d2[k] < best_d2_km:
-                    best_d2_km = d2[k]
-                    best_idx = k
-            miss_distance_m = float(np.sqrt(best_d2_km) * 1000.0)
-            if best_idx is not None and best_idx + 1 < len(r_km):
-                r_km = r_km[: best_idx + 1]
-                z = z[: best_idx + 1]
-
-        if (closest_approach_threshold_m is not None
-                and miss_distance_m is not None
-                and miss_distance_m > closest_approach_threshold_m):
-            continue
         if len(z):
             max_ray_depth = max(max_ray_depth, float(np.max(z)))
         if len(r_km):
             max_ray_range = max(max_ray_range, float(np.max(r_km)))
 
         if color_by_bounces:
-            n_top = int(ray.get('n_top_bounces', 0) or 0)
-            n_bot = int(ray.get('n_bot_bounces', 0) or 0)
-            if n_top >= 1 and n_bot >= 1:
-                kind = 'both'
-            elif n_bot >= 1:
-                kind = 'bottom'
-            elif n_top >= 1:
-                kind = 'surface'
-            else:
-                kind = 'direct'
+            kind = bounce_class_of(ray)
             bounce_counts[kind] += 1
             color = ray_colors[kind]
         else:
@@ -562,7 +527,7 @@ def plot_rays(
     if receiver is not None:
         rd = np.atleast_1d(getattr(receiver, 'depths', []))
         rr = np.atleast_1d(getattr(receiver, 'ranges', []))
-    elif is_eigenrays:
+    elif bool(getattr(field, 'is_eigen', False)):
         rd_attr = getattr(field, 'receiver_depths', None)
         rr_attr = getattr(field, 'receiver_ranges', None)
         rd = np.atleast_1d(rd_attr) if rd_attr is not None else np.array([])
@@ -818,14 +783,9 @@ def plot_arrivals(
     counts = {'direct': 0, 'surface': 0, 'bottom': 0, 'both': 0}
     for tt, amp, ns, nb in zip(delays, amplitudes, n_top, n_bot):
         if color_by_bounces:
-            if ns >= 1 and nb >= 1:
-                kind = 'both'
-            elif nb >= 1:
-                kind = 'bottom'
-            elif ns >= 1:
-                kind = 'surface'
-            else:
-                kind = 'direct'
+            kind = bounce_class_of(
+                {'n_top_bounces': ns, 'n_bot_bounces': nb}
+            )
             color = bounce_colors[kind]
             counts[kind] += 1
         else:
@@ -2818,8 +2778,8 @@ def plot_transmission_loss_polar(
     --------
     plot_transmission_loss : Standard 2D rectangular TL plot
     """
-    if field.field_type not in ['tl', 'pressure']:
-        raise ValueError(f"Polar TL plot requires TL or pressure field, got {field.field_type}")
+    if not isinstance(field, PressureField):
+        raise ValueError(f"Polar TL plot requires PressureField, got {type(field).__name__}")
 
     # Extract theta from metadata
     theta = field.metadata.get('theta', None)

@@ -648,45 +648,25 @@ class PropagationModel(ABC):
         receiver: Optional[Receiver] = None,
         range_m: Optional[float] = None,
         depth_m: Optional[float] = None,
-        tolerance_m: Optional[float] = None,
-        max_rays: Optional[int] = None,
-        truncate: bool = True,
         **kwargs,
     ) -> Result:
         """Compute eigenrays — rays that arrive at the receiver(s).
 
-        Runs the model's eigenray solver (Bellhop's ``RunType='E'``) and,
-        for a single-point query, sorts the returned rays by closest-
-        approach miss distance, drops any beyond ``tolerance_m`` (default:
-        one acoustic wavelength), caps to ``max_rays``, and (when
-        ``truncate=True``) trims each kept polyline at its closest-
-        approach index for clean display.
+        Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Accepts
+        either a ``Receiver`` directly or a single-point shortcut via
+        ``range_m=``/``depth_m=`` (a 1-point Receiver is built
+        internally). Returns the raw :class:`Rays` from the solver.
 
-        Two usage patterns:
+        Filtering / sorting / truncation lives on :class:`Rays`. To select
+        the closest paths, chain a Rays method:
 
-        * Single point — pass ``range_m`` and ``depth_m``. A 1-point
-          ``Receiver`` is built internally and the cosmetic post-filter
-          fires.
-        * Multi-receiver — pass a ``Receiver`` directly. The solver
-          targets every receiver point; the post-filter is skipped (no
-          single anchor) and ``tolerance_m`` / ``max_rays`` / ``truncate``
-          are ignored. To narrow afterwards, call ``compute_eigenrays``
-          again for the specific point of interest.
+        >>> rays = bellhop.compute_eigenrays(env, source, range_m=2000, depth_m=30)
+        >>> close = rays.top_n_by_miss(8).truncate_at_receiver()
+        >>> direct = rays.filter_by_bounces(kind='direct')
+        >>> within = rays.filter_by_miss_distance(max_miss_m=15.0)
 
-        ``**kwargs`` forwards to :meth:`run`, so the full per-model
-        configuration surface (beam type, step size, etc.) is available.
-
-        Examples
-        --------
-        >>> bellhop = Bellhop(verbose=False, alpha=(-20, 20), n_beams=51)
-        >>> rays = bellhop.compute_eigenrays(env, source,
-        ...                                   range_m=2000, depth_m=30,
-        ...                                   tolerance_m=15, max_rays=8)
-        >>> for r in rays.rays:
-        ...     print(r['miss_distance_m'])
+        ``**kwargs`` forwards to :meth:`run`.
         """
-        from uacpy.core.results import Rays as _Rays
-
         if not self.supports_mode(RunMode.EIGENRAYS):
             raise UnsupportedFeatureError(
                 self.model_name,
@@ -710,54 +690,8 @@ class PropagationModel(ABC):
                 "Pass either receiver=… OR (range_m, depth_m), not both."
             )
 
-        result = self.run(env, source, receiver,
-                          run_mode=RunMode.EIGENRAYS, **kwargs)
-
-        if not single_point:
-            return result
-
-        if tolerance_m is None:
-            f = float(np.atleast_1d(source.frequencies)[0])
-            tolerance_m = DEFAULT_SOUND_SPEED / f if f > 0 else float('inf')
-
-        rr_km = range_m / 1000.0
-        scored = []
-        for ray in result.rays:
-            r_km = np.asarray(ray.get('r', [])) / 1000.0
-            z = np.asarray(ray.get('z', []))
-            if len(r_km) == 0:
-                continue
-            d2 = (r_km - rr_km) ** 2 + ((z - depth_m) / 1000.0) ** 2
-            k = int(np.argmin(d2))
-            miss_m = float(np.sqrt(d2[k]) * 1000.0)
-            if miss_m > tolerance_m:
-                continue
-            ray = dict(ray)
-            if truncate and k + 1 < len(r_km):
-                ray['r'] = np.asarray(ray['r'])[: k + 1]
-                ray['z'] = np.asarray(ray['z'])[: k + 1]
-            ray['miss_distance_m'] = miss_m
-            scored.append((miss_m, ray))
-
-        scored.sort(key=lambda t: t[0])
-        if max_rays is not None:
-            scored = scored[:max_rays]
-
-        meta = dict(result.metadata)
-        meta['receiver_range_m'] = float(range_m)
-        meta['receiver_depth_m'] = float(depth_m)
-        meta['tolerance_m'] = tolerance_m
-        return _Rays(
-            rays=[r for _, r in scored],
-            is_eigen=True,
-            receiver_depths=np.array([float(depth_m)]),
-            receiver_ranges=np.array([float(range_m)]),
-            model=result.model,
-            backend=result.backend,
-            source_depths=result.source_depths,
-            frequencies=result.frequencies,
-            metadata=meta,
-        )
+        return self.run(env, source, receiver,
+                        run_mode=RunMode.EIGENRAYS, **kwargs)
 
     def compute_reflection(
         self,

@@ -808,17 +808,35 @@ class SoundSpeedProfile:
         )
 
     def extend_to(self, depth_max: float) -> 'SoundSpeedProfile':
-        """Return a copy extended downward to ``depth_max`` if needed.
+        """Return a copy with the deepest sample sitting exactly at
+        ``depth_max``.
 
-        If ``depth_max`` exceeds the deepest current sample, a new row is
-        appended at ``depth_max`` carrying the deepest existing sound
-        speed value (constant extrapolation, the same convention used by
-        every Acoustics-Toolbox env writer).
+        Three cases:
+
+        * ``depth_max == depths[-1]`` — return ``self`` unchanged.
+        * ``depth_max > depths[-1]`` — append a new sample at
+          ``depth_max`` carrying the deepest existing sound speed
+          (constant extrapolation, the AT writer convention).
+        * ``depth_max < depths[-1]`` — truncate samples below
+          ``depth_max`` and interpolate a final sample exactly at
+          ``depth_max`` so writers that require ``ssp[-1] == env.depth``
+          (Bellhop / Kraken) round-trip without manual alignment.
         """
-        if depth_max <= self.depths[-1]:
+        if depth_max == self.depths[-1]:
             return self
-        new_depths = np.append(self.depths, depth_max)
-        new_data = np.vstack([self.data, self.data[-1:, :]])
+        if depth_max > self.depths[-1]:
+            new_depths = np.append(self.depths, depth_max)
+            new_data = np.vstack([self.data, self.data[-1:, :]])
+        else:
+            keep = self.depths < depth_max
+            kept_depths = self.depths[keep]
+            kept_data = self.data[keep]
+            interp_row = np.array([
+                np.interp(depth_max, self.depths, self.data[:, j])
+                for j in range(self.data.shape[1])
+            ])
+            new_depths = np.append(kept_depths, depth_max)
+            new_data = np.vstack([kept_data, interp_row[None, :]])
         return SoundSpeedProfile(
             depths=new_depths,
             data=new_data,

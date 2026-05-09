@@ -45,8 +45,8 @@ class TestComputeAPI:
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert isinstance(result_bellhop, PressureField) and result_bellhop.units == "dB"
-        assert isinstance(result_kraken, PressureField) and result_kraken.units == "dB"
+        assert isinstance(result_bellhop, PressureField)
+        assert isinstance(result_kraken, PressureField)
         assert result_bellhop.field_type == 'tl'
         assert result_kraken.field_type == 'tl'
 
@@ -120,16 +120,20 @@ class TestFieldMethods:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        # Test get_value
-        value = result.get_value(range_m=3000, depth=50)
-        assert isinstance(value, (float, np.floating))
+        # Test get_value — chain-able 1×1 PressureField. .tl auto-squeezes
+        # singleton dims so a point query returns a 0-D scalar; .p does
+        # the same for complex pressure.
+        point = result.get_value(range_m=3000, depth=50)
+        assert isinstance(point, PressureField)
+        assert point.tl.ndim == 0
+        assert isinstance(float(point.tl), float)
 
-        # Test get_at_range
-        values_at_range = result.get_at_range(3000)
+        # Test get_at_range — returns a sliced PressureField; .tl gives the array
+        values_at_range = result.get_at_range(3000).tl
         assert len(values_at_range) == len(receiver_small.depths)
 
         # Test get_at_depth
-        values_at_depth = result.get_at_depth(50)
+        values_at_depth = result.get_at_depth(50).tl
         assert len(values_at_depth) == len(receiver_small.ranges)
 
     def test_field_properties(self, simple_env, source, receiver_small):

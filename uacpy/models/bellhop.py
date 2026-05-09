@@ -186,6 +186,13 @@ _RUN_MODE_TO_BELLHOP_TYPE = {
     RunMode.TIME_SERIES: 'A',  # synthesised from arrivals
 }
 
+# Default broadband-synthesis grid when the user passes neither
+# `frequencies=` nor a custom waveform. 128 bins gives ~16 ms IFFT
+# resolution at 100 Hz centre / 2.0 bandwidth_factor; coarser users
+# should pass `frequencies=` explicitly.
+_DEFAULT_BROADBAND_N_FREQS = 128
+_DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 1.0
+
 
 class Bellhop(PropagationModel):
     """
@@ -485,11 +492,28 @@ class Bellhop(PropagationModel):
         arrivals_format : str, optional
             Per-call override: ``'ascii'`` or ``'binary'``. Only takes effect
             for ``run_mode=RunMode.ARRIVALS``.
+        frequencies : ndarray, optional
+            Explicit frequency vector (Hz) for ``RunMode.BROADBAND`` /
+            ``RunMode.TIME_SERIES``. When ``None`` and no
+            ``source_waveform`` is given, the wrapper auto-synthesises
+            ``_DEFAULT_BROADBAND_N_FREQS`` (128) bins linearly spaced over
+            ``[fc*(1 - bw), fc*(1 + bw)]`` with ``bw =
+            _DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (1.0). These module-level
+            constants govern the IFFT resolution of the resulting
+            ``TransferFunction``; pass ``frequencies=`` explicitly to
+            override.
+        source_waveform : ndarray, optional
+            Time-domain source waveform for delay-and-sum synthesis
+            (``RunMode.TIME_SERIES``). Requires ``sample_rate``.
+        sample_rate : float, optional
+            Sample rate (Hz) accompanying ``source_waveform``.
         **kwargs
             Advanced Cerveny/Simple-Gaussian beam parameters (used when
             ``beam_type`` is 'C', 'R' or 'S'):
             beam_width_type ('F'/'M'/'W'), beam_curvature ('D'/'S'/'Z'),
             eps_multiplier, r_loop, n_image, ib_win, component.
+            Broadband-only: ``time_window``, ``t_start``, ``n_freqs``,
+            ``bandwidth_factor`` (see :meth:`_run_broadband`).
 
         Returns
         -------
@@ -804,8 +828,8 @@ class Bellhop(PropagationModel):
         sample_rate: Optional[float] = None,
         time_window: Optional[float] = None,
         t_start: Optional[float] = None,
-        n_freqs: int = 128,
-        bandwidth_factor: float = 1.0,
+        n_freqs: int = _DEFAULT_BROADBAND_N_FREQS,
+        bandwidth_factor: float = _DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
         **kwargs
     ) -> Result:
         """
@@ -858,10 +882,12 @@ class Bellhop(PropagationModel):
             arrival. Only used when ``source_waveform`` is provided.
         n_freqs : int, optional
             Number of frequency points for transfer function mode.
-            Default: 128. Ignored when source_waveform is provided.
+            Default: ``_DEFAULT_BROADBAND_N_FREQS`` (128). Ignored when
+            source_waveform is provided.
         bandwidth_factor : float, optional
             Fractional bandwidth around fc. bandwidth_factor=1.0 means
-            [0, 2*fc]. Default: 1.0. Ignored when source_waveform is provided.
+            [0, 2*fc]. Default: ``_DEFAULT_BROADBAND_BANDWIDTH_FACTOR``
+            (1.0). Ignored when source_waveform is provided.
         **kwargs
             Additional Bellhop parameters (beam_type, etc.)
 
@@ -940,17 +966,11 @@ class Bellhop(PropagationModel):
                 depths=np.asarray(rz, dtype=float),
                 ranges=np.asarray(rr, dtype=float),
                 time=t_vec,
-                model=self.model_name,
-                backend='bellhop',
-                source_depths=sz,
-                frequencies=fc,
-                metadata={
-                    'dt': 1.0 / sample_rate,
-                    'fs': sample_rate,
-                    'nt': n_t,
-                    't_start': t_start_locked,
-                    'center_frequency': fc,
-                },
+                **self._result_kwargs(
+                    source, backend='bellhop', frequencies=fc,
+                    dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
+                    t_start=t_start_locked, center_frequency=fc,
+                ),
             )
 
         # ── Path B: frequency-domain transfer function ──

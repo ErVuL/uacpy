@@ -47,7 +47,6 @@ from uacpy.core.results import (
     Result, PressureField, TransferFunction,
     Modes, Covariance, Replicas, ReflectionCoefficient,
 )
-from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
     UnsupportedFeatureError,
@@ -341,26 +340,40 @@ class OAST(PropagationModel):
                 output_file = plt_file
 
                 self._log(f"Reading OAST output: {output_file}")
-                tl_data, metadata = read_oast_tl(
+                tl_data, native_depths, native_ranges, metadata = read_oast_tl(
                     filepath=output_file,
                     receiver_depths=receiver.depths,
-                    receiver_ranges=receiver.ranges
                 )
 
-                # Build a typed PressureField. OAST stashes the rest in metadata.
+                # Wrap the OAST native grid as a dB-units PressureField,
+                # then resample onto the user's receiver grid. OAST writes
+                # TL directly to disk so the units stay 'dB' (no
+                # complex-pressure available from the binary).
                 metadata.pop('model', None)
                 metadata.pop('backend', None)
-                result = PressureField(
-            units="dB",
+                native = PressureField(
+                    units="dB",
                     data=tl_data,
-                    depths=receiver.depths,
-                    ranges=receiver.ranges,
+                    depths=native_depths,
+                    ranges=native_ranges,
                     model='OAST',
                     backend='oast',
                     source_depths=np.atleast_1d(np.asarray(source.depths, dtype=float)),
                     frequencies=float(np.atleast_1d(source.frequencies)[0]),
                     metadata=metadata,
                 )
+                receiver_ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+                receiver_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+                ranges_match = (
+                    len(native_ranges) == len(receiver_ranges)
+                    and np.allclose(native_ranges, receiver_ranges)
+                )
+                if ranges_match:
+                    result = native
+                else:
+                    result = native.resample_to(receiver_ranges, receiver_depths)
+                    result.metadata['oast_native_ranges'] = native_ranges
+                    result.metadata['interpolated'] = True
 
                 self._log("OAST simulation complete")
                 return result
@@ -1182,22 +1195,20 @@ class OASP(PropagationModel):
                         sample_rate=sample_rate,
                     )
             else:
-                # COHERENT_TL: extract TL at source frequency.
+                # COHERENT_TL: pick the bin nearest the source frequency
+                # and return the complex narrowband pressure (transposed
+                # to the (n_depth, n_range) layout). Users get TL via
+                # ``field.tl`` or ``.to_tl()``.
                 freq_idx = 0
                 if len(trf_data['freq']) > 1:
                     freq_diff = np.abs(trf_data['freq'] - source.frequencies[0])
                     freq_idx = np.argmin(freq_diff)
 
-                tl_at_freq = transfer_func[freq_idx, :, :]
-                magnitude = np.abs(tl_at_freq)
-                magnitude[magnitude == 0] = PRESSURE_FLOOR
-                tl_db = -20 * np.log10(magnitude)
-                # Transpose to (n_depth, n_range).
-                tl_db = tl_db.T
+                p_at_freq = transfer_func[freq_idx, :, :].T  # (n_d, n_r)
 
                 result = PressureField(
-            units="dB",
-                    data=tl_db,
+                    units="complex",
+                    data=p_at_freq,
                     depths=trf_data['depths'],
                     ranges=trf_data['ranges'],
                     **self._result_kwargs(

@@ -523,7 +523,7 @@ class TestRangeDependentLayeredBottom:
         ram = RAM(verbose=False)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.data) < 100
+        assert 30 < np.nanmin(result.tl) < 100
 
 
 @pytest.mark.requires_binary
@@ -619,8 +619,8 @@ class TestIntegrationLayeredBottom:
         kf = KrakenField(verbose=False)
         result = kf.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.data) < 100
-        assert 50 < np.nanmax(result.data) < 200
+        assert 30 < np.nanmin(result.tl) < 100
+        assert 50 < np.nanmax(result.tl) < 200
 
     @pytest.mark.requires_binary
     def test_scooter_layered(self, layered_env, source, receiver):
@@ -629,7 +629,7 @@ class TestIntegrationLayeredBottom:
         scooter = Scooter(verbose=False)
         result = scooter.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.data) < 100
+        assert 30 < np.nanmin(result.tl) < 100
 
     @pytest.mark.requires_binary
     def test_kraken_layered_modes(self, layered_env, source, receiver):
@@ -664,8 +664,8 @@ class TestIntegrationRunWithBounce:
         result = bellhop.run_with_bounce(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
         assert result.data.shape == (10, 10)
-        assert 30 < np.nanmin(result.data) < 100
-        assert 50 < np.nanmax(result.data) < 200
+        assert 30 < np.nanmin(result.tl) < 100
+        assert 50 < np.nanmax(result.tl) < 200
 
 
 class TestIntegrationRAMRangeDependent:
@@ -691,7 +691,7 @@ class TestIntegrationRAMRangeDependent:
         ram = RAM(verbose=False)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.data) < 100
+        assert 30 < np.nanmin(result.tl) < 100
 
 
 class TestATEnvWriterLayered:

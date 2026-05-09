@@ -168,8 +168,8 @@ class TestSPARCModeComparison:
         # belongs in a dedicated benchmark with stored reference data.
         for r in (result_h, result_v):
             assert np.all(np.isfinite(r.data)), "non-finite TL"
-            assert np.all(r.data > 0), "non-positive TL"
-            assert np.all(r.data < 200), "TL exceeds 200 dB"
+            assert np.all(r.tl > 0), "non-positive TL"
+            assert np.all(r.tl < 200), "TL exceeds 200 dB"
 
 
     @pytest.mark.requires_binary
@@ -198,8 +198,8 @@ class TestSPARCModeComparison:
         sparc_R = SPARC(verbose=False, output_mode='R')
         result_R = sparc_R.run(sparc_simple_env, source_50hz, receiver_R)
 
-        tl_S = np.asarray(result_S.data).reshape(-1)[:len(ranges)]
-        tl_R = np.asarray(result_R.data).reshape(-1)[:len(ranges)]
+        tl_S = np.asarray(result_S.tl).reshape(-1)[:len(ranges)]
+        tl_R = np.asarray(result_R.tl).reshape(-1)[:len(ranges)]
 
         # Both must be finite and physical.
         assert np.all(np.isfinite(tl_S)), "snapshot TL contains non-finite values"

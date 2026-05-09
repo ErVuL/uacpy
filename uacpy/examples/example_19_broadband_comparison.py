@@ -310,10 +310,7 @@ def main():
     fig, ax = plt.subplots(figsize=(8, 6))
 
     for name, result in tf_models.items():
-        freqs = result.frequencies
-        center_idx = np.argmin(np.abs(freqs - source.frequencies[0]))
-        # New shape (n_d, n_r, n_f) → pick first range, freq slice on axis 2.
-        tl_at_fc = -20 * np.log10(np.abs(result.data[:, 0, center_idx]) + 1e-30)
+        tl_at_fc = result.to_tl(frequency=source.frequencies[0]).tl[:, 0]
         ax.plot(tl_at_fc, result.depths, label=name, linewidth=1.5)
 
     ax.set_xlabel('Transmission Loss (dB)')
@@ -357,18 +354,17 @@ def main():
             print(f"  {name}: FAILED ({e})")
 
     # Add Bellhop delay-and-sum result. Bellhop TIME_SERIES returns a
-    # TimeSeriesField over a 1×1 grid → data shape (1, 1, n_t); pick the
-    # single trace.
+    # TimeSeriesField over a 1×1 grid; extract the single trace.
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        trace = r.data[0, 0, :] if r.data.ndim == 3 else r.data
+        trace = r.get_trace(target_depth, target_range).data
         ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, trace)
 
-    # Add SPARC (depth 0, last range). New shape: (n_d, n_r, n_t) — pick
-    # depth 0, last range, all time samples.
+    # Add SPARC at the first depth and last range.
     if 'SPARC' in results:
         r = results['SPARC']
-        ts_results['SPARC'] = (r.metadata['time'] * 1000, r.data[0, -1, :])
+        trace = r.get_trace(float(r.depths[0]), float(r.ranges[-1])).data
+        ts_results['SPARC'] = (r.metadata['time'] * 1000, trace)
 
     if ts_results:
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
@@ -424,8 +420,7 @@ def main():
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
         t_ms = r.metadata['time'] * 1000
-        # Bellhop TIME_SERIES is a TimeSeriesField over a 1×1 grid → (1, 1, n_t).
-        data = r.data[0, 0, :] if r.data.ndim == 3 else r.data
+        data = r.get_trace(target_depth, target_range).data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
 

@@ -256,9 +256,9 @@ def main():
         print(f"\nModels run: {len(results)}")
         for model_name, result in results.items():
             if result is not None:
-                tl_min = result.data.min()
-                tl_max = result.data.max()
-                tl_mean = result.data.mean()
+                tl_min = result.tl.min()
+                tl_max = result.tl.max()
+                tl_mean = result.tl.mean()
                 print(f"  {model_name:12s}: TL range [{tl_min:5.1f}, {tl_max:5.1f}] dB, mean = {tl_mean:5.1f} dB")
             else:
                 print(f"  {model_name:12s}: Failed")

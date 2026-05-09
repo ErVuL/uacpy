@@ -21,18 +21,20 @@ import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, List, Any, Optional
 
-from uacpy.core.results import PressureField, Arrivals, Rays
-from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
+from uacpy.core.results import PressureField, Arrivals, Rays, TimeSeriesField
 from uacpy.io._fortran_helpers import read_vector as _read_vector
 
 
 def read_shd_file(filepath: Union[str, Path]) -> PressureField:
-    """Read a single-frequency ``.shd`` file as a typed :class:`PressureField`.
+    """Read a single-frequency ``.shd`` file as a complex :class:`PressureField`.
 
-    Thin wrapper around :func:`read_shd_bin` that converts the dict
-    return into a dB-units PressureField. Multi-frequency ``.shd`` files raise
-    ``ValueError`` — call ``read_shd_bin`` directly and build a
-    :class:`TransferFunction` from its complex pressure cube instead.
+    Thin wrapper around :func:`read_shd_bin` that returns the first
+    bearing / first source slice of the complex pressure cube as a
+    ``units='complex'`` PressureField. Use ``field.tl`` (or
+    ``field.to_tl()``) to materialise transmission loss in dB.
+    Multi-frequency ``.shd`` files raise ``ValueError`` — call
+    ``read_shd_bin`` directly and build a :class:`TransferFunction` from
+    its complex pressure cube instead.
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
@@ -48,13 +50,11 @@ def read_shd_file(filepath: Union[str, Path]) -> PressureField:
 
     pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
     p = pressure[0, 0, :, :]                 # first bearing, first source
-    p_abs = np.maximum(np.abs(p), PRESSURE_FLOOR)
-    tl_data = np.clip(-20.0 * np.log10(p_abs), None, TL_MAX_DB)
 
     pos = shd['Pos']
     return PressureField(
-            units="dB",
-        data=tl_data,
+        units="complex",
+        data=p,
         ranges=pos['r']['r'],
         depths=pos['r']['z'],
         model='', backend='',
@@ -1414,81 +1414,43 @@ def rts_to_tl(rts_data: Dict[str, Any], freq: float, method: str = "fft") -> Tup
     """
     Convert time series to transmission loss at specified frequency.
 
-    Parameters
-    ----------
-    rts_data : dict
-        Time series data from read_rts_file()
-    freq : float
-        Frequency to extract in Hz
-    method : str, optional
-        Method: 'fft' or 'goertzel'. Default is 'fft'.
-
-    Returns
-    -------
-    tl : ndarray
-        Transmission loss in dB, shape (nr,)
-    ranges : ndarray
-        Range vector in meters
-
-    Notes
-    -----
-    Uses FFT to transform time series to frequency domain, then extracts
-    the amplitude at the specified frequency.
-
-    The FFT approach:
-    1. Apply window to time series (Hanning)
-    2. FFT to frequency domain
-    3. Find bin closest to target frequency
-    4. Extract amplitude
-    5. Convert to TL: TL = -20*log10(|p|)
+    .. deprecated::
+        Use :meth:`uacpy.core.results.TimeSeriesField.extract_tone` —
+        build a ``TimeSeriesField`` from :func:`read_rts_file` and call
+        ``ts.extract_tone(freq)`` to recover complex pressure (then
+        ``.tl`` for dB). This wrapper is kept only as a transitional
+        shim until SPARC and ``io/__init__.py`` consumers migrate.
     """
     p = rts_data["p"]
     dt = rts_data["dt"]
-    time = rts_data["time"]
     ranges = rts_data["ranges"]
 
     nt, nr = p.shape
 
     if method == "fft":
-        # Hanning window suppresses leakage from SPARC's finite observation
-        # window; the 2/sum(window) normalisation gives back the full
-        # steady-state complex amplitude (rfft sees only the +ω side of the
-        # cosine's symmetric Dirac pair, so a leading 2 is required).
         window = np.hanning(nt)
-
         p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
         freqs = np.fft.rfftfreq(nt, dt)
         freq_idx = np.argmin(np.abs(freqs - freq))
         p_at_freq = 2.0 * p_freq[freq_idx, :] / np.sum(window)
-
     elif method == "goertzel":
-        # Single-frequency extraction; cheaper than rfft when only one
-        # bin is wanted. Final 2/nt normalisation matches the rfft path.
         omega = 2 * np.pi * freq
         coeff = 2 * np.cos(omega * dt)
-
         p_at_freq = np.zeros(nr, dtype=complex)
-
         for ir in range(nr):
             s0 = 0.0
             s1 = 0.0
             s2 = 0.0
-
             for it in range(nt):
                 s0 = p[it, ir] + coeff * s1 - s2
                 s2 = s1
                 s1 = s0
-
             p_at_freq[ir] = s0 - s1 * np.exp(-1j * omega * dt)
-
         p_at_freq = 2.0 * p_at_freq / nt
-
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    # Convert to transmission loss
     tl = -20 * np.log10(np.abs(p_at_freq) + 1e-37)
-
     return tl, ranges
 
 

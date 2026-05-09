@@ -102,7 +102,7 @@ def quick_rays(field: Field, env: Optional[Environment] = None,
     >>> rays = bellhop.compute_rays(env, source, rcv)
     >>> quick_rays(rays, env, n_rays=100)
     """
-    fig, ax = field.plot(env=env, max_rays=n_rays)
+    fig, ax = field.filter_nfirst(n_rays).plot(env=env)
 
     if save:
         fig.savefig(save, dpi=150, bbox_inches='tight')
@@ -313,9 +313,8 @@ def quick_report(results: Dict[str, Field], env: Environment,
     ax_row2 = fig.add_subplot(gs[1, :])
     depth = list(results.values())[0].depths[len(list(results.values())[0].depths) // 3]
     for model_name, field in results.items():
-        r_idx = np.argmin(np.abs(field.depths - depth))
         ranges_km = field.ranges / 1000.0
-        tl_slice = field.data[r_idx, :]
+        tl_slice = field.get_at_depth(depth).tl
         ax_row2.plot(ranges_km, tl_slice, label=model_name, linewidth=2)
     ax_row2.set_xlabel('Range (km)', fontsize=11)
     ax_row2.set_ylabel('TL (dB)', fontsize=11)
@@ -329,7 +328,7 @@ def quick_report(results: Dict[str, Field], env: Environment,
     model_names = list(results.keys())
     stats = []
     for field in results.values():
-        data = field.data[np.isfinite(field.data)]
+        data = field.tl[np.isfinite(field.tl)]
         stats.append([np.mean(data), np.std(data), np.min(data), np.max(data)])
     stats = np.array(stats)
 

@@ -244,8 +244,8 @@ class TestCollinsBinaries:
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
         # Sensible TL range (no gain, bounded loss)
-        assert 0 < result.data.min() < 60
-        assert result.data.max() < 200
+        assert 0 < result.tl.min() < 60
+        assert result.tl.max() < 200
 
     def test_rams_elastic_runs(self):
         env = _env(bottom=_elastic_bottom())

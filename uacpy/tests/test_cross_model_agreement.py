@@ -318,37 +318,19 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         ranges=np.linspace(500.0, 8000.0, 30),
     )
 
-    def _bb_to_fc_tl(field):
-        # Pick the centre-frequency slice from a transfer-function field
-        # and convert |H(fc, ·)| to dB for comparison.
-        i_fc = int(np.argmin(np.abs(field.frequencies - 50.0)))
-        return -20.0 * np.log10(np.abs(field.data[:, :, i_fc]) + 1e-20)
-
     def reference(env_unused, src_, rcv_):
         kf = KrakenField(verbose=False).run(
             env_halfspace, src_, rcv_,
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
         )
-        # Inject the centre-freq TL into a fake 'tl' Field-like object the
-        # comparator already understands. Build an ad-hoc Field with TL only.
-        from uacpy.core.results import PressureField
-        return PressureField(units="dB", 
-            data=_bb_to_fc_tl(kf),
-            depths=kf.depths, ranges=kf.ranges,
-            model='KrakenField', frequencies=50.0,
-        )
+        return kf.to_tl(frequency=50.0)
 
     def rams_bb(env_unused, src_, rcv_):
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=2.0)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import PressureField
-        return PressureField(units="dB", 
-            data=_bb_to_fc_tl(hf),
-            depths=hf.depths, ranges=hf.ranges,
-            model='RAM(rams)', frequencies=50.0,
-        )
+        return hf.to_tl(frequency=50.0)
 
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
@@ -392,10 +374,6 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ranges=np.linspace(500.0, 6000.0, 30),
     )
 
-    def _bb_to_fc_tl(field):
-        i_fc = int(np.argmin(np.abs(field.frequencies - 200.0)))
-        return -20.0 * np.log10(np.abs(field.data[:, :, i_fc]) + 1e-20)
-
     def reference(env_, src_, rcv_):
         bh = Bellhop(verbose=False).run(
             env_, src_, rcv_, run_mode=RunMode.COHERENT_TL,
@@ -406,12 +384,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=2.0)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import PressureField
-        return PressureField(units="dB", 
-            data=_bb_to_fc_tl(hf),
-            depths=hf.depths, ranges=hf.ranges,
-            model='RAM(ramsurf)', frequencies=200.0,
-        )
+        return hf.to_tl(frequency=200.0)
 
     return Scenario(
         name='altimetry-broadband-200Hz-fc-slice',
@@ -483,8 +456,8 @@ def test_cross_model_agreement(scenario: Scenario, label: str, callable_,
 
     # Pick the receiver-depth and ranges shared by both (single-depth
     # scenarios are the simple case; for multi-depth, take depth 0).
-    ref_tl = np.asarray(ref_field.data).squeeze()
-    cmp_tl = np.asarray(cmp_field.data).squeeze()
+    ref_tl = np.asarray(ref_field.tl)
+    cmp_tl = np.asarray(cmp_field.tl)
     if ref_tl.ndim == 2:
         ref_tl = ref_tl[0]
     if cmp_tl.ndim == 2:

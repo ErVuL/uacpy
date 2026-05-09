@@ -25,47 +25,45 @@ import warnings
 def read_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
-    receiver_ranges: np.ndarray,
-    interpolate: bool = True
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
-    Read OAST transmission loss output
+    Read OAST transmission loss output on its native grid.
 
     OAST outputs two files:
     - .plp: Plot metadata (ASCII with binary markers) - contains grid info
     - .plt: Actual TL data (pure ASCII, one value per line)
 
-    OAST uses FFT-based automatic range sampling, so we:
-    1. Parse .plp to get OAST's actual grid
-    2. Read .plt data on that grid
-    3. Optionally interpolate onto requested receiver grid
+    OAST writes TL (in dB) directly to disk; this reader returns the
+    native ``(n_depths, n_ranges)`` TL grid plus the depth and range
+    axes. Resampling onto a user receiver grid is the caller's job —
+    use :meth:`PressureField.resample_to` after wrapping.
 
     Parameters
     ----------
     filepath : str or Path
         Path to .plt or .plp file (base name works for both)
     receiver_depths : ndarray
-        Requested receiver depths in meters
-    receiver_ranges : ndarray
-        Requested receiver ranges in meters
-    interpolate : bool, optional
-        If True, interpolate OAST grid onto receiver grid. Default is True.
+        Receiver depth axis (m). OAST writes TL on this depth grid; the
+        depth axis is taken verbatim from the user.
 
     Returns
     -------
     tl_data : ndarray
-        Transmission loss data, shape (n_depths, n_ranges)
+        Transmission loss data on the OAST native grid, shape
+        ``(n_depths, n_ranges_native)``.
+    depths : ndarray
+        Depth axis (m), == ``receiver_depths``.
+    ranges : ndarray
+        OAST's native range grid in metres.
     metadata : dict
-        Metadata including:
-        - 'oast_native_ranges': OAST's range grid
-        - 'oast_grid_shape': Shape of OAST's native grid
-        - 'model': 'OAST'
+        ``{'model': 'OAST', 'oast_grid_shape': (n_d, n_r_native)}``.
 
-    Examples
-    --------
-    >>> tl, meta = read_oast_tl('test.plt', depths, ranges)
-    >>> print(tl.shape)
-    (40, 100)
+    Raises
+    ------
+    IOError
+        If the ``.plp`` file is missing or cannot be parsed (OAST chooses
+        its own range grid via FFT-based sampling, so the native grid
+        cannot be reconstructed without it).
     """
     filepath = Path(filepath)
 
@@ -96,35 +94,18 @@ def read_oast_tl(
     else:
         raise FileNotFoundError(f"OAST TL data file not found. Checked: {plt_file}, {f020_file}")
 
-    # Parse .plp file to get OAST's grid
-    oast_grid = None
-    if plp_file.exists():
-        try:
-            oast_grid = _parse_oast_plp(plp_file)
-        except Exception as e:
-            warnings.warn(
-                f"Could not parse .plp file: {e}. "
-                "Assuming grid matches receiver specification.",
-                UserWarning, stacklevel=2
-            )
+    # Parse .plp file to get OAST's native range grid. The grid is
+    # mandatory: OAST chooses its own ranges via FFT-based sampling, so
+    # without .plp we have no way to know what range each TL value
+    # corresponds to. Raise rather than fabricate.
+    if not plp_file.exists():
+        raise IOError(
+            f"OAST .plp grid file not found: {plp_file}. "
+            "Without it the native range grid cannot be reconstructed."
+        )
+    oast_grid = _parse_oast_plp(plp_file)
 
-    if oast_grid is None:
-        # If .plp doesn't exist or couldn't be parsed, use receiver grid
-        if not plp_file.exists():
-            warnings.warn(
-                f".plp file not found: {plp_file}. "
-                "Cannot determine OAST's native grid. "
-                "Assuming grid matches receiver specification.",
-                UserWarning, stacklevel=2
-            )
-        oast_grid = {
-            'n_ranges': len(receiver_ranges),
-            'ranges': receiver_ranges,
-            'range_offset_km': receiver_ranges[0] / 1000.0,
-            'range_increment_km': (receiver_ranges[-1] - receiver_ranges[0]) / (len(receiver_ranges) - 1) / 1000.0 if len(receiver_ranges) > 1 else 0.0
-        }
-
-    n_depths_oast = len(receiver_depths)  # OAST uses our receiver depths
+    n_depths_oast = len(receiver_depths)  # OAST writes TL on this depth grid
     n_ranges_oast = oast_grid['n_ranges']
     ranges_oast = oast_grid['ranges']
 
@@ -160,47 +141,11 @@ def read_oast_tl(
     # Take expected amount and reshape
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 
-    # Interpolate onto requested receiver grid if requested
-    # Check if grids match (same shape and values)
-    ranges_match = (len(ranges_oast) == len(receiver_ranges) and
-                   np.allclose(ranges_oast, receiver_ranges))
-
-    if interpolate and not ranges_match:
-        from scipy.interpolate import RegularGridInterpolator
-
-        # Create interpolator
-        interp = RegularGridInterpolator(
-            (receiver_depths, ranges_oast),
-            tl_oast,
-            method='linear',
-            bounds_error=False,
-            fill_value=None
-        )
-
-        # Create grid for requested points
-        mesh_d, mesh_r = np.meshgrid(receiver_depths, receiver_ranges, indexing='ij')
-        points = np.array([mesh_d.ravel(), mesh_r.ravel()]).T
-
-        # Interpolate
-        tl_interp = interp(points).reshape(len(receiver_depths), len(receiver_ranges))
-
-        metadata = {
-            'model': 'OAST',
-            'oast_native_ranges': ranges_oast,
-            'oast_grid_shape': (n_depths_oast, n_ranges_oast),
-            'interpolated': True
-        }
-
-        return tl_interp, metadata
-    else:
-        metadata = {
-            'model': 'OAST',
-            'oast_native_ranges': ranges_oast,
-            'oast_grid_shape': (n_depths_oast, n_ranges_oast),
-            'interpolated': False
-        }
-
-        return tl_oast, metadata
+    metadata = {
+        'model': 'OAST',
+        'oast_grid_shape': (n_depths_oast, n_ranges_oast),
+    }
+    return tl_oast, np.asarray(receiver_depths, dtype=float), ranges_oast, metadata
 
 
 def _parse_oast_plp(plp_file: Path) -> Dict:

@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import PressureField, TransferFunction
-from uacpy.core.constants import PRESSURE_FLOOR
 
 
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -346,11 +345,9 @@ def grn_to_field(
         source_type=source_type, spectrum=spectrum, cmin=cmin, cmax=cmax,
     )
 
-    tl = -20 * np.log10(np.abs(p_out) + PRESSURE_FLOOR)
-
     return PressureField(
-            units="dB",
-        data=tl,
+        units="complex",
+        data=p_out,
         ranges=ranges,
         depths=grn_data["rd"],
         model='', backend='',
@@ -376,23 +373,19 @@ def sparc_snapshot_to_field(
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
 ) -> PressureField:
-    """Extract steady-state TL at ``frequency`` from a SPARC snapshot file.
+    """Extract steady-state complex pressure at ``frequency`` from a SPARC snapshot.
 
     SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
     of the wavenumber-domain Green's function (``Green(itout, irz, ik)``,
-    ``sparc.f90:283-289``). To recover transmission loss at the source
-    frequency we:
+    ``sparc.f90:283-289``). To recover the steady-state pressure at the
+    source frequency we:
 
-    1. Take the FFT along the snapshot-time axis to obtain
-       :math:`G(f, k, z)`.
+    1. FFT along the snapshot-time axis to obtain :math:`G(f, k, z)`.
     2. Pick the bin closest to the source ``frequency``.
-    3. Hankel-transform the resulting :math:`G(k, z)` slab to range.
+    3. Hankel-transform :math:`G(k, z)` to range.
 
-    This mirrors the "treat snapshots as multi-frequency Green's function
-    pages" interpretation used by ``Matlab/Scooter/fieldsco.m``, but
-    simplified to the single source frequency the user is interested in
-    (the rest of the spectrum is dominated by the pulse's bandwidth — see
-    ``sparc.htm`` PULSE description).
+    Returns a complex :class:`PressureField` (``units='complex'``); use
+    ``.tl`` or ``.to_tl()`` to materialise transmission loss in dB.
     """
     if not grn_data["is_sparc"]:
         raise ValueError(
@@ -416,9 +409,6 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    # FFT along the time axis. G is complex (SPARC stores complex Green's
-    # functions per wavenumber), so we use the full FFT and pick the bin
-    # closest to the source frequency on the positive-frequency side.
     G_freq = np.fft.fft(G, axis=0) * dt              # scale to spectral density
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
@@ -444,11 +434,9 @@ def sparc_snapshot_to_field(
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
 
-    tl = -20 * np.log10(np.abs(p_out) + PRESSURE_FLOOR)
-
     return PressureField(
-            units="dB",
-        data=tl,
+        units="complex",
+        data=p_out,
         ranges=ranges,
         depths=grn_data["rd"],
         model='', backend='',

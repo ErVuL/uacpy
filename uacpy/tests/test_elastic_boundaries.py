@@ -82,8 +82,8 @@ class TestElasticBoundaryAutoDetection:
         assert result.field_type == 'tl'
 
         # TL should be reasonable (not all zeros, not all inf)
-        assert np.any(result.data > 0)
-        assert np.all(result.data < 200)  # Reasonable TL range
+        assert np.any(result.tl > 0)
+        assert np.all(result.tl < 200)  # Reasonable TL range
 
     def test_krakenfield_fluid_bottom(self, fluid_env, source, receiver_small):
         """Test that KrakenField works with fluid bottom (uses regular Kraken)."""
@@ -102,8 +102,9 @@ class TestElasticBoundaryAutoDetection:
         result_elastic = krakenfield.compute_tl(elastic_env, source, receiver_small)
         result_fluid = krakenfield.compute_tl(fluid_env, source, receiver_small)
 
-        # Should have different TL values
-        diff = np.abs(result_elastic.data - result_fluid.data)
+        # Should have different TL values (compare in dB; .tl works regardless
+        # of underlying units storage)
+        diff = np.abs(result_elastic.tl - result_fluid.tl)
         mean_diff = np.nanmean(diff)
 
         # Elastic bottom should have some different loss characteristics

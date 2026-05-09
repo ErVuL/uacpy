@@ -304,57 +304,20 @@ def write_ssp_section(
     n_mesh: int = 0,
     roughness: float = 0.0
 ) -> None:
+    """Write the SSP section with the deepest sample aligned to
+    ``bottom_depth`` (rounded to the writer's ``.1f`` header precision).
+
+    Both the header line and the SSP samples go through the same rounded
+    depth so the AT parser sees ``ssp[-1].z == header.z_max`` exactly.
+    Alignment delegates to :meth:`SoundSpeedProfile.extend_to`, which
+    truncates with linear interpolation when the SSP runs past
+    ``bottom_depth``, or extends by constant extrapolation when it falls
+    short.
     """
-    Write SSP section with proper depth clipping
-
-    Handles the critical issue of SSP depths exceeding bottom depth
-    due to floating-point precision. Ensures SSP is clipped to the
-    rounded bottom depth that will be written to the file.
-
-    Parameters
-    ----------
-    f : TextIO
-        Open file handle
-    env : Environment
-        Environment with SSP data
-    bottom_depth : float
-        Bottom depth in meters
-    n_mesh : int, optional
-        Number of mesh points (0 = automatic)
-    roughness : float, optional
-        Surface/interface roughness in meters
-    """
-    # Write mesh parameters
-    f.write(f"{n_mesh}  {roughness:.1f}  {bottom_depth:.1f}\n")
-
-    # CRITICAL: Match precision of written bottom depth
-    # Bottom depth is written with .1f, so clip SSP to that rounded value
     bottom_depth_rounded = float(f"{bottom_depth:.1f}")
+    f.write(f"{n_mesh}  {roughness:.1f}  {bottom_depth_rounded}\n")
 
-    # Build SSP array with clipping and duplicate removal
-    ssp_to_write = []
-    prev_depth = None
-
-    for depth, c in env.ssp.to_pairs():
-        # Clip SSP depth to not exceed rounded bottom depth
-        if depth > bottom_depth_rounded:
-            depth = bottom_depth_rounded
-
-        # Skip duplicate depths (after clipping)
-        if prev_depth is not None and abs(depth - prev_depth) < 1e-6:
-            continue
-
-        ssp_to_write.append((depth, c))
-        prev_depth = depth
-
-    # Ensure we have SSP at exactly bottom depth
-    if len(ssp_to_write) > 0 and ssp_to_write[-1][0] < bottom_depth_rounded:
-        # Extend to bottom with last sound speed
-        last_c = ssp_to_write[-1][1]
-        ssp_to_write.append((bottom_depth_rounded, last_c))
-
-    # Write SSP data (Kraken format: depth sound_speed /)
-    for depth, c in ssp_to_write:
+    for depth, c in env.ssp.extend_to(bottom_depth_rounded).to_pairs():
         if env.volume_attenuation > 0:
             f.write(f"  {depth:.6f} {c:.6f} {env.volume_attenuation:.6f} /\n")
         else:

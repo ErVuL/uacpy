@@ -108,7 +108,7 @@ def main():
         try:
             field = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
             im = ax.pcolormesh(
-                field.ranges / 1000.0, field.depths, field.data,
+                field.ranges / 1000.0, field.depths, field.tl,
                 shading='auto', cmap='jet_r', vmin=30, vmax=110,
             )
             ax.invert_yaxis()

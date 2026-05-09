@@ -197,14 +197,8 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
 
     # Compute dynamic colorbar limits if not provided
     if vmin is None or vmax is None:
-        all_tl_values = []
-        for result in results.values():
-            all_tl_values.extend(result.data.flatten())
-        all_tl_values = np.array(all_tl_values)
-        # Filter out NaN and Inf values before computing percentiles
+        all_tl_values = np.concatenate([r.tl.ravel() for r in results.values()])
         all_tl_values = all_tl_values[np.isfinite(all_tl_values)]
-        # Filter out extreme outliers (Bellhop sentinel value is 740 dB)
-        # Cap at 200 dB which is already extremely high for TL
         all_tl_values = all_tl_values[all_tl_values < 200]
 
         if len(all_tl_values) == 0:
@@ -230,7 +224,7 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
         ax = axes[idx]
 
         # Mask TL data below seafloor (if applicable)
-        tl_data = result.data.copy()
+        tl_data = result.tl.copy()
         if env.bathymetry is not None and len(env.bathymetry) > 0:
             # Interpolate bathymetry depth for each range
             from scipy.interpolate import interp1d
@@ -302,8 +296,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     # TL vs Range at source depth
     ax = axes[0]
     for name, result in results.items():
-        depth_idx = np.argmin(np.abs(result.depths - source_depth))
-        tl_vs_range = result.data[depth_idx, :]
+        tl_vs_range = result.get_at_depth(source_depth).tl
         ax.plot(result.ranges/1000, tl_vs_range, linewidth=2.5,
                label=name, color=COLORS.get(name, None), alpha=0.8)
 
@@ -317,8 +310,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     ax = axes[1]
     for name, result in results.items():
         mid_range_km = np.median(result.ranges) / 1000
-        range_idx = np.argmin(np.abs(result.ranges/1000 - mid_range_km))
-        tl_vs_depth = result.data[:, range_idx]
+        tl_vs_depth = result.get_at_range(mid_range_km * 1000.0).tl
         ax.plot(tl_vs_depth, result.depths, linewidth=2.5,
                label=name, color=COLORS.get(name, None), alpha=0.8)
 
@@ -349,8 +341,7 @@ def plot_model_statistics(results: Dict, source_depth: float):
     model_names = list(results.keys())
     stats = []
     for name, result in results.items():
-        depth_idx = np.argmin(np.abs(result.depths - source_depth))
-        tl_vs_range = result.data[depth_idx, :]
+        tl_vs_range = result.get_at_depth(source_depth).tl
         stats.append([np.mean(tl_vs_range), np.std(tl_vs_range)])
 
     stats = np.array(stats)
@@ -380,11 +371,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
                     result_i = results[model_names[i]]
                     result_j = results[model_names[j]]
 
-                    depth_idx_i = np.argmin(np.abs(result_i.depths - source_depth))
-                    depth_idx_j = np.argmin(np.abs(result_j.depths - source_depth))
-
-                    tl_i = result_i.data[depth_idx_i, :]
-                    tl_j = result_j.data[depth_idx_j, :]
+                    tl_i = result_i.get_at_depth(source_depth).tl
+                    tl_j = result_j.get_at_depth(source_depth).tl
 
                     # Interpolate to common grid
                     if len(tl_i) != len(tl_j):
@@ -472,7 +460,7 @@ def create_example_report(example_num: int, title: str, description: str,
     print(f"\nModels tested: {len(results)}")
     for name, result in results.items():
         if result is not None:
-            print(f"  {name:15s}: TL range {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+            print(f"  {name:15s}: TL range {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
         else:
             print(f"  {name:15s}: Skipped")
 

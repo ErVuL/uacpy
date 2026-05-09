@@ -27,7 +27,7 @@ class TestBellhop:
         assert result.field_type == 'tl'
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
         assert np.all(np.isfinite(result.data))
-        assert np.all(result.data > 0)  # TL should be positive
+        assert np.all(result.tl > 0)  # TL should be positive
 
     def test_bellhop_range_dependent(self, range_dependent_env, source, receiver_small):
         """Test Bellhop with range-dependent environment."""

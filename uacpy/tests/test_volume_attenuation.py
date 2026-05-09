@@ -75,7 +75,7 @@ class TestVolumeAttenuation:
 
         assert result_thorp.field_type == 'tl'
         observed_extra = (
-            np.mean(result_thorp.data[:, -1]) - np.mean(result_no_atten.data[:, -1])
+            np.mean(result_thorp.tl[:, -1]) - np.mean(result_no_atten.tl[:, -1])
         )
         # Sign must be right (Thorp adds loss, never reduces it).
         assert observed_extra > 0, (

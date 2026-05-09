@@ -162,7 +162,7 @@ def main():
             try:
                 field = model.run(env, source, receiver)
                 results[case_label][model_label] = field
-                print(f"    {model_label:15s} TL: [{np.nanmin(field.data):.1f}, {np.nanmax(field.data):.1f}] dB")
+                print(f"    {model_label:15s} TL: [{np.nanmin(field.tl):.1f}, {np.nanmax(field.tl):.1f}] dB")
             except Exception as e:
                 print(f"    {model_label:15s} ERROR: {e}")
                 results[case_label][model_label] = None
@@ -178,7 +178,7 @@ def main():
         for kf_label in ['KF adiabatic', 'KF coupled']:
             f_kf = results[case_label].get(kf_label)
             if f_ram is not None and f_kf is not None:
-                diff = f_ram.data[mid_idx, :] - f_kf.data[mid_idx, :]
+                diff = f_ram.tl[mid_idx, :] - f_kf.tl[mid_idx, :]
                 print(f"    {case_label:15s} {kf_label:15s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
                       f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
 
@@ -191,7 +191,7 @@ def main():
     for case_label in results:
         for field in results[case_label].values():
             if field is not None:
-                all_tl.append(field.data)
+                all_tl.append(field.tl)
     if all_tl:
         vmin_shared = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax_shared = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -227,7 +227,7 @@ def main():
         for key in ['RAM', 'KF adiabatic', 'KF coupled']:
             f = results[case_label].get(key)
             if f is not None:
-                ax.plot(ranges_km, f.data[mid_idx, :], color=colors[key],
+                ax.plot(ranges_km, f.tl[mid_idx, :], color=colors[key],
                         label=key)
         ax.set_xlabel('Range (km)')
         ax.set_ylabel('TL (dB)')
@@ -249,7 +249,7 @@ def main():
         for diff_idx, (kf_key, _) in enumerate(diff_panels):
             f_kf = results[case_label].get(kf_key)
             if f_ram is not None and f_kf is not None:
-                d = np.asarray(f_ram.data) - np.asarray(f_kf.data)
+                d = np.asarray(f_ram.tl) - np.asarray(f_kf.tl)
                 finite = d[np.isfinite(d)]
                 if finite.size:
                     v = max(5.0, float(np.nanpercentile(np.abs(finite), 95)))

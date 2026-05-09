@@ -68,26 +68,28 @@ def main():
     print()
 
     print("Running Bellhop ...")
-    tl_bh = Bellhop(verbose=False).run(
+    res_bh = Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.COHERENT_TL,
-    ).data.squeeze()
+    )
+    tl_bh = res_bh.tl[0]
 
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-    tl_ram = res_ram.data.squeeze()
+    tl_ram = res_ram.tl[0]
     print(f"  → backend: {res_ram.metadata['backend']}")
     print()
 
+    from uacpy.core.metrics import tl_rmse, tl_max_error, tl_bias
     ranges = rcv.ranges
     rmin, rmax = 1000.0, 5000.0
+    rmse = tl_rmse(res_ram, res_bh, range_window=(rmin, rmax))
+    mxe = tl_max_error(res_ram, res_bh, range_window=(rmin, rmax))
+    bias = tl_bias(res_ram, res_bh, range_window=(rmin, rmax))
     mask = (
         (ranges >= rmin) & (ranges <= rmax)
         & np.isfinite(tl_bh) & np.isfinite(tl_ram)
     )
     diff = tl_ram[mask] - tl_bh[mask]
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-    bias = float(np.mean(diff))
-    mxe = float(np.max(np.abs(diff)))
     median_abs = float(np.median(np.abs(diff)))
 
     print(f"Agreement in {rmin/1000:.1f}-{rmax/1000:.1f} km window "

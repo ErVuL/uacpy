@@ -138,8 +138,7 @@ def main():
 
     # Plot 2: TL vs Range (at source depth)
     ax = axes[0, 1]
-    depth_idx = np.argmin(np.abs(result.depths - source.depths[0]))
-    tl_vs_range = result.data[depth_idx, :]
+    tl_vs_range = result.get_at_depth(source.depths[0]).tl
     ax.plot(result.ranges/1000, tl_vs_range, 'b-', linewidth=2)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -154,8 +153,7 @@ def main():
     # Plot 3: TL vs Depth (at mid-range)
     ax = axes[1, 0]
     mid_range_km = np.median(result.ranges) / 1000
-    range_idx = np.argmin(np.abs(result.ranges/1000 - mid_range_km))
-    tl_vs_depth = result.data[:, range_idx]
+    tl_vs_depth = result.get_at_range(mid_range_km * 1000.0).tl
     ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
     ax.invert_yaxis()
     ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
@@ -226,7 +224,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nResults:")
-    print(f"  • TL range: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+    print(f"  • TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
     print(f"  • Computation time: < 1 second")
 

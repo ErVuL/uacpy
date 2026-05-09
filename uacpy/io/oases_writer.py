@@ -394,8 +394,10 @@ def write_oast_input(
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
-    # Sound speed profile
-    ssp_data = env.ssp.to_pairs()
+    # Sound speed profile — align to env.depth so the deepest sample sits
+    # exactly at the seabed interface (OASES expects monotone depth + the
+    # last entry to terminate the water column).
+    ssp_data = env.ssp.extend_to(depth).to_pairs()
 
     # Source and receiver parameters (receiver depth bookkeeping now lives in
     # ``_receiver_block_lines`` which handles equidistant/explicit cases).
@@ -654,8 +656,8 @@ def write_oasn_input(
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
-    # Sound speed profile
-    ssp_data = env.ssp.to_pairs()
+    # Sound speed profile — align to env.depth (see OAST writer for rationale).
+    ssp_data = env.ssp.extend_to(depth).to_pairs()
 
     # Noise/source parameters
     surface_noise_level = kwargs.get('surface_noise_level', 0)
@@ -879,8 +881,8 @@ def write_oasp_input(
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
-    # Sound speed profile
-    ssp_data = env.ssp.to_pairs()
+    # Sound speed profile — align to env.depth (see OAST writer).
+    ssp_data = env.ssp.extend_to(depth).to_pairs()
 
     # Source parameter (receiver depth bookkeeping handled by
     # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
@@ -1105,7 +1107,7 @@ def write_oasr_input(
     # A full stratified water column has no meaning here — OASR only sees the
     # (homogeneous) medium immediately above the reflecting interface.
     # Sound speed right above the seabed interface.
-    c_water = float(env.ssp.to_pairs()[-1, 1])
+    c_water = float(env.ssp.extend_to(depth).to_pairs()[-1, 1])
 
     # Multi-frequency support — OASR sweep parameters.
     freqs_arr = np.atleast_1d(source.frequencies)

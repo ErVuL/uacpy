@@ -314,7 +314,11 @@ def write_bellhop_env_file(
             if max_alti_above_msl > 0:
                 z_min = -max_alti_above_msl - 0.5
 
-        z_max = env.depth
+        # Bellhop requires the last SSP sample to sit *exactly* at the
+        # medium depth written in the SSP header — and the header uses
+        # one decimal place. Round both sides through the same value so
+        # the parser sees aligned depths.
+        z_max = float(f"{env.depth:.1f}")
 
         ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
         if z_min < ssp_data_extended[0, 0]:
