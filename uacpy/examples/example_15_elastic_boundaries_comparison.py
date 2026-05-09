@@ -56,9 +56,9 @@ import time
 
 
 def main():
-    print("\n" + "=" * 80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison")
-    print("=" * 80)
+    print("═" * 80)
     print("\nCompares two approaches for modeling elastic boundaries:")
     print("  1. KrakenField Auto-Detection (→ KrakenC)")
     print("  2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN")
@@ -447,7 +447,7 @@ def main():
     # Save
     output_file = OUTPUT_DIR / 'example_15_elastic_boundaries_comparison.png'
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"  ✓ Figure saved: {output_file}")
+    print(f"  ✓ Saved: {output_file}")
 
     plt.close()
 
@@ -481,9 +481,7 @@ def main():
     print("  • KRAKEN uses .irc files (NOT .brc)")
     print("  • SPARC does not support reflection files")
 
-    print("\n" + "=" * 80)
-    print("EXAMPLE 15 COMPLETE")
-    print("=" * 80 + "\n")
+    print("\n✓ Example 15 complete\n")
 
     return 0
 

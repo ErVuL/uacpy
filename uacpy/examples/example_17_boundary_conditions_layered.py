@@ -210,8 +210,9 @@ def main():
         ('Range-dep layered (RAM)',        example_range_dependent_layered, RAM),
     ]
 
-    print("Example 17: Boundary Conditions - Top BC and Layered Bottoms")
-    print("=" * 65)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 17: Boundary Conditions - Top BC and Layered Bottoms")
+    print("═" * 80)
 
     fields = []
     envs_out = []
@@ -270,7 +271,7 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / 'example_17_boundary_conditions.png'
     fig.savefig(out_path, dpi=150)
-    print(f"\n  Figure saved to {out_path}")
+    print(f"\n  ✓ Saved: {out_path}")
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
         if env.has_range_dependent_layered_bottom():
@@ -278,10 +279,10 @@ def main():
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')
             plt.close(fig_b)
-            print(f"  Figure saved to {path}")
+            print(f"  ✓ Saved: {path}")
             break
 
-    print("Done.")
+    print("\n✓ Example 17 complete\n")
 
 
 if __name__ == '__main__':

@@ -1437,7 +1437,7 @@ class KrakenField(_KrakenBase):
             frequencies = np.linspace(fc * 0.5, fc * 2.0, 64)
         frequencies = np.asarray(frequencies, dtype=float)
 
-        self._log(f"Broadband mode: {len(frequencies)} frequencies, "
+        self._log(f"Broadband: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")
 
         env = self._project_environment(env)

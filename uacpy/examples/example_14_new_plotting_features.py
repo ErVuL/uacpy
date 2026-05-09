@@ -81,13 +81,13 @@ def demo_stacked_time_series():
     out = OUTPUT_DIR / 'example_14_time_series_stacked.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
     fig, _ = plot_time_series(ts, stacked=False)
     out = OUTPUT_DIR / 'example_14_time_series_overlaid.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
 
 def demo_modes_heatmap():
@@ -126,27 +126,25 @@ def demo_modes_heatmap():
     out = OUTPUT_DIR / 'example_14_modes_heatmap_all.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
                                    normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
 
 def main():
-    print("\n" + "═" * 70)
+    print("\n" + "═" * 80)
     print("EXAMPLE 14: plot_time_series & plot_modes_heatmap")
-    print("═" * 70)
+    print("═" * 80)
 
     demo_stacked_time_series()
     demo_modes_heatmap()
 
-    print("\n" + "═" * 70)
-    print("EXAMPLE 14 COMPLETE")
-    print("═" * 70)
+    print("\n✓ Example 14 complete\n")
     return 0
 
 

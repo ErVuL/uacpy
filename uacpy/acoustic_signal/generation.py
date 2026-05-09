@@ -10,10 +10,11 @@ commonly used in underwater acoustic applications including:
 
 import numpy as np
 from typing import Tuple, Literal, Union
-
+import warnings
+import math
 
 def ssrp(Pxx, Fxx, duration=1, scale=1, *,
-         n_fft=None, fs=None, interp='linear'):
+         n_fft=65536, fs=None, interp='linear'):
     """
     Spectral Synthesis of Random Processes.
 
@@ -33,11 +34,9 @@ def ssrp(Pxx, Fxx, duration=1, scale=1, *,
     scale : float
         Scale factor applied to the output signal.
     n_fft : int, optional
-        IFFT chunk size (must be even, ≥ 4). Defaults to
-        ``2 * (len(Pxx) + 1)``. Larger values give finer frequency
-        resolution at proportionally higher CPU cost.
-    fs : float, optional
-        Output sample rate in Hz. Defaults to ``2 * Fxx[-1]``.
+        IFFT chunk size (must be even, ≥ 4). Defaults to 65536.
+    fs : int, optional
+        Output sample rate in Hz. Defaults to 2*Fxx[-1]..
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
         How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
         interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
@@ -61,21 +60,48 @@ def ssrp(Pxx, Fxx, duration=1, scale=1, *,
     >>> t, x, fs = ssrp(Pxx, f, duration=10,
     ...                 n_fft=2**16, fs=40_000, interp='log')
     """
+    MAX_NFFT = 262144
+    
     Pxx = np.asarray(Pxx, dtype=float)
     Fxx = np.asarray(Fxx, dtype=float)
     if Pxx.ndim != 1 or Fxx.shape != Pxx.shape:
-        raise ValueError("Pxx and Fxx must be 1-D arrays of equal length")
+        raise ValueError(
+            f"ssrp: Pxx and Fxx must be 1-D arrays of equal length; "
+            f"got Pxx.shape={Pxx.shape} and Fxx.shape={Fxx.shape}"
+        )
     if Pxx.size < 2:
-        raise ValueError("Pxx must have at least 2 points")
+        raise ValueError(
+            f"ssrp: Pxx must have at least 2 points (got {Pxx.size})"
+        )
     if not np.all(np.diff(Fxx) > 0):
-        raise ValueError("Fxx must be strictly increasing")
+        raise ValueError("ssrp: Fxx must be strictly increasing")
 
     if fs is None:
-        fs = 2.0 * float(Fxx[-1])
+        fs = 2 * Fxx[-1]
+
     if n_fft is None:
-        n_fft = 2 * (Pxx.size + 1)
-    if n_fft < 4 or n_fft % 2:
-        raise ValueError("n_fft must be an even integer ≥ 4")
+        n_fft = 65536
+    elif n_fft < 16:
+        warnings.warn(
+            f"ssrp: n_fft={n_fft} below minimum 16; raising to 65536.",
+            UserWarning, stacklevel=2,
+        )
+        n_fft = 65536
+    elif n_fft > MAX_NFFT:
+        warnings.warn(
+            f"ssrp: n_fft={n_fft} above MAX_NFFT={MAX_NFFT}; "
+            f"clamping to {MAX_NFFT}.",
+            UserWarning, stacklevel=2,
+        )
+        n_fft = MAX_NFFT
+    if not _is_power_of_two(n_fft):
+        rounded = _closest_power_of_two(n_fft)
+        warnings.warn(
+            f"ssrp: n_fft={n_fft} is not a power of two; "
+            f"rounding to {rounded}.",
+            UserWarning, stacklevel=2,
+        )
+        n_fft = rounded
 
     N = n_fft // 2 - 1
     dF = fs / n_fft
@@ -130,7 +156,8 @@ def _resample_psd(Pxx, Fxx, f_target, method):
     if method == 'log':
         if Fxx[0] <= 0 or np.any(Pxx <= 0):
             raise ValueError(
-                "interp='log' requires strictly positive Pxx and Fxx")
+                "ssrp: interp='log' requires strictly positive Pxx and Fxx"
+            )
         out[in_range] = 10.0 ** np.interp(
             np.log10(f_target[in_range]),
             np.log10(Fxx), np.log10(Pxx))
@@ -150,9 +177,16 @@ def _resample_psd(Pxx, Fxx, f_target, method):
         return np.maximum(out, 0.0)
 
     raise ValueError(
-        f"Unknown interp method: {method!r}. "
-        "Use 'linear', 'log', 'pchip', or 'nearest'.")
+        f"ssrp: unknown interp={method!r}; "
+        "valid: 'linear', 'log', 'pchip', 'nearest'."
+    )
 
+def _is_power_of_two(x):
+    return x > 0 and x.is_integer() and ((int(x) & (int(x) - 1)) == 0)
+
+def _closest_power_of_two(x):
+    n = round(math.log2(x))
+    return 2 ** n
 
 def cans(
     t: np.ndarray,

@@ -65,9 +65,9 @@ def main():
     # =========================================================================
     # 1. ENVIRONMENT SETUP
     # =========================================================================
-    print("=" * 70)
-    print("Example 19: Broadband Model Comparison")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 19: Broadband Model Comparison")
+    print("═" * 80)
 
     env = uacpy.Environment(
         name='Pekeris Waveguide',
@@ -304,7 +304,7 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"\nSaved: {OUTPUT_DIR / 'example_19_transfer_functions.png'}")
+        print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_19_transfer_functions.png'}")
 
     # --- Plot B: TL vs depth comparison at center frequency ---
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -327,7 +327,7 @@ def main():
     fig.savefig(OUTPUT_DIR / 'example_19_tl_depth_comparison.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'example_19_tl_depth_comparison.png'}")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_tl_depth_comparison.png'}")
 
     # --- Plot C: TIME-SERIES COMPARISON (all models at same receiver) ---
     # Convert all transfer functions to time domain at the target point
@@ -418,7 +418,7 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_time_series_comparison.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_time_series_comparison.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_time_series_comparison.png'}")
 
     # --- Plot D: Bellhop delay-and-sum detail ---
     if 'Bellhop (chirp)' in results:
@@ -451,7 +451,7 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_bellhop_chirp.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_bellhop_chirp.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_bellhop_chirp.png'}")
 
     # --- Plot E: SPARC waterfall (if available) ---
     if 'SPARC' in results:
@@ -480,7 +480,7 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_sparc_time_series.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_sparc_time_series.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_sparc_time_series.png'}")
 
     # =========================================================================
     # 9. SUMMARY
@@ -505,6 +505,8 @@ def main():
     print(f"  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
     print(f"  SPARC       - time-marched FFP (native time domain), returns time_series")
     print(f"  OASP        - OASES PE broadband, returns transfer_function")
+
+    print("\n✓ Example 19 complete\n")
 
 
 if __name__ == '__main__':

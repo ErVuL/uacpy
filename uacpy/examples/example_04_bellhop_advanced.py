@@ -46,9 +46,9 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 def main():
-    print("=" * 70)
-    print("ADVANCED BELLHOP EXAMPLE - All Features")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 04: Bellhop advanced features")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT: Continental Shelf with Grain Size Bottom
@@ -267,9 +267,6 @@ def main():
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_rays.png")
 
-    print("\n" + "=" * 70)
-    print("BELLHOP ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated:")
     print("  ✓ Advanced RunType (7 positions)")
     print("  ✓ Cerveny beam parameters")
@@ -284,6 +281,8 @@ def main():
     print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
     print("  ✓ Subplot colorbar control (shared colorbar)")
     print("  ✓ jet_r colormap (blue=good, red=poor)")
+
+    print("\n✓ Example 04 complete\n")
 
     return 0
 

@@ -321,7 +321,7 @@ class Bounce(PropagationModel):
                 base_name = 'bounce_run'
                 input_file = fm.get_path(f'{base_name}.env')
 
-                self._log(f"Writing BOUNCE input file: {input_file}", level='info')
+                self._log(f"Writing input file: {input_file}", level='info')
                 # Caller-supplied francois_garrison_params / bio_layers in
                 # run() override the constructor defaults.
                 fg = kwargs.pop('francois_garrison_params',
@@ -341,7 +341,7 @@ class Bounce(PropagationModel):
                     **kwargs
                 )
 
-                self._log("Running BOUNCE...", level='info')
+                self._log("Running...", level='info')
                 self._execute(input_file, fm.work_dir)
 
                 brc_file = fm.get_path(f'{base_name}.brc')
@@ -364,7 +364,7 @@ class Bounce(PropagationModel):
                 if irc_file.exists():
                     self._dedupe_reflection_file(irc_file)
 
-                self._log(f"Reading BOUNCE output: {brc_file}", level='info')
+                self._log(f"Reading output: {brc_file}", level='info')
                 result = read_reflection_coefficient(str(brc_file), boundary='bottom')
 
                 # Reflection-coefficient files must outlive the work dir
@@ -424,7 +424,7 @@ class Bounce(PropagationModel):
                         ignore_errors=True,
                     )
 
-                self._log("BOUNCE simulation complete", level='info')
+                self._log("Simulation complete", level='info')
                 return field
 
             finally:

@@ -51,9 +51,9 @@ from uacpy.visualization.plots import (
 )
 
 def main():
-    print("=" * 70)
-    print("ADVANCED KRAKEN EXAMPLE - Coupled Mode Theory")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 06: Kraken advanced features - Coupled Mode Theory")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT: Continental Shelf
@@ -324,9 +324,6 @@ def main():
         plt.savefig(OUTPUT_DIR / 'example_06_result.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_06_result.png")
 
-    print("\n" + "=" * 70)
-    print("KRAKEN ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated:")
     print("  ✓ Volume attenuation (Francois-Garrison)")
     print("  ✓ Range-dependent bottom properties")
@@ -340,6 +337,8 @@ def main():
     print("  ✓ Auto TL limits (median + 0.75σ)")
     print("  ✓ Contour overlays on TL plots")
     print("  ✓ jet_r colormap (blue=good, red=poor)")
+
+    print("\n✓ Example 06 complete\n")
 
     return 0
 

@@ -207,7 +207,7 @@ def scenario_a_model_comparison():
     plt.savefig(OUTPUT_DIR / 'example_12a_model_comparison.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"\n✓ Generated: {OUTPUT_DIR / 'example_12a_model_comparison.png'}")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_12a_model_comparison.png'}")
 
 
 def scenario_b_environmental_sensitivity():
@@ -320,7 +320,7 @@ def scenario_b_environmental_sensitivity():
     print(f"    • Depth (0-6000m): {min(atten_vs_depth):.3f} to {max(atten_vs_depth):.3f} dB/km "
           f"(range: {max(atten_vs_depth)-min(atten_vs_depth):.3f} dB/km)")
 
-    print("\n✓ Generated: output/example_12b_environmental_sensitivity.png")
+    print("  ✓ Saved: output/example_12b_environmental_sensitivity.png")
 
 
 def scenario_c_unit_conversions():
@@ -406,16 +406,16 @@ def scenario_c_unit_conversions():
     plt.savefig(OUTPUT_DIR / 'example_12c_unit_conversions.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("\n✓ Generated: output/example_12c_unit_conversions.png")
+    print("  ✓ Saved: output/example_12c_unit_conversions.png")
 
 
 def main():
     """
     Run all attenuation model demonstrations.
     """
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 12: Attenuation Models Comparison")
-    print("═"*80)
+    print("═" * 80)
     print("\nThis example demonstrates:")
     print("  • Attenuation model comparison (Thorp, Francois-Garrison)")
     print("  • Frequency dependence (10 Hz - 1 MHz)")
@@ -428,9 +428,6 @@ def main():
     scenario_c_unit_conversions()
 
     # Summary
-    print("\n" + "═"*80)
-    print("EXAMPLE 12 COMPLETE")
-    print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Attenuation increases with frequency (roughly f²)")
     print("  ✓ Francois-Garrison most accurate for 1 Hz - 1 MHz")
@@ -442,7 +439,8 @@ def main():
     print("  → Mid freq (1-10 kHz): Moderate loss, medium range")
     print("  → High freq (> 100 kHz): High loss, short range")
     print("  → Attenuation doubles temperature: ~30% increase")
-    print("\n" + "═"*80 + "\n")
+
+    print("\n✓ Example 12 complete\n")
 
     return 0
 

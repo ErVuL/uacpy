@@ -878,7 +878,7 @@ class Bellhop(PropagationModel):
         fc = float(np.atleast_1d(source.frequencies)[0])
 
         # Step 1: Run Bellhop in arrivals mode
-        self._log("Broadband mode: running Bellhop in arrivals mode...", level='info')
+        self._log("Running in arrivals mode (broadband path)...", level='info')
         arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
 
         arrivals_by_rcv = arr_field.metadata['arrivals_by_receiver']
@@ -898,7 +898,7 @@ class Bellhop(PropagationModel):
                 )
 
             self._log(
-                f"Broadband: delay-and-sum over {nrd}×{nrr} receiver grid",
+                f"Delay-and-sum over {nrd}×{nrr} receiver grid",
                 level='info',
             )
 
@@ -972,7 +972,7 @@ class Bellhop(PropagationModel):
                     rcv_arr, frequencies, fc
                 )
 
-        self._log(f"Broadband: built transfer function "
+        self._log(f"Built transfer function "
                   f"({nrd} depths x {n_freq} freqs x {nrr} ranges)",
                   level='info')
 

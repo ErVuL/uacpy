@@ -63,6 +63,10 @@ from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
 from example_helpers import create_example_report
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation")
+    print("═" * 80)
+
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT SETUP - Summer thermocline
     # ═══════════════════════════════════════════════════════════════════════
@@ -153,6 +157,8 @@ def main():
     else:
         print("\n⚠ No models ran successfully!")
         return 1
+
+    print("\n✓ Example 03 complete\n")
 
     return 0
 

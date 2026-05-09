@@ -40,9 +40,9 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 def main():
-    print("=" * 80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 01: Basic Shallow Water Propagation - Pekeris Waveguide")
-    print("=" * 80)
+    print("═" * 80)
     print("\nThis is the simplest UACPY example - a 'Hello World' for underwater acoustics!")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -225,10 +225,6 @@ def main():
     # Summary
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n" + "=" * 80)
-    print("EXAMPLE 01 COMPLETE!")
-    print("=" * 80)
-
     print("\nResults:")
     print(f"  • TL range: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
@@ -251,7 +247,7 @@ def main():
     print("  • Try example_11 to compare multiple models")
     print("  • Try example_21 for all new plotting features")
 
-    print("\n" + "=" * 80 + "\n")
+    print("\n✓ Example 01 complete\n")
 
     return 0
 

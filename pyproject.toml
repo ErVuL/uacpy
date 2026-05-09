@@ -72,7 +72,7 @@ uacpy = [
 
 [tool.pytest.ini_options]
 testpaths = ["uacpy/tests"]
-addopts = "-n auto --dist=worksteal"
+addopts = "-n logical --dist=worksteal"
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",

@@ -254,7 +254,7 @@ def scenario_a_tl_modes():
     print(f"    • Incoherent TL is smoothest (phase-averaged)")
     print(f"    • Semi-coherent is intermediate")
 
-    print("\n✓ Generated: output/example_11a_tl_modes.png")
+    print("\n  ✓ Saved: output/example_11a_tl_modes.png")
 
 
 def scenario_b_ray_tracing():
@@ -317,7 +317,7 @@ def scenario_b_ray_tracing():
     print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
     print(f"    • Maximum range: 100 km")
 
-    print("\n✓ Generated: output/example_11b_ray_tracing.png")
+    print("\n  ✓ Saved: output/example_11b_ray_tracing.png")
 
 
 def scenario_c_eigenrays_arrivals():
@@ -440,7 +440,7 @@ def scenario_c_eigenrays_arrivals():
             print(f"    • Arrivals detected: {len(rec)}")
             print(f"    • Time spread: {max(delays) - min(delays):.4f} s")
 
-    print("\n✓ Generated: output/example_11c_eigenrays_arrivals.png")
+    print("\n  ✓ Saved: output/example_11c_eigenrays_arrivals.png")
 
 
 def scenario_d_compute_eigenrays_pekeris():
@@ -494,16 +494,16 @@ def scenario_d_compute_eigenrays_pekeris():
     fig.savefig(OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("\n✓ Generated: output/example_11d_compute_eigenrays_pekeris.png")
+    print("\n  ✓ Saved: output/example_11d_compute_eigenrays_pekeris.png")
 
 
 def main():
     """
     Run all Bellhop run mode demonstrations.
     """
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 11: Bellhop Run Modes - Comprehensive")
-    print("═"*80)
+    print("═" * 80)
     print("\nThis example demonstrates:")
     print("  • Coherent vs Incoherent vs Semi-coherent TL")
     print("  • Ray tracing and visualization")
@@ -517,9 +517,6 @@ def main():
     scenario_d_compute_eigenrays_pekeris()
 
     # Summary
-    print("\n" + "═"*80)
-    print("EXAMPLE 11 COMPLETE")
-    print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Coherent TL shows phase interference (modal patterns)")
     print("  ✓ Incoherent TL represents phase-averaged, broadband behavior")
@@ -532,7 +529,8 @@ def main():
     print("  → Semi-coherent: Practical compromise")
     print("  → Rays: Understanding propagation paths, caustics")
     print("  → Eigenrays/Arrivals: Pulse propagation, time-domain analysis")
-    print("\n" + "═"*80 + "\n")
+
+    print("\n✓ Example 11 complete\n")
 
     return 0
 

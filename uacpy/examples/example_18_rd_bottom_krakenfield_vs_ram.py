@@ -123,8 +123,9 @@ def main():
         plot_transmission_loss, plot_rd_layered_bottom, plot_tl_difference,
     )
 
-    print("Example 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
-    print("=" * 65)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
+    print("═" * 80)
 
     source = uacpy.Source(frequencies=100, depths=30)
     receiver = uacpy.Receiver(
@@ -292,7 +293,7 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / 'example_18_rd_krakenfield_vs_ram.png'
     fig.savefig(out_path, dpi=150)
-    print(f"\n  Figure saved to {out_path}")
+    print(f"\n  ✓ Saved: {out_path}")
 
     for case_label in ('Hard layered', 'Soft layered'):
         fig_b, _ = plot_rd_layered_bottom(envs[case_label])
@@ -300,9 +301,9 @@ def main():
         path = out_dir / f'example_18_rd_layered_{slug}.png'
         fig_b.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig_b)
-        print(f"  Figure saved to {path}")
+        print(f"  ✓ Saved: {path}")
 
-    print("Done.")
+    print("\n✓ Example 18 complete\n")
 
 
 if __name__ == '__main__':

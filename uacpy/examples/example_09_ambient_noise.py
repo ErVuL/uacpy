@@ -66,10 +66,8 @@ def main():
     print("  ✓ Saved: output/example_09_wenz_components.png")
 
     # ── 2. ssrp time-domain realisation of the Wenz total ───────────────
-    # ssrp prefers a power-of-two PSD length and samples at fs = f_max·2.
-    # Use 2¹⁵ + 1 frequency points up to 50 kHz → fs = 100 kHz.
-    n_freq = 2 ** 15 + 1
-    f_ssrp = np.linspace(1.0, 5e4, n_freq)
+    n_fft = 1
+    f_ssrp = np.linspace(1.0, 5e4, 10000)
     wenz_ssrp = WenzNoise(
         f_ssrp,
         wind_speed=wenz_plot.wind_speed,
@@ -80,8 +78,8 @@ def main():
     Pxx = wenz_ssrp.as_psd()                           # Pa² / Hz (linear)
 
     duration = 30.0                                    # seconds
-    t, x, fs = uacpy.signal.ssrp(Pxx, f_ssrp,
-                                 duration=duration, scale=1.0)
+    t, x, fs = uacpy.signal.ssrp(Pxx, f_ssrp, fs=96000,
+                                 duration=duration, scale=1.0, n_fft=n_fft)
     print(f"  ssrp: synthesised {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
 
@@ -112,7 +110,7 @@ def main():
     )
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
                 dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    #plt.close(fig)
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
@@ -138,7 +136,7 @@ def main():
     ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
     fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
                 dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    #plt.close(fig)
     print("  ✓ Saved: output/example_09_ppsd.png")
 
     print("\n✓ Example 09 complete\n")

@@ -249,14 +249,13 @@ class _GridResult(Result):
         ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         if data.ndim < 2:
             raise ValueError(
-                f"{type(self).__name__}.data must be at least 2-D "
-                f"(got shape {data.shape})"
+                f"{type(self).__name__}.data: must be at least 2-D; "
+                f"got shape {data.shape}"
             )
         if data.shape[:2] != (len(depths), len(ranges)):
             raise ValueError(
-                f"{type(self).__name__}.data first two axes "
-                f"{data.shape[:2]} must equal (n_depths, n_ranges) = "
-                f"({len(depths)}, {len(ranges)})"
+                f"{type(self).__name__}.data: first two axes {data.shape[:2]} "
+                f"must equal (n_depths, n_ranges) = ({len(depths)}, {len(ranges)})"
             )
         self.data = data
         self.depths = depths
@@ -312,11 +311,15 @@ class _GridResult(Result):
         if time is not None:
             t_axis = self.metadata.get('time')
             if t_axis is None:
-                raise ValueError("time= requested but result has no time axis")
+                raise ValueError(
+                    f"{type(self).__name__}.get_value: time= requested but "
+                    "result has no time axis"
+                )
             k = int(np.argmin(np.abs(np.asarray(t_axis) - time)))
             return self.data[d_idx, r_idx, k]
         raise ValueError(
-            f"{type(self).__name__} has 3 axes; specify frequencies= or time="
+            f"{type(self).__name__}.get_value: 3-D result requires "
+            "frequency= or time="
         )
 
     def get_max(self) -> Tuple[float, float, float]:
@@ -354,9 +357,13 @@ class TLField(_GridResult):
         """For broadband ``TLField``, return the narrowband TLField at the
         nearest frequency."""
         if not self.is_broadband:
-            raise ValueError("at_frequency() only valid for broadband TLField")
+            raise ValueError(
+                "TLField.at_frequency: only valid for broadband TLField"
+            )
         if self.frequencies is None:
-            raise ValueError("broadband TLField missing self.frequencies")
+            raise ValueError(
+                "TLField.at_frequency: broadband TLField missing self.frequencies"
+            )
         k = int(np.argmin(np.abs(self.frequencies - frequency)))
         return TLField(
             data=self.data[..., k],
@@ -423,31 +430,34 @@ class TransferFunction(_GridResult):
         **kwargs,
     ):
         if frequencies is None or len(frequencies) == 0:
-            raise ValueError("TransferFunction requires a non-empty frequencies vector")
+            raise ValueError(
+                "TransferFunction: requires a non-empty frequencies vector"
+            )
         super().__init__(
             data=data, depths=depths, ranges=ranges,
             frequencies=frequencies, **kwargs,
         )
         if data.ndim != 3:
             raise ValueError(
-                f"TransferFunction.data must be 3-D (n_d, n_r, n_f), got {data.shape}"
+                f"TransferFunction.data: must be 3-D (n_d, n_r, n_f); "
+                f"got shape {data.shape}"
             )
         if data.shape[2] != len(self.frequencies):
             raise ValueError(
-                f"TransferFunction.data axis 2 ({data.shape[2]}) does not "
+                f"TransferFunction.data: axis 2 ({data.shape[2]}) does not "
                 f"match len(frequencies) ({len(self.frequencies)})"
             )
         if phase_reference is None or phase_reference == "":
             raise ValueError(
-                "TransferFunction requires a phase_reference. "
-                f"Valid values: {[m.value for m in PhaseReference]}"
+                f"TransferFunction: requires a phase_reference; "
+                f"valid: {[m.value for m in PhaseReference]}"
             )
         try:
             ref = PhaseReference(phase_reference)
         except ValueError:
             raise ValueError(
-                f"Unknown phase_reference {phase_reference!r}. "
-                f"Valid values: {[m.value for m in PhaseReference]}"
+                f"TransferFunction: unknown phase_reference={phase_reference!r}; "
+                f"valid: {[m.value for m in PhaseReference]}"
             ) from None
         self.phase_reference = ref
         # Mirror the string form into ``metadata`` so dict-style consumers
@@ -485,7 +495,7 @@ class TransferFunction(_GridResult):
         """
         if self.data.ndim < 3:
             raise ValueError(
-                "TransferFunction.to_tl needs a 3-D (depth, range, freq) "
+                f"TransferFunction.to_tl: requires a 3-D (depth, range, freq) "
                 f"array; got shape {self.data.shape}"
             )
         from uacpy.core.constants import PRESSURE_FLOOR
@@ -544,12 +554,13 @@ class TimeSeriesField(_GridResult):
         )
         if data.ndim != 3:
             raise ValueError(
-                f"TimeSeriesField.data must be 3-D (n_d, n_r, n_t), got {data.shape}"
+                f"TimeSeriesField.data: must be 3-D (n_d, n_r, n_t); "
+                f"got shape {data.shape}"
             )
         time = np.asarray(time, dtype=float)
         if data.shape[2] != len(time):
             raise ValueError(
-                f"TimeSeriesField.data axis 2 ({data.shape[2]}) does not "
+                f"TimeSeriesField.data: axis 2 ({data.shape[2]}) does not "
                 f"match len(time) ({len(time)})"
             )
         self.time = time
@@ -626,7 +637,7 @@ class TimeTrace(Result):
         data = np.asarray(data)
         if data.ndim != 1:
             raise ValueError(
-                f"TimeTrace.data must be 1-D, got shape {data.shape}"
+                f"TimeTrace.data: must be 1-D; got shape {data.shape}"
             )
         time = np.asarray(time, dtype=float)
         if len(time) != len(data):
@@ -916,7 +927,7 @@ class Rays(Result):
         }
         if kind is not None and kind not in kind_map:
             raise ValueError(
-                f"kind must be one of {sorted(kind_map)}; got {kind!r}"
+                f"Arrivals.filter: kind={kind!r} not in {sorted(kind_map)}"
             )
 
         def _in_bounds(value, spec):
@@ -1001,7 +1012,7 @@ class Modes(Result):
         self.depths = np.atleast_1d(np.asarray(depths, dtype=float))
         if self.phi.shape != (len(self.depths), len(self.k)):
             raise ValueError(
-                f"Modes.phi shape {self.phi.shape} must equal "
+                f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
         self._n_modes = int(n_modes if n_modes is not None else len(self.k))
@@ -1042,11 +1053,13 @@ class Modes(Result):
         f0_self, f0_other = self.f0, other.f0
         if f0_self is None or f0_other is None:
             raise ValueError(
-                "compute_group_velocity requires both Modes instances to have a frequency"
+                "Modes.compute_group_velocity: both Modes instances must "
+                "have a frequency"
             )
         if f0_self == f0_other:
             raise ValueError(
-                "compute_group_velocity needs Modes at two distinct frequencies"
+                "Modes.compute_group_velocity: requires Modes at two distinct "
+                "frequencies"
             )
         n = min(self.n_modes, other.n_modes)
         if n == 0:
@@ -1091,7 +1104,7 @@ class Covariance(Result):
         cov = np.asarray(covariance)
         if cov.ndim != 3 or cov.shape[1] != cov.shape[2]:
             raise ValueError(
-                "Covariance.covariance must be 3-D (n_freq, n_rcv, n_rcv); "
+                f"Covariance.covariance: must be 3-D (n_freq, n_rcv, n_rcv); "
                 f"got shape {cov.shape}"
             )
         self.covariance = cov
@@ -1099,7 +1112,7 @@ class Covariance(Result):
             rp = np.asarray(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != cov.shape[1]:
                 raise ValueError(
-                    "Covariance.receiver_positions must have shape "
+                    f"Covariance.receiver_positions: must have shape "
                     f"(n_receivers={cov.shape[1]}, 3); got {rp.shape}"
                 )
             self.receiver_positions = rp
@@ -1156,8 +1169,8 @@ class Replicas(Result):
         rep = np.asarray(replicas)
         if rep.ndim != 5:
             raise ValueError(
-                "Replicas.replicas must be 5-D (n_freq, n_zr, n_xr, n_yr, n_rcv); "
-                f"got shape {rep.shape}"
+                f"Replicas.replicas: must be 5-D "
+                f"(n_freq, n_zr, n_xr, n_yr, n_rcv); got shape {rep.shape}"
             )
         self.replicas = rep
         self.replica_z = np.atleast_1d(np.asarray(replica_z, dtype=float))
@@ -1168,14 +1181,14 @@ class Replicas(Result):
         )
         if rep.shape[1:4] != expected:
             raise ValueError(
-                f"Replicas.replicas axes 1-3 {rep.shape[1:4]} must match "
+                f"Replicas.replicas: axes 1-3 {rep.shape[1:4]} must match "
                 f"(n_zr, n_xr, n_yr) = {expected}"
             )
         if receiver_positions is not None:
             rp = np.asarray(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != rep.shape[4]:
                 raise ValueError(
-                    "Replicas.receiver_positions must have shape "
+                    f"Replicas.receiver_positions: must have shape "
                     f"(n_receivers={rep.shape[4]}, 3); got {rp.shape}"
                 )
             self.receiver_positions = rp
@@ -1248,21 +1261,22 @@ class ReflectionCoefficient(Result):
                 )
             if self.R.shape[0] != len(self.theta):
                 raise ValueError(
-                    f"ReflectionCoefficient.R axis 0 ({self.R.shape[0]}) "
+                    f"ReflectionCoefficient.R: axis 0 ({self.R.shape[0]}) "
                     f"must equal len(theta) ({len(self.theta)})"
                 )
             if self.frequencies is None:
                 raise ValueError(
-                    "ReflectionCoefficient: 2-D R requires `frequencies=`"
+                    "ReflectionCoefficient: 2-D R requires frequencies="
                 )
             if self.R.shape[1] != len(self.frequencies):
                 raise ValueError(
-                    f"ReflectionCoefficient.R axis 1 ({self.R.shape[1]}) "
+                    f"ReflectionCoefficient.R: axis 1 ({self.R.shape[1]}) "
                     f"must equal len(frequencies) ({len(self.frequencies)})"
                 )
         else:
             raise ValueError(
-                f"ReflectionCoefficient.R must be 1-D or 2-D, got shape {self.R.shape}"
+                f"ReflectionCoefficient.R: must be 1-D or 2-D; "
+                f"got shape {self.R.shape}"
             )
         # Mirror into ``metadata`` for dict-style access.
         self.metadata.setdefault('theta', self.theta)
@@ -1280,7 +1294,10 @@ class ReflectionCoefficient(Result):
     def at_frequency(self, frequency: float) -> "ReflectionCoefficient":
         """Single-frequency slice of a broadband reflection coefficient."""
         if not self.is_broadband:
-            raise ValueError("at_frequency() only valid for broadband ReflectionCoefficient")
+            raise ValueError(
+                "ReflectionCoefficient.at_frequency: only valid for "
+                "broadband ReflectionCoefficient"
+            )
         k = int(np.argmin(np.abs(self.frequencies - frequency)))
         return ReflectionCoefficient(
             theta=self.theta,
@@ -1335,14 +1352,16 @@ def _ifft_to_trace(
     n_d, n_r, n_freq = data.shape
 
     if n_freq < 2:
-        raise ValueError("need at least 2 frequencies for IFFT")
+        raise ValueError(
+            f"_ifft_to_trace: need at least 2 frequencies for IFFT; got {n_freq}"
+        )
 
     if tf.phase_reference == 'time_domain_native':
         raise ValueError(
-            "TransferFunction.phase_reference='time_domain_native' is not a "
+            "_ifft_to_trace: phase_reference='time_domain_native' is not a "
             "frequency-domain transfer function; the producing model "
-            "(SPARC) returned p(t) directly. Use the TimeSeriesField result "
-            "from RunMode.TIME_SERIES instead of synthesising via IFFT."
+            "(SPARC) returned p(t) directly — use the TimeSeriesField result "
+            "from RunMode.TIME_SERIES instead of synthesising via IFFT"
         )
 
     d_idx = (
@@ -1388,7 +1407,10 @@ def _ifft_to_trace(
     elif window == 'none':
         win = np.ones(n_freq)
     else:
-        raise ValueError(f"unknown window: {window!r}")
+        raise ValueError(
+            f"_ifft_to_trace: unknown window={window!r}; "
+            "valid: 'hann', 'hamming', 'blackman', 'tukey', 'none'"
+        )
 
     dt = 1.0 / (nfft * df)
 
@@ -1470,9 +1492,15 @@ def _synthesize_time_series(
     wf = np.asarray(source_waveform, dtype=float).ravel()
     n_src = len(wf)
     if n_src < 2:
-        raise ValueError("source_waveform must have at least 2 samples")
+        raise ValueError(
+            f"_synthesize_time_series: source_waveform must have at least "
+            f"2 samples; got {n_src}"
+        )
     if sample_rate <= 0:
-        raise ValueError("sample_rate must be positive")
+        raise ValueError(
+            f"_synthesize_time_series: sample_rate must be positive; "
+            f"got {sample_rate}"
+        )
 
     src_fft = np.fft.rfft(wf)
     src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)

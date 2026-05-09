@@ -321,7 +321,7 @@ class Scooter(PropagationModel):
                 else:
                     fc = float(source.frequencies[0])
                     broadband_freqs = np.linspace(fc * 0.5, fc * 2.0, 64)
-                self._log(f"Broadband mode: {len(broadband_freqs)} frequencies, "
+                self._log(f"Broadband: {len(broadband_freqs)} frequencies, "
                           f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
 
             # Decide whether to use fields.exe. Broadband runs must use the
@@ -543,14 +543,15 @@ class Scooter(PropagationModel):
                     else:
                         self._log(f"Reflection coefficient file not found: {env.bottom.reflection_file}", level='error')
                         raise FileNotFoundError(
-                            f"Reflection coefficient file not found: {env.bottom.reflection_file}\n"
-                            f"Generate this file using BOUNCE or OASR models."
+                            f"Scooter: reflection coefficient file not found: "
+                            f"{env.bottom.reflection_file}; "
+                            f"generate it via BOUNCE or OASR first."
                         )
                 else:
                     self._log("acoustic_type='file' requires reflection_file parameter", level='error')
                     raise ValueError(
-                        "acoustic_type='file' requires reflection_file parameter.\n"
-                        "Example: BoundaryProperties(acoustic_type='file', reflection_file='path/to/file.brc')"
+                        "Scooter: acoustic_type='file' requires reflection_file= "
+                        "on the bottom BoundaryProperties (path to a .brc file)."
                     )
 
                 # 'F': no bottom-property line; cLow/cHigh/RMax follow

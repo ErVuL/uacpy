@@ -50,9 +50,9 @@ from uacpy.visualization.plots import (
 )
 
 def main():
-    print("=" * 70)
-    print("ADVANCED RAM EXAMPLE - Range-Dependent SSP & Bottom")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 05: RAM advanced features - Range-Dependent SSP & Bottom")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # CREATE 2D RANGE-DEPENDENT SSP (Thermal Front)
@@ -152,7 +152,7 @@ def main():
     try:
         krakenfield = KrakenField(verbose=False)
         result_krakenfield = krakenfield.compute_tl(env, source, receiver)
-        print("  ✅ KrakenField completed (using range-independent approximation)")
+        print("  ✓ KrakenField completed (using range-independent approximation)")
         print(f"  ✓ TL range: {result_krakenfield.data.min():.1f} to {result_krakenfield.data.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ KrakenField: {e}")
@@ -163,7 +163,7 @@ def main():
     try:
         bellhop = Bellhop(verbose=False)
         result_bellhop = bellhop.compute_tl(env, source, receiver)
-        print("  ✅ Bellhop completed (full range-dependent capability)")
+        print("  ✓ Bellhop completed (full range-dependent capability)")
         print(f"  ✓ TL range: {result_bellhop.data.min():.1f} to {result_bellhop.data.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ Bellhop: {e}")
@@ -244,14 +244,13 @@ def main():
         plt.close(fig6)
         print("  ✓ Saved: example_05_differences.png")
 
-    print("\n" + "=" * 70)
-    print("RAM ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated:")
     print("  ✓ Range-dependent bottom properties (mud → sand)")
     print("  ✓ Sloping shelf bathymetry")
     print("  ✓ RAM parabolic equation with PE accuracy control")
     print("  ✓ Three-model comparison (RAM / Bellhop / KrakenField)")
+
+    print("\n✓ Example 05 complete\n")
 
     return 0
 

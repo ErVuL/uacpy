@@ -29,6 +29,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 24: Synthesize a time series from H(f)")
+    print("═" * 80)
+
     bottom = BoundaryProperties(
         acoustic_type='half-space', sound_speed=1700.0,
         density=1.5, attenuation=0.5,
@@ -95,7 +99,9 @@ def main():
     fig.tight_layout()
     out = OUTPUT_DIR / 'example_24_synthesize_time_series.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
-    print(f"Saved: {out}")
+    print(f"  ✓ Saved: {out}")
+
+    print("\n✓ Example 24 complete\n")
     return 0
 
 

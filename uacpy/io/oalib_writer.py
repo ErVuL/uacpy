@@ -455,16 +455,17 @@ def write_bottom_section(
                 brc_dest = filepath.with_suffix('.brc')
                 shutil.copy(brc_source, brc_dest)
                 if verbose:
-                    print(f"[at_env_writer] Copied reflection file: {brc_source} -> {brc_dest}")
+                    print(f"at_env_writer: copied reflection file: {brc_source} -> {brc_dest}")
             else:
                 raise FileNotFoundError(
-                    f"Reflection coefficient file not found: {env.bottom.reflection_file}\n"
-                    f"Generate this file using BOUNCE or OASR models."
+                    f"at_env_writer: reflection coefficient file not found: "
+                    f"{env.bottom.reflection_file}; "
+                    f"generate it via BOUNCE or OASR first."
                 )
         elif env.bottom.reflection_file is None:
             raise ValueError(
-                "acoustic_type='file' requires reflection_file parameter.\n"
-                "Example: BoundaryProperties(acoustic_type='file', reflection_file='path/to/file.brc')"
+                "at_env_writer: acoustic_type='file' requires reflection_file= "
+                "on the bottom BoundaryProperties (path to a .brc file)."
             )
 
         # For 'F' type, write phase velocity bounds and rmax (not bottom properties)

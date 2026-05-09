@@ -368,9 +368,9 @@ def main():
     """
     Run all three SSP scenarios.
     """
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 02: Sound Speed Profiles - Munk, Pekeris, Thermocline")
-    print("═"*80)
+    print("═" * 80)
     print("\nThis example demonstrates:")
     print("  • Munk canonical profile (SOFAR channel)")
     print("  • Pekeris waveguide (elastic bottom)")
@@ -385,9 +385,6 @@ def main():
     results_c = scenario_c_thermocline()
 
     # Summary
-    print("\n" + "═"*80)
-    print("EXAMPLE 02 COMPLETE")
-    print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Munk profile: Deep water sound channel, convergence zones, ultra-long range")
     print("  ✓ Pekeris: Elastic bottom reduces mode count, increases bottom loss")
@@ -397,7 +394,8 @@ def main():
     print("  → Example 03: Multi-frequency / broadband")
     print("  → Example 06: Kraken advanced (mode analysis)")
     print("  → Example 23: Range-dependent collapse methods")
-    print("\n" + "═"*80 + "\n")
+
+    print("\n✓ Example 02 complete\n")
 
     return 0
 

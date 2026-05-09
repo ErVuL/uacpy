@@ -25,9 +25,9 @@ from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import OAST, OASN, OASR, OASP
 
 def main():
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 13: OASES Suite Comprehensive")
-    print("═"*80)
+    print("═" * 80)
 
     # Simple environment for OASES demonstration
     env = uacpy.Environment(
@@ -240,7 +240,7 @@ def main():
     print("  • Complete elastic modeling (compression + shear)")
     print("  • Range-independent and range-dependent scenarios")
     print("  • Broadband and narrowband analysis")
-    print("\n" + "═"*80 + "\nEXAMPLE 13 COMPLETE\n" + "═"*80 + "\n")
+    print("\n✓ Example 13 complete\n")
     return 0
 
 if __name__ == "__main__":

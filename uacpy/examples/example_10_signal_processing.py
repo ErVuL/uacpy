@@ -25,9 +25,9 @@ from uacpy.acoustic_signal.generation import (
 import os
 
 def main():
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 10: Signal Processing")
-    print("═"*80)
+    print("═" * 80)
 
     # Generate various signals
     print("\n  Generating signals...")
@@ -112,8 +112,8 @@ def main():
     plt.savefig(OUTPUT_DIR / 'example_10_signal_processing.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"\n✓ Generated: {OUTPUT_DIR / 'example_10_signal_processing.png'}")
-    print("\n" + "═"*80 + "\nEXAMPLE 10 COMPLETE\n" + "═"*80 + "\n")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_10_signal_processing.png'}")
+    print("\n✓ Example 10 complete\n")
     return 0
 
 if __name__ == "__main__":

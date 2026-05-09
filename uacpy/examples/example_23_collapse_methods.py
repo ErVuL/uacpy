@@ -68,6 +68,10 @@ def build_rd_environment() -> uacpy.Environment:
 
 
 def main() -> None:
+    print("\n" + "═" * 80)
+    print("EXAMPLE 23: Per-feature collapse-method API")
+    print("═" * 80)
+
     env = build_rd_environment()
     source = uacpy.Source(depths=20.0, frequencies=200.0)
     receiver = uacpy.Receiver(
@@ -115,6 +119,8 @@ def main() -> None:
     fig_cmp.savefig(out_cmp, dpi=150, bbox_inches='tight')
     plt.close(fig_cmp)
     print(f"  ✓ Saved: {out_cmp}")
+
+    print("\n✓ Example 23 complete\n")
 
 
 if __name__ == '__main__':

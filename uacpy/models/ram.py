@@ -889,7 +889,7 @@ class RAM(PropagationModel):
             self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
             backend = self.select_backend(env)
-            self._log(f"RAM dispatch → {backend} backend", level='info')
+            self._log(f"Dispatching to {backend} backend", level='info')
             self._warn_on_mpirams_only_overrides(backend)
             env = self._drop_unsupported_surface_shear(env)
 
@@ -1443,7 +1443,7 @@ class RAM(PropagationModel):
                      else self._compute_zmax(env, f_min))
 
         self._log(
-            f"RAM:{kind} broadband: {len(frequencies)} frequencies, "
+            f"{kind} broadband: {len(frequencies)} frequencies, "
             f"{frequencies[0]:.2f}-{frequencies[-1]:.2f} Hz, "
             f"df={df:.2f} Hz, bw={bw:.2f} Hz, "
             f"dr={dr_band:.2f}m, dz={dz_band:.3f}m, zmax={zmax_band:.0f}m",
@@ -1467,7 +1467,7 @@ class RAM(PropagationModel):
         for k, freq in enumerate(frequencies):
             if self.verbose and (k % log_every == 0 or k == len(frequencies) - 1):
                 self._log(
-                    f"RAM:{kind} broadband: freq {k + 1}/{len(frequencies)} "
+                    f"{kind} broadband: freq {k + 1}/{len(frequencies)} "
                     f"({float(freq):.2f} Hz)",
                     level='info',
                 )
@@ -1723,7 +1723,7 @@ class RAM(PropagationModel):
             dr_opt = min(dr_safety, dr_cap)
             limit = 'safety factor' if dr_safety <= dr_cap else 'λ cap'
             self._log(
-                f"RAM:rams: tightened dr from {dr_pre:.2f} m to "
+                f"rams: tightened dr from {dr_pre:.2f} m to "
                 f"{dr_opt:.2f} m (safety={dr_safety:.2f}, "
                 f"λ-cap={dr_cap:.2f}; {limit} active).",
                 level='info',
@@ -1786,7 +1786,7 @@ class RAM(PropagationModel):
 
         c0_origin = 'user' if self.c0 is not None else 'Lytaev Eq.15'
         self._log(
-            f"RAM:{kind}: Lytaev grid → dr={dr_opt:.2f} m, "
+            f"{kind}: Lytaev grid → dr={dr_opt:.2f} m, "
             f"dz={dz_opt:.3f} m (predicted error "
             f"{res['predicted_error']:.2e}, c₀={c0_pe:.1f} m/s "
             f"[{c0_origin}], θ_max={self.theta_max:.0f}°, "
@@ -1910,8 +1910,8 @@ class RAM(PropagationModel):
         # (Q→∞, T=1) unless the user widened it via Q=/T=.
         Q_tl = 1e6 if self.Q is None else float(self.Q)
         T_tl = 1.0 if self.T is None else float(self.T)
-        self._log(f"RAM:mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s", level='info')
-        self._log(f"  Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
+        self._log(f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s", level='info')
+        self._log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2061,8 +2061,8 @@ class RAM(PropagationModel):
                 tl_output[mask, j] = np.nan
 
             elapsed = time.time() - start_time
-            self._log(f"RAM TL completed in {elapsed:.2f}s", level='info')
-            self._log(f"  TL range: {np.nanmin(tl_output):.1f} to {np.nanmax(tl_output):.1f} dB", level='info')
+            self._log(f"TL completed in {elapsed:.2f}s", level='info')
+            self._log(f"TL range: {np.nanmin(tl_output):.1f} to {np.nanmax(tl_output):.1f} dB", level='info')
 
             return TLField(
                 data=tl_output,
@@ -2108,8 +2108,8 @@ class RAM(PropagationModel):
 
         Q_bb = 2.0 if self.Q is None else float(self.Q)
         T_bb = 10.0 if self.T is None else float(self.T)
-        self._log(f"RAM:mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
-        self._log(f"  Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
+        self._log(f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
+        self._log(f"Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2209,8 +2209,8 @@ class RAM(PropagationModel):
                 pressure[mask, :, j] = np.nan
 
             elapsed = time.time() - start_time
-            self._log(f"RAM broadband completed in {elapsed:.2f}s", level='info')
-            self._log(f"  Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
+            self._log(f"Broadband completed in {elapsed:.2f}s", level='info')
+            self._log(f"Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
 
             # (n_d, n_r, n_f).
             pressure = np.moveaxis(pressure, 1, 2)
@@ -2246,7 +2246,7 @@ class RAM(PropagationModel):
             env['OMP_NUM_THREADS'] = str(os.cpu_count() or 1)
             omp_source = 'auto = os.cpu_count()'
         self._log(
-            f"Executing RAM:mpiramS: {self.executable} "
+            f"Executing mpiramS: {self.executable} "
             f"(cwd={work_dir}, OMP_NUM_THREADS={env['OMP_NUM_THREADS']} "
             f"{omp_source})",
             level='info',

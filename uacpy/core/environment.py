@@ -61,11 +61,11 @@ class SedimentLayer:
 
     def __post_init__(self):
         if self.thickness <= 0:
-            raise ValueError(f"layer thickness must be positive (m), got {self.thickness}")
+            raise ValueError(f"SedimentLayer: thickness must be positive (m); got {self.thickness}")
         if self.sound_speed <= 0:
-            raise ValueError(f"layer sound_speed must be positive (m/s), got {self.sound_speed}")
+            raise ValueError(f"SedimentLayer: sound_speed must be positive (m/s); got {self.sound_speed}")
         if self.density <= 0:
-            raise ValueError(f"layer density must be positive (g/cm^3), got {self.density}")
+            raise ValueError(f"SedimentLayer: density must be positive (g/cm^3); got {self.density}")
 
 
 @dataclass
@@ -141,15 +141,15 @@ class BoundaryProperties:
 
     def __post_init__(self):
         if self.density <= 0:
-            raise ValueError(f"density must be positive (g/cm^3), got {self.density}")
+            raise ValueError(f"BoundaryProperties: density must be positive (g/cm^3); got {self.density}")
         if self.sound_speed < 0:
-            raise ValueError(f"sound_speed must be non-negative (m/s), got {self.sound_speed}")
+            raise ValueError(f"BoundaryProperties: sound_speed must be non-negative (m/s); got {self.sound_speed}")
         if self.attenuation < 0:
-            raise ValueError(f"attenuation must be non-negative, got {self.attenuation}")
+            raise ValueError(f"BoundaryProperties: attenuation must be non-negative; got {self.attenuation}")
         if self.shear_speed < 0:
-            raise ValueError(f"shear_speed must be non-negative (m/s), got {self.shear_speed}")
+            raise ValueError(f"BoundaryProperties: shear_speed must be non-negative (m/s); got {self.shear_speed}")
         if self.shear_attenuation < 0:
-            raise ValueError(f"shear_attenuation must be non-negative, got {self.shear_attenuation}")
+            raise ValueError(f"BoundaryProperties: shear_attenuation must be non-negative; got {self.shear_attenuation}")
 
 
 @dataclass
@@ -216,7 +216,10 @@ class RangeDependentBottom:
         for attr_name in ['sound_speed', 'density', 'attenuation']:
             attr = getattr(self, attr_name)
             if len(attr) != n:
-                raise ValueError(f"{attr_name} must have same length as ranges ({n})")
+                raise ValueError(
+                    f"RangeDependentBottom: {attr_name} length ({len(attr)}) must "
+                    f"match ranges length ({n})"
+                )
 
         if self.shear_speed is None:
             self.shear_speed = np.zeros(n)
@@ -263,8 +266,8 @@ class RangeDependentBottom:
             reduce = np.median
         else:
             raise ValueError(
-                f"Unknown collapse method {method!r}. Use "
-                "'r0', 'rmax', 'mean', or 'median'."
+                f"RangeDependentBottom.collapse: unknown method={method!r}; "
+                "valid: 'r0', 'rmax', 'mean', 'median'"
             )
         return BoundaryProperties(
             acoustic_type=self.acoustic_type,
@@ -314,7 +317,7 @@ class LayeredBottom:
 
     def __post_init__(self):
         if not self.layers:
-            raise ValueError("layered bottom requires at least one SedimentLayer, got 0")
+            raise ValueError("LayeredBottom: requires at least one SedimentLayer; got 0")
 
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m)."""
@@ -459,8 +462,8 @@ class LayeredBottom:
                 shear_speed=float(np.average(cs_shear, weights=weights)),
             )
         raise ValueError(
-            f"Unknown collapse method {method!r}. Use "
-            "'halfspace', 'top_layer', or 'volume_average'."
+            f"LayeredBottom.collapse: unknown method={method!r}; "
+            "valid: 'halfspace', 'top_layer', 'volume_average'"
         )
 
     @classmethod
@@ -552,11 +555,13 @@ class RangeDependentLayeredBottom:
         n = len(self.ranges)
         if len(self.profiles) != n:
             raise ValueError(
-                f"profiles length ({len(self.profiles)}) must match "
-                f"ranges length ({n})"
+                f"RangeDependentLayeredBottom: profiles length ({len(self.profiles)}) "
+                f"must match ranges length ({n})"
             )
         if n < 1:
-            raise ValueError("At least one range point is required")
+            raise ValueError(
+                "RangeDependentLayeredBottom: at least one range point is required"
+            )
 
     def max_total_thickness(self) -> float:
         """Maximum total sediment thickness across all range points."""
@@ -646,8 +651,8 @@ class RangeDependentLayeredBottom:
             idx = len(self.profiles) // 2
         else:
             raise ValueError(
-                f"Unknown range collapse {range_method!r}. Use "
-                "'r0', 'rmax', or 'middle'."
+                f"RangeDependentLayeredBottom.collapse: unknown "
+                f"range_method={range_method!r}; valid: 'r0', 'rmax', 'middle'"
             )
         return self.profiles[idx].collapse(layered_method)
 
@@ -693,30 +698,30 @@ class SoundSpeedProfile:
             self.data = self.data.reshape(-1, 1)
         if self.data.ndim != 2:
             raise ValueError(
-                f"data must be 1-D or 2-D, got {self.data.ndim}-D"
+                f"SoundSpeedProfile: data must be 1-D or 2-D; got {self.data.ndim}-D"
             )
         if self.data.shape[0] != self.depths.size:
             raise ValueError(
-                f"data rows ({self.data.shape[0]}) must match depths "
-                f"length ({self.depths.size})"
+                f"SoundSpeedProfile: data rows ({self.data.shape[0]}) must match "
+                f"depths length ({self.depths.size})"
             )
         if self.ranges is not None:
             self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != self.data.shape[1]:
                 raise ValueError(
-                    f"ranges length ({self.ranges.size}) must match "
-                    f"data columns ({self.data.shape[1]})"
+                    f"SoundSpeedProfile: ranges length ({self.ranges.size}) must "
+                    f"match data columns ({self.data.shape[1]})"
                 )
         elif self.data.shape[1] != 1:
             raise ValueError(
-                "ranges=None requires single-column data; got "
-                f"shape {self.data.shape}"
+                f"SoundSpeedProfile: ranges=None requires single-column data; "
+                f"got shape {self.data.shape}"
             )
         self.interp = str(self.interp).lower()
         if self.interp not in _VALID_SSP_INTERP:
             raise ValueError(
-                f"interp must be one of {_VALID_SSP_INTERP}, got "
-                f"{self.interp!r}"
+                f"SoundSpeedProfile: interp={self.interp!r} not in "
+                f"{_VALID_SSP_INTERP}"
             )
 
     @property
@@ -792,8 +797,8 @@ class SoundSpeedProfile:
             col = np.median(self.data, axis=1)
         else:
             raise ValueError(
-                f"Unknown collapse method {method!r}. Use "
-                "'r0', 'rmax', 'mean', or 'median'."
+                f"SoundSpeedProfile.collapse: unknown method={method!r}; "
+                "valid: 'r0', 'rmax', 'mean', 'median'"
             )
         return SoundSpeedProfile(
             depths=self.depths.copy(),
@@ -849,7 +854,8 @@ class SoundSpeedProfile:
         arr = np.asarray(pairs, dtype=float)
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ValueError(
-                "pairs must have shape (N, 2) as (depth, sound_speed)"
+                f"SoundSpeedProfile.from_pairs: pairs must have shape (N, 2) "
+                f"as (depth, sound_speed); got shape {arr.shape}"
             )
         return cls(
             depths=arr[:, 0],
@@ -1043,21 +1049,22 @@ class Environment:
             water_depth = float(bathymetry)
             if water_depth <= 0:
                 raise ValueError(
-                    f"bathymetry depth must be positive (m), got {water_depth}"
+                    f"Environment: bathymetry depth must be positive (m); "
+                    f"got {water_depth}"
                 )
             self.bathymetry = np.array([[0.0, water_depth]], dtype=np.float64)
         else:
             self.bathymetry = np.array(bathymetry, dtype=np.float64)
             if self.bathymetry.ndim != 2 or self.bathymetry.shape[1] != 2:
                 raise ValueError(
-                    f"bathymetry must be a positive scalar or shape (N, 2) as "
-                    f"[(range_m, depth_m), ...], got shape {self.bathymetry.shape}; "
-                    f"example: [(0, 100), (5000, 200)]"
+                    f"Environment: bathymetry must be a positive scalar or shape "
+                    f"(N, 2) as [(range_m, depth_m), ...]; got shape "
+                    f"{self.bathymetry.shape} (example: [(0, 100), (5000, 200)])"
                 )
             if np.any(self.bathymetry[:, 1] <= 0):
                 raise ValueError(
-                    f"bathymetry depths must be positive (m), got "
-                    f"{self.bathymetry[:, 1].tolist()}"
+                    f"Environment: bathymetry depths must be positive (m); "
+                    f"got {self.bathymetry[:, 1].tolist()}"
                 )
 
         max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
@@ -1068,13 +1075,17 @@ class Environment:
             self.ssp = ssp
         else:
             raise TypeError(
-                f"ssp must be a SoundSpeedProfile, got {type(ssp).__name__}"
+                f"Environment: ssp must be a SoundSpeedProfile; "
+                f"got {type(ssp).__name__}"
             )
 
         if altimetry is not None:
             self.altimetry = np.array(altimetry, dtype=np.float64)
             if self.altimetry.ndim != 2 or self.altimetry.shape[1] != 2:
-                raise ValueError("altimetry must have shape (N, 2) as (range_m, height_m)")
+                raise ValueError(
+                    f"Environment: altimetry must have shape (N, 2) as "
+                    f"(range_m, height_m); got shape {self.altimetry.shape}"
+                )
         else:
             self.altimetry = None
 
@@ -1259,8 +1270,8 @@ class Environment:
             return float(depths[0])
         else:
             raise ValueError(
-                f"unknown representative-depth method {method!r}; use "
-                "'max', 'median', 'mean', 'min', or 'initial'"
+                f"Environment.get_representative_depth: unknown method={method!r}; "
+                "valid: 'max', 'median', 'mean', 'min', 'initial'"
             )
 
     def get_range_independent_approximation(self, method: str = 'max'):

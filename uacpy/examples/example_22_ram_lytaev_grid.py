@@ -35,6 +35,10 @@ from uacpy.models import RAM, RunMode
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 22: RAM Padé-error grid optimizer (Lytaev 2023)")
+    print("═" * 80)
+
     fc = 100.0
     waveguide_depth = 100.0
     rmax = 10000.0
@@ -126,7 +130,9 @@ def main():
     out = Path(__file__).parent / 'output' / 'example_22_ram_lytaev_grid.png'
     out.parent.mkdir(exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches='tight')
-    print(f"\nSaved: {out}")
+    print(f"\n  ✓ Saved: {out}")
+
+    print("\n✓ Example 22 complete\n")
 
 
 if __name__ == '__main__':

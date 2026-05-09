@@ -65,6 +65,10 @@ from uacpy.models import Bellhop, RAM, KrakenField, Scooter, SPARC, OAST
 from plotting_utils import create_example_report
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 08: Deep Water Long Range - 100+ km Propagation")
+    print("═" * 80)
+
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT SETUP - Deep ocean Munk profile
     # ═══════════════════════════════════════════════════════════════════════
@@ -139,6 +143,8 @@ def main():
     else:
         print("\n⚠ No models ran successfully!")
         return 1
+
+    print("\n✓ Example 08 complete\n")
 
     return 0
 

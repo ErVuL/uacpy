@@ -30,6 +30,10 @@ from uacpy.models import Bellhop, RAM, RunMode
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 21: Bellhop vs RAM(ramsurf) on identical altimetry env")
+    print("═" * 80)
+
     # Identical inputs to both models — Pekeris fluid waveguide with ice-keel
     # altimetry. ``env.altimetry`` follows uacpy's "positive up" convention;
     # the RAM dispatcher converts to ramsurf's "depth below z=0" internally.
@@ -135,7 +139,9 @@ def main():
     out = Path(__file__).parent / 'output' / 'example_21_bellhop_vs_ramsurf.png'
     out.parent.mkdir(exist_ok=True)
     fig.savefig(out, dpi=120)
-    print(f"\nSaved: {out}")
+    print(f"\n  ✓ Saved: {out}")
+
+    print("\n✓ Example 21 complete\n")
 
 
 if __name__ == '__main__':

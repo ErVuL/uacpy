@@ -51,9 +51,9 @@ from uacpy.visualization.plots import (
 )
 
 def main():
-    print("=" * 70)
-    print("ADVANCED ALL-MODELS COMPARISON")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 07: All-models comparison")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # CREATE 2D RANGE-DEPENDENT SSP
@@ -263,9 +263,6 @@ def main():
             else:
                 print(f"  {model_name:12s}: Failed")
 
-    print("\n" + "=" * 70)
-    print("ALL-MODELS ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated across all models:")
     print("  ✓ 2D range-dependent SSP (thermal front)")
     print("  ✓ Range-dependent bottom properties")
@@ -279,6 +276,8 @@ def main():
     print("  ✓ Contour overlays at 70, 90 dB")
     print("  ✓ jet_r colormap (blue=good, red=poor) - AT standard")
     print("\n  All models tested with realistic, complex environment!")
+
+    print("\n✓ Example 07 complete\n")
 
     return 0
 

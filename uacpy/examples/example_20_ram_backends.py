@@ -37,6 +37,10 @@ from uacpy.models import RAM, RunMode
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 20: RAM multi-backend dispatch")
+    print("═" * 80)
+
     fc = 100.0  # Hz
     waveguide_depth = 100.0
     rmax = 5000.0
@@ -119,7 +123,9 @@ def main():
     out = Path(__file__).parent / 'output' / 'example_20_ram_backends.png'
     out.parent.mkdir(exist_ok=True)
     fig.savefig(out, dpi=120)
-    print(f"\nSaved: {out}")
+    print(f"\n  ✓ Saved: {out}")
+
+    print("\n✓ Example 20 complete\n")
 
 
 if __name__ == '__main__':

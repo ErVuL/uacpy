@@ -272,7 +272,7 @@ def write_bellhop_env_file(
             ati_data[:, 1] = -ati_data[:, 1]
             write_ati_file(ati_filepath, ati_data, interp_type=bty_interp_type)
             if verbose:
-                print(f"[bellhop_writer] Wrote altimetry file: {ati_filepath}")
+                print(f"bellhop_writer: wrote altimetry file: {ati_filepath}")
 
         # If the surface boundary is a reflection file ('F'), copy the
         # .trc file alongside the .env so Bellhop can read it by base
@@ -294,7 +294,7 @@ def write_bellhop_env_file(
             dest = filepath.with_suffix('.trc')
             shutil.copy(src, dest)
             if verbose:
-                print(f"[bellhop_writer] Copied top reflection file: "
+                print(f"bellhop_writer: copied top reflection file: "
                       f"{src} -> {dest}")
 
         # Handle range-dependent SSP if using Quad interpolation
@@ -304,7 +304,7 @@ def write_bellhop_env_file(
             # write_ssp (.ssp file format) expects ranges in km.
             write_ssp(ssp_file, env.ssp.ranges / 1000.0, env.ssp.data)
             if verbose:
-                print(f"[bellhop_writer] Wrote range-dependent SSP file: {ssp_file}")
+                print(f"bellhop_writer: wrote range-dependent SSP file: {ssp_file}")
 
         # Extend SSP above MSL to cover any wave crests (env.altimetry
         # positive-up, SSP z-axis positive-down).
@@ -388,16 +388,17 @@ def write_bellhop_env_file(
                     brc_dest = filepath.with_suffix('.brc')
                     shutil.copy(brc_source, brc_dest)
                     if verbose:
-                        print(f"[bellhop_writer] Copied reflection file: {brc_source} -> {brc_dest}")
+                        print(f"bellhop_writer: copied reflection file: {brc_source} -> {brc_dest}")
                 else:
                     raise FileNotFoundError(
-                        f"Reflection coefficient file not found: {env.bottom.reflection_file}\n"
-                        f"Generate this file using BOUNCE or OASR models."
+                        f"bellhop_writer: reflection coefficient file not found: "
+                        f"{env.bottom.reflection_file}; "
+                        f"generate it via BOUNCE or OASR first."
                     )
             else:
                 raise ValueError(
-                    "acoustic_type='file' requires reflection_file parameter.\n"
-                    "Example: BoundaryProperties(acoustic_type='file', reflection_file='path/to/file.brc')"
+                    "bellhop_writer: acoustic_type='file' requires reflection_file= "
+                    "on the bottom BoundaryProperties (path to a .brc file)."
                 )
 
             # For 'F' type, Bellhop finds the .brc file by name convention

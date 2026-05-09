@@ -78,7 +78,10 @@ class PPSD:
                 else:
                     signals = [data[:, i] for i in range(data.shape[1])]
             else:
-                raise ValueError("Data must be 1D, 2D, or list of arrays")
+                raise ValueError(
+                    "PPSD.compute: data must be 1-D, 2-D, or a list of 1-D arrays; "
+                    f"got ndim={data.ndim}"
+                )
 
         chunk_size = int(self.seg_duration * fs)
         overlap_samples = int(chunk_size * self.overlap_pct / 100)
@@ -101,8 +104,8 @@ class PPSD:
 
         if len(psd_list) == 0:
             raise ValueError(
-                f"No PSD segments computed. "
-                f"Check segment duration ({self.seg_duration}s) vs signal length ({len(sig)/fs:.2f}s)."
+                f"PPSD.compute: no PSD segments computed; "
+                f"seg_duration={self.seg_duration}s vs signal length={len(sig)/fs:.2f}s"
             )
 
         psd_array = np.array(psd_list)
@@ -242,7 +245,9 @@ class Spectrogram:
             or not hasattr(self, "times")
             or not hasattr(self, "Sxx")
         ):
-            raise RuntimeError("You must compute the spectrogram before plotting it.")
+            raise RuntimeError(
+                "Spectrogram.plot: compute() must be called before plotting"
+            )
 
         # Convert to dB scale
         Sxx_db = 10 * np.log10(self.Sxx / (self.ref**2))
@@ -354,7 +359,10 @@ class SEL:
             List of tuples containing (low, center, high) frequencies for each band.
         """
         if self.fmin <= 0 or self.fmax <= self.fmin:
-            raise ValueError("fmin must be > 0 and fmax must be greater than fmin.")
+            raise ValueError(
+                f"SEL._generate_frequency_bands: require fmin > 0 and fmax > fmin; "
+                f"got fmin={self.fmin}, fmax={self.fmax}"
+            )
 
         if self.band_type in ["octave", "third_octave"]:
             self._adjust_fmin_fmax(fs)
@@ -386,7 +394,8 @@ class SEL:
         elif self.band_type == "linear":
             if self.num_bands <= 0:
                 raise ValueError(
-                    "num_bands must be a positive integer for linear bands."
+                    f"SEL._generate_frequency_bands: num_bands must be a "
+                    f"positive integer for linear bands; got {self.num_bands}"
                 )
             band_width = (self.fmax - self.fmin) / self.num_bands
             f_low = self.fmin
@@ -400,7 +409,8 @@ class SEL:
 
         else:
             raise ValueError(
-                "Invalid band_type. Choose 'octave', 'third_octave', or 'linear'."
+                f"SEL._generate_frequency_bands: unknown band_type={self.band_type!r}; "
+                "valid: 'octave', 'third_octave', 'linear'"
             )
 
         return bands
@@ -627,7 +637,7 @@ class PSD:
             Additional keyword arguments passed to ``ax.semilogx``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
-            raise RuntimeError("You must compute the PSD before plotting it.")
+            raise RuntimeError("PSD.plot: compute() must be called before plotting")
 
         # Convert PSD to dB scale
         psd_db = 10 * np.log10(self.psd / (self.ref**2))
@@ -803,7 +813,10 @@ class FRF:
         if y.ndim == 1:
             y = y.reshape(1, -1)
         if x.shape[0] != y.shape[0]:
-            raise ValueError("x and y must have the same number of measurements")
+            raise ValueError(
+                f"FRF.compute: x and y must have the same number of measurements; "
+                f"got x.shape[0]={x.shape[0]}, y.shape[0]={y.shape[0]}"
+            )
         n_meas = x.shape[0]
 
         # Initialize lists to store results from all measurements
@@ -828,7 +841,10 @@ class FRF:
             elif self.method == "p_etfe":
                 freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, fs)
             else:
-                raise ValueError(f"Unsupported method: {self.method}")
+                raise ValueError(
+                    f"FRF.compute: unknown method={self.method!r}; "
+                    "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'"
+                )
 
             # Append results
             tf_list.append(tf_i)
@@ -929,7 +945,10 @@ class FRF:
         n_periods = len(x) // period
 
         if n_periods < 1:
-            raise ValueError("Signal length must be at least one period.")
+            raise ValueError(
+                f"FRF.compute_periodic_etfe: signal length must be at least one "
+                f"period; got len(x)={len(x)} samples, period={period} samples"
+            )
 
         # Extract a whole number of periods
         x = x[: n_periods * period]
@@ -1337,7 +1356,7 @@ class FRF:
 
         if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
             raise RuntimeError(
-                "You must compute the Transfer Function before plotting it."
+                "FRF.plot_impulse_info: compute() must be called before plotting"
             )
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
@@ -1537,7 +1556,10 @@ class FKTransform:
         """
         if FK is None:
             if not hasattr(self, "FK"):
-                raise RuntimeError("No f–k data available for inverse transform.")
+                raise RuntimeError(
+                    "FKTransform.inverse: no f-k data available; "
+                    "call compute() first or pass FK= explicitly"
+                )
             FK = self.FK
 
         # Undo fftshift before inverse FFT
@@ -1565,7 +1587,9 @@ class FKTransform:
             Additional keyword arguments passed to ``ax.imshow``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
-            raise RuntimeError("You must compute the f–k transform before plotting it.")
+            raise RuntimeError(
+                "FKTransform.plot: compute() must be called before plotting"
+            )
 
         fk_db = 10 * np.log10(self.fk / (self.ref ** 2))
 

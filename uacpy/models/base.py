@@ -1264,7 +1264,7 @@ class PropagationModel(ABC):
                 msg, log_label = collapser(env, e, method, alts)
                 warnings.warn(msg, UserWarning, stacklevel=3)
                 self._log(
-                    f"{self.model_name}: {log_label} dropped/collapsed.",
+                    f"{log_label} dropped/collapsed.",
                     level='warn',
                 )
 
@@ -1291,7 +1291,7 @@ class PropagationModel(ABC):
                     UserWarning, stacklevel=3,
                 )
                 self._log(
-                    f"{self.model_name}: elastic {where} collapsed ({method}).",
+                    f"elastic {where} collapsed ({method}).",
                     level='warn',
                 )
 
