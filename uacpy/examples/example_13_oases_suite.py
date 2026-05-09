@@ -128,7 +128,7 @@ def main():
 
     print("\nGenerating visualizations...")
 
-    # Plot 1: OAST transmission loss (TLField → plot_transmission_loss).
+    # Plot 1: OAST transmission loss (PressureField (units="dB") → plot_transmission_loss).
     fig1, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
     fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
                  dpi=150, bbox_inches='tight')
@@ -181,12 +181,13 @@ def main():
         plt.close(fig3)
         print("  ✓ Saved: output/example_13_oasn_covariance.png")
 
-    # Plot 4: OASP — broadband transfer function. Slice |H| → TLField at the
-    # center frequency, then use the helper. Also synthesize a time trace
-    # with a Gaussian pulse and let TimeTrace.plot() render it.
+    # Plot 4: OASP — broadband transfer function. Slice |H| → dB
+    # PressureField at the center frequency, then use the helper. Also
+    # synthesize a time trace with a Gaussian pulse and let
+    # TimeTrace.plot() render it.
     if oasp_success and result_oasp is not None:
         from uacpy.core.constants import PRESSURE_FLOOR
-        from uacpy import TLField
+        from uacpy import PressureField
 
         H = result_oasp.data
         freqs_h = result_oasp.frequencies
@@ -196,8 +197,9 @@ def main():
         k_c = int(np.argmin(np.abs(freqs_h - f_center)))
 
         TL_centre = -20.0 * np.log10(np.maximum(np.abs(H[..., k_c]), PRESSURE_FLOOR))
-        tl_field = TLField(
+        tl_field = PressureField(
             data=TL_centre, depths=depths_h, ranges=ranges_h,
+            units='dB',
             model='OASP', backend='oasp',
             source_depths=result_oasp.source_depths,
             frequencies=f_center,

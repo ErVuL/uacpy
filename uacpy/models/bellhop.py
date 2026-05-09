@@ -171,7 +171,7 @@ def _validate_arrivals_format(fmt: str) -> None:
             "Use arrivals_format='ascii' instead."
         )
     if fmt != 'ascii':
-        raise ValueError(
+        raise ConfigurationError(
             f"arrivals_format must be 'ascii', got {fmt!r}"
         )
 
@@ -610,7 +610,7 @@ class Bellhop(PropagationModel):
                         from uacpy.io.refl_io import write_source_beam_pattern
                         arr = np.asarray(sbp_spec, dtype=float)
                         if arr.ndim != 2 or arr.shape[1] != 2:
-                            raise ValueError(
+                            raise ConfigurationError(
                                 "source_beam_pattern_file array must be shape "
                                 "(N, 2): [angle_deg, level_dB]."
                             )
@@ -675,18 +675,18 @@ class Bellhop(PropagationModel):
                     output_file = fm.get_path(f'{base_name}.ray')
                     reader = read_ray_file
                 else:
-                    self._log(f"Unknown run_type: {run_type}", level='error')
-                    raise ValueError(f"Unknown run_type: {run_type}")
+                    raise ConfigurationError(f"Unknown run_type: {run_type}")
 
                 if not output_file.exists():
-                    self._log(f"Output file not found: {output_file}", level='error')
-                    raise ModelExecutionError(
+                    exc = ModelExecutionError(
                         self.model_name, return_code=0, stdout=None,
                         stderr=(
                             f"Bellhop did not produce {output_file}; "
                             f"check {output_file.with_suffix('.prt')} for diagnostics."
                         ),
                     )
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
                 result = reader(output_file)
                 if rt in ('R', 'E'):
                     # The .ray file format is identical for fan and
@@ -893,7 +893,7 @@ class Bellhop(PropagationModel):
         if source_waveform is not None:
 
             if sample_rate is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "sample_rate is required when source_waveform is provided"
                 )
 
@@ -1154,31 +1154,3 @@ class BellhopCUDA(Bellhop):
     def _build_command(self, base_name: str) -> list:
         """Always emit the ``--<dim>`` flag required by the CUDA/CXX CLI."""
         return [str(self.executable), f'--{self.dimensionality}', base_name]
-
-
-class Bellhop3D(Bellhop):
-    """
-    Placeholder wrapper for BELLHOP3D (3D ray tracing).
-
-    Full 3D support requires a separate env-file layout (NSx/NSy source
-    grid, Ntheta/Nbeta bearing fan, 3D bathymetry via .bty3d, 3D SSP via
-    .ssp hexahedral format, etc.) and a 3D-aware output reader path.
-    See ``third_party/Acoustics-Toolbox/doc/bellhop3d.htm`` for the
-    authoritative file format.
-
-    This stub exists so users can discover the gap via ``from
-    uacpy.models import Bellhop3D`` rather than silently falling back to
-    2D. Constructing the class raises :class:`NotImplementedError`.
-
-    Contributions welcome.
-    """
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "Bellhop3D wrapper is pending — the uacpy writer currently "
-            "emits 2D env blocks only (write_bellhop_env_file hardcodes "
-            "position 6 to '2'). Contributions welcome; see "
-            "third_party/Acoustics-Toolbox/doc/bellhop3d.htm for the 3D "
-            "env-file specification and bellhop3D.f90 for the Fortran "
-            "reference."
-        )

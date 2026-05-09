@@ -521,18 +521,10 @@ def read_oasn_replicas(
         raise IOError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
-def _read_fortran_record_marker(f) -> int:
-    """
-    Read Fortran unformatted record marker (4-byte integer)
-
-    Fortran unformatted files have record markers before and after each record
-    indicating the size of the record in bytes.
-    """
-    marker_bytes = f.read(4)
-    if len(marker_bytes) < 4:
-        raise IOError("Unexpected end of file while reading record marker")
-    marker = struct.unpack('i', marker_bytes)[0]
-    return marker
+from uacpy.io._fortran_helpers import (
+    read_fortran_record_marker as _read_fortran_record_marker,
+    read_fortran_record as _read_fortran_record,
+)
 
 
 def read_oasp_trf(
@@ -603,61 +595,6 @@ def read_oasp_trf(
     )
 
 
-def _read_fortran_record(f, fmt=None, raw=False, endian='<'):
-    """Read a single Fortran UNFORMATTED sequential record.
-
-    Layout::
-
-        [4-byte length N][N bytes payload][4-byte length N]
-
-    Both length markers must match; mismatch indicates file corruption or
-    wrong endianness and raises ``IOError``.
-
-    Parameters
-    ----------
-    f : file object (binary mode)
-    fmt : str, optional
-        struct format string for the payload (excluding endian prefix).
-    raw : bool, optional
-        If True, return raw bytes. Default False.
-    endian : str, optional
-        '<' (little-endian, x86 default) or '>' (big-endian).
-
-    Returns
-    -------
-    tuple | bytes
-        Unpacked payload (or raw bytes).
-    """
-    head = f.read(4)
-    if len(head) < 4:
-        raise IOError("Unexpected EOF reading Fortran record head")
-    (nbytes,) = struct.unpack(endian + 'i', head)
-    if nbytes < 0 or nbytes > (1 << 28):  # magic-number sanity: <256 MB
-        raise IOError(
-            f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
-        )
-    payload = f.read(nbytes)
-    if len(payload) < nbytes:
-        raise IOError(
-            f"Short read: expected {nbytes} bytes, got {len(payload)}"
-        )
-    tail = f.read(4)
-    if len(tail) < 4:
-        raise IOError("Unexpected EOF reading Fortran record tail")
-    (ntail,) = struct.unpack(endian + 'i', tail)
-    if ntail != nbytes:
-        raise IOError(
-            f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
-            "(wrong endianness or truncated file)"
-        )
-    if raw or fmt is None:
-        return payload
-    expected = struct.calcsize(endian + fmt)
-    if expected != nbytes:
-        raise IOError(
-            f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
-        )
-    return struct.unpack(endian + fmt, payload)
 
 
 def _read_oasp_trf_binary(filepath: Path) -> Dict:

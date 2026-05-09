@@ -13,7 +13,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, TLField, PressureField, TransferFunction,
+    Result, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace, Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
 )
@@ -152,8 +152,6 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
     Selects the correct specialised plot function based on the concrete
     ``Result`` subclass. Used by ``Result.plot()``.
     """
-    if isinstance(result, TLField):
-        return plot_transmission_loss(result, env=env, **kwargs)
     if isinstance(result, PressureField):
         return plot_transmission_loss(result.to_tl(), env=env, **kwargs)
     if isinstance(result, TransferFunction):
@@ -1337,14 +1335,14 @@ def compare_models(
             ax.axis('off')
             continue
 
-        if isinstance(field, TLField):
-            pass
-        elif isinstance(field, (PressureField, TransferFunction)):
+        if isinstance(field, PressureField):
+            field = field.to_tl()
+        elif isinstance(field, TransferFunction):
             field = field.to_tl()
         else:
             raise TypeError(
                 f"compare_models: '{model_name}' is a {type(field).__name__}; "
-                "expected TLField, PressureField, or TransferFunction."
+                "expected PressureField or TransferFunction."
             )
 
         ranges_km = field.ranges / 1000.0
@@ -2947,7 +2945,7 @@ def plot_transfer_function(
        result or a mapping ``{model_name: field}`` to overlay several.
     2. ``frequencies=<Hz>``: 2-D ``|H(f)|`` heatmap on the ``(depth, range)``
        grid at the nearest frequency. Mirrors :func:`plot_transmission_loss`
-       for broadband ``TLField``. Returns ``(fig, ax)`` only.
+       for broadband ``PressureField``. Returns ``(fig, ax)`` only.
 
     Result data shape may be ``(n_depths, n_freqs, n_ranges)`` (RAM /
     KrakenField / OASP convention) or ``(n_depths, n_ranges, n_freqs)``

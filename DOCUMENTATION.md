@@ -51,7 +51,7 @@ import uacpy
 from uacpy.models import Bellhop
 from uacpy.visualization import plot_transmission_loss
 
-env = uacpy.Environment(name="shallow", bathymetry=100.0, sound_speed=1500.0)
+env = uacpy.Environment(name="shallow", bathymetry=100.0, ssp=1500.0)
 source = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(
     depths=np.linspace(0, 100, 101),
@@ -76,7 +76,7 @@ from uacpy import (
 )
 # Result types (used for type checks in user code)
 from uacpy import (
-    Result, TLField, PressureField, TransferFunction,
+    Result, PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
     Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
@@ -125,9 +125,10 @@ Environment + Source + Receiver  →  Model.run()  →  Result
   pattern, optional position.
 - **`Receiver`** — grid or line of hydrophones at specified depths/ranges.
 - **`Result`** — returned by every model. Concrete typed subclass
-  (`TLField`, `PressureField`, `TransferFunction`, `TimeSeriesField`,
-  `Arrivals`, `Rays`, `Modes`, `Covariance`, `Replicas`,
-  `ReflectionCoefficient`) carries the data appropriate to the run mode.
+  (`PressureField` (with `units='dB'` for TL or `'complex'` for pressure),
+  `TransferFunction`, `TimeSeriesField`, `Arrivals`, `Rays`, `Modes`,
+  `Covariance`, `Replicas`, `ReflectionCoefficient`) carries the data
+  appropriate to the run mode.
 
 All models inherit from `PropagationModel` (`uacpy.models.base`) and expose:
 
@@ -183,14 +184,16 @@ Model(
     timeout=600.0,                            # subprocess timeout (s) per binary run
     # Per-feature collapse policies — applied by ``_project_environment``
     # at the top of ``run()`` when env contains a feature this model does
-    # not natively support.
-    bathymetry_collapse_method='max',         # max|median|mean|min|initial
-    ssp_collapse_method='r0',                 # r0|rmax|mean|median
-    bottom_collapse_method='r0',              # r0|rmax|mean|median
-    layered_collapse_method='halfspace',      # halfspace|top_layer|volume_average
-    rd_layered_collapse_method='halfspace',   # same set as layered
-    altimetry_collapse_method='drop',         # drop
-    elastic_collapse_method='fluid',          # fluid (zero shear) | vacuum
+    # not natively support. Pass any subset; missing keys keep defaults.
+    collapse={                                # default values shown
+        'bathymetry': 'max',                  # max|median|mean|min|initial
+        'ssp':        'r0',                   # r0|rmax|mean|median
+        'bottom':     'r0',                   # r0|rmax|mean|median
+        'layered':    'halfspace',            # halfspace|top_layer|volume_average
+        'rd_layered': 'halfspace',            # same set as layered
+        'altimetry':  'drop',                 # drop
+        'elastic':    'fluid',                # fluid (zero shear) | vacuum
+    },
 )
 ```
 
@@ -283,7 +286,7 @@ classmethods; the `interp` field carries the writer hint
 from uacpy import SoundSpeedProfile
 
 # 1. Constant — also the default when Environment(ssp=None)
-env = uacpy.Environment(name="iso", bathymetry=100, sound_speed=1500.0)
+env = uacpy.Environment(name="iso", bathymetry=100, ssp=1500.0)
 
 # 2. Tabulated 1-D profile
 profile = [(0, 1540), (50, 1520), (100, 1510), (200, 1505)]
@@ -387,7 +390,7 @@ long `.bty` format (per-range `cp / ρ / α / cs` written to the
 RD-bottom through the Fortran natively. The Collins backends (rams0.5,
 ramsurf1.5) use the range-0 profile only and warn on the dropped data.
 Models that don't natively support RD bottoms collapse via
-`bottom_collapse_method` (default `'r0'` — see §5.2).
+`collapse={'bottom': …}` (default `'r0'` — see §5.2).
 
 ### Layered bottom (varies with depth only)
 
@@ -433,7 +436,7 @@ rdl = RangeDependentLayeredBottom(
 
 # Bathymetry lives on the Environment, not on the RDL.
 bathy = np.array([[0, 100], [20000, 300]])   # (range_m, seafloor_depth_m)
-env = uacpy.Environment(name="shelf", sound_speed=1500,
+env = uacpy.Environment(name="shelf", ssp=1500,
                         bathymetry=bathy, bottom=rdl)
 ```
 
@@ -447,7 +450,7 @@ at one of the RDL ranges interpolate it from `env.bathymetry`.
 
 ```python
 bathy = np.array([[0, 100], [5000, 150], [10000, 200]])  # (range_m, depth_m)
-env = uacpy.Environment(name="slope", sound_speed=1500,
+env = uacpy.Environment(name="slope", ssp=1500,
                         bathymetry=bathy)
 
 # Rough sea surface (Bellhop and RAM ramsurf backend — others drop it)
@@ -456,7 +459,7 @@ env = uacpy.Environment(name="slope", sound_speed=1500,
 alt = uacpy.generate_sea_surface(
     max_range_m=10_000, wind_speed_ms=10.0, n_points=500, seed=0xACED,
 )
-env = uacpy.Environment(name="rough", bathymetry=100, sound_speed=1500,
+env = uacpy.Environment(name="rough", bathymetry=100, ssp=1500,
                         altimetry=alt)
 ```
 
@@ -470,10 +473,9 @@ env.has_range_dependent_bottom()
 env.has_layered_bottom()
 env.has_range_dependent_layered_bottom()
 
-# Per-feature collapse is the canonical path: pass *_collapse_method
-# kwargs to the model constructor (see §2). The whole-env shortcut below
-# only collapses bathymetry + truncates SSP — it does not honour the
-# per-feature methods.
+# Per-feature collapse is the canonical path: pass `collapse={…}` to the
+# model constructor (see §2). The whole-env shortcut below only collapses
+# bathymetry + truncates SSP — it does not honour the per-feature methods.
 env_ri = env.get_range_independent_approximation(method='median')
 ```
 
@@ -588,15 +590,16 @@ representation reachable through `RunMode.BROADBAND`.
 > through, choose an env that routes to mpiramS.
 
 `warn+collapse` = uacpy emits a `UserWarning` and collapses each
-unsupported feature axis via the matching `*_collapse_method`
-constructor kwarg (`bathymetry_collapse_method`, `ssp_collapse_method`,
-`bottom_collapse_method`, `layered_collapse_method`,
-`rd_layered_collapse_method`, `altimetry_collapse_method`). The default
-`bathymetry_collapse_method='max'` keeps source/receiver depths above the
-seafloor; other valid values are `'min'`, `'median'`, `'mean'`,
-`'initial'`. SSP/bottom defaults are `'r0'` (range-0 column / sample);
-layered defaults are `'halfspace'`. See
-`PropagationModel._project_environment` (`models/base.py`).
+unsupported feature axis via the matching key in the model's
+`collapse={…}` constructor kwarg. The seven keys are `'bathymetry'`,
+`'ssp'`, `'bottom'`, `'layered'`, `'rd_layered'`, `'altimetry'`,
+`'elastic'` (pass any subset; missing keys keep defaults). The default
+`'bathymetry': 'max'` keeps source/receiver depths above the seafloor;
+other valid values are `'min'`, `'median'`, `'mean'`, `'initial'`.
+SSP/bottom defaults are `'r0'` (range-0 column / sample); layered
+defaults are `'halfspace'`; elastic default is `'fluid'` (zero shear,
+keep cp/ρ/α). See `PropagationModel._project_environment`
+(`models/base.py`).
 
 The matrix above is driven by six boolean capability flags each model
 sets in its `__init__`:
@@ -798,7 +801,7 @@ modes = krc.run(env_with_shear_bottom, source, receiver)
 For genuinely range-dependent modal propagation use `KrakenField`. When
 `Kraken` / `KrakenC` are given a range-dependent env, the wrapper emits a
 `UserWarning` per unsupported feature and collapses each via the
-matching `*_collapse_method` (bathymetry default `'max'`, SSP/bottom
+matching `collapse={…}` key (bathymetry default `'max'`, SSP/bottom
 default `'r0'`).
 
 Note: real Kraken cannot handle elastic media (`shear_speed > 0`); the
@@ -1180,31 +1183,37 @@ packaged as the typed `Covariance` / `Replicas` results. A covariance is
 a hydrophone × hydrophone correlation; replicas are frequency-domain
 Green's-function templates for matched-field processing.
 
-### 5.12 OASES unified façade
+### 5.12 OASES factory
 
 ```python
-from uacpy.models import OASES
+from uacpy.models import OASES, OAST, OASN, OASR, OASP
 from uacpy.models.base import RunMode
 
-oases = OASES(use_tmpfs=False, verbose=False)
+# OASES(...) is a one-line factory that returns the OASES sub-class
+# matching the requested run_mode. Defaults to OAST (COHERENT_TL).
+m = OASES(verbose=False)                                  # → OAST
+m = OASES(broadband=True)                                 # → OASP
+m = OASES(run_mode=RunMode.COVARIANCE)                    # → OASN
+m = OASES(run_mode=RunMode.REPLICA)                       # → OASN
+m = OASES(run_mode=RunMode.REFLECTION)                    # → OASR
+m = OASES(run_mode=RunMode.BROADBAND)                     # → OASP
+m = OASES(run_mode=RunMode.TIME_SERIES)                   # → OASP
 
-field  = oases.compute_tl(env, source, receiver)                      # → OAST
-field  = oases.compute_tl(env, source, receiver, broadband=True)      # → OASP
-refl   = oases.compute_reflection(env, source, receiver)              # → OASR
-trf    = oases.compute_transfer_function(env, source, receiver)       # → OASP
+result = m.run(env, source, receiver)
 ```
 
-For maximum control use the individual classes; the façade is for
-convenience. Pass `broadband=True` to route a TL request through OASP
-(wideband transfer function) instead of OAST — needed for
-range-dependent environments where OAST's range-independent kernel is
-inappropriate.
+The factory is a convenience entry point; for maximum control instantiate
+`OAST` / `OASN` / `OASR` / `OASP` directly. Pass `broadband=True` with the
+default `COHERENT_TL` to route through OASP (wideband transfer function)
+instead of OAST — needed for range-dependent environments where OAST's
+range-independent kernel is inappropriate. Sub-class-specific kwargs
+(e.g. `angles=` when routing to `OASN`) are silently dropped.
 
 OASES does not compute explicit normal-mode eigenfunctions; for those
-use `Kraken` or `KrakenC`. Calling `OASES.run(run_mode=RunMode.MODES)`
-raises `UnsupportedFeatureError` and points at OASN's hydrophone-array
-products: `RunMode.COVARIANCE` (covariance matrix) or `RunMode.REPLICA`
-(replica field at array elements).
+use `Kraken` or `KrakenC`. Calling `OASES(run_mode=RunMode.MODES)` raises
+`UnsupportedFeatureError` and points at OASN's hydrophone-array products:
+`RunMode.COVARIANCE` (covariance matrix) or `RunMode.REPLICA` (replica
+field at array elements).
 
 ---
 
@@ -1217,22 +1226,23 @@ type with `isinstance`:
 ```python
 from uacpy.core.results import (
     Result, PhaseReference,
-    TLField, PressureField, TransferFunction,
+    PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
     Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient,
 )
 
 result = bellhop.run(env, source, receiver)
-assert isinstance(result, TLField)
+assert isinstance(result, PressureField) and result.units == 'dB'
 ```
 
 Hierarchy:
 
 ```
 Result                              identification + metadata
-├── TLField                         (n_d, n_r) or (n_d, n_r, n_f), dB
-├── PressureField                   (n_d, n_r) complex
+├── PressureField                   (n_d, n_r) or (n_d, n_r, n_f);
+│                                   real (dB TL) when units='dB',
+│                                   complex when units='complex'
 ├── TransferFunction                (n_d, n_r, n_f) complex
 ├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
@@ -1338,9 +1348,8 @@ The variable axis (frequency or time) is always **trailing**. So:
 
 | Result | Shape |
 |---|---|
-| `TLField` (narrowband) | `(n_d, n_r)` |
-| `TLField` (broadband) | `(n_d, n_r, n_f)` |
-| `PressureField` | `(n_d, n_r)` complex |
+| `PressureField` (narrowband, `units='dB'` or `'complex'`) | `(n_d, n_r)` |
+| `PressureField` (broadband, `units='dB'` or `'complex'`) | `(n_d, n_r, n_f)` |
 | `TransferFunction` | `(n_d, n_r, n_f)` complex |
 | `TimeSeriesField` | `(n_d, n_r, n_t)` real |
 | `TimeTrace` | `(n_t,)` real |
@@ -1382,8 +1391,9 @@ Common access patterns:
 ```python
 # TL grid (Bellhop / KrakenField / RAM / Scooter / SPARC / OAST / OASP)
 result = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-assert isinstance(result, TLField)
+assert isinstance(result, PressureField) and result.units == 'dB'
 tl   = result.data            # shape (n_d, n_r), dB
+# (or `result.tl` — works regardless of units)
 rngs = result.ranges          # m
 zs   = result.depths          # m
 
@@ -1996,10 +2006,10 @@ environment.
 
 **A model dropped my range-dependent SSP / bottom / layered bottom.**
 Each unsupported feature triggers one `UserWarning` per `run()` and is
-collapsed via the matching `*_collapse_method` constructor kwarg.
-Either pick a model that supports the feature (see the matrix in §5.2)
-or change the collapse policy — e.g.
-`Kraken(ssp_collapse_method='mean', bottom_collapse_method='median')`.
+collapsed via the matching key in the model's `collapse={…}` constructor
+kwarg. Either pick a model that supports the feature (see the matrix in
+§5.2) or change the collapse policy — e.g.
+`Kraken(collapse={'ssp': 'mean', 'bottom': 'median'})`.
 
 **`LayeredBottom` in Bellhop collapses to a halfspace.** Bellhop natively
 honours range-dependent bathymetry and range-dependent bottom
@@ -2076,7 +2086,7 @@ the four examples that need a longer subprocess timeout (see
 | 20 | `example_20_ram_backends.py`                   | RAM dispatcher: mpiramS / rams / ramsurf | |
 | 21 | `example_21_bellhop_vs_ramsurf.py`             | Bellhop vs ramsurf with rough surface | |
 | 22 | `example_22_ram_lytaev_grid.py`                | RAM Lytaev (2023) Padé grid optimizer | ✓ |
-| 23 | `example_23_collapse_methods.py`               | Same RD env collapsed four ways via `*_collapse_method` kwargs | |
+| 23 | `example_23_collapse_methods.py`               | Same RD env collapsed four ways via `collapse={…}` kwarg | |
 | 24 | `example_24_synthesize_time_series.py`         | Bellhop BROADBAND H(f) → IFFT → p(t) via `TransferFunction.synthesize_time_series` | |
 
 Smoke test:

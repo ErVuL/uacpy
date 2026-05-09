@@ -50,7 +50,7 @@ def demo_stacked_time_series():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         bathymetry=100,
-        sound_speed=1500,
+        ssp=1500,
         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'),
     )
     source = uacpy.Source(depths=50, frequencies=100)
@@ -99,7 +99,7 @@ def demo_modes_heatmap():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         bathymetry=100,
-        sound_speed=1500,
+        ssp=1500,
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700,

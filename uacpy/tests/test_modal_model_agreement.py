@@ -9,7 +9,6 @@ import pytest
 import numpy as np
 
 import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Kraken, KrakenField, Scooter, OAST
 
 # All tests in this module spawn model binaries (Kraken, Scooter, OAST)
@@ -22,12 +21,10 @@ class TestModalModelAgreement:
     @pytest.fixture
     def simple_environment(self):
         """Create a simple Pekeris waveguide for testing."""
-        ssp_data = np.array([[0, 1500], [100, 1480]])
         env = uacpy.Environment(
             name='Pekeris',
             bathymetry=100,
-            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear'),
-            sound_speed=1500
+            ssp=1500
         )
         return env
 

@@ -67,7 +67,7 @@ def demo_bellhop_bounce():
     env = uacpy.Environment(
         name='Elastic Sandy Bottom',
         bathymetry=100,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=bottom,
     )
 
@@ -168,7 +168,7 @@ def demo_layered_bottom():
     env = uacpy.Environment(
         name='Continental Shelf - Layered Sediment',
         bathymetry=200.0,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=layered,
     )
     print(f"has_layered_bottom: {env.has_layered_bottom()}")
@@ -357,7 +357,7 @@ def demo_rd_layered_bottom():
 
     env = uacpy.Environment(
         name='Shelf: Mud/Clay to Sand/Rock',
-        sound_speed=1500.0,
+        ssp=1500.0,
         bathymetry=rdl_bathymetry,
         bottom=rdl,
     )

@@ -1,3 +1,7 @@
+# This Makefile is vendored by uacpy. Compiler flags here are intentionally
+# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
+# FORTRAN_ARCH_FLAGS on the make command line. To build outside uacpy, pass
+# your own flags (e.g. `make FFLAGS="-O3 -march=native ..."`).
 #
 # To install the Acoustics Toolbox:
 #
@@ -114,7 +118,13 @@ export FC=gfortran
 # export FFLAGS= -march=corei7 -Bstatic -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation        -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer
 # export FFLAGS= -march=native          -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wa,-q -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
 # Had a problem with -O2 in the KRAKENC root finder for at/tests/Noise/Sduct. Switching to O1 (4//25/2023)
-export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
+# -march=native / -mtune=native baked-in flags commented out by uacpy: they
+# produce CPU-specific binaries that break wheel/sdist consumers and macOS/ARM
+# cross-compiles. install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS= on the
+# command line; users invoking `make` directly should pass FFLAGS= explicitly
+# if they want CPU tuning.
+# export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
+export FFLAGS= -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
 
 # Compilation and run-time diagnostics on:
 # omni.env fails trap=invalid

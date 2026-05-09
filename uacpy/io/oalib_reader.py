@@ -21,15 +21,16 @@ import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, List, Any, Optional
 
-from uacpy.core.results import TLField, Arrivals, Rays
+from uacpy.core.results import PressureField, Arrivals, Rays
 from uacpy.core.constants import PRESSURE_FLOOR, TL_MAX_DB
+from uacpy.io._fortran_helpers import read_vector as _read_vector
 
 
-def read_shd_file(filepath: Union[str, Path]) -> TLField:
-    """Read a single-frequency ``.shd`` file as a typed :class:`TLField`.
+def read_shd_file(filepath: Union[str, Path]) -> PressureField:
+    """Read a single-frequency ``.shd`` file as a typed :class:`PressureField`.
 
     Thin wrapper around :func:`read_shd_bin` that converts the dict
-    return into a TLField. Multi-frequency ``.shd`` files raise
+    return into a dB-units PressureField. Multi-frequency ``.shd`` files raise
     ``ValueError`` — call ``read_shd_bin`` directly and build a
     :class:`TransferFunction` from its complex pressure cube instead.
     """
@@ -51,7 +52,8 @@ def read_shd_file(filepath: Union[str, Path]) -> TLField:
     tl_data = np.clip(-20.0 * np.log10(p_abs), None, TL_MAX_DB)
 
     pos = shd['Pos']
-    return TLField(
+    return PressureField(
+            units="dB",
         data=tl_data,
         ranges=pos['r']['r'],
         depths=pos['r']['z'],
@@ -1283,49 +1285,6 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
             "Nro": N_offsets,
         },
     }
-
-
-def _read_vector(fid) -> Tuple[np.ndarray, int]:
-    """
-    Read a vector from file with Fortran-style / shorthand.
-
-    Helper function for read_flp.
-    """
-    # Read number of points
-    n = int(fid.readline().strip())
-
-    # Read data line
-    line = fid.readline().strip()
-
-    if "/" in line:
-        # Parse values before '/'
-        parts = line.split("/")[0].strip().split()
-        values = [float(v) for v in parts if v]
-
-        if n == 1:
-            x = np.array([values[0]]) if values else np.array([0.0])
-        elif n == 2:
-            x = (
-                np.array(values[:2])
-                if len(values) >= 2
-                else np.array([values[0], values[0]])
-            )
-        else:
-            # Generate linearly spaced
-            if len(values) >= 2:
-                x = np.linspace(values[0], values[1], n)
-            elif len(values) == 1:
-                x = np.full(n, values[0])
-            else:
-                x = np.zeros(n)
-    else:
-        # Explicit values
-        values = [float(v) for v in line.split() if v]
-        x = np.array(values[:n])
-        if len(x) < n:
-            x = np.pad(x, (0, n - len(x)), constant_values=0)
-
-    return x, n
 
 
 def _read_sz_rz(fid) -> Dict[str, np.ndarray]:

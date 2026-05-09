@@ -25,7 +25,7 @@ def sparc_simple_env():
     env = Environment(
         name="Test Environment",
         bathymetry=100.0,
-        sound_speed=1500.0
+        ssp=1500.0
     )
     # SPARC requires vacuum or rigid bottom
     env.bottom.acoustic_type = 'vacuum'
@@ -234,7 +234,7 @@ class TestSPARCErrorHandling:
     @pytest.mark.requires_binary
     def test_sparc_halfspace_warning(self, source_50hz, receiver_grid):
         """Test that halfspace bottom generates warning."""
-        env = Environment(name="Test", bathymetry=100, sound_speed=1500)
+        env = Environment(name="Test", bathymetry=100, ssp=1500)
         env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
 
         sparc = SPARC(verbose=False)

@@ -348,13 +348,15 @@ class Bounce(PropagationModel):
                 irc_file = fm.get_path(f'{base_name}.irc')
 
                 if not brc_file.exists():
-                    raise ModelExecutionError(
+                    exc = ModelExecutionError(
                         self.model_name, return_code=0, stdout=None,
                         stderr=(
                             f"BOUNCE did not produce {brc_file}; "
                             f"check {fm.work_dir}/{base_name}.prt for diagnostics."
                         ),
                     )
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
 
                 # bellhopcuda's strict monotonicity check on .brc/.irc rejects
                 # the duplicate near-zero angles bounce.f90 emits when many

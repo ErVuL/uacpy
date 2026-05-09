@@ -18,7 +18,7 @@ References:
 
 import warnings
 from pathlib import Path
-from typing import Callable, List, Optional, TextIO, Union
+from typing import Callable, List, Optional, TextIO, Tuple, Union
 import numpy as np
 
 from uacpy.core.environment import BoundaryProperties, Environment
@@ -155,6 +155,70 @@ def _emit_bottom_layers(
         f.write(f"{water_depth:.2f} {fallback_c_p:.2f} {fallback_c_s:.2f} "
                 f"{fallback_alpha_p:.3f} {fallback_alpha_s:.3f} "
                 f"{fallback_rho:.2f}{suffix_fn(iface)}\n")
+
+
+def _resolve_freq_sweep(
+    source: Source, freq_fallback: float
+) -> Tuple[float, float, int]:
+    """Resolve the (freq_min, freq_max, nfreq) sweep tuple from a Source.
+
+    Multi-frequency sources advertise the actual sweep bounds; single-freq
+    sources collapse to ``(freq, freq, 1)``. The fallback covers the rare
+    case where ``source.frequencies`` is empty (callers pass the model's
+    canonical centre frequency).
+    """
+    freqs_arr = np.atleast_1d(source.frequencies)
+    if len(freqs_arr) > 1:
+        return float(freqs_arr.min()), float(freqs_arr.max()), int(len(freqs_arr))
+    return freq_fallback, freq_fallback, 1
+
+
+def _emit_oases_freq_line(
+    f: TextIO,
+    freq_min: float,
+    freq_max: float,
+    nfreq: int,
+    *,
+    integration_offset: float,
+    doppler: bool = False,
+    vrec: Optional[float] = None,
+    offdb: Optional[float] = None,
+) -> None:
+    """Write the OASES Block-III frequency-sweep line.
+
+    Layout: ``FREQ1 FREQ2 NFREQ COFF [VREC]``.  The 5-token Doppler form
+    fires only when the lowercase ``'d'`` option is enabled (OAST). OASN
+    and OASR always emit the 4-token form.
+    """
+    if doppler:
+        offdb_val = offdb if offdb is not None else integration_offset
+        vrec_val = vrec if vrec is not None else 0.0
+        f.write(
+            f"{freq_min:.1f} {freq_max:.1f} {nfreq} {offdb_val} {vrec_val}\n"
+        )
+    else:
+        f.write(
+            f"{freq_min:.1f} {freq_max:.1f} {nfreq} {integration_offset}\n"
+        )
+
+
+def _oases_wavenumber_bounds(
+    ssp_data: np.ndarray,
+    c_p: float,
+    *,
+    ssp_factor: float = 0.9,
+    c_p_factor: float = 1.1,
+    c_p_ceiling: float = 1e8,
+) -> Tuple[float, float]:
+    """Return the (cmin, cmax) wavenumber-integration bounds.
+
+    ``cmin = min(SSP) * ssp_factor`` (default 0.9 for OAST/OASP, 0.95 for
+    OASN noise blocks). ``cmax = max(c_p * c_p_factor, c_p_ceiling)``
+    (OAST uses 1e8, OASP uses 1e9).
+    """
+    cmin = float(ssp_data[:, 1].min()) * ssp_factor
+    cmax = max(c_p * c_p_factor, c_p_ceiling)
+    return cmin, cmax
 
 
 def _count_bottom_layers(env: Environment) -> int:
@@ -312,7 +376,7 @@ def write_oast_input(
 
     Examples
     --------
-    >>> env = Environment(bathymetry=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, ssp=1500)
     >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=np.linspace(10,90,40),
     ...                     ranges=np.linspace(100,10000,100))
@@ -353,33 +417,23 @@ def write_oast_input(
         options = 'N J T'  # Normal stress, complex contour, TL vs range
     options = _inject_volume_attenuation(options, volume_attenuation)
 
-    # Multi-frequency sweep support.
-    freqs_arr = np.atleast_1d(source.frequencies)
-    if len(freqs_arr) > 1:
-        freq_min = float(freqs_arr.min())
-        freq_max = float(freqs_arr.max())
-        nfreq = int(len(freqs_arr))
-    else:
-        freq_min = freq_max = freq
-        nfreq = 1
+    freq_min, freq_max, nfreq = _resolve_freq_sweep(source, freq)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OAST Simulation via UACPY")
 
-        # Block III: Frequencies
-        # FREQ1 FREQ2 NFREQ COFF [VREC]
-        # Per unoast31.f:125-133, when the 'd' (lowercase Doppler) option is
-        # enabled the block must include a 5th value VREC (source/receiver
-        # velocity). Capital 'D' is the depth-averaged-TL flag and does NOT
-        # trigger Doppler, so keep the check case-specific.
-        opt_tokens_freq = options.split()
-        doppler_on = 'd' in opt_tokens_freq
-        if doppler_on:
-            vrec = kwargs.get('vrec', 0.0)
-            offdb = kwargs.get('offdb', integration_offset)
-            f.write(f"{freq_min:.1f} {freq_max:.1f} {nfreq} {offdb} {vrec}\n")
-        else:
-            f.write(f"{freq_min:.1f} {freq_max:.1f} {nfreq} {integration_offset}\n")
+        # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF [VREC].
+        # unoast31.f:125-133: lowercase 'd' enables Doppler and demands the
+        # 5th VREC token. Uppercase 'D' is depth-averaged-TL and stays in
+        # the 4-token form.
+        doppler_on = 'd' in options.split()
+        _emit_oases_freq_line(
+            f, freq_min, freq_max, nfreq,
+            integration_offset=integration_offset,
+            doppler=doppler_on,
+            vrec=kwargs.get('vrec', 0.0),
+            offdb=kwargs.get('offdb'),
+        )
 
         # Block IV: Environment
         # OASES uses CS = -999.999 to indicate continuous SVP gradient to next layer
@@ -465,11 +519,8 @@ def write_oast_input(
         for line in _receiver_block_lines(receiver, trailing=' 1'):
             f.write(line + '\n')
 
-        # Block VII: Wavenumber sampling
-        # CMIN CMAX
-        c_water_min = float(ssp_data[:, 1].min())
-        cmin = c_water_min * 0.9
-        cmax = max(c_p * 1.1, 1e8)
+        # Block VII: Wavenumber sampling — CMIN CMAX.
+        cmin, cmax = _oases_wavenumber_bounds(ssp_data, c_p)
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
         # NW IC1 IC2 — automatic sampling (NW=-1) ignores IC1/IC2 per
@@ -585,7 +636,7 @@ def write_oasn_input(
 
     Examples
     --------
-    >>> env = Environment(bathymetry=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, ssp=1500)
     >>> source = Source(depths=50, frequencies=100)
     >>> receiver = Receiver(depths=[30, 50, 70], ranges=[0])
     >>> write_oasn_input('test.dat', env, source, receiver,
@@ -622,22 +673,16 @@ def write_oasn_input(
     # Integration parameters
     integration_offset = kwargs.get('integration_offset', 0)
 
-    # Multi-frequency sweep support.
-    freqs_arr = np.atleast_1d(source.frequencies)
-    if len(freqs_arr) > 1:
-        freq_min_b = float(freqs_arr.min())
-        freq_max_b = float(freqs_arr.max())
-        nfreq = int(len(freqs_arr))
-    else:
-        freq_min_b = freq_max_b = freq
-        nfreq = 1
+    freq_min_b, freq_max_b, nfreq = _resolve_freq_sweep(source, freq)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
-        # Block III: Frequencies
-        # FREQ1 FREQ2 NFREQ COFF
-        f.write(f"{freq_min_b:.1f} {freq_max_b:.1f} {nfreq} {integration_offset}\n")
+        # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF.
+        _emit_oases_freq_line(
+            f, freq_min_b, freq_max_b, nfreq,
+            integration_offset=integration_offset,
+        )
 
         # Block IV: Environment
         # NL = number of layers (including halfspaces and all water layers)
@@ -816,7 +861,7 @@ def write_oasp_input(
 
     Examples
     --------
-    >>> env = Environment(bathymetry=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, ssp=1500)
     >>> source = Source(depths=80, frequencies=30)
     >>> receiver = Receiver(depths=np.linspace(20,100,5),
     ...                     ranges=np.linspace(1000,5000,5))
@@ -873,9 +918,7 @@ def write_oasp_input(
     # Wavenumber sampling
     integration_offset = kwargs.get('integration_offset', 0)
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
-    c_water_min = float(ssp_data[:, 1].min())
-    cmin = c_water_min * 0.9
-    cmax = max(c_p * 1.1, 1e9)
+    cmin, cmax = _oases_wavenumber_bounds(ssp_data, c_p, c_p_ceiling=1e9)
 
     # Options string
     if options is None:
@@ -1035,7 +1078,7 @@ def write_oasr_input(
 
     Examples
     --------
-    >>> env = Environment(bathymetry=100, sound_speed=1500)
+    >>> env = Environment(bathymetry=100, ssp=1500)
     >>> env.bottom.sound_speed = 1600
     >>> env.bottom.shear_speed = 400
     >>> source = Source(depths=50, frequencies=100)

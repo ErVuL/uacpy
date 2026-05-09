@@ -50,7 +50,7 @@ def main():
     ]
     env = Environment(
         name='altimetry-rough',
-        bathymetry=100.0, sound_speed=1500.0,
+        bathymetry=100.0, ssp=1500.0,
         bottom=fluid_bottom, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)

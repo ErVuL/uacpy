@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField
-from uacpy.core.results import Result, TLField, Modes
+from uacpy.core.results import Result, PressureField, Modes
 from uacpy.visualization import plots
 from uacpy.models import RunMode
 
@@ -45,8 +45,8 @@ class TestComputeAPI:
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert isinstance(result_bellhop, TLField)
-        assert isinstance(result_kraken, TLField)
+        assert isinstance(result_bellhop, PressureField) and result_bellhop.units == "dB"
+        assert isinstance(result_kraken, PressureField) and result_kraken.units == "dB"
         assert result_bellhop.field_type == 'tl'
         assert result_kraken.field_type == 'tl'
 

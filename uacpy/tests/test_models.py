@@ -12,6 +12,7 @@ from uacpy.models import (
 )
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 
 @pytest.mark.requires_binary
@@ -133,7 +134,7 @@ class TestBounce:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom
         )
 
@@ -170,7 +171,7 @@ class TestBounce:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom,
         )
         bounce = Bounce(verbose=False)
@@ -221,7 +222,7 @@ class TestRAM:
             depths=np.array([50.0]),
             ranges=np.array([5000.0])
         )
-        with pytest.raises(ValueError, match="source_waveform"):
+        with pytest.raises(ConfigurationError, match="source_waveform"):
             ram.run(simple_env, source, receiver,
                     run_mode=RunMode.TIME_SERIES)
 
@@ -321,7 +322,7 @@ class TestModelConsistency:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_elastic,
         )
         bounce = Bounce(verbose=False)
@@ -346,7 +347,7 @@ class TestModelConsistency:
         env_with_rc = Environment(
             name="test_with_rc",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_with_rc,
         )
 

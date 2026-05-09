@@ -263,6 +263,40 @@ def write_broadband_freqs(f: TextIO, frequencies: np.ndarray) -> None:
     f.write(f"{freq_str} /\n")
 
 
+def write_phase_speed_and_rmax(
+    f: TextIO,
+    env: Environment,
+    *,
+    rmax_m: float,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    brc_overrides: Optional[Tuple[float, float]] = None,
+    rmax_format: str = "{:.1f}",
+) -> None:
+    """Write the cLow/cHigh phase-speed line and the RMax (km) line.
+
+    cLow/cHigh resolve in this order:
+      1. Explicit ``c_low`` / ``c_high`` (caller-supplied user override).
+      2. ``brc_overrides=(cmin, cmax)`` for ``F``-table bottoms.
+      3. SSP-derived: ``c_min·C_LOW_FACTOR`` and
+         ``max(c_max, env.bottom.sound_speed)·C_HIGH_FACTOR``.
+
+    ``rmax_m`` is converted to km. ``rmax_format`` controls the Fortran
+    print width (Scooter/SPARC use ``"{:.6f}"`` to preserve sub-km
+    precision; Kraken/KrakenField use the ``"{:.1f}"`` default).
+    """
+    if brc_overrides is not None:
+        _c_low, _c_high = brc_overrides
+    else:
+        ssp_pairs = env.ssp.to_pairs()
+        c_min = float(ssp_pairs[:, 1].min())
+        c_max = max(float(ssp_pairs[:, 1].max()), env.bottom.sound_speed)
+        _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
+        _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR
+    f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
+    f.write(rmax_format.format(rmax_m / 1000.0) + "\n")
+
+
 def write_ssp_section(
     f: TextIO,
     env: Environment,
@@ -398,6 +432,8 @@ def write_bottom_section(
     filepath: Optional[Path] = None,
     verbose: bool = False,
     halfspace_depth: Optional[float] = None,
+    halfspace_alpha_s_source: str = 'zero',
+    emit_reflection_table_block: bool = True,
 ) -> None:
     """
     Write bottom boundary section
@@ -410,18 +446,24 @@ def write_bottom_section(
         Environment configuration
     bottom_type : BoundaryType, optional
         Bottom boundary type (uses env.bottom.acoustic_type if None)
-    cp_bottom : float, optional
-        Bottom compressional sound speed (uses env.bottom.sound_speed if None)
-    cs_bottom : float, optional
-        Bottom shear sound speed (uses env.bottom.shear_speed if None)
-    rho_bottom : float, optional
-        Bottom density (uses env.bottom.density if None)
-    alpha_bottom : float, optional
-        Bottom attenuation (uses env.bottom.attenuation if None)
+    cp_bottom, cs_bottom, rho_bottom, alpha_bottom : float, optional
+        Halfspace overrides; default to ``env.bottom`` values.
     filepath : Path, optional
         Path to the ENV file being written (needed for copying .brc files)
     verbose : bool, optional
         Print verbose output
+    halfspace_depth : float, optional
+        Depth used for the 'A' halfspace line. Defaults to ``env.depth``
+        plus stacked layered-bottom thicknesses.
+    halfspace_alpha_s_source : {'zero', 'env'}
+        Trailing column of the 'A' halfspace line. ``'zero'`` (Kraken/Bounce
+        family) emits a literal ``0.0`` for shear attenuation; ``'env'``
+        (Scooter) emits ``env.bottom.shear_attenuation``.
+    emit_reflection_table_block : bool
+        When the bottom is type ``'F'`` (reflection-coefficient table):
+        emit the cmin/cmax/RMax bounds line that Kraken/Bounce expect.
+        Scooter writes those bounds via ``write_phase_speed_and_rmax``
+        instead and so passes ``False``.
     """
     # Get bottom properties
     if bottom_type is None:
@@ -468,14 +510,16 @@ def write_bottom_section(
                 "on the bottom BoundaryProperties (path to a .brc file)."
             )
 
-        # For 'F' type, write phase velocity bounds and rmax (not bottom properties)
-        # These define the range of angles covered by the reflection coefficient table.
-        # Bellhop expects rmax in km; the public attribute is in meters.
-        cmin = getattr(env.bottom, 'reflection_cmin', 1400.0)
-        cmax = getattr(env.bottom, 'reflection_cmax', 10000.0)
-        rmax_m = getattr(env.bottom, 'reflection_rmax_m', 10000.0)
-        f.write(f"{cmin:.2f}  {cmax:.2f}\n")
-        f.write(f"{rmax_m / 1000.0:.2f}\n")
+        if emit_reflection_table_block:
+            # cmin/cmax/RMax line bounding the angles covered by the BRC
+            # reflection-coefficient table. Kraken/Bounce read this as
+            # part of the bottom block; Scooter consumes the same bounds
+            # via write_phase_speed_and_rmax instead.
+            cmin = getattr(env.bottom, 'reflection_cmin', 1400.0)
+            cmax = getattr(env.bottom, 'reflection_cmax', 10000.0)
+            rmax_m = getattr(env.bottom, 'reflection_rmax_m', 10000.0)
+            f.write(f"{cmin:.2f}  {cmax:.2f}\n")
+            f.write(f"{rmax_m / 1000.0:.2f}\n")
 
     # Write halfspace parameters (type 'A')
     elif bottom_code == 'A':  # Half-space
@@ -489,8 +533,12 @@ def write_bottom_section(
                 z_bottom = float(f"{z_bottom:.1f}")
                 for layer in env.bottom_layered.layers:
                     z_bottom = float(f"{z_bottom + layer.thickness:.1f}")
+        if halfspace_alpha_s_source == 'env':
+            alpha_s = getattr(env.bottom, 'shear_attenuation', 0.0)
+        else:
+            alpha_s = 0.0
         f.write(f"  {z_bottom:.2f}  {cp:.2f}  {cs:.1f}  "
-               f"{rho:.2f}  {alpha:.2f}  0.0 /\n")
+               f"{rho:.2f}  {alpha:.2f}  {alpha_s:.2f} /\n")
 
 
 def write_source_depths(f: TextIO, source: Source) -> None:
@@ -736,19 +784,11 @@ def write_multi_profile_env(
                 halfspace_depth=hs_depth,
             )
 
-            # Phase speed limits (cLow, cHigh) — part of ReadEnvironment
-            _ssp_pairs = env_seg.ssp.to_pairs()
-            c_min = float(_ssp_pairs[:, 1].min())
-            c_max = max(
-                float(_ssp_pairs[:, 1].max()),
-                env_seg.bottom.sound_speed,
+            write_phase_speed_and_rmax(
+                f, env_seg,
+                rmax_m=rmax_m,
+                c_low=c_low, c_high=c_high,
             )
-            _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
-            _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR
-            f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
-
-            # Maximum range (km) — part of ReadEnvironment
-            f.write(f"{rmax_m / 1000.0:.1f}\n")
 
             write_source_depths(f, source)
             write_receiver_depths(f, receiver)

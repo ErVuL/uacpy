@@ -23,7 +23,7 @@ class TestSPARCBasic:
         env = Environment(
             name="sparc_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
         source = Source(depths=50.0, frequencies=50.0)
         receiver = Receiver(
@@ -48,7 +48,7 @@ class TestSPARCTimeSeries:
         env = Environment(
             name="sparc_ts",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
         )
         source = Source(depths=50.0, frequencies=50.0)
         receiver = Receiver(

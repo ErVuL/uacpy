@@ -6,6 +6,7 @@ and seismo-acoustic coupling. It uses the same wavenumber integration approach
 as Scooter but with support for elastic media.
 """
 
+import warnings
 from pathlib import Path
 from typing import Optional
 import numpy as np
@@ -13,11 +14,11 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, TLField, TimeSeriesField
+from uacpy.core.results import Result, PressureField, TimeSeriesField
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
+    DEFAULT_SOUND_SPEED,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -26,7 +27,7 @@ from uacpy.core.exceptions import (
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
-from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
+from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer_sections, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
@@ -123,7 +124,7 @@ class SPARC(PropagationModel):
     >>> from uacpy.models.sparc import SPARC
     >>>
     >>> # Create simple environment
-    >>> env = uacpy.Environment(bathymetry=100.0, sound_speed=1500.0)
+    >>> env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
     >>>
     >>> source = uacpy.Source(depths=50.0, frequencies=100.0)
     >>> receiver = uacpy.Receiver(
@@ -405,10 +406,12 @@ class SPARC(PropagationModel):
                     # Read output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise ModelExecutionError(
+                        exc = ModelExecutionError(
                             self.model_name, return_code=0, stdout=None,
                             stderr=f"SPARC did not produce {rts_file}",
                         )
+                        self._attach_prt_tail(exc, fm.work_dir, base_name)
+                        raise exc
 
                     rts_data = read_rts_file(rts_file)
 
@@ -435,7 +438,7 @@ class SPARC(PropagationModel):
                                 t_start=float(time[0]) if len(time) else 0.0,
                             ),
                         )
-                        self._log("SPARC simulation complete (time-series mode)")
+                        self._log("simulation complete (time-series mode)")
                         return result
 
                     tl, ranges_out = rts_to_tl(rts_data, freq, method='fft')
@@ -467,11 +470,12 @@ class SPARC(PropagationModel):
                         # Read output
                         rts_file = fm.get_path(f'{depth_base}.rts')
                         if not rts_file.exists():
-                            self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise ModelExecutionError(
-                            self.model_name, return_code=0, stdout=None,
-                            stderr=f"SPARC did not produce {rts_file}",
-                        )
+                            exc = ModelExecutionError(
+                                self.model_name, return_code=0, stdout=None,
+                                stderr=f"SPARC did not produce {rts_file}",
+                            )
+                            self._attach_prt_tail(exc, fm.work_dir, depth_base)
+                            raise exc
 
                         rts_data = read_rts_file(rts_file)
                         if time_grid is None:
@@ -512,13 +516,14 @@ class SPARC(PropagationModel):
                                 t_start=float(time[0]) if len(time) else 0.0,
                             ),
                         )
-                        self._log("SPARC simulation complete (time-series mode)")
+                        self._log("simulation complete (time-series mode)")
                         return result
 
                     # Stack all depths into 2D array
                     tl_field = np.vstack(tl_field)  # shape: (n_depths, n_ranges)
 
-                result = TLField(
+                result = PressureField(
+            units="dB",
                     data=tl_field,
                     ranges=ranges_out,
                     depths=receiver.depths,
@@ -547,10 +552,12 @@ class SPARC(PropagationModel):
                     # Read vertical array output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
-                        raise ModelExecutionError(
+                        exc = ModelExecutionError(
                             self.model_name, return_code=0, stdout=None,
                             stderr=f"SPARC did not produce {rts_file}",
                         )
+                        self._attach_prt_tail(exc, fm.work_dir, base_name)
+                        raise exc
 
                     rts_data = read_rts_file(rts_file)
                     # In vertical mode, 'ranges' in RTS file actually contains depths
@@ -577,11 +584,12 @@ class SPARC(PropagationModel):
 
                         rts_file = fm.get_path(f'{range_base}.rts')
                         if not rts_file.exists():
-                            self._log(f"RTS file not found: {rts_file}", level='error')
-                            raise ModelExecutionError(
-                            self.model_name, return_code=0, stdout=None,
-                            stderr=f"SPARC did not produce {rts_file}",
-                        )
+                            exc = ModelExecutionError(
+                                self.model_name, return_code=0, stdout=None,
+                                stderr=f"SPARC did not produce {rts_file}",
+                            )
+                            self._attach_prt_tail(exc, fm.work_dir, range_base)
+                            raise exc
 
                         rts_data = read_rts_file(rts_file)
                         tl_single, _ = rts_to_tl(rts_data, freq, method='fft')
@@ -590,7 +598,8 @@ class SPARC(PropagationModel):
                     # Stack all ranges into 2D array
                     tl_field = np.column_stack(tl_field)  # shape: (n_depths, n_ranges)
 
-                result = TLField(
+                result = PressureField(
+            units="dB",
                     data=tl_field,
                     ranges=receiver.ranges,
                     depths=depths_out,
@@ -621,24 +630,28 @@ class SPARC(PropagationModel):
                 # Read Green's function file
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
-                    raise ModelExecutionError(
+                    exc = ModelExecutionError(
                         self.model_name, return_code=0, stdout=None,
                         stderr=(
                             f"SPARC snapshot mode did not produce {grn_file}; "
                             f"check {fm.work_dir}/{base_name}.prt for diagnostics."
                         ),
                     )
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
 
                 self._log("Reading snapshot Green's function and extracting source-freq TL...")
                 grn_data = read_grn_file(grn_file)
                 if not grn_data['is_sparc']:
-                    raise ModelExecutionError(
+                    exc = ModelExecutionError(
                         self.model_name, return_code=0, stdout=None,
                         stderr=(
                             "GRN title does not start with 'SPARC' — snapshot path "
                             "expects a SPARC-produced file."
                         ),
                     )
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
 
                 # Time-FFT along the snapshot's tout axis, pick the source
                 # frequency bin, then Hankel transform — recovers steady-state
@@ -687,12 +700,12 @@ class SPARC(PropagationModel):
         # SPARC limitation: only supports Vacuum and Rigid boundaries
         bottom_acoustic_type = env.bottom.acoustic_type.lower()
         if bottom_acoustic_type in ['half-space', 'halfspace', 'a']:
-            self._log(
-                "SPARC does not support elastic halfspace bottom boundaries. "
+            warnings.warn(
+                "SPARC: does not support elastic halfspace bottom boundaries. "
                 "Automatically converting to 'rigid' boundary. "
                 "For full elastic bottom support, use Bellhop, Kraken, OASES, or Scooter. "
                 "To suppress this warning, explicitly set env.bottom.acoustic_type='rigid' before running SPARC.",
-                level='warn'
+                UserWarning, stacklevel=2,
             )
             bottom_acoustic_type = 'rigid'
 
@@ -753,20 +766,16 @@ class SPARC(PropagationModel):
 
             # SPARC-SPECIFIC SECTIONS
 
-            # Phase speed limits (cLow, cHigh)
-            _ssp_pairs = env.ssp.to_pairs()
-            c_min = float(_ssp_pairs[:, 1].min())
-            c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
-            c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
-            c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
-            f.write(f"{c_low:.1f} {c_high:.1f}\n")
-
-            # RMax (maximum range in km)
-            # RMax must strictly exceed the largest receiver range, so pad by
-            # a small multiplicative margin (default 1 ppm) to absorb float
+            # RMax must strictly exceed the largest receiver range; pad by a
+            # small multiplicative margin (default 1 ppm) to absorb float
             # roundoff when the user requests ranges exactly at the max.
-            rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_safety_margin
-            f.write(f"{rmax:.6f}\n")
+            rmax_m = float(receiver.ranges.max()) * self.rmax_safety_margin
+            write_phase_speed_and_rmax(
+                f, env,
+                rmax_m=rmax_m,
+                c_low=self.c_low, c_high=self.c_high,
+                rmax_format="{:.6f}",
+            )
 
             # Source and receiver depths. Use the shared ATEnvWriter so
             # non-uniform arrays are written verbatim rather than collapsed
@@ -817,9 +826,8 @@ class SPARC(PropagationModel):
             f.write(f"{self.n_t_out}\n")
 
             # Time output range (s)
-            max_range_m = rmax * 1000.0  # Convert km to m
             c_water = kwargs.get('sound_speed', DEFAULT_SOUND_SPEED)
-            travel_time = max_range_m / c_water
+            travel_time = rmax_m / c_water
             t_max = self.t_max if self.t_max is not None else travel_time * 2.5
             f.write(f"0.0 {t_max:.6f} /\n")
 

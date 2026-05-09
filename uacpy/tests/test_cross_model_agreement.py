@@ -101,7 +101,7 @@ def _ram_tl(env, src, rcv):
 
 def _pekeris_fluid() -> Scenario:
     env = Environment(
-        name='pekeris-fluid', bathymetry=100.0, sound_speed=1500.0,
+        name='pekeris-fluid', bathymetry=100.0, ssp=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -156,10 +156,10 @@ def _pekeris_elastic() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-layered', bathymetry=100.0, ssp=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-halfspace', bathymetry=100.0, ssp=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -219,7 +219,7 @@ def _altimetry_consistency() -> Scenario:
         sound_speed=1700.0, density=1.7, attenuation=0.5,
     )
     env = Environment(
-        name='altimetry-rough', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough', bathymetry=100.0, ssp=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
@@ -252,7 +252,7 @@ def _pekeris_fluid_hf() -> Scenario:
     50 Hz scenario gives the framework a frequency-dependence handle.
     """
     env = Environment(
-        name='pekeris-fluid-hf', bathymetry=100.0, sound_speed=1500.0,
+        name='pekeris-fluid-hf', bathymetry=100.0, ssp=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -307,10 +307,10 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-bb-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-bb-layered', bathymetry=100.0, ssp=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-bb-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-bb-halfspace', bathymetry=100.0, ssp=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -332,8 +332,8 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         )
         # Inject the centre-freq TL into a fake 'tl' Field-like object the
         # comparator already understands. Build an ad-hoc Field with TL only.
-        from uacpy.core.results import TLField
-        return TLField(
+        from uacpy.core.results import PressureField
+        return PressureField(units="dB", 
             data=_bb_to_fc_tl(kf),
             depths=kf.depths, ranges=kf.ranges,
             model='KrakenField', frequencies=50.0,
@@ -343,8 +343,8 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=2.0)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import TLField
-        return TLField(
+        from uacpy.core.results import PressureField
+        return PressureField(units="dB", 
             data=_bb_to_fc_tl(hf),
             depths=hf.depths, ranges=hf.ranges,
             model='RAM(rams)', frequencies=50.0,
@@ -384,7 +384,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         (6000.0, 0.0),
     ]
     env = Environment(
-        name='altimetry-rough-bb', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough-bb', bathymetry=100.0, ssp=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
@@ -406,8 +406,8 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=2.0)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import TLField
-        return TLField(
+        from uacpy.core.results import PressureField
+        return PressureField(units="dB", 
             data=_bb_to_fc_tl(hf),
             depths=hf.depths, ranges=hf.ranges,
             model='RAM(ramsurf)', frequencies=200.0,

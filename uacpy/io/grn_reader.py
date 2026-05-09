@@ -25,7 +25,7 @@ import struct
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
-from uacpy.core.results import TLField, TransferFunction
+from uacpy.core.results import PressureField, TransferFunction
 from uacpy.core.constants import PRESSURE_FLOOR
 
 
@@ -317,7 +317,7 @@ def grn_to_field(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
-) -> TLField:
+) -> PressureField:
     """Transform a single-frequency Green's function to a TL field.
 
     The reader returns a 4-D ``G`` regardless of ``nfreq``; this picks the
@@ -348,7 +348,8 @@ def grn_to_field(
 
     tl = -20 * np.log10(np.abs(p_out) + PRESSURE_FLOOR)
 
-    return TLField(
+    return PressureField(
+            units="dB",
         data=tl,
         ranges=ranges,
         depths=grn_data["rd"],
@@ -374,7 +375,7 @@ def sparc_snapshot_to_field(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
-) -> TLField:
+) -> PressureField:
     """Extract steady-state TL at ``frequency`` from a SPARC snapshot file.
 
     SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
@@ -445,7 +446,8 @@ def sparc_snapshot_to_field(
 
     tl = -20 * np.log10(np.abs(p_out) + PRESSURE_FLOOR)
 
-    return TLField(
+    return PressureField(
+            units="dB",
         data=tl,
         ranges=ranges,
         depths=grn_data["rd"],

@@ -59,7 +59,7 @@ from uacpy.core.results import Result, Modes, PressureField, TransferFunction
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
+    DEFAULT_SOUND_SPEED,
 )
 import inspect
 import shutil
@@ -67,7 +67,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
     UnsupportedFeatureError,
 )
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_receiver_depths, write_source_depths, write_ssp_section, write_fieldflp
+from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section, write_fieldflp
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin
 from uacpy.models.coupled_modes import segment_environment_by_range
 
@@ -317,16 +317,11 @@ class _KrakenBase(PropagationModel):
 
             # KRAKEN-SPECIFIC SECTIONS
 
-            # Phase speed limits (cLow, cHigh)
-            _ssp_pairs = env.ssp.to_pairs()
-            c_min = float(_ssp_pairs[:, 1].min())
-            c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
-            c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
-            c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
-            f.write(f"{c_low:.1f} {c_high:.1f}\n")
-
-            # Maximum range — Kraken expects km on disk; the wrapper carries m.
-            f.write(f"{rmax_m / 1000.0:.1f}\n")
+            write_phase_speed_and_rmax(
+                f, env,
+                rmax_m=rmax_m,
+                c_low=self.c_low, c_high=self.c_high,
+            )
 
             # Source depths (use ATEnvWriter helper for full non-uniform support)
             write_source_depths(f, source)
@@ -1057,7 +1052,7 @@ class KrakenField(_KrakenBase):
         if mode_coupling is not _UNSET and mode_coupling not in (
             'adiabatic', 'coupled'
         ):
-            raise ValueError(
+            raise ConfigurationError(
                 f"mode_coupling must be 'adiabatic' or 'coupled', "
                 f"got {mode_coupling!r}"
             )
@@ -1123,7 +1118,7 @@ class KrakenField(_KrakenBase):
                 if run_mode == RunMode.TIME_SERIES and (
                     source_waveform is None or sample_rate is None
                 ):
-                    raise ValueError(
+                    raise ConfigurationError(
                         "KrakenField.run(run_mode=TIME_SERIES) requires "
                         "source_waveform and sample_rate. For the broadband "
                         "transfer function H(f), use run_mode=RunMode.BROADBAND."
@@ -1338,13 +1333,15 @@ class KrakenField(_KrakenBase):
             # Fortran) even when computation succeeds, so check for .shd first.
             shd_file = fm.get_path(f'{base_name}.shd')
             if not shd_file.exists():
-                raise ModelExecutionError(
+                exc = ModelExecutionError(
                     self.model_name, return_code=0, stdout=None,
                     stderr=(
                         "field.exe did not produce a .shd file; check the "
                         f".prt log at {fm.get_path(base_name + '.prt')}"
                     ),
                 )
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
 
             if broadband:
                 shd0 = read_shd_bin(str(shd_file))

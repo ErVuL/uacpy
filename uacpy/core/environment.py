@@ -983,12 +983,14 @@ class Environment:
         range-dependent bathymetry as ``[(range_m, depth_m), …]``.
         The maximum depth in this argument defines the water column
         extent; ``env.depth`` exposes it as a read-only property.
-    ssp : SoundSpeedProfile, optional
-        Sound-speed profile (1-D or 2-D). When ``None``, an isovelocity
-        profile is built from ``sound_speed``.
-    sound_speed : float, optional
-        Reference speed for the default isovelocity profile (m/s).
-        Ignored when ``ssp`` is provided. Default 1500.
+    ssp : scalar (m/s), list of (depth_m, c_m_s) pairs, or SoundSpeedProfile, optional
+        Sound-speed profile.
+
+        * Scalar — isovelocity at the given speed.
+        * List/array of ``(depth, sound_speed)`` pairs — linear-interp
+          ``SoundSpeedProfile`` built via :meth:`SoundSpeedProfile.from_pairs`.
+        * ``SoundSpeedProfile`` instance — used as-is (1-D or 2-D).
+        * ``None`` (default) — isovelocity at 1500 m/s.
     altimetry : array-like, optional
         Surface altimetry as ``[(range_m, height_m), …]`` (height
         positive up). Default ``None`` (flat surface).
@@ -1006,7 +1008,7 @@ class Environment:
     --------
     Isovelocity:
 
-    >>> env = Environment(name='shallow', bathymetry=100, sound_speed=1500)
+    >>> env = Environment(name='shallow', bathymetry=100, ssp=1500)
 
     Linear SSP:
 
@@ -1033,8 +1035,12 @@ class Environment:
     def __init__(
         self,
         bathymetry: Union[float, List[Tuple[float, float]], np.ndarray],
-        ssp: Optional[SoundSpeedProfile] = None,
-        sound_speed: float = 1500.0,
+        ssp: Optional[Union[
+            float, int,
+            List[Tuple[float, float]],
+            np.ndarray,
+            SoundSpeedProfile,
+        ]] = None,
         altimetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
         bottom: Optional[Union[BoundaryProperties, RangeDependentBottom, 'LayeredBottom', 'RangeDependentLayeredBottom']] = None,
         surface: Optional[BoundaryProperties] = None,
@@ -1070,13 +1076,21 @@ class Environment:
         max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
 
         if ssp is None:
-            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, sound_speed)
+            # default isovelocity at 1500 m/s
+            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, 1500.0)
         elif isinstance(ssp, SoundSpeedProfile):
             self.ssp = ssp
+        elif isinstance(ssp, (int, float, np.integer, np.floating)):
+            # scalar → isovelocity at the given speed
+            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, float(ssp))
+        elif isinstance(ssp, (list, tuple, np.ndarray)):
+            # list of (z, c) pairs → from_pairs (linear interp)
+            self.ssp = SoundSpeedProfile.from_pairs(ssp)
         else:
             raise TypeError(
-                f"Environment: ssp must be a SoundSpeedProfile; "
-                f"got {type(ssp).__name__}"
+                f"Environment: ssp must be a scalar (m/s), a list of (depth, "
+                f"sound_speed) pairs, or a SoundSpeedProfile; got "
+                f"{type(ssp).__name__}"
             )
 
         if altimetry is not None:
@@ -1234,7 +1248,7 @@ class Environment:
         method : str, optional
             Method for computing representative value:
             - 'max': Maximum depth (deepest, default — matches the
-              project-wide ``bathymetry_collapse_method='max'``)
+              project-wide ``collapse={'bathymetry': 'max'}``)
             - 'median': Median depth
             - 'mean': Mean depth
             - 'min': Minimum depth (shallowest)

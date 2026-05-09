@@ -34,7 +34,7 @@ pytestmark = pytest.mark.requires_binary
 def _pekeris_env() -> Environment:
     return Environment(
         name='pekeris-broadband',
-        bathymetry=100.0, sound_speed=1500.0,
+        bathymetry=100.0, ssp=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,

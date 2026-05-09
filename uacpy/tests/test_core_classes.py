@@ -45,7 +45,7 @@ class TestEnvironment:
     def test_invalid_depth(self):
         """Test that negative depth raises error."""
         with pytest.raises(ValueError):
-            uacpy.Environment(name="Test", bathymetry=-10, sound_speed=1500)
+            uacpy.Environment(name="Test", bathymetry=-10, ssp=1500)
 
 
 class TestSource:
@@ -105,15 +105,15 @@ class TestReceiver:
 
 
 class TestField:
-    """Tests for the typed Result hierarchy (TLField etc.)."""
+    """Tests for the typed Result hierarchy (PressureField etc.)."""
 
     def test_create_tl_field(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.random.rand(10, 20) * 50 + 40  # Random TL between 40-90 dB
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
 
         assert field.field_type == 'tl'
@@ -122,47 +122,47 @@ class TestField:
         assert field.n_depths == 10
 
     def test_field_get_value(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
         value = field.get_value(range_m=4500, depth=45)
         assert 44 <= value <= 55
 
     def test_field_get_at_range(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
         values = field.get_at_range(4500)
         assert len(values) == 10
         assert 50 <= values[5] <= 59
 
     def test_field_get_at_depth(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
         values = field.get_at_depth(45)
         assert len(values) == 10
         assert 40 <= values[5] <= 49
 
     def test_field_copy(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.random.rand(10, 20)
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
         field_copy = field.copy()
 
@@ -172,15 +172,15 @@ class TestField:
         assert field_copy.data is not field.data
 
     def test_field_repr(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         data = np.random.rand(10, 20)
         ranges = np.linspace(100, 5000, 20)
         depths = np.linspace(10, 90, 10)
 
-        field = TLField(data=data, ranges=ranges, depths=depths,
+        field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                         model='Test', frequencies=100.0)
         repr_str = repr(field)
-        assert 'TLField' in repr_str
+        assert 'PressureField' in repr_str
         assert field.shape == (10, 20)
         assert field.n_ranges == 20
         assert field.n_depths == 10

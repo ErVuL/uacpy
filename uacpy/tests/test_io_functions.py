@@ -84,7 +84,7 @@ class TestEnvironmentIO:
 
             env = uacpy.Environment(
                 name="Test",
-                sound_speed=1500.0,
+                ssp=1500.0,
                 bathymetry=bathymetry
             )
 
@@ -118,8 +118,8 @@ class TestFieldIO:
 
     def test_field_metadata_preservation(self):
         """Result subclasses preserve metadata + identification kwargs."""
-        from uacpy.core.results import TLField
-        field = TLField(
+        from uacpy.core.results import PressureField
+        field = PressureField(units="dB", 
             data=np.random.rand(10, 20),
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),
@@ -138,8 +138,8 @@ class TestFieldIO:
 
     def test_field_copy_preserves_metadata(self):
         """Result.copy() returns a deep copy with metadata preserved."""
-        from uacpy.core.results import TLField
-        field = TLField(
+        from uacpy.core.results import PressureField
+        field = PressureField(units="dB", 
             data=np.random.rand(10, 20),
             ranges=np.linspace(100, 5000, 20),
             depths=np.linspace(10, 90, 10),

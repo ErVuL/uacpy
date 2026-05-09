@@ -80,7 +80,7 @@ class TestInputValidation:
 
     def test_zero_environment_depth_rejected(self):
         with pytest.raises(ValueError):
-            uacpy.Environment(name='bad', bathymetry=0, sound_speed=1500)
+            uacpy.Environment(name='bad', bathymetry=0, ssp=1500)
 
 
 class TestUnsupportedOperations:
@@ -88,7 +88,7 @@ class TestUnsupportedOperations:
 
     def test_kraken_does_not_support_rays(self):
         kraken = Kraken(verbose=False)
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
         source = uacpy.Source(depths=50, frequencies=100)
         receiver = uacpy.Receiver(depths=[10], ranges=[1000])
         with pytest.raises(UnsupportedFeatureError):

@@ -38,7 +38,7 @@ def main():
         density=1.5, attenuation=0.5,
     )
     env = uacpy.Environment(
-        name='Pekeris', bathymetry=100.0, sound_speed=1500.0, bottom=bottom,
+        name='Pekeris', bathymetry=100.0, ssp=1500.0, bottom=bottom,
     )
     f_center = 200.0
     source = uacpy.Source(depths=20.0, frequencies=f_center)

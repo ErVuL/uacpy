@@ -12,6 +12,8 @@ import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from uacpy.core.exceptions import ModelExecutionError
+
 
 def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     """
@@ -282,7 +284,10 @@ def read_modes_asc(
     except FileNotFoundError:
         raise FileNotFoundError(f"Mode file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading mode file {filename}: {e}") from e
+        raise ModelExecutionError(
+            'Kraken', return_code=0, stdout=None,
+            stderr=f"Error reading mode file {filename}: {e}",
+        ) from e
 
     # Return as dictionary
     return {

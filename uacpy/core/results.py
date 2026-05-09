@@ -6,8 +6,8 @@ Convention
 ----------
 **Spatial axes come first, the variable axis is trailing.** That means:
 
-* ``TLField.data``       — ``(n_d, n_r)`` narrowband, ``(n_d, n_r, n_f)`` broadband, dB
-* ``PressureField.data`` — ``(n_d, n_r)`` complex
+* ``PressureField.data`` — ``(n_d, n_r)`` or ``(n_d, n_r, n_f)``; real (dB TL)
+  when ``units='dB'``, complex when ``units='complex'``
 * ``TransferFunction.data`` — ``(n_d, n_r, n_f)`` complex
 * ``TimeSeriesField.data``  — ``(n_d, n_r, n_t)`` real
 * ``TimeTrace.data``        — ``(n_t,)`` real
@@ -26,8 +26,7 @@ Hierarchy
 
     Result
     ├── _GridResult                 (private mixin; spatial accessors)
-    │   ├── TLField
-    │   ├── PressureField
+    │   ├── PressureField           (units='dB' for TL, 'complex' for pressure)
     │   ├── TransferFunction
     │   └── TimeSeriesField
     ├── TimeTrace                   (single point, no spatial grid)
@@ -88,9 +87,9 @@ class Result:
     """Common base for every model output.
 
     Carries identification (``model``, ``backend``), the source context
-    (``source_depths``, ``frequency`` or ``frequencies``), and a free-form
-    ``metadata`` dict for model-specific extras. Subclasses add the shape-
-    specific payload and methods.
+    (``source_depths``, ``frequencies``), and a free-form ``metadata``
+    dict for model-specific extras. Subclasses add the shape-specific
+    payload and methods.
 
     Parameters
     ----------
@@ -103,10 +102,10 @@ class Result:
         not a dispatcher.
     source_depths : array-like, optional
         Source depths used in the run (m). Stored as a 1-D ndarray.
-    frequency : float, optional
-        Single (centre) frequency in Hz, when applicable.
     frequencies : array-like, optional
-        Frequency vector in Hz, when broadband.
+        Frequency vector in Hz, always stored as 1-D ndarray; length-1 for
+        narrowband. Use ``result.f0`` to access the centre/single frequency
+        as a scalar.
     metadata : dict, optional
         Model-specific extras (Q, T, dr, dz, n_modes, …).
     """
@@ -340,59 +339,94 @@ class _GridResult(Result):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TLField(_GridResult):
-    """Transmission loss on a ``(depth, range)`` grid (dB, real).
+class PressureField(_GridResult):
+    """Acoustic pressure on a ``(depth, range)`` grid.
+
+    Carries either complex pressure (``units='complex'``) or transmission
+    loss in dB (``units='dB'``).
 
     ``data`` shape:
       * narrowband: ``(n_depths, n_ranges)``
       * broadband : ``(n_depths, n_ranges, n_frequencies)``
+
+    Units
+    -----
+    ``units='complex'`` — model-native **source-normalized** complex pressure
+    (dimensionless; equivalently Pa @ 1 m for a unit-amplitude monopole),
+    such that ``-20·log10(|p|)`` is TL in dB re 1 m. Every uacpy model
+    (Bellhop / Kraken family / Scooter / SPARC / Bounce / RAM / OASES)
+    delivers this same convention. To convert to absolute Pa at the
+    receiver, multiply by the source amplitude — uacpy does not carry one
+    (``Source`` only has frequencies and depths, no level).
+
+    ``units='dB'`` — transmission loss, real, dB re 1 m.
+
+    Use :meth:`to_tl` to get a ``units='dB'`` view, or read the dB array
+    on the fly via :attr:`tl` (available for both unit modes).
     """
-    field_type = "tl"
+
+    def __init__(
+        self,
+        *,
+        data: np.ndarray,
+        depths: np.ndarray,
+        ranges: np.ndarray,
+        units: str = 'complex',
+        **kwargs,
+    ):
+        if units not in ('complex', 'dB'):
+            raise ValueError(
+                f"PressureField.units: must be 'complex' or 'dB', got {units!r}"
+            )
+        self.units = units
+        super().__init__(
+            data=data, depths=depths, ranges=ranges, **kwargs,
+        )
+
+    @property
+    def field_type(self) -> str:
+        return 'tl' if self.units == 'dB' else 'pressure'
 
     @property
     def is_broadband(self) -> bool:
         return self.data.ndim == 3
 
-    def at_frequency(self, frequency: float) -> "TLField":
-        """For broadband ``TLField``, return the narrowband TLField at the
-        nearest frequency."""
+    def at_frequency(self, frequency: float) -> "PressureField":
+        """For a broadband field, return the narrowband slice at the
+        frequency nearest ``frequency``."""
         if not self.is_broadband:
             raise ValueError(
-                "TLField.at_frequency: only valid for broadband TLField"
+                "PressureField.at_frequency: only valid for broadband data"
             )
         if self.frequencies is None:
             raise ValueError(
-                "TLField.at_frequency: broadband TLField missing self.frequencies"
+                "PressureField.at_frequency: broadband data missing self.frequencies"
             )
         k = int(np.argmin(np.abs(self.frequencies - frequency)))
-        return TLField(
+        return PressureField(
             data=self.data[..., k],
             depths=self.depths,
             ranges=self.ranges,
+            units=self.units,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=float(self.frequencies[k]),
             metadata=dict(self.metadata),
         )
 
+    def to_tl(self) -> "PressureField":
+        """Return a ``units='dB'`` view via ``-20·log10(|p|)``.
 
-class PressureField(_GridResult):
-    """Complex pressure on a ``(depth, range)`` grid.
-
-    ``data`` shape: ``(n_depths, n_ranges)`` complex.
-
-    Use :meth:`to_tl` to obtain the dB transmission-loss view.
-    """
-    field_type = "pressure"
-
-    def to_tl(self) -> TLField:
-        """Convert to ``TLField`` via ``-20·log10(|p|)``."""
+        No-op when ``self.units == 'dB'``.
+        """
+        if self.units == 'dB':
+            return self
         p_abs = np.maximum(np.abs(self.data), PRESSURE_FLOOR)
-        tl = -20.0 * np.log10(p_abs)
-        return TLField(
-            data=tl,
+        return PressureField(
+            data=-20.0 * np.log10(p_abs),
             depths=self.depths,
             ranges=self.ranges,
+            units='dB',
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
@@ -400,11 +434,31 @@ class PressureField(_GridResult):
         )
 
     @property
+    def tl(self) -> np.ndarray:
+        """Transmission loss in dB.
+
+        ``self.data`` directly when ``units='dB'``; computed on the fly via
+        ``-20·log10(|p|)`` when ``units='complex'``.
+        """
+        if self.units == 'dB':
+            return self.data
+        p_abs = np.maximum(np.abs(self.data), PRESSURE_FLOOR)
+        return -20.0 * np.log10(p_abs)
+
+    @property
     def magnitude(self) -> np.ndarray:
+        if self.units == 'dB':
+            raise AttributeError(
+                "PressureField.magnitude: only valid when units='complex'"
+            )
         return np.abs(self.data)
 
     @property
     def phase(self) -> np.ndarray:
+        if self.units == 'dB':
+            raise AttributeError(
+                "PressureField.phase: only valid when units='complex'"
+            )
         return np.angle(self.data)
 
 
@@ -485,13 +539,13 @@ class TransferFunction(_GridResult):
             window=window, nfft=nfft, t_start=t_start,
         )
 
-    def to_tl(self, frequency: Optional[float] = None) -> "TLField":
+    def to_tl(self, frequency: Optional[float] = None) -> "PressureField":
         """Magnitude-in-dB view of this transfer function at one frequency.
 
         Picks the frequency-axis sample whose value is closest to
         ``frequency`` (or the centre frequency if ``None``) and returns a
-        :class:`TLField` of shape ``(n_depth, n_range)`` carrying
-        ``-20 * log10(|H|)`` clamped to ``PRESSURE_FLOOR``.
+        :class:`PressureField` (``units='dB'``) of shape ``(n_depth, n_range)``
+        carrying ``-20 * log10(|H|)`` clamped to ``PRESSURE_FLOOR``.
         """
         if self.data.ndim < 3:
             raise ValueError(
@@ -504,8 +558,9 @@ class TransferFunction(_GridResult):
         i_f = int(np.argmin(np.abs(freqs - target)))
         H = self.data[..., i_f]
         tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
-        return TLField(
+        return PressureField(
             data=tl, depths=self.depths, ranges=self.ranges,
+            units='dB',
             model=getattr(self, 'model', None),
             backend=getattr(self, 'backend', None),
             source_depths=getattr(self, 'source_depths', None),
@@ -1563,7 +1618,7 @@ __all__ = [
     "Result",
     "PhaseReference",
     # Spatial
-    "TLField", "PressureField", "TransferFunction",
+    "PressureField", "TransferFunction",
     # Time-domain
     "TimeSeriesField", "TimeTrace",
     # Sparse / non-grid

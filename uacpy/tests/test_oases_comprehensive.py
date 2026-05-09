@@ -36,7 +36,7 @@ class TestOAST:
         return Environment(
             name="oast_test",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -86,7 +86,7 @@ class TestOAST:
         env = Environment(
             name="oast_elastic",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -111,7 +111,7 @@ class TestOASN:
         return Environment(
             name="oasn_test",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -173,7 +173,7 @@ class TestOASN:
         env = Environment(
             name="oasn_elastic",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -199,7 +199,7 @@ class TestOASR:
         return Environment(
             name="oasr_test",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -278,7 +278,7 @@ class TestOASP:
 
         return Environment(
             name="oasp_test",
-            sound_speed=1500.0,
+            ssp=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
         )
@@ -342,120 +342,69 @@ class TestOASP:
         assert result.data.shape[:2] == (len(receiver.depths), len(receiver.ranges))
 
 
-class TestOASESUnified:
-    """Tests for unified OASES interface."""
+class TestOASESFactory:
+    """Tests for the OASES() factory function."""
 
     @pytest.mark.requires_binary
-    def test_oases_instantiation(self):
-        """Test unified OASES interface."""
-        oases = OASES(verbose=False)
-        assert oases.model_name == 'OASES'
+    def test_default_returns_oast(self):
+        """OASES() with no run_mode defaults to OAST."""
+        m = OASES(verbose=False)
+        assert isinstance(m, OAST)
+        assert m.model_name == 'OAST'
 
     @pytest.mark.requires_binary
-    def test_oases_auto_select_model(self):
-        """Test that OASES automatically selects appropriate sub-model."""
+    def test_factory_compute_tl(self):
+        """OASES() returns an OAST that handles compute_tl."""
         env = Environment(
-            name="oases_test",
-            bathymetry=100.0,
-            sound_speed=1500.0
+            name="oases_test", bathymetry=100.0, ssp=1500.0,
         )
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
-            depths=[25.0, 50.0, 75.0],
-            ranges=[1000.0, 3000.0]
+            depths=[25.0, 50.0, 75.0], ranges=[1000.0, 3000.0],
         )
-
-        oases = OASES(verbose=False)
-
-        # Should default to OAST for TL computation
-        result = oases.compute_tl(env=env, source=source, receiver=receiver)
+        m = OASES(verbose=False)
+        result = m.compute_tl(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
+
+    def test_routes_covariance_to_oasn(self):
+        assert isinstance(OASES(run_mode=RunMode.COVARIANCE), OASN)
+
+    def test_routes_replica_to_oasn(self):
+        assert isinstance(OASES(run_mode=RunMode.REPLICA), OASN)
+
+    def test_routes_reflection_to_oasr(self):
+        assert isinstance(OASES(run_mode=RunMode.REFLECTION), OASR)
+
+    def test_routes_broadband_to_oasp(self):
+        assert isinstance(OASES(run_mode=RunMode.BROADBAND), OASP)
+
+    def test_routes_time_series_to_oasp(self):
+        assert isinstance(OASES(run_mode=RunMode.TIME_SERIES), OASP)
+
+    def test_coherent_tl_broadband_routes_to_oasp(self):
+        assert isinstance(OASES(broadband=True), OASP)
+
+    def test_unknown_kwarg_silently_ignored(self):
+        """uacpy convention: unknown kwargs are silently dropped."""
+        m = OASES(verbose=False, angles=np.linspace(0, 90, 10))
+        assert isinstance(m, OAST)
+        assert not hasattr(m, 'angles') or getattr(m, 'angles', None) is None
+
+    def test_volume_attenuation_propagates(self):
+        m = OASES(
+            run_mode=RunMode.COHERENT_TL,
+            volume_attenuation='F',
+            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+        )
+        assert m.volume_attenuation == 'F'
+        assert m.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
 
 
 # Integration test to verify all OASES models can be imported and instantiated
 @pytest.mark.requires_binary
 def test_all_oases_models_importable():
-    """Verify all OASES models can be imported and instantiated."""
-    models = {
-        'OAST': OAST,
-        'OASN': OASN,
-        'OASR': OASR,
-        'OASP': OASP,
-        'OASES': OASES
-    }
-
-    for name, ModelClass in models.items():
+    """Verify all OASES sub-classes import and instantiate correctly."""
+    for name, ModelClass in {'OAST': OAST, 'OASN': OASN, 'OASR': OASR, 'OASP': OASP}.items():
         model = ModelClass(verbose=False)
-        assert model.model_name == name, f"{name} has incorrect model_name"
-        assert hasattr(model, 'run'), f"{name} missing run() method"
-        assert hasattr(model, 'compute_tl') or name == 'OASN' or name == 'OASR', \
-            f"{name} missing compute_tl() method"
-
-
-class TestOASESCovarianceReplicaDispatch:
-    """A4: OASES.run delegates COVARIANCE/REPLICA to OASN."""
-
-    @pytest.mark.requires_binary
-    def test_covariance_routes_to_oasn(self, monkeypatch):
-        oases = OASES(verbose=False)
-        seen = {}
-
-        def spy_run(self_, env, source, receiver, run_mode=None, **kwargs):
-            seen['target'] = self_.__class__.__name__
-            seen['run_mode'] = run_mode
-            raise RuntimeError("stop after dispatch")
-
-        monkeypatch.setattr(OASN, 'run', spy_run)
-
-        env = Environment(
-            name='oases_dispatch', bathymetry=100.0, sound_speed=1500.0,
-        )
-        source = Source(depths=50.0, frequencies=100.0)
-        receiver = Receiver(depths=[50.0], ranges=[1000.0])
-        with pytest.raises(RuntimeError, match='stop after dispatch'):
-            oases.run(env, source, receiver, run_mode=RunMode.COVARIANCE)
-        assert seen['target'] == 'OASN'
-        assert seen['run_mode'] == RunMode.COVARIANCE
-
-    @pytest.mark.requires_binary
-    def test_replica_routes_to_oasn(self, monkeypatch):
-        oases = OASES(verbose=False)
-        seen = {}
-
-        def spy_run(self_, env, source, receiver, run_mode=None, **kwargs):
-            seen['target'] = self_.__class__.__name__
-            seen['run_mode'] = run_mode
-            raise RuntimeError("stop after dispatch")
-
-        monkeypatch.setattr(OASN, 'run', spy_run)
-
-        env = Environment(
-            name='oases_dispatch', bathymetry=100.0, sound_speed=1500.0,
-        )
-        source = Source(depths=50.0, frequencies=100.0)
-        receiver = Receiver(depths=[50.0], ranges=[1000.0])
-        with pytest.raises(RuntimeError, match='stop after dispatch'):
-            oases.run(env, source, receiver, run_mode=RunMode.REPLICA)
-        assert seen['target'] == 'OASN'
-        assert seen['run_mode'] == RunMode.REPLICA
-
-
-class TestOASESConstructorPlumbing:
-    """B3: OASES forwards volume_attenuation / FG params to all sub-models."""
-
-    @pytest.mark.requires_binary
-    def test_volume_attenuation_propagates(self):
-        oases = OASES(
-            verbose=False,
-            volume_attenuation='F',
-            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
-        )
-        for sub in (oases._oast, oases._oasn, oases._oasr, oases._oasp):
-            assert sub.volume_attenuation == 'F'
-            assert sub.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
-
-    @pytest.mark.requires_binary
-    def test_unknown_kwarg_silently_ignored(self):
-        oases = OASES(verbose=False, angles=np.linspace(0, 90, 10))
-        for sub in (oases._oast, oases._oasn, oases._oasr, oases._oasp):
-            assert not hasattr(sub, 'angles') or getattr(sub, 'angles', None) is None
+        assert model.model_name == name
+        assert hasattr(model, 'run')

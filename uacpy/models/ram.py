@@ -14,7 +14,7 @@ binaries based on the environment:
 - **ramsurf1.5** (``env.altimetry is not None``): Collins' rough-surface /
   beach-geometry PE. Single-frequency. Same writer as rams.
 
-Elastic bottom + altimetry raises ``NotImplementedError`` — no published
+Elastic bottom + altimetry raises ``UnsupportedFeatureError`` — no published
 Collins PE handles that combination; use OASES for range-independent elastic.
 
 Run modes by backend:
@@ -40,10 +40,11 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overri
 from uacpy.core.environment import Environment, LayeredBottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, TLField, TransferFunction
+from uacpy.core.results import Result, PressureField, TransferFunction
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, TL_MAX_DB
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
@@ -104,7 +105,7 @@ class RAM(PropagationModel):
     ---------
     COHERENT_TL:
         Narrowband TL over a range-depth grid. Available on every backend.
-        Returns ``TLField``.
+        Returns ``PressureField``.
 
     BROADBAND — *mpiramS only*:
         Broadband complex pressure field. Returns
@@ -849,7 +850,7 @@ class RAM(PropagationModel):
         Returns
         -------
         result : Result
-            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
             for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
         if run_mode is None:
@@ -860,7 +861,7 @@ class RAM(PropagationModel):
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
             if freqs_arr.size == 0:
-                raise ValueError(
+                raise ConfigurationError(
                     "RAM.run(frequencies=…) requires at least one positive "
                     "frequency"
                 )
@@ -889,7 +890,13 @@ class RAM(PropagationModel):
             self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
             backend = self.select_backend(env)
-            self._log(f"Dispatching to {backend} backend", level='info')
+            elastic = self._env_has_elastic_bottom(env)
+            rough = getattr(env, 'altimetry', None) is not None
+            self._log(
+                f"Dispatching to {backend} backend "
+                f"(elastic_bottom={elastic}, altimetry={rough})",
+                level='info',
+            )
             self._warn_on_mpirams_only_overrides(backend)
             env = self._drop_unsupported_surface_shear(env)
 
@@ -898,7 +905,7 @@ class RAM(PropagationModel):
                     return self._run_broadband(env, source, receiver)
                 if run_mode == RunMode.TIME_SERIES:
                     if source_waveform is None or sample_rate is None:
-                        raise ValueError(
+                        raise ConfigurationError(
                             "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
                             "and sample_rate. For the broadband transfer function "
                             "H(f), use run_mode=RunMode.BROADBAND."
@@ -923,7 +930,7 @@ class RAM(PropagationModel):
                 )
             if run_mode == RunMode.TIME_SERIES:
                 if source_waveform is None or sample_rate is None:
-                    raise ValueError(
+                    raise ConfigurationError(
                         f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
                         f"source_waveform and sample_rate. For the broadband "
                         f"transfer function H(f), use run_mode=RunMode.BROADBAND."
@@ -935,7 +942,7 @@ class RAM(PropagationModel):
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            raise ValueError(
+            raise ConfigurationError(
                 f"Unsupported run_mode {run_mode} for RAM:{backend}"
             )
 
@@ -1018,7 +1025,7 @@ class RAM(PropagationModel):
 
         Raises
         ------
-        NotImplementedError
+        UnsupportedFeatureError
             For elastic + variable-surface environments — no published
             Collins PE handles that combination. Use OASES for
             range-independent elastic propagation, or approximate by
@@ -1028,12 +1035,14 @@ class RAM(PropagationModel):
         elastic = self._env_has_elastic_bottom(env)
         rough = getattr(env, 'altimetry', None) is not None
         if elastic and rough:
-            raise NotImplementedError(
-                "RAM does not handle elastic bottom + rough surface — no "
-                "Collins-family PE supports that combination. Either drop "
-                "the altimetry (use shear bottom alone → rams0.5), "
-                "fluidise the bottom (use altimetry alone → ramsurf1.5), "
-                "or switch to OASES for range-independent elastic runs."
+            raise UnsupportedFeatureError(
+                'RAM',
+                'elastic bottom + sea-surface altimetry',
+                alternatives=[
+                    "OASES (range-independent elastic + rough)",
+                    "drop env.altimetry to use rams0.5 (Collins elastic PE)",
+                    "fluidise the bottom (set shear_speed=0) to use ramsurf1.5",
+                ],
             )
         if elastic:
             return 'rams'
@@ -1079,7 +1088,7 @@ class RAM(PropagationModel):
         source's centre frequency and return a TL Field.
 
         Wraps :meth:`_run_collins_one_freq` and converts the binary's
-        ``tl.grid`` to a :class:`TLField` interpolated onto the
+        ``tl.grid`` to a :class:`PressureField` interpolated onto the
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
@@ -1092,6 +1101,7 @@ class RAM(PropagationModel):
         from scipy.interpolate import RegularGridInterpolator
         n_nonfinite = int(np.count_nonzero(~np.isfinite(raw['tl'])))
         if n_nonfinite > 0:
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind}: {n_nonfinite}/{raw['tl'].size} TL samples "
                 f"are NaN/inf (Padé instability or PE divergence) and "
@@ -1113,7 +1123,8 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
-        return TLField(
+        return PressureField(
+            units="dB",
             data=tl_out,
             depths=rcv_d,
             ranges=rcv_r,
@@ -1157,6 +1168,7 @@ class RAM(PropagationModel):
         # through. Loud warning rather than silent drop — proper RD support
         # would need one segment per range break in the writer call.
         if env.has_range_dependent_ssp():
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 SSP only — "
                 f"range-dependent SSP from env is dropped. For range-dependent "
@@ -1165,6 +1177,7 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=3,
             )
         if getattr(env, 'bottom_rd_layered', None) is not None:
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 layered bottom only — "
                 f"env.bottom_rd_layered range-dependence is dropped.",
@@ -1208,6 +1221,7 @@ class RAM(PropagationModel):
         # extrapolates to TL_MAX_DB.
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
         if float(np.max(rcv_d)) > zmax:
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind}: receiver depths up to {float(np.max(rcv_d)):.1f} m "
                 f"exceed the PE domain (zmax={zmax:.1f} m); TL is extrapolated "
@@ -1327,7 +1341,7 @@ class RAM(PropagationModel):
             )
 
             self._log(f"Executing: {binary} (cwd={fm.work_dir})", level='info')
-            self._run_subprocess(
+            proc_result = self._run_subprocess(
                 [str(binary)],
                 cwd=fm.work_dir,
                 timeout=self.timeout,
@@ -1338,8 +1352,11 @@ class RAM(PropagationModel):
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
-                    stdout='',
-                    stderr=f"{kind}: tl.grid not produced (cwd={fm.work_dir})",
+                    stdout=proc_result.stdout,
+                    stderr=(
+                        f"{kind}: tl.grid not produced (cwd={fm.work_dir})\n"
+                        + (proc_result.stderr or "")
+                    ),
                 )
             ranges, depths, tl = read_tl_grid(
                 tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
@@ -1352,11 +1369,12 @@ class RAM(PropagationModel):
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
-                    stdout='',
+                    stdout=proc_result.stdout,
                     stderr=(
                         f"{kind}: pcomplex.bin not produced. Rebuild the "
                         f"binaries via install.sh so the patched outpt "
-                        f"routine emits the complex envelope."
+                        f"routine emits the complex envelope.\n"
+                        + (proc_result.stderr or "")
                     ),
                 )
             _, _, pcomplex = read_pcomplex_grid(
@@ -1577,13 +1595,13 @@ class RAM(PropagationModel):
         import warnings as _w
         e = env.copy()
         e.surface = self._collapse_elastic_boundary(
-            e.surface, self.elastic_collapse_method,
+            e.surface, self._collapse["elastic"],
         )
         _w.warn(
             "RAM: surface shear is not supported by any backend "
             "(mpiramS / rams0.5 / ramsurf1.5 all model the surface as "
             "pressure-release); collapsed surface shear "
-            f"(elastic_collapse_method={self.elastic_collapse_method!r}). "
+            f"(collapse['elastic']={self._collapse['elastic']!r}). "
             "For an elastic surface use Bellhop or KrakenC.",
             UserWarning, stacklevel=3,
         )
@@ -1998,6 +2016,7 @@ class RAM(PropagationModel):
             # not fully converged.
             n_nan_p = int(np.count_nonzero(~np.isfinite(pressure)))
             if n_nan_p > 0:
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
                     f"RAM:mpiramS broadband: {n_nan_p}/{pressure.size} "
                     f"complex samples are NaN/inf and have been zeroed "
@@ -2036,6 +2055,7 @@ class RAM(PropagationModel):
             # Protect 10*log10(r) from r=0; warn if we had to clip.
             log_ranges = rcv_ranges.astype(np.float64).copy()
             if log_ranges.size > 0 and log_ranges[0] <= 0.0:
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
                     f"Receiver range at index 0 is {log_ranges[0]}; "
                     f"clipping to dr={dr} for TL conversion to avoid "
@@ -2064,7 +2084,8 @@ class RAM(PropagationModel):
             self._log(f"TL completed in {elapsed:.2f}s", level='info')
             self._log(f"TL range: {np.nanmin(tl_output):.1f} to {np.nanmax(tl_output):.1f} dB", level='info')
 
-            return TLField(
+            return PressureField(
+            units="dB",
                 data=tl_output,
                 ranges=receiver.ranges,
                 depths=receiver.depths,
@@ -2172,6 +2193,7 @@ class RAM(PropagationModel):
             rout_safe = np.asarray(rout, dtype=np.float64).copy()
             if rout_safe.size > 0 and np.any(rout_safe <= 0.0):
                 clip_to = float(dr) if dr and dr > 0 else 1.0
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
                     f"RAM broadband: rout contained non-positive values "
                     f"(min={float(rout_safe.min())}); clipping to "

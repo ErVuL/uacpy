@@ -45,7 +45,7 @@ class TestPekerisWaveguide:
         env = uacpy.Environment(
             name='Pekeris Waveguide',
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
         return env
@@ -216,7 +216,7 @@ class TestRangeDependentPhysicalSanity:
         env = uacpy.Environment(
             name='Sloping Bottom',
             # Initial depth
-            sound_speed=1500.0,
+            ssp=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
         )
@@ -389,7 +389,7 @@ class TestNumericalStability:
         env = uacpy.Environment(
             name='Very Shallow',
             bathymetry=10.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,
@@ -414,7 +414,7 @@ class TestNumericalStability:
         env = uacpy.Environment(
             name='High Frequency',
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,

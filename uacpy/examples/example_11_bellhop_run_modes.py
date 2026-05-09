@@ -463,7 +463,7 @@ def scenario_d_compute_eigenrays_pekeris():
         density=1.5, attenuation=0.5,
     )
     env = uacpy.Environment(
-        name='Pekeris', bathymetry=100.0, sound_speed=1500.0, bottom=bottom,
+        name='Pekeris', bathymetry=100.0, ssp=1500.0, bottom=bottom,
     )
     source = uacpy.Source(depths=20.0, frequencies=200.0)
 

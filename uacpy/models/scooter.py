@@ -12,7 +12,7 @@ binary if present; the in-tree Python Hankel transform is the default
 path and the only one ``install.sh`` provisions.
 """
 
-import shutil
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -29,11 +29,11 @@ from uacpy.core.results import Result
 from uacpy.core.constants import (
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_reader import read_shd_file
-from uacpy.io.oalib_writer import write_bio_layers, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_receiver_depths, write_source_depths, write_ssp_section
+from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section
 
 
 class Scooter(PropagationModel):
@@ -280,7 +280,7 @@ class Scooter(PropagationModel):
         Returns
         -------
         result : Result
-            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
             for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
         import numpy as np
@@ -293,7 +293,7 @@ class Scooter(PropagationModel):
         if run_mode == RunMode.TIME_SERIES and (
             source_waveform is None or sample_rate is None
         ):
-            raise ValueError(
+            raise ConfigurationError(
                 "Scooter.run(run_mode=TIME_SERIES) requires source_waveform "
                 "and sample_rate. For the broadband transfer function "
                 "H(f), use run_mode=RunMode.BROADBAND."
@@ -330,17 +330,18 @@ class Scooter(PropagationModel):
             # transparently fall back to the Python transform.
             use_fields = self.use_fields_exe and not broadband_mode
             if self.use_fields_exe and broadband_mode:
-                self._log(
-                    "fields.exe cannot handle Nfreq > 1; broadband run "
-                    "falls back to the in-tree Python Hankel transform "
+                warnings.warn(
+                    "Scooter: fields.exe cannot handle Nfreq > 1; broadband "
+                    "run falls back to the in-tree Python Hankel transform "
                     "(use_fields_exe=True is ignored in broadband mode).",
-                    level='warn',
+                    UserWarning, stacklevel=2,
                 )
             if use_fields and self._get_fields_executable() is None:
-                self._log(
-                    "fields.exe not found; falling back to in-tree Python "
-                    "Hankel transform. Set use_fields_exe=False to silence.",
-                    level='warn',
+                warnings.warn(
+                    "Scooter: fields.exe not found; falling back to in-tree "
+                    "Python Hankel transform. Set use_fields_exe=False to "
+                    "silence.",
+                    UserWarning, stacklevel=2,
                 )
                 use_fields = False
 
@@ -361,20 +362,21 @@ class Scooter(PropagationModel):
                 )
 
                 # Run Scooter
-                self._log("Running Scooter...")
+                self._log("Running...")
                 self._run_scooter(base_name, fm.work_dir)
 
                 # Sanity-check the Green's function output
                 grn_file = fm.get_path(f'{base_name}.grn')
                 if not grn_file.exists():
-                    self._log(f"Green's function file not found: {grn_file}", level='error')
-                    raise ModelExecutionError(
+                    exc = ModelExecutionError(
                         self.model_name, return_code=0, stdout=None,
                         stderr=(
                             f"Scooter did not produce {grn_file}; "
                             f"check {fm.work_dir}/{base_name}.prt for diagnostics."
                         ),
                     )
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
 
                 if use_fields:
                     # Write FLP and invoke fields.exe -> .shd
@@ -387,13 +389,15 @@ class Scooter(PropagationModel):
 
                     shd_file = fm.get_path(f'{base_name}.shd')
                     if not shd_file.exists():
-                        raise ModelExecutionError(
+                        exc = ModelExecutionError(
                             self.model_name, return_code=0, stdout=None,
                             stderr=(
                                 f"fields.exe did not produce {shd_file}; "
                                 f"check {fm.work_dir}/fields.prt for diagnostics."
                             ),
                         )
+                        self._attach_prt_tail(exc, fm.work_dir, 'fields')
+                        raise exc
                     self._log("Reading SHD file...")
                     result = read_shd_file(shd_file)
                     result.tag(
@@ -411,19 +415,21 @@ class Scooter(PropagationModel):
                     grn_data = read_grn_file(grn_file)
 
                     if grn_data['nk'] == 0:
-                        self._log("Scooter produced empty Green's function (nk=0)", level='error')
-                        raise ModelExecutionError(
+                        exc = ModelExecutionError(
                             self.model_name, return_code=0,
                             stdout=None,
                             stderr="Scooter produced empty Green's function (nk=0)",
                         )
+                        self._attach_prt_tail(exc, fm.work_dir, base_name)
+                        raise exc
 
                     if grn_data['nsd'] > 1:
-                        self._log(
-                            f"Multi-source-depth GRN ({grn_data['nsd']} sources); "
-                            "in-tree Hankel transform returns the field for the "
-                            "first source depth only.",
-                            level='warn',
+                        warnings.warn(
+                            f"Scooter: multi-source-depth GRN "
+                            f"({grn_data['nsd']} sources); in-tree Hankel "
+                            "transform returns the field for the first "
+                            "source depth only.",
+                            UserWarning, stacklevel=2,
                         )
 
                     transform_kwargs = dict(
@@ -520,69 +526,33 @@ class Scooter(PropagationModel):
             # Write sediment layers if layered bottom
             write_layer_sections(f, env, env.depth)
 
-            # Bottom section with shear wave support for Scooter
+            # Bottom section. Scooter honours real shear attenuation on the
+            # 'A' halfspace line and writes its own cLow/cHigh/RMax block,
+            # so the F-type reflection-table bounds line is suppressed.
             bottom_code = bottom_type.to_acoustics_toolbox_code()
-            sigma = getattr(env.bottom, 'roughness', 0.0)
+            write_bottom_section(
+                f, env,
+                bottom_type=bottom_type,
+                filepath=Path(filepath),
+                halfspace_alpha_s_source='env',
+                emit_reflection_table_block=False,
+            )
 
-            # Check for range-dependent bathymetry
-            if len(env.bathymetry) > 1:
-                f.write(f"'{bottom_code}~' {sigma:.1f}\n")
-            else:
-                f.write(f"'{bottom_code}' {sigma:.1f}\n")
-
-            # Handle reflection coefficient file (type 'F')
+            rmax_m = float(receiver.ranges.max()) * self.rmax_multiplier
             if bottom_code == 'F':
-                # Copy reflection file to working directory
-                if env.bottom.reflection_file:
-                    brc_source = Path(env.bottom.reflection_file)
-                    if brc_source.exists():
-                        # Copy to same directory as .env file with matching base name
-                        brc_dest = Path(filepath).with_suffix('.brc')
-                        shutil.copy(brc_source, brc_dest)
-                        self._log(f"Copied reflection file: {brc_source} -> {brc_dest}", level='info')
-                    else:
-                        self._log(f"Reflection coefficient file not found: {env.bottom.reflection_file}", level='error')
-                        raise FileNotFoundError(
-                            f"Scooter: reflection coefficient file not found: "
-                            f"{env.bottom.reflection_file}; "
-                            f"generate it via BOUNCE or OASR first."
-                        )
-                else:
-                    self._log("acoustic_type='file' requires reflection_file parameter", level='error')
-                    raise ValueError(
-                        "Scooter: acoustic_type='file' requires reflection_file= "
-                        "on the bottom BoundaryProperties (path to a .brc file)."
-                    )
-
-                # 'F': no bottom-property line; cLow/cHigh/RMax follow
-                # below (ReadEnvironmentMod.f90:133-140).
-                pass
-
-            elif bottom_code == 'A':  # Half-space (with optional shear)
-                cp = env.bottom.sound_speed
-                cs = getattr(env.bottom, 'shear_speed', 0.0)
-                rho = env.bottom.density
-                alpha_p = env.bottom.attenuation
-                alpha_s = getattr(env.bottom, 'shear_attenuation', 0.0)
-                f.write(f"  {env.depth:.2f}  {cp:.2f}  {cs:.1f}  "
-                       f"{rho:.2f}  {alpha_p:.2f}  {alpha_s:.2f} /\n")
-
-            # cLow/cHigh: BRC-table bounds for 'F'; SSP-derived otherwise.
-            if bottom_code == 'F':
-                c_low = getattr(env.bottom, 'reflection_cmin', DEFAULT_C_MIN)
-                c_high = getattr(env.bottom, 'reflection_cmax', DEFAULT_C_MAX)
+                brc_overrides = (
+                    getattr(env.bottom, 'reflection_cmin', DEFAULT_C_MIN),
+                    getattr(env.bottom, 'reflection_cmax', DEFAULT_C_MAX),
+                )
             else:
-                _ssp_pairs = env.ssp.to_pairs()
-                c_min = float(_ssp_pairs[:, 1].min())
-                c_max = max(float(_ssp_pairs[:, 1].max()), env.bottom.sound_speed)
-                c_low = self.c_low if self.c_low is not None else c_min * C_LOW_FACTOR
-                c_high = self.c_high if self.c_high is not None else c_max * C_HIGH_FACTOR
-            f.write(f"{c_low:.1f} {c_high:.1f}\n")
-
-            # RMax (km) sets Scooter's k-grid via deltak = pi/RMax. Derived
-            # from receiver range, not reflection_rmax_m (different concept).
-            rmax = float(receiver.ranges.max() / 1000.0) * self.rmax_multiplier
-            f.write(f"{rmax:.6f}\n")
+                brc_overrides = None
+            write_phase_speed_and_rmax(
+                f, env,
+                rmax_m=rmax_m,
+                c_low=self.c_low, c_high=self.c_high,
+                brc_overrides=brc_overrides,
+                rmax_format="{:.6f}",
+            )
 
             # Source and receiver depths. Use the shared ATEnvWriter so
             # arbitrary-length depth arrays are written verbatim rather than
@@ -639,7 +609,7 @@ class Scooter(PropagationModel):
                 f"{self.field_interp} "
             )
         if len(options) != 4:
-            raise ValueError(
+            raise ConfigurationError(
                 f"FLP option string must be 4 characters, got {len(options)!r}"
             )
 

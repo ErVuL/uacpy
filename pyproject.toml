@@ -39,14 +39,16 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "numpy>=1.22.0",
-    "scipy>=1.8.0",
-    "matplotlib>=3.5.0",
-    "pytest>=6.0",
-    "pytest-xdist>=3.0",
+    "numpy>=1.22.0,<3.0",
+    "scipy>=1.8.0,<2.0",
+    "matplotlib>=3.5.0,<4.0",
 ]
 
 [project.optional-dependencies]
+test = [
+    "pytest>=6.0,<9.0",
+    "pytest-xdist>=3.0,<4.0",
+]
 dev = [
     "pytest-cov",
     "black",
@@ -62,11 +64,13 @@ Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
 exclude = ["uacpy.tests", "uacpy.tests.*"]
 
 [tool.setuptools.package-data]
+# OASES binaries are intentionally NOT listed here: OASES is academic-licensed
+# (not redistributable). It must remain a post-install user-side download via
+# `install.sh --oases yes`, never bundled into a wheel/sdist.
 uacpy = [
     "bin/oalib/*",
     "bin/bellhopcuda/*",
     "bin/mpirams/*",
-    "bin/oases/*",
     "bin/ramsurf/*",
 ]
 
@@ -90,4 +94,5 @@ filterwarnings = [
     "ignore:RAM.*Lytaev relaxed:UserWarning",
     "ignore:Receiver ranges.*exceed PE computed range:UserWarning",
     "ignore:ramsurf1\\.5 only models pressure-release:UserWarning",
+    "ignore:SPARC.*does not support elastic halfspace bottom:UserWarning",
 ]

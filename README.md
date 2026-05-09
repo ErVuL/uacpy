@@ -79,16 +79,33 @@ What `install.sh` builds:
 
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
+| `python3`                | Driving `install.sh` and importing uacpy (always) |
 | `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
+| `tar`                    | Submodule unpacking + OASES archive (always)      |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
-| CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`)            |
-| `curl`, `tar`            | OASES download (`--oases yes`)                    |
+| CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`) — **required** when `--bellhop cuda` is passed; the installer hard-errors if `nvcc` is absent (no silent downgrade to cxx) |
+| `curl`                   | OASES archive download (`--oases yes`)            |
 
 `install.sh` **verifies** these are present and aborts with a clear
 message if anything is missing — it does *not* install system packages
 itself. Provision the toolchain once for your platform, then run the
 build.
+
+**Continuous integration** runs on **Linux (`ubuntu-latest`), Python 3.12,
+`--bellhop cxx`, `--oases yes`** — see
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). macOS, Windows/WSL,
+Python 3.10/3.11/3.13, the CUDA Bellhop build, the Fortran-only Bellhop
+fallback, and the no-OASES partial install are all **supported
+configurations exercised by users in practice but not validated by CI**.
+Patches that touch any of those paths should be tested locally before
+submission.
+
+> **OASES supply-chain note.** `install.sh` downloads OASES over HTTPS from
+> MIT and supports an optional sha256 pin via the `OASES_EXPECTED_SHA256`
+> variable in the script (currently empty). Once you have a verified-good
+> install on your platform, pin that hash locally for reproducibility and
+> tamper-detection on subsequent rebuilds.
 
 ---
 
@@ -134,7 +151,7 @@ pip install -e .
 | `--bellhop cxx`           | Also build C++ Bellhop (CPU)                                |
 | `--bellhop cuda`          | Also build CUDA Bellhop (GPU, requires `nvcc`)              |
 | `--oases yes` / `no`      | Download + build OASES (or skip the prompt)                 |
-| `--force`                 | Rebuild even if binaries already exist                      |
+| `--force`                 | Skip incremental builds; do a full clean rebuild of every selected component |
 
 ---
 
@@ -284,54 +301,68 @@ rm -rf uacpy
 
 ## ▶ Simplest example
 
-A minimal "hello world": transmission loss in a 100 m Pekeris waveguide with
-Bellhop, at 1000 Hz, out to 5 km.
+A Gaussian seamount in 200 m water → **three range-dependent solvers
+agree, plus Bellhop eigenrays before the obstacle**. Scooter is excluded
+because it is range-independent and would collapse the seamount.
 
 ``` python
 import numpy as np
 import matplotlib.pyplot as plt
 
 import uacpy
-from uacpy.models import Bellhop, RunMode
+from uacpy.models import Bellhop, KrakenField, RAM
 from uacpy.core.environment import BoundaryProperties
-from uacpy.visualization.plots import plot_transmission_loss
+from uacpy.visualization.plots import compare_models, plot_model_comparison_matrix
 
-# 1. Environment — isovelocity water over a fluid half-space bottom
+# Gaussian seamount: 200 m water column rises to 80 m at the peak (r=7.5 km)
+ranges_km = np.linspace(0, 15e3, 61)
+seafloor  = 200.0 - 120.0 * np.exp(-((ranges_km - 7500.0) / 2000.0) ** 2)
+seafloor[0] = seafloor[-1] = 200.0   # pin endpoints so max == 200 exactly
+bathymetry = np.column_stack([ranges_km, seafloor])
+
 env = uacpy.Environment(
-    name="Pekeris Waveguide",
-    bathymetry=100.0,
-    sound_speed=1500.0,
+    name="Seamount",
+    bathymetry=bathymetry,
+    ssp=[(0, 1530), (200, 1490)],   # downward-refracting profile
     bottom=BoundaryProperties(
         acoustic_type='half-space',
-        sound_speed=1600.0,
-        density=1.5,
-        attenuation=0.5,
+        sound_speed=1700.0, density=1.7, attenuation=0.5,
     ),
 )
-
-# 2. Source — 1000 Hz, mid water column
-source = uacpy.Source(depths=50.0, frequencies=1000.0)
-
-# 3. Receiver grid — 200 depths × 5000 ranges out to 5 km
+source   = uacpy.Source(depths=50.0, frequencies=200.0)
 receiver = uacpy.Receiver(
-    depths=np.linspace(0, 100, 200),
-    ranges=np.linspace(0, 5000, 5000),
+    depths=np.linspace(0, 195, 200),
+    ranges=np.linspace(100, 15e3, 500),
 )
 
-# 4. Run Bellhop in coherent-TL mode
-result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
-    env, source, receiver, run_mode=RunMode.COHERENT_TL,
-)
+# 1. TL field from three range-dependent solvers
+results = {
+    'Bellhop':     Bellhop().compute_tl(env, source, receiver),
+    'KrakenField': KrakenField().compute_tl(env, source, receiver),
+    'RAM':         RAM().compute_tl(env, source, receiver),
+}
+compare_models(results, env=env, vmin=40, vmax=110, ncols=1, figsize=(14, 14))
+plt.savefig('docs/readme_compare_models.png', dpi=150, bbox_inches='tight')
 
-# 5. Plot the TL field
-fig, ax = plt.subplots(figsize=(8, 4))
-plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
-plt.tight_layout()
+# 2. Pairwise model-vs-model TL agreement matrix (RdYlGn_r — green = good)
+plot_model_comparison_matrix(results)
+plt.savefig('docs/readme_agreement_matrix.png', dpi=150, bbox_inches='tight')
+
+# 3. Bellhop eigenrays — keep only the direct paths (no surface/bottom bounces)
+rays = Bellhop().compute_eigenrays(
+    env, source, range_m=12000.0, depth_m=30.0,
+).filter_by_bounces(kind='direct')
+rays.plot(env=env)
+plt.savefig('docs/readme_eigenrays.png', dpi=150, bbox_inches='tight')
 plt.show()
 ```
 
 <p align="center">
-  <img src="./docs/bellhop_tl_example.png" alt="Bellhop TL field — Pekeris waveguide, 1 kHz" width="720">
+  <img src="./docs/readme_compare_models.png" alt="Seamount TL — Bellhop / KrakenField / RAM stacked" width="720">
+  <br>
+  <img src="./docs/readme_agreement_matrix.png" alt="Pairwise TL RMSE between the three solvers" width="480">
+  <br>
+  <img src="./docs/readme_eigenrays.png" alt="Bellhop eigenrays to a receiver before the seamount" width="720">
 </p>
 
 ## 📚 Documentation & Examples
@@ -350,6 +381,18 @@ of each one.
 ## 🧪 Testing
 
 UACPY uses **pytest** with custom markers for categorizing tests.
+
+`pytest` and `pytest-xdist` are no longer pulled in by the runtime
+dependency set — install the `test` extra to get them, or the `dev` extra
+for the additional formatting / linting / coverage tooling:
+
+``` bash
+# For running the test suite
+pip install -e ".[test]"
+
+# For development (test deps + black, flake8, pytest-cov)
+pip install -e ".[dev]"
+```
 
 ### Run all tests
 

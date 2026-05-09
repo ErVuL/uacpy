@@ -1,3 +1,14 @@
+# uacpy CI — minimal smoke test.
+#
+# Scope: Linux (ubuntu-latest), Python 3.12, --bellhop cxx, --oases yes.
+# What this DOES test: native Fortran/C builds + the python package against
+# the standard test markers.
+# What this does NOT test: macOS, Windows/WSL, Python 3.10/3.11/3.13, the
+# CUDA build, the fortran-only Bellhop fallback, the no-OASES partial
+# install. Those configurations are advertised as supported but exercised
+# by users, not by this workflow. Expand this matrix if any of the above
+# becomes a recurring breakage source.
+
 name: CI
 
 on:
@@ -14,10 +25,17 @@ jobs:
   test:
     name: Build native binaries + run tests
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Per-job wall-clock cap so a hung Fortran process can't burn 6h of
+    # CI minutes on a stuck build.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout (recursive submodules)
+        # bellhopcuda is a git submodule; install.sh's pin_bellhopcuda_tag
+        # then forces it to BELLHOPCUDA_TAG (currently "v1.5").
+        # TODO: if install.sh ever switches from a tag to a commit-SHA pin
+        # (BHC_COMMIT_SHA), revisit whether this checkout step needs to
+        # fetch unshallowed history for that SHA to be reachable.
         uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -35,8 +53,24 @@ jobs:
       - name: Install Python package (editable + dev extras)
         run: pip install -e ".[dev]"
 
-      # Builds oalib + bellhopcxx + mpiramS + ramsurf locally, downloads
-      # OASES from MIT (acoustics.mit.edu) and builds it.
+      # Cache the OASES source tree + compiled binaries so CI does not hit
+      # acoustics.mit.edu on every run (the MIT server is the single point
+      # of failure for the `--oases yes` path). Key is hashed on
+      # install.sh, so any change to the install logic — including the
+      # OASES URL or a future SHA pin — invalidates the cache.
+      - name: Cache OASES build
+        id: cache-oases
+        uses: actions/cache@v4
+        with:
+          path: |
+            uacpy/third_party/oases
+            uacpy/bin/oases
+          key: oases-${{ runner.os }}-${{ hashFiles('install.sh') }}
+
+      # Builds oalib + bellhopcxx + mpiramS + ramsurf locally. OASES is
+      # downloaded from MIT (acoustics.mit.edu) and built only on cache
+      # miss; install.sh's OASES path is idempotent and reuses the cached
+      # tree when present.
       - name: Build native binaries
         run: ./install.sh -y --bellhop cxx --oases yes
 
@@ -47,6 +81,11 @@ jobs:
             --count --select=E9,F63,F7,F82 \
             --show-source --statistics
 
+      # No `-W error::UserWarning` here on purpose: the project's
+      # deliberate-warning suppressions live in pyproject.toml's
+      # `filterwarnings` and the suite emits intended UserWarnings (e.g.
+      # collapse-method notices in _project_environment). Promoting
+      # warnings to errors here would break the suite (Audit 3 finding G3).
       - name: Run test suite
         env:
           # Avoid /dev/shm size limits on GH-hosted runners.

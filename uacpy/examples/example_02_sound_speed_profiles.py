@@ -197,7 +197,7 @@ def scenario_b_pekeris_waveguide():
     env = uacpy.Environment(
         name="Pekeris Waveguide - Elastic Bottom",
         bathymetry=100.0,             # Shallow water
-        sound_speed=1500.0,      # Isovelocity water column
+        ssp=1500.0,      # Isovelocity water column
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),

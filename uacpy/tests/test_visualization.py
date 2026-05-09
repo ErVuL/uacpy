@@ -20,7 +20,7 @@ def basic_setup():
     env = uacpy.Environment(
         name='test',
         bathymetry=100,
-        sound_speed=1500
+        ssp=1500
     )
     source = uacpy.Source(depths=50, frequencies=100)
     receiver = uacpy.Receiver(
@@ -292,7 +292,7 @@ class TestPlottingEdgeCases:
 
     def test_plot_empty_results(self):
         """Test plotting with empty results dict."""
-        env = uacpy.Environment(name='test', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='test', bathymetry=100, ssp=1500)
 
         with pytest.raises((ValueError, KeyError, IndexError)):
             plots.compare_models({}, env)
@@ -324,13 +324,13 @@ class TestPlottingIntegration:
     """Integration tests for plotting workflows."""
 
     def test_complete_workflow(self, basic_setup, tmp_path):
-        """Combined plot/compare/cuts/report workflow on synthetic TLFields.
+        """Combined plot/compare/cuts/report workflow on synthetic PressureFields.
 
         Real model output is not needed to exercise the plotting pipeline; we
-        feed three synthetic TLFields differing by a constant offset so each
+        feed three synthetic PressureFields differing by a constant offset so each
         plotting helper has distinct data to render.
         """
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
 
         env, _, _ = basic_setup
         depths = np.linspace(5, 95, 19)
@@ -339,7 +339,7 @@ class TestPlottingIntegration:
         base = np.broadcast_to(base, (depths.size, ranges.size)).copy()
 
         results = {
-            name: TLField(
+            name: PressureField(units="dB", 
                 data=base + offset, depths=depths, ranges=ranges, model=name,
             )
             for name, offset in (('Bellhop', 0.0), ('RAM', 1.5), ('KrakenField', -1.5))
@@ -406,7 +406,7 @@ class TestCompareModelsTypeDispatch:
     pytestmark = []
 
     def test_pressure_field_routes_via_to_tl(self):
-        from uacpy.core.results import PressureField, TLField
+        from uacpy.core.results import PressureField
 
         depths = np.linspace(5, 95, 10)
         ranges = np.linspace(100, 5000, 20)
@@ -417,14 +417,14 @@ class TestCompareModelsTypeDispatch:
             data=p, depths=depths, ranges=ranges,
             model='Bellhop', frequencies=100.0,
         )
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
         fig, axes = plots.compare_models({'Bellhop': pfield}, env=env)
         assert fig is not None
         plt.close(fig)
 
     def test_unsupported_field_type_raises(self):
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
-        with pytest.raises(TypeError, match="expected TLField"):
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        with pytest.raises(TypeError, match="expected PressureField"):
             plots.compare_models({'bogus': object()}, env=env)
 
 
@@ -434,42 +434,42 @@ class TestTLRmse:
     pytestmark = []
 
     def test_identical_fields_zero_rmse(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
 
         d = np.linspace(5, 95, 10)
         r = np.linspace(100, 5000, 20)
         data = 60 + 10 * np.log10(np.maximum(r, 1.0)[None, :])
         data = np.broadcast_to(data, (10, 20)).copy()
-        a = TLField(data=data, depths=d, ranges=r, model='A')
-        b = TLField(data=data.copy(), depths=d, ranges=r, model='B')
+        a = PressureField(units="dB", data=data, depths=d, ranges=r, model='A')
+        b = PressureField(units="dB", data=data.copy(), depths=d, ranges=r, model='B')
         assert uacpy.tl_rmse(a, b) == pytest.approx(0.0)
 
     def test_constant_offset(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
 
         d = np.linspace(5, 95, 10)
         r = np.linspace(100, 5000, 20)
         base = np.zeros((10, 20))
-        a = TLField(data=base, depths=d, ranges=r)
-        b = TLField(data=base + 3.0, depths=d, ranges=r)
+        a = PressureField(units="dB", data=base, depths=d, ranges=r)
+        b = PressureField(units="dB", data=base + 3.0, depths=d, ranges=r)
         assert uacpy.tl_rmse(a, b) == pytest.approx(3.0)
 
     def test_window_selects_subregion(self):
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
         from uacpy.core.metrics import tl_rmse
 
         d = np.linspace(5, 95, 10)
         r = np.linspace(100, 5000, 20)
-        a = TLField(data=np.zeros((10, 20)), depths=d, ranges=r)
+        a = PressureField(units="dB", data=np.zeros((10, 20)), depths=d, ranges=r)
         b_data = np.zeros((10, 20))
         b_data[:, :5] = 10.0
-        b = TLField(data=b_data, depths=d, ranges=r)
+        b = PressureField(units="dB", data=b_data, depths=d, ranges=r)
         # Inside the noisy band, RMSE = 10. Excluding it, RMSE = 0.
         assert tl_rmse(a, b, range_window=(r[0], r[4])) == pytest.approx(10.0)
         assert tl_rmse(a, b, range_window=(r[5], r[-1])) == pytest.approx(0.0)
 
     def test_type_error_on_non_tlfield(self):
-        from uacpy.core.results import TLField
-        a = TLField(data=np.zeros((4, 4)), depths=np.arange(4), ranges=np.arange(4))
+        from uacpy.core.results import PressureField
+        a = PressureField(units="dB", data=np.zeros((4, 4)), depths=np.arange(4), ranges=np.arange(4))
         with pytest.raises(TypeError):
             uacpy.tl_rmse(a, object())

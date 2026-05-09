@@ -21,7 +21,7 @@ class TestBellhopRunModes:
         return Environment(
             name="run_mode_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
     @pytest.fixture
@@ -216,7 +216,7 @@ class TestAdvancedBeamTypes:
         return Environment(
             name="beam_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
     @pytest.fixture
@@ -293,7 +293,7 @@ class TestRunWithBounceConstructorPlumbing:
             francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
             bio_layers=None,
         )
-        env = Environment(name='b', bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name='b', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
         with pytest.raises(RuntimeError, match='stop after Bounce __init__'):

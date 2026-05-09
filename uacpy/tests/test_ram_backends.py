@@ -16,6 +16,7 @@ from uacpy.core.source import Source
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import read_tl_grid, read_tl_line
 from uacpy.models import RAM, RunMode
+from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ def _rough_altimetry():
 
 def _env(*, bottom, altimetry=None):
     return Environment(
-        name='test', bathymetry=100.0, sound_speed=1500.0,
+        name='test', bathymetry=100.0, ssp=1500.0,
         bottom=bottom, altimetry=altimetry,
     )
 
@@ -75,7 +76,7 @@ class TestBackendSelection:
 
     def test_elastic_rough_raises_not_implemented(self):
         env = _env(bottom=_elastic_bottom(), altimetry=_rough_altimetry())
-        with pytest.raises(NotImplementedError, match="elastic bottom \\+ rough surface"):
+        with pytest.raises(UnsupportedFeatureError, match="elastic bottom \\+ sea-surface altimetry"):
             RAM(verbose=False).select_backend(env)
 
 
@@ -281,5 +282,5 @@ class TestCollinsBinaries:
         env = _env(bottom=_fluid_bottom(), altimetry=_rough_altimetry())
         src, rcv = self._src_rcv()
         ram = RAM(verbose=False)
-        with pytest.raises(ValueError, match="source_waveform"):
+        with pytest.raises(ConfigurationError, match="source_waveform"):
             ram.run(env, src, rcv, run_mode=RunMode.TIME_SERIES)

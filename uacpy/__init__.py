@@ -28,7 +28,7 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, PhaseReference,
-    TLField, PressureField, TransferFunction,
+    PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
@@ -71,7 +71,7 @@ __all__ = [
     'generate_sea_surface',
     'Receiver',
     'Result', 'PhaseReference',
-    'TLField', 'PressureField', 'TransferFunction',
+    'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',

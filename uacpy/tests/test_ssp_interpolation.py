@@ -29,7 +29,7 @@ class TestSSPInterpolationMethods:
         env = Environment(
             name="iso_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
         bellhop = Bellhop(verbose=False)

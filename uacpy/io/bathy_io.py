@@ -16,6 +16,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
 
+from uacpy.core.exceptions import ModelExecutionError
 from uacpy.io._fortran_helpers import read_vector
 
 
@@ -121,7 +122,10 @@ def read_boundary_3d(
     except FileNotFoundError:
         raise FileNotFoundError(f"Boundary file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading boundary file {filename}: {e}") from e
+        raise ModelExecutionError(
+            'Bellhop3D', return_code=0, stdout=None,
+            stderr=f"Error reading boundary file {filename}: {e}",
+        ) from e
 
     return x_bot, y_bot, z_bot, n_x, n_y
 
@@ -438,18 +442,23 @@ def write_bty_long_format(
     bottom_rd : RangeDependentBottom
         Object carrying per-range geoacoustics with attributes
         ``ranges`` (metres), ``sound_speed``, ``density``, ``attenuation``,
-        ``shear_speed``.
+        ``shear_speed``, ``shear_attenuation``.
     interp_type : str, optional
         'L' (linear, default) or 'C' (curvilinear).
 
     Notes
     -----
-    File format (extended BTY — long format):
+    File format (extended BTY — long format), matching the AT Fortran
+    READ in ``Bellhop/bdryMod.f90:200-201``:
+    ``READ(BTYFile,*) Bot(ii)%x, %HS%alphaR, %HS%betaR, %HS%rho,
+    %HS%alphaI, %HS%betaI``  — i.e. 7 numbers per row.
+
     - Line 1: 2-character TYPE in quotes — position 1 is interpolation
       ('L' or 'C'), position 2 is 'L' (long format, bathymetry +
       geoacoustics). See ATI_BTY_File.htm.
     - Line 2: number of points
-    - Following lines: ``range_km depth_m cp_m_s rho_g_cm3 atten cs_m_s``
+    - Following lines:
+      ``range_km depth_m cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
 
     Ranges in ``bottom_rd.ranges`` (metres) are re-sampled onto the
     bathymetry range grid via ``numpy.interp`` so the two lengths match.
@@ -470,14 +479,22 @@ def write_bty_long_format(
     cs_arr = bottom_rd.shear_speed if bottom_rd.shear_speed is not None \
         else np.zeros_like(rd_r_km)
     cs = np.interp(bathy_km[:, 0], rd_r_km, cs_arr)
+    # Fallback to 0.0 when bottom_rd lacks shear_attenuation (older objects).
+    alpha_s_arr = getattr(bottom_rd, 'shear_attenuation', None)
+    if alpha_s_arr is None:
+        alpha_s_arr = np.zeros_like(rd_r_km)
+    alpha_s = np.interp(bathy_km[:, 0], rd_r_km, alpha_s_arr)
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")
         f.write(f"{n_pts}\n")
         for i in range(n_pts):
+            # Column order matches bdryMod.f90:200-201:
+            # range_km depth_m cp cs rho alpha_p alpha_s
             f.write(
                 f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f} "
-                f"{cp[i]:.3f} {rho[i]:.3f} {alpha[i]:.6f} {cs[i]:.3f}\n"
+                f"{cp[i]:.3f} {cs[i]:.3f} {rho[i]:.3f} "
+                f"{alpha[i]:.6f} {alpha_s[i]:.6f}\n"
             )
         f.write("\n")
 

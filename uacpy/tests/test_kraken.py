@@ -20,7 +20,7 @@ class TestKrakenFieldBroadband:
     @pytest.mark.slow
     def test_krakenfield_broadband_returns_transfer_function(self):
         """KrakenField BROADBAND returns H(f) on the receiver grid."""
-        env = Environment(name="kf_bb", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="kf_bb", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
@@ -44,7 +44,7 @@ class TestKrakenFieldBroadband:
     @pytest.mark.slow
     def test_krakenfield_time_series_returns_time_series_field(self):
         """KrakenField TIME_SERIES with a tonal waveform returns TimeSeriesField."""
-        env = Environment(name="kf_ts", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="kf_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),
@@ -88,7 +88,7 @@ class TestKrakenFieldBroadband:
         return Environment(
             name="krakenc_test",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
 
@@ -135,7 +135,7 @@ class TestKrakenAttenuationUnit:
     def test_attenuation_unit_reaches_env_writer(self, tmp_path):
         from uacpy.core.constants import AttenuationUnits
         kraken = Kraken(attenuation_unit='M')
-        env = Environment(name='kr', bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name='kr', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[25.0, 50.0, 75.0], ranges=[1000.0])
         env_file = tmp_path / 'kraken.env'
@@ -177,7 +177,7 @@ class TestKrakenModePointsPerMeter:
 
         monkeypatch.setattr(Kraken, 'run', spy_run)
 
-        env = Environment(name='kr_modes', bathymetry=200.0, sound_speed=1500.0)
+        env = Environment(name='kr_modes', bathymetry=200.0, ssp=1500.0)
         source = Source(depths=100.0, frequencies=50.0)
         kraken = Kraken(mode_points_per_meter=5.0)
         with pytest.raises(RuntimeError, match='stop'):

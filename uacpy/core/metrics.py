@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from uacpy.core.results import TLField
+from uacpy.core.results import PressureField
 
 
 def _resolve_window(
@@ -27,12 +27,12 @@ def _resolve_window(
 
 
 def tl_rmse(
-    field_a: TLField,
-    field_b: TLField,
+    field_a: PressureField,
+    field_b: PressureField,
     range_window: Optional[Tuple[float, float]] = None,
     depth_window: Optional[Tuple[float, float]] = None,
 ) -> float:
-    """Root-mean-square TL difference between two ``TLField`` objects.
+    """Root-mean-square TL difference between two TL fields.
 
     Both fields must share the same ``depths`` and ``ranges`` axes; the
     caller is responsible for ensuring they're sampled compatibly (e.g.
@@ -40,7 +40,7 @@ def tl_rmse(
 
     Parameters
     ----------
-    field_a, field_b : TLField
+    field_a, field_b : PressureField (units='dB')
         Narrowband TL fields. Broadband ``(n_d, n_r, n_f)`` fields raise.
     range_window : (float, float), optional
         ``(rmin_m, rmax_m)`` inclusive. Defaults to all ranges.
@@ -55,19 +55,21 @@ def tl_rmse(
     Raises
     ------
     TypeError
-        If either input is not a :class:`TLField`.
+        If either input is not a dB-units :class:`PressureField`.
     ValueError
         If shapes/axes don't match, the fields are broadband, or the
         window selects no finite cells.
     """
-    if not isinstance(field_a, TLField) or not isinstance(field_b, TLField):
-        raise TypeError(
-            "tl_rmse: both inputs must be TLField; got "
-            f"{type(field_a).__name__} and {type(field_b).__name__}"
-        )
+    for label, f in (('field_a', field_a), ('field_b', field_b)):
+        if not isinstance(f, PressureField) or f.units != 'dB':
+            raise TypeError(
+                f"tl_rmse: {label} must be a PressureField with units='dB' "
+                f"(TL); got {type(f).__name__}"
+                + (f" (units={f.units!r})" if isinstance(f, PressureField) else "")
+            )
     if field_a.data.ndim != 2 or field_b.data.ndim != 2:
         raise ValueError(
-            "tl_rmse: broadband TLField (3-D data) is not supported; "
+            "tl_rmse: broadband TL field (3-D data) is not supported; "
             "extract a single frequency via .at_frequency(f) first."
         )
 

@@ -18,7 +18,7 @@ Layout:
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
 * ``shd_utils`` — broadband ``.shd`` merging.
-* ``utils`` — shared helpers (``crci``, ``complex_ssp``, ``equally_spaced``).
+* ``utils`` — shared helpers (``equally_spaced``).
 * ``file_manager`` — temp-dir / tmpfs management.
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
 """
@@ -55,7 +55,7 @@ from uacpy.io.grn_reader import (
     read_grn_file, grn_to_field, grn_to_transfer_function,
     sparc_snapshot_to_field,
 )
-from uacpy.io.utils import equally_spaced, crci, complex_ssp
+from uacpy.io.utils import equally_spaced
 from uacpy.io.shd_utils import merge_shd_files
 from uacpy.io.oases_writer import (
     write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input,
@@ -102,7 +102,7 @@ __all__ = [
     "read_rts_file", "rts_to_tl",
     "read_ts",
     # Utilities
-    "equally_spaced", "crci", "complex_ssp",
+    "equally_spaced",
     "merge_shd_files",
     # OASES I/O
     "write_oast_input", "write_oasn_input", "write_oasp_input", "write_oasr_input",

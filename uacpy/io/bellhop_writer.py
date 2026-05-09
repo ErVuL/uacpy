@@ -368,10 +368,15 @@ def write_bellhop_env_file(
             # Append '~' to bottom type to indicate bathymetry from file
             # Format: 'A~' = halfspace with range-dependent bathymetry
             bottom_type_with_bathy = f"{bottom_type}~"
-            f.write(f"'{bottom_type_with_bathy}' 0.0\n")
+            # 2nd field on this BOT line is sigma (top-of-bottom RMS
+            # roughness) per ReadEnvironmentBell.f90:466.
+            roughness = getattr(env.bottom, 'roughness', 0.0)
+            f.write(f"'{bottom_type_with_bathy}' {roughness:.6f}\n")
         else:
-            # Range-independent bottom
-            f.write(f"'{bottom_type}' 0.0\n")  # Top of halfspace (usually 0)
+            # Range-independent bottom; 2nd field is sigma (RMS roughness)
+            # per ReadEnvironmentBell.f90:466.
+            roughness = getattr(env.bottom, 'roughness', 0.0)
+            f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
         if bottom_type == "G":  # Grain size
@@ -404,13 +409,17 @@ def write_bellhop_env_file(
             # For 'F' type, Bellhop finds the .brc file by name convention
             # (same base name as .env). No additional lines needed in the env file.
         elif bottom_type == "A":  # Acousto-elastic halfspace
-            # Format: depth sound_speed shear_speed density attenuation roughness /
+            # Per ReadEnvironmentBell.f90:474 the row is
+            # READ(ENVFile,*) zTemp, alphaR, betaR, rhoR, alphaI, betaI
+            # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
+            # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
+            # on the preceding BOT line ('A' sigma).
             shear_speed = getattr(env.bottom, 'shear_speed', 0.0)
-            roughness = getattr(env.bottom, "roughness", 0.0)
+            shear_atten = getattr(env.bottom, 'shear_attenuation', 0.0)
             f.write(
                 f" {env.depth:.2f}  {env.bottom.sound_speed:.2f} "
                 f"{shear_speed:.1f} {env.bottom.density:.1f} "
-                f"{env.bottom.attenuation:.1f} {roughness:.1f} /\n"
+                f"{env.bottom.attenuation:.6f} {shear_atten:.6f} /\n"
             )
 
         write_source_depths(f, source)

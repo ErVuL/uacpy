@@ -11,8 +11,8 @@ binaries based on the environment:
 - **ramsurf1.5** — fluid bottom + variable surface (``env.altimetry``); single
   frequency, rough-surface / beach-style propagation.
 
-Combining elastic + rough surface raises ``NotImplementedError`` — there is no
-published Collins PE for that combination. Use OASES for range-independent
+Combining elastic + rough surface raises ``UnsupportedFeatureError`` — there
+is no published Collins PE for that combination. Use OASES for range-independent
 elastic problems, or fluidise / flatten one side as an approximation.
 
 This example runs the same Pekeris-like waveguide through all three backends
@@ -34,6 +34,7 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import RAM, RunMode
+from uacpy.core.exceptions import UnsupportedFeatureError
 
 
 def main():
@@ -75,13 +76,13 @@ def main():
 
     cases = [
         ('mpiramS (fluid + flat)', Environment(
-            name='fluid-flat', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace,
+            name='fluid-flat', bathymetry=waveguide_depth, ssp=1500.0, bottom=fluid_halfspace,
         )),
         ('rams0.5 (elastic + flat)', Environment(
-            name='elastic-flat', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered,
+            name='elastic-flat', bathymetry=waveguide_depth, ssp=1500.0, bottom=elastic_layered,
         )),
         ('ramsurf1.5 (fluid + rough)', Environment(
-            name='fluid-rough', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace, altimetry=surface,
+            name='fluid-rough', bathymetry=waveguide_depth, ssp=1500.0, bottom=fluid_halfspace, altimetry=surface,
         )),
     ]
 
@@ -95,12 +96,12 @@ def main():
     # The elastic + altimetry combination is the documented gap.
     print("\nGap demonstration:")
     bad_env = Environment(
-        name='elastic-rough', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered, altimetry=surface,
+        name='elastic-rough', bathymetry=waveguide_depth, ssp=1500.0, bottom=elastic_layered, altimetry=surface,
     )
     try:
         ram.select_backend(bad_env)
-    except NotImplementedError as e:
-        print(f"  elastic + altimetry → NotImplementedError: {str(e)[:80]}…")
+    except UnsupportedFeatureError as e:
+        print(f"  elastic + altimetry → UnsupportedFeatureError: {str(e)[:80]}…")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
     for ax, (label, env) in zip(axes, cases):
