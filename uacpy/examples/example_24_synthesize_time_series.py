@@ -77,7 +77,7 @@ def main():
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
-    tl_at_pt = H.tl_at(target_depth_m, target_range_m)
+    tl_at_pt = H.at(depth=target_depth_m, range_m=target_range_m).to_tl()
     axes[0].plot(tl_at_pt.frequencies, tl_at_pt.tl, 'C0-', lw=1.2)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Frequency (Hz)')

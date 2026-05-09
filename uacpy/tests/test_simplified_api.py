@@ -116,24 +116,19 @@ class TestFieldMethods:
     """Tests for Field convenience methods."""
 
     def test_field_get_methods(self, simple_env, source, receiver_small):
-        """Test Field get_value, get_at_range, get_at_depth."""
+        """Test Field sel(...) for point and line slices."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        # Test get_value — chain-able 1×1 PressureField. .tl auto-squeezes
-        # singleton dims so a point query returns a 0-D scalar; .p does
-        # the same for complex pressure.
-        point = result.get_value(range_m=3000, depth=50)
+        point = result.at(range_m=3000, depth=50)
         assert isinstance(point, PressureField)
         assert point.tl.ndim == 0
         assert isinstance(float(point.tl), float)
 
-        # Test get_at_range — returns a sliced PressureField; .tl gives the array
-        values_at_range = result.get_at_range(3000).tl
+        values_at_range = result.at(range_m=3000).tl
         assert len(values_at_range) == len(receiver_small.depths)
 
-        # Test get_at_depth
-        values_at_depth = result.get_at_depth(50).tl
+        values_at_depth = result.at(depth=50).tl
         assert len(values_at_depth) == len(receiver_small.ranges)
 
     def test_field_properties(self, simple_env, source, receiver_small):

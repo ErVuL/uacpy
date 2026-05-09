@@ -296,7 +296,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     # TL vs Range at source depth
     ax = axes[0]
     for name, result in results.items():
-        tl_vs_range = result.get_at_depth(source_depth).tl
+        tl_vs_range = result.at(depth=source_depth).tl
         ax.plot(result.ranges/1000, tl_vs_range, linewidth=2.5,
                label=name, color=COLORS.get(name, None), alpha=0.8)
 
@@ -310,7 +310,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     ax = axes[1]
     for name, result in results.items():
         mid_range_km = np.median(result.ranges) / 1000
-        tl_vs_depth = result.get_at_range(mid_range_km * 1000.0).tl
+        tl_vs_depth = result.at(range_m=mid_range_km * 1000.0).tl
         ax.plot(tl_vs_depth, result.depths, linewidth=2.5,
                label=name, color=COLORS.get(name, None), alpha=0.8)
 
@@ -341,7 +341,7 @@ def plot_model_statistics(results: Dict, source_depth: float):
     model_names = list(results.keys())
     stats = []
     for name, result in results.items():
-        tl_vs_range = result.get_at_depth(source_depth).tl
+        tl_vs_range = result.at(depth=source_depth).tl
         stats.append([np.mean(tl_vs_range), np.std(tl_vs_range)])
 
     stats = np.array(stats)
@@ -371,8 +371,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
                     result_i = results[model_names[i]]
                     result_j = results[model_names[j]]
 
-                    tl_i = result_i.get_at_depth(source_depth).tl
-                    tl_j = result_j.get_at_depth(source_depth).tl
+                    tl_i = result_i.at(depth=source_depth).tl
+                    tl_j = result_j.at(depth=source_depth).tl
 
                     # Interpolate to common grid
                     if len(tl_i) != len(tl_j):

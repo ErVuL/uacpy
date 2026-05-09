@@ -326,9 +326,9 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[1, 1])
 
-    ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.get_at_depth(source.depths[0]).tl,
+    ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.at(depth=source.depths[0]).tl,
             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
-    ax5.plot(result_scooter.ranges/1000, result_scooter.get_at_depth(source.depths[0]).tl,
+    ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).tl,
             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax5.set_xlabel('Range (km)', fontweight='bold')
@@ -345,9 +345,9 @@ def main():
 
     mid_range_km = np.median(result_krakenfield.ranges) / 1000
 
-    ax6.plot(result_krakenfield.get_at_range(mid_range_km * 1000.0).tl, result_krakenfield.depths,
+    ax6.plot(result_krakenfield.at(range_m=mid_range_km * 1000.0).tl, result_krakenfield.depths,
             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
-    ax6.plot(result_scooter.get_at_range(mid_range_km * 1000.0).tl, result_scooter.depths,
+    ax6.plot(result_scooter.at(range_m=mid_range_km * 1000.0).tl, result_scooter.depths,
             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax6.invert_yaxis()

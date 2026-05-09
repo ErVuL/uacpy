@@ -226,10 +226,12 @@ class Result:
 class _GridResult(Result):
     """Mixin for results that live on a regular ``(depth, range)`` grid.
 
-    Provides ``depths``, ``ranges`` and the shape-checking + slicing
-    helpers (``get_at_range``, ``get_at_depth``, ``get_value``, ``get_max``).
-    Subclasses define the dtype/units of ``data`` and may add a third
-    trailing axis (``frequencies`` or ``time``).
+    Provides ``depths``, ``ranges`` and the shape-checking machinery.
+    Concrete subclasses (``PressureField``, ``TransferFunction``,
+    ``TimeSeriesField``) provide a label-based ``at(...)`` slicer and
+    a ``max()`` reducer that return chain-able typed slices. The dtype
+    and units of ``data``, plus an optional third trailing axis
+    (``frequencies`` or ``time``), are subclass-specific.
     """
 
     # Filled in by subclasses to give clearer error messages.
@@ -274,63 +276,10 @@ class _GridResult(Result):
     def n_ranges(self) -> int:
         return len(self.ranges)
 
-    # Slicing ----------------------------------------------------------------
-
-    def get_at_range(self, range_m: float) -> np.ndarray:
-        """Slice at the nearest range. Returns shape ``data.shape`` minus
-        the range axis (axis 1)."""
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        if self.data.ndim == 2:
-            return self.data[:, r_idx]
-        return self.data[:, r_idx, ...]
-
-    def get_at_depth(self, depth: float) -> np.ndarray:
-        """Slice at the nearest depth. Returns shape ``data.shape`` minus
-        the depth axis (axis 0)."""
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        return self.data[d_idx, ...]
-
-    def get_value(
-        self,
-        range_m: float,
-        depth: float,
-        *,
-        frequency: Optional[float] = None,
-        time: Optional[float] = None,
-    ) -> Any:
-        """Return the value at the nearest ``(depth, range)`` (and, if the
-        result has a third axis, the nearest ``frequency`` or ``time``)."""
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        if self.data.ndim == 2:
-            return self.data[d_idx, r_idx]
-        if frequency is not None and self.frequencies is not None:
-            k = int(np.argmin(np.abs(self.frequencies - frequency)))
-            return self.data[d_idx, r_idx, k]
-        if time is not None:
-            t_axis = self.metadata.get('time')
-            if t_axis is None:
-                raise ValueError(
-                    f"{type(self).__name__}.get_value: time= requested but "
-                    "result has no time axis"
-                )
-            k = int(np.argmin(np.abs(np.asarray(t_axis) - time)))
-            return self.data[d_idx, r_idx, k]
-        raise ValueError(
-            f"{type(self).__name__}.get_value: 3-D result requires "
-            "frequency= or time="
-        )
-
-    def get_max(self):
-        """Argmax position. Default returns ``(max_value, range, depth)``;
-        :class:`PressureField` overrides to a chain-able 1×1 slice."""
-        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
-        d_idx, r_idx = idx[0], idx[1]
-        return (
-            float(np.abs(self.data[idx])),
-            float(self.ranges[r_idx]),
-            float(self.depths[d_idx]),
-        )
+    # Slicing — concrete subclasses (PressureField, TransferFunction,
+    # TimeSeriesField) provide a label-based ``at(...)`` that returns a
+    # chain-able typed slice. ``_GridResult`` itself is abstract w.r.t.
+    # selection.
 
 
 
@@ -389,82 +338,95 @@ class PressureField(_GridResult):
     def is_broadband(self) -> bool:
         return self.data.ndim == 3
 
-    # Override _GridResult slicers so PressureField returns a sliced
-    # PressureField (units preserved). Chain ``.tl`` / ``.p`` / ``.data``
-    # to get the underlying array. ``get_value`` stays scalar (returns
-    # real TL in dB regardless of underlying units).
-    def get_at_range(self, range_m: float) -> "_SlicedPressureField":
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        return _SlicedPressureField(
-            data=self.data[:, r_idx:r_idx + 1, ...],
-            depths=self.depths,
-            ranges=np.array([float(self.ranges[r_idx])]),
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
+    # Unified label-based selection — xarray-style. Pass any subset of
+    # ``depth``, ``range_m``, ``frequency``; each picks the nearest grid
+    # sample and collapses that axis to size 1. The selected axis stays
+    # in ``.data.shape`` (so the returned ``_SlicedPressureField`` keeps
+    # its declared dimensionality), but ``.tl`` / ``.p`` squeeze size-1
+    # axes for plot-friendly shapes.
+    def at(
+        self,
+        *,
+        depth: Optional[float] = None,
+        range_m: Optional[float] = None,
+        frequency: Optional[float] = None,
+    ) -> "_SlicedPressureField":
+        d_idx = (int(np.argmin(np.abs(self.depths - depth)))
+                 if depth is not None else None)
+        r_idx = (int(np.argmin(np.abs(self.ranges - range_m)))
+                 if range_m is not None else None)
+        f_idx = None
+        if frequency is not None:
+            if self.frequencies is None or self.data.ndim < 3:
+                raise ValueError(
+                    "PressureField.at: frequency= requires a broadband (3-D) field"
+                )
+            f_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
+        return self.at_idx(depth_idx=d_idx, range_idx=r_idx, frequency_idx=f_idx)
 
-    def get_at_depth(self, depth: float) -> "_SlicedPressureField":
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        return _SlicedPressureField(
-            data=self.data[d_idx:d_idx + 1, ...],
-            depths=np.array([float(self.depths[d_idx])]),
-            ranges=self.ranges,
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
+    def at_idx(
+        self,
+        *,
+        depth_idx: Optional[int] = None,
+        range_idx: Optional[int] = None,
+        frequency_idx: Optional[int] = None,
+    ) -> "_SlicedPressureField":
+        """Integer-index counterpart to :meth:`at` (xarray-style ``isel``).
 
-    def get_max(self) -> "_SlicedPressureField":
-        """Slice at the argmax of ``|data|``. Returns a 1×1
-        :class:`_SlicedPressureField` — ``.tl`` / ``.p`` are 0-D scalars
-        (``float()``-able). Read ``.ranges[0]`` / ``.depths[0]`` for the
-        location."""
-        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
-        d_idx, r_idx = idx[0], idx[1]
-        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, ...]
+        Negative indices wrap from the end (``-1`` → last sample); each
+        axis is resolved with ``np.take`` semantics. Use this when the
+        caller already has axis indices (loop counters, argmax, etc.)
+        and wants to skip the nearest-label argmin lookup.
+        """
+        sliced = self.data
+        new_depths = self.depths
+        new_ranges = self.ranges
+        new_freqs = self.frequencies
+        if depth_idx is not None:
+            d_idx = int(depth_idx) % len(self.depths)
+            sliced = sliced[d_idx:d_idx + 1, ...]
+            new_depths = np.array([float(self.depths[d_idx])])
+        if range_idx is not None:
+            r_idx = int(range_idx) % len(self.ranges)
+            sliced = sliced[:, r_idx:r_idx + 1, ...]
+            new_ranges = np.array([float(self.ranges[r_idx])])
+        if frequency_idx is not None:
+            if self.frequencies is None or self.data.ndim < 3:
+                raise ValueError(
+                    "PressureField.at_idx: frequency_idx= requires a broadband "
+                    "(3-D) field"
+                )
+            f_idx = int(frequency_idx) % len(self.frequencies)
+            sliced = sliced[..., f_idx:f_idx + 1]
+            new_freqs = np.array([float(self.frequencies[f_idx])])
         return _SlicedPressureField(
             data=sliced,
-            depths=np.array([float(self.depths[d_idx])]),
-            ranges=np.array([float(self.ranges[r_idx])]),
+            depths=new_depths,
+            ranges=new_ranges,
             units=self.units,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=self.frequencies,
+            frequencies=new_freqs,
             metadata=dict(self.metadata),
         )
 
-    def get_value(self, range_m: float, depth: float, **kwargs) -> "_SlicedPressureField":
-        """Slice at the nearest ``(depth, range)`` point.
-
-        Returns a 1×1 :class:`_SlicedPressureField` whose ``.tl`` / ``.p``
-        squeeze to 0-D scalars (``float()``-able), so callers chain
-        ``field.get_value(r, z).tl`` straight into ``float()``.
+    def max(self) -> "_SlicedPressureField":
+        """Slice at the global argmax of ``|data|`` across **every** axis.
+        Returns a 1×1 (or 1×1×1) :class:`_SlicedPressureField` — ``.tl`` /
+        ``.p`` are 0-D scalars (``float()``-able). Read ``.depths[0]`` /
+        ``.ranges[0]`` / ``.frequencies[0]`` for the location of the max.
         """
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        if self.data.ndim == 2:
-            data = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
-            freqs = self.frequencies
+        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
+        d_idx, r_idx = idx[0], idx[1]
+        if self.data.ndim == 3:
+            f_idx = idx[2]
+            sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx:f_idx + 1]
+            freqs = np.array([float(self.frequencies[f_idx])])
         else:
-            freq = kwargs.get('frequency')
-            if freq is None and self.frequencies is not None and len(self.frequencies):
-                freq = float(self.frequencies[len(self.frequencies) // 2])
-            f_idx = (
-                int(np.argmin(np.abs(self.frequencies - freq)))
-                if (freq is not None and self.frequencies is not None) else 0
-            )
-            data = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx]
-            freqs = (
-                np.array([float(self.frequencies[f_idx])])
-                if self.frequencies is not None else None
-            )
+            sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
+            freqs = self.frequencies
         return _SlicedPressureField(
-            data=data,
+            data=sliced,
             depths=np.array([float(self.depths[d_idx])]),
             ranges=np.array([float(self.ranges[r_idx])]),
             units=self.units,
@@ -474,38 +436,18 @@ class PressureField(_GridResult):
             metadata=dict(self.metadata),
         )
 
-    def at_frequency(self, frequency: float) -> "PressureField":
-        """For a broadband field, return the narrowband slice at the
-        frequency nearest ``frequency``."""
-        if not self.is_broadband:
-            raise ValueError(
-                "PressureField.at_frequency: only valid for broadband data"
-            )
-        if self.frequencies is None:
-            raise ValueError(
-                "PressureField.at_frequency: broadband data missing self.frequencies"
-            )
-        k = int(np.argmin(np.abs(self.frequencies - frequency)))
-        return PressureField(
-            data=self.data[..., k],
-            depths=self.depths,
-            ranges=self.ranges,
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=float(self.frequencies[k]),
-            metadata=dict(self.metadata),
-        )
-
     def to_tl(self) -> "PressureField":
         """Return a ``units='dB'`` view via ``-20·log10(|p|)``.
 
-        No-op when ``self.units == 'dB'``.
+        No-op when ``self.units == 'dB'``. Returns the same concrete
+        subtype as ``self`` (so a ``_SlicedPressureField.to_tl()`` stays a
+        ``_SlicedPressureField`` and the squeezed ``.tl`` accessor is
+        preserved).
         """
         if self.units == 'dB':
             return self
         p_abs = np.maximum(np.abs(self.data), PRESSURE_FLOOR)
-        return PressureField(
+        return type(self)(
             data=-20.0 * np.log10(p_abs),
             depths=self.depths,
             ranges=self.ranges,
@@ -522,8 +464,7 @@ class PressureField(_GridResult):
 
         ``self.data`` directly when ``units='dB'``; computed on the fly via
         ``-20·log10(|p|)`` when ``units='complex'``. Slice returns from
-        :meth:`get_at_depth` / :meth:`get_at_range` / :meth:`get_value` /
-        :meth:`get_max` collapse singleton axes — they're typed
+        :meth:`sel` / :meth:`max` collapse singleton axes — they're typed
         :class:`_SlicedPressureField` and override this property.
         """
         if self.units == 'dB':
@@ -666,13 +607,14 @@ class PressureField(_GridResult):
 
 
 class _SlicedPressureField(PressureField):
-    """Returned by :meth:`PressureField.get_at_depth` / ``get_at_range`` /
-    ``get_value`` / ``get_max``. Same as :class:`PressureField` except
-    ``.tl`` / ``.p`` apply :func:`numpy.squeeze` so chain calls give
-    plot-friendly shapes (``(N,)`` for line cuts, 0-D scalars for point
-    queries) without manual ``.squeeze()`` / ``.item()`` at the call site.
-    Internal — model wrappers always emit full :class:`PressureField`
-    instances; only slicing produces this subtype.
+    """Returned by :meth:`PressureField.at` / :meth:`PressureField.max`
+    (and the same methods on :class:`TransferFunction`). Same as
+    :class:`PressureField` except ``.tl`` / ``.p`` apply
+    :func:`numpy.squeeze` so chain calls give plot-friendly shapes
+    (``(N,)`` for line cuts, 0-D scalars for point queries) without
+    manual ``.squeeze()`` / ``.item()`` at the call site. Internal —
+    model wrappers always emit full :class:`PressureField` instances;
+    only slicing produces this subtype.
     """
 
     @property
@@ -684,15 +626,20 @@ class _SlicedPressureField(PressureField):
         return np.squeeze(PressureField.p.fget(self))
 
 
-class TransferFunction(PressureField):
+class TransferFunction(_GridResult):
     """Complex broadband transfer function ``H(d, r, f)``.
 
-    A multi-frequency :class:`PressureField` (always ``units='complex'``)
-    with a required ``phase_reference`` and time-domain helpers
-    (:meth:`synthesize_time_series`, :meth:`to_time_trace`, :meth:`tl_at`).
-    Inherits ``.tl`` / ``.p`` / slicing from :class:`PressureField`.
+    Sibling of :class:`PressureField`, not a subclass — distinct semantic
+    role: the system response used to drive time-domain synthesis. Carries
+    a required ``phase_reference`` and the synthesis helpers
+    (:meth:`synthesize_time_series`, :meth:`to_time_trace`, :meth:`to_tl`).
 
     ``data`` shape: ``(n_depths, n_ranges, n_frequencies)`` complex.
+
+    Label-based slicing via :meth:`at` (and reduction via :meth:`max`)
+    returns a :class:`_SlicedPressureField` — the slice is a pressure
+    field, no longer a transfer function, so
+    the synthesis machinery is unreachable from a slice.
 
     See ``DOCUMENTATION.md §5.13`` for ``phase_reference`` semantics.
     """
@@ -712,14 +659,9 @@ class TransferFunction(PressureField):
             raise ValueError(
                 "TransferFunction: requires a non-empty frequencies vector"
             )
-        units = kwargs.pop('units', 'complex')
-        if units != 'complex':
-            raise ValueError(
-                f"TransferFunction: units must be 'complex'; got {units!r}"
-            )
         super().__init__(
             data=data, depths=depths, ranges=ranges,
-            units='complex', frequencies=frequencies, **kwargs,
+            frequencies=frequencies, **kwargs,
         )
         if data.ndim != 3:
             raise ValueError(
@@ -748,6 +690,59 @@ class TransferFunction(PressureField):
         # see the same value they wrote (``ref.value`` round-trips).
         self.metadata.setdefault('phase_reference', ref.value)
 
+    @property
+    def tl(self) -> np.ndarray:
+        """TL in dB at ``data.shape`` — ``-20·log10(|H|)`` clamped to
+        :data:`PRESSURE_FLOOR`."""
+        H_abs = np.maximum(np.abs(self.data), PRESSURE_FLOOR)
+        return -20.0 * np.log10(H_abs)
+
+    @property
+    def p(self) -> np.ndarray:
+        """Complex transfer-function values, shape ``data.shape``."""
+        return self.data
+
+    @classmethod
+    def from_pressure_field(
+        cls,
+        pf: "PressureField",
+        *,
+        phase_reference: Union[PhaseReference, str],
+    ) -> "TransferFunction":
+        """Promote a 3-D complex :class:`PressureField` to a
+        :class:`TransferFunction` by attaching a ``phase_reference``.
+
+        ``pf`` must satisfy ``pf.units == 'complex'`` and
+        ``pf.data.ndim == 3`` (broadband H(d, r, f)). Axes / data /
+        frequencies / model identity / metadata round-trip; only the
+        type and the ``phase_reference`` field change.
+        """
+        if not isinstance(pf, PressureField):
+            raise TypeError(
+                f"TransferFunction.from_pressure_field: pf must be a "
+                f"PressureField; got {type(pf).__name__}"
+            )
+        if pf.units != 'complex':
+            raise ValueError(
+                f"TransferFunction.from_pressure_field: pf must have "
+                f"units='complex'; got units={pf.units!r}"
+            )
+        if pf.data.ndim != 3:
+            raise ValueError(
+                f"TransferFunction.from_pressure_field: pf.data must be "
+                f"3-D (n_d, n_r, n_f); got shape {pf.data.shape}"
+            )
+        return cls(
+            data=pf.data,
+            depths=pf.depths,
+            ranges=pf.ranges,
+            frequencies=pf.frequencies,
+            phase_reference=phase_reference,
+            model=pf.model, backend=pf.backend,
+            source_depths=pf.source_depths,
+            metadata=dict(pf.metadata),
+        )
+
     # Time-domain conversion ------------------------------------------------
     def to_time_trace(
         self,
@@ -769,61 +764,19 @@ class TransferFunction(PressureField):
             window=window, nfft=nfft, t_start=t_start,
         )
 
-    def to_tl(self, frequency: Optional[float] = None) -> "PressureField":
-        """Magnitude-in-dB view of this transfer function at one frequency.
-
-        Picks the frequency-axis sample whose value is closest to
-        ``frequency`` (or the centre frequency if ``None``) and returns a
-        :class:`PressureField` (``units='dB'``) of shape ``(n_depth, n_range)``
-        carrying ``-20 * log10(|H|)`` clamped to ``PRESSURE_FLOOR``.
+    def to_tl(self) -> "_SlicedPressureField":
+        """Return a ``units='dB'`` view of the full TF — magnitude in dB
+        at every (depth, range, frequency) bin via ``-20·log10(|H|)``
+        clamped to :data:`PRESSURE_FLOOR`. Chain with ``sel(...)`` to
+        narrow further (``tf.at(frequency=200).to_tl()`` for one freq,
+        ``tf.at(depth=z, range_m=r).to_tl()`` for TL spectrum at a point).
         """
-        if self.data.ndim < 3:
-            raise ValueError(
-                f"TransferFunction.to_tl: requires a 3-D (depth, range, freq) "
-                f"array; got shape {self.data.shape}"
-            )
-        from uacpy.core.constants import PRESSURE_FLOOR
-        freqs = np.asarray(self.frequencies, dtype=float)
-        target = float(frequency) if frequency is not None else float(np.median(freqs))
-        i_f = int(np.argmin(np.abs(freqs - target)))
-        H = self.data[..., i_f]
-        tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
-        return PressureField(
+        tl = -20.0 * np.log10(np.maximum(np.abs(self.data), PRESSURE_FLOOR))
+        return _SlicedPressureField(
             data=tl, depths=self.depths, ranges=self.ranges,
             units='dB',
-            model=getattr(self, 'model', None),
-            backend=getattr(self, 'backend', None),
-            source_depths=getattr(self, 'source_depths', None),
-            frequencies=float(freqs[i_f]),
-            metadata=dict(self.metadata),
-        )
-
-    def tl_at(
-        self,
-        depth: float,
-        range_m: float,
-    ) -> "PressureField":
-        """TL vs frequency at one ``(depth, range)`` cell.
-
-        Symmetrical with :meth:`to_tl` (which returns TL on the
-        ``(depth, range)`` grid at one frequency). Returns a 1×1×n_freq
-        :class:`PressureField` (``units='dB'``) — chain ``.tl`` for the
-        dB array along the frequency axis, ``.frequencies`` for the
-        frequency vector.
-        """
-        from uacpy.core.constants import PRESSURE_FLOOR
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        H = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, :]
-        tl = -20.0 * np.log10(np.maximum(np.abs(H), PRESSURE_FLOOR))
-        return _SlicedPressureField(
-            data=tl,
-            depths=np.array([float(self.depths[d_idx])]),
-            ranges=np.array([float(self.ranges[r_idx])]),
-            units='dB',
-            model=getattr(self, 'model', None),
-            backend=getattr(self, 'backend', None),
-            source_depths=getattr(self, 'source_depths', None),
+            model=self.model, backend=self.backend,
+            source_depths=self.source_depths,
             frequencies=self.frequencies,
             metadata=dict(self.metadata),
         )
@@ -844,49 +797,79 @@ class TransferFunction(PressureField):
             t_start=t_start, window=window, nfft=nfft,
         )
 
-    def get_at_range(self, range_m: float) -> "_SlicedTransferFunction":
-        r_idx = int(np.argmin(np.abs(self.ranges - range_m)))
-        return _SlicedTransferFunction(
-            data=self.data[:, r_idx:r_idx + 1, :],
-            depths=self.depths,
-            ranges=np.array([float(self.ranges[r_idx])]),
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
+    # Label-based selection. Spatial slicing degrades type — the slice
+    # is a complex pressure field, no longer a transfer function
+    # (synthesis machinery only operates on the full TF).
+
+    def at(
+        self,
+        *,
+        depth: Optional[float] = None,
+        range_m: Optional[float] = None,
+        frequency: Optional[float] = None,
+    ) -> "_SlicedPressureField":
+        d_idx = (int(np.argmin(np.abs(self.depths - depth)))
+                 if depth is not None else None)
+        r_idx = (int(np.argmin(np.abs(self.ranges - range_m)))
+                 if range_m is not None else None)
+        f_idx = (int(np.argmin(np.abs(self.frequencies - frequency)))
+                 if frequency is not None else None)
+        return self.at_idx(depth_idx=d_idx, range_idx=r_idx, frequency_idx=f_idx)
+
+    def at_idx(
+        self,
+        *,
+        depth_idx: Optional[int] = None,
+        range_idx: Optional[int] = None,
+        frequency_idx: Optional[int] = None,
+    ) -> "_SlicedPressureField":
+        """Integer-index counterpart to :meth:`at` (xarray-style ``isel``).
+        Negative indices wrap from the end. Slicing degrades type to
+        :class:`_SlicedPressureField` (units='complex')."""
+        sliced = self.data
+        new_depths = self.depths
+        new_ranges = self.ranges
+        new_freqs = self.frequencies
+        if depth_idx is not None:
+            d_idx = int(depth_idx) % len(self.depths)
+            sliced = sliced[d_idx:d_idx + 1, ...]
+            new_depths = np.array([float(self.depths[d_idx])])
+        if range_idx is not None:
+            r_idx = int(range_idx) % len(self.ranges)
+            sliced = sliced[:, r_idx:r_idx + 1, ...]
+            new_ranges = np.array([float(self.ranges[r_idx])])
+        if frequency_idx is not None:
+            f_idx = int(frequency_idx) % len(self.frequencies)
+            sliced = sliced[..., f_idx:f_idx + 1]
+            new_freqs = np.array([float(self.frequencies[f_idx])])
+        return _SlicedPressureField(
+            data=sliced,
+            depths=new_depths, ranges=new_ranges,
+            units='complex',
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
+            frequencies=new_freqs,
             metadata=dict(self.metadata),
         )
 
-    def get_at_depth(self, depth: float) -> "_SlicedTransferFunction":
-        d_idx = int(np.argmin(np.abs(self.depths - depth)))
-        return _SlicedTransferFunction(
-            data=self.data[d_idx:d_idx + 1, :, :],
+    def max(self) -> "_SlicedPressureField":
+        """Slice at the global argmax of ``|H|`` across **every** axis
+        — ``.tl`` / ``.p`` are 0-D scalars; the picked frequency lands
+        in ``.frequencies[0]`` (and the picked location in
+        ``.depths[0]`` / ``.ranges[0]``)."""
+        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
+        d_idx, r_idx, f_idx = idx[0], idx[1], idx[2]
+        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx:f_idx + 1]
+        return _SlicedPressureField(
+            data=sliced,
             depths=np.array([float(self.depths[d_idx])]),
-            ranges=self.ranges,
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
+            ranges=np.array([float(self.ranges[r_idx])]),
+            units='complex',
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
+            frequencies=np.array([float(self.frequencies[f_idx])]),
             metadata=dict(self.metadata),
         )
-
-
-class _SlicedTransferFunction(TransferFunction):
-    """Sibling of :class:`_SlicedPressureField` for :class:`TransferFunction`
-    slices. Same squeeze behaviour on ``.tl`` / ``.p``, plus preserves
-    :meth:`synthesize_time_series` / :meth:`tl_at` / :attr:`phase_reference`.
-    Returned by :meth:`TransferFunction.get_at_depth` / ``get_at_range``;
-    point-wise ``get_value`` / ``get_max`` collapse the frequency axis and
-    fall back to :class:`_SlicedPressureField`.
-    """
-
-    @property
-    def tl(self) -> np.ndarray:
-        return np.squeeze(PressureField.tl.fget(self))
-
-    @property
-    def p(self) -> np.ndarray:
-        return np.squeeze(PressureField.p.fget(self))
 
 
 class TimeSeriesField(_GridResult):
@@ -971,7 +954,7 @@ class TimeSeriesField(_GridResult):
         Returns a :class:`PressureField` with ``units='complex'`` and shape
         ``(n_d, n_r)``. The receiver grid is preserved verbatim — this
         method is the time-domain → narrowband-pressure analogue of
-        :meth:`PressureField.at_frequency`.
+        ``PressureField.at(frequency=f)``.
         """
         if window == 'hann':
             win = np.hanning(self.n_t)
@@ -1104,40 +1087,112 @@ class TimeTrace(Result):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class Arrivals(Result):
-    """Ray arrivals from Bellhop.
+def _arrival_kind(n_top: int, n_bot: int) -> str:
+    if n_top >= 1 and n_bot >= 1:
+        return 'both'
+    if n_bot >= 1:
+        return 'bottom'
+    if n_top >= 1:
+        return 'surface'
+    return 'direct'
 
-    Attributes
-    ----------
-    by_receiver : dict
-        Nested dict keyed by ``(isz, ird, irr)`` returning a list of arrival
-        records (each with ``amplitude``, ``phase``, ``delay``,
-        ``src_angle``, ``rcv_angle``, ``n_top_bounces``,
-        ``n_bot_bounces``).
-        The structure mirrors what Bellhop's ``.arr`` reader produces.
-    receiver_depths, receiver_ranges : ndarray
-        Receiver grid.
+
+def _bounce_in_bounds(value: int, spec) -> bool:
+    """Match ``value`` against an int (exact) or ``(lo, hi)`` tuple
+    (closed range, ``None`` = unbounded). Shared with :class:`Rays`."""
+    if spec is None:
+        return True
+    if isinstance(spec, int):
+        return value == spec
+    lo, hi = spec
+    if lo is not None and value < lo:
+        return False
+    if hi is not None and value > hi:
+        return False
+    return True
+
+
+class Arrivals(Result):
+    """Ray arrivals from Bellhop — a flat list of arrival events.
+
+    Each arrival is a dict with: ``delay``, ``amplitude``, ``phase``,
+    ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
+    ``kind`` ('direct' / 'surface' / 'bottom' / 'both'), plus the cell
+    of origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell
+    runs can be filtered back to one cell if needed.
+
+    Mirrors the :class:`Rays` API surface: filter / chain / table.
     """
     field_type = "arrivals"
 
     def __init__(
         self,
         *,
-        by_receiver: Any,
+        arrivals: Optional[List[Dict[str, Any]]] = None,
+        by_receiver: Any = None,
         receiver_depths: np.ndarray,
         receiver_ranges: np.ndarray,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.by_receiver = by_receiver
         self.receiver_depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
         self.receiver_ranges = np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
-        # Mirror into ``metadata`` for dict-style access.
-        self.metadata.setdefault('arrivals_by_receiver', self.by_receiver)
+        # ``by_receiver`` is the nested ``[src][depth][range] -> dict``
+        # form that Bellhop's IO produces and the broadband
+        # delay-and-sum path needs. Kept around as an opaque attribute
+        # so ``models.bellhop`` and downstream IO consumers can still
+        # walk it without duplicating the structure in metadata.
+        self.by_receiver = by_receiver
+        if arrivals is not None:
+            self.arrivals = list(arrivals)
+        else:
+            self.arrivals = self._flatten_by_receiver(by_receiver)
+        self.metadata.setdefault('arrivals', self.arrivals)
+        if by_receiver is not None:
+            self.metadata.setdefault('arrivals_by_receiver', by_receiver)
         self.metadata.setdefault('receiver_depths', self.receiver_depths)
         self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
 
-    # Plotting-helper accessors used by visualization.plots.plot_arrivals.
+    @staticmethod
+    def _flatten_by_receiver(by_receiver: Any) -> List[Dict[str, Any]]:
+        """Flatten Bellhop's ``arrivals_data[src][depth][range] -> dict``
+        nesting into a single per-arrival list. Each emitted record
+        carries its source/cell indices so callers can filter back."""
+        if by_receiver is None:
+            return []
+        out: List[Dict[str, Any]] = []
+        for s_idx, by_src in enumerate(by_receiver if isinstance(by_receiver, list) else []):
+            for d_idx, by_depth in enumerate(by_src if isinstance(by_src, list) else []):
+                for r_idx, cell in enumerate(by_depth if isinstance(by_depth, list) else []):
+                    if not isinstance(cell, dict):
+                        continue
+                    delays = np.asarray(cell.get('delays', []))
+                    if len(delays) == 0:
+                        continue
+                    amps = np.asarray(cell.get('amplitudes', np.zeros_like(delays)))
+                    phs = np.asarray(cell.get('phases', np.zeros_like(delays)))
+                    nt = np.asarray(cell.get('n_top_bounces', np.zeros(len(delays), int)))
+                    nb = np.asarray(cell.get('n_bot_bounces', np.zeros(len(delays), int)))
+                    sa = np.asarray(cell.get('src_angles', np.zeros_like(delays)))
+                    ra = np.asarray(cell.get('rcv_angles', np.zeros_like(delays)))
+                    for i in range(len(delays)):
+                        n_top, n_bot = int(nt[i]), int(nb[i])
+                        out.append({
+                            'delay': float(delays[i]),
+                            'amplitude': float(amps[i]),
+                            'phase': float(phs[i]),
+                            'n_top_bounces': n_top,
+                            'n_bot_bounces': n_bot,
+                            'src_angle': float(sa[i]),
+                            'rcv_angle': float(ra[i]),
+                            'kind': _arrival_kind(n_top, n_bot),
+                            'src_idx': s_idx,
+                            'depth_idx': d_idx,
+                            'range_idx': r_idx,
+                        })
+        return out
+
+    # Plot helpers — :func:`uacpy.visualization.plots.plot_arrivals` uses these.
     @property
     def depths(self) -> np.ndarray:
         return self.receiver_depths
@@ -1146,91 +1201,105 @@ class Arrivals(Result):
     def ranges(self) -> np.ndarray:
         return self.receiver_ranges
 
-    # Convenience accessor.
-    @property
-    def arrivals_data(self) -> Any:
-        """The per-receiver arrivals payload. Same as ``self.by_receiver``."""
-        return self.by_receiver
+    def __len__(self) -> int:
+        return len(self.arrivals)
+
+    def __iter__(self):
+        return iter(self.arrivals)
+
+    # Per-field bulk views ---------------------------------------------------
 
     @property
     def delays(self) -> np.ndarray:
-        """Travel times of every arrival at the (src=0, depth=0, range=0) cell."""
-        return np.asarray(self.at().get('delays', []), dtype=float)
+        """Travel times (s) of every arrival in the list."""
+        return np.asarray([a['delay'] for a in self.arrivals], dtype=float)
 
     @property
     def amplitudes(self) -> np.ndarray:
-        """Amplitudes of every arrival at the (src=0, depth=0, range=0) cell."""
-        return np.asarray(self.at().get('amplitudes', []), dtype=float)
+        """Amplitudes (linear) of every arrival in the list."""
+        return np.asarray([a['amplitude'] for a in self.arrivals], dtype=float)
 
     @property
     def phases(self) -> np.ndarray:
-        """Phases (rad) of every arrival at the (src=0, depth=0, range=0) cell."""
-        return np.asarray(self.at().get('phases', []), dtype=float)
+        """Phases (rad) of every arrival in the list."""
+        return np.asarray([a['phase'] for a in self.arrivals], dtype=float)
 
-    def at(self, range_idx: int = 0, depth_idx: int = 0,
-           src_idx: int = 0) -> Dict[str, np.ndarray]:
-        """Return the flat arrivals dict for one (source, depth, range) cell.
+    # Filter / chain / sort --------------------------------------------------
 
-        Bellhop's ``.arr`` payload is nested as
-        ``arrivals_data[src][depth][range] -> dict``; with a single-point
-        receiver the leading dimensions all have length 1. This walks the
-        nesting and returns the dict so users can access ``delays``,
-        ``amplitudes``, ``phases``, ``n_top_bounces``,
-        ``n_bot_bounces``, ``src_angles``, ``rcv_angles`` directly.
-        """
-        node = self.by_receiver
-        for idx in (src_idx, depth_idx, range_idx):
-            if isinstance(node, list):
-                if not node:
-                    return {}
-                idx = min(idx, len(node) - 1)
-                node = node[idx]
-            elif isinstance(node, dict):
-                break
-        while isinstance(node, list) and node:
-            node = node[0]
-        return node if isinstance(node, dict) else {}
+    def _spawn(self, arrivals: List[Dict[str, Any]]) -> 'Arrivals':
+        return Arrivals(
+            arrivals=arrivals,
+            receiver_depths=self.receiver_depths,
+            receiver_ranges=self.receiver_ranges,
+            model=self.model,
+            backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            metadata={k: v for k, v in self.metadata.items()
+                      if k != 'arrivals_by_receiver'},
+        )
 
-    def to_table(self, range_idx: int = 0, depth_idx: int = 0,
-                 src_idx: int = 0) -> List[Dict[str, float]]:
-        """Return a flat list of per-arrival records (one dict per arrival).
+    def filter(self, predicate) -> 'Arrivals':
+        """Return a new ``Arrivals`` keeping arrivals for which
+        ``predicate(arrival_dict)`` returns true."""
+        return self._spawn([a for a in self.arrivals if predicate(a)])
 
-        Each record has keys: ``delay``, ``amplitude``, ``phase``,
-        ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``,
-        ``rcv_angle``, ``kind`` ('direct' / 'surface' / 'bottom' / 'both').
-        """
-        d = self.at(range_idx=range_idx, depth_idx=depth_idx, src_idx=src_idx)
-        if not d:
-            return []
-        delays = np.asarray(d['delays'])
-        amps = np.asarray(d['amplitudes'])
-        phs = np.asarray(d.get('phases', np.zeros_like(delays)))
-        nt = np.asarray(d.get('n_top_bounces', np.zeros(len(delays), int)))
-        nb = np.asarray(d.get('n_bot_bounces', np.zeros(len(delays), int)))
-        sa = np.asarray(d.get('src_angles', np.zeros_like(delays)))
-        ra = np.asarray(d.get('rcv_angles', np.zeros_like(delays)))
-        out = []
-        for i in range(len(delays)):
-            ns, nbi = int(nt[i]), int(nb[i])
-            if ns >= 1 and nbi >= 1:
-                kind = 'both'
-            elif nbi >= 1:
-                kind = 'bottom'
-            elif ns >= 1:
-                kind = 'surface'
-            else:
-                kind = 'direct'
-            out.append({
-                'delay': float(delays[i]),
-                'amplitude': float(amps[i]),
-                'phase': float(phs[i]),
-                'n_top_bounces': ns,
-                'n_bot_bounces': nbi,
-                'src_angle': float(sa[i]),
-                'rcv_angle': float(ra[i]),
-                'kind': kind,
-            })
-        return out
+    def filter_by_bounces(
+        self,
+        kind: Optional[str] = None,
+        top: Optional[Union[int, Tuple[Optional[int], Optional[int]]]] = None,
+        bot: Optional[Union[int, Tuple[Optional[int], Optional[int]]]] = None,
+    ) -> 'Arrivals':
+        """Subset by multipath component — same semantics as
+        :meth:`Rays.filter_by_bounces`. ``kind`` ∈
+        ``{'direct', 'surface', 'bottom', 'both'}``; ``top`` / ``bot`` are
+        an int (exact) or ``(lo, hi)`` tuple (closed range, ``None`` =
+        unbounded)."""
+        valid = ('direct', 'surface', 'bottom', 'both')
+        if kind is not None and kind not in valid:
+            raise ValueError(
+                f"Arrivals.filter_by_bounces: kind={kind!r} not in {valid}"
+            )
+
+        def pred(a):
+            if kind is not None and a['kind'] != kind:
+                return False
+            return (_bounce_in_bounds(int(a['n_top_bounces']), top)
+                    and _bounce_in_bounds(int(a['n_bot_bounces']), bot))
+        return self.filter(pred)
+
+    def in_delay_window(
+        self,
+        t_min: Optional[float] = None,
+        t_max: Optional[float] = None,
+    ) -> 'Arrivals':
+        """Keep arrivals whose ``delay`` falls inside ``[t_min, t_max]``
+        (each bound optional)."""
+        def pred(a):
+            d = a['delay']
+            if t_min is not None and d < t_min:
+                return False
+            if t_max is not None and d > t_max:
+                return False
+            return True
+        return self.filter(pred)
+
+    def sorted_by_amplitude(self, descending: bool = True) -> 'Arrivals':
+        """Return a copy sorted by ``amplitude`` (descending by default)."""
+        return self._spawn(sorted(self.arrivals,
+                                   key=lambda a: a['amplitude'],
+                                   reverse=bool(descending)))
+
+    def top_n_by_amplitude(self, n: int) -> 'Arrivals':
+        """Keep the ``n`` loudest arrivals."""
+        return self._spawn(self.sorted_by_amplitude(descending=True)
+                           .arrivals[:int(n)])
+
+    def to_table(self) -> List[Dict[str, float]]:
+        """Return the flat list of arrival dicts. Equivalent to
+        ``list(arrivals)`` but kept as an explicit method for symmetry
+        with :meth:`Rays.to_table` style consumers."""
+        return list(self.arrivals)
 
 
 class Rays(Result):

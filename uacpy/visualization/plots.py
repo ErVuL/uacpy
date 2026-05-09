@@ -152,20 +152,18 @@ def _overlay_bathymetry(
 def _select_2d_slice(field, frequency: Optional[float] = None) -> np.ndarray:
     """Return a 2-D ``(n_depths, n_ranges)`` TL view (dB) of a gridded Result.
 
-    For 2-D narrowband ``PressureField`` we return ``.tl`` (auto-computes
-    dB from complex storage). For 3-D broadband data the frequency-axis
-    collapse is delegated to the typed Result API:
-
-    * :class:`TransferFunction` → ``to_tl(frequency=…)`` returns the
-      magnitude-in-dB slice.
-    * Broadband :class:`PressureField` → ``at_frequency(…).tl``.
+    Narrowband :class:`PressureField` returns ``.tl`` directly. Broadband
+    fields collapse the frequency axis via :meth:`sel` — picking
+    ``frequency`` if given, else the middle bin.
     """
     if isinstance(field, TransferFunction):
-        return field.to_tl(frequency=frequency).tl
+        f = frequency if frequency is not None \
+            else float(field.frequencies[len(field.frequencies) // 2])
+        return field.at(frequency=f).to_tl().tl
     if isinstance(field, PressureField) and field.is_broadband:
-        sliced = field.at_frequency(frequency if frequency is not None
-                                     else float(field.frequencies[len(field.frequencies) // 2]))
-        return sliced.tl
+        f = frequency if frequency is not None \
+            else float(field.frequencies[len(field.frequencies) // 2])
+        return field.at(frequency=f).tl
     if isinstance(field, PressureField):
         return field.tl
     data = field.data
@@ -729,9 +727,8 @@ def plot_arrivals(
     Each arrival is drawn as a vertical line + marker at ``(delay, amplitude)``.
     With ``color_by_bounces=True``, stems are coloured red/green/blue/black
     for direct / surface-only / bottom-only / both-boundary arrivals using the
-    same palette as ``plot_rays``. Accepts ``Arrivals`` results from Bellhop
-    whose payload sits at ``by_receiver`` or, when broadband, in nested
-    ``arrivals_data[i][j]`` dicts.
+    same palette as ``plot_rays``. Iterates the flat
+    :attr:`Arrivals.arrivals` list directly.
     """
     if not isinstance(field, Arrivals):
         raise ValueError("plot_arrivals requires arrivals-type field")
@@ -741,27 +738,7 @@ def plot_arrivals(
     else:
         fig = ax.get_figure()
 
-    payload = None
-    candidate = getattr(field, 'by_receiver', None)
-    if isinstance(candidate, dict) and 'delays' in candidate:
-        payload = candidate
-    if payload is None:
-        ad = getattr(field, 'arrivals_data', None)
-        if ad is not None:
-            node = ad
-            while isinstance(node, list) and node:
-                node = node[0]
-            if isinstance(node, dict) and 'delays' in node:
-                payload = node
-    if payload is None:
-        meta = getattr(field, 'metadata', {}) or {}
-        for key in ('arrivals_by_receiver', 'arrivals'):
-            cand = meta.get(key)
-            if isinstance(cand, dict) and 'delays' in cand:
-                payload = cand
-                break
-
-    if payload is None or len(payload.get('delays', [])) == 0:
+    if len(field) == 0:
         warnings.warn("No arrival data found", UserWarning, stacklevel=2)
         return fig, ax
 
@@ -773,30 +750,22 @@ def plot_arrivals(
             'both':    '#000000',
         }
 
-    delays = np.asarray(payload['delays'])
-    amplitudes = np.asarray(payload['amplitudes'])
-    n_top = np.asarray(payload.get('n_top_bounces',
-                                    np.zeros(len(delays), dtype=int)))
-    n_bot = np.asarray(payload.get('n_bot_bounces',
-                                    np.zeros(len(delays), dtype=int)))
-
     counts = {'direct': 0, 'surface': 0, 'bottom': 0, 'both': 0}
-    for tt, amp, ns, nb in zip(delays, amplitudes, n_top, n_bot):
+    for a in field.arrivals:
         if color_by_bounces:
-            kind = bounce_class_of(
-                {'n_top_bounces': ns, 'n_bot_bounces': nb}
-            )
+            kind = a['kind']
             color = bounce_colors[kind]
             counts[kind] += 1
         else:
             color = bounce_colors['both']
-        ax.vlines(tt, 0, amp, color=color, linewidth=1.5, alpha=0.9)
-        ax.plot(tt, amp, 'o', color=color, markersize=4)
+        ax.vlines(a['delay'], 0, a['amplitude'],
+                  color=color, linewidth=1.5, alpha=0.9)
+        ax.plot(a['delay'], a['amplitude'], 'o', color=color, markersize=4)
 
     ax.set_xlabel('Travel time (s)', fontsize=11)
     ax.set_ylabel('Amplitude', fontsize=11)
     if title is None:
-        title = f'Arrival structure ({len(delays)} arrivals)'
+        title = f'Arrival structure ({len(field)} arrivals)'
     ax.set_title(title, fontsize=12, fontweight='bold')
     ax.grid(True, alpha=0.3)
 

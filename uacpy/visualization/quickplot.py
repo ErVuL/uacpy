@@ -314,7 +314,7 @@ def quick_report(results: Dict[str, Field], env: Environment,
     depth = list(results.values())[0].depths[len(list(results.values())[0].depths) // 3]
     for model_name, field in results.items():
         ranges_km = field.ranges / 1000.0
-        tl_slice = field.get_at_depth(depth).tl
+        tl_slice = field.at(depth=depth).tl
         ax_row2.plot(ranges_km, tl_slice, label=model_name, linewidth=2)
     ax_row2.set_xlabel('Range (km)', fontsize=11)
     ax_row2.set_ylabel('TL (dB)', fontsize=11)

@@ -310,7 +310,7 @@ def main():
     fig, ax = plt.subplots(figsize=(8, 6))
 
     for name, result in tf_models.items():
-        tl_at_fc = result.to_tl(frequency=source.frequencies[0]).tl[:, 0]
+        tl_at_fc = result.at(frequency=source.frequencies[0]).to_tl().tl
         ax.plot(tl_at_fc, result.depths, label=name, linewidth=1.5)
 
     ax.set_xlabel('Transmission Loss (dB)')

@@ -98,11 +98,11 @@ class TestUnsupportedOperations:
 class TestFieldErrors:
     """Result classes refuse operations that don't apply to their shape."""
 
-    def test_rays_has_no_get_value(self):
+    def test_rays_has_no_sel(self):
         from uacpy.core.results import Rays
         r = Rays(rays=[], model='Bellhop')
         with pytest.raises(AttributeError):
-            r.get_value(range_m=1000, depth=50)
+            r.at(range_m=1000, depth=50)
 
     def test_rays_has_no_to_db(self):
         from uacpy.core.results import Rays

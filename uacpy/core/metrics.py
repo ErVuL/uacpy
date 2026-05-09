@@ -63,7 +63,7 @@ def _validate_tl_pair_and_window(
     if field_a.data.ndim != 2 or field_b.data.ndim != 2:
         raise ValueError(
             f"{fname}: broadband TL field (3-D data) is not supported; "
-            "extract a single frequency via .at_frequency(f) first."
+            "extract a single frequency via .at(frequency=f) first."
         )
 
     da = _to_db(field_a)

@@ -212,9 +212,9 @@ def scenario_a_tl_modes():
 
     # Range cut comparison at channel axis
     ax = axes[1, 1]
-    tl_coherent = result_coherent.get_at_depth(1000).tl
-    tl_incoherent = result_incoherent.get_at_depth(1000).tl
-    tl_semicoherent = result_semicoherent.get_at_depth(1000).tl
+    tl_coherent = result_coherent.at(depth=1000).tl
+    tl_incoherent = result_incoherent.at(depth=1000).tl
+    tl_semicoherent = result_semicoherent.at(depth=1000).tl
 
     ax.plot(result_coherent.ranges/1000, tl_coherent,
             'b-', linewidth=2.5, label='Coherent', alpha=0.8)
@@ -388,13 +388,7 @@ def scenario_c_eigenrays_arrivals():
 
     from uacpy.visualization.plots import plot_rays
 
-    arrivals_ok = False
-    if result_arr is not None:
-        node = getattr(result_arr, 'arrivals_data', None)
-        while isinstance(node, list) and node:
-            node = node[0]
-        if isinstance(node, dict) and len(node.get('delays', [])) > 0:
-            arrivals_ok = True
+    arrivals_ok = result_arr is not None and len(result_arr) > 0
 
     n_panels = 3 if arrivals_ok else 2
     fig = plt.figure(figsize=(14, 4 * n_panels + 1))
@@ -429,7 +423,7 @@ def scenario_c_eigenrays_arrivals():
     print(f"\n  Analysis complete:")
     print(f"    • Eigenrays found: {n_eigenrays}")
     if arrivals_ok:
-        rec = result_arr.to_table(range_idx=0, depth_idx=0, src_idx=0)
+        rec = result_arr.to_table()
         if rec:
             delays = [r['delay'] for r in rec]
             print(f"    • Arrivals detected: {len(rec)}")

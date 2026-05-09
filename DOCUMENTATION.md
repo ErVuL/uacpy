@@ -1245,17 +1245,23 @@ Hierarchy:
 ```
 Result                              identification + metadata
 ├── PressureField                   (n_d, n_r) or (n_d, n_r, n_f);
-│   │                               complex pressure (units='complex',
-│   │                               default) or real dB TL (units='dB'
-│   │                               for binaries that emit dB only).
-│   │                               .tl always works; .p only when complex.
-│   └── TransferFunction            (n_d, n_r, n_f) complex; subclass —
-│                                   adds phase_reference + time-domain
+│                                   complex pressure (units='complex',
+│                                   default) or real dB TL (units='dB'
+│                                   for binaries that emit dB only).
+│                                   .tl always works; .p only when complex.
+├── TransferFunction                (n_d, n_r, n_f) complex; sibling of
+│                                   PressureField — distinct semantic
+│                                   role (system response for synthesis).
+│                                   Carries phase_reference + time-domain
 │                                   helpers (synthesize_time_series,
-│                                   to_time_trace, tl_at, to_tl(frequency=))
+│                                   to_time_trace, to_tl()).
+│                                   Spatial slicing degrades to a
+│                                   _SlicedPressureField.
 ├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
 ├── TimeTrace                       (n_t,) real, p(t) at one (d, r)
-├── Arrivals                        per-(isd, ird, irr) arrival lists
+├── Arrivals                        flat list of arrival events
+│                                   (Rays-style: filter / top_n_by_amplitude /
+│                                   in_delay_window chain methods)
 ├── Rays                            list of ray paths
 ├── Modes                           Kraken normal modes (k, phi, z)
 ├── Covariance                      OASN spatial covariance C(f, i, j)
@@ -1328,27 +1334,39 @@ and receiver markers without re-passing them.
 
 ### Arrivals helpers
 
-Bellhop's `.arr` payload is nested as
-`arrivals_data[src][depth][range] -> dict`; with single-point receivers
-the leading dimensions all have length 1. Two flat accessors avoid
-walking the structure manually:
+`Arrivals` is a **flat list of arrival events** (Rays-style, not a
+gridded field). Each arrival is a dict with `delay`, `amplitude`,
+`phase`, `kind` (``'direct'`` / ``'surface'`` / ``'bottom'`` / ``'both'``),
+`n_top_bounces`, `n_bot_bounces`, `src_angle`, `rcv_angle`, plus the
+cell of origin (`src_idx`, `depth_idx`, `range_idx`).
 
 ```python
 result = bellhop.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
 
-# Flat dict for one (src, depth, range) cell:
-d = result.at()                          # default cell (all indices 0)
-d = result.at(src_idx=0, depth_idx=2, range_idx=5)
-delays = d['delays']
-amps = d['amplitudes']
-n_top = d['n_top_bounces']
+# Iterate / introspect the flat list:
+len(result)                       # total number of arrivals
+result.delays                     # ndarray of all travel times
+result.amplitudes                 # ndarray of all amplitudes
+result.phases                     # ndarray of all phases (rad)
 
-# Per-arrival list of dicts (already classified by bounce kind):
+# Per-arrival records:
 for arr in result.to_table():
-    print(arr['delay'], arr['amplitude'],
-          arr['kind'],          # 'direct' | 'surface' | 'bottom' | 'both'
+    print(arr['delay'], arr['amplitude'], arr['kind'],
           arr['src_angle'], arr['rcv_angle'],
-          arr['n_top_bounces'], arr['n_bot_bounces'])
+          arr['n_top_bounces'], arr['n_bot_bounces'],
+          arr['src_idx'], arr['depth_idx'], arr['range_idx'])
+
+# Filter / chain (mirrors the Rays API surface):
+direct  = result.filter_by_bounces(kind='direct')
+no_bot  = result.filter_by_bounces(bot=0)
+with_bot = result.filter_by_bounces(bot=(1, None))   # ≥1 bottom bounce
+window  = result.in_delay_window(0.05, 0.15)
+loudest = result.top_n_by_amplitude(8)
+custom  = result.filter(lambda a: a['delay'] < 0.1 and a['kind'] != 'both')
+
+# Bellhop's broadband path (delay-and-sum) walks the nested
+# ``result.by_receiver`` / ``result.metadata['arrivals_by_receiver']``
+# structure; user code rarely needs that.
 ```
 
 ### Trailing-axis convention
@@ -1410,15 +1428,21 @@ p    = result.p               # complex pressure (raises if units='dB')
 rngs = result.ranges          # m
 zs   = result.depths          # m
 
-# Chain accessors return *sliced* PressureField subtypes whose .tl/.p
-# auto-squeeze singleton axes — natural shape at the call site:
-field.get_at_depth(50.0).tl       # shape (n_r,) — ready for plt.plot
-field.get_at_range(2000.0).tl     # shape (n_d,)
-field.get_value(2000.0, 50.0).tl  # 0-D scalar — float()-able
-field.get_max().tl                # 0-D scalar at argmax(|data|)
-# (Indexing is by argmin distance; the returned slice's .ranges[0] /
-# .depths[0] carries the actual grid value picked.) Full grids stay
-# .data.shape — no surprise squeezes.
+# Chain accessors are unified under a single label-based ``.at(...)``
+# method. Pass any subset of ``depth=``, ``range_m=``, ``frequency=``;
+# each picks the nearest grid sample and collapses that axis. The
+# returned ``_SlicedPressureField`` keeps the underlying ``.data.shape``
+# but its ``.tl`` / ``.p`` auto-squeeze singleton axes — natural shape
+# at the call site:
+field.at(depth=50.0).tl                       # shape (n_r,) — plt-ready
+field.at(range_m=2000.0).tl                   # shape (n_d,)
+field.at(range_m=2000.0, depth=50.0).tl       # 0-D scalar — float()-able
+field.at(frequency=200.0).tl                  # 2-D narrowband (broadband only)
+field.max().tl                                # 0-D scalar at global argmax(|data|)
+# (Indexing is nearest-label via argmin; the returned slice's
+# ``.depths[0]`` / ``.ranges[0]`` / ``.frequencies[0]`` carries the
+# actual grid value picked.) Full grids stay ``.data.shape`` — no
+# surprise squeezes.
 
 # Rays — Bellhop run_type='R' / compute_rays returns a Rays Result.
 rays = bellhop.run(env, source, receiver, run_mode=RunMode.RAYS)
@@ -1452,20 +1476,25 @@ rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)
-assert isinstance(tf, TransferFunction)        # also isinstance(tf, PressureField)
+assert isinstance(tf, TransferFunction)
+assert not isinstance(tf, PressureField)   # sibling, not a subclass
 H     = tf.p                     # complex, shape (n_d, n_r, n_f) — same as .data
 freqs = tf.frequencies
 trace = tf.to_time_trace(depth=50.0, range_m=2000.0)   # → TimeTrace
 ts    = tf.synthesize_time_series(src_pulse, fs)       # → TimeSeriesField
-tl_f  = tf.tl_at(depth=50.0, range_m=2000.0).tl        # TL vs frequency, 1-D
-tl_2d = tf.to_tl(frequency=200.0).tl                    # TL grid at one freq
+tl_f  = tf.at(depth=50.0, range_m=2000.0).to_tl().tl    # TL vs frequency, 1-D
+tl_2d = tf.at(frequency=200.0).to_tl().tl               # TL grid at one freq
 
-# TransferFunction is a PressureField subclass — slicing along depth or
-# range preserves TF type (.synthesize_time_series stays available);
-# point queries collapse the frequency axis and return a plain sliced
-# PressureField.
-tf.get_at_depth(50.0)        # _SlicedTransferFunction (3-D, freq axis kept)
-tf.get_value(2000.0, 50.0)   # _SlicedPressureField   (point at picked freq)
+# Spatial slicing degrades to PressureField — the slice is a sub-field,
+# no longer a transfer function, so the synthesis machinery is only
+# reachable on the full TF object.
+tf.at(depth=50.0)        # _SlicedPressureField (3-D, freq axis kept)
+tf.at(range_m=2000.0)    # _SlicedPressureField (3-D, freq axis kept)
+
+# To go the other way — promote a 3-D complex PressureField (e.g. one
+# built by hand or assembled from outside-source data) into a TF —
+# attach a phase_reference via the classmethod:
+tf = TransferFunction.from_pressure_field(pf, phase_reference='travelling_wave')
 
 # Reflection coefficients — unified Bounce / OASR.
 rc = bounce.run(env, source, receiver, run_mode=RunMode.REFLECTION)
@@ -1665,7 +1694,7 @@ from uacpy.visualization import (
 )
 
 # Arrivals — coloured by bounce class (direct/surface/bottom/both),
-# walks any nesting of arrivals_data automatically:
+# iterates the flat ``Arrivals.arrivals`` list directly:
 plot_arrivals(arrivals_field)
 
 # Transfer function — 1-D spectrum overlay (optionally with phase):

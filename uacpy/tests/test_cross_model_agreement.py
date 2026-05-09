@@ -324,13 +324,13 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
         )
-        return kf.to_tl(frequency=50.0)
+        return kf.at(frequency=50.0).to_tl()
 
     def rams_bb(env_unused, src_, rcv_):
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=2.0)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.to_tl(frequency=50.0)
+        return hf.at(frequency=50.0).to_tl()
 
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
@@ -384,7 +384,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=2.0)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.to_tl(frequency=200.0)
+        return hf.at(frequency=200.0).to_tl()
 
     return Scenario(
         name='altimetry-broadband-200Hz-fc-slice',
