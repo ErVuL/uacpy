@@ -11,7 +11,7 @@ Provides:
 * ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII or binary)
 * ``.ssp`` — :func:`read_ssp_2d`, :func:`read_ssp_3d`
 * ``.flp`` — :func:`read_flp`, :func:`read_flp3d`
-* ``.rts`` — :func:`read_rts_file`, :func:`rts_to_tl` (SPARC time series, binary)
+* ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, binary)
 * ``.ts``  — :func:`read_ts` (generic time series, ASCII)
 """
 
@@ -41,6 +41,12 @@ def read_shd_file(filepath: Union[str, Path]) -> PressureField:
 
     freqs = np.asarray(shd['freqVec'], dtype=float)
     nfreq = len(freqs)
+    if nfreq == 0:
+        raise ValueError(
+            f"read_shd_file: {filepath} declares zero frequencies; the .shd "
+            f"file is malformed (every Acoustics-Toolbox writer emits at "
+            f"least one frequency record)."
+        )
     if nfreq > 1:
         raise ValueError(
             f"read_shd_file: {filepath} contains {nfreq} frequencies; "
@@ -59,7 +65,7 @@ def read_shd_file(filepath: Union[str, Path]) -> PressureField:
         depths=pos['r']['z'],
         model='', backend='',
         source_depths=pos['s']['z'],
-        frequencies=np.atleast_1d(freqs) if nfreq else None,
+        frequencies=freqs,
         metadata={
             'title': shd['title'],
             'plot_type': shd['PlotType'],
@@ -1089,9 +1095,9 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     Notes
     -----
     SPARC outputs time-domain pressure fields which must be FFT'd
-    to extract frequency-domain transmission loss. The RTS file does
-    NOT store the analysis frequency; callers must pass it explicitly
-    to :func:`rts_to_tl`.
+    to extract a frequency-domain pressure. The RTS file does NOT
+    store the analysis frequency; callers must pass it explicitly to
+    :func:`rts_to_pressure`.
 
     File format is Fortran ASCII (FORMATTED), written by SPARC's output
     routine (``Scooter/sparc.f90``):
@@ -1165,16 +1171,21 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
-def rts_to_tl(rts_data: Dict[str, Any], freq: float, method: str = "fft") -> Tuple[np.ndarray, np.ndarray]:
+def rts_to_pressure(
+    rts_data: Dict[str, Any], freq: float, method: str = "fft",
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Convert SPARC time-series data to transmission loss at one frequency.
+    Project SPARC time-series data onto complex pressure at one frequency.
 
     ``method='fft'`` extracts the spectral bin nearest ``freq`` from a
     Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
-    single-bin DFT. Both return ``(tl_db, ranges)``.
+    single-bin DFT. Both return ``(p_at_freq, ranges)`` where
+    ``p_at_freq`` is the model-native, source-normalised complex pressure
+    (suitable for ``PressureField(units='complex',
+    phase_reference='travelling_wave')``).
 
     Used by :class:`uacpy.models.SPARC` to project the native
-    time-domain pressure onto a TL field at the source frequency.
+    time-domain pressure onto a steady-state field at the source frequency.
     """
     p = rts_data["p"]
     dt = rts_data["dt"]
@@ -1203,10 +1214,12 @@ def rts_to_tl(rts_data: Dict[str, Any], freq: float, method: str = "fft") -> Tup
             p_at_freq[ir] = s0 - s1 * np.exp(-1j * omega * dt)
         p_at_freq = 2.0 * p_at_freq / nt
     else:
-        raise ValueError(f"Unknown method: {method}")
+        raise ValueError(
+            f"rts_to_pressure: unknown method {method!r}; "
+            f"use 'fft' or 'goertzel'."
+        )
 
-    tl = -20 * np.log10(np.abs(p_at_freq) + 1e-37)
-    return tl, ranges
+    return p_at_freq, ranges
 
 
 def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:

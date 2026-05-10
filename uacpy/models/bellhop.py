@@ -99,8 +99,12 @@ def delayandsum(
     """
     n_arr = rcv_arrivals['n_arrivals']
     if n_arr == 0:
-        nrts = int(0.1 * sample_rate)
-        return np.zeros(nrts), np.arange(nrts) / sample_rate
+        if time_window is not None:
+            nrts = int(np.ceil(time_window * sample_rate))
+        else:
+            nrts = int(0.1 * sample_rate)
+        t0 = 0.0 if t_start is None else float(t_start)
+        return np.zeros(nrts), t0 + np.arange(nrts) / sample_rate
 
     amps = rcv_arrivals['amplitudes']
     phases_deg = rcv_arrivals['phases']
@@ -426,6 +430,8 @@ class Bellhop(PropagationModel):
         # RD-SSP gated on ssp.interp='quad' — non-quad warned in run().
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = True
+        self._supports_layered_bottom = False
+        self._supports_range_dependent_layered_bottom = False
         self._supports_elastic_media = True
         self._supports_multi_source_depth = True
 
@@ -442,6 +448,7 @@ class Bellhop(PropagationModel):
         self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
+        self._validate_volume_attenuation_params()
         self.bty_interp_type = bty_interp_type
         self.source_beam_pattern_file = (
             Path(source_beam_pattern_file)

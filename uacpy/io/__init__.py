@@ -29,7 +29,7 @@ from uacpy.io.oalib_reader import (
     read_arr_file, read_ray_file,
     read_ssp_2d, read_ssp_3d,
     read_flp, read_flp3d,
-    read_rts_file, rts_to_tl, read_ts,
+    read_rts_file, rts_to_pressure, read_ts,
 )
 from uacpy.io.oalib_writer import (
     write_ssp,
@@ -99,7 +99,7 @@ __all__ = [
     "grn_to_field",
     "grn_to_transfer_function",
     "sparc_snapshot_to_field",
-    "read_rts_file", "rts_to_tl",
+    "read_rts_file", "rts_to_pressure",
     "read_ts",
     # Utilities
     "equally_spaced",

@@ -1063,7 +1063,7 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
-        return PressureField(
+        field = PressureField(
             units="dB",
             data=tl_out,
             depths=rcv_d,
@@ -1076,6 +1076,15 @@ class RAM(PropagationModel):
                 c0=self._resolve_c0(env),
             ),
         )
+        self._attach_output_paths(
+            field, raw['work_dir'], '',
+            primary_files=(
+                ('tl_grid_file', 'tl.grid'),
+                ('pcomplex_file', 'pcomplex.bin'),
+                ('in_file', raw['in_name']),
+            ),
+        )
+        return field
 
     def _run_collins_one_freq(
         self,
@@ -1327,6 +1336,8 @@ class RAM(PropagationModel):
                 'ranges': ranges,
                 'dr': dr, 'dz': dz, 'zmax': zmax,
                 'frequency': fc, 'source_depth': zs,
+                'work_dir': fm.work_dir,
+                'in_name': in_name,
             }
         finally:
             if fm.cleanup:
@@ -1481,7 +1492,7 @@ class RAM(PropagationModel):
             )
             H = np.conj(H) * carrier
 
-        return TransferFunction(
+        field = TransferFunction(
             data=H,
             depths=rcv_d,
             ranges=rcv_r,
@@ -1497,6 +1508,15 @@ class RAM(PropagationModel):
                 cmin=c0,
             ),
         )
+        self._attach_output_paths(
+            field, raw['work_dir'], '',
+            primary_files=(
+                ('tl_grid_file', 'tl.grid'),
+                ('pcomplex_file', 'pcomplex.bin'),
+                ('in_file', raw['in_name']),
+            ),
+        )
+        return field
 
     def _fallback_layered_from_bottom(self, env: Environment) -> 'LayeredBottom':
         """Synthetic single-layer LayeredBottom for the Collins backends.

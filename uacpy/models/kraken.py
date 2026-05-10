@@ -900,6 +900,7 @@ class KrakenField(_KrakenBase):
             RunMode.BROADBAND,
             RunMode.TIME_SERIES,
         ]
+        self._supports_altimetry = False
         self._supports_range_dependent_bathymetry = True
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = False

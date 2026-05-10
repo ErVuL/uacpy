@@ -936,8 +936,8 @@ class OASR(PropagationModel):
             self._attach_output_paths(
                 field, fm.work_dir, base_name,
                 primary_files=(
-                    ('plt_file', '.plt'),
-                    ('plp_file', '.plp'),
+                    ('trc_file', '.trc'),
+                    ('rco_file', '.rco'),
                 ),
             )
 

@@ -199,8 +199,8 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
 
         bty_data = []
         for i in range(n_pts):
-            range_km = float(fid.readline().strip())
-            depth = float(fid.readline().strip())
+            parts = fid.readline().split()
+            range_km, depth = float(parts[0]), float(parts[1])
             bty_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):
@@ -296,8 +296,8 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
 
         ati_data = []
         for i in range(n_pts):
-            range_km = float(fid.readline().strip())
-            depth = float(fid.readline().strip())
+            parts = fid.readline().split()
+            range_km, depth = float(parts[0]), float(parts[1])
             ati_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):

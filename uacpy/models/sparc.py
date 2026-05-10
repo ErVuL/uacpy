@@ -26,7 +26,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode
-from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
+from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
 from uacpy.io.oalib_writer import (
     write_bio_layers, write_fg_params, write_layer_sections,
     write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
@@ -259,6 +259,11 @@ class SPARC(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        if c_low is not None and c_high is not None and c_low >= c_high:
+            raise ConfigurationError(
+                f"SPARC spectral phase-velocity band requires "
+                f"c_low < c_high; got c_low={c_low} m/s, c_high={c_high} m/s."
+            )
         self.n_mesh = n_mesh
         self.roughness = roughness
         if output_mode not in ('R', 'D', 'S'):
@@ -439,14 +444,16 @@ class SPARC(PropagationModel):
                         self._log("simulation complete (time-series mode)")
                         return result
 
-                    tl, ranges_out = rts_to_tl(rts_data, freq, method='fft')
-                    tl_field = tl.reshape(1, -1)
+                    p_at_freq, ranges_out = rts_to_pressure(
+                        rts_data, freq, method='fft',
+                    )
+                    p_field = p_at_freq.reshape(1, -1)
 
                 else:
                     # Multiple depths - run SPARC for each depth
                     self._log(f"Computing for {len(receiver.depths)} depths (SPARC horizontal array mode)...")
 
-                    tl_field = []
+                    p_list = []
                     ranges_out = receiver.ranges
                     pressure_all = [] if run_mode == RunMode.TIME_SERIES else None
                     time_grid = None  # captured from first run; SPARC's grid is depth-independent
@@ -484,8 +491,10 @@ class SPARC(PropagationModel):
                         if run_mode == RunMode.TIME_SERIES:
                             pressure_all.append(rts_data['p'])  # (nt, nr)
                         else:
-                            tl_single, ranges_out = rts_to_tl(rts_data, freq, method='fft')
-                            tl_field.append(tl_single)
+                            p_single, ranges_out = rts_to_pressure(
+                                rts_data, freq, method='fft',
+                            )
+                            p_list.append(p_single)
 
                     if run_mode == RunMode.TIME_SERIES:
                         # Each pressure_all[i] is (nt, nr); stack into
@@ -515,18 +524,18 @@ class SPARC(PropagationModel):
                         self._log("simulation complete (time-series mode)")
                         return result
 
-                    # Stack all depths into 2D array
-                    tl_field = np.vstack(tl_field)  # shape: (n_depths, n_ranges)
+                    p_field = np.vstack(p_list)  # shape: (n_depths, n_ranges)
 
                 result = PressureField(
-                    units="dB",
-                    data=tl_field,
+                    units="complex",
+                    data=p_field,
                     ranges=ranges_out,
                     depths=receiver.depths,
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
                         frequencies=freq,
+                        phase_reference='travelling_wave',
                         conversion_method='fft',
                         output_mode='R',
                         n_depth_runs=len(receiver.depths),
@@ -558,12 +567,11 @@ class SPARC(PropagationModel):
                     rts_data = read_rts_file(rts_file)
                     # In vertical mode, 'ranges' in RTS file actually contains depths
                     depths_out = rts_data['ranges']  # These are actually depths
-                    tl, _ = rts_to_tl(rts_data, freq, method='fft')
-                    tl_field = tl.reshape(-1, 1)  # shape: (n_depths, 1)
+                    p_at_freq, _ = rts_to_pressure(rts_data, freq, method='fft')
+                    p_field = p_at_freq.reshape(-1, 1)  # shape: (n_depths, 1)
 
                 else:
-                    # Multiple ranges - run SPARC for each range
-                    tl_field = []
+                    p_list = []
                     depths_out = receiver.depths
 
                     for idx, range in enumerate(receiver.ranges):
@@ -588,21 +596,21 @@ class SPARC(PropagationModel):
                             raise exc
 
                         rts_data = read_rts_file(rts_file)
-                        tl_single, _ = rts_to_tl(rts_data, freq, method='fft')
-                        tl_field.append(tl_single)
+                        p_single, _ = rts_to_pressure(rts_data, freq, method='fft')
+                        p_list.append(p_single)
 
-                    # Stack all ranges into 2D array
-                    tl_field = np.column_stack(tl_field)  # shape: (n_depths, n_ranges)
+                    p_field = np.column_stack(p_list)  # shape: (n_depths, n_ranges)
 
                 result = PressureField(
-                    units="dB",
-                    data=tl_field,
+                    units="complex",
+                    data=p_field,
                     ranges=receiver.ranges,
                     depths=depths_out,
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
                         frequencies=freq,
+                        phase_reference='travelling_wave',
                         conversion_method='fft',
                         output_mode='D',
                         n_range_runs=len(receiver.ranges),

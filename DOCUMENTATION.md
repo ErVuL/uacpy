@@ -870,10 +870,10 @@ cleaned up, no signal needed.
 | SPARC | `grn_file` / `rts_file` (output-mode dependent), `prt_file` |
 | OAST | `plt_file`, `prt_file` |
 | OASN | `xsm_file` (Covariance) / `rpo_file` (Replicas), `prt_file` |
-| OASR | `plt_file`, `plp_file`, `prt_file` |
+| OASR | `trc_file`, `rco_file`, `prt_file` |
 | OASP | `trf_file`, `prt_file` |
 | RAM (mpiramS) | `psif_file`, `prt_file` |
-| RAM (Collins) | (no persistent paths — Collins binaries write to per-call tempdirs) |
+| RAM (Collins) | `tl_grid_file`, `pcomplex_file`, `in_file` (per-call work-dir; broadband attaches the last frequency's paths) |
 | Bounce | `brc_file`, `irc_file`, `prt_file` |
 
 Read with `.get()` so absence is graceful:
@@ -891,13 +891,15 @@ result.metadata['shd_file']                   # → './out/bellhop_run.shd'
 of `str`). Two values today:
 
 - **`'travelling_wave'`** — Bellhop / Scooter / OASP / KrakenField /
-  RAM (all backends). `H(f)` carries the engineering propagator
-  `exp(-i 2πf r/c)`; a direct IFFT aligns arrivals at `t = r/c`. The
-  wrappers normalise across solvers (negate KrakenField field.exe to
-  match Scooter polarity; bake the carrier into RAM mpiramS / rams0.5
-  / ramsurf1.5 outputs which each store a different raw quantity).
-- **`'time_domain_native'`** — SPARC. Result data is real `p(t)` direct
-  from the solver; no phase reconstruction needed.
+  RAM (all backends) / SPARC steady-state modes (`output_mode='R'/'D'/'S'`,
+  recovered via time-FFT + Hankel transform of the native pressure).
+  `H(f)` carries the engineering propagator `exp(-i 2πf r/c)`; a direct
+  IFFT aligns arrivals at `t = r/c`. The wrappers normalise across
+  solvers (negate KrakenField field.exe to match Scooter polarity; bake
+  the carrier into RAM mpiramS / rams0.5 / ramsurf1.5 outputs which
+  each store a different raw quantity).
+- **`'time_domain_native'`** — SPARC `RunMode.TIME_SERIES`. Result data
+  is real `p(t)` direct from the solver; no phase reconstruction needed.
 
 `TransferFunction.synthesize_time_series(...)` and `.to_time_trace(...)`
 honour both transparently. Cross-model agreement is verified in

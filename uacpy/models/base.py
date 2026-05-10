@@ -1192,7 +1192,11 @@ class PropagationModel(ABC):
         if not prt.exists():
             return
         try:
-            tail = prt.read_text()[-n_chars:]
+            size = prt.stat().st_size
+            with prt.open('rb') as fh:
+                if size > n_chars:
+                    fh.seek(size - n_chars)
+                tail = fh.read().decode('utf-8', errors='replace')
         except OSError:
             return
         exc.args = (
