@@ -78,6 +78,11 @@ class Receiver:
                 f"receiver depths must be non-negative (down from surface), got {self.depths.tolist()}"
             )
 
+        if np.any(self.ranges < 0):
+            raise ValueError(
+                f"receiver ranges must be non-negative (outward from source), got {self.ranges.tolist()}"
+            )
+
         if receiver_type == 'line':
             if len(self.depths) != len(self.ranges):
                 if len(self.ranges) == 1:

@@ -71,6 +71,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core.constants import PRESSURE_FLOOR, DEFAULT_SOUND_SPEED
+from uacpy.core.exceptions import ConfigurationError
 
 
 def _complex_to_db(data: np.ndarray) -> np.ndarray:
@@ -266,12 +267,12 @@ class _GridResult(Result):
         depths = np.atleast_1d(np.asarray(depths, dtype=float))
         ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         if data.ndim < 2:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{type(self).__name__}.data: must be at least 2-D; "
                 f"got shape {data.shape}"
             )
         if data.shape[:2] != (len(depths), len(ranges)):
-            raise ValueError(
+            raise ConfigurationError(
                 f"{type(self).__name__}.data: first two axes {data.shape[:2]} "
                 f"must equal (n_depths, n_ranges) = ({len(depths)}, {len(ranges)})"
             )
@@ -340,7 +341,7 @@ class PressureField(_GridResult):
         **kwargs,
     ):
         if units not in ('complex', 'dB'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"PressureField.units: must be 'complex' or 'dB', got {units!r}"
             )
         self.units = units
@@ -882,11 +883,16 @@ class TimeSeriesField(_GridResult):
 
     @property
     def dt(self) -> float:
-        return float(self.time[1] - self.time[0]) if len(self.time) >= 2 else 0.0
+        if len(self.time) >= 2:
+            return float(self.time[1] - self.time[0])
+        return float(self.metadata.get('dt', 0.0))
 
     @property
     def fs(self) -> float:
-        return 1.0 / self.dt if self.dt > 0 else 0.0
+        dt = self.dt
+        if dt > 0:
+            return 1.0 / dt
+        return float(self.metadata.get('fs', 0.0))
 
     def get_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return ``(freqs, X)`` from a real FFT along the time axis.
@@ -1068,11 +1074,16 @@ class TimeTrace(Result):
 
     @property
     def dt(self) -> float:
-        return float(self.time[1] - self.time[0]) if len(self.time) >= 2 else 0.0
+        if len(self.time) >= 2:
+            return float(self.time[1] - self.time[0])
+        return float(self.metadata.get('dt', 0.0))
 
     @property
     def fs(self) -> float:
-        return 1.0 / self.dt if self.dt > 0 else 0.0
+        dt = self.dt
+        if dt > 0:
+            return 1.0 / dt
+        return float(self.metadata.get('fs', 0.0))
 
     def spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return ``(freqs, X)`` from a real FFT of ``self.data``."""

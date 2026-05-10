@@ -175,22 +175,23 @@ def absorption(
     P2 = 1.0 - 1.37e-4 * depth + 6.2e-9 * depth * depth
     f2 = 8.17 * 10 ** (8 - 1990 / (temperature + 273)) / (1 + 0.0018 * (salinity - 35))
 
-    # Pure water contribution
+    # Pure water contribution. The two polynomial branches differ at the
+    # 20°C boundary; ``np.where`` selects element-wise so array inputs
+    # work as well as scalars.
     P3 = 1.0 - 3.83e-5 * depth + 4.9e-10 * depth * depth
-    if temperature < 20:
-        A3 = (
-            4.937e-4
-            - 2.59e-5 * temperature
-            + 9.11e-7 * temperature**2
-            - 1.5e-8 * temperature**3
-        )
-    else:
-        A3 = (
-            3.964e-4
-            - 1.146e-5 * temperature
-            + 1.45e-7 * temperature**2
-            - 6.5e-10 * temperature**3
-        )
+    A3_cold = (
+        4.937e-4
+        - 2.59e-5 * temperature
+        + 9.11e-7 * temperature**2
+        - 1.5e-8 * temperature**3
+    )
+    A3_warm = (
+        3.964e-4
+        - 1.146e-5 * temperature
+        + 1.45e-7 * temperature**2
+        - 6.5e-10 * temperature**3
+    )
+    A3 = np.where(np.asarray(temperature) < 20, A3_cold, A3_warm)
 
     # Total absorption coefficient in dB/km
     a = (

@@ -157,14 +157,18 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
         elif Nx == 2:
             x = values[:2] if len(values) >= 2 else values
         elif Nx > 2:
-            if len(values) > 1:
-                # Generate linearly spaced vector
+            # AT convention: an explicit list of length Nx (with the
+            # trailing '/') is allowed and takes precedence over the
+            # 2-value linspace shorthand. Only fall back to linspace
+            # when fewer than Nx values are present.
+            if len(values) >= Nx:
+                x = values[:Nx]
+            elif len(values) > 1:
+                # 2-value shorthand: linearly spaced vector
                 x = np.linspace(values[0], values[1], Nx)
             elif len(values) == 1:
-                # Replicate single value
                 x = np.full(Nx, values[0])
             else:
-                # No values provided, return zeros
                 x = np.zeros(Nx)
         else:
             x = np.array([])

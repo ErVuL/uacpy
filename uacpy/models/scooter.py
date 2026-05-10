@@ -8,7 +8,6 @@ TL field via the in-tree Python Hankel transform in
 and broadband time-series output.
 """
 
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -176,6 +175,11 @@ class Scooter(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        if c_low is not None and c_high is not None and c_low >= c_high:
+            raise ConfigurationError(
+                f"Scooter spectral phase-velocity band requires "
+                f"c_low < c_high; got c_low={c_low} m/s, c_high={c_high} m/s."
+            )
         self.n_mesh = n_mesh
         self.roughness = roughness
         self.rmax_multiplier = rmax_multiplier
@@ -357,15 +361,6 @@ class Scooter(PropagationModel):
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
-
-            if grn_data['nsd'] > 1:
-                warnings.warn(
-                    f"Scooter: multi-source-depth GRN "
-                    f"({grn_data['nsd']} sources); in-tree Hankel "
-                    "transform returns the field for the first "
-                    "source depth only.",
-                    UserWarning, stacklevel=2,
-                )
 
             transform_kwargs = dict(
                 source_type=self.source_type,
