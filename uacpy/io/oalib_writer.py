@@ -277,8 +277,12 @@ def write_phase_speed_and_rmax(
     print width (Scooter/SPARC use ``"{:.6f}"`` to preserve sub-km
     precision; Kraken/KrakenField use the ``"{:.1f}"`` default).
     """
-    if brc_overrides is not None:
-        _c_low, _c_high = brc_overrides
+    if c_low is not None and c_high is not None:
+        _c_low, _c_high = c_low, c_high
+    elif brc_overrides is not None:
+        brc_low, brc_high = brc_overrides
+        _c_low = c_low if c_low is not None else brc_low
+        _c_high = c_high if c_high is not None else brc_high
     else:
         ssp_pairs = env.ssp.to_pairs()
         c_min = float(ssp_pairs[:, 1].min())

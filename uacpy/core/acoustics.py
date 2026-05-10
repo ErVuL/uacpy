@@ -335,11 +335,14 @@ def reflection_coeff(
     if c is None:
         c = soundspeed()
 
-    # Brekhovskikh & Lysanov formulation
+    # Brekhovskikh & Lysanov formulation. ``scimath.sqrt`` returns the
+    # complex principal value beyond critical incidence (where
+    # ``n**2 - sin**2`` goes negative); a real ``np.sqrt`` would yield NaN
+    # there instead of the physical totally-reflecting branch (``|V|=1``).
     n = float(c) / c1 * (1 + 1j * alpha)
     m = float(rho1) / rho
     t1 = m * np.cos(angle)
-    t2 = np.sqrt(n**2 - np.sin(angle) ** 2)
+    t2 = np.lib.scimath.sqrt(n**2 - np.sin(angle) ** 2)
     V = (t1 - t2) / (t1 + t2)
 
     return V.real if np.all(V.imag == 0) else V

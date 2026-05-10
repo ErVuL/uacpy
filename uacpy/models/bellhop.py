@@ -611,7 +611,14 @@ class Bellhop(PropagationModel):
                     f"collapse policy and run with fluid-approximated physics).",
                     UserWarning, stacklevel=2,
                 )
-                return self.run_with_bounce(env, source, receiver, **kwargs)
+                return self.run_with_bounce(
+                    env, source, receiver,
+                    run_mode=run_mode,
+                    frequencies=frequencies,
+                    source_waveform=source_waveform,
+                    sample_rate=sample_rate,
+                    **kwargs,
+                )
             # auto_bounce=False: fall through. ``_project_environment``
             # below will collapse the bottom via the user's
             # ``collapse={...}`` policy (default ``layered='halfspace'``,
@@ -816,6 +823,10 @@ class Bellhop(PropagationModel):
         c_low: float = DEFAULT_C_MIN,
         c_high: float = DEFAULT_C_MAX,
         rmax: float = 10000.0,
+        run_mode: Optional[RunMode] = None,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         **kwargs
     ) -> Result:
         """
@@ -886,7 +897,14 @@ class Bellhop(PropagationModel):
             )
 
             self._log("Running Bellhop with BOUNCE reflection coefficients...", level='info')
-            result = self.run(env_bounce, source, receiver, **kwargs)
+            result = self.run(
+                env_bounce, source, receiver,
+                run_mode=run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                **kwargs,
+            )
 
             # Strip the about-to-be-invalid file paths (work dir is wiped
             # in the finally block below) and attach the in-memory bounce

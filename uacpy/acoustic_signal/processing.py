@@ -406,12 +406,14 @@ def fourier_synthesis(
     Nfreq = len(freq_vec)
     original_shape = pressure_freq.shape
 
-    # Reshape to (Nfreq, -1) for processing
+    # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
+    # multiplications below do not mutate the caller's input through the
+    # reshape view.
     if pressure_freq.ndim == 1:
-        pressure_work = pressure_freq.reshape(-1, 1)
+        pressure_work = pressure_freq.reshape(-1, 1).copy()
     else:
         n_receivers = np.prod(original_shape[1:])
-        pressure_work = pressure_freq.reshape(Nfreq, n_receivers)
+        pressure_work = pressure_freq.reshape(Nfreq, n_receivers).copy()
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *

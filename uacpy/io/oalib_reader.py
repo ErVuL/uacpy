@@ -512,9 +512,9 @@ def read_arr_file(filepath: Union[str, Path]):
                                     "n_arrivals": narr,
                                 }
 
-                                rd_list.append(rcv_arrivals)
-                            sd_list.append(rd_list)
-                        arrivals_by_receiver.append(sd_list)
+                            rd_list.append(rcv_arrivals)
+                        sd_list.append(rd_list)
+                    arrivals_by_receiver.append(sd_list)
         else:
             raise NotImplementedError("3D arrivals format not yet implemented")
 
