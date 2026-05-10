@@ -50,6 +50,7 @@ test = [
     "pytest-xdist>=3.0,<4.0",
 ]
 dev = [
+    "uacpy[test]",
     "pytest-cov",
     "black",
     "flake8",
