@@ -31,7 +31,6 @@ from uacpy.core.constants import (
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
-    UnsupportedFeatureError,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file

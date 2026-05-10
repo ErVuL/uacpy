@@ -16,7 +16,6 @@ import numpy as np
 
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
-    UnsupportedFeatureError,
 )
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment

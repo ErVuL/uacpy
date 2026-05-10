@@ -500,11 +500,11 @@ def read_arr_file(filepath: Union[str, Path]):
                                     "delays": np.array(delays_r),
                                     "delay_imag": np.array(delays_i),
                                     "src_angles": np.array(src_angs),
-                                        "rcv_angles": np.array(rcv_angs),
-                                        "n_top_bounces": np.array(n_tops, dtype='int32'),
-                                        "n_bot_bounces": np.array(n_bots, dtype='int32'),
-                                        "n_arrivals": narr,
-                                    }
+                                    "rcv_angles": np.array(rcv_angs),
+                                    "n_top_bounces": np.array(n_tops, dtype='int32'),
+                                    "n_bot_bounces": np.array(n_bots, dtype='int32'),
+                                    "n_arrivals": narr,
+                                }
 
                                 rd_list.append(rcv_arrivals)
                             sd_list.append(rd_list)

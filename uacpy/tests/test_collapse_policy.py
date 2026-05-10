@@ -106,6 +106,7 @@ def _bare_model_factory(supports_layered: bool):
         def __init__(self, **kw):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
+
         def run(self, env, source, receiver, run_mode=None, **kwargs):
             return self._project_environment(env)
 
@@ -264,12 +265,11 @@ def test_layered_volume_average_forwards_shear_attenuation():
 
 def test_rdlb_collapse_uses_median_range():
     """``rdlb.collapse(method)`` shorthand selects the median range
-    profile (was r0 before; aligned with ``_project_environment``)."""
+    profile (aligned with ``_project_environment``)."""
     rdlb = _make_rdlb()
-    flat = rdlb.collapse('halfspace')
-    # median-range halfspace uses sound_speed of the chosen profile's halfspace,
-    # which is 1700 for all profiles (same hs). Sanity-check by also
-    # testing the 'top_layer' branch which exposes the per-range layer.
+    # The 'halfspace' branch returns the chosen profile's halfspace
+    # (1700 for all profiles in _make_rdlb — same hs object). Use
+    # 'top_layer' instead to expose the per-range layer's sound_speed.
     flat_top = rdlb.collapse('top_layer')
     assert flat_top.sound_speed == pytest.approx(1620.0), (
         f"Expected median-range top layer c ~ 1620, got {flat_top.sound_speed}"

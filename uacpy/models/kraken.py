@@ -65,7 +65,6 @@ import inspect
 import shutil
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
-    UnsupportedFeatureError,
 )
 from uacpy.io.oalib_writer import (
     write_bio_layers, write_bottom_section, write_broadband_freqs,
