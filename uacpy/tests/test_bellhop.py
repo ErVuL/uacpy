@@ -3,14 +3,12 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import Bellhop
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestBellhopRunModes:
     """Test all Bellhop run modes systematically."""
@@ -21,7 +19,7 @@ class TestBellhopRunModes:
         return Environment(
             name="run_mode_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
     @pytest.fixture
@@ -49,7 +47,7 @@ class TestBellhopRunModes:
         assert result.field_type == 'tl'
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
-        assert np.all(result.data > 0), "TL should be positive"
+        assert np.all(result.tl > 0), "TL should be positive"
 
     @pytest.mark.requires_binary
     def test_bellhop_incoherent_tl(self, setup_env, setup_source, setup_receiver):
@@ -131,22 +129,22 @@ class TestBellhopRunModes:
         """Test Bellhop.compute_eigenrays one-call API."""
         bellhop = Bellhop(verbose=False)
 
-        result = bellhop.compute_eigenrays(
+        rays = bellhop.compute_eigenrays(
             setup_env, setup_source,
-            range_m=3000.0, depth_m=50.0,
-            max_rays=4,
+            range=3000.0, depth=50.0,
         )
-        assert result.field_type == 'rays'
-        assert result.is_eigen is True
-        assert len(result.rays) <= 4
-        # Sorted by miss distance ascending.
-        miss = [r.get('miss_distance_m') for r in result.rays]
+        assert rays.field_type == 'rays'
+        assert rays.is_eigen is True
+        # Receiver positions reflect the single target point.
+        assert rays.receiver_ranges is not None
+        assert float(rays.receiver_ranges[0]) == 3000.0
+        assert float(rays.receiver_depths[0]) == 50.0
+        # Filtering happens on Rays, not on the model.
+        top4 = rays.top_n_by_miss(4)
+        assert len(top4.rays) <= 4
+        miss = [r['miss_distance_m'] for r in top4.rays]
         if len(miss) > 1:
             assert miss == sorted(miss)
-        # Receiver positions reflect the single target point.
-        assert result.receiver_ranges is not None
-        assert float(result.receiver_ranges[0]) == 3000.0
-        assert float(result.receiver_depths[0]) == 50.0
 
     @pytest.mark.requires_binary
     def test_rays_filter_helpers_preserve_is_eigen(self, setup_env, setup_source, setup_receiver):
@@ -204,8 +202,7 @@ class TestBellhopRunModes:
         )
 
         assert result.field_type == 'arrivals'
-        # Check for arrival structure in metadata (nested per-receiver format)
-        assert 'arrivals_by_receiver' in result.metadata
+        assert result.by_receiver is not None
 
 
 class TestAdvancedBeamTypes:
@@ -216,7 +213,7 @@ class TestAdvancedBeamTypes:
         return Environment(
             name="beam_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
     @pytest.fixture
@@ -293,19 +290,19 @@ class TestRunWithBounceConstructorPlumbing:
             francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
             bio_layers=None,
         )
-        env = Environment(name='b', bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name='b', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
         with pytest.raises(RuntimeError, match='stop after Bounce __init__'):
             bellhop.run_with_bounce(
                 env=env, source=source, receiver=receiver,
-                c_low=1450.0, c_high=20000.0, rmax_m=42000.0,
+                c_low=1450.0, c_high=20000.0, rmax=42000.0,
             )
         assert captured.get('volume_attenuation') == 'F'
         assert captured.get('francois_garrison_params') == (10.0, 35.0, 8.0, 1000.0)
         assert captured.get('c_low') == 1450.0
         assert captured.get('c_high') == 20000.0
-        assert captured.get('rmax_m') == 42000.0
+        assert captured.get('rmax') == 42000.0
 
 
 class TestBounceConstructorAcceptsFGParams:

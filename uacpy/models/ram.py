@@ -14,7 +14,7 @@ binaries based on the environment:
 - **ramsurf1.5** (``env.altimetry is not None``): Collins' rough-surface /
   beach-geometry PE. Single-frequency. Same writer as rams.
 
-Elastic bottom + altimetry raises ``NotImplementedError`` — no published
+Elastic bottom + altimetry raises ``UnsupportedFeatureError`` — no published
 Collins PE handles that combination; use OASES for range-independent elastic.
 
 Run modes by backend:
@@ -34,16 +34,19 @@ import time
 import warnings
 from pathlib import Path
 from typing import Optional, List
-import scipy.interpolate
+from scipy.interpolate import RegularGridInterpolator, interp1d
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
-from uacpy.core.environment import Environment, LayeredBottom
+from uacpy.models.base import PropagationModel, RunMode
+from uacpy.core.environment import (
+    Environment, LayeredBottom, RangeDependentLayeredBottom,
+)
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, TLField, TransferFunction
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, TL_MAX_DB
+from uacpy.core.results import Result, PressureField, TransferFunction
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_MAX_DB
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
 from uacpy.io.mpirams_reader import read_psif
@@ -104,7 +107,7 @@ class RAM(PropagationModel):
     ---------
     COHERENT_TL:
         Narrowband TL over a range-depth grid. Available on every backend.
-        Returns ``TLField``.
+        Returns ``PressureField``.
 
     BROADBAND — *mpiramS only*:
         Broadband complex pressure field. Returns
@@ -254,9 +257,13 @@ class RAM(PropagationModel):
         rs_stability : float, optional
             Stability range (m). None = max output range. Default: None.
         Q : float, optional
-            Q value for broadband bandwidth (fc/Q). Default: 2.0.
+            Q value for broadband bandwidth (fc/Q). Default: ``None``,
+            which resolves to ``2.0`` for broadband paths and to
+            ``1e6`` for COHERENT_TL (effectively single-frequency).
         T : float, optional
-            Time window width (s). Default: 10.0.
+            Time window width (s). Default: ``None``, which resolves
+            to ``10.0`` for broadband paths and to ``1.0`` for
+            COHERENT_TL.
         depth_decimation : int, optional
             Output depth decimation factor. Default: 1.
         flat_earth : bool, optional
@@ -325,6 +332,7 @@ class RAM(PropagationModel):
         # supported by any backend. _drop_unsupported_surface_shear() in
         # run() warns + zeros surface shear when present.
         self._supports_elastic_media = True
+        self._supports_multi_source_depth = False
 
         if executable is not None:
             self.executable = Path(executable)
@@ -446,17 +454,26 @@ class RAM(PropagationModel):
             return float(self.c0)
         from uacpy.models._pade_optimizer import optimal_c0
         speeds = [float(c) for c in env.ssp.data[:, 0]]
-        b = getattr(env, 'bottom', None)
-        if b is not None and getattr(b, 'sound_speed', None):
-            speeds.append(float(b.sound_speed))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, RangeDependentLayeredBottom):
+            for prof in b.profiles:
+                for layer in prof.layers:
+                    if getattr(layer, 'sound_speed', None):
+                        speeds.append(float(layer.sound_speed))
+                if getattr(prof.halfspace, 'sound_speed', None):
+                    speeds.append(float(prof.halfspace.sound_speed))
+        elif isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 if getattr(layer, 'sound_speed', None):
                     speeds.append(float(layer.sound_speed))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None and getattr(hs, 'sound_speed', None):
-                speeds.append(float(hs.sound_speed))
+            if getattr(b.halfspace, 'sound_speed', None):
+                speeds.append(float(b.halfspace.sound_speed))
+        elif b is not None and getattr(b, 'sound_speed', None) is not None:
+            cs = b.sound_speed
+            if hasattr(cs, '__len__'):
+                speeds.extend(float(c) for c in cs)
+            else:
+                speeds.append(float(cs))
         if not speeds:
             return DEFAULT_SOUND_SPEED
         c_min = float(min(speeds))
@@ -508,7 +525,7 @@ class RAM(PropagationModel):
         zmax_pe = self._compute_zmax(env, freq)
 
         # Build depth grid from surface to zmax_pe
-        interp_func = scipy.interpolate.interp1d(
+        interp_func = interp1d(
             depths_orig, speeds_orig,
             kind='linear', bounds_error=False,
             fill_value=(speeds_orig[0], speeds_orig[-1])
@@ -529,7 +546,7 @@ class RAM(PropagationModel):
             speeds_2d = np.zeros((len(depths), len(ranges_m)))
             for i in range(len(ranges_m)):
                 profile = env.ssp.data[:, i]
-                interp_func = scipy.interpolate.interp1d(
+                interp_func = interp1d(
                     ssp_depths, profile, kind='linear',
                     bounds_error=False,
                     fill_value=(profile[0], profile[-1])
@@ -558,7 +575,7 @@ class RAM(PropagationModel):
         return bth_filename, 1
 
     def _get_water_speed_at_bottom(
-        self, env: Environment, range_m: Optional[float] = None,
+        self, env: Environment, range: Optional[float] = None,
     ) -> float:
         """
         Get the water-column sound speed at the nominal seafloor depth.
@@ -567,17 +584,17 @@ class RAM(PropagationModel):
         Used to convert an absolute bottom sound speed into the perturbation
         that mpiramS expects (``cs = cb - cwg``).
 
-        Range-aware: when ``env`` has a range-dependent SSP and ``range_m``
-        is provided, the profile at that range is used. With no ``range_m``
+        Range-aware: when ``env`` has a range-dependent SSP and ``range``
+        is provided, the profile at that range is used. With no ``range``
         but RD SSP, the profile at range 0 is used (first column). This
         keeps the range-independent callers consistent with the RD-aware
         branches in :meth:`_prepare_bottom_properties`.
         """
         depth = env.depth
         if env.has_range_dependent_ssp():
-            if range_m is None:
-                range_m = 0.0
-            ssp = env.ssp_at_range(range_m)
+            if range is None:
+                range = 0.0
+            ssp = env.ssp.eval(range=range).to_pairs()
         else:
             ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
@@ -603,9 +620,8 @@ class RAM(PropagationModel):
         # Use thin sediment layer for sharp interface (≈ half-space)
         sedlayer = self._effective_dz(env)
 
-        if env.bottom_rd_layered is not None and work_dir is not None:
-            # Range-dependent layered bottom
-            rdl = env.bottom_rd_layered
+        if env.has_range_dependent_layered_bottom() and work_dir is not None:
+            rdl = env.bottom
             n_ranges = len(rdl.ranges)
             sedlayer_rdl = max(rdl.max_total_thickness(), self._effective_dz(env))
 
@@ -626,7 +642,7 @@ class RAM(PropagationModel):
                     env.bathymetry_at_range(rdl.ranges[i])
                 ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp_at_range(rdl.ranges[i])
+                    ssp_at_range = env.ssp.eval(range=rdl.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -659,9 +675,8 @@ class RAM(PropagationModel):
             attn_arr = attn_profiles[:, 0].copy()
             return sedlayer_rdl, nzs, cs, rho_arr, attn_arr, 1, sed_filename
 
-        if env.bottom_layered is not None:
-            # Range-independent layered bottom: sample at nzs depths
-            layered = env.bottom_layered
+        if env.has_layered_bottom():
+            layered = env.bottom
             total_thick = layered.total_thickness()
             sedlayer_lay = max(total_thick, self._effective_dz(env))
 
@@ -687,9 +702,8 @@ class RAM(PropagationModel):
 
             return sedlayer_lay, nzs, cs, rho_arr, attn_arr, 0, ''
 
-        if env.bottom_rd is not None and work_dir is not None:
-            # Range-dependent halfspace bottom
-            bottom_rd = env.bottom_rd
+        if env.has_range_dependent_bottom() and work_dir is not None:
+            bottom_rd = env.bottom
             n_ranges = len(bottom_rd.ranges)
 
             cs_profiles = np.zeros((nzs, n_ranges))
@@ -700,7 +714,7 @@ class RAM(PropagationModel):
                 cb = bottom_rd.sound_speed[i]
                 seafloor_i = float(env.bathymetry_at_range(bottom_rd.ranges[i])[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp_at_range(bottom_rd.ranges[i])
+                    ssp_at_range = env.ssp.eval(range=bottom_rd.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -739,10 +753,10 @@ class RAM(PropagationModel):
         attn_val = 0.5
 
         if env.bottom is not None:
-            bottom = env.bottom
-            cb_val = getattr(bottom, 'sound_speed', 1600.0) or 1600.0
-            rho_val = getattr(bottom, 'density', 1.2) or 1.2
-            attn_val = getattr(bottom, 'attenuation', 0.5) or 0.5
+            hs = env.halfspace_at_range(0.0)
+            cb_val = float(getattr(hs, 'sound_speed', 1600.0) or 1600.0)
+            rho_val = float(getattr(hs, 'density', 1.2) or 1.2)
+            attn_val = float(getattr(hs, 'attenuation', 0.5) or 0.5)
             cs_offset = cb_val - cwg_bottom
 
         cs = np.zeros(nzs)
@@ -789,22 +803,6 @@ class RAM(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        zmax=_UNSET,
-        dr=_UNSET,
-        dz=_UNSET,
-        np_pade=_UNSET,
-        ns_stability=_UNSET,
-        rs_stability=_UNSET,
-        Q=_UNSET,
-        T=_UNSET,
-        depth_decimation=_UNSET,
-        n_sed_points=_UNSET,
-        absorbing_layer_width=_UNSET,
-        absorbing_layer_attn=_UNSET,
-        c0=_UNSET,
-        accuracy=_UNSET,
-        theta_max=_UNSET,
-        timeout=_UNSET,
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
@@ -839,105 +837,86 @@ class RAM(PropagationModel):
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
-        zmax, dr, dz, np_pade, ns_stability, rs_stability, Q, T,
-        depth_decimation, n_sed_points, absorbing_layer_width,
-        absorbing_layer_attn, c0, accuracy, theta_max : optional
-            Per-call overrides for the matching constructor argument.
         **kwargs
             Silently ignored (warns on unknown kwargs).
 
         Returns
         -------
         result : Result
-            :class:`TLField` for COHERENT_TL, :class:`TransferFunction`
+            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
             for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
-        if run_mode is None:
-            run_mode = RunMode.COHERENT_TL
-
-        self._warn_unknown_kwargs(kwargs)
+        run_mode = self._resolve_run_mode(run_mode)
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
             if freqs_arr.size == 0:
-                raise ValueError(
+                raise ConfigurationError(
                     "RAM.run(frequencies=…) requires at least one positive "
                     "frequency"
                 )
             source = Source(depths=source.depths, frequencies=freqs_arr)
 
-        with _resolve_overrides(
-            self,
-            zmax=zmax,
-            dr=dr,
-            dz=dz,
-            np_pade=np_pade,
-            ns_stability=ns_stability,
-            rs_stability=rs_stability,
-            Q=Q,
-            T=T,
-            depth_decimation=depth_decimation,
-            n_sed_points=n_sed_points,
-            absorbing_layer_width=absorbing_layer_width,
-            absorbing_layer_attn=absorbing_layer_attn,
-            c0=c0,
-            accuracy=accuracy,
-            theta_max=theta_max,
-            timeout=timeout,
-        ):
-            env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        env = self._project_environment(env)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-            backend = self.select_backend(env)
-            self._log(f"RAM dispatch → {backend} backend", level='info')
-            self._warn_on_mpirams_only_overrides(backend)
-            env = self._drop_unsupported_surface_shear(env)
+        backend = self.select_backend(env)
+        elastic = self._env_has_elastic_bottom(env)
+        rough = getattr(env, 'altimetry', None) is not None
+        self._log(
+            f"Dispatching to {backend} backend "
+            f"(elastic_bottom={elastic}, altimetry={rough})",
+            level='info',
+        )
+        self._warn_on_mpirams_only_overrides(backend)
+        env = self._drop_unsupported_surface_shear(env)
 
-            if backend == 'mpiramS':
-                if run_mode == RunMode.BROADBAND:
-                    return self._run_broadband(env, source, receiver)
-                if run_mode == RunMode.TIME_SERIES:
-                    if source_waveform is None or sample_rate is None:
-                        raise ValueError(
-                            "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
-                            "and sample_rate. For the broadband transfer function "
-                            "H(f), use run_mode=RunMode.BROADBAND."
-                        )
-                    tf = self._run_broadband(env, source, receiver)
-                    return tf.synthesize_time_series(
-                        source_waveform=source_waveform,
-                        sample_rate=sample_rate,
-                    )
-                return self._run_tl(env, source, receiver)
-
-            # Collins backends: rams0.5 / ramsurf1.5 are single-frequency
-            # PE solvers but uacpy's local patch dumps the complex
-            # envelope (see third_party/MODIFICATIONS.md), so BROADBAND is
-            # implemented as a Python-side frequency loop and TIME_SERIES
-            # builds on top of that via TransferFunction.synthesize_time_series.
-            if run_mode == RunMode.COHERENT_TL:
-                return self._run_collins(env, source, receiver, kind=backend)
+        if backend == 'mpiramS':
             if run_mode == RunMode.BROADBAND:
-                return self._run_collins_broadband(
-                    env, source, receiver, kind=backend
-                )
+                return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
                 if source_waveform is None or sample_rate is None:
-                    raise ValueError(
-                        f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
-                        f"source_waveform and sample_rate. For the broadband "
-                        f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+                    raise ConfigurationError(
+                        "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
+                        "and sample_rate. For the broadband transfer function "
+                        "H(f), use run_mode=RunMode.BROADBAND."
                     )
-                tf = self._run_collins_broadband(
-                    env, source, receiver, kind=backend,
-                )
+                tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            raise ValueError(
-                f"Unsupported run_mode {run_mode} for RAM:{backend}"
+            return self._run_tl(env, source, receiver)
+
+        # Collins backends: rams0.5 / ramsurf1.5 are single-frequency
+        # PE solvers but uacpy's local patch dumps the complex
+        # envelope (see third_party/MODIFICATIONS.md), so BROADBAND is
+        # implemented as a Python-side frequency loop and TIME_SERIES
+        # builds on top of that via TransferFunction.synthesize_time_series.
+        if run_mode == RunMode.COHERENT_TL:
+            return self._run_collins(env, source, receiver, kind=backend)
+        if run_mode == RunMode.BROADBAND:
+            return self._run_collins_broadband(
+                env, source, receiver, kind=backend
             )
+        if run_mode == RunMode.TIME_SERIES:
+            if source_waveform is None or sample_rate is None:
+                raise ConfigurationError(
+                    f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
+                    f"source_waveform and sample_rate. For the broadband "
+                    f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+                )
+            tf = self._run_collins_broadband(
+                env, source, receiver, kind=backend,
+            )
+            return tf.synthesize_time_series(
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            )
+        raise UnsupportedFeatureError(
+            f"RAM:{backend}", str(run_mode),
+            alternatives=[str(m) for m in self._supported_modes],
+        )
 
     @staticmethod
     def _min_shear_speed(env: Environment) -> float:
@@ -959,49 +938,19 @@ class RAM(PropagationModel):
                 if v > 0:
                     speeds.append(float(v))
 
-        b = getattr(env, 'bottom', None)
-        if b is not None:
-            _maybe_add(getattr(b, 'shear_speed', None))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 _maybe_add(getattr(layer, 'shear_speed', None))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None:
-                _maybe_add(getattr(hs, 'shear_speed', None))
+            _maybe_add(getattr(b.halfspace, 'shear_speed', None))
+        elif b is not None:
+            _maybe_add(getattr(b, 'shear_speed', None))
         return min(speeds) if speeds else 0.0
 
     @staticmethod
     def _env_has_elastic_bottom(env: Environment) -> bool:
         """Return True if any bottom container carries shear_speed > 0."""
-        def has_shear(obj):
-            cs = getattr(obj, 'shear_speed', None)
-            if cs is None:
-                return False
-            try:
-                arr = np.atleast_1d(cs).astype(float)
-                return bool(np.any(arr > 0))
-            except (TypeError, ValueError):
-                return False
-
-        candidates = []
-        for attr in ('bottom', 'bottom_rd', 'bottom_layered'):
-            obj = getattr(env, attr, None)
-            if obj is None:
-                continue
-            candidates.append(obj)
-            if hasattr(obj, 'layers'):
-                candidates.extend(obj.layers or [])
-            if hasattr(obj, 'profiles'):
-                for prof in obj.profiles or []:
-                    candidates.append(prof)
-                    if hasattr(prof, 'layers'):
-                        candidates.extend(prof.layers or [])
-            halfspace = getattr(obj, 'halfspace', None)
-            if halfspace is not None:
-                candidates.append(halfspace)
-
-        return any(has_shear(c) for c in candidates)
+        return env.has_elastic_bottom()
 
     def select_backend(self, env: Environment) -> str:
         """Inspect which RAM-family binary will run for a given environment.
@@ -1018,7 +967,7 @@ class RAM(PropagationModel):
 
         Raises
         ------
-        NotImplementedError
+        UnsupportedFeatureError
             For elastic + variable-surface environments — no published
             Collins PE handles that combination. Use OASES for
             range-independent elastic propagation, or approximate by
@@ -1028,12 +977,14 @@ class RAM(PropagationModel):
         elastic = self._env_has_elastic_bottom(env)
         rough = getattr(env, 'altimetry', None) is not None
         if elastic and rough:
-            raise NotImplementedError(
-                "RAM does not handle elastic bottom + rough surface — no "
-                "Collins-family PE supports that combination. Either drop "
-                "the altimetry (use shear bottom alone → rams0.5), "
-                "fluidise the bottom (use altimetry alone → ramsurf1.5), "
-                "or switch to OASES for range-independent elastic runs."
+            raise UnsupportedFeatureError(
+                'RAM',
+                'elastic bottom + sea-surface altimetry',
+                alternatives=[
+                    "OASES (range-independent elastic + rough)",
+                    "drop env.altimetry to use rams0.5 (Collins elastic PE)",
+                    "fluidise the bottom (set shear_speed=0) to use ramsurf1.5",
+                ],
             )
         if elastic:
             return 'rams'
@@ -1047,7 +998,7 @@ class RAM(PropagationModel):
         # uses mpiramS for fluid+flat (broadband + RD bottom support).
         names = {'rams': 'rams0.5', 'ramsurf': 'ramsurf1.5'}
         if kind not in names:
-            raise ValueError(f"Unknown Collins kind {kind!r}")
+            raise ConfigurationError(f"Unknown Collins kind {kind!r}")
         return self._find_executable_in_paths(
             names[kind],
             bin_subdirs=['ramsurf'],
@@ -1079,19 +1030,18 @@ class RAM(PropagationModel):
         source's centre frequency and return a TL Field.
 
         Wraps :meth:`_run_collins_one_freq` and converts the binary's
-        ``tl.grid`` to a :class:`TLField` interpolated onto the
+        ``tl.grid`` to a :class:`PressureField` interpolated onto the
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
-        zs = float(np.atleast_1d(source.depths)[0])
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc,
             theta=self._theta_for_freq(fc),
         )
 
-        from scipy.interpolate import RegularGridInterpolator
         n_nonfinite = int(np.count_nonzero(~np.isfinite(raw['tl'])))
         if n_nonfinite > 0:
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind}: {n_nonfinite}/{raw['tl'].size} TL samples "
                 f"are NaN/inf (Padé instability or PE divergence) and "
@@ -1113,7 +1063,8 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
-        return TLField(
+        return PressureField(
+            units="dB",
             data=tl_out,
             depths=rcv_d,
             ranges=rcv_r,
@@ -1157,6 +1108,7 @@ class RAM(PropagationModel):
         # through. Loud warning rather than silent drop — proper RD support
         # would need one segment per range break in the writer call.
         if env.has_range_dependent_ssp():
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 SSP only — "
                 f"range-dependent SSP from env is dropped. For range-dependent "
@@ -1164,10 +1116,10 @@ class RAM(PropagationModel):
                 f"shear, no altimetry).",
                 UserWarning, stacklevel=3,
             )
-        if getattr(env, 'bottom_rd_layered', None) is not None:
+        if env.has_range_dependent_layered_bottom():
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 layered bottom only — "
-                f"env.bottom_rd_layered range-dependence is dropped.",
+                f"env.bottom range-dependence is dropped.",
                 UserWarning, stacklevel=3,
             )
 
@@ -1208,6 +1160,7 @@ class RAM(PropagationModel):
         # extrapolates to TL_MAX_DB.
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
         if float(np.max(rcv_d)) > zmax:
+            # expected; not in filterwarnings — emerges to user
             warnings.warn(
                 f"RAM:{kind}: receiver depths up to {float(np.max(rcv_d)):.1f} m "
                 f"exceed the PE domain (zmax={zmax:.1f} m); TL is extrapolated "
@@ -1229,7 +1182,7 @@ class RAM(PropagationModel):
 
         if kind == 'ramsurf':
             if env.altimetry is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "ramsurf backend requires env.altimetry to be set; "
                     "got env.altimetry=None. Use the mpiramS backend "
                     "(no altimetry) or supply an altimetry profile."
@@ -1265,8 +1218,8 @@ class RAM(PropagationModel):
         )
 
         layered = (
-            getattr(env, 'bottom_layered', None)
-            or self._fallback_layered_from_bottom(env)
+            env.bottom if isinstance(env.bottom, LayeredBottom)
+            else self._fallback_layered_from_bottom(env)
         )
 
         if kind == 'rams':
@@ -1327,7 +1280,7 @@ class RAM(PropagationModel):
             )
 
             self._log(f"Executing: {binary} (cwd={fm.work_dir})", level='info')
-            self._run_subprocess(
+            proc_result = self._run_subprocess(
                 [str(binary)],
                 cwd=fm.work_dir,
                 timeout=self.timeout,
@@ -1338,8 +1291,11 @@ class RAM(PropagationModel):
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
-                    stdout='',
-                    stderr=f"{kind}: tl.grid not produced (cwd={fm.work_dir})",
+                    stdout=proc_result.stdout,
+                    stderr=(
+                        f"{kind}: tl.grid not produced (cwd={fm.work_dir})\n"
+                        + (proc_result.stderr or "")
+                    ),
                 )
             ranges, depths, tl = read_tl_grid(
                 tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
@@ -1352,11 +1308,12 @@ class RAM(PropagationModel):
                 raise ModelExecutionError(
                     self.model_name,
                     return_code=0,
-                    stdout='',
+                    stdout=proc_result.stdout,
                     stderr=(
                         f"{kind}: pcomplex.bin not produced. Rebuild the "
                         f"binaries via install.sh so the patched outpt "
-                        f"routine emits the complex envelope."
+                        f"routine emits the complex envelope.\n"
+                        + (proc_result.stderr or "")
                     ),
                 )
             _, _, pcomplex = read_pcomplex_grid(
@@ -1398,7 +1355,6 @@ class RAM(PropagationModel):
         resolved per frequency by ``_theta_for_freq`` — useful when the
         elastic stability angle has to vary across the band.
         """
-        from scipy.interpolate import RegularGridInterpolator
 
         fc = float(np.atleast_1d(source.frequencies)[0])
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
@@ -1443,7 +1399,7 @@ class RAM(PropagationModel):
                      else self._compute_zmax(env, f_min))
 
         self._log(
-            f"RAM:{kind} broadband: {len(frequencies)} frequencies, "
+            f"{kind} broadband: {len(frequencies)} frequencies, "
             f"{frequencies[0]:.2f}-{frequencies[-1]:.2f} Hz, "
             f"df={df:.2f} Hz, bw={bw:.2f} Hz, "
             f"dr={dr_band:.2f}m, dz={dz_band:.3f}m, zmax={zmax_band:.0f}m",
@@ -1467,7 +1423,7 @@ class RAM(PropagationModel):
         for k, freq in enumerate(frequencies):
             if self.verbose and (k % log_every == 0 or k == len(frequencies) - 1):
                 self._log(
-                    f"RAM:{kind} broadband: freq {k + 1}/{len(frequencies)} "
+                    f"{kind} broadband: freq {k + 1}/{len(frequencies)} "
                     f"({float(freq):.2f} Hz)",
                     level='info',
                 )
@@ -1479,8 +1435,10 @@ class RAM(PropagationModel):
                 zmax_override=zmax_band,
             )
             zmax_used = raw['zmax']
-            dr_first = dr_first or raw['dr']
-            dz_first = dz_first or raw['dz']
+            if dr_first is None:
+                dr_first = raw['dr']
+            if dz_first is None:
+                dz_first = raw['dz']
 
             # Out-of-grid receivers → NaN so the resulting H(f) cell is
             # NaN (transparent in plots) instead of 0 (which clips TL to
@@ -1548,10 +1506,12 @@ class RAM(PropagationModel):
         wrapper that needs a synthetic sediment layer.
         """
         if env.bottom is None:
-            raise ValueError(
-                "RAM backend requires env.bottom (or env.bottom_layered)"
+            raise ConfigurationError(
+                "RAM backend requires env.bottom"
             )
-        return LayeredBottom.from_halfspace(env.bottom, env.depth)
+        if isinstance(env.bottom, LayeredBottom):
+            return env.bottom
+        return LayeredBottom.from_halfspace(env.halfspace_at_range(0.0), env.depth)
 
     # Settings that only the mpiramS backend consumes. When the dispatcher
     # picks rams0.5 / ramsurf1.5 and one of these has been overridden from
@@ -1567,7 +1527,6 @@ class RAM(PropagationModel):
         ('n_sed_points', 50),
     )
 
-
     def _drop_unsupported_surface_shear(self, env: Environment) -> Environment:
         """No RAM backend reads surface shear properties; warn and zero them."""
         s = getattr(env, 'surface', None)
@@ -1577,13 +1536,13 @@ class RAM(PropagationModel):
         import warnings as _w
         e = env.copy()
         e.surface = self._collapse_elastic_boundary(
-            e.surface, self.elastic_collapse_method,
+            e.surface, self._collapse["elastic"],
         )
         _w.warn(
             "RAM: surface shear is not supported by any backend "
             "(mpiramS / rams0.5 / ramsurf1.5 all model the surface as "
             "pressure-release); collapsed surface shear "
-            f"(elastic_collapse_method={self.elastic_collapse_method!r}). "
+            f"(collapse['elastic']={self._collapse['elastic']!r}). "
             "For an elastic surface use Bellhop or KrakenC.",
             UserWarning, stacklevel=3,
         )
@@ -1628,17 +1587,26 @@ class RAM(PropagationModel):
         speeds = [c0_pe]
         for c in env.ssp.data[:, 0]:
             speeds.append(float(c))
-        b = getattr(env, 'bottom', None)
-        if b is not None and getattr(b, 'sound_speed', None):
-            speeds.append(float(b.sound_speed))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, RangeDependentLayeredBottom):
+            for prof in b.profiles:
+                for layer in prof.layers:
+                    if getattr(layer, 'sound_speed', None):
+                        speeds.append(float(layer.sound_speed))
+                if getattr(prof.halfspace, 'sound_speed', None):
+                    speeds.append(float(prof.halfspace.sound_speed))
+        elif isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 if getattr(layer, 'sound_speed', None):
                     speeds.append(float(layer.sound_speed))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None and getattr(hs, 'sound_speed', None):
-                speeds.append(float(hs.sound_speed))
+            if getattr(b.halfspace, 'sound_speed', None):
+                speeds.append(float(b.halfspace.sound_speed))
+        elif b is not None and getattr(b, 'sound_speed', None) is not None:
+            cs = b.sound_speed
+            if hasattr(cs, '__len__'):
+                speeds.extend(float(c) for c in cs)
+            else:
+                speeds.append(float(cs))
         c_min = float(min(speeds))
         c_max = float(max(speeds))
 
@@ -1689,7 +1657,7 @@ class RAM(PropagationModel):
             if res is not None:
                 break
         if res is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"RAM:{kind}: no Lytaev grid feasible even at ε=0.5, "
                 f"θ_max=10° for f={freq:.1f} Hz, x_max={max_range:.0f} m. "
                 f"Set ``dr``/``dz`` explicitly. Optimiser said: {last_exc}"
@@ -1723,7 +1691,7 @@ class RAM(PropagationModel):
             dr_opt = min(dr_safety, dr_cap)
             limit = 'safety factor' if dr_safety <= dr_cap else 'λ cap'
             self._log(
-                f"RAM:rams: tightened dr from {dr_pre:.2f} m to "
+                f"rams: tightened dr from {dr_pre:.2f} m to "
                 f"{dr_opt:.2f} m (safety={dr_safety:.2f}, "
                 f"λ-cap={dr_cap:.2f}; {limit} active).",
                 level='info',
@@ -1786,7 +1754,7 @@ class RAM(PropagationModel):
 
         c0_origin = 'user' if self.c0 is not None else 'Lytaev Eq.15'
         self._log(
-            f"RAM:{kind}: Lytaev grid → dr={dr_opt:.2f} m, "
+            f"{kind}: Lytaev grid → dr={dr_opt:.2f} m, "
             f"dz={dz_opt:.3f} m (predicted error "
             f"{res['predicted_error']:.2e}, c₀={c0_pe:.1f} m/s "
             f"[{c0_origin}], θ_max={self.theta_max:.0f}°, "
@@ -1842,16 +1810,13 @@ class RAM(PropagationModel):
             if cp_attr:
                 speeds.append(float(cp_attr))
 
-        b = getattr(env, 'bottom', None)
-        if b is not None:
-            _add(getattr(b, 'sound_speed', None))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 _add(getattr(layer, 'sound_speed', None))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None:
-                _add(getattr(hs, 'sound_speed', None))
+            _add(getattr(b.halfspace, 'sound_speed', None))
+        elif b is not None:
+            _add(getattr(b, 'sound_speed', None))
         c_min = min(speeds)
         wavelength = c_min / max(freq, 1.0)
         target = float(np.clip(wavelength / LAMBDA_PER_DZ_FLOOR, 0.05, 1.0))
@@ -1880,13 +1845,11 @@ class RAM(PropagationModel):
         """
         Run in narrowband TL mode.
 
-        Honours ``self.Q`` / ``self.T`` (after any per-call ``run(Q=…, T=…)``
-        override applied via ``_resolve_overrides``). For a single-frequency
-        TL grid the conventional choice is a very large Q so the bandwidth
-        collapses, but the user is free to widen it.
+        Honours ``self.Q`` / ``self.T``. For a single-frequency TL grid the
+        conventional choice is a very large Q so the bandwidth collapses,
+        but the user is free to widen it.
         """
         start_time = time.time()
-
 
         freq = float(source.frequencies[0])
         zsrc = float(source.depths[0])
@@ -1910,8 +1873,12 @@ class RAM(PropagationModel):
         # (Q→∞, T=1) unless the user widened it via Q=/T=.
         Q_tl = 1e6 if self.Q is None else float(self.Q)
         T_tl = 1.0 if self.T is None else float(self.T)
-        self._log(f"RAM:mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s", level='info')
-        self._log(f"  Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
+        self._log(
+            f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, "
+            f"dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s",
+            level='info',
+        )
+        self._log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -1959,14 +1926,11 @@ class RAM(PropagationModel):
 
             # Run mpiramS
             self._run_binary(work_dir)
-
-            # Read output
             result = read_psif(work_dir)
 
             psif = result['psif']  # (nzo, nf, nr)
             zg = result['zg']
             rout = result['rout']
-            c0 = result['c0']
 
             # Extract center frequency (middle of frequency vector)
             center_idx = result['nf'] // 2
@@ -1977,15 +1941,19 @@ class RAM(PropagationModel):
             # BEFORE computing TL. Interpolating in dB destroys interference
             # nulls because linear interpolation of log-scale values smooths
             # out the sharp zeros in the field.
-            from scipy.interpolate import RegularGridInterpolator
 
             rcv_depths = receiver.depths
-            # Warn if any receiver ranges exceed the PE computed range
-            if np.any(receiver.ranges > rout[-1]):
-                beyond = receiver.ranges[receiver.ranges > rout[-1]]
+            # Warn only when receiver ranges genuinely exceed the PE
+            # marched range; tolerate float-edge drift (rout[-1] often
+            # lands ~µm below the user's requested rmax due to dr×nstep
+            # accumulation).
+            dr_eff = rout[-1] - rout[-2] if rout.size >= 2 else 1.0
+            tol = max(1e-6, 0.5 * float(dr_eff))
+            if np.any(receiver.ranges > rout[-1] + tol):
+                beyond = receiver.ranges[receiver.ranges > rout[-1] + tol]
                 warnings.warn(
-                    f"Receiver ranges {beyond} exceed PE computed range; "
-                    f"clamped to {rout[-1]}",
+                    f"{self.model_name}: receiver ranges {beyond} exceed "
+                    f"PE computed range; clamped to {rout[-1]}",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -1998,6 +1966,7 @@ class RAM(PropagationModel):
             # not fully converged.
             n_nan_p = int(np.count_nonzero(~np.isfinite(pressure)))
             if n_nan_p > 0:
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
                     f"RAM:mpiramS broadband: {n_nan_p}/{pressure.size} "
                     f"complex samples are NaN/inf and have been zeroed "
@@ -2036,36 +2005,36 @@ class RAM(PropagationModel):
             # Protect 10*log10(r) from r=0; warn if we had to clip.
             log_ranges = rcv_ranges.astype(np.float64).copy()
             if log_ranges.size > 0 and log_ranges[0] <= 0.0:
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
-                    f"Receiver range at index 0 is {log_ranges[0]}; "
-                    f"clipping to dr={dr} for TL conversion to avoid "
-                    f"log(0). The receiver.ranges array is not modified.",
+                    f"{self.model_name}: receiver range at index 0 is "
+                    f"{log_ranges[0]}; clipping to dr={dr} for TL "
+                    f"conversion to avoid log(0). The receiver.ranges "
+                    f"array is not modified.",
                     UserWarning,
                     stacklevel=2,
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
+            # Build complex pressure |p| such that
+            #   TL_dB = -20*log10(|p|) = -20*log10(|psi|*4π) - 10*log10(r)
+            # is recovered by PressureField.tl. We bake the cylindrical
+            # 1/sqrt(r) spreading into the magnitude by dividing
+            # |psi|*4π by sqrt(r); since we don't have psi's true phase
+            # at the receiver we keep a phase of 0 (consumers that only
+            # need TL can read field.tl, which depends on |p| only).
+            r_safe = log_ranges.astype(np.float64)
             with np.errstate(divide='ignore', invalid='ignore'):
                 psi_mag = np.abs(pressure_rcv) * 4.0 * np.pi
-                tl_output = -20.0 * np.log10(psi_mag + PRESSURE_FLOOR) + 10.0 * np.log10(log_ranges)[np.newaxis, :]
-
-            tl_output = np.clip(tl_output, 0.0, TL_MAX_DB)
-
-            # Mask TL values below the seafloor at each range.
-            # RAM computes valid field in the sediment, but for plotting
-            # consistency with other models, set sub-bottom values to NaN.
-            bathy = env.bathymetry
-            bathy_depths = np.interp(receiver.ranges, bathy[:, 0], bathy[:, 1])
-            for j, bd in enumerate(bathy_depths):
-                mask = receiver.depths > bd
-                tl_output[mask, j] = np.nan
+                p_mag = psi_mag / np.sqrt(r_safe)[np.newaxis, :]
+            pressure_field = p_mag.astype(np.complex128)
 
             elapsed = time.time() - start_time
-            self._log(f"RAM TL completed in {elapsed:.2f}s", level='info')
-            self._log(f"  TL range: {np.nanmin(tl_output):.1f} to {np.nanmax(tl_output):.1f} dB", level='info')
+            self._log(f"TL completed in {elapsed:.2f}s", level='info')
 
-            return TLField(
-                data=tl_output,
+            field = PressureField(
+                units="complex",
+                data=pressure_field,
                 ranges=receiver.ranges,
                 depths=receiver.depths,
                 **self._result_kwargs(
@@ -2076,6 +2045,12 @@ class RAM(PropagationModel):
                     c0=self._resolve_c0(env),
                 ),
             )
+            field = field.mask_below_seafloor(env.bathymetry)
+            self._attach_output_paths(
+                field, fm.work_dir, '',
+                primary_files=(('psif_file', 'psif.dat'),),
+            )
+            return field
 
         finally:
             if fm.cleanup:
@@ -2088,7 +2063,6 @@ class RAM(PropagationModel):
         Returns complex transfer function psi(depth, frequency, range).
         """
         start_time = time.time()
-
 
         freq = float(source.frequencies[0])
         zsrc = float(source.depths[0])
@@ -2108,8 +2082,12 @@ class RAM(PropagationModel):
 
         Q_bb = 2.0 if self.Q is None else float(self.Q)
         T_bb = 10.0 if self.T is None else float(self.T)
-        self._log(f"RAM:mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
-        self._log(f"  Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
+        self._log(
+            f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
+            f"dr={dr:.1f} m, dz={dz:.3f} m",
+            level='info',
+        )
+        self._log(f"Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2172,6 +2150,7 @@ class RAM(PropagationModel):
             rout_safe = np.asarray(rout, dtype=np.float64).copy()
             if rout_safe.size > 0 and np.any(rout_safe <= 0.0):
                 clip_to = float(dr) if dr and dr > 0 else 1.0
+                # expected; not in filterwarnings — emerges to user
                 warnings.warn(
                     f"RAM broadband: rout contained non-positive values "
                     f"(min={float(rout_safe.min())}); clipping to "
@@ -2199,23 +2178,14 @@ class RAM(PropagationModel):
             else:
                 out_depths = zg
 
-            # Mask sub-bottom samples with NaN for consistency with _run_tl.
-            # RAM computes valid fields in the sediment, but other uacpy
-            # models return NaN below the seafloor.
-            bathy = env.bathymetry
-            bathy_depths_rout = np.interp(rout, bathy[:, 0], bathy[:, 1])
-            for j, bd in enumerate(bathy_depths_rout):
-                mask = out_depths > bd
-                pressure[mask, :, j] = np.nan
-
             elapsed = time.time() - start_time
-            self._log(f"RAM broadband completed in {elapsed:.2f}s", level='info')
-            self._log(f"  Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
+            self._log(f"Broadband completed in {elapsed:.2f}s", level='info')
+            self._log(f"Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
 
             # (n_d, n_r, n_f).
             pressure = np.moveaxis(pressure, 1, 2)
 
-            return TransferFunction(
+            tf = TransferFunction(
                 data=pressure,
                 ranges=rout,
                 depths=out_depths,
@@ -2232,6 +2202,19 @@ class RAM(PropagationModel):
                     cmin=result['cmin'],
                 ),
             )
+            # Mask sub-bottom samples with NaN for consistency with _run_tl.
+            # RAM computes valid fields in the sediment, but other uacpy
+            # models return NaN below the seafloor.
+            bathy = np.asarray(env.bathymetry, dtype=float)
+            seafloor = np.interp(rout, bathy[:, 0], bathy[:, 1])
+            for j, bd in enumerate(seafloor):
+                mask = out_depths > bd
+                tf.data[mask, j, :] = np.nan
+            self._attach_output_paths(
+                tf, fm.work_dir, '',
+                primary_files=(('psif_file', 'psif.dat'),),
+            )
+            return tf
 
         finally:
             if fm.cleanup:
@@ -2246,7 +2229,7 @@ class RAM(PropagationModel):
             env['OMP_NUM_THREADS'] = str(os.cpu_count() or 1)
             omp_source = 'auto = os.cpu_count()'
         self._log(
-            f"Executing RAM:mpiramS: {self.executable} "
+            f"Executing mpiramS: {self.executable} "
             f"(cwd={work_dir}, OMP_NUM_THREADS={env['OMP_NUM_THREADS']} "
             f"{omp_source})",
             level='info',

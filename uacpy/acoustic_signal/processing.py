@@ -11,7 +11,7 @@ This module contains signal processing computations including:
 import warnings
 
 import numpy as np
-from typing import Union, Tuple, Optional
+from typing import Tuple, Optional
 from scipy.signal.windows import hann
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -89,8 +89,6 @@ def planewave_rep(
 
     theta_rad = np.deg2rad(angles)  # Convert to radians
     Nelts = phone_coords.shape[1]
-
-    # Generate matrix of steering vectors
     omega = 2 * np.pi * freq
     k0 = omega / c
     e = np.exp(1j * k0 * np.sin(theta_rad) @ phone_coords)
@@ -170,22 +168,14 @@ def beamform(
     """
     if angles is None:
         angles = np.arange(-90, 91, 1)
-
-    # Set up replica vectors
     e = planewave_rep(phone_coords, angles, freq, c=c)
-
-    # Compute beamformed output
     # e has shape (n_angles, n_phones)
     # pressure has shape (n_phones, n_ranges)
     beamformed = e @ pressure
-
-    # Calculate power in dB
     power = 20 * np.log10(np.abs(beamformed)) + SL - NL
     peak = np.max(power)
 
     return power, angles, peak
-
-
 
 
 def add_noise(
@@ -246,7 +236,6 @@ def add_noise(
     ----------
     Original MATLAB code by mbp, 4/09
     """
-    # Convert dB to linear scale
     SL = 10.0 ** (source_level_db / 20.0)
 
     # Target noise RMS for a one-sided PSD level ``noise_level_db`` (dB
@@ -317,8 +306,6 @@ def make_bandlimited_noise(
     >>> print(f"Generated {len(noise)} samples")
     """
     from scipy.signal import butter, filtfilt
-
-    # Generate white Gaussian noise
     n_samples = int(duration * sample_rate)
     noise = np.random.randn(n_samples)
 
@@ -338,11 +325,7 @@ def make_bandlimited_noise(
     # Ensure normalized frequencies are in valid range (0, 1)
     low = max(min(low, 0.99), 0.01)
     high = max(min(high, 0.99), 0.02)
-
-    # Create bandpass filter
     b, a = butter(4, [low, high], btype='band')
-
-    # Apply filter
     filtered_noise = filtfilt(b, a, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS
@@ -429,12 +412,10 @@ def fourier_synthesis(
     else:
         n_receivers = np.prod(original_shape[1:])
         pressure_work = pressure_freq.reshape(Nfreq, n_receivers)
-
-    # Apply time-shift via phase rotation
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
-                                     np.exp(1j * 2 * np.pi * Tstart * freq_vec))
+                                      np.exp(1j * 2 * np.pi * Tstart * freq_vec))
     elif len(freq_vec) > 0 and freq_vec[0] > 0:
         warnings.warn(
             f"fourier_synthesis: freq_vec[0]={freq_vec[0]:.3g} Hz > 0 with "
@@ -463,13 +444,9 @@ def fourier_synthesis(
     else:
         new_shape = (Nfreq,) + original_shape[1:]
         rmod = rmod_work.reshape(new_shape)
-
-    # Set up time vector based on FFT sampling rules
     deltaf = freq_vec[1] - freq_vec[0] if len(freq_vec) > 1 else 1.0
     Tmax = 1 / deltaf
     deltat = Tmax / Nfreq
     time = np.linspace(0.0, Tmax - deltat, Nfreq)
 
     return rmod, time
-
-

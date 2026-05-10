@@ -46,9 +46,14 @@ BIN_DIR_OASES="${BIN_ROOT}/oases"
 BIN_DIR_MPIRAMS="${BIN_ROOT}/mpirams"
 BIN_DIR_RAMSURF="${BIN_ROOT}/ramsurf"
 
-# Bellhopcuda upstream release we build against; install.sh forces the
-# submodule HEAD to this tag.
+# Bellhopcuda upstream release we build against. Tags are mutable on the
+# upstream side (a maintainer can re-point v1.5 to a different commit), so
+# we also support an immutable commit SHA. If BELLHOPCUDA_COMMIT_SHA is
+# non-empty it takes precedence; otherwise we fall back to the tag with a
+# loud warning. Pin the SHA after the first known-good install:
+#     git -C uacpy/third_party/bellhopcuda rev-parse HEAD
 BELLHOPCUDA_TAG="v1.5"
+BELLHOPCUDA_COMMIT_SHA=""  # TODO: paste the v1.5 commit SHA for supply-chain pinning
 
 # Default behavior: interactive
 AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
@@ -241,6 +246,18 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 elif [[ "$OSTYPE" == "darwin"* ]]; then
     OS="macOS"
     PACKAGE_MANAGER="brew"
+    # Apple Silicon's Homebrew lives under /opt/homebrew/bin and isn't on
+    # the default user PATH. Without this, `command_exists brew` and
+    # subsequently `gfortran` fail even when the user has installed them.
+    if [ -d /opt/homebrew/bin ]; then
+        export PATH="/opt/homebrew/bin:$PATH"
+    fi
+    if command_exists brew; then
+        BREW_GCC_PREFIX="$(brew --prefix gcc 2>/dev/null || true)"
+        if [ -n "$BREW_GCC_PREFIX" ] && [ -d "$BREW_GCC_PREFIX/bin" ]; then
+            export PATH="$BREW_GCC_PREFIX/bin:$PATH"
+        fi
+    fi
 else
     echo -e "${RED}Unsupported OS: $OSTYPE${NC}"
     exit 1
@@ -257,6 +274,21 @@ else
     echo -e "Mode: ${GREEN}Interactive${NC}"
 fi
 echo ""
+
+# Apple's clang lacks OpenMP support unless Homebrew's libomp is installed;
+# building -fopenmp without it fails at link time. gfortran from brew works
+# but the C/C++ side of bellhopcuda still needs libomp. Disable OpenMP on
+# macOS hosts that don't have it.
+if [ "$OS" = "macOS" ] && [ "$ENABLE_OPENMP" -eq 1 ]; then
+    BREW_OMP_PREFIX=""
+    if command_exists brew; then
+        BREW_OMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+    fi
+    if [ -z "$BREW_OMP_PREFIX" ] || [ ! -d "$BREW_OMP_PREFIX" ]; then
+        echo -e "${YELLOW}macOS detected without Homebrew libomp; disabling OpenMP for this build (brew install libomp to re-enable).${NC}"
+        ENABLE_OPENMP=0
+    fi
+fi
 
 # -------------------------
 # Choose Bellhop variant
@@ -418,6 +450,14 @@ check_curl() {
     fail_missing "curl" "$(hint_for curl curl curl curl)"
 }
 
+# tar (required only when extracting the OASES tarball)
+check_tar() {
+    if command_exists tar; then
+        return 0
+    fi
+    fail_missing "tar" "$(hint_for tar tar tar tar)"
+}
+
 
 # CUDA
 check_cuda() {
@@ -478,41 +518,65 @@ fixup_bhc_dotgit() {
     ln -s "$gitdir_abs" "$BHC_DIR/.git"
 }
 
-# Force the bellhopcuda submodule HEAD to $BELLHOPCUDA_TAG.
+# Force the bellhopcuda submodule HEAD to $BELLHOPCUDA_COMMIT_SHA (preferred,
+# immutable) or $BELLHOPCUDA_TAG (mutable upstream alias) as a fallback.
 pin_bellhopcuda_tag() {
     if ! command_exists git; then
         echo -e "${YELLOW}git not available; skipping bellhopcuda tag verification${NC}"
         return 0
     fi
 
-    local current_tag
+    # Refuse to clobber uncommitted work in the submodule. A developer running
+    # install.sh after editing third_party/bellhopcuda/ would otherwise lose
+    # those changes silently.
+    if [ -n "$(git -C "$BHC_DIR" status --porcelain 2>/dev/null)" ]; then
+        echo -e "${YELLOW}bellhopcuda submodule has uncommitted changes; skipping pin to avoid clobbering work.${NC}"
+        return 0
+    fi
+
+    # Prefer the commit SHA when set — tags are mutable upstream and a SHA
+    # locks the supply chain.
+    local pin_ref
+    if [ -n "$BELLHOPCUDA_COMMIT_SHA" ]; then
+        pin_ref="$BELLHOPCUDA_COMMIT_SHA"
+    else
+        echo -e "${YELLOW}BELLHOPCUDA_COMMIT_SHA is unset; pinning to mutable tag ${BELLHOPCUDA_TAG}. Set the SHA in install.sh for supply-chain integrity.${NC}"
+        pin_ref="$BELLHOPCUDA_TAG"
+    fi
+
+    local current_sha current_tag
+    current_sha="$(git -C "$BHC_DIR" rev-parse HEAD 2>/dev/null || true)"
     current_tag="$(git -C "$BHC_DIR" describe --tags --exact-match 2>/dev/null || true)"
-    if [[ "$current_tag" == "$BELLHOPCUDA_TAG" ]]; then
+    if [ -n "$BELLHOPCUDA_COMMIT_SHA" ] && [[ "$current_sha" == "$BELLHOPCUDA_COMMIT_SHA"* ]]; then
+        echo -e "✓ bellhopcuda at commit ${GREEN}${BELLHOPCUDA_COMMIT_SHA}${NC}"
+        return 0
+    fi
+    if [ -z "$BELLHOPCUDA_COMMIT_SHA" ] && [[ "$current_tag" == "$BELLHOPCUDA_TAG" ]]; then
         echo -e "✓ bellhopcuda at tag ${GREEN}${BELLHOPCUDA_TAG}${NC}"
         return 0
     fi
 
-    echo -e "${BLUE}Pinning bellhopcuda to ${BELLHOPCUDA_TAG}...${NC}"
+    echo -e "${BLUE}Pinning bellhopcuda to ${pin_ref}...${NC}"
 
     # Shallow clones (CI) may not have tags — fetch on demand.
-    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "refs/tags/${BELLHOPCUDA_TAG}" >/dev/null; then
-        echo -e "  Fetching tags from origin..."
+    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "${pin_ref}^{commit}" >/dev/null 2>&1; then
+        echo -e "  Fetching from origin..."
         git -C "$BHC_DIR" fetch --tags origin 2>&1 | tail -3 || true
     fi
-    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "refs/tags/${BELLHOPCUDA_TAG}" >/dev/null; then
-        fail_missing "bellhopcuda tag '${BELLHOPCUDA_TAG}'" \
-            "Tag not found in ${BHC_DIR}. Edit BELLHOPCUDA_TAG in install.sh or fetch tags manually."
+    if ! git -C "$BHC_DIR" rev-parse --verify --quiet "${pin_ref}^{commit}" >/dev/null 2>&1; then
+        fail_missing "bellhopcuda ref '${pin_ref}'" \
+            "Ref not found in ${BHC_DIR}. Edit BELLHOPCUDA_TAG / BELLHOPCUDA_COMMIT_SHA in install.sh or fetch manually."
     fi
 
-    if ! git -C "$BHC_DIR" checkout --quiet "${BELLHOPCUDA_TAG}"; then
+    if ! git -C "$BHC_DIR" checkout --quiet "${pin_ref}"; then
         fail_missing "bellhopcuda checkout" \
-            "Could not check out tag '${BELLHOPCUDA_TAG}' in ${BHC_DIR}"
+            "Could not check out '${pin_ref}' in ${BHC_DIR}"
     fi
 
-    # GLM (nested submodule) commit may differ between tags — re-sync it.
+    # GLM (nested submodule) commit may differ between revisions — re-sync it.
     git -C "$BHC_DIR" submodule update --init --recursive 2>&1 | tail -3 || true
 
-    echo -e "${GREEN}✓ bellhopcuda pinned to ${BELLHOPCUDA_TAG}${NC}"
+    echo -e "${GREEN}✓ bellhopcuda pinned to ${pin_ref}${NC}"
 }
 
 # Pre-checks for build paths
@@ -527,10 +591,17 @@ echo -e "✓ Found OALIB (Acoustics-Toolbox): ${GREEN}$OALIB_DIR${NC}"
 if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     check_cmake
     check_cxx_compiler
+    # bellhopcuda comes via the git submodule + nested GLM; both need git.
+    check_git
     if [[ "$BELLHOP_VERSION" == "cuda" ]]; then
+        # If we landed on cuda the user explicitly asked for it (auto-detect
+        # only picks cuda when nvcc is present). Refuse to silently downgrade —
+        # the user's intent (GPU build) wouldn't be honoured and the resulting
+        # CPU binary would surprise downstream tooling.
         if ! check_cuda; then
-            echo -e "${YELLOW}CUDA not present; falling back to C++/CPU bellhop (cxx).${NC}"
-            BELLHOP_VERSION="cxx"
+            echo -e "${RED}--bellhop cuda was requested but nvcc is not on PATH.${NC}" >&2
+            echo -e "${YELLOW}Install the CUDA toolkit, or pass --bellhop cxx for the CPU-only C++ build, or --bellhop fortran for the reference Fortran build.${NC}" >&2
+            exit 1
         fi
     fi
     check_bellhopcuda_submodule
@@ -570,7 +641,11 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     cd "$BHC_DIR"
 
     BUILD_DIR="$BHC_DIR/build"
-    rm -rf "$BUILD_DIR"
+    # Default to incremental rebuilds (CMake handles dirty-source dependency
+    # tracking). --force wipes the build dir so cmake reconfigures from scratch.
+    if [ "$FORCE" -eq 1 ]; then
+        rm -rf "$BUILD_DIR"
+    fi
     mkdir -p "$BUILD_DIR"
 
     # BHC_BUILD_EXAMPLES=OFF skips the bellhopcuda/examples/*.cpp programs —
@@ -589,16 +664,33 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
         echo -e "  - CUDA support: OFF (CPU build)"
     fi
 
+    # Run cmake under set +e so a CMake failure (missing CUDA arch, broken GLM
+    # checkout, etc.) doesn't abort the whole installer — OALIB/mpiramS/ramsurf
+    # are independent of bellhopcxx/cuda and should still get a chance to build.
     echo -e "${BLUE}Configuring CMake...${NC}"
+    set +e
     cmake -S "$BHC_DIR" -B "$BUILD_DIR" $CMAKE_OPTIONS
+    BHC_CONFIGURE_RC=$?
 
-    echo -e "${BLUE}Building (this may take a while)...${NC}"
-    NPROC=$(get_nproc)
-    cmake --build "$BUILD_DIR" --config Release -j"$NPROC"
+    if [ $BHC_CONFIGURE_RC -eq 0 ]; then
+        echo -e "${BLUE}Building (this may take a while)...${NC}"
+        NPROC=$(get_nproc)
+        cmake --build "$BUILD_DIR" --config Release -j"$NPROC"
+        BHC_BUILD_RC=$?
+    else
+        BHC_BUILD_RC=1
+    fi
+    set -e
 
-    echo -e "${GREEN}✓ Bellhop (${BELLHOP_VERSION}) build finished${NC}"
-    STATUS_BELLHOPCUDA="ok"
-    NOTE_BELLHOPCUDA="${BELLHOP_VERSION} → $BIN_DIR_BELLHOP"
+    if [ $BHC_CONFIGURE_RC -eq 0 ] && [ $BHC_BUILD_RC -eq 0 ]; then
+        echo -e "${GREEN}✓ Bellhop (${BELLHOP_VERSION}) build finished${NC}"
+        STATUS_BELLHOPCUDA="ok"
+        NOTE_BELLHOPCUDA="${BELLHOP_VERSION} → $BIN_DIR_BELLHOP"
+    else
+        echo -e "${YELLOW}⚠ Bellhop (${BELLHOP_VERSION}) build failed (cmake exit codes: configure=$BHC_CONFIGURE_RC, build=$BHC_BUILD_RC); continuing with other components.${NC}"
+        STATUS_BELLHOPCUDA="failed"
+        NOTE_BELLHOPCUDA="cmake exit codes (configure=$BHC_CONFIGURE_RC, build=$BHC_BUILD_RC)"
+    fi
     echo ""
 fi
 
@@ -628,8 +720,13 @@ else
     OALIB_CFLAGS="-g"
 fi
 
-echo -e "${YELLOW}Cleaning previous builds...${NC}"
-make clean 2>/dev/null || true
+# Default rebuild is incremental — make tracks dependencies. --force wipes
+# everything for a from-scratch build (slower but bypasses any stale .mod /
+# .o issues).
+if [ "$FORCE" -eq 1 ]; then
+    echo -e "${YELLOW}Cleaning previous builds (--force)...${NC}"
+    make clean 2>/dev/null || true
+fi
 
 # OALIB is built serially (no -j). The subdirectory Makefiles (misc/, Kraken/…)
 # declare Fortran module dependencies incompletely — e.g. the rule for
@@ -666,7 +763,14 @@ echo ""
 # -------------------------
 # Build OASES
 # -------------------------
-OASES_URL="http://acoustics.mit.edu/faculty/henrik/LAMSS/pub/Oases/oases.tar.gz"
+OASES_URL="https://acoustics.mit.edu/faculty/henrik/LAMSS/pub/Oases/oases.tar.gz"
+
+# Pin the OASES tarball to a known-good sha256 to defend against supply-chain
+# tampering. After the first verified install run:
+#     sha256sum "$OASES_TMP/oases.tar.gz"
+# and paste the resulting digest below. While empty, install.sh warns once and
+# proceeds without enforcement.
+OASES_EXPECTED_SHA256=""
 
 if [[ "$INSTALL_OASES" != "yes" ]]; then
     echo -e "${YELLOW}=== Skipping OASES (not selected) ===${NC}"
@@ -675,22 +779,67 @@ if [[ "$INSTALL_OASES" != "yes" ]]; then
 else
 echo -e "${BLUE}=== Building OASES ===${NC}"
 if [ ! -d "$OASES_DIR" ]; then
-    # curl is only needed when fetching OASES — check here so a cxx-only build
-    # without OASES selected doesn't require it.
+    # curl + tar are only needed when fetching OASES — check here so a
+    # cxx-only build without OASES selected doesn't require them.
     check_curl
+    check_tar
     echo -e "${BLUE}Downloading OASES from $OASES_URL ...${NC}"
     OASES_TMP="$(mktemp -d)"
-    if curl -fSL "$OASES_URL" -o "$OASES_TMP/oases.tar.gz"; then
-        tar -xzf "$OASES_TMP/oases.tar.gz" -C "$OASES_TMP"
-        # The tarball extracts to Oases_export/; rename to match expected path
-        if [ -d "$OASES_TMP/Oases_export" ]; then
-            mv "$OASES_TMP/Oases_export" "$OASES_DIR"
-            echo -e "${GREEN}✓ OASES source downloaded and placed at $OASES_DIR${NC}"
-        else
-            echo -e "${RED}✗ Unexpected archive structure. Skipping OASES build.${NC}"
-        fi
+    OASES_TARBALL="$OASES_TMP/oases.tar.gz"
+
+    set +e
+    curl -fSL "$OASES_URL" -o "$OASES_TARBALL"
+    OASES_CURL_RC=$?
+    set -e
+
+    if [ $OASES_CURL_RC -ne 0 ]; then
+        echo -e "${RED}✗ Failed to download OASES (curl exit $OASES_CURL_RC). Skipping build.${NC}"
+        STATUS_OASES="failed"
+        NOTE_OASES="download failed (curl exit $OASES_CURL_RC)"
     else
-        echo -e "${RED}✗ Failed to download OASES. Skipping build.${NC}"
+        # Optional supply-chain pin: if a known-good digest is set, refuse to
+        # extract a tarball that doesn't match. We never enforce on an empty
+        # pin (first-install / dev workflow) but we do warn.
+        OASES_SHA_OK=1
+        if [ -n "$OASES_EXPECTED_SHA256" ] && command_exists sha256sum; then
+            OASES_ACTUAL_SHA=$(sha256sum "$OASES_TARBALL" | awk '{print $1}')
+            if [ "$OASES_ACTUAL_SHA" != "$OASES_EXPECTED_SHA256" ]; then
+                echo -e "${RED}✗ OASES tarball checksum mismatch — refusing to extract.${NC}"
+                echo -e "${RED}    expected: ${OASES_EXPECTED_SHA256}${NC}"
+                echo -e "${RED}    got:      ${OASES_ACTUAL_SHA}${NC}"
+                STATUS_OASES="failed"
+                NOTE_OASES="sha256 mismatch (expected ${OASES_EXPECTED_SHA256}, got ${OASES_ACTUAL_SHA})"
+                OASES_SHA_OK=0
+            fi
+        elif [ -z "$OASES_EXPECTED_SHA256" ]; then
+            echo -e "${YELLOW}OASES_EXPECTED_SHA256 is unset; skipping checksum verification. Pin it for supply-chain integrity.${NC}"
+        fi
+
+        if [ "$OASES_SHA_OK" -eq 1 ]; then
+            set +e
+            tar -xzf "$OASES_TARBALL" -C "$OASES_TMP"
+            OASES_TAR_RC=$?
+            set -e
+            if [ $OASES_TAR_RC -ne 0 ]; then
+                echo -e "${RED}✗ tar extraction failed (exit $OASES_TAR_RC). Skipping OASES build.${NC}"
+                STATUS_OASES="failed"
+                NOTE_OASES="tar extract failed (exit $OASES_TAR_RC)"
+            else
+                # Locate the extracted root by finding the Makefile rather
+                # than hard-coding "Oases_export/" — upstream has changed
+                # tarball layouts before and silent fallthrough to a "skipped"
+                # status row was masking real failures.
+                OASES_EXTRACTED_ROOT=$(find "$OASES_TMP" -maxdepth 2 -name Makefile -printf '%h\n' 2>/dev/null | head -n 1)
+                if [ -n "$OASES_EXTRACTED_ROOT" ] && [ -d "$OASES_EXTRACTED_ROOT" ]; then
+                    mv "$OASES_EXTRACTED_ROOT" "$OASES_DIR"
+                    echo -e "${GREEN}✓ OASES source downloaded and placed at $OASES_DIR${NC}"
+                else
+                    echo -e "${RED}✗ Could not locate Makefile in extracted archive (depth ≤ 2). Skipping OASES build.${NC}"
+                    STATUS_OASES="failed"
+                    NOTE_OASES="unexpected archive layout (no Makefile found)"
+                fi
+            fi
+        fi
     fi
     rm -rf "$OASES_TMP"
 fi
@@ -811,8 +960,10 @@ if [ -d "$MPIRAMS_DIR" ]; then
     # Ensure obj/ and mod/ directories exist
     mkdir -p obj mod
 
-    echo -e "${YELLOW}Cleaning previous mpiramS builds...${NC}"
-    make clean 2>/dev/null || true
+    if [ "$FORCE" -eq 1 ]; then
+        echo -e "${YELLOW}Cleaning previous mpiramS builds (--force)...${NC}"
+        make clean 2>/dev/null || true
+    fi
 
     echo -e "${BLUE}Compiling mpiramS (single-processor version, double precision)...${NC}"
     # mpiramS Makefile hardcodes -march=native in FFLAGS and LDFLAGS (lines
@@ -852,8 +1003,10 @@ echo -e "${BLUE}=== Building ramsurf (Collins RAM family) ===${NC}"
 if [ -d "$RAMSURF_DIR" ]; then
     cd "$RAMSURF_DIR"
 
-    echo -e "${YELLOW}Cleaning previous ramsurf builds...${NC}"
-    make clean 2>/dev/null || true
+    if [ "$FORCE" -eq 1 ]; then
+        echo -e "${YELLOW}Cleaning previous ramsurf builds (--force)...${NC}"
+        make clean 2>/dev/null || true
+    fi
 
     echo -e "${BLUE}Compiling rams0.5 (elastic) / ramsurf1.5 (rough surface)...${NC}"
     # Same flag profile as mpiramS: -Ofast plus the shared FORTRAN_ARCH_FLAGS
@@ -952,6 +1105,14 @@ OALIB_EXECUTABLES=(
 # regardless of whether a C++/CUDA variant was also selected.
 OALIB_EXECUTABLES+=("Bellhop/bellhop.exe" "Bellhop/bellhop3d.exe")
 
+# Every uacpy model wrapper depends on one of these binaries; missing any of
+# them silently turns the corresponding wrapper into a runtime error. Treat
+# them all as required and downgrade STATUS_OALIB to "failed" if any is
+# absent — better a loud failure now than a confusing ExecutableNotFoundError
+# at user runtime.
+OALIB_REQUIRED_BASENAMES=(field.exe kraken.exe krakenc.exe bounce.exe scooter.exe sparc.exe bellhop.exe bellhop3d.exe)
+OALIB_MISSING=()
+
 for path in "${OALIB_EXECUTABLES[@]}"; do
     if [ -f "$OALIB_DIR/$path" ]; then
         bn=$(basename "$path")
@@ -963,6 +1124,19 @@ for path in "${OALIB_EXECUTABLES[@]}"; do
         echo -e "  ${YELLOW}Not found (OALIB): $path${NC}"
     fi
 done
+
+for bn in "${OALIB_REQUIRED_BASENAMES[@]}"; do
+    if [ ! -x "$BIN_DIR_OALIB/$bn" ]; then
+        OALIB_MISSING+=("$bn")
+    fi
+done
+
+if [ ${#OALIB_MISSING[@]} -gt 0 ]; then
+    OALIB_MISSING_LIST="$(IFS=,; echo "${OALIB_MISSING[*]}")"
+    echo -e "${RED}✗ OALIB build is missing required binaries: ${OALIB_MISSING_LIST}${NC}"
+    STATUS_OALIB="failed"
+    NOTE_OALIB="missing: ${OALIB_MISSING_LIST} (see /tmp/oalib_build.log)"
+fi
 echo ""
 
 # Install OASES copies were already attempted above (BIN_DIR_OASES)

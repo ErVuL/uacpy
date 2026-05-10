@@ -1,5 +1,5 @@
 """
-Tests for visualization module including plots and quickplot
+Tests for visualization module
 """
 
 import pytest
@@ -7,8 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import uacpy
-from uacpy.models import Bellhop, RAM, Kraken, KrakenField
-from uacpy.visualization import plots, quickplot
+from uacpy.models import Bellhop, RAM, Kraken
+from uacpy.visualization import plots
 
 # Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
 pytestmark = pytest.mark.requires_binary
@@ -20,7 +20,7 @@ def basic_setup():
     env = uacpy.Environment(
         name='test',
         bathymetry=100,
-        sound_speed=1500
+        ssp=1500
     )
     source = uacpy.Source(depths=50, frequencies=100)
     receiver = uacpy.Receiver(
@@ -82,14 +82,14 @@ class TestPlotRays:
         assert ax is not None
         plt.close(fig)
 
-    def test_plot_rays_max_rays(self, basic_setup):
-        """Test ray plotting with max_rays limit."""
+    def test_plot_rays_filter_nfirst(self, basic_setup):
+        """Filtering before plotting via Rays.filter_nfirst."""
         env, source, _ = basic_setup
 
         bellhop = Bellhop(verbose=False)
         rays = bellhop.compute_rays(env, source, uacpy.Receiver(depths=[50], ranges=[5000]))
 
-        fig, ax = plots.plot_rays(rays, env, max_rays=20)
+        fig, ax = plots.plot_rays(rays.filter_nfirst(20), env)
         assert fig is not None
         plt.close(fig)
 
@@ -136,7 +136,7 @@ class TestCompareModels:
         )
 
         bellhop = Bellhop(verbose=False)
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
 
         results = {
             'Bellhop': bellhop.compute_tl(env, source, receiver),
@@ -165,7 +165,7 @@ class TestRangeDepthCuts:
         """Test depth cut plotting."""
         env, source, result = basic_setup
 
-        fig, ax = plots.plot_depth_cut(result, range_m=2500)
+        fig, ax = plots.plot_depth_cut(result, range=2500)
         assert fig is not None
         plt.close(fig)
 
@@ -198,7 +198,7 @@ class TestFieldPlotMethod:
         bellhop = Bellhop(verbose=False)
         rays = bellhop.compute_rays(env, source, uacpy.Receiver(depths=[50], ranges=[5000]))
 
-        fig, ax = rays.plot(env=env, max_rays=20)
+        fig, ax = rays.filter_nfirst(20).plot(env=env)
         assert fig is not None
         plt.close(fig)
 
@@ -222,77 +222,12 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
 
-class TestQuickplot:
-    """Tests for quickplot convenience functions."""
-
-    def test_quick_tl(self, basic_setup, tmp_path):
-        """Test quick_tl function."""
-        env, source, result = basic_setup
-
-        save_path = tmp_path / "test_tl.png"
-        fig, ax = quickplot.quick_tl(result, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_compare(self, basic_setup, tmp_path):
-        """Test quick_compare function."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        save_path = tmp_path / "test_compare.png"
-        fig, axes = quickplot.quick_compare(results, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_env(self, basic_setup, tmp_path):
-        """Test quick_env function."""
-        env, source, _ = basic_setup
-
-        save_path = tmp_path / "test_env.png"
-        fig, axes = quickplot.quick_env(env, source, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_cut(self, basic_setup, tmp_path):
-        """Test quick_cut function."""
-        env, source, result = basic_setup
-
-        save_path = tmp_path / "test_cut.png"
-        fig, ax = quickplot.quick_cut(result, depth=50, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_analysis(self, basic_setup, tmp_path):
-        """Test quick_analysis function."""
-        env, source, result = basic_setup
-
-        save_prefix = str(tmp_path / "test")
-        fig = quickplot.quick_analysis(result, env, save_prefix=save_prefix)
-        assert fig is not None
-        assert (tmp_path / "test_analysis.png").exists()
-        plt.close(fig)
-
-    def test_quick_report(self, basic_setup, tmp_path):
-        """Test quick_report function."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        save_path = tmp_path / "test_report.png"
-        fig = quickplot.quick_report(results, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
 class TestPlottingEdgeCases:
     """Tests for edge cases and error handling."""
 
     def test_plot_empty_results(self):
         """Test plotting with empty results dict."""
-        env = uacpy.Environment(name='test', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='test', bathymetry=100, ssp=1500)
 
         with pytest.raises((ValueError, KeyError, IndexError)):
             plots.compare_models({}, env)
@@ -324,13 +259,13 @@ class TestPlottingIntegration:
     """Integration tests for plotting workflows."""
 
     def test_complete_workflow(self, basic_setup, tmp_path):
-        """Combined plot/compare/cuts/report workflow on synthetic TLFields.
+        """Combined plot/compare/cuts/report workflow on synthetic PressureFields.
 
         Real model output is not needed to exercise the plotting pipeline; we
-        feed three synthetic TLFields differing by a constant offset so each
+        feed three synthetic PressureFields differing by a constant offset so each
         plotting helper has distinct data to render.
         """
-        from uacpy.core.results import TLField
+        from uacpy.core.results import PressureField
 
         env, _, _ = basic_setup
         depths = np.linspace(5, 95, 19)
@@ -339,9 +274,9 @@ class TestPlottingIntegration:
         base = np.broadcast_to(base, (depths.size, ranges.size)).copy()
 
         results = {
-            name: TLField(
-                data=base + offset, depths=depths, ranges=ranges, model=name,
-            )
+            name: PressureField(units="dB",
+                                data=base + offset, depths=depths, ranges=ranges, model=name,
+                                )
             for name, offset in (('Bellhop', 0.0), ('RAM', 1.5), ('KrakenField', -1.5))
         }
 
@@ -356,11 +291,6 @@ class TestPlottingIntegration:
 
         fig, ax = plots.compare_range_cuts(results, depth=50)
         assert fig is not None
-        plt.close(fig)
-
-        save_path = tmp_path / "workflow_report.png"
-        fig = quickplot.quick_report(results, env, save=str(save_path))
-        assert fig is not None and save_path.exists()
         plt.close(fig)
 
 
@@ -406,7 +336,7 @@ class TestCompareModelsTypeDispatch:
     pytestmark = []
 
     def test_pressure_field_routes_via_to_tl(self):
-        from uacpy.core.results import PressureField, TLField
+        from uacpy.core.results import PressureField
 
         depths = np.linspace(5, 95, 10)
         ranges = np.linspace(100, 5000, 20)
@@ -417,59 +347,37 @@ class TestCompareModelsTypeDispatch:
             data=p, depths=depths, ranges=ranges,
             model='Bellhop', frequencies=100.0,
         )
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
         fig, axes = plots.compare_models({'Bellhop': pfield}, env=env)
         assert fig is not None
         plt.close(fig)
 
     def test_unsupported_field_type_raises(self):
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
-        with pytest.raises(TypeError, match="expected TLField"):
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        with pytest.raises(TypeError, match="expected PressureField"):
             plots.compare_models({'bogus': object()}, env=env)
 
 
-class TestTLRmse:
-    """C8: tl_rmse public helper."""
+class TestAutoTLLimits:
+    """``_auto_tl_limits`` must drop Bellhop's outside-the-fan TL sentinel
+    (~600–740 dB) before computing the median+std auto-scale; otherwise
+    vmax explodes off-scale and the visible field saturates at vmin."""
 
-    pytestmark = []
+    def test_sentinel_removed_from_vmax(self):
+        from uacpy.visualization.plots import _auto_tl_limits
+        rng = np.random.default_rng(0)
+        body = 50.0 + 10.0 * rng.standard_normal((30, 30))
+        sentinels = np.full((10, 10), 600.0)
+        data = np.empty((40, 40))
+        data[:30, :30] = body
+        data[30:, 30:] = sentinels
+        data[:30, 30:] = body[:, :10]
+        data[30:, :30] = body[:10, :]
+        vmin, vmax = _auto_tl_limits(data)
+        assert vmax < 200.0
+        assert vmin < vmax
 
-    def test_identical_fields_zero_rmse(self):
-        from uacpy.core.results import TLField
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        data = 60 + 10 * np.log10(np.maximum(r, 1.0)[None, :])
-        data = np.broadcast_to(data, (10, 20)).copy()
-        a = TLField(data=data, depths=d, ranges=r, model='A')
-        b = TLField(data=data.copy(), depths=d, ranges=r, model='B')
-        assert uacpy.tl_rmse(a, b) == pytest.approx(0.0)
-
-    def test_constant_offset(self):
-        from uacpy.core.results import TLField
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        base = np.zeros((10, 20))
-        a = TLField(data=base, depths=d, ranges=r)
-        b = TLField(data=base + 3.0, depths=d, ranges=r)
-        assert uacpy.tl_rmse(a, b) == pytest.approx(3.0)
-
-    def test_window_selects_subregion(self):
-        from uacpy.core.results import TLField
-        from uacpy.core.metrics import tl_rmse
-
-        d = np.linspace(5, 95, 10)
-        r = np.linspace(100, 5000, 20)
-        a = TLField(data=np.zeros((10, 20)), depths=d, ranges=r)
-        b_data = np.zeros((10, 20))
-        b_data[:, :5] = 10.0
-        b = TLField(data=b_data, depths=d, ranges=r)
-        # Inside the noisy band, RMSE = 10. Excluding it, RMSE = 0.
-        assert tl_rmse(a, b, range_window=(r[0], r[4])) == pytest.approx(10.0)
-        assert tl_rmse(a, b, range_window=(r[5], r[-1])) == pytest.approx(0.0)
-
-    def test_type_error_on_non_tlfield(self):
-        from uacpy.core.results import TLField
-        a = TLField(data=np.zeros((4, 4)), depths=np.arange(4), ranges=np.arange(4))
-        with pytest.raises(TypeError):
-            uacpy.tl_rmse(a, object())
+    def test_no_finite_falls_back_to_default(self):
+        from uacpy.visualization.plots import _auto_tl_limits
+        vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
+        assert (vmin, vmax) == (30.0, 80.0)

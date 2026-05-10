@@ -17,24 +17,28 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 
-import uacpy
-from uacpy.core.environment import BoundaryProperties
-from uacpy.models import Bellhop, RunMode
+import uacpy  # noqa: E402
+from uacpy.core.environment import BoundaryProperties  # noqa: E402
+from uacpy.models import Bellhop, RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 24: Synthesize a time series from H(f)")
+    print("═" * 80)
+
     bottom = BoundaryProperties(
         acoustic_type='half-space', sound_speed=1700.0,
         density=1.5, attenuation=0.5,
     )
     env = uacpy.Environment(
-        name='Pekeris', bathymetry=100.0, sound_speed=1500.0, bottom=bottom,
+        name='Pekeris', bathymetry=100.0, ssp=1500.0, bottom=bottom,
     )
     f_center = 200.0
     source = uacpy.Source(depths=20.0, frequencies=f_center)
@@ -68,14 +72,13 @@ def main():
     # 3. Synthesize p(t) = IFFT(H · S)
     ts = H.synthesize_time_series(p_src, sample_rate=fs)
     print(f"TimeSeriesField shape: {ts.data.shape}, "
-          f"dt={ts.metadata['dt']*1e3:.3f} ms, nt={ts.n_t}")
+          f"dt={ts.dt*1e3:.3f} ms, nt={ts.n_t}")
 
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
-    H_trace = H.data[0, 0]
-    TL_dB = -20.0 * np.log10(np.maximum(np.abs(H_trace), 1e-12))
-    axes[0].plot(H.frequencies, TL_dB, 'C0-', lw=1.2)
+    tl_at_pt = H.at(depth=target_depth_m, range=target_range_m).to_tl()
+    axes[0].plot(tl_at_pt.frequencies, tl_at_pt.tl, 'C0-', lw=1.2)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Frequency (Hz)')
     axes[0].set_ylabel('TL(f)  (dB)')
@@ -85,7 +88,7 @@ def main():
     )
     axes[0].grid(True, alpha=0.3)
 
-    p_trace = ts.data[0, 0]
+    p_trace = ts.at(depth=target_depth_m, range=target_range_m).data
     axes[1].plot(ts.time * 1e3, p_trace, 'C1-', lw=1.0)
     axes[1].set_xlabel('Time (ms)')
     axes[1].set_ylabel('p(t)')
@@ -95,7 +98,9 @@ def main():
     fig.tight_layout()
     out = OUTPUT_DIR / 'example_24_synthesize_time_series.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
-    print(f"Saved: {out}")
+    print(f"  ✓ Saved: {out}")
+
+    print("\n✓ Example 24 complete\n")
     return 0
 
 

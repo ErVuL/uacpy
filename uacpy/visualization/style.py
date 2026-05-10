@@ -226,8 +226,8 @@ def get_cmap_for_field(field_type: str) -> str:
 
 
 def format_axes_professional(ax, title: Optional[str] = None,
-                            xlabel: Optional[str] = None,
-                            ylabel: Optional[str] = None):
+                             xlabel: Optional[str] = None,
+                             ylabel: Optional[str] = None):
     """
     Apply professional formatting to a single axes.
 
@@ -290,5 +290,3 @@ def create_professional_colorbar(fig, im, ax, label: str = ''):
     cbar.outline.set_linewidth(1.0)
 
     return cbar
-
-

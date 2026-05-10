@@ -79,16 +79,33 @@ What `install.sh` builds:
 
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
+| `python3`                | Driving `install.sh` and importing uacpy (always) |
 | `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
+| `tar`                    | Submodule unpacking + OASES archive (always)      |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
-| CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`)            |
-| `curl`, `tar`            | OASES download (`--oases yes`)                    |
+| CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`) — **required** when `--bellhop cuda` is passed; the installer hard-errors if `nvcc` is absent (no silent downgrade to cxx) |
+| `curl`                   | OASES archive download (`--oases yes`)            |
 
 `install.sh` **verifies** these are present and aborts with a clear
 message if anything is missing — it does *not* install system packages
 itself. Provision the toolchain once for your platform, then run the
 build.
+
+**Continuous integration** runs on **Linux (`ubuntu-latest`), Python 3.12,
+`--bellhop cxx`, `--oases yes`** — see
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). macOS, Windows/WSL,
+Python 3.10/3.11/3.13, the CUDA Bellhop build, the Fortran-only Bellhop
+fallback, and the no-OASES partial install are all **supported
+configurations exercised by users in practice but not validated by CI**.
+Patches that touch any of those paths should be tested locally before
+submission.
+
+> **OASES supply-chain note.** `install.sh` downloads OASES over HTTPS from
+> MIT and supports an optional sha256 pin via the `OASES_EXPECTED_SHA256`
+> variable in the script (currently empty). Once you have a verified-good
+> install on your platform, pin that hash locally for reproducibility and
+> tamper-detection on subsequent rebuilds.
 
 ---
 
@@ -134,7 +151,7 @@ pip install -e .
 | `--bellhop cxx`           | Also build C++ Bellhop (CPU)                                |
 | `--bellhop cuda`          | Also build CUDA Bellhop (GPU, requires `nvcc`)              |
 | `--oases yes` / `no`      | Download + build OASES (or skip the prompt)                 |
-| `--force`                 | Rebuild even if binaries already exist                      |
+| `--force`                 | Skip incremental builds; do a full clean rebuild of every selected component |
 
 ---
 
@@ -284,8 +301,8 @@ rm -rf uacpy
 
 ## ▶ Simplest example
 
-A minimal "hello world": transmission loss in a 100 m Pekeris waveguide with
-Bellhop, at 1000 Hz, out to 5 km.
+A Pekeris waveguide — isovelocity water over a fluid half-space — at
+1 kHz, plotted as a transmission-loss field.
 
 ``` python
 import numpy as np
@@ -300,7 +317,7 @@ from uacpy.visualization.plots import plot_transmission_loss
 env = uacpy.Environment(
     name="Pekeris Waveguide",
     bathymetry=100.0,
-    sound_speed=1500.0,
+    ssp=1500.0,
     bottom=BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1600.0,
@@ -331,7 +348,7 @@ plt.show()
 ```
 
 <p align="center">
-  <img src="./docs/bellhop_tl_example.png" alt="Bellhop TL field — Pekeris waveguide, 1 kHz" width="720">
+  <img src="./docs/readme_tl.png" alt="Pekeris waveguide TL field at 1 kHz" width="720">
 </p>
 
 ## 📚 Documentation & Examples
@@ -341,8 +358,8 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 24 example scripts numbered
-sequentially (`example_01_*.py` through `example_24_*.py`); the full
+Inside `uacpy/uacpy/examples/` you will find 25 example scripts numbered
+sequentially (`example_01_*.py` through `example_25_*.py`); the full
 suite runs in a few minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
@@ -350,6 +367,18 @@ of each one.
 ## 🧪 Testing
 
 UACPY uses **pytest** with custom markers for categorizing tests.
+
+`pytest` and `pytest-xdist` are no longer pulled in by the runtime
+dependency set — install the `test` extra to get them, or the `dev` extra
+for the additional formatting / linting / coverage tooling:
+
+``` bash
+# For running the test suite
+pip install -e ".[test]"
+
+# For development (test deps + black, flake8, pytest-cov)
+pip install -e ".[dev]"
+```
 
 ### Run all tests
 
@@ -409,7 +438,7 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 - **🔬 Native model re‑validation** — every in‑tree modification is potential silent numerical drift. Diff mpiramS against unmodified upstream; confirm the KrakenField OOB fix; validate the UACPY RAM TL formula; run cross‑model regressions (Bellhop / Kraken / Scooter / RAM / OASES agree within tolerance).
 - **🐍 Python‑side review** — dead / hallucinated code paths, doc ↔ code drift, clean error handling, `subprocess` + file‑I/O security, magic numbers traced to references.
 - **📊 Visualization review** — axes / units / orientation, colormap and dynamic‑range defaults, overlay coordinate frames, ray & mode ordering conventions, honest interpolation in comparison helpers, rcParams leakage.
-- **🧪 Test suite audit** — separate smoke from validation; add reference‑case regressions (ASA 1990, Pekeris, Munk, Jensen–Kuperman); audit marker application; verify every `uacpy/examples/` script runs.
+- **🧪 Test suite audit** — separate smoke from validation; add reference‑case regressions (Pekeris, Munk, canonical waveguides); audit marker application; verify every `uacpy/examples/` script runs.
 - **📦 Build, install, packaging** — reproduce installs on clean Linux VM / macOS / WSL; keep `install.sh` ↔ `install.bat` in sync; confirm the OASES URL + archive hash; pin a known‑good numpy / scipy / matplotlib set.
 - **🔁 CI / CD** — a minimal GitHub Actions workflow runs on every push to `main` and every PR: builds the native binaries (`oalib`, `bellhop-cxx`, `mpiramS`, `ramsurf`, downloads + builds OASES), runs `flake8` (real bugs only) and the full `pytest` suite on Python 3.12 / Ubuntu (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Still wanted before a tagged release: nightly full suite with binaries, macOS / WSL matrix, release automation, benchmark regression job with TL / arrival tolerances.
 - **🌍 Community & process** — issue template for benchmark deviations; targeted per‑model reviews by domain experts.
@@ -473,9 +502,8 @@ Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit
 
 Mandar Chitre (Acoustic Research Lab, National University of Singapore) --- https://github.com/org-arl/arlpy
 
-Utility functions adapted into `uacpy/core/acoustics.py` and
-`uacpy/acoustic_signal/advanced.py` preserve Mandar Chitre's 2016
-copyright header and cite arlpy as the source.
+Utility functions adapted into `uacpy/core/acoustics.py` preserve Mandar
+Chitre's 2016 copyright header and cite arlpy as the source.
 
 
 ## 📄 Licensing
@@ -491,7 +519,7 @@ when redistributing or modifying UACPY or its outputs.
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
-| arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
+| arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 

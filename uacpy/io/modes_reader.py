@@ -8,9 +8,9 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 """
 
 import numpy as np
-import struct
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
+
+from uacpy.core.exceptions import ModelExecutionError
 
 
 def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
@@ -70,15 +70,10 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     phi_full = modes_dict["phi"]
     z = modes_dict["z"]
     Mater = modes_dict.get("Mater", [["ACOUSTIC"]])
-
-    # Step through each medium
     for medium in range(Nmedia):
         for ii in range(len(z)):
-            # Jump out if modes are not tabulated in elastic media
             if k >= phi_full.shape[0]:
                 break
-
-            # Get material type for this medium
             if medium < len(Mater):
                 material = (
                     Mater[medium].strip()
@@ -89,13 +84,11 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
                 material = "ACOUSTIC"
 
             if material == "ACOUSTIC":
-                # Acoustic: single component (pressure)
                 if jj < len(z):
                     phi.append(phi_full[k, :])
                 k += 1
 
             elif material == "ELASTIC":
-                # Elastic: 4 components
                 if jj < len(z):
                     if comp == "H":
                         phi.append(phi_full[k, :])
@@ -209,72 +202,44 @@ def read_modes_asc(
     """
     try:
         with open(filename, "r") as fid:
-            # Read record length (not used in ASCII)
-            lrecl = int(fid.readline().strip())
-
-            # Read title
+            int(fid.readline().strip())
             pltitl = fid.readline().strip()
-
-            # Read parameters
             params_line = fid.readline().strip().split()
             freq = float(params_line[0])
             Nmedia = int(params_line[1])
             ntot = int(params_line[2])
             nmat = int(params_line[3])
             M = int(params_line[4])  # total number of modes
-
-            # Skip medium property lines
             for _ in range(Nmedia):
                 fid.readline()
-
-            # Skip halfspace lines and blank line
             fid.readline()  # top halfspace
             fid.readline()  # bottom halfspace
             fid.readline()  # blank line
-
-            # Read depth vector
             z_line = fid.readline().strip().split()
             z = np.array([float(x) for x in z_line])
-
-            # Read wavenumbers (real and imaginary parts)
             k_real_line = fid.readline().strip().split()
             k_imag_line = fid.readline().strip().split()
             k_real = np.array([float(x) for x in k_real_line])
             k_imag = np.array([float(x) for x in k_imag_line])
             k_all = k_real + 1j * k_imag
-
-            # Determine which modes to read
             if modes is None:
                 modes_to_read = list(range(1, M + 1))  # 1-indexed
             elif isinstance(modes, (int, np.integer)):
                 modes_to_read = [modes]
             else:
                 modes_to_read = list(modes)
-
-            # Filter out invalid mode numbers
             modes_to_read = [m for m in modes_to_read if 1 <= m <= M]
-
-            # Select requested wavenumbers
             k_selected = k_all[[m - 1 for m in modes_to_read]]  # Convert to 0-indexed
-
-            # Read mode shapes
             phi = np.zeros((ntot, len(modes_to_read)), dtype=complex)
 
             for mode_num in range(1, M + 1):
-                # Skip blank line before each mode
                 fid.readline()
-
-                # Read real parts
                 phi_real_line = fid.readline().strip().split()
                 phi_real = np.array([float(x) for x in phi_real_line])
-
-                # Read imaginary parts
                 phi_imag_line = fid.readline().strip().split()
                 phi_imag = np.array([float(x) for x in phi_imag_line])
 
                 phi_mode = phi_real + 1j * phi_imag
-
-                # Store if this mode is in the list
                 if mode_num in modes_to_read:
                     idx = modes_to_read.index(mode_num)
                     phi[:, idx] = phi_mode
@@ -282,9 +247,10 @@ def read_modes_asc(
     except FileNotFoundError:
         raise FileNotFoundError(f"Mode file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading mode file {filename}: {e}") from e
-
-    # Return as dictionary
+        raise ModelExecutionError(
+            'Kraken', return_code=0, stdout=None,
+            stderr=f"Error reading mode file {filename}: {e}",
+        ) from e
     return {
         "pltitl": pltitl,
         "freq": freq,
@@ -372,15 +338,11 @@ def read_modes_bin(
     >>> modes = read_modes_bin('pekeris', freq=100.0, modes=[1, 2, 3])
     >>> print(f"Mode shapes: {modes['phi'].shape}")
     """
-    # Add extension if not present
     if not filename.endswith(".moA"):
         filename = filename + ".moA"
 
     with open(filename, "rb") as fid:
-        # Read record length (in bytes, converted from Fortran words)
         lrecl = 4 * np.fromfile(fid, dtype=np.int32, count=1)[0]
-
-        # Read header record (rec 0)
         fid.seek(4, 0)  # Skip 4 bytes
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
@@ -392,8 +354,6 @@ def read_modes_bin(
 
         if Ntot < 0:
             raise ValueError("Invalid mode file: Ntot < 0")
-
-        # Read N and Mater (rec 1)
         fid.seek(lrecl, 0)
         N = []
         Mater = []
@@ -402,28 +362,18 @@ def read_modes_bin(
             N.append(n_val)
             mater_bytes = fid.read(8)
             Mater.append(mater_bytes.decode("ascii", errors="ignore").strip())
-
-        # Read depth and density (rec 2)
         fid.seek(2 * lrecl, 0)
         bulk = np.fromfile(fid, dtype=np.float32, count=2 * Nmedia).reshape(
             (2, Nmedia), order="F"
         )
         depth = bulk[0, :]
         rho = bulk[1, :]
-
-        # Read frequencies (rec 3)
         fid.seek(3 * lrecl, 0)
         freqVec = np.fromfile(fid, dtype=np.float64, count=Nfreq)
-
-        # Read z (rec 4)
         fid.seek(4 * lrecl, 0)
         z = np.fromfile(fid, dtype=np.float32, count=Ntot)
-
-        # Find closest frequency
         freq_diff = np.abs(freqVec - freq)
         freq_index = np.argmin(freq_diff)
-
-        # Navigate to the correct frequency
         # Initialize iRecProfile to 5 (matches MATLAB after iRecProfile += 4)
         # Records 0-3: Header, N/Mater, depth/rho, freqVec
         # Record 4: z vector
@@ -437,8 +387,6 @@ def read_modes_bin(
                 # Advance to next frequency
                 # Formula from MATLAB line 113: iRecProfile + 3 + M + floor(4*(2*M-1)/lrecl)
                 iRecProfile = iRecProfile + 3 + M + (4 * (2 * M - 1)) // lrecl
-
-        # Determine which modes to read
         if modes is None:
             modes = np.arange(1, M + 1)
         elif isinstance(modes, int):
@@ -446,11 +394,7 @@ def read_modes_bin(
         else:
             modes = np.array(modes)
             modes = modes[modes <= M]
-
-        # Read top and bottom halfspace info (rec iRecProfile + 2)
         fid.seek((iRecProfile + 2) * lrecl, 0)
-
-        # Top boundary
         Top = {}
         Top["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
         cp_data = np.fromfile(fid, dtype=np.float32, count=2)
@@ -459,8 +403,6 @@ def read_modes_bin(
         Top["cs"] = complex(cs_data[0], cs_data[1])
         Top["rho"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
         Top["depth"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
-
-        # Bottom boundary
         Bot = {}
         Bot["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
         cp_data = np.fromfile(fid, dtype=np.float32, count=2)
@@ -469,8 +411,6 @@ def read_modes_bin(
         Bot["cs"] = complex(cs_data[0], cs_data[1])
         Bot["rho"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
         Bot["depth"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
-
-        # Read eigenfunctions
         if M == 0:
             phi = np.array([])
             k = np.array([])
@@ -484,8 +424,6 @@ def read_modes_bin(
                     (2, NMat), order="F"
                 )
                 phi[:, ii] = phi_data[0, :] + 1j * phi_data[1, :]
-
-            # Read wavenumbers
             rec = iRecProfile + 2 + M
             fid.seek(rec * lrecl, 0)
             k_data = np.fromfile(fid, dtype=np.float32, count=2 * M).reshape(
@@ -570,9 +508,7 @@ def read_modes(
     >>> modes = read_modes('test.moa')
     """
     import os
-    from ..utils import pekeris_root  # Import for halfspace calculations
-
-    # Parse filename
+    from uacpy.core.acoustics import pekeris_root
     fileroot, ext = os.path.splitext(filename)
 
     if not ext:
@@ -585,10 +521,7 @@ def read_modes(
             ext = ".mod.mat"
 
     filename = fileroot + ext
-
-    # Read mode data based on extension
     if ext == ".mod":
-        # Binary format
         if modes is None:
             Modes = read_modes_bin(filename, freq)
         else:
@@ -607,7 +540,6 @@ def read_modes(
                 Modes[key] = mat_data[key]
 
     elif ext == ".moa":
-        # ASCII format
         if modes is None:
             Modes = read_modes_asc(filename)
         else:
@@ -615,37 +547,26 @@ def read_modes(
 
     else:
         raise ValueError(f"read_modes: Unrecognized file extension {ext}")
-
-    # Find frequency index closest to requested frequency
     freq_diff = np.abs(Modes["freqVec"] - freq)
     freq_index = np.argmin(freq_diff)
-
-    # Calculate wavenumbers in halfspaces (if there are any modes)
     if Modes["M"] != 0:
-        # Top halfspace
         if Modes["Top"]["BC"] == "A":
-            # Acoustic halfspace
             k_top = 2.0 * np.pi * Modes["freqVec"][0] / Modes["Top"]["cp"]
             Modes["Top"]["k2"] = k_top**2
             gamma2 = Modes["k"] ** 2 - Modes["Top"]["k2"]
             Modes["Top"]["gamma"] = pekeris_root(gamma2)
             Modes["Top"]["phi"] = Modes["phi"][0, :]
         else:
-            # Vacuum or rigid boundary
             Modes["Top"]["rho"] = 1.0
             Modes["Top"]["gamma"] = np.zeros_like(Modes["k"])
             Modes["Top"]["phi"] = np.zeros_like(Modes["phi"][0, :])
-
-        # Bottom halfspace
         if Modes["Bot"]["BC"] == "A":
-            # Acoustic halfspace
             k_bot = 2.0 * np.pi * Modes["freqVec"][freq_index] / Modes["Bot"]["cp"]
             Modes["Bot"]["k2"] = k_bot**2
             gamma2 = Modes["k"] ** 2 - Modes["Bot"]["k2"]
             Modes["Bot"]["gamma"] = pekeris_root(gamma2)
             Modes["Bot"]["phi"] = Modes["phi"][-1, :]
         else:
-            # Vacuum or rigid boundary
             Modes["Bot"]["rho"] = 1.0
             Modes["Bot"]["gamma"] = np.zeros_like(Modes["k"])
             Modes["Bot"]["phi"] = np.zeros_like(Modes["phi"][-1, :])

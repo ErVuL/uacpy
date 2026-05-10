@@ -16,12 +16,11 @@ approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
 * Searches for the coarsest ``(Δx, Δz)`` whose total error stays under a
   user accuracy budget ``ε`` over ``n_steps = ⌈x_max/Δx⌉`` range steps.
 
-``c₀`` is treated as a user input (it has physical meaning — the
-reference water sound speed, conventionally 1500 m/s) and the
-optimizer picks ``(Δx, Δz)`` against that value. Users who want the
-performance-optimal ``c₀`` from Eq. 15 can call :func:`optimal_c0`
-explicitly and pass the result back in via the ``c0`` argument; we
-deliberately do not change ``c₀`` behind the user's back.
+``c₀`` is a user input (it has physical meaning — the reference water
+sound speed, conventionally 1500 m/s); the optimizer picks
+``(Δx, Δz)`` against that value. For the performance-optimal ``c₀``
+from Eq. 15, call :func:`optimal_c0` explicitly and pass the result
+back in via the ``c0`` argument.
 
 The Padé coefficients are derived numerically from the Taylor series of
 ``f(ξ) = exp(ikΔx(√(1+ξ)−1))`` so the same code handles any order

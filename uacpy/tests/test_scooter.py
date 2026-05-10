@@ -3,15 +3,14 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import TransferFunction, TimeSeriesField
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import Scooter
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestScooterBasic:
     """Basic tests for Scooter model (wavenumber integration)."""
@@ -22,7 +21,7 @@ class TestScooterBasic:
         env = Environment(
             name="scooter_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -44,7 +43,7 @@ class TestScooterBroadband:
     @pytest.mark.slow
     def test_scooter_broadband_returns_transfer_function(self):
         """Scooter BROADBAND returns a populated H(f) TransferFunction."""
-        env = Environment(name="sc_bb", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_bb", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
@@ -67,7 +66,7 @@ class TestScooterBroadband:
     @pytest.mark.slow
     def test_scooter_time_series_returns_time_series_field(self):
         """Scooter TIME_SERIES with a tonal waveform returns TimeSeriesField."""
-        env = Environment(name="sc_ts", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),
@@ -96,14 +95,14 @@ class TestScooterBroadband:
 
     def test_scooter_time_series_requires_waveform(self):
         """Scooter TIME_SERIES without source_waveform must raise."""
-        env = Environment(name="sc_ts_err", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="sc_ts_err", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),
             ranges=np.array([2000.0]),
         )
         scooter = Scooter(verbose=False)
-        with pytest.raises(ValueError, match="source_waveform"):
+        with pytest.raises(ConfigurationError, match="source_waveform"):
             scooter.run(
                 env, source, receiver,
                 run_mode=RunMode.TIME_SERIES,

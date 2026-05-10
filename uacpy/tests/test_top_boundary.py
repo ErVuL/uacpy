@@ -154,7 +154,7 @@ def test_bellhop_top_bc_changes_tl():
         _basic_env(BoundaryProperties(acoustic_type='vacuum')), src, rcv,
     )
     tl_ice = bellhop.compute_tl(_basic_env(_ice()), src, rcv)
-    diff = np.abs(tl_vac.data - tl_ice.data)
+    diff = np.abs(tl_vac.tl - tl_ice.tl)
     finite = np.isfinite(diff)
     assert finite.any() and diff[finite].max() >= 1.0, (
         "TL identical for vacuum vs ice surface — env.surface may not "

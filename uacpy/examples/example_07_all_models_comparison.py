@@ -37,23 +37,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
-from uacpy.visualization.plots import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_ssp_2d,
     plot_rd_bottom,
     plot_environment_advanced,
     compare_models,
 )
 
+
 def main():
-    print("=" * 70)
-    print("ADVANCED ALL-MODELS COMPARISON")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 07: All-models comparison")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # CREATE 2D RANGE-DEPENDENT SSP
@@ -120,8 +121,8 @@ def main():
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
-            interp='pchip',
-        ),
+                                      interp='pchip',
+                                      ),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )
@@ -149,9 +150,8 @@ def main():
     print("\n[1/5] Bellhop (Gaussian beams + Thorp attenuation)...")
     try:
         bellhop = Bellhop(verbose=False, volume_attenuation='T')
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['Bellhop'] = bellhop.compute_tl(env_approx, source, receiver)
-        print("  ✓ Success (range-independent approximation)")
+        results['Bellhop'] = bellhop.compute_tl(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
 
@@ -178,25 +178,20 @@ def main():
     # Scooter with volume attenuation
     print("[4/5] Scooter (volume attenuation)...")
     try:
-        scooter = Scooter(verbose=False)
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['Scooter'] = scooter.run(env_approx, source, receiver,
-                                        volume_attenuation='T')
-        print("  ✓ Success (range-independent approximation)")
+        scooter = Scooter(verbose=False, volume_attenuation='T')
+        results['Scooter'] = scooter.run(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
 
     # OAST with volume attenuation
     print("[5/5] OAST (wavenumber integration)...")
     try:
-        oast = OAST(verbose=False)
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['OAST'] = oast.run(env_approx, source, receiver,
-                                   volume_attenuation='T')
-        print("  ✓ Success (range-independent approximation)")
+        oast = OAST(verbose=False, volume_attenuation='T')
+        results['OAST'] = oast.run(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
-
 
     # ═══════════════════════════════════════════════════════════════════════
     # VISUALIZATION
@@ -256,16 +251,13 @@ def main():
         print(f"\nModels run: {len(results)}")
         for model_name, result in results.items():
             if result is not None:
-                tl_min = result.data.min()
-                tl_max = result.data.max()
-                tl_mean = result.data.mean()
+                tl_min = result.tl.min()
+                tl_max = result.tl.max()
+                tl_mean = result.tl.mean()
                 print(f"  {model_name:12s}: TL range [{tl_min:5.1f}, {tl_max:5.1f}] dB, mean = {tl_mean:5.1f} dB")
             else:
                 print(f"  {model_name:12s}: Failed")
 
-    print("\n" + "=" * 70)
-    print("ALL-MODELS ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated across all models:")
     print("  ✓ 2D range-dependent SSP (thermal front)")
     print("  ✓ Range-dependent bottom properties")
@@ -280,7 +272,10 @@ def main():
     print("  ✓ jet_r colormap (blue=good, red=poor) - AT standard")
     print("\n  All models tested with realistic, complex environment!")
 
+    print("\n✓ Example 07 complete\n")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

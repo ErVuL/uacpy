@@ -5,28 +5,20 @@ Tests for all UACPY propagation models
 import pytest
 
 import numpy as np
-import uacpy
 from uacpy.models import (
-    Bellhop, BellhopCUDA, RAM, Kraken, KrakenField,
-    Bounce, Scooter, SPARC,
+    Bellhop, RAM, Kraken, KrakenField,
+    Bounce, Scooter,
 )
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 
 @pytest.mark.requires_binary
 class TestBellhop:
-    """Tests for Bellhop model."""
-
-    def test_bellhop_compute_tl(self, simple_env, source, receiver_small):
-        """Test Bellhop TL computation."""
-        bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-
-        assert result.field_type == 'tl'
-        assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
-        assert np.all(np.isfinite(result.data))
-        assert np.all(result.data > 0)  # TL should be positive
+    """Tests for Bellhop model. Smoke TL coverage on ``simple_env`` lives
+    in ``test_simplified_api.TestComputeAPI`` and ``test_bellhop`` —
+    only model-specific scenarios live here."""
 
     def test_bellhop_range_dependent(self, range_dependent_env, source, receiver_small):
         """Test Bellhop with range-dependent environment."""
@@ -69,15 +61,15 @@ class TestKraken:
         modes = kraken.compute_modes(env=simple_env, source=source)
 
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert 'phi' in modes.metadata
-        assert len(modes.metadata['k']) > 0
+        assert modes.k is not None
+        assert modes.phi is not None
+        assert len(modes.k) > 0
 
     def test_kraken_n_modes_clips_output(self, simple_env, source):
         """``n_modes`` caps the number of returned modes from Kraken."""
         kraken = Kraken(verbose=False)
         capped = kraken.compute_modes(env=simple_env, source=source, n_modes=3)
-        assert len(capped.metadata['k']) <= 3
+        assert len(capped.k) <= 3
         assert capped.metadata.get('n_modes_requested') == 3
 
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
@@ -85,7 +77,7 @@ class TestKraken:
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source)
 
-        k = modes.metadata['k']
+        k = modes.k
         assert len(k) > 0
         # Real part of wavenumber should be positive for propagating modes
         # Some modes may have k≈0 (non-propagating), which is valid
@@ -116,9 +108,10 @@ class TestBounce:
     def test_bounce_compute_reflection_coefficient(self, simple_env, source, receiver_small, tmp_path):
         """Test Bounce reflection coefficient computation.
 
-        Uses ``output_dir`` so the .brc/.irc files survive cleanup.
+        Uses ``work_dir`` (with Bounce's default ``cleanup=False``) so
+        the .brc/.irc files survive past the call for the consumer model.
         """
-        bounce = Bounce(verbose=False)
+        bounce = Bounce(verbose=False, work_dir=tmp_path)
 
         # Bounce needs an environment with elastic bottom properties
         from uacpy.core import Environment, BoundaryProperties
@@ -133,7 +126,7 @@ class TestBounce:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom
         )
 
@@ -141,23 +134,22 @@ class TestBounce:
             env=env_elastic,
             source=source,
             receiver=receiver_small,
-            output_dir=tmp_path,
         )
 
         assert result.field_type == 'reflection_coefficients'
         assert 'brc_file' in result.metadata
         assert result.metadata['brc_file'] is not None
 
-        # Check that .brc file persisted via output_dir
+        # Check that .brc file persists in work_dir
         import os
         brc_file = result.metadata['brc_file']
         assert os.path.exists(brc_file), f"BRC file should exist: {brc_file}"
 
         # Check reflection coefficient data
-        assert 'R' in result.metadata
-        assert 'theta' in result.metadata
-        assert len(result.metadata['R']) > 0
-        assert len(result.metadata['theta']) > 0
+        assert result.R is not None
+        assert result.theta is not None
+        assert len(result.R) > 0
+        assert len(result.theta) > 0
 
     def test_bounce_compute_reflection_helper(self, simple_env, source, receiver_small, tmp_path):
         """Verify the convenience method ``Bounce.compute_reflection`` runs."""
@@ -170,13 +162,12 @@ class TestBounce:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom,
         )
-        bounce = Bounce(verbose=False)
+        bounce = Bounce(verbose=False, work_dir=tmp_path)
         result = bounce.compute_reflection(
             env=env_elastic, source=source, receiver=receiver_small,
-            output_dir=tmp_path,
         )
         assert result.field_type == 'reflection_coefficients'
 
@@ -187,7 +178,7 @@ class TestRAM:
 
     def test_ram_compute_tl(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         assert result.field_type == 'tl'
@@ -197,7 +188,7 @@ class TestRAM:
 
     def test_ram_broadband_mode(self, simple_env, source):
         """RAM BROADBAND returns the H(f) transfer function."""
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([5000.0])
@@ -216,12 +207,12 @@ class TestRAM:
 
     def test_ram_time_series_requires_waveform(self, simple_env, source):
         """TIME_SERIES without source_waveform must raise."""
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(
             depths=np.array([50.0]),
             ranges=np.array([5000.0])
         )
-        with pytest.raises(ValueError, match="source_waveform"):
+        with pytest.raises(ConfigurationError, match="source_waveform"):
             ram.run(simple_env, source, receiver,
                     run_mode=RunMode.TIME_SERIES)
 
@@ -229,7 +220,7 @@ class TestRAM:
     def test_ram_compute_time_series_helper(self, simple_env, source):
         """Verify the convenience method ``RAM.compute_time_series`` runs."""
         from uacpy.core.results import TimeSeriesField
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
         fs = 4000.0
         nt = 64
@@ -255,24 +246,8 @@ class TestRAM:
 class TestModelConsistency:
     """Tests for consistency between different models."""
 
-    @pytest.mark.slow
-    def test_tl_consistency_bellhop_kraken(self, simple_env, source, receiver_small):
-        """Test TL consistency between Bellhop and KrakenField."""
-        bellhop = Bellhop(verbose=False)
-        krakenfield = KrakenField(verbose=False)
-
-        result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-        result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-
-        # Results should be broadly similar (within ~20 dB in most places)
-        # This is a rough consistency check, not an exact match
-        valid_bellhop = result_bellhop.data[np.isfinite(result_bellhop.data)]
-        valid_kraken = result_kraken.data[np.isfinite(result_kraken.data)]
-
-        if len(valid_bellhop) > 0 and len(valid_kraken) > 0:
-            # Check that mean TL is in similar range
-            mean_diff = abs(np.mean(valid_bellhop) - np.mean(valid_kraken))
-            assert mean_diff < 30, f"Mean TL difference too large: {mean_diff:.1f} dB"
+    # Bellhop ↔ KrakenField TL agreement is covered with tighter
+    # tolerance in test_cross_model_agreement.py.
 
     @pytest.mark.slow
     @pytest.mark.parametrize(
@@ -321,13 +296,12 @@ class TestModelConsistency:
         env_elastic = Environment(
             name="elastic_test",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_elastic,
         )
-        bounce = Bounce(verbose=False)
+        bounce = Bounce(verbose=False, work_dir=tmp_path)
         bounce_result = bounce.run(
             env=env_elastic, source=source, receiver=receiver_small,
-            output_dir=tmp_path,
         )
         assert 'brc_file' in bounce_result.metadata
         brc_file = bounce_result.metadata['brc_file']
@@ -341,12 +315,12 @@ class TestModelConsistency:
             density=1.8,
             reflection_cmin=bounce_result.metadata['c_low'],
             reflection_cmax=bounce_result.metadata['c_high'],
-            reflection_rmax_m=bounce_result.metadata['rmax_m'],
+            reflection_rmax=bounce_result.metadata['rmax'],
         )
         env_with_rc = Environment(
             name="test_with_rc",
             bathymetry=simple_env.depth,
-            sound_speed=float(simple_env.ssp.data[0, 0]),
+            ssp=float(simple_env.ssp.data[0, 0]),
             bottom=bottom_with_rc,
         )
 
@@ -355,9 +329,9 @@ class TestModelConsistency:
                 env=env_with_rc, source=source, receiver=receiver_small,
             )
             assert modes.field_type == 'modes'
-            assert 'k' in modes.metadata and len(modes.metadata['k']) > 0
-            assert modes.metadata['phi'].shape[1] == len(modes.metadata['k'])
-            assert np.all(np.isfinite(modes.metadata['k']))
+            assert modes.k is not None and len(modes.k) > 0
+            assert modes.phi.shape[1] == len(modes.k)
+            assert np.all(np.isfinite(modes.k))
         else:
             model_cls = {"Bellhop": Bellhop, "Scooter": Scooter}[downstream]
             result = model_cls(verbose=False).compute_tl(

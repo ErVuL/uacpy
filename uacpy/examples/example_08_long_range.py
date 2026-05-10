@@ -58,13 +58,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, SPARC, OAST
-from plotting_utils import create_example_report
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import Bellhop, KrakenField, Scooter, OAST  # noqa: E402
+from plotting_utils import create_example_report  # noqa: E402
+
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 08: Deep Water Long Range - 100+ km Propagation")
+    print("═" * 80)
+
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT SETUP - Deep ocean Munk profile
     # ═══════════════════════════════════════════════════════════════════════
@@ -126,21 +131,24 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
     if any(r is not None for r in results.values()):
         create_example_report(
-            example_num=12,
+            example_num=8,
             title="Deep Water Long Range - 100+ km Propagation",
             description="Very long-range propagation (150 km) in deep SOFAR channel. "
-                       "Demonstrates convergence zones, channel trapping, and model efficiency.",
+            "Demonstrates convergence zones, channel trapping, and model efficiency.",
             env=env,
             source=source,
             receiver=receiver,
             results=results,
-            output_prefix="example_12"
+            output_prefix="example_08"
         )
     else:
         print("\n⚠ No models ran successfully!")
         return 1
 
+    print("\n✓ Example 08 complete\n")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

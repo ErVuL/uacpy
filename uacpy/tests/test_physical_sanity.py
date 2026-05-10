@@ -6,10 +6,10 @@ These tests validate qualitative physical behavior on canonical scenarios
 modes are positive, mode count scales with frequency, etc. They do NOT
 compare against stored reference numbers.
 
-For *quantitative* benchmarks against published reference solutions
-(ASA 1990, Jensen-Kuperman, etc.), see the roadmap item in README.md
-("add reference-case regressions"). That work is tracked separately and
-will live in benchmark_data/ + test_benchmarks.py when added.
+For *quantitative* benchmarks against canonical waveguides (Pekeris,
+Munk, layered fluids), see the roadmap item in README.md ("add
+reference-case regressions"). That work is tracked separately and will
+live in benchmark_data/ + test_benchmarks.py when added.
 """
 
 import pytest
@@ -45,7 +45,7 @@ class TestPekerisWaveguide:
         env = uacpy.Environment(
             name='Pekeris Waveguide',
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
         return env
@@ -82,20 +82,20 @@ class TestPekerisWaveguide:
 
         # Physics validation
         # 1. TL increases with range (monotonic in mean)
-        tl_vs_range = result.data.mean(axis=0)  # Average over depths
+        tl_vs_range = result.tl.mean(axis=0)  # Average over depths
         assert tl_vs_range[-1] > tl_vs_range[0], "TL should increase with range"
 
         # 2. TL at 5km should be reasonable (70-90 dB typical for 100 Hz)
-        tl_at_5km = result.data[:, -1].mean()
+        tl_at_5km = result.tl[:, -1].mean()
         assert 60 < tl_at_5km < 100, f"TL at 5km should be ~70-90 dB, got {tl_at_5km:.1f} dB"
 
         # 3. TL at 1km should be less than at 5km
-        tl_at_1km = result.data[:, 0].mean()
+        tl_at_1km = result.tl[:, 0].mean()
         assert tl_at_1km < tl_at_5km, "TL at 1km should be less than at 5km"
 
         # 4. No NaN or inf values
-        assert np.all(result.data > 0), "All TL values should be positive"
-        assert np.all(result.data < 200), "TL should not exceed 200 dB (sanity check)"
+        assert np.all(result.tl > 0), "All TL values should be positive"
+        assert np.all(result.tl < 200), "TL should not exceed 200 dB (sanity check)"
 
     @pytest.mark.requires_binary
     def test_bellhop_pekeris_depth_structure(self, pekeris_env, pekeris_source, pekeris_receiver):
@@ -110,7 +110,7 @@ class TestPekerisWaveguide:
         result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
 
         # Check depth variation exists (not constant)
-        tl_vs_depth_at_1km = result.data[:, 0]
+        tl_vs_depth_at_1km = result.tl[:, 0]
         depth_std = np.std(tl_vs_depth_at_1km)
         assert depth_std > 1.0, "Should see >1 dB variation in TL vs depth (Lloyd mirror pattern)"
 
@@ -129,11 +129,11 @@ class TestPekerisWaveguide:
         modes = kraken.compute_modes(pekeris_env, pekeris_source, n_modes=20)
 
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata, "Should have wavenumber data"
-        assert 'phi' in modes.metadata, "Should have mode functions"
+        assert modes.k is not None, "Should have wavenumber data"
+        assert modes.phi is not None, "Should have mode functions"
 
-        k = modes.metadata['k']
-        phi = modes.metadata['phi']
+        k = modes.k
+        phi = modes.phi
 
         # Mode validation
         assert len(k) > 0, "Should compute at least one mode"
@@ -176,8 +176,8 @@ class TestPekerisWaveguide:
 
         # Compare TL values
         # Use mean TL over depths at each range to reduce sensitivity to modal structure
-        bellhop_tl_mean = bellhop_result.data.mean(axis=0)
-        kraken_tl_mean = kraken_result.data.mean(axis=0)
+        bellhop_tl_mean = bellhop_result.tl.mean(axis=0)
+        kraken_tl_mean = kraken_result.tl.mean(axis=0)
 
         # Models should agree within reasonable tolerance
         tl_diff = np.abs(bellhop_tl_mean - kraken_tl_mean)
@@ -216,7 +216,7 @@ class TestRangeDependentPhysicalSanity:
         env = uacpy.Environment(
             name='Sloping Bottom',
             # Initial depth
-            sound_speed=1500.0,
+            ssp=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
         )
@@ -244,8 +244,8 @@ class TestRangeDependentPhysicalSanity:
         assert result.shape == (len(slope_receiver.depths), len(slope_receiver.ranges))
 
         # TL should be reasonable
-        assert np.all(result.data > 0)
-        assert np.all(result.data < 150)
+        assert np.all(result.tl > 0)
+        assert np.all(result.tl < 150)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -255,15 +255,15 @@ class TestRangeDependentPhysicalSanity:
 
         RAM is specifically designed for range-dependent environments.
         """
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(slope_env, slope_source, slope_receiver)
 
         assert result.field_type == 'tl'
         assert np.all(np.isfinite(result.data))
 
         # TL should be physically reasonable
-        assert np.all(result.data > 0)
-        assert np.all(result.data < 150)
+        assert np.all(result.tl > 0)
+        assert np.all(result.tl < 150)
 
 
 class TestMunkProfile:
@@ -322,8 +322,8 @@ class TestMunkProfile:
 
         # Check for sound channel effect
         # TL at mid-depths should be lower than at surface (averaged over ranges)
-        tl_surface = result.data[0, :].mean()  # Surface receivers
-        tl_mid = result.data[len(result.depths)//2, :].mean()  # Mid-depth receivers
+        tl_surface = result.tl[0, :].mean()  # Surface receivers
+        tl_mid = result.tl[len(result.depths)//2, :].mean()  # Mid-depth receivers
 
         # Sound channel should focus energy (lower TL at mid-depth)
         # This is a weak test - just checking qualitative behavior
@@ -389,7 +389,7 @@ class TestNumericalStability:
         env = uacpy.Environment(
             name='Very Shallow',
             bathymetry=10.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,
@@ -414,7 +414,7 @@ class TestNumericalStability:
         env = uacpy.Environment(
             name='High Frequency',
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=BoundaryProperties(
                 acoustic_type='half-space',
                 sound_speed=1600.0,
@@ -433,4 +433,4 @@ class TestNumericalStability:
         result = bellhop.compute_tl(env, source, receiver)
         assert np.all(np.isfinite(result.data))
         # High frequency should have higher TL due to absorption
-        assert np.all(result.data > 20)  # Expect significant loss
+        assert np.all(result.tl > 20)  # Expect significant loss

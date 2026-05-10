@@ -37,22 +37,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import RAM
-from uacpy.visualization.plots import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import RAM  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_transmission_loss,
     plot_rd_bottom,
     plot_environment_advanced,
 )
 
+
 def main():
-    print("=" * 70)
-    print("ADVANCED RAM EXAMPLE - Range-Dependent SSP & Bottom")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 05: RAM advanced features - Range-Dependent SSP & Bottom")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # CREATE 2D RANGE-DEPENDENT SSP (Thermal Front)
@@ -104,7 +105,7 @@ def main():
         bottom=bottom_rd
     )
 
-    print(f"\n✓ Environment created:")
+    print("\n✓ Environment created:")
     print(f"    - is_range_dependent: {env.is_range_dependent}")
     print(f"    - has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
     print(f"    - has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
@@ -130,7 +131,7 @@ def main():
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
         print("  RAM TL completed successfully")
-        print(f"  TL range: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"  TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
     except Exception as e:
         print(f"  RAM error: {e}")
         import traceback
@@ -152,8 +153,8 @@ def main():
     try:
         krakenfield = KrakenField(verbose=False)
         result_krakenfield = krakenfield.compute_tl(env, source, receiver)
-        print("  ✅ KrakenField completed (using range-independent approximation)")
-        print(f"  ✓ TL range: {result_krakenfield.data.min():.1f} to {result_krakenfield.data.max():.1f} dB")
+        print("  ✓ KrakenField completed (using range-independent approximation)")
+        print(f"  ✓ TL range: {result_krakenfield.tl.min():.1f} to {result_krakenfield.tl.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ KrakenField: {e}")
         result_krakenfield = None
@@ -163,23 +164,23 @@ def main():
     try:
         bellhop = Bellhop(verbose=False)
         result_bellhop = bellhop.compute_tl(env, source, receiver)
-        print("  ✅ Bellhop completed (full range-dependent capability)")
-        print(f"  ✓ TL range: {result_bellhop.data.min():.1f} to {result_bellhop.data.max():.1f} dB")
+        print("  ✓ Bellhop completed (full range-dependent capability)")
+        print(f"  ✓ TL range: {result_bellhop.tl.min():.1f} to {result_bellhop.tl.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ Bellhop: {e}")
         result_bellhop = None
 
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
     if result is not None and result_krakenfield is not None:
-        diff_kf = np.abs(result.data - result_krakenfield.data)
+        diff_kf = np.abs(result.tl - result_krakenfield.tl)
         print(f"\n  RAM vs KrakenField: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
-        diff_bh = np.abs(result.data - result_bellhop.data)
+        diff_bh = np.abs(result.tl - result_bellhop.tl)
         print(f"  RAM vs Bellhop: Mean diff = {np.nanmean(diff_bh):.1f} dB (PE vs ray methods)")
 
     if result_bellhop is not None and result_krakenfield is not None:
-        diff_bk = np.abs(result_bellhop.data - result_krakenfield.data)
+        diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)
         print(f"  Bellhop vs KrakenField: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -244,16 +245,16 @@ def main():
         plt.close(fig6)
         print("  ✓ Saved: example_05_differences.png")
 
-    print("\n" + "=" * 70)
-    print("RAM ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated:")
     print("  ✓ Range-dependent bottom properties (mud → sand)")
     print("  ✓ Sloping shelf bathymetry")
     print("  ✓ RAM parabolic equation with PE accuracy control")
     print("  ✓ Three-model comparison (RAM / Bellhop / KrakenField)")
 
+    print("\n✓ Example 05 complete\n")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

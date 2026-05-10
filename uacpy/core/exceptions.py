@@ -37,7 +37,7 @@ class ExecutableNotFoundError(UACPYError):
 
         search_info = ""
         if search_paths:
-            search_info = f"\n\nSearched in:\n" + "\n".join(f"  • {p}" for p in search_paths)
+            search_info = "\n\nSearched in:\n" + "\n".join(f"  • {p}" for p in search_paths)
 
         remediation = (
             f"1. Run installation script:\n"
@@ -98,7 +98,7 @@ class UnsupportedFeatureError(UACPYError):
 
         remediation = None
         if alternatives:
-            remediation = f"Try these models instead:\n" + "\n".join(f"  • {alt}" for alt in alternatives)
+            remediation = "Try these models instead:\n" + "\n".join(f"  • {alt}" for alt in alternatives)
 
         super().__init__(message, remediation)
         self.model_name = model_name
@@ -107,5 +107,8 @@ class UnsupportedFeatureError(UACPYError):
 
 
 class ConfigurationError(UACPYError):
-    """Raised for invalid or unreadable configuration files."""
+    """Raised when user-supplied inputs to a model wrapper or core class
+    fail validation (bad parameter values, illegal combinations of
+    flags, missing required kwargs, malformed envs, etc.). The generic
+    "bad inputs" exception across the package."""
     pass

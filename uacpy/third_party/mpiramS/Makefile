@@ -1,5 +1,10 @@
+# This Makefile is vendored by uacpy. Compiler flags here are intentionally
+# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
+# FORTRAN_ARCH_FLAGS at make-time. To build outside uacpy, pass your own
+# flags (e.g. `make FFLAGS="-O3 -march=native -fopenmp -I mod"`).
+
 PROG = s_mpiram
-# Makefile for single processor version.  
+# Makefile for single processor version.
 
 OBJDIR = obj
 MODDIR = mod
@@ -8,19 +13,26 @@ SRCDIR = src
 
 ###########################################
 # Gnu g77/gfortran options (64 bit)
-FC = gfortran
+FC ?= gfortran
 
-#FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -falign-functions=2  -O3 -fomit-frame-pointer 
-#FFLAGS = -g -pg -march=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall 
+#FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -falign-functions=2  -O3 -fomit-frame-pointer
+#FFLAGS = -g -pg -march=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall
 #FFLAGS = -march=corei7-avx -mtune=corei7-avx -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -fomit-frame-pointer -falign-functions=2  -O3 -fuse-linker-plugin
-#FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -fomit-frame-pointer -falign-functions=2  -O3 
+#FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -fomit-frame-pointer -falign-functions=2  -O3
 
 #LDFLAGS = -fopenmp -march=corei7-avx -mtune=corei7-avx -flto
 #LDFLAGS = -fopenmp -march=native -mtune=native
-#LDFLAGS = -g -pg -fopenmp -march=native -mtune=native 
+#LDFLAGS = -g -pg -fopenmp -march=native -mtune=native
 
-FFLAGS = -Ofast -march=native -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
-LDFLAGS = -Ofast -fopenmp -march=native -flto
+# -march=native baked-in flag commented out by uacpy: produces CPU-specific
+# binaries that break wheel/sdist consumers and macOS/ARM cross-compiles.
+# install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS=/LDFLAGS= on the command
+# line; users invoking `make` directly should pass FFLAGS=/LDFLAGS=
+# explicitly if they want CPU tuning.
+# FFLAGS  = -Ofast -march=native -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
+# LDFLAGS = -Ofast -fopenmp -march=native -flto
+FFLAGS  ?= -Ofast -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
+LDFLAGS ?= -Ofast -fopenmp -flto
 
 #####################################################
 # The Nvidia compiler 

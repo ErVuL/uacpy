@@ -11,7 +11,7 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, PhaseReference,
-    TLField, PressureField, TransferFunction,
+    PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
@@ -27,6 +27,11 @@ from uacpy.core.exceptions import (
 )
 
 from uacpy.core import acoustics
+from uacpy.core import materials
+from uacpy.core.materials import MATERIALS, list_materials, get_material
+from uacpy.core.constants import (
+    AttenuationUnits, VolumeAttenuation, BoundaryType,
+)
 
 __all__ = [
     'Source',
@@ -40,7 +45,7 @@ __all__ = [
     'generate_sea_surface',
     'Receiver',
     'Result', 'PhaseReference',
-    'TLField', 'PressureField', 'TransferFunction',
+    'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
@@ -52,4 +57,6 @@ __all__ = [
     'UnsupportedFeatureError',
     'ConfigurationError',
     'acoustics',
+    'materials', 'MATERIALS', 'list_materials', 'get_material',
+    'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
 ]

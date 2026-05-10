@@ -33,22 +33,23 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import Bellhop
-from uacpy.visualization.plots import plot_transmission_loss, plot_environment_advanced, plot_rays
-from uacpy.models import RunMode
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import Bellhop  # noqa: E402
+from uacpy.visualization.plots import plot_transmission_loss, plot_environment_advanced, plot_rays  # noqa: E402
+from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+
 def main():
-    print("=" * 70)
-    print("ADVANCED BELLHOP EXAMPLE - All Features")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 04: Bellhop advanced features")
+    print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT: Continental Shelf with Grain Size Bottom
@@ -92,7 +93,7 @@ def main():
 
     receiver = uacpy.Receiver(
         depths=np.linspace(10, 450, 50),    # Dense vertical sampling
-        ranges=np.linspace(100, 30000, 150) # 0.1 to 30 km
+        ranges=np.linspace(100, 30000, 150)  # 0.1 to 30 km
     )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -100,18 +101,16 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\n[1/4] Running Bellhop with Thorp volume attenuation...")
-    bellhop = Bellhop(verbose=False)
+    bellhop_thorp = Bellhop(
+        verbose=False,
+        beam_type='B', source_type='R', grid_type='R',
+        volume_attenuation='T',
+        n_beams=500, alpha=(-85, 85),
+    )
 
     try:
-        result_thorp = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,            # Coherent TL
-            beam_type='B',           # Gaussian beams
-            source_type='R',         # Point source (cylindrical)
-            grid_type='R',           # Rectilinear grid
-            volume_attenuation='T',  # Thorp formula
-            n_beams=500,             # High beam count for accuracy
-            alpha=(-85, 85),         # Wide angle coverage
+        result_thorp = bellhop_thorp.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -124,24 +123,19 @@ def main():
 
     print("[2/4] Running Bellhop with Cerveny beams...")
 
+    bellhop_cerveny = Bellhop(
+        verbose=False,
+        beam_type='C', source_type='R', grid_type='R',
+        volume_attenuation='T',
+        n_beams=500, alpha=(-85, 85),
+        beam_width_type='M', beam_curvature='Z',
+        eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
+    )
+
     try:
-        result_cerveny = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,
-            beam_type='C',           # Cerveny Cartesian beams
-            source_type='R',
-            grid_type='R',
-            beam_shift=True,         # Enable beam shift
-            volume_attenuation='T',
-            n_beams=500,
-            alpha=(-85, 85),
-            # Cerveny parameters
-            beam_width_type='M',     # Minimum width beams
-            beam_curvature='Z',      # Zero curvature (for grazing angles)
-            eps_multiplier=0.7,      # Narrower beams
-            r_loop=10.0,             # Control up to 10 km
-            n_image=2,               # Include 2 images
-            ib_win=4                 # Beam windowing
+        result_cerveny = bellhop_cerveny.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
+            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -154,15 +148,15 @@ def main():
 
     print("[3/4] Running Bellhop with line source...")
 
+    bellhop_line = Bellhop(
+        verbose=False,
+        beam_type='B', source_type='X', grid_type='R',
+        volume_attenuation='T', n_beams=500,
+    )
+
     try:
-        result_line = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,
-            beam_type='B',
-            source_type='X',         # Line source (Cartesian)
-            grid_type='R',
-            volume_attenuation='T',
-            n_beams=500,
+        result_line = bellhop_line.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -175,16 +169,16 @@ def main():
 
     print("[4/4] Running ray trace with beam shift...")
 
+    bellhop_rays = Bellhop(
+        verbose=False,
+        beam_type='g', source_type='R', grid_type='R',
+        n_beams=50, alpha=(-80, 80),
+    )
+
     try:
-        result_rays = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.RAYS,            # Ray trace
-            beam_type='g',           # Geometric hat beams
-            source_type='R',
-            grid_type='R',
-            beam_shift=True,         # Beam shift enabled
-            n_beams=50,              # Fewer beams for ray trace
-            alpha=(-80, 80),
+        result_rays = bellhop_rays.run(
+            env, source, receiver, run_mode=RunMode.RAYS,
+            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -203,22 +197,22 @@ def main():
     print("  ✓ Saved: example_04_environment.png")
 
     # Plot 2: Compare standard vs Cerveny beams
-    #Using show_colorbar=False for subplots with shared colorbar
+    # Using show_colorbar=False for subplots with shared colorbar
     if result_thorp is not None and result_cerveny is not None:
         fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-        #Disable individual colorbars, add contours at 70, 85, 100 dB
+        # Disable individual colorbars, add contours at 70, 85, 100 dB
         _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
-                                         show_colorbar=False,
-                                         contours=[70, 85, 100])
+                                      show_colorbar=False,
+                                      contours=[70, 85, 100])
         ax1.set_title('Standard Gaussian Beams\n(with Thorp attenuation)')
 
         _, _ = plot_transmission_loss(result_cerveny, env, ax=ax2,
-                                         show_colorbar=False,
-                                         contours=[70, 85, 100])
+                                      show_colorbar=False,
+                                      contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
 
-        #Add single shared colorbar
+        # Add single shared colorbar
         import matplotlib as mpl
         cbar_ax = fig2.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
@@ -227,24 +221,24 @@ def main():
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
         plt.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays + shared colorbar)',
-                    fontsize=16, fontweight='bold')
+                     fontsize=16, fontweight='bold')
         plt.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_beam_comparison.png")
 
     # Plot 3: Point source vs Line source
-    #Using auto TL limits (median + 0.75σ, rounded)
+    # Using auto TL limits (median + 0.75σ, rounded)
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
-                                         show_colorbar=False)
+                                      show_colorbar=False)
         ax1.set_title('Point Source (Cylindrical)\nRunType: CB R2')
 
         _, _ = plot_transmission_loss(result_line, env, ax=ax2,
-                                         show_colorbar=False)
+                                      show_colorbar=False)
         ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
 
-        #Shared colorbar
+        # Shared colorbar
         import matplotlib as mpl
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
@@ -253,23 +247,20 @@ def main():
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
         plt.suptitle('Bellhop: Point vs Line Source (auto TL limits — AT standard)',
-                    fontsize=16, fontweight='bold')
+                     fontsize=16, fontweight='bold')
         plt.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_source_comparison.png")
 
     # Plot 4: Ray trace
-    #Using color_by_bounces=True for ray color-coding
+    # Using color_by_bounces=True for ray color-coding
     if result_rays is not None:
         fig4, ax4 = plot_rays(result_rays, env,
-                             color_by_bounces=True)  #Color-code rays by bounce type
+                              color_by_bounces=True)  # Color-code rays by bounce type
         ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
-                     '(rays colored by bounce type - R/G/B/K)')
+                      '(rays colored by bounce type - R/G/B/K)')
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_rays.png")
 
-    print("\n" + "=" * 70)
-    print("BELLHOP ADVANCED EXAMPLE COMPLETE")
-    print("=" * 70)
     print("\nFeatures demonstrated:")
     print("  ✓ Advanced RunType (7 positions)")
     print("  ✓ Cerveny beam parameters")
@@ -285,7 +276,10 @@ def main():
     print("  ✓ Subplot colorbar control (shared colorbar)")
     print("  ✓ jet_r colormap (blue=good, red=poor)")
 
+    print("\n✓ Example 04 complete\n")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

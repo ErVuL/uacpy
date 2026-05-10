@@ -15,7 +15,6 @@ from scipy.linalg import toeplitz
 from matplotlib.gridspec import GridSpec
 
 
-
 class PPSD:
     """Compute the probability density function of PSD levels.
 
@@ -78,7 +77,10 @@ class PPSD:
                 else:
                     signals = [data[:, i] for i in range(data.shape[1])]
             else:
-                raise ValueError("Data must be 1D, 2D, or list of arrays")
+                raise ValueError(
+                    "PPSD.compute: data must be 1-D, 2-D, or a list of 1-D arrays; "
+                    f"got ndim={data.ndim}"
+                )
 
         chunk_size = int(self.seg_duration * fs)
         overlap_samples = int(chunk_size * self.overlap_pct / 100)
@@ -95,14 +97,14 @@ class PPSD:
                 self.welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
 
             for i in range(0, len(sig) - chunk_size + 1, step):
-                chunk = sig[i : i + chunk_size]
+                chunk = sig[i: i + chunk_size]
                 freqs, psd = _sig.welch(chunk, fs, **self.welch_params)
                 psd_list.append(psd)
 
         if len(psd_list) == 0:
             raise ValueError(
-                f"No PSD segments computed. "
-                f"Check segment duration ({self.seg_duration}s) vs signal length ({len(sig)/fs:.2f}s)."
+                f"PPSD.compute: no PSD segments computed; "
+                f"seg_duration={self.seg_duration}s vs signal length={len(sig)/fs:.2f}s"
             )
 
         psd_array = np.array(psd_list)
@@ -132,7 +134,7 @@ class PPSD:
         if vmax is None:
             vmax = 1 / self.binwidth_dB
 
-        fig, ax = plt.subplots(figsize=(10,6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         align_ybins = self.binwidth_dB / 2
 
         pcm = ax.pcolormesh(
@@ -159,7 +161,7 @@ class PPSD:
         ax.set_xlabel("Frequency [Hz]")
         ax.set_ylabel("Level [dB]")
         ax.set_xscale("log")
-        ax.set_xlim((np.max((self.frequencies[0],1)), self.frequencies[-1]))
+        ax.set_xlim((np.max((self.frequencies[0], 1)), self.frequencies[-1]))
         ax.set_ylim((ymin, ymax))
         ax.grid(which="both", alpha=0.5)
         ax.legend(loc="upper right")
@@ -242,9 +244,9 @@ class Spectrogram:
             or not hasattr(self, "times")
             or not hasattr(self, "Sxx")
         ):
-            raise RuntimeError("You must compute the spectrogram before plotting it.")
-
-        # Convert to dB scale
+            raise RuntimeError(
+                "Spectrogram.plot: compute() must be called before plotting"
+            )
         Sxx_db = 10 * np.log10(self.Sxx / (self.ref**2))
 
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -354,7 +356,10 @@ class SEL:
             List of tuples containing (low, center, high) frequencies for each band.
         """
         if self.fmin <= 0 or self.fmax <= self.fmin:
-            raise ValueError("fmin must be > 0 and fmax must be greater than fmin.")
+            raise ValueError(
+                f"SEL._generate_frequency_bands: require fmin > 0 and fmax > fmin; "
+                f"got fmin={self.fmin}, fmax={self.fmax}"
+            )
 
         if self.band_type in ["octave", "third_octave"]:
             self._adjust_fmin_fmax(fs)
@@ -386,7 +391,8 @@ class SEL:
         elif self.band_type == "linear":
             if self.num_bands <= 0:
                 raise ValueError(
-                    "num_bands must be a positive integer for linear bands."
+                    f"SEL._generate_frequency_bands: num_bands must be a "
+                    f"positive integer for linear bands; got {self.num_bands}"
                 )
             band_width = (self.fmax - self.fmin) / self.num_bands
             f_low = self.fmin
@@ -400,7 +406,8 @@ class SEL:
 
         else:
             raise ValueError(
-                "Invalid band_type. Choose 'octave', 'third_octave', or 'linear'."
+                f"SEL._generate_frequency_bands: unknown band_type={self.band_type!r}; "
+                "valid: 'octave', 'third_octave', 'linear'"
             )
 
         return bands
@@ -443,27 +450,19 @@ class SEL:
             nfft = fs
 
         window = _sig.windows.hann(nfft)
-
-        # Initialize frequency axis to determine band indices
         f = np.fft.rfftfreq(nfft, d=1 / fs)
-
-        # Initialize band indices
         band_indices = []
         for low, center, high in self.bands:
             idx = np.logical_and(f >= low, f < high)
             band_indices.append(idx)
-
-        # Initialize SEL accumulator
         self.sel = np.zeros(len(self.bands))
 
         # Process data in chunks
         for i in range(0, len(data), chunk_size):
-            chunk = data[i : min(i + chunk_size, len(data))]
+            chunk = data[i: min(i + chunk_size, len(data))]
 
             if len(chunk) < nfft:
                 chunk = np.pad(chunk, (0, nfft - len(chunk)))
-
-            # Compute spectrogram for chunk
             f, t, Sxx = _sig.spectrogram(
                 chunk, fs, window=window, noverlap=0, nfft=nfft, scaling="spectrum"
             )
@@ -603,7 +602,6 @@ class PSD:
         psd : ndarray
             PSD values in linear scale (Pa^2/Hz).
         """
-        # Compute Welch periodogram
         freqs, Pxx = _sig.welch(data, fs, **self.welch_params)
 
         # Store frequencies and PSD values
@@ -627,12 +625,8 @@ class PSD:
             Additional keyword arguments passed to ``ax.semilogx``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
-            raise RuntimeError("You must compute the PSD before plotting it.")
-
-        # Convert PSD to dB scale
+            raise RuntimeError("PSD.plot: compute() must be called before plotting")
         psd_db = 10 * np.log10(self.psd / (self.ref**2))
-
-        # Plot PSD
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.semilogx(self.frequencies, psd_db, label=label, **kwargs)
 
@@ -803,18 +797,17 @@ class FRF:
         if y.ndim == 1:
             y = y.reshape(1, -1)
         if x.shape[0] != y.shape[0]:
-            raise ValueError("x and y must have the same number of measurements")
+            raise ValueError(
+                f"FRF.compute: x and y must have the same number of measurements; "
+                f"got x.shape[0]={x.shape[0]}, y.shape[0]={y.shape[0]}"
+            )
         n_meas = x.shape[0]
-
-        # Initialize lists to store results from all measurements
-        m_list, freqs_list, tf_list, coh_list = [], [], [], []
+        m_list, tf_list, coh_list = [], [], []
 
         for i in range(n_meas):
             # Extract the i-th measurement
             x_i = x[i, :].ravel()
             y_i = y[i, :].ravel()
-
-            # Compute FRF for this measurement
             if self.method == "welch":
                 freqs_i, tf_i, coh_i = self.compute_welch(x_i, y_i, fs)
                 coh_list.append(coh_i)
@@ -828,7 +821,10 @@ class FRF:
             elif self.method == "p_etfe":
                 freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, fs)
             else:
-                raise ValueError(f"Unsupported method: {self.method}")
+                raise ValueError(
+                    f"FRF.compute: unknown method={self.method!r}; "
+                    "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'"
+                )
 
             # Append results
             tf_list.append(tf_i)
@@ -880,19 +876,13 @@ class FRF:
         coh : ndarray
             Array of coherence values.
         """
-
-        # Compute cross-spectral densities
         freqs, Pxx = _sig.welch(x, fs, scaling="density", **self.params)
         _, Pyy = _sig.welch(y, fs, scaling="density", **self.params)
         _, Pxy = _sig.csd(y, x, fs, scaling="density", **self.params)
-
-        # Compute transfer function based on estimator choice
         if self.estimator == "H2":
             tf = Pyy / Pxy
         else:  # Default to H1
             tf = np.conj(Pxy) / Pxx
-
-        # Compute coherence
         coh = abs(Pxy) ** 2 / (Pxx * Pyy)
 
         return freqs, tf, coh
@@ -929,7 +919,10 @@ class FRF:
         n_periods = len(x) // period
 
         if n_periods < 1:
-            raise ValueError("Signal length must be at least one period.")
+            raise ValueError(
+                f"FRF.compute_periodic_etfe: signal length must be at least one "
+                f"period; got len(x)={len(x)} samples, period={period} samples"
+            )
 
         # Extract a whole number of periods
         x = x[: n_periods * period]
@@ -942,18 +935,10 @@ class FRF:
         # Average over periods to reduce noise
         x_avg = np.mean(x_reshaped, axis=0)
         y_avg = np.mean(y_reshaped, axis=0)
-
-        # Compute FFT of averaged signals
         X = np.fft.rfft(x_avg) + np.finfo(float).eps
         Y = np.fft.rfft(y_avg) + np.finfo(float).eps
-
-        # Compute frequencies
         freqs = np.fft.rfftfreq(period, d=1 / fs)
-
-        # Initialize transfer function
         tf = np.zeros_like(X, dtype=complex)
-
-        # Compute transfer function where input has significant energy
         tf = Y / X
 
         return freqs, tf
@@ -986,19 +971,13 @@ class FRF:
         min_len = min(len(x), len(y))
         x = x[:min_len]
         y = y[:min_len]
-
-        # Compute FFTs
         X = np.fft.rfft(x) + np.finfo(float).eps
         Y = np.fft.rfft(y)
 
         # Determine frequency grid based on n_freqs
         n_fft = min_len
         freqs = np.fft.rfftfreq(n_fft, d=1 / fs)
-
-        # Initialize transfer function
         tf = np.zeros_like(X, dtype=complex)
-
-        # Compute transfer function
         tf = Y / X
 
         return freqs, tf
@@ -1067,7 +1046,6 @@ class FRF:
 
             for m_candidate in range(1, m_max + 1):
                 try:
-                    # Compute information matrix and vector
                     u_temp = u[:N].copy()
                     phiuu = np.zeros(m_candidate)
                     phiuy = np.zeros(m_candidate)
@@ -1091,8 +1069,6 @@ class FRF:
                     Vinfo = phiuy - np.dot(W.T, y[: m_candidate - 1])
 
                     g = np.linalg.solve(Minfo, Vinfo)
-
-                    # Compute residuals
                     y_hat = np.convolve(u[:N], g, mode="full")[:N]
                     residuals = y[:N] - y_hat
                     sse = np.sum(residuals**2) / (N - m_candidate)
@@ -1211,25 +1187,17 @@ class FRF:
         axes : list of Axes
             List of [matrix_ax, vector_ax, impulse_ax].
         """
-
-        # Create figure and gridspec
         fig = plt.figure(figsize=figsize)
 
         # Define a 2x2 grid with adjusted height ratios
         gs = GridSpec(2, 2, width_ratios=[2, 1], height_ratios=[2, 1])
-
-        # Plot Minfo as heatmap
         ax1 = fig.add_subplot(gs[0, 0])
         im = ax1.imshow(self.Minfo, cmap="viridis", aspect="equal")
         ax1.set_title(f"[Information Matrix] {title}", loc="left")
         ax1.set_xlabel("Index j")
         ax1.set_ylabel("Index i")
-
-        # Add colorbar to Minfo plot
         cbar = plt.colorbar(im, ax=ax1, shrink=0.8)
         cbar.set_label("Correlation Value")
-
-        # Plot Vinfo as bar chart
         ax2 = fig.add_subplot(gs[0, 1])
         indices = np.arange(len(self.Vinfo))
         ax2.bar(indices, self.Vinfo, color="skyblue", edgecolor="navy")
@@ -1337,7 +1305,7 @@ class FRF:
 
         if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
             raise RuntimeError(
-                "You must compute the Transfer Function before plotting it."
+                "FRF.plot_impulse_info: compute() must be called before plotting"
             )
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
@@ -1462,6 +1430,7 @@ class FRF:
 
         return axes
 
+
 class FKTransform:
     """Frequency-Wavenumber (f-k) transform computation and visualization."""
 
@@ -1537,7 +1506,10 @@ class FKTransform:
         """
         if FK is None:
             if not hasattr(self, "FK"):
-                raise RuntimeError("No f–k data available for inverse transform.")
+                raise RuntimeError(
+                    "FKTransform.inverse: no f-k data available; "
+                    "call compute() first or pass FK= explicitly"
+                )
             FK = self.FK
 
         # Undo fftshift before inverse FFT
@@ -1545,8 +1517,6 @@ class FKTransform:
 
         # Inverse 2D FFT
         data_rec = np.fft.ifft2(FK_unshifted)
-
-        # Return real-valued signal if applicable
         data_rec = np.real(data_rec)
 
         return data_rec
@@ -1565,7 +1535,9 @@ class FKTransform:
             Additional keyword arguments passed to ``ax.imshow``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
-            raise RuntimeError("You must compute the f–k transform before plotting it.")
+            raise RuntimeError(
+                "FKTransform.plot: compute() must be called before plotting"
+            )
 
         fk_db = 10 * np.log10(self.fk / (self.ref ** 2))
 
@@ -1591,7 +1563,7 @@ class FKTransform:
         ax.set_xlim((self.wavenumbers[0], self.wavenumbers[-1]))
         ax.set_ylim((0, self.frequencies[-1]))
         ax.grid(alpha=0.3)
-        
+
         if self.ref == 1e-6:
             ref = "1µ"
         elif self.ref == 2e-5:
@@ -1604,4 +1576,3 @@ class FKTransform:
 
         plt.tight_layout()
         return fig, ax
-

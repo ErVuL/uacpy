@@ -2,8 +2,8 @@
 Example helper functions for UACPY examples
 
 ⚠️ IMPORTANT: These are examples-only utilities for UACPY demonstration purposes.
-For production code, please use the official API from uacpy.visualization, particularly
-the quickplot() function and plot_* functions which provide the full feature set.
+For production code, use the official API from uacpy.visualization (the
+``plot_*`` and ``compare_*`` helpers).
 
 Provides common utilities for examples 01-10 to ensure consistency
 and reduce code duplication.
@@ -12,13 +12,13 @@ and reduce code duplication.
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 from uacpy.visualization import (
     plot_transmission_loss,
     plot_environment_advanced,
-    plot_comparison_curves,
-    plot_model_comparison_matrix
+    compare_range_cuts,
+    plot_model_comparison_matrix,
 )
 
 # Resolve relative to this file so outputs always land next to the examples,
@@ -76,30 +76,32 @@ def create_example_report(
     print(f"  Depth: {env.depth}m")
     print(f"  SSP type: {env.ssp.interp}")
     if env.is_range_dependent:
-        print(f"  Range-dependent: YES")
+        print("  Range-dependent: YES")
     else:
-        print(f"  Range-dependent: NO")
+        print("  Range-dependent: NO")
 
     # Source info
-    print(f"\nSource:")
+    print("\nSource:")
     print(f"  Depth: {source.depths[0]}m")
     print(f"  Frequency: {source.frequencies[0]}Hz")
 
     # Receiver info
-    print(f"\nReceivers:")
+    print("\nReceivers:")
     print(f"  Depths: {len(receiver.depths)} points ({receiver.depths[0]:.1f}m to {receiver.depths[-1]:.1f}m)")
-    print(f"  Ranges: {len(receiver.ranges)} points ({receiver.ranges[0]/1000:.1f}km to {receiver.ranges[-1]/1000:.1f}km)")
+    r0_km = receiver.ranges[0] / 1000
+    r1_km = receiver.ranges[-1] / 1000
+    print(f"  Ranges: {len(receiver.ranges)} points ({r0_km:.1f}km to {r1_km:.1f}km)")
 
     # Model results
     print(f"\nModels tested: {len(results)}")
     for name, result in results.items():
         if result is not None:
-            print(f"  {name:15s}: TL range {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+            print(f"  {name:15s}: TL range {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
         else:
             print(f"  {name:15s}: SKIPPED (returned None)")
 
     # Generate plots
-    print(f"\nGenerating plots...")
+    print("\nGenerating plots...")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -139,9 +141,9 @@ def create_example_report(
         plt.close(fig)
         print(f"  ✓ {fields_path}")
 
-    # Plot 3: Comparison curves (if multiple models)
+    # Plot 3: TL-vs-range overlay at source depth (if multiple models)
     if len(results) >= 2:
-        fig, axes = plot_comparison_curves(results, source_depth=source.depths[0])
+        fig, ax = compare_range_cuts(results, depth=float(source.depths[0]))
         curves_path = OUTPUT_DIR / f'{output_prefix}_curves.png'
         fig.savefig(curves_path, dpi=150, bbox_inches='tight')
         plt.close(fig)

@@ -78,11 +78,11 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
         # Bookkeeping:
         # Some constants
         f_wind = 2000  # Cutoff for wind noise section
-        s1w    = 1.5   # Constant in wind calcs
-        s2w    = -5.0  # Constant in wind calc
-        a      = -25   # Curve melding exponent
-        slope  = s2w * (0.1 / np.log10(2))  # Slope at high freq
-        NL     = np.zeros_like(f)
+        s1w = 1.5   # Constant in wind calcs
+        s2w = -5.0  # Constant in wind calc
+        a = -25   # Curve melding exponent
+        slope = s2w * (0.1 / np.log10(2))  # Slope at high freq
+        NL = np.zeros_like(f)
 
         # Do the wind part for f <= 2000 Hz
         if water_depth == 'shallow':
@@ -97,11 +97,11 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
         f_temp = f[i_wind] if np.any(i_wind) else np.array([2000])
 
         # Variable letters mirror the original Wenz/Coppens MATLAB script.
-        f0w             = 770 - 100 * np.log10(u)
-        L0w             = cst + 20 * np.log10(u) - 17 * np.log10(f0w / 770)
-        L1w             = L0w + (s1w / np.log10(2)) * np.log10(f_temp / f0w)
-        L2w             = L0w + (s2w / np.log10(2)) * np.log10(f_temp / f0w)
-        Lw              = L1w * (1 + (L1w / L2w) ** (-a)) ** (1 / a)
+        f0w = 770 - 100 * np.log10(u)
+        L0w = cst + 20 * np.log10(u) - 17 * np.log10(f0w / 770)
+        L1w = L0w + (s1w / np.log10(2)) * np.log10(f_temp / f0w)
+        L2w = L0w + (s2w / np.log10(2)) * np.log10(f_temp / f0w)
+        Lw = L1w * (1 + (L1w / L2w) ** (-a)) ** (1 / a)
         temp_noise_dist = 10 ** (Lw / 10)
 
         if np.any(i_wind):
@@ -109,7 +109,7 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
 
         # Meld with a sensible line at freqs greater than 2000 Hz
         if np.any(~i_wind):
-            prop_const  = temp_noise_dist[-1] / f_temp[-1] ** slope
+            prop_const = temp_noise_dist[-1] / f_temp[-1] ** slope
             NL[~i_wind] = prop_const * f[~i_wind] ** slope * df[~i_wind]
 
         NL = 10 * np.log10(NL)
@@ -126,7 +126,7 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
 
 
 _SHIPPING_C2 = {'low': 1, 'medium': 4, 'high': 7, 'no': 4}
-_RAIN_INDEX  = {'no': 0, 'light': 1, 'moderate': 2, 'heavy': 3, 'veryheavy': 4}
+_RAIN_INDEX = {'no': 0, 'light': 1, 'moderate': 2, 'heavy': 3, 'veryheavy': 4}
 _RAIN_R0 = [0, 51.0769, 61.5358, 65.1107, 74.3464]
 _RAIN_R1 = [0, 1.4687,  1.0147,  0.8226,  1.0131]
 _RAIN_R2 = [0, -0.5232, -0.4255, -0.3825, -0.4258]
@@ -209,10 +209,10 @@ class WenzNoise:
                 f"got {rain_rate!r}"
             )
 
-        self.frequencies    = np.asarray(frequencies, dtype=float).flatten()
-        self.wind_speed     = float(wind_speed)
-        self.rain_rate      = rain_rate
-        self.water_depth    = water_depth
+        self.frequencies = np.asarray(frequencies, dtype=float).flatten()
+        self.wind_speed = float(wind_speed)
+        self.rain_rate = rain_rate
+        self.water_depth = water_depth
         self.shipping_level = shipping_level
 
         f = self.frequencies
@@ -251,18 +251,18 @@ class WenzNoise:
             + _RAIN_R2[ir] * fk ** 2
             + _RAIN_R3[ir] * fk ** 3
         )
-        slope        = -5.0 * (0.1 / np.log10(2))
+        slope = -5.0 * (0.1 / np.log10(2))
         idxs_below_7k = np.where(f < 7000)[0]
         if idxs_below_7k.size and (f > 7000).any():
-            ind          = int(idxs_below_7k[-1])
-            prop_const   = 10 ** (rain[ind] / 10) / f[ind] ** slope
+            ind = int(idxs_below_7k[-1])
+            prop_const = 10 ** (rain[ind] / 10) / f[ind] ** slope
             rain[f > 7000] = 10 * np.log10(prop_const * f[f > 7000] ** slope)
 
-        self.thermal    = thermal
-        self.wind       = wind
-        self.shipping   = shipping
+        self.thermal = thermal
+        self.wind = wind
+        self.shipping = shipping
         self.turbulence = turbulence
-        self.rain       = rain
+        self.rain = rain
         # Sum incoherent dB sources via logsumexp to avoid 10**(x/10) overflow
         # on very loud components (e.g. heavy rain at high frequency).
         ln10 = np.log(10.0)

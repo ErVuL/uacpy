@@ -9,9 +9,9 @@ availability summary.
 
 import pytest
 
-pytestmark = pytest.mark.requires_oases
-
 from uacpy.models import OAST, OASN, OASR, OASP
+
+pytestmark = pytest.mark.requires_oases
 
 
 @pytest.mark.requires_binary

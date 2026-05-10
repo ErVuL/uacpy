@@ -140,7 +140,7 @@ def write_bellhop_env_file(
         - beam_width_type (str): 'F'/'M'/'W'
         - beam_curvature (str): 'D'/'S'/'Z'
         - eps_multiplier (float): Epsilon multiplier
-        - r_loop (float): Range for beam width (km)
+        - r_loop (float): Range (m) for choosing beam width
         - n_image (int): Number of images
         - ib_win (int): Beam windowing
         - component (str): 'P' for pressure (default), 'D' for displacement
@@ -176,26 +176,8 @@ def write_bellhop_env_file(
         # Number of media (1 for simple case)
         f.write("1\n")
 
-        # SSP interpolation type mapping
-        # Maps user-facing ssp_type to Acoustics Toolbox interpolation codes
-        # AT codes: N=N2-Linear, C=C-Linear, P=PCHIP, S=Spline, Q=Quad, A=Analytic
-        ssp_interp_map = {
-            # Profile types → default to C-Linear
-            "isovelocity": "C",  # Constant profile → C-Linear
-            "munk": "C",         # Munk profile data → C-Linear
-            "linear": "C",       # Linear profile → C-Linear
-            "bilinear": "C",     # Bilinear profile → C-Linear
-            # Interpolation types → AT codes
-            "n2linear": "N",     # N2-Linear approximation
-            "c-linear": "C",     # C-Linear approximation
-            "clin": "C",         # C-Linear (short form)
-            "pchip": "P",        # PCHIP approximation
-            "spline": "S",       # Spline approximation
-            "cubic": "S",        # Cubic spline (alias)
-            "quad": "Q",         # Quad approximation (needs .ssp file)
-            "analytic": "A",     # Analytic SSP option
-        }
-        interp_char = ssp_interp_map.get(env.ssp.interp, "C")
+        from uacpy.core.constants import parse_ssp_type
+        interp_char = parse_ssp_type(env.ssp.interp).to_acoustics_toolbox_code()
 
         # Top boundary (surface)
         top_bc = get_top_bc_code(env)
@@ -272,7 +254,7 @@ def write_bellhop_env_file(
             ati_data[:, 1] = -ati_data[:, 1]
             write_ati_file(ati_filepath, ati_data, interp_type=bty_interp_type)
             if verbose:
-                print(f"[bellhop_writer] Wrote altimetry file: {ati_filepath}")
+                print(f"bellhop_writer: wrote altimetry file: {ati_filepath}")
 
         # If the surface boundary is a reflection file ('F'), copy the
         # .trc file alongside the .env so Bellhop can read it by base
@@ -294,7 +276,7 @@ def write_bellhop_env_file(
             dest = filepath.with_suffix('.trc')
             shutil.copy(src, dest)
             if verbose:
-                print(f"[bellhop_writer] Copied top reflection file: "
+                print(f"bellhop_writer: copied top reflection file: "
                       f"{src} -> {dest}")
 
         # Handle range-dependent SSP if using Quad interpolation
@@ -304,7 +286,7 @@ def write_bellhop_env_file(
             # write_ssp (.ssp file format) expects ranges in km.
             write_ssp(ssp_file, env.ssp.ranges / 1000.0, env.ssp.data)
             if verbose:
-                print(f"[bellhop_writer] Wrote range-dependent SSP file: {ssp_file}")
+                print(f"bellhop_writer: wrote range-dependent SSP file: {ssp_file}")
 
         # Extend SSP above MSL to cover any wave crests (env.altimetry
         # positive-up, SSP z-axis positive-down).
@@ -314,7 +296,11 @@ def write_bellhop_env_file(
             if max_alti_above_msl > 0:
                 z_min = -max_alti_above_msl - 0.5
 
-        z_max = env.depth
+        # Bellhop requires the last SSP sample to sit *exactly* at the
+        # medium depth written in the SSP header — and the header uses
+        # one decimal place. Round both sides through the same value so
+        # the parser sees aligned depths.
+        z_max = float(f"{env.depth:.1f}")
 
         ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
         if z_min < ssp_data_extended[0, 0]:
@@ -340,24 +326,23 @@ def write_bellhop_env_file(
                 f"{env.volume_attenuation:.6f} 0.0 /\n"
             )
 
-        bottom_type = _BOUNDARY_TYPE_MAP.get(
-            env.bottom.acoustic_type.lower(), "A",
-        )
+        bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
+        bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
 
         # Check if bathymetry is range-dependent (more than 1 point)
         is_range_dependent_bathy = len(env.bathymetry) > 1
 
+        from uacpy.core.environment import RangeDependentBottom
+        hs = env.halfspace_at_range(0.0)
         if is_range_dependent_bathy:
-            # Write .bty file for range-dependent bathymetry.
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
             # auto-selected by the writer: write_bty_long_format emits
             # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. Callers only pick
             # the 1st char (interpolation) via bty_interp_type.
-            bottom_rd = getattr(env, 'bottom_rd', None)
-            if bottom_rd is not None and len(getattr(bottom_rd, 'ranges', [])) > 0:
+            if isinstance(env.bottom, RangeDependentBottom) and len(env.bottom.ranges) > 0:
                 write_bty_long_format(
-                    bty_filepath, env.bathymetry, bottom_rd,
+                    bty_filepath, env.bathymetry, env.bottom,
                     interp_type=bty_interp_type,
                 )
             else:
@@ -365,51 +350,58 @@ def write_bellhop_env_file(
                     bty_filepath, env.bathymetry,
                     interp_type=bty_interp_type,
                 )
-            # Append '~' to bottom type to indicate bathymetry from file
-            # Format: 'A~' = halfspace with range-dependent bathymetry
             bottom_type_with_bathy = f"{bottom_type}~"
-            f.write(f"'{bottom_type_with_bathy}' 0.0\n")
+            # 2nd field on this BOT line is sigma (top-of-bottom RMS
+            # roughness) per ReadEnvironmentBell.f90:466.
+            roughness = getattr(hs, 'roughness', 0.0)
+            f.write(f"'{bottom_type_with_bathy}' {roughness:.6f}\n")
         else:
-            # Range-independent bottom
-            f.write(f"'{bottom_type}' 0.0\n")  # Top of halfspace (usually 0)
+            roughness = getattr(hs, 'roughness', 0.0)
+            f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
         if bottom_type == "G":  # Grain size
             # Format: depth Mz (mean grain size in phi units)
-            grain_size = getattr(env.bottom, 'grain_size_phi', 1.0)
+            hs = env.halfspace_at_range(0.0)
+            grain_size = getattr(hs, 'grain_size_phi', 1.0)
             f.write(f" {env.depth:.2f}  {grain_size:.2f} /\n")
         elif bottom_type == "F":  # Reflection coefficient from file
-            # Copy reflection file to working directory
-            if env.bottom.reflection_file:
+            hs = env.halfspace_at_range(0.0)
+            if hs.reflection_file:
                 import shutil
-                brc_source = Path(env.bottom.reflection_file)
+                brc_source = Path(hs.reflection_file)
                 if brc_source.exists():
-                    # Copy to same directory as .env file with matching base name
                     brc_dest = filepath.with_suffix('.brc')
                     shutil.copy(brc_source, brc_dest)
                     if verbose:
-                        print(f"[bellhop_writer] Copied reflection file: {brc_source} -> {brc_dest}")
+                        print(f"bellhop_writer: copied reflection file: {brc_source} -> {brc_dest}")
                 else:
                     raise FileNotFoundError(
-                        f"Reflection coefficient file not found: {env.bottom.reflection_file}\n"
-                        f"Generate this file using BOUNCE or OASR models."
+                        f"bellhop_writer: reflection coefficient file not found: "
+                        f"{hs.reflection_file}; "
+                        f"generate it via BOUNCE or OASR first."
                     )
             else:
                 raise ValueError(
-                    "acoustic_type='file' requires reflection_file parameter.\n"
-                    "Example: BoundaryProperties(acoustic_type='file', reflection_file='path/to/file.brc')"
+                    "bellhop_writer: acoustic_type='file' requires reflection_file= "
+                    "on the bottom BoundaryProperties (path to a .brc file)."
                 )
 
             # For 'F' type, Bellhop finds the .brc file by name convention
             # (same base name as .env). No additional lines needed in the env file.
         elif bottom_type == "A":  # Acousto-elastic halfspace
-            # Format: depth sound_speed shear_speed density attenuation roughness /
-            shear_speed = getattr(env.bottom, 'shear_speed', 0.0)
-            roughness = getattr(env.bottom, "roughness", 0.0)
+            # Per ReadEnvironmentBell.f90:474 the row is
+            # READ(ENVFile,*) zTemp, alphaR, betaR, rhoR, alphaI, betaI
+            # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
+            # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
+            # on the preceding BOT line ('A' sigma).
+            hs = env.halfspace_at_range(0.0)
+            shear_speed = getattr(hs, 'shear_speed', 0.0)
+            shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
-                f" {env.depth:.2f}  {env.bottom.sound_speed:.2f} "
-                f"{shear_speed:.1f} {env.bottom.density:.1f} "
-                f"{env.bottom.attenuation:.1f} {roughness:.1f} /\n"
+                f" {env.depth:.2f}  {hs.sound_speed:.2f} "
+                f"{shear_speed:.1f} {hs.density:.1f} "
+                f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )
 
         write_source_depths(f, source)
@@ -468,19 +460,18 @@ def write_bellhop_env_file(
         # without destroying the original beam_type (lowercase 'b','g'
         # are distinct ray-centered variants).
         if beam_type.upper() in ('C', 'R', 'S'):
-            # Get parameters from kwargs with sensible defaults
-            beam_width_type = kwargs.get('beam_width_type', 'F')  # Filling
-            beam_curvature = kwargs.get('beam_curvature', 'D')    # Double
+            beam_width_type = kwargs.get('beam_width_type', 'F')
+            beam_curvature = kwargs.get('beam_curvature', 'D')
             eps_multiplier = kwargs.get('eps_multiplier', 1.0)
-            r_loop = kwargs.get('r_loop', 1.0)  # Range for choosing beam width (km)
-            n_image = kwargs.get('n_image', 1)  # Number of images
-            ib_win = kwargs.get('ib_win', 4)    # Beam windowing parameter
-            component = kwargs.get('component', 'P')  # 'P' for pressure, 'D' for displacement
+            # Bellhop's RLoop column expects km; uacpy keeps everything in
+            # metres at the API surface, so convert here.
+            r_loop_km = kwargs.get('r_loop', 1000.0) / 1000.0
+            n_image = kwargs.get('n_image', 1)
+            ib_win = kwargs.get('ib_win', 4)
+            component = kwargs.get('component', 'P')
 
-            # ALWAYS write these two lines for beam_type 'C' or 'R'
-            # Line 1: beam width/curvature type, epsilon multiplier, r_loop
             beam_type_str = f"{beam_width_type}{beam_curvature}"
-            f.write(f"'{beam_type_str}' {eps_multiplier:.6f} {r_loop:.6f}\n")
+            f.write(f"'{beam_type_str}' {eps_multiplier:.6f} {r_loop_km:.6f}\n")
 
             # Line 2: n_image, ib_win, component
             f.write(f"{n_image} {ib_win} '{component}'\n")

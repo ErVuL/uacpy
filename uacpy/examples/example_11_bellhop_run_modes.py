@@ -98,13 +98,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop
-from uacpy.models import RunMode
-import os
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import Bellhop  # noqa: E402
+from uacpy.models import RunMode  # noqa: E402
 
 
 def scenario_a_tl_modes():
@@ -168,7 +167,7 @@ def scenario_a_tl_modes():
     # Coherent TL
     ax = axes[0, 0]
     im = ax.pcolormesh(result_coherent.ranges/1000, result_coherent.depths,
-                       result_coherent.data, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_coherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_coherent.ranges[0]/1000, result_coherent.ranges[-1]/1000])
     ax.set_ylim([result_coherent.depths[-1], result_coherent.depths[0]])
@@ -183,7 +182,7 @@ def scenario_a_tl_modes():
     # Incoherent TL
     ax = axes[0, 1]
     im = ax.pcolormesh(result_incoherent.ranges/1000, result_incoherent.depths,
-                       result_incoherent.data, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_incoherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_incoherent.ranges[0]/1000, result_incoherent.ranges[-1]/1000])
     ax.set_ylim([result_incoherent.depths[-1], result_incoherent.depths[0]])
@@ -198,7 +197,7 @@ def scenario_a_tl_modes():
     # Semi-coherent TL
     ax = axes[1, 0]
     im = ax.pcolormesh(result_semicoherent.ranges/1000, result_semicoherent.depths,
-                       result_semicoherent.data, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_semicoherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_semicoherent.ranges[0]/1000, result_semicoherent.ranges[-1]/1000])
     ax.set_ylim([result_semicoherent.depths[-1], result_semicoherent.depths[0]])
@@ -212,10 +211,9 @@ def scenario_a_tl_modes():
 
     # Range cut comparison at channel axis
     ax = axes[1, 1]
-    depth_idx = np.argmin(np.abs(result_coherent.depths - 1000))
-    tl_coherent = result_coherent.data[depth_idx, :]
-    tl_incoherent = result_incoherent.data[depth_idx, :]
-    tl_semicoherent = result_semicoherent.data[depth_idx, :]
+    tl_coherent = result_coherent.at(depth=1000).tl
+    tl_incoherent = result_incoherent.at(depth=1000).tl
+    tl_semicoherent = result_semicoherent.at(depth=1000).tl
 
     ax.plot(result_coherent.ranges/1000, tl_coherent,
             'b-', linewidth=2.5, label='Coherent', alpha=0.8)
@@ -242,19 +240,19 @@ def scenario_a_tl_modes():
     plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"\n  TL statistics at channel axis (1000m depth):")
-    print(f"    • Coherent    - Mean: {np.mean(result_coherent.data[depth_idx, :]):.1f} dB, "
-          f"Std: {np.std(result_coherent.data[depth_idx, :]):.1f} dB")
-    print(f"    • Incoherent  - Mean: {np.mean(result_incoherent.data[depth_idx, :]):.1f} dB, "
-          f"Std: {np.std(result_incoherent.data[depth_idx, :]):.1f} dB")
-    print(f"    • Semi-coh    - Mean: {np.mean(result_semicoherent.data[depth_idx, :]):.1f} dB, "
-          f"Std: {np.std(result_semicoherent.data[depth_idx, :]):.1f} dB")
-    print(f"\n  Key observations:")
-    print(f"    • Coherent TL shows strong modal interference (high std dev)")
-    print(f"    • Incoherent TL is smoothest (phase-averaged)")
-    print(f"    • Semi-coherent is intermediate")
+    print("\n  TL statistics at channel axis (1000m depth):")
+    print(f"    • Coherent    - Mean: {np.mean(tl_coherent):.1f} dB, "
+          f"Std: {np.std(tl_coherent):.1f} dB")
+    print(f"    • Incoherent  - Mean: {np.mean(tl_incoherent):.1f} dB, "
+          f"Std: {np.std(tl_incoherent):.1f} dB")
+    print(f"    • Semi-coh    - Mean: {np.mean(tl_semicoherent):.1f} dB, "
+          f"Std: {np.std(tl_semicoherent):.1f} dB")
+    print("\n  Key observations:")
+    print("    • Coherent TL shows strong modal interference (high std dev)")
+    print("    • Incoherent TL is smoothest (phase-averaged)")
+    print("    • Semi-coherent is intermediate")
 
-    print("\n✓ Generated: output/example_11a_tl_modes.png")
+    print("\n  ✓ Saved: output/example_11a_tl_modes.png")
 
 
 def scenario_b_ray_tracing():
@@ -311,13 +309,13 @@ def scenario_b_ray_tracing():
                 bbox_inches='tight')
     plt.close()
 
-    print(f"\n  Ray tracing parameters:")
+    print("\n  Ray tracing parameters:")
     print(f"    • Number of rays: {len(source.angles)}")
     print(f"    • Launch angles: {source.angles[0]:.1f}° to {source.angles[-1]:.1f}°")
     print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
-    print(f"    • Maximum range: 100 km")
+    print("    • Maximum range: 100 km")
 
-    print("\n✓ Generated: output/example_11b_ray_tracing.png")
+    print("\n  ✓ Saved: output/example_11b_ray_tracing.png")
 
 
 def scenario_c_eigenrays_arrivals():
@@ -351,21 +349,18 @@ def scenario_c_eigenrays_arrivals():
           f"z={receiver.depths[0]:.0f} m)")
 
     # RunMode.EIGENRAYS returns every ray Bellhop wrote — the Fortran
-    # eigenray tolerance is loose. Use compute_eigenrays to post-filter
-    # by closest-approach miss distance so only rays that actually land
-    # within λ/4 of the receiver survive.
+    # eigenray tolerance is loose. Filter via Rays methods so only rays
+    # that actually land within λ/4 of the receiver survive.
     bellhop_eigen = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=2001)
     wavelength_m = 1500.0 / float(np.atleast_1d(source.frequencies)[0])
-    print(f"    • Filtering eigenrays via compute_eigenrays "
+    print(f"    • Filtering eigenrays "
           f"(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)...",
           end=" ", flush=True)
     result_eigen = bellhop_eigen.compute_eigenrays(
         env, source,
-        range_m=float(receiver.ranges[0]),
-        depth_m=float(receiver.depths[0]),
-        tolerance_m=wavelength_m / 4,
-        max_rays=12,
-    )
+        range=float(receiver.ranges[0]),
+        depth=float(receiver.depths[0]),
+    ).filter_by_miss_distance(wavelength_m / 4).top_n_by_miss(12).truncate_at_receiver()
     print("✓")
 
     print("    • Computing context ray fan (RunMode.RAYS)...",
@@ -392,13 +387,7 @@ def scenario_c_eigenrays_arrivals():
 
     from uacpy.visualization.plots import plot_rays
 
-    arrivals_ok = False
-    if result_arr is not None:
-        node = getattr(result_arr, 'arrivals_data', None)
-        while isinstance(node, list) and node:
-            node = node[0]
-        if isinstance(node, dict) and len(node.get('delays', [])) > 0:
-            arrivals_ok = True
+    arrivals_ok = result_arr is not None and len(result_arr) > 0
 
     n_panels = 3 if arrivals_ok else 2
     fig = plt.figure(figsize=(14, 4 * n_panels + 1))
@@ -415,9 +404,8 @@ def scenario_c_eigenrays_arrivals():
     if n_eigenrays > 0:
         plot_rays(result_eigen, env=env, source=source, receiver=receiver,
                   ax=ax_eigen, linewidth=1.5, alpha=0.9,
-                  truncate_at_receiver=False,
                   title=f'{n_eigenrays} eigenrays at receiver '
-                        f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
+                  f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
     else:
         ax_eigen.text(0.5, 0.5, 'No eigenrays returned',
                       ha='center', va='center', transform=ax_eigen.transAxes)
@@ -431,16 +419,16 @@ def scenario_c_eigenrays_arrivals():
                 bbox_inches='tight')
     plt.close(fig)
 
-    print(f"\n  Analysis complete:")
+    print("\n  Analysis complete:")
     print(f"    • Eigenrays found: {n_eigenrays}")
     if arrivals_ok:
-        rec = result_arr.to_table(range_idx=0, depth_idx=0, src_idx=0)
+        rec = result_arr.arrivals
         if rec:
             delays = [r['delay'] for r in rec]
             print(f"    • Arrivals detected: {len(rec)}")
             print(f"    • Time spread: {max(delays) - min(delays):.4f} s")
 
-    print("\n✓ Generated: output/example_11c_eigenrays_arrivals.png")
+    print("\n  ✓ Saved: output/example_11c_eigenrays_arrivals.png")
 
 
 def scenario_d_compute_eigenrays_pekeris():
@@ -463,7 +451,7 @@ def scenario_d_compute_eigenrays_pekeris():
         density=1.5, attenuation=0.5,
     )
     env = uacpy.Environment(
-        name='Pekeris', bathymetry=100.0, sound_speed=1500.0, bottom=bottom,
+        name='Pekeris', bathymetry=100.0, ssp=1500.0, bottom=bottom,
     )
     source = uacpy.Source(depths=20.0, frequencies=200.0)
 
@@ -476,9 +464,8 @@ def scenario_d_compute_eigenrays_pekeris():
     bellhop = Bellhop(verbose=False, alpha=(-30, 30), n_beams=2001)
     rays = bellhop.compute_eigenrays(
         env, source,
-        range_m=target_range_m, depth_m=target_depth_m,
-        max_rays=8,
-    )
+        range=target_range_m, depth=target_depth_m,
+    ).top_n_by_miss(8).truncate_at_receiver()
     print("✓")
 
     print(f"\n  Found {len(rays.rays)} eigenrays:")
@@ -494,16 +481,16 @@ def scenario_d_compute_eigenrays_pekeris():
     fig.savefig(OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("\n✓ Generated: output/example_11d_compute_eigenrays_pekeris.png")
+    print("\n  ✓ Saved: output/example_11d_compute_eigenrays_pekeris.png")
 
 
 def main():
     """
     Run all Bellhop run mode demonstrations.
     """
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 11: Bellhop Run Modes - Comprehensive")
-    print("═"*80)
+    print("═" * 80)
     print("\nThis example demonstrates:")
     print("  • Coherent vs Incoherent vs Semi-coherent TL")
     print("  • Ray tracing and visualization")
@@ -517,9 +504,6 @@ def main():
     scenario_d_compute_eigenrays_pekeris()
 
     # Summary
-    print("\n" + "═"*80)
-    print("EXAMPLE 11 COMPLETE")
-    print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Coherent TL shows phase interference (modal patterns)")
     print("  ✓ Incoherent TL represents phase-averaged, broadband behavior")
@@ -532,7 +516,8 @@ def main():
     print("  → Semi-coherent: Practical compromise")
     print("  → Rays: Understanding propagation paths, caustics")
     print("  → Eigenrays/Arrivals: Pulse propagation, time-domain analysis")
-    print("\n" + "═"*80 + "\n")
+
+    print("\n✓ Example 11 complete\n")
 
     return 0
 

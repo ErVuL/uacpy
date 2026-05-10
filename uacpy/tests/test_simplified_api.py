@@ -3,16 +3,15 @@ Tests for the simplified UACPY API
 """
 
 import pytest
-
-pytestmark = pytest.mark.requires_binary
 import numpy as np
 import matplotlib.pyplot as plt
 
-import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField
-from uacpy.core.results import Result, TLField, Modes
+from uacpy.core.results import PressureField, Modes
 from uacpy.visualization import plots
 from uacpy.models import RunMode
+
+pytestmark = pytest.mark.requires_binary
 
 
 class TestComputeAPI:
@@ -34,8 +33,8 @@ class TestComputeAPI:
 
         assert isinstance(modes, Modes)
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert 'phi' in modes.metadata
+        assert modes.k is not None
+        assert modes.phi is not None
 
     def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""
@@ -45,8 +44,8 @@ class TestComputeAPI:
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert isinstance(result_bellhop, TLField)
-        assert isinstance(result_kraken, TLField)
+        assert isinstance(result_bellhop, PressureField)
+        assert isinstance(result_kraken, PressureField)
         assert result_bellhop.field_type == 'tl'
         assert result_kraken.field_type == 'tl'
 
@@ -116,20 +115,19 @@ class TestFieldMethods:
     """Tests for Field convenience methods."""
 
     def test_field_get_methods(self, simple_env, source, receiver_small):
-        """Test Field get_value, get_at_range, get_at_depth."""
+        """Test Field sel(...) for point and line slices."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        # Test get_value
-        value = result.get_value(range_m=3000, depth=50)
-        assert isinstance(value, (float, np.floating))
+        point = result.at(range=3000, depth=50)
+        assert isinstance(point, PressureField)
+        assert point.tl.ndim == 0
+        assert isinstance(float(point.tl), float)
 
-        # Test get_at_range
-        values_at_range = result.get_at_range(3000)
+        values_at_range = result.at(range=3000).tl
         assert len(values_at_range) == len(receiver_small.depths)
 
-        # Test get_at_depth
-        values_at_depth = result.get_at_depth(50)
+        values_at_depth = result.at(depth=50).tl
         assert len(values_at_depth) == len(receiver_small.ranges)
 
     def test_field_properties(self, simple_env, source, receiver_small):
@@ -157,7 +155,7 @@ class TestRunModeAndComputeTl:
         """compute_tl and run(run_mode=COHERENT_TL) produce the same field."""
         bellhop = Bellhop(verbose=False)
         a = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
-                       run_mode=RunMode.COHERENT_TL)
+                        run_mode=RunMode.COHERENT_TL)
         b = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         # Bellhop has non-deterministic floating-point; compare loosely.
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)

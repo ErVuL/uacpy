@@ -133,12 +133,23 @@ convention as mpiramS' `psif`. ramsurf1.5's `solve` has no `g0`
 argument (`ramsurf1.5.f:310`); the carrier is absorbed into the
 matrix coefficients by the operator function
 `g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:564`),
-so its `u` is the bare envelope. `_run_collins_broadband` therefore
-branches on `kind`: rams gets `np.conj(H)` only, ramsurf gets
-`np.conj(H) · exp(−i k₀(ω) r)`. After this convention bookkeeping all
+so its `u` carries no `exp(+i k₀ r)`. ramsurf1.5 stores
+`u · f3 / sqrt(r+eps)` (the density-jump-rescaled, range-rescaled
+envelope; matches what `tlg` is computed from). Since `f3 ∈ ℝ`, the
+wrapper's `conj(H) · exp(−i k₀ r)` post-multiply still recovers the
+engineering travelling-wave convention.
+`_run_collins_broadband` therefore branches on `kind`: rams gets
+`np.conj(H)` only, ramsurf gets `np.conj(H) · exp(−i k₀(ω) r)`. After this convention bookkeeping all
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
 waveguide modal dispersion ~20 ms).
+
+### Build system
+
+uacpy supplies a minimal `Makefile` (`gfortran -O2 -std=legacy -w`) that
+builds only the two binaries uacpy dispatches to (`rams0.5`,
+`ramsurf1.5`). This replaces upstream's autotools setup (`configure.ac` /
+`Makefile.am`) which targets a wider set of executables uacpy doesn't use.
 
 ### Dispatcher
 
@@ -918,60 +929,6 @@ modified version wraps it in `if (iflat==1)`.
 +  end if
 ```
 
-#### Output file format rewrite
-
-`psif.dat` header now includes the number of output ranges `nr` and a dedicated
-record for `rout(1:nr)`.  Data records loop over ranges.  The record-length
-calculation uses `inquire(iolength=...)` instead of manual arithmetic.  The
-Python reader `io/mpirams_reader.py` matches this format.
-
-```diff
--inquire(iolength=length) real(psif(1,:))
--length=2*length+length/nf  ! We need nf real and nf imaginary values and the depth.
--! length is the record length, an important piece of information
--! Write it out for handy reference:
-+block
-+  integer :: rl1
-+  inquire(iolength=rl1) fc        ! iolength of one real(wp)
-+  length = max(8, nf, nr, 1+2*nf) * rl1
-+end block
-+
- open(nunit, form='formatted',file='recl.dat')
- write(nunit,*) length
- close(nunit)
- 
--! Now write out the data to a direct access file:
- open(nunit, access='direct',recl=length,file='psif.dat')
- 
--! Float the integers to real, otherwise there will be trouble.
--write(nunit,rec=1) Nsam,real(nf,wp),real(nzo,wp),rout,c0,cmin,fs,Q
--write(nunit,rec=2) frq     ! vector of size nf
--
--do ii=1,nzo
-- write(nunit,rec=ii+2) zg1(ii),((real(psif(ii,jj))),(aimag(psif(ii,jj))),jj=1,nf)
-+! Record 1: header parameters
-+write(nunit,rec=1) Nsam,real(nf,wp),real(nzo,wp),real(nr,wp),c0,cmin,fs,Q
-+! Record 2: frequency vector
-+write(nunit,rec=2) frq
-+! Record 3: output ranges
-+write(nunit,rec=3) rout
-+
-+! Records 4+: data blocks, one per range, each containing nzo depth records
-+do ir=1,nr
-+  do ii=1,nzo
-+    write(nunit,rec=3+(ir-1)*nzo+ii) zg1(ii), &
-+        ((real(psif(ii,jj,ir))),(aimag(psif(ii,jj,ir))),jj=1,nf)
-+  end do
-  end do
- 
-  close(nunit)
- 
-  print *, 'ALL DONE! '
-+print '(a,i6,a,i4,a)','Wrote ',nzo,' depths x ',nr,' ranges to psif.dat'
-  print *,'recl.dat has the record length of the direct access file.'
--print *,'The direct access file with the parameters and results is psif.dat.'
-```
-
 ---
 
 ## Wrapper-only patches (no vendored-source change) — 2026-05-08
@@ -1014,11 +971,11 @@ to sweep ~500 frequencies per COHERENT_TL call.
 ### Scooter BRC RMax — wrapper bug fix
 
 `models/scooter.py:_write_scooter_env` previously fed
-`BoundaryProperties.reflection_rmax_m` directly as Scooter's spectral
+`BoundaryProperties.reflection_rmax` directly as Scooter's spectral
 RMax for `acoustic_type='file'` bottoms. Those are different concepts:
-`reflection_rmax_m` bounds the BRC tabulation, while Scooter's RMax
+`reflection_rmax` bounds the BRC tabulation, while Scooter's RMax
 sets the wavenumber-integration grid via `Δk = π / RMax`. With
-`reflection_rmax_m=10` (a typical BRC sampling), Scooter computed
+`reflection_rmax=10` (a typical BRC sampling), Scooter computed
 `Nk=2` and stabilising `atten ≈ 0.3` — the in-tree Hankel transform
 then overflowed `exp(atten · r)` past machine range at any meaningful
 receiver distance.

@@ -33,14 +33,15 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import (
-    Bellhop, Kraken, KrakenField, RAM, RunMode, Scooter,
+    Bellhop, KrakenField, RAM, RunMode, Scooter,
 )
+
 
 # Detect availability of compiled RAM-family binaries — env-dependent so
 # the rough-surface scenario can be skipped cleanly when ramsurf isn't built.
 def _has_ramsurf() -> bool:
     try:
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         ram._collins_binary('ramsurf')
         return True
     except FileNotFoundError:
@@ -73,6 +74,7 @@ class Scenario:
     comparisons: List[Tuple] = field(default_factory=list)
     tolerance_db: float = 3.0
     range_window_m: Tuple[float, float] = (1000.0, 8000.0)
+    slow: bool = False         # adds ``@pytest.mark.slow`` to the generated params
 
 
 # ─── Reference / comparison runners ───────────────────────────────────────
@@ -93,7 +95,18 @@ def _bellhop_tl(env, src, rcv):
 
 def _ram_tl(env, src, rcv):
     """RAM dispatcher — picks mpiramS / rams / ramsurf based on env."""
-    return RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        # Lytaev grid-relaxation warnings are informational here and locally
+        # consumed; cross-model agreement tolerances absorb the small
+        # accuracy degradation.
+        _warnings.filterwarnings(
+            'ignore', message=r'RAM:.*raised dz from', category=UserWarning,
+        )
+        _warnings.filterwarnings(
+            'ignore', message=r'RAM:.*Lytaev relaxed', category=UserWarning,
+        )
+        return RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
 # ─── Scenarios ─────────────────────────────────────────────────────────────
@@ -101,7 +114,7 @@ def _ram_tl(env, src, rcv):
 
 def _pekeris_fluid() -> Scenario:
     env = Environment(
-        name='pekeris-fluid', bathymetry=100.0, sound_speed=1500.0,
+        name='pekeris-fluid', bathymetry=100.0, ssp=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -156,10 +169,10 @@ def _pekeris_elastic() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-layered', bathymetry=100.0, ssp=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-halfspace', bathymetry=100.0, ssp=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -219,7 +232,7 @@ def _altimetry_consistency() -> Scenario:
         sound_speed=1700.0, density=1.7, attenuation=0.5,
     )
     env = Environment(
-        name='altimetry-rough', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough', bathymetry=100.0, ssp=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
@@ -237,7 +250,7 @@ def _altimetry_consistency() -> Scenario:
             # ~3 km as surface multipaths accumulate; 8 dB RMSE is the
             # empirical bar in 1-5 km. The test still catches sign flips
             # cleanly — an inverted surface produces RMSE > 25 dB.
-            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False).run(
+            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False, dr=20.0, dz=2.0).run(
                 env, s, r, run_mode=RunMode.COHERENT_TL), 8.0),
         ],
         tolerance_db=8.0,
@@ -252,7 +265,7 @@ def _pekeris_fluid_hf() -> Scenario:
     50 Hz scenario gives the framework a frequency-dependence handle.
     """
     env = Environment(
-        name='pekeris-fluid-hf', bathymetry=100.0, sound_speed=1500.0,
+        name='pekeris-fluid-hf', bathymetry=100.0, ssp=1500.0,
         bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -307,10 +320,10 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         attenuation=0.2, shear_attenuation=0.5,
     )
     env_layered = Environment(
-        name='pekeris-elastic-bb-layered', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_layered,
+        name='pekeris-elastic-bb-layered', bathymetry=100.0, ssp=1500.0, bottom=elastic_layered,
     )
     env_halfspace = Environment(
-        name='pekeris-elastic-bb-halfspace', bathymetry=100.0, sound_speed=1500.0, bottom=elastic_halfspace,
+        name='pekeris-elastic-bb-halfspace', bathymetry=100.0, ssp=1500.0, bottom=elastic_halfspace,
     )
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
@@ -318,37 +331,19 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         ranges=np.linspace(500.0, 8000.0, 30),
     )
 
-    def _bb_to_fc_tl(field):
-        # Pick the centre-frequency slice from a transfer-function field
-        # and convert |H(fc, ·)| to dB for comparison.
-        i_fc = int(np.argmin(np.abs(field.frequencies - 50.0)))
-        return -20.0 * np.log10(np.abs(field.data[:, :, i_fc]) + 1e-20)
-
     def reference(env_unused, src_, rcv_):
         kf = KrakenField(verbose=False).run(
             env_halfspace, src_, rcv_,
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
         )
-        # Inject the centre-freq TL into a fake 'tl' Field-like object the
-        # comparator already understands. Build an ad-hoc Field with TL only.
-        from uacpy.core.results import TLField
-        return TLField(
-            data=_bb_to_fc_tl(kf),
-            depths=kf.depths, ranges=kf.ranges,
-            model='KrakenField', frequencies=50.0,
-        )
+        return kf.at(frequency=50.0).to_tl()
 
     def rams_bb(env_unused, src_, rcv_):
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=2.0)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import TLField
-        return TLField(
-            data=_bb_to_fc_tl(hf),
-            depths=hf.depths, ranges=hf.ranges,
-            model='RAM(rams)', frequencies=50.0,
-        )
+        return hf.at(frequency=50.0).to_tl()
 
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
@@ -358,6 +353,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         comparisons=[('RAM(rams0.5) broadband', rams_bb, 4.0)],
         tolerance_db=4.0,
         range_window_m=(1000.0, 7000.0),
+        slow=True,                    # rams0.5 broadband Python freq-loop
     )
 
 
@@ -384,17 +380,13 @@ def _altimetry_broadband_at_fc() -> Scenario:
         (6000.0, 0.0),
     ]
     env = Environment(
-        name='altimetry-rough-bb', bathymetry=100.0, sound_speed=1500.0, bottom=fluid, altimetry=surface,
+        name='altimetry-rough-bb', bathymetry=100.0, ssp=1500.0, bottom=fluid, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(
         depths=np.array([50.0]),
         ranges=np.linspace(500.0, 6000.0, 30),
     )
-
-    def _bb_to_fc_tl(field):
-        i_fc = int(np.argmin(np.abs(field.frequencies - 200.0)))
-        return -20.0 * np.log10(np.abs(field.data[:, :, i_fc]) + 1e-20)
 
     def reference(env_, src_, rcv_):
         bh = Bellhop(verbose=False).run(
@@ -406,12 +398,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=2.0)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        from uacpy.core.results import TLField
-        return TLField(
-            data=_bb_to_fc_tl(hf),
-            depths=hf.depths, ranges=hf.ranges,
-            model='RAM(ramsurf)', frequencies=200.0,
-        )
+        return hf.at(frequency=200.0).to_tl()
 
     return Scenario(
         name='altimetry-broadband-200Hz-fc-slice',
@@ -422,6 +409,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         comparisons=[('RAM(ramsurf1.5) broadband', ramsurf_bb, 9.0)],
         tolerance_db=9.0,
         range_window_m=(1000.0, 5000.0),
+        slow=True,                    # ramsurf1.5 broadband Python freq-loop
     )
 
 
@@ -452,7 +440,12 @@ def _comparison_pairs():
                     f"Scenario {s.name!r}: comparison entry must be "
                     f"(label, fn) or (label, fn, tolerance_db); got {entry!r}"
                 )
-            out.append(pytest.param(s, label, fn, tol, id=f"{s.name}::{label}"))
+            marks = (pytest.mark.slow,) if s.slow else ()
+            out.append(pytest.param(
+                s, label, fn, tol,
+                id=f"{s.name}::{label}",
+                marks=marks,
+            ))
     return out
 
 
@@ -483,8 +476,8 @@ def test_cross_model_agreement(scenario: Scenario, label: str, callable_,
 
     # Pick the receiver-depth and ranges shared by both (single-depth
     # scenarios are the simple case; for multi-depth, take depth 0).
-    ref_tl = np.asarray(ref_field.data).squeeze()
-    cmp_tl = np.asarray(cmp_field.data).squeeze()
+    ref_tl = np.asarray(ref_field.tl)
+    cmp_tl = np.asarray(cmp_field.tl)
     if ref_tl.ndim == 2:
         ref_tl = ref_tl[0]
     if cmp_tl.ndim == 2:

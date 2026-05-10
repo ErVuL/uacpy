@@ -12,7 +12,6 @@ from uacpy.models._pade_optimizer import (
     optimal_c0,
     pade_error,
     numerov_error,
-    combined_error,
     optimize_grid,
     rams_dz_floor,
 )

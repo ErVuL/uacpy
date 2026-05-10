@@ -11,8 +11,8 @@ binaries based on the environment:
 - **ramsurf1.5** — fluid bottom + variable surface (``env.altimetry``); single
   frequency, rough-surface / beach-style propagation.
 
-Combining elastic + rough surface raises ``NotImplementedError`` — there is no
-published Collins PE for that combination. Use OASES for range-independent
+Combining elastic + rough surface raises ``UnsupportedFeatureError`` — there
+is no published Collins PE for that combination. Use OASES for range-independent
 elastic problems, or fluidise / flatten one side as an approximation.
 
 This example runs the same Pekeris-like waveguide through all three backends
@@ -23,20 +23,25 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from uacpy.core.environment import (
+from uacpy.core.environment import (  # noqa: E402
     BoundaryProperties, Environment, LayeredBottom, SedimentLayer,
 )
-from uacpy.core.receiver import Receiver
-from uacpy.core.source import Source
-from uacpy.models import RAM, RunMode
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.models import RAM, RunMode  # noqa: E402
+from uacpy.core.exceptions import UnsupportedFeatureError  # noqa: E402
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 20: RAM multi-backend dispatch")
+    print("═" * 80)
+
     fc = 100.0  # Hz
     waveguide_depth = 100.0
     rmax = 5000.0
@@ -71,13 +76,13 @@ def main():
 
     cases = [
         ('mpiramS (fluid + flat)', Environment(
-            name='fluid-flat', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace,
+            name='fluid-flat', bathymetry=waveguide_depth, ssp=1500.0, bottom=fluid_halfspace,
         )),
         ('rams0.5 (elastic + flat)', Environment(
-            name='elastic-flat', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered,
+            name='elastic-flat', bathymetry=waveguide_depth, ssp=1500.0, bottom=elastic_layered,
         )),
         ('ramsurf1.5 (fluid + rough)', Environment(
-            name='fluid-rough', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=fluid_halfspace, altimetry=surface,
+            name='fluid-rough', bathymetry=waveguide_depth, ssp=1500.0, bottom=fluid_halfspace, altimetry=surface,
         )),
     ]
 
@@ -91,23 +96,23 @@ def main():
     # The elastic + altimetry combination is the documented gap.
     print("\nGap demonstration:")
     bad_env = Environment(
-        name='elastic-rough', bathymetry=waveguide_depth, sound_speed=1500.0, bottom=elastic_layered, altimetry=surface,
+        name='elastic-rough', bathymetry=waveguide_depth, ssp=1500.0, bottom=elastic_layered, altimetry=surface,
     )
     try:
         ram.select_backend(bad_env)
-    except NotImplementedError as e:
-        print(f"  elastic + altimetry → NotImplementedError: {str(e)[:80]}…")
+    except UnsupportedFeatureError as e:
+        print(f"  elastic + altimetry → UnsupportedFeatureError: {str(e)[:80]}…")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
     for ax, (label, env) in zip(axes, cases):
         try:
             field = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
             im = ax.pcolormesh(
-                field.ranges / 1000.0, field.depths, field.data,
+                field.ranges / 1000.0, field.depths, field.tl,
                 shading='auto', cmap='jet_r', vmin=30, vmax=110,
             )
             ax.invert_yaxis()
-            ax.set_title(f"{label}\nbackend={field.metadata['backend']}")
+            ax.set_title(f"{label}\nbackend={field.backend}")
             ax.set_xlabel("Range (km)")
             if ax is axes[0]:
                 ax.set_ylabel("Depth (m)")
@@ -119,7 +124,9 @@ def main():
     out = Path(__file__).parent / 'output' / 'example_20_ram_backends.png'
     out.parent.mkdir(exist_ok=True)
     fig.savefig(out, dpi=120)
-    print(f"\nSaved: {out}")
+    print(f"\n  ✓ Saved: {out}")
+
+    print("\n✓ Example 20 complete\n")
 
 
 if __name__ == '__main__':

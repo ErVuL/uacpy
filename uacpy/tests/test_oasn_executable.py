@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.requires_oases
-
 from uacpy.core.exceptions import ExecutableNotFoundError
 from uacpy.models.oases import OASN
+
+pytestmark = pytest.mark.requires_oases
 
 
 class TestOASNExecutableResolution:

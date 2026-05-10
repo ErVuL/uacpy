@@ -16,6 +16,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
 
+from uacpy.core.exceptions import ModelExecutionError
 from uacpy.io._fortran_helpers import read_vector
 
 
@@ -65,10 +66,8 @@ def read_boundary_3d(
     """
     try:
         with open(filename, "r") as fid:
-            # Read boundary type
             bdry_type_line = fid.readline().strip()
 
-            # Extract character between quotes
             import re
 
             match = re.search(r"'(.)'", bdry_type_line)
@@ -85,7 +84,6 @@ def read_boundary_3d(
                 else:
                     raise ValueError(f"Unknown boundary type: {bdry_type}")
 
-            # Read x-coordinates
             x_bot, n_x = read_vector(fid)
 
             if verbose:
@@ -97,7 +95,6 @@ def read_boundary_3d(
                     elif i == 50:
                         print("   ...")
 
-            # Read y-coordinates
             y_bot, n_y = read_vector(fid)
 
             if verbose:
@@ -109,19 +106,20 @@ def read_boundary_3d(
                     elif i == 50:
                         print("   ...")
 
-            # Read z-values (depth/height matrix)
             z_values = []
             for line in fid:
                 values = [float(v) for v in line.split() if v]
                 z_values.extend(values)
 
-            # Reshape and transpose
             z_bot = np.array(z_values).reshape(n_x, n_y).T
 
     except FileNotFoundError:
         raise FileNotFoundError(f"Boundary file not found: {filename}")
     except Exception as e:
-        raise RuntimeError(f"Error reading boundary file {filename}: {e}") from e
+        raise ModelExecutionError(
+            'Bellhop3D', return_code=0, stdout=None,
+            stderr=f"Error reading boundary file {filename}: {e}",
+        ) from e
 
     return x_bot, y_bot, z_bot, n_x, n_y
 
@@ -174,9 +172,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
             print("\n_______________________")
             print("Using bottom-bathymetry file")
 
-        # Read interpolation type
         line = fid.readline().strip()
-        # Extract character between quotes
         if "'" in line:
             start = line.index("'") + 1
             end = line.index("'", start)
@@ -195,42 +191,35 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
             else:
                 print("Curvilinear approximation to bathymetry")
 
-        # Read number of points
         n_pts = int(fid.readline().strip())
 
         if verbose:
             print(f"Number of bathymetry points = {n_pts}\n")
             print(" Range (km)     Depth (m)")
 
-        # Read bathymetry points
         bty_data = []
         for i in range(n_pts):
             range_km = float(fid.readline().strip())
-            depth_m = float(fid.readline().strip())
-            bty_data.append([range_km, depth_m])
+            depth = float(fid.readline().strip())
+            bty_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth_m:9.5g}")
+                print(f"{range_km:9.5g}    {depth:9.5g}")
             elif verbose and i == 10:
                 print("    ...")
 
-        bty_data = np.array(bty_data).T  # Shape: (2, n_pts)
+        bty_data = np.array(bty_data).T
 
-    # Convert ranges from km to meters
     bty_data[0, :] *= 1000.0
 
-    # Extend bathymetry to ±infinity
     n_pts_extended = n_pts + 2
     bty = np.zeros((2, n_pts_extended))
 
-    # Left endpoint at -infinity with constant depth
     bty[0, 0] = -1e50
     bty[1, 0] = bty_data[1, 0]
 
-    # Copy interior points
     bty[:, 1:-1] = bty_data
 
-    # Right endpoint at +infinity with constant depth
     bty[0, -1] = 1e50
     bty[1, -1] = bty_data[1, -1]
 
@@ -282,9 +271,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
             print("\n_______________________")
             print("Using top-altimetry file")
 
-        # Read interpolation type
         line = fid.readline().strip()
-        # Extract character between quotes
         if "'" in line:
             start = line.index("'") + 1
             end = line.index("'", start)
@@ -301,42 +288,35 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
             else:
                 print("Curvilinear approximation to altimetry")
 
-        # Read number of points
         n_pts = int(fid.readline().strip())
 
         if verbose:
             print(f"Number of altimetry points = {n_pts}\n")
             print(" Range (km)     Depth (m)")
 
-        # Read altimetry points
         ati_data = []
         for i in range(n_pts):
             range_km = float(fid.readline().strip())
-            depth_m = float(fid.readline().strip())
-            ati_data.append([range_km, depth_m])
+            depth = float(fid.readline().strip())
+            ati_data.append([range_km, depth])
 
             if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth_m:9.5g}")
+                print(f"{range_km:9.5g}    {depth:9.5g}")
             elif verbose and i == 10:
                 print("    ...")
 
-        ati_data = np.array(ati_data).T  # Shape: (2, n_pts)
+        ati_data = np.array(ati_data).T
 
-    # Convert ranges from km to meters
     ati_data[0, :] *= 1000.0
 
-    # Extend altimetry to ±infinity
     n_pts_extended = n_pts + 2
     ati = np.zeros((2, n_pts_extended))
 
-    # Left endpoint at -infinity with constant depth
     ati[0, 0] = -1e50
     ati[1, 0] = ati_data[1, 0]
 
-    # Copy interior points
     ati[:, 1:-1] = ati_data
 
-    # Right endpoint at +infinity with constant depth
     ati[0, -1] = 1e50
     ati[1, -1] = ati_data[1, -1]
 
@@ -392,26 +372,18 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     """
     filepath = Path(filepath)
     interp_char = _validate_interp_type(interp_type)
-    # 2-char TYPE: position 1 = interpolation, position 2 = 'S' short format
     type_str = f"{interp_char}S"
 
-    # Convert to km for range column (first column)
     bathy_km = bathymetry.copy()
-    bathy_km[:, 0] = bathy_km[:, 0] / 1000.0  # Convert m to km
+    bathy_km[:, 0] = bathy_km[:, 0] / 1000.0
 
     n_pts = bathy_km.shape[0]
 
     with open(filepath, "w") as f:
-        # Write 2-character TYPE string
         f.write(f"'{type_str}'\n")
-
-        # Write number of points
         f.write(f"{n_pts}\n")
-
-        # Write range-depth pairs (range in km, depth in m)
         for i in range(n_pts):
             f.write(f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f}\n")
-
         f.write("\n")
 
 
@@ -438,25 +410,29 @@ def write_bty_long_format(
     bottom_rd : RangeDependentBottom
         Object carrying per-range geoacoustics with attributes
         ``ranges`` (metres), ``sound_speed``, ``density``, ``attenuation``,
-        ``shear_speed``.
+        ``shear_speed``, ``shear_attenuation``.
     interp_type : str, optional
         'L' (linear, default) or 'C' (curvilinear).
 
     Notes
     -----
-    File format (extended BTY — long format):
+    File format (extended BTY — long format), matching the AT Fortran
+    READ in ``Bellhop/bdryMod.f90:200-201``:
+    ``READ(BTYFile,*) Bot(ii)%x, %HS%alphaR, %HS%betaR, %HS%rho,
+    %HS%alphaI, %HS%betaI``  — i.e. 7 numbers per row.
+
     - Line 1: 2-character TYPE in quotes — position 1 is interpolation
       ('L' or 'C'), position 2 is 'L' (long format, bathymetry +
       geoacoustics). See ATI_BTY_File.htm.
     - Line 2: number of points
-    - Following lines: ``range_km depth_m cp_m_s rho_g_cm3 atten cs_m_s``
+    - Following lines:
+      ``range_km depth cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
 
     Ranges in ``bottom_rd.ranges`` (metres) are re-sampled onto the
     bathymetry range grid via ``numpy.interp`` so the two lengths match.
     """
     filepath = Path(filepath)
     interp_char = _validate_interp_type(interp_type)
-    # 2-char TYPE: position 1 = interpolation, position 2 = 'L' long format
     type_str = f"{interp_char}L"
 
     bathy_km = bathymetry.copy()
@@ -470,14 +446,20 @@ def write_bty_long_format(
     cs_arr = bottom_rd.shear_speed if bottom_rd.shear_speed is not None \
         else np.zeros_like(rd_r_km)
     cs = np.interp(bathy_km[:, 0], rd_r_km, cs_arr)
+    alpha_s_arr = getattr(bottom_rd, 'shear_attenuation', None)
+    if alpha_s_arr is None:
+        alpha_s_arr = np.zeros_like(rd_r_km)
+    alpha_s = np.interp(bathy_km[:, 0], rd_r_km, alpha_s_arr)
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")
         f.write(f"{n_pts}\n")
         for i in range(n_pts):
+            # Column order matches bdryMod.f90:200-201 (range_km depth cp cs rho alpha_p alpha_s).
             f.write(
                 f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f} "
-                f"{cp[i]:.3f} {rho[i]:.3f} {alpha[i]:.6f} {cs[i]:.3f}\n"
+                f"{cp[i]:.3f} {cs[i]:.3f} {rho[i]:.3f} "
+                f"{alpha[i]:.6f} {alpha_s[i]:.6f}\n"
             )
         f.write("\n")
 
@@ -514,26 +496,18 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     """
     filepath = Path(filepath)
     interp_char = _validate_interp_type(interp_type)
-    # 2-char TYPE: position 1 = interpolation, position 2 = 'S' short format
     type_str = f"{interp_char}S"
 
-    # Convert to km for range column
     alti_km = altimetry.copy()
-    alti_km[:, 0] = alti_km[:, 0] / 1000.0  # Convert m to km
+    alti_km[:, 0] = alti_km[:, 0] / 1000.0
 
     n_pts = alti_km.shape[0]
 
     with open(filepath, "w") as f:
-        # Write 2-character TYPE string
         f.write(f"'{type_str}'\n")
-
-        # Write number of points
         f.write(f"{n_pts}\n")
-
-        # Write range-altitude pairs (range in km, altitude in m)
         for i in range(n_pts):
             f.write(f"{alti_km[i, 0]:.6f} {alti_km[i, 1]:.6f}\n")
-
         f.write("\n")
 
 
@@ -582,38 +556,31 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     """
     filepath = Path(filepath)
 
-    # Validate interpolation type
     if interp_type not in ['R', 'C']:
         raise ValueError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
 
-    # Replace NaN with 0.0
     depth = depth.copy()
     depth[np.isnan(depth)] = 0.0
 
     nx = len(X)
     ny = len(Y)
 
-    # Verify depth array shape
     if depth.shape != (ny, nx):
         raise ValueError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
 
     with open(filepath, 'w') as f:
-        # Write interpolation type
         f.write(f"'{interp_type}'\n")
 
-        # Write X data
         f.write(f"{nx}\n")
         for x in X:
             f.write(f"{x:.6f} ")
         f.write("\n")
 
-        # Write Y data
         f.write(f"{ny}\n")
         for y in Y:
             f.write(f"{y:.6f} ")
         f.write("\n")
 
-        # Write depth matrix (row by row)
         for iy in range(ny):
             for ix in range(nx):
                 f.write(f"{depth[iy, ix]:9.3f} ")

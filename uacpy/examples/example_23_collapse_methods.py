@@ -4,15 +4,15 @@ Example 23 — Per-feature collapse-method API
 
 When an `Environment` carries a feature a model does not natively
 support, `PropagationModel._project_environment` reduces it via the
-matching `*_collapse_method` constructor parameter and emits one
-`UserWarning` per dropped feature.
+matching key in the model's `collapse={…}` constructor parameter and
+emits one `UserWarning` per dropped feature.
 
 This example feeds **the same range-dependent environment** to
 `Scooter` (range-independent wavenumber-integration TL solver — drops
-both RD bathymetry and RD SSP). Four runs vary
-`bathymetry_collapse_method` and `ssp_collapse_method`. The four TL
-fields are laid out side-by-side via `compare_models` so the effect of
-each collapse choice is visible.
+both RD bathymetry and RD SSP). Four runs vary the `'bathymetry'` and
+`'ssp'` keys of `collapse={…}`. The four TL fields are laid out
+side-by-side via `compare_models` so the effect of each collapse choice
+is visible.
 
 A range-independent model is the right vehicle here: range-aware models
 like RAM or KrakenField *honour* RD bathymetry and SSP natively, so
@@ -57,8 +57,8 @@ def build_rd_environment() -> uacpy.Environment:
     return uacpy.Environment(
         name='Continental shelf — RD demo',
         ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
-            interp='pchip',
-        ),
+                                      interp='pchip',
+                                      ),
         bathymetry=bathymetry,
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
@@ -68,6 +68,10 @@ def build_rd_environment() -> uacpy.Environment:
 
 
 def main() -> None:
+    print("\n" + "═" * 80)
+    print("EXAMPLE 23: Per-feature collapse-method API")
+    print("═" * 80)
+
     env = build_rd_environment()
     source = uacpy.Source(depths=20.0, frequencies=200.0)
     receiver = uacpy.Receiver(
@@ -93,8 +97,7 @@ def main() -> None:
     results = {}
     for bathy_m, ssp_m in combos:
         sc = Scooter(
-            bathymetry_collapse_method=bathy_m,
-            ssp_collapse_method=ssp_m,
+            collapse={'bathymetry': bathy_m, 'ssp': ssp_m},
             verbose=False,
         )
         label = f"bathy={bathy_m!r}, ssp={ssp_m!r}"
@@ -109,12 +112,14 @@ def main() -> None:
 
     fig_cmp, _ = compare_models(
         results, env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
-        suptitle='Same RD env collapsed four ways via *_collapse_method',
+        suptitle='Same RD env collapsed four ways via collapse={…}',
     )
     out_cmp = OUTPUT_DIR / 'example_23_collapse_methods.png'
     fig_cmp.savefig(out_cmp, dpi=150, bbox_inches='tight')
     plt.close(fig_cmp)
     print(f"  ✓ Saved: {out_cmp}")
+
+    print("\n✓ Example 23 complete\n")
 
 
 if __name__ == '__main__':

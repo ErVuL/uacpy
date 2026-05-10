@@ -74,11 +74,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
-from example_helpers import create_example_report
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import Bellhop, RAM, KrakenField, Scooter  # noqa: E402
+from example_helpers import create_example_report  # noqa: E402
 
 
 def scenario_a_munk_profile():
@@ -155,8 +155,8 @@ def scenario_a_munk_profile():
             example_num="2A",
             title="Sound Speed Profiles - Munk Deep Ocean",
             description="Deep water sound channel with Munk canonical profile. Demonstrates "
-                       "SOFAR channel trapping, convergence zones, and ultra-long-range propagation. "
-                       "Channel axis at ~1000m depth provides optimal trapping.",
+            "SOFAR channel trapping, convergence zones, and ultra-long-range propagation. "
+            "Channel axis at ~1000m depth provides optimal trapping.",
             env=env,
             source=source,
             receiver=receiver,
@@ -197,7 +197,7 @@ def scenario_b_pekeris_waveguide():
     env = uacpy.Environment(
         name="Pekeris Waveguide - Elastic Bottom",
         bathymetry=100.0,             # Shallow water
-        sound_speed=1500.0,      # Isovelocity water column
+        ssp=1500.0,      # Isovelocity water column
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),
@@ -251,8 +251,8 @@ def scenario_b_pekeris_waveguide():
             example_num="2B",
             title="Sound Speed Profiles - Pekeris Elastic Bottom",
             description="Classic Pekeris waveguide with elastic seafloor. Demonstrates modal "
-                       "propagation with bottom loss, shear wave conversion at interface, and "
-                       "reduced mode count compared to rigid bottom.",
+            "propagation with bottom loss, shear wave conversion at interface, and "
+            "reduced mode count compared to rigid bottom.",
             env=env,
             source=source,
             receiver=receiver,
@@ -349,8 +349,8 @@ def scenario_c_thermocline():
             example_num="2C",
             title="Sound Speed Profiles - Thermocline Surface Duct",
             description="Coastal environment with bilinear SSP creating surface duct. Source "
-                       "within duct demonstrates strong trapping in isothermal layer (0-50m) with "
-                       "downward refraction below thermocline.",
+            "within duct demonstrates strong trapping in isothermal layer (0-50m) with "
+            "downward refraction below thermocline.",
             env=env,
             source=source,
             receiver=receiver,
@@ -368,9 +368,9 @@ def main():
     """
     Run all three SSP scenarios.
     """
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 02: Sound Speed Profiles - Munk, Pekeris, Thermocline")
-    print("═"*80)
+    print("═" * 80)
     print("\nThis example demonstrates:")
     print("  • Munk canonical profile (SOFAR channel)")
     print("  • Pekeris waveguide (elastic bottom)")
@@ -380,14 +380,11 @@ def main():
     print("  • Deep vs shallow vs coastal acoustics")
 
     # Run all three scenarios
-    results_a = scenario_a_munk_profile()
-    results_b = scenario_b_pekeris_waveguide()
-    results_c = scenario_c_thermocline()
+    scenario_a_munk_profile()
+    scenario_b_pekeris_waveguide()
+    scenario_c_thermocline()
 
     # Summary
-    print("\n" + "═"*80)
-    print("EXAMPLE 02 COMPLETE")
-    print("═"*80)
     print("\nKey Takeaways:")
     print("  ✓ Munk profile: Deep water sound channel, convergence zones, ultra-long range")
     print("  ✓ Pekeris: Elastic bottom reduces mode count, increases bottom loss")
@@ -397,7 +394,8 @@ def main():
     print("  → Example 03: Multi-frequency / broadband")
     print("  → Example 06: Kraken advanced (mode analysis)")
     print("  → Example 23: Range-dependent collapse methods")
-    print("\n" + "═"*80 + "\n")
+
+    print("\n✓ Example 02 complete\n")
 
     return 0
 

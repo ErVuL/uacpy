@@ -86,7 +86,7 @@ def write_ramin(
         depth (m).
     c0, np_pade : float, int
         Reference sound speed (m/s) and number of Padé coefficients.
-    bathymetry : list of (range_m, depth_m)
+    bathymetry : list of (range, depth)
         Seafloor profile vs range. Linearly interpolated by the binary.
     range_segments : list of dict
         One entry per range section, in order. The first entry's
@@ -100,7 +100,7 @@ def write_ramin(
         - ``bottom_attn``: list of (depth, attn) — compressional attenuation
         - ``bottom_cs``  (RAMS only): list of (depth, shear speed)
         - ``bottom_attns`` (RAMS only): list of (depth, shear attenuation)
-    surface : list of (range_m, depth_m), optional
+    surface : list of (range, depth), optional
         Surface profile (only used / required when ``kind='ramsurf'``).
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
         surface sits at that range.

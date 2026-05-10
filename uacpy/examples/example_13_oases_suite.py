@@ -18,16 +18,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import OAST, OASN, OASR, OASP
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import OAST, OASN, OASR, OASP  # noqa: E402
+
 
 def main():
-    print("\n" + "═"*80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 13: OASES Suite Comprehensive")
-    print("═"*80)
+    print("═" * 80)
 
     # Simple environment for OASES demonstration
     env = uacpy.Environment(
@@ -85,10 +86,9 @@ def main():
 
     print("[3/4] Running OASR (Reflection Coefficients)...", end=" ", flush=True)
     try:
-        oasr = OASR(verbose=False)
-        # OASR computes reflection coefficients as function of angle
         angles = np.linspace(0, 90, 91)
-        result_oasr = oasr.run(env, source, receiver, angles=angles)
+        oasr = OASR(verbose=False, angles=angles)
+        result_oasr = oasr.run(env, source, receiver)
         print("✓")
         oasr_success = True
     except Exception as e:
@@ -102,17 +102,14 @@ def main():
 
     print("[4/4] Running OASP (Pulse / Wideband TRF)...", end=" ", flush=True)
     try:
-        oasp = OASP(verbose=False)
+        oasp = OASP(verbose=False, n_time_samples=256, freq_max=120)
         receiver_small = uacpy.Receiver(
             depths=np.linspace(5, 95, 20),
             ranges=np.linspace(500, 15000, 30),
         )
-        # BROADBAND returns a TransferFunction H(d, r, f) so the example can
-        # render TL at center frequency and synthesize a time trace.
         result_oasp = oasp.run(
             env, source, receiver_small,
             run_mode=uacpy.RunMode.BROADBAND,
-            n_time_samples=256, freq_max=120,
         )
         print("✓")
         oasp_success = True
@@ -128,7 +125,7 @@ def main():
 
     print("\nGenerating visualizations...")
 
-    # Plot 1: OAST transmission loss (TLField → plot_transmission_loss).
+    # Plot 1: OAST transmission loss (PressureField (units="dB") → plot_transmission_loss).
     fig1, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
     fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
                  dpi=150, bbox_inches='tight')
@@ -138,7 +135,7 @@ def main():
     # Plot 2: OASR reflection coefficient (1-D R(θ) and phase).
     if oasr_success and result_oasr is not None:
         rc_for_plot = (
-            result_oasr.at_frequency(result_oasr.frequencies[len(result_oasr.frequencies) // 2])
+            result_oasr.at(frequency=result_oasr.frequencies[len(result_oasr.frequencies) // 2])
             if result_oasr.is_broadband else result_oasr
         )
         fig2, _ = uacpy.plot.plot_reflection_coefficient(
@@ -181,12 +178,13 @@ def main():
         plt.close(fig3)
         print("  ✓ Saved: output/example_13_oasn_covariance.png")
 
-    # Plot 4: OASP — broadband transfer function. Slice |H| → TLField at the
-    # center frequency, then use the helper. Also synthesize a time trace
-    # with a Gaussian pulse and let TimeTrace.plot() render it.
+    # Plot 4: OASP — broadband transfer function. Slice |H| → dB
+    # PressureField at the center frequency, then use the helper. Also
+    # synthesize a time trace with a Gaussian pulse and let
+    # TimeTrace.plot() render it.
     if oasp_success and result_oasp is not None:
         from uacpy.core.constants import PRESSURE_FLOOR
-        from uacpy import TLField
+        from uacpy import PressureField
 
         H = result_oasp.data
         freqs_h = result_oasp.frequencies
@@ -196,8 +194,9 @@ def main():
         k_c = int(np.argmin(np.abs(freqs_h - f_center)))
 
         TL_centre = -20.0 * np.log10(np.maximum(np.abs(H[..., k_c]), PRESSURE_FLOOR))
-        tl_field = TLField(
+        tl_field = PressureField(
             data=TL_centre, depths=depths_h, ranges=ranges_h,
+            units='dB',
             model='OASP', backend='oasp',
             source_depths=result_oasp.source_depths,
             frequencies=f_center,
@@ -209,8 +208,8 @@ def main():
         print("  ✓ Saved: output/example_13_oasp_tl.png")
 
         # Synthesized time trace at one (depth, range) using a Gaussian pulse.
-        d_pick = float(depths_h[int(np.argmin(np.abs(depths_h - source.depths[0])))])
-        r_pick = float(ranges_h[int(np.argmin(np.abs(ranges_h - 5000.0)))])
+        d_pick = float(source.depths[0])
+        r_pick = 5000.0
         fs = 4.0 * float(freqs_h[-1])
         nt_pulse = 64
         t_pulse = np.arange(nt_pulse) / fs
@@ -221,7 +220,7 @@ def main():
         )
         try:
             ts = result_oasp.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
-            trace = ts.get_trace(depth=d_pick, range_m=r_pick)
+            trace = ts.at(depth=d_pick, range=r_pick)
             fig5, _ = uacpy.plot.plot_time_trace(trace)
             fig5.savefig(OUTPUT_DIR / 'example_13_oasp_trace.png',
                          dpi=150, bbox_inches='tight')
@@ -240,8 +239,9 @@ def main():
     print("  • Complete elastic modeling (compression + shear)")
     print("  • Range-independent and range-dependent scenarios")
     print("  • Broadband and narrowband analysis")
-    print("\n" + "═"*80 + "\nEXAMPLE 13 COMPLETE\n" + "═"*80 + "\n")
+    print("\n✓ Example 13 complete\n")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

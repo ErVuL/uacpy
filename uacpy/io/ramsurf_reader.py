@@ -44,6 +44,63 @@ def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
     return data[:, 0].astype(float), data[:, 1].astype(float)
 
 
+def _read_lz_records(
+    filepath: Union[str, Path], *, dtype: str
+) -> Tuple[int, np.ndarray]:
+    """
+    Read a Fortran-unformatted file whose record 1 is ``int32 lz`` and
+    records 2..N each hold ``lz`` samples of ``dtype``. Returns ``(lz,
+    matrix[lz, n_records])``.
+    """
+    path = Path(filepath)
+    raw = path.read_bytes()
+    pos = 0
+    item_size = np.dtype(dtype).itemsize
+
+    if len(raw) < 12:
+        raise ValueError(f"{path}: too short to contain the header record")
+    rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
+    pos += 4
+    if rec_len != 4:
+        raise ValueError(
+            f"{path}: expected 4-byte header record, got {rec_len}"
+        )
+    lz = struct.unpack('<i', raw[pos:pos + 4])[0]
+    pos += 4
+    rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
+    pos += 4
+    if rec_len_close != 4:
+        raise ValueError(
+            f"{path}: malformed header record marker {rec_len_close}"
+        )
+
+    columns = []
+    expected = lz * item_size
+    while pos < len(raw):
+        if len(raw) - pos < 8 + expected:
+            break
+        rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
+        pos += 4
+        if rec_len != expected:
+            raise ValueError(
+                f"{path}: expected {expected}-byte data record, got {rec_len}"
+            )
+        col = np.frombuffer(raw[pos:pos + expected], dtype=dtype).copy()
+        pos += expected
+        rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
+        pos += 4
+        if rec_len_close != expected:
+            raise ValueError(
+                f"{path}: malformed data-record closing marker {rec_len_close}"
+            )
+        columns.append(col)
+
+    if not columns:
+        raise ValueError(f"{path}: no data records found")
+
+    return lz, np.stack(columns, axis=1)
+
+
 def read_tl_grid(
     filepath: Union[str, Path],
     *,
@@ -72,53 +129,8 @@ def read_tl_grid(
         Range axis (m), depth axis (m), and TL field of shape
         ``(n_depths, n_ranges)``.
     """
-    path = Path(filepath)
-    raw = path.read_bytes()
-    pos = 0
-
-    # First record: a single int32 lz.
-    if len(raw) < 12:
-        raise ValueError(f"{path}: too short to contain the header record")
-    rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
-    pos += 4
-    if rec_len != 4:
-        raise ValueError(
-            f"{path}: expected 4-byte header record, got {rec_len}"
-        )
-    lz = struct.unpack('<i', raw[pos:pos + 4])[0]
-    pos += 4
-    rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
-    pos += 4
-    if rec_len_close != 4:
-        raise ValueError(
-            f"{path}: malformed header record marker {rec_len_close}"
-        )
-
-    columns = []
-    expected = lz * 4
-    while pos < len(raw):
-        if len(raw) - pos < 8 + expected:
-            break
-        rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
-        pos += 4
-        if rec_len != expected:
-            raise ValueError(
-                f"{path}: expected {expected}-byte data record, got {rec_len}"
-            )
-        col = np.frombuffer(raw[pos:pos + expected], dtype='<f4').astype(float)
-        pos += expected
-        rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
-        pos += 4
-        if rec_len_close != expected:
-            raise ValueError(
-                f"{path}: malformed data-record closing marker {rec_len_close}"
-            )
-        columns.append(col)
-
-    if not columns:
-        raise ValueError(f"{path}: no data records found")
-
-    tl = np.stack(columns, axis=1)
+    lz, tl = _read_lz_records(filepath, dtype='<f4')
+    tl = tl.astype(float)
     n_ranges = tl.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
     depths = np.arange(1, lz + 1, dtype=float) * dz * ndz
@@ -157,43 +169,8 @@ def read_pcomplex_grid(
         Range axis (m), depth axis (m), complex envelope of shape
         ``(n_depths, n_ranges)``.
     """
-    path = Path(filepath)
-    raw = path.read_bytes()
-    pos = 0
-
-    if len(raw) < 12:
-        raise ValueError(f"{path}: too short for header record")
-    rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]; pos += 4
-    if rec_len != 4:
-        raise ValueError(f"{path}: expected 4-byte header, got {rec_len}")
-    lz = struct.unpack('<i', raw[pos:pos + 4])[0]; pos += 4
-    rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]; pos += 4
-    if rec_len_close != 4:
-        raise ValueError(f"{path}: malformed header marker {rec_len_close}")
-
-    columns = []
-    expected = lz * 8  # complex64 = 8 bytes
-    while pos < len(raw):
-        if len(raw) - pos < 8 + expected:
-            break
-        rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]; pos += 4
-        if rec_len != expected:
-            raise ValueError(
-                f"{path}: expected {expected}-byte complex record, got {rec_len}"
-            )
-        col = np.frombuffer(raw[pos:pos + expected], dtype='<c8').astype(complex)
-        pos += expected
-        rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]; pos += 4
-        if rec_len_close != expected:
-            raise ValueError(
-                f"{path}: malformed closing marker {rec_len_close}"
-            )
-        columns.append(col)
-
-    if not columns:
-        raise ValueError(f"{path}: no data records found")
-
-    p = np.stack(columns, axis=1)
+    lz, p = _read_lz_records(filepath, dtype='<c8')
+    p = p.astype(complex)
     n_ranges = p.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
     depths = np.arange(1, lz + 1, dtype=float) * dz * ndz

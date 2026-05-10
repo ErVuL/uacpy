@@ -1,14 +1,13 @@
 """Tests for exception handling and public exception types."""
 
 import pytest
-import numpy as np
 
 import uacpy
 from uacpy.core.exceptions import (
-    UACPYError, ExecutableNotFoundError, InvalidDepthError,
-    UnsupportedFeatureError, ConfigurationError, ModelExecutionError,
+    UACPYError, InvalidDepthError,
+    UnsupportedFeatureError,
 )
-from uacpy.models import Bellhop, Kraken
+from uacpy.models import Kraken
 
 
 class TestCustomExceptions:
@@ -80,7 +79,7 @@ class TestInputValidation:
 
     def test_zero_environment_depth_rejected(self):
         with pytest.raises(ValueError):
-            uacpy.Environment(name='bad', bathymetry=0, sound_speed=1500)
+            uacpy.Environment(name='bad', bathymetry=0, ssp=1500)
 
 
 class TestUnsupportedOperations:
@@ -88,7 +87,7 @@ class TestUnsupportedOperations:
 
     def test_kraken_does_not_support_rays(self):
         kraken = Kraken(verbose=False)
-        env = uacpy.Environment(name='t', bathymetry=100, sound_speed=1500)
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
         source = uacpy.Source(depths=50, frequencies=100)
         receiver = uacpy.Receiver(depths=[10], ranges=[1000])
         with pytest.raises(UnsupportedFeatureError):
@@ -98,11 +97,11 @@ class TestUnsupportedOperations:
 class TestFieldErrors:
     """Result classes refuse operations that don't apply to their shape."""
 
-    def test_rays_has_no_get_value(self):
+    def test_rays_has_no_sel(self):
         from uacpy.core.results import Rays
         r = Rays(rays=[], model='Bellhop')
         with pytest.raises(AttributeError):
-            r.get_value(range_m=1000, depth=50)
+            r.at(range=1000, depth=50)
 
     def test_rays_has_no_to_db(self):
         from uacpy.core.results import Rays

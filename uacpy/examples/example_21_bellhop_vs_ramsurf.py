@@ -18,18 +18,22 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from uacpy.core.environment import BoundaryProperties, Environment
-from uacpy.core.receiver import Receiver
-from uacpy.core.source import Source
-from uacpy.models import Bellhop, RAM, RunMode
+from uacpy.core.environment import BoundaryProperties, Environment  # noqa: E402
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 21: Bellhop vs RAM(ramsurf) on identical altimetry env")
+    print("═" * 80)
+
     # Identical inputs to both models — Pekeris fluid waveguide with ice-keel
     # altimetry. ``env.altimetry`` follows uacpy's "positive up" convention;
     # the RAM dispatcher converts to ramsurf's "depth below z=0" internally.
@@ -46,7 +50,7 @@ def main():
     ]
     env = Environment(
         name='altimetry-rough',
-        bathymetry=100.0, sound_speed=1500.0,
+        bathymetry=100.0, ssp=1500.0,
         bottom=fluid_bottom, altimetry=surface,
     )
     src = Source(depths=50.0, frequencies=200.0)
@@ -64,26 +68,28 @@ def main():
     print()
 
     print("Running Bellhop ...")
-    tl_bh = Bellhop(verbose=False).run(
+    res_bh = Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.COHERENT_TL,
-    ).data.squeeze()
+    )
+    tl_bh = res_bh.tl[0]
 
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-    tl_ram = res_ram.data.squeeze()
-    print(f"  → backend: {res_ram.metadata['backend']}")
+    tl_ram = res_ram.tl[0]
+    print(f"  → backend: {res_ram.backend}")
     print()
 
+    from uacpy.core.metrics import tl_rmse, tl_max_error, tl_bias
     ranges = rcv.ranges
     rmin, rmax = 1000.0, 5000.0
+    rmse = tl_rmse(res_ram, res_bh, range_window=(rmin, rmax))
+    mxe = tl_max_error(res_ram, res_bh, range_window=(rmin, rmax))
+    bias = tl_bias(res_ram, res_bh, range_window=(rmin, rmax))
     mask = (
         (ranges >= rmin) & (ranges <= rmax)
         & np.isfinite(tl_bh) & np.isfinite(tl_ram)
     )
     diff = tl_ram[mask] - tl_bh[mask]
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-    bias = float(np.mean(diff))
-    mxe = float(np.max(np.abs(diff)))
     median_abs = float(np.median(np.abs(diff)))
 
     print(f"Agreement in {rmin/1000:.1f}-{rmax/1000:.1f} km window "
@@ -135,7 +141,9 @@ def main():
     out = Path(__file__).parent / 'output' / 'example_21_bellhop_vs_ramsurf.png'
     out.parent.mkdir(exist_ok=True)
     fig.savefig(out, dpi=120)
-    print(f"\nSaved: {out}")
+    print(f"\n  ✓ Saved: {out}")
+
+    print("\n✓ Example 21 complete\n")
 
 
 if __name__ == '__main__':

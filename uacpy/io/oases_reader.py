@@ -21,51 +21,54 @@ import numpy as np
 import struct
 import warnings
 
+from uacpy.io._fortran_helpers import (
+    read_fortran_record_marker as _read_fortran_record_marker,
+    read_fortran_record as _read_fortran_record,
+)
+
 
 def read_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
-    receiver_ranges: np.ndarray,
-    interpolate: bool = True
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
-    Read OAST transmission loss output
+    Read OAST transmission loss output on its native grid.
 
     OAST outputs two files:
     - .plp: Plot metadata (ASCII with binary markers) - contains grid info
     - .plt: Actual TL data (pure ASCII, one value per line)
 
-    OAST uses FFT-based automatic range sampling, so we:
-    1. Parse .plp to get OAST's actual grid
-    2. Read .plt data on that grid
-    3. Optionally interpolate onto requested receiver grid
+    OAST writes TL (in dB) directly to disk; this reader returns the
+    native ``(n_depths, n_ranges)`` TL grid plus the depth and range
+    axes. Resampling onto a user receiver grid is the caller's job —
+    use :meth:`PressureField.resample_to` after wrapping.
 
     Parameters
     ----------
     filepath : str or Path
         Path to .plt or .plp file (base name works for both)
     receiver_depths : ndarray
-        Requested receiver depths in meters
-    receiver_ranges : ndarray
-        Requested receiver ranges in meters
-    interpolate : bool, optional
-        If True, interpolate OAST grid onto receiver grid. Default is True.
+        Receiver depth axis (m). OAST writes TL on this depth grid; the
+        depth axis is taken verbatim from the user.
 
     Returns
     -------
     tl_data : ndarray
-        Transmission loss data, shape (n_depths, n_ranges)
+        Transmission loss data on the OAST native grid, shape
+        ``(n_depths, n_ranges_native)``.
+    depths : ndarray
+        Depth axis (m), == ``receiver_depths``.
+    ranges : ndarray
+        OAST's native range grid in metres.
     metadata : dict
-        Metadata including:
-        - 'oast_native_ranges': OAST's range grid
-        - 'oast_grid_shape': Shape of OAST's native grid
-        - 'model': 'OAST'
+        ``{'model': 'OAST', 'oast_grid_shape': (n_d, n_r_native)}``.
 
-    Examples
-    --------
-    >>> tl, meta = read_oast_tl('test.plt', depths, ranges)
-    >>> print(tl.shape)
-    (40, 100)
+    Raises
+    ------
+    IOError
+        If the ``.plp`` file is missing or cannot be parsed (OAST chooses
+        its own range grid via FFT-based sampling, so the native grid
+        cannot be reconstructed without it).
     """
     filepath = Path(filepath)
 
@@ -96,35 +99,18 @@ def read_oast_tl(
     else:
         raise FileNotFoundError(f"OAST TL data file not found. Checked: {plt_file}, {f020_file}")
 
-    # Parse .plp file to get OAST's grid
-    oast_grid = None
-    if plp_file.exists():
-        try:
-            oast_grid = _parse_oast_plp(plp_file)
-        except Exception as e:
-            warnings.warn(
-                f"Could not parse .plp file: {e}. "
-                "Assuming grid matches receiver specification.",
-                UserWarning, stacklevel=2
-            )
+    # Parse .plp file to get OAST's native range grid. The grid is
+    # mandatory: OAST chooses its own ranges via FFT-based sampling, so
+    # without .plp we have no way to know what range each TL value
+    # corresponds to. Raise rather than fabricate.
+    if not plp_file.exists():
+        raise IOError(
+            f"OAST .plp grid file not found: {plp_file}. "
+            "Without it the native range grid cannot be reconstructed."
+        )
+    oast_grid = _parse_oast_plp(plp_file)
 
-    if oast_grid is None:
-        # If .plp doesn't exist or couldn't be parsed, use receiver grid
-        if not plp_file.exists():
-            warnings.warn(
-                f".plp file not found: {plp_file}. "
-                "Cannot determine OAST's native grid. "
-                "Assuming grid matches receiver specification.",
-                UserWarning, stacklevel=2
-            )
-        oast_grid = {
-            'n_ranges': len(receiver_ranges),
-            'ranges': receiver_ranges,
-            'range_offset_km': receiver_ranges[0] / 1000.0,
-            'range_increment_km': (receiver_ranges[-1] - receiver_ranges[0]) / (len(receiver_ranges) - 1) / 1000.0 if len(receiver_ranges) > 1 else 0.0
-        }
-
-    n_depths_oast = len(receiver_depths)  # OAST uses our receiver depths
+    n_depths_oast = len(receiver_depths)  # OAST writes TL on this depth grid
     n_ranges_oast = oast_grid['n_ranges']
     ranges_oast = oast_grid['ranges']
 
@@ -155,52 +141,15 @@ def read_oast_tl(
             UserWarning, stacklevel=2
         )
         tl_values = np.pad(tl_values, (0, expected_total - len(tl_values)),
-                          mode='edge')
+                           mode='edge')
 
     # Take expected amount and reshape
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 
-    # Interpolate onto requested receiver grid if requested
-    # Check if grids match (same shape and values)
-    ranges_match = (len(ranges_oast) == len(receiver_ranges) and
-                   np.allclose(ranges_oast, receiver_ranges))
-
-    if interpolate and not ranges_match:
-        from scipy.interpolate import RegularGridInterpolator
-
-        # Create interpolator
-        interp = RegularGridInterpolator(
-            (receiver_depths, ranges_oast),
-            tl_oast,
-            method='linear',
-            bounds_error=False,
-            fill_value=None
-        )
-
-        # Create grid for requested points
-        mesh_d, mesh_r = np.meshgrid(receiver_depths, receiver_ranges, indexing='ij')
-        points = np.array([mesh_d.ravel(), mesh_r.ravel()]).T
-
-        # Interpolate
-        tl_interp = interp(points).reshape(len(receiver_depths), len(receiver_ranges))
-
-        metadata = {
-            'model': 'OAST',
-            'oast_native_ranges': ranges_oast,
-            'oast_grid_shape': (n_depths_oast, n_ranges_oast),
-            'interpolated': True
-        }
-
-        return tl_interp, metadata
-    else:
-        metadata = {
-            'model': 'OAST',
-            'oast_native_ranges': ranges_oast,
-            'oast_grid_shape': (n_depths_oast, n_ranges_oast),
-            'interpolated': False
-        }
-
-        return tl_oast, metadata
+    metadata = {
+        'oast_grid_shape': (n_depths_oast, n_ranges_oast),
+    }
+    return tl_oast, np.asarray(receiver_depths, dtype=float), ranges_oast, metadata
 
 
 def _parse_oast_plp(plp_file: Path) -> Dict:
@@ -521,20 +470,6 @@ def read_oasn_replicas(
         raise IOError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
-def _read_fortran_record_marker(f) -> int:
-    """
-    Read Fortran unformatted record marker (4-byte integer)
-
-    Fortran unformatted files have record markers before and after each record
-    indicating the size of the record in bytes.
-    """
-    marker_bytes = f.read(4)
-    if len(marker_bytes) < 4:
-        raise IOError("Unexpected end of file while reading record marker")
-    marker = struct.unpack('i', marker_bytes)[0]
-    return marker
-
-
 def read_oasp_trf(
     filepath: Union[str, Path]
 ) -> Dict:
@@ -601,63 +536,6 @@ def read_oasp_trf(
     raise IOError(
         f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
     )
-
-
-def _read_fortran_record(f, fmt=None, raw=False, endian='<'):
-    """Read a single Fortran UNFORMATTED sequential record.
-
-    Layout::
-
-        [4-byte length N][N bytes payload][4-byte length N]
-
-    Both length markers must match; mismatch indicates file corruption or
-    wrong endianness and raises ``IOError``.
-
-    Parameters
-    ----------
-    f : file object (binary mode)
-    fmt : str, optional
-        struct format string for the payload (excluding endian prefix).
-    raw : bool, optional
-        If True, return raw bytes. Default False.
-    endian : str, optional
-        '<' (little-endian, x86 default) or '>' (big-endian).
-
-    Returns
-    -------
-    tuple | bytes
-        Unpacked payload (or raw bytes).
-    """
-    head = f.read(4)
-    if len(head) < 4:
-        raise IOError("Unexpected EOF reading Fortran record head")
-    (nbytes,) = struct.unpack(endian + 'i', head)
-    if nbytes < 0 or nbytes > (1 << 28):  # magic-number sanity: <256 MB
-        raise IOError(
-            f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
-        )
-    payload = f.read(nbytes)
-    if len(payload) < nbytes:
-        raise IOError(
-            f"Short read: expected {nbytes} bytes, got {len(payload)}"
-        )
-    tail = f.read(4)
-    if len(tail) < 4:
-        raise IOError("Unexpected EOF reading Fortran record tail")
-    (ntail,) = struct.unpack(endian + 'i', tail)
-    if ntail != nbytes:
-        raise IOError(
-            f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
-            "(wrong endianness or truncated file)"
-        )
-    if raw or fmt is None:
-        return payload
-    expected = struct.calcsize(endian + fmt)
-    if expected != nbytes:
-        raise IOError(
-            f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
-        )
-    return struct.unpack(endian + fmt, payload)
 
 
 def _read_oasp_trf_binary(filepath: Path) -> Dict:
@@ -778,7 +656,6 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         'transfer_function': transfer_function,
         'source_depth': float(sd),
         'center_frequency': float(freqs),
-        'model': 'OASP',
     }
 
 
@@ -933,7 +810,6 @@ def read_oasr_reflection_coefficients(
             'angles_or_slowness': angles_or_slowness_list,
             'magnitude': magnitude_list,
             'phase': phase_list,
-            'model': 'OASR'
         }
 
     except Exception as e:

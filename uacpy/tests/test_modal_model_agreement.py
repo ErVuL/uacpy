@@ -9,7 +9,6 @@ import pytest
 import numpy as np
 
 import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.models import Kraken, KrakenField, Scooter, OAST
 
 # All tests in this module spawn model binaries (Kraken, Scooter, OAST)
@@ -22,12 +21,10 @@ class TestModalModelAgreement:
     @pytest.fixture
     def simple_environment(self):
         """Create a simple Pekeris waveguide for testing."""
-        ssp_data = np.array([[0, 1500], [100, 1480]])
         env = uacpy.Environment(
             name='Pekeris',
             bathymetry=100,
-            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear'),
-            sound_speed=1500
+            ssp=1500
         )
         return env
 
@@ -62,7 +59,7 @@ class TestModalModelAgreement:
         kraken = Kraken(verbose=False)
         result = kraken.run(simple_environment, simple_source, receiver)
 
-        k = result.metadata['k']
+        k = result.k
 
         # Check that we have modes
         assert len(k) > 0, "No modes computed"
@@ -84,12 +81,12 @@ class TestModalModelAgreement:
         # KrakenField
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.data[0, 0]
+        kf_tl = kf_result.tl[0, 0]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.data[0, 0]
+        scooter_tl = scooter_result.tl[0, 0]
 
         # Check agreement
         diff = np.abs(kf_tl - scooter_tl)
@@ -107,12 +104,12 @@ class TestModalModelAgreement:
         # KrakenField
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, multi_range_receiver)
-        kf_tl = kf_result.data[0, :]
+        kf_tl = kf_result.tl[0, :]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, multi_range_receiver)
-        scooter_tl = scooter_result.data[0, :]
+        scooter_tl = scooter_result.tl[0, :]
 
         # Check agreement at each range
         diffs = np.abs(kf_tl - scooter_tl)
@@ -137,15 +134,15 @@ class TestModalModelAgreement:
         # Run all models
         kf = KrakenField(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.data[0, 0]
+        kf_tl = kf_result.tl[0, 0]
 
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.data[0, 0]
+        scooter_tl = scooter_result.tl[0, 0]
 
         oast = OAST(verbose=False)
         oast_result = oast.run(simple_environment, simple_source, single_receiver)
-        oast_tl = oast_result.data[0, 0]
+        oast_tl = oast_result.tl[0, 0]
 
         # Compute pairwise differences
         kf_scooter_diff = np.abs(kf_tl - scooter_tl)
@@ -180,7 +177,7 @@ class TestModalModelAgreement:
             kraken = Kraken(verbose=False)
             result = kraken.run(simple_environment, simple_source, receiver)
 
-            k = result.metadata['k']
+            k = result.k
             n_valid = sum(1 for k_val in k if np.abs(k_val) >= 1e-10 and np.imag(k_val) <= 0)
             mode_counts.append(n_valid)
 

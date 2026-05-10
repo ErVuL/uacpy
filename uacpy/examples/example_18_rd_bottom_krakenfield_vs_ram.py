@@ -22,14 +22,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import (
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import (  # noqa: E402
     BoundaryProperties, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, SoundSpeedProfile,
 )
-from uacpy.models.ram import RAM
-from uacpy.models.kraken import KrakenField
+from uacpy.models.ram import RAM  # noqa: E402
+from uacpy.models.kraken import KrakenField  # noqa: E402
 
 
 def make_base_env(bottom):
@@ -47,8 +47,8 @@ def make_base_env(bottom):
     env = uacpy.Environment(
         name='rd_comparison',
         ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
-            interp='linear',
-        ),
+                                      interp='linear',
+                                      ),
         bathymetry=bathymetry,
         bottom=bottom,
     )
@@ -123,8 +123,9 @@ def main():
         plot_transmission_loss, plot_rd_layered_bottom, plot_tl_difference,
     )
 
-    print("Example 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
-    print("=" * 65)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
+    print("═" * 80)
 
     source = uacpy.Source(frequencies=100, depths=30)
     receiver = uacpy.Receiver(
@@ -132,7 +133,7 @@ def main():
         ranges=np.linspace(1000, 6000, 300),
     )
 
-    bathy_ranges_m = np.array([0, 5000, 10000, 15000, 20000.0])
+    np.array([0, 5000, 10000, 15000, 20000.0])
     bathy_depths_m = np.array([100, 120, 150, 180, 200.0])
 
     # ── Run both bottom cases with all three models ─────────────
@@ -161,7 +162,7 @@ def main():
             try:
                 field = model.run(env, source, receiver)
                 results[case_label][model_label] = field
-                print(f"    {model_label:15s} TL: [{np.nanmin(field.data):.1f}, {np.nanmax(field.data):.1f}] dB")
+                print(f"    {model_label:15s} TL: [{np.nanmin(field.tl):.1f}, {np.nanmax(field.tl):.1f}] dB")
             except Exception as e:
                 print(f"    {model_label:15s} ERROR: {e}")
                 results[case_label][model_label] = None
@@ -177,7 +178,7 @@ def main():
         for kf_label in ['KF adiabatic', 'KF coupled']:
             f_kf = results[case_label].get(kf_label)
             if f_ram is not None and f_kf is not None:
-                diff = f_ram.data[mid_idx, :] - f_kf.data[mid_idx, :]
+                diff = f_ram.tl[mid_idx, :] - f_kf.tl[mid_idx, :]
                 print(f"    {case_label:15s} {kf_label:15s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
                       f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
 
@@ -190,7 +191,7 @@ def main():
     for case_label in results:
         for field in results[case_label].values():
             if field is not None:
-                all_tl.append(field.data)
+                all_tl.append(field.tl)
     if all_tl:
         vmin_shared = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax_shared = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -214,7 +215,7 @@ def main():
             f = results[case_label].get(key)
             if f is not None:
                 plot_transmission_loss(f, env_plot, ax=ax, show_colorbar=False,
-                                      vmin=vmin_shared, vmax=vmax_shared)
+                                       vmin=vmin_shared, vmax=vmax_shared)
                 tl_im = ax.collections[0] if ax.collections else tl_im
             ax.set_title(f'{case_label} — {title_suffix}', fontsize=10,
                          fontweight='bold')
@@ -226,7 +227,7 @@ def main():
         for key in ['RAM', 'KF adiabatic', 'KF coupled']:
             f = results[case_label].get(key)
             if f is not None:
-                ax.plot(ranges_km, f.data[mid_idx, :], color=colors[key],
+                ax.plot(ranges_km, f.tl[mid_idx, :], color=colors[key],
                         label=key)
         ax.set_xlabel('Range (km)')
         ax.set_ylabel('TL (dB)')
@@ -248,7 +249,7 @@ def main():
         for diff_idx, (kf_key, _) in enumerate(diff_panels):
             f_kf = results[case_label].get(kf_key)
             if f_ram is not None and f_kf is not None:
-                d = np.asarray(f_ram.data) - np.asarray(f_kf.data)
+                d = np.asarray(f_ram.tl) - np.asarray(f_kf.tl)
                 finite = d[np.isfinite(d)]
                 if finite.size:
                     v = max(5.0, float(np.nanpercentile(np.abs(finite), 95)))
@@ -292,7 +293,7 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / 'example_18_rd_krakenfield_vs_ram.png'
     fig.savefig(out_path, dpi=150)
-    print(f"\n  Figure saved to {out_path}")
+    print(f"\n  ✓ Saved: {out_path}")
 
     for case_label in ('Hard layered', 'Soft layered'):
         fig_b, _ = plot_rd_layered_bottom(envs[case_label])
@@ -300,9 +301,9 @@ def main():
         path = out_dir / f'example_18_rd_layered_{slug}.png'
         fig_b.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig_b)
-        print(f"  Figure saved to {path}")
+        print(f"  ✓ Saved: {path}")
 
-    print("Done.")
+    print("\n✓ Example 18 complete\n")
 
 
 if __name__ == '__main__':

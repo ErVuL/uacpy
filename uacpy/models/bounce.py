@@ -13,27 +13,28 @@ Outputs:
 Note: SPARC does not support reflection coefficient files.
 """
 
-import shutil
-import tempfile
-import warnings
-import weakref
 import numpy as np
 from pathlib import Path
 from typing import Optional
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
+from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, ReflectionCoefficient
+from uacpy.core.results import Result
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX,
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError, ModelExecutionError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.io.refl_io import read_reflection_coefficient
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
+from uacpy.io.oalib_writer import (
+    write_bio_layers, write_bottom_section, write_fg_params,
+    write_header, write_layer_sections, write_ssp_section,
+)
 
 
 class Bounce(PropagationModel):
@@ -52,13 +53,51 @@ class Bounce(PropagationModel):
     Parameters
     ----------
     executable : Path, optional
-        Path to bounce executable. If None, searches standard locations.
-    use_tmpfs : bool, optional
-        Use tmpfs for I/O operations. Default False.
-    verbose : bool, optional
-        Print detailed execution information. Default False.
-    work_dir : Path, optional
-        Working directory for I/O files. Default uses temp directory.
+        Path to ``bounce``. Auto-detected if ``None``.
+    c_low, c_high : float, optional
+        Phase-velocity bounds for tabulation (m/s). ``c_low`` must be
+        strictly positive (BOUNCE rejects ``c_low <= 0``); ``c_high=1e9``
+        is a valid recommendation for ~full 90° coverage. Defaults
+        ``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX``.
+    rmax : float, optional
+        Max range (m) for angular sampling. Default ``10000``. Ignored
+        when ``n_angles`` is provided.
+    volume_attenuation : str, optional
+        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
+    francois_garrison_params, bio_layers : optional
+        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
+    n_angles : int, optional
+        Explicit number of angular samples (``NkTab`` in
+        ``bounce.f90``). When provided, uacpy back-derives ``rmax`` to
+        hit ``~n_angles``.
+    use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
+        Standard plumbing (see :class:`PropagationModel`).
+
+    Notes
+    -----
+    Only emits ``RunMode.REFLECTION``. The result always carries the
+    in-memory reflection coefficient as typed attributes
+    (``.theta``, ``.R``, ``.phi``); the standalone Python user does not
+    need the on-disk files.
+
+    To **chain to another model** (Bellhop / Scooter / Kraken /
+    KrakenC reading ``acoustic_type='file'``), pin ``work_dir=`` so the
+    ``.brc`` / ``.irc`` files outlive the call. The same uniform
+    ``(work_dir, cleanup)`` rule every other model uses applies here:
+
+    - ``Bounce(work_dir='./bounce_out')`` ⇒ files persist there
+      (``cleanup=False`` because the user owns the dir);
+      ``result.metadata['brc_file']`` is a valid path.
+    - ``Bounce()`` (no ``work_dir``) ⇒ uacpy uses a temp dir,
+      ``cleanup=True`` ⇒ files are removed when ``run()`` returns;
+      ``result.metadata`` does not carry the (now stale) file paths.
+
+    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
+    BOUNCE produces ONE BRC consumed across the whole receiver-range
+    axis; the median sample is the most representative single profile.
+    Per-model: ``'bottom': 'median'``,
+    ``'rd_layered_layers': 'preserve'`` (BOUNCE consumes
+    ``LayeredBottom`` natively).
 
     Examples
     --------
@@ -81,10 +120,10 @@ class Bounce(PropagationModel):
     >>> source = Source(depths=50, frequencies=50)
     >>> receiver = Receiver(depths=np.array([50]))
     >>>
-    >>> # Compute reflection coefficients
-    >>> bounce = Bounce()
-    >>> result = bounce.run(env, source, receiver,
-    ...                     c_low=1400, c_high=10000, rmax_m=10000)
+    >>> # Pin work_dir so the .brc/.irc files persist for the consumer.
+    >>> bounce = Bounce(c_low=1400, c_high=10000, rmax=10000,
+    ...                 work_dir='./bounce_out')
+    >>> result = bounce.run(env, source, receiver)
     >>>
     >>> # Output files can be used by different models:
     >>> # - .brc file → Use with BELLHOP, SCOOTER, KRAKENC (experimental)
@@ -123,7 +162,7 @@ class Bounce(PropagationModel):
         executable: Optional[Path] = None,
         c_low: float = DEFAULT_C_MIN,
         c_high: float = DEFAULT_C_MAX,
-        rmax_m: float = 10000.0,
+        rmax: float = 10000.0,
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
@@ -147,7 +186,7 @@ class Bounce(PropagationModel):
             A value of ``1e9`` is a valid recommendation for full 90-deg
             coverage (kraken doc: "c_high large => kmin ~ 0 => grazing
             angles near 0 included"). Must be strictly greater than c_low.
-        rmax_m : float, optional
+        rmax : float, optional
             Maximum range (m) for angular sampling. Default: 10000. Ignored
             when ``n_angles`` is provided. (Internally converted to km
             because BOUNCE's input format is in km.)
@@ -156,17 +195,26 @@ class Bounce(PropagationModel):
         n_angles : int, optional
             Explicit override for the number of angular samples (``NkTab``
             in AT's bounce). If None (default), bounce computes NkTab
-            internally from ``rmax_m``. When provided, uacpy sets
-            ``rmax_m`` such that bounce's internal formula yields
-            approximately ``n_angles`` samples.
+            internally from ``rmax``. When provided, uacpy sets ``rmax``
+            such that bounce's internal formula yields approximately
+            ``n_angles`` samples.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
 
+        # BOUNCE produces ONE BRC consumed across the whole range axis;
+        # the median sample is the most representative single profile.
+        # ``rd_layered_layers='preserve'`` keeps the layer stack (BOUNCE
+        # handles LayeredBottom natively).
+        self._set_collapse_defaults({
+            'bottom': 'median',
+            'rd_layered_layers': 'preserve',
+        })
+
         self.c_low = c_low
         self.c_high = c_high
-        self.rmax_m = rmax_m
+        self.rmax = rmax
         self.volume_attenuation = volume_attenuation
         self.francois_garrison_params = francois_garrison_params
         self.bio_layers = bio_layers
@@ -188,9 +236,14 @@ class Bounce(PropagationModel):
 
         # BOUNCE computes plane-wave reflection coefficients, not TL.
         self._supported_modes = [RunMode.REFLECTION]
-        # BOUNCE writes a layered AT env; layered bottoms honored.
+        self._supports_altimetry = False
+        self._supports_range_dependent_bathymetry = False
+        self._supports_range_dependent_ssp = False
+        self._supports_range_dependent_bottom = False
         self._supports_layered_bottom = True
+        self._supports_range_dependent_layered_bottom = False
         self._supports_elastic_media = True
+        self._supports_multi_source_depth = False
         if executable is None:
             self.executable = self._find_executable_in_paths(
                 'bounce',
@@ -209,227 +262,182 @@ class Bounce(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        *,
-        output_brc: bool = True,
-        output_irc: bool = True,
-        output_dir: Optional[Path] = None,
-        c_low=_UNSET,
-        c_high=_UNSET,
-        rmax_m=_UNSET,
-        volume_attenuation=_UNSET,
-        n_angles=_UNSET,
         **kwargs
     ) -> Result:
         """
-        Run BOUNCE reflection coefficient computation
+        Run BOUNCE reflection coefficient computation.
+
+        ``.brc`` / ``.irc`` files are written into the model's
+        ``work_dir`` (constructor kwarg). Bounce defaults
+        ``cleanup=False`` so they outlive the call and can be consumed
+        by Bellhop / Scooter / Kraken / KrakenC. Pass
+        ``Bounce(work_dir='./bounce_out')`` to pin the location.
 
         Parameters
         ----------
         env : Environment
-            Ocean environment (bottom properties define the stack)
+            Ocean environment (bottom properties define the stack).
         source : Source
-            Source definition (frequency is used)
+            Source definition (frequency is used).
         receiver : Receiver
-            Receiver definition (not used by BOUNCE, but required for API)
-        output_brc : bool, optional
-            Output .BRC file (for BELLHOP/SCOOTER). Default True.
-        output_irc : bool, optional
-            Output .IRC file (for KRAKEN). Default True.
+            Receiver definition (not used by BOUNCE, but required for API).
+        run_mode : RunMode, optional
+            Must be ``RunMode.REFLECTION`` (the only mode BOUNCE emits)
+            or ``None`` (defaults to REFLECTION). Other values raise
+            :class:`UnsupportedFeatureError`.
         **kwargs
-            Additional parameters passed to ENV file writer
+            Additional parameters passed to the ENV file writer
+            (``francois_garrison_params``, ``bio_layers``, …).
 
         Returns
         -------
-        result : Result
-            Field containing reflection coefficient data with:
-            - angles: grazing angles (degrees)
-            - R_magnitude: reflection coefficient magnitudes
-            - R_phase: reflection coefficient phases (degrees)
-            - brc_file: path to .BRC file (if output_brc=True)
-            - irc_file: path to .IRC file (if output_irc=True)
+        ReflectionCoefficient
+            Typed result with ``theta`` (grazing angles in degrees),
+            ``R`` (reflection coefficient magnitude), and ``phi`` (phase
+            in radians). The persisted ``.brc`` / ``.irc`` paths live on
+            ``result.metadata['brc_file']`` and
+            ``result.metadata['irc_file']``.
 
         Notes
         -----
-        - For full 90-degree coverage, set c_low=1400, c_high=1e9
-          (c_high=1e9 triggers kmin=0 in the Fortran: see bounce.f90)
-        - Larger rmax_m gives finer angular resolution
-        - The output .BRC / .IRC files can be used directly by other
-          models. Pass ``output_dir=<path>`` to persist them across cleanup.
+        - For full 90-degree coverage, set ``c_low=1400, c_high=1e9``
+          (``c_high=1e9`` triggers ``kmin=0`` in the Fortran; see
+          ``bounce.f90``).
+        - Larger ``rmax`` gives finer angular resolution.
+        - ``.brc`` is consumed by Bellhop / Scooter / KrakenC via
+          ``BoundaryProperties(acoustic_type='file', reflection_file=…)``.
+          ``.irc`` is consumed by Kraken (true normal modes).
         """
-        # Bounce only emits reflection coefficients — guard against the
-        # caller asking for something else explicitly.
-        if run_mode is not None and run_mode != RunMode.REFLECTION:
-            raise UnsupportedFeatureError(
-                self.model_name, str(run_mode),
-                alternatives=["RunMode.REFLECTION"],
+        run_mode = self._resolve_run_mode(run_mode)
+
+        if self.c_low <= 0:
+            raise ConfigurationError(
+                f"Bounce requires c_low > 0 strictly (got {self.c_low})."
+            )
+        if self.c_high <= self.c_low:
+            raise ConfigurationError(
+                f"c_high ({self.c_high}) must be strictly greater than "
+                f"c_low ({self.c_low})."
             )
 
-        self._warn_unknown_kwargs(
-            kwargs, allowed=('francois_garrison_params', 'bio_layers'),
-        )
-
-        with _resolve_overrides(
-            self,
-            c_low=c_low,
-            c_high=c_high,
-            rmax_m=rmax_m,
-            volume_attenuation=volume_attenuation,
-            n_angles=n_angles,
-        ):
-            if self.c_low <= 0:
+        # n_angles → rmax: bounce.f90:49 sets
+        #     NkTab = INT(1000 * RMax_km * (kMax - kMin) / (2*pi))
+        # with kMax = omega/cLow, kMin = omega/cHigh (or 0 if cHigh
+        # is "infinity"). Inverting:
+        #     RMax_m = NkTab * 2*pi / (omega * (1/cLow - 1/cHigh))
+        # Derive into a per-call local — keep ``self`` unmutated so
+        # successive ``run()`` calls with different sources stay
+        # consistent and the instance remains thread-safe.
+        rmax = self.rmax
+        if self.n_angles is not None:
+            if self.n_angles <= 0:
                 raise ConfigurationError(
-                    f"Bounce requires c_low > 0 strictly (got {self.c_low})."
+                    f"n_angles must be > 0 (got {self.n_angles})."
                 )
-            if self.c_high <= self.c_low:
+            f_hz = float(np.atleast_1d(source.frequencies)[0])
+            omega = 2.0 * np.pi * f_hz
+            inv_c_diff = 1.0 / float(self.c_low)
+            if self.c_high is not None and self.c_high < 1e8:
+                inv_c_diff -= 1.0 / float(self.c_high)
+            if omega * inv_c_diff <= 0:
                 raise ConfigurationError(
-                    f"c_high ({self.c_high}) must be strictly greater than "
-                    f"c_low ({self.c_low})."
+                    f"Cannot derive rmax from n_angles={self.n_angles}: "
+                    f"omega·(1/cLow - 1/cHigh) is non-positive "
+                    f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
                 )
+            rmax = (
+                float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
+            )
 
-            # n_angles → rmax_m: bounce.f90:49 sets
-            #     NkTab = INT(1000 * RMax_km * (kMax - kMin) / (2*pi))
-            # with kMax = omega/cLow, kMin = omega/cHigh (or 0 if cHigh
-            # is "infinity"). Inverting:
-            #     RMax_m = NkTab * 2*pi / (omega * (1/cLow - 1/cHigh))
-            if self.n_angles is not None:
-                if self.n_angles <= 0:
-                    raise ConfigurationError(
-                        f"n_angles must be > 0 (got {self.n_angles})."
-                    )
-                f_hz = float(np.atleast_1d(source.frequencies)[0])
-                omega = 2.0 * np.pi * f_hz
-                inv_c_diff = 1.0 / float(self.c_low)
-                if self.c_high is not None and self.c_high < 1e8:
-                    inv_c_diff -= 1.0 / float(self.c_high)
-                if omega * inv_c_diff <= 0:
-                    raise ConfigurationError(
-                        f"Cannot derive rmax_m from n_angles={self.n_angles}: "
-                        f"omega·(1/cLow - 1/cHigh) is non-positive "
-                        f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
-                    )
-                rmax_from_angles_m = (
-                    float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
-                )
-                self.rmax_m = rmax_from_angles_m
+        env = self._project_environment(env)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-            env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        fm = self._setup_file_manager()
 
-            fm = self._setup_file_manager()
+        try:
+            base_name = 'bounce_run'
+            input_file = fm.get_path(f'{base_name}.env')
 
-            try:
-                base_name = 'bounce_run'
-                input_file = fm.get_path(f'{base_name}.env')
+            self._log(f"Writing input file: {input_file}", level='info')
+            # Caller-supplied francois_garrison_params / bio_layers in
+            # run() override the constructor defaults.
+            fg = kwargs.pop('francois_garrison_params',
+                            self.francois_garrison_params)
+            bl = kwargs.pop('bio_layers', self.bio_layers)
+            self._write_bounce_input(
+                filepath=input_file,
+                env=env,
+                source=source,
+                receiver=receiver,
+                c_low=self.c_low,
+                c_high=self.c_high,
+                rmax=rmax,
+                volume_attenuation=self.volume_attenuation,
+                francois_garrison_params=fg,
+                bio_layers=bl,
+                **kwargs
+            )
 
-                self._log(f"Writing BOUNCE input file: {input_file}", level='info')
-                # Caller-supplied francois_garrison_params / bio_layers in
-                # run() override the constructor defaults.
-                fg = kwargs.pop('francois_garrison_params',
-                                self.francois_garrison_params)
-                bl = kwargs.pop('bio_layers', self.bio_layers)
-                self._write_bounce_input(
-                    filepath=input_file,
-                    env=env,
-                    source=source,
-                    receiver=receiver,
-                    c_low=self.c_low,
-                    c_high=self.c_high,
-                    rmax_m=self.rmax_m,
-                    volume_attenuation=self.volume_attenuation,
-                    francois_garrison_params=fg,
-                    bio_layers=bl,
-                    **kwargs
-                )
+            self._log("Running...", level='info')
+            self._execute(input_file, fm.work_dir)
 
-                self._log("Running BOUNCE...", level='info')
-                self._execute(input_file, fm.work_dir)
+            brc_file = fm.get_path(f'{base_name}.brc')
+            irc_file = fm.get_path(f'{base_name}.irc')
 
-                brc_file = fm.get_path(f'{base_name}.brc')
-                irc_file = fm.get_path(f'{base_name}.irc')
-
-                if not brc_file.exists():
-                    raise ModelExecutionError(
-                        self.model_name, return_code=0, stdout=None,
-                        stderr=(
-                            f"BOUNCE did not produce {brc_file}; "
-                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
-                        ),
-                    )
-
-                # bellhopcuda's strict monotonicity check on .brc/.irc rejects
-                # the duplicate near-zero angles bounce.f90 emits when many
-                # high-c samples round to the same kx — rewrite both files
-                # with a strictly-increasing angle axis.
-                self._dedupe_reflection_file(brc_file)
-                if irc_file.exists():
-                    self._dedupe_reflection_file(irc_file)
-
-                self._log(f"Reading BOUNCE output: {brc_file}", level='info')
-                result = read_reflection_coefficient(str(brc_file), boundary='bottom')
-
-                # Reflection-coefficient files must outlive the work dir
-                # because Bellhop/Scooter/Kraken consume them downstream. If
-                # ``output_dir`` was passed, persist there (user-owned lifetime);
-                # otherwise copy to a private tempdir tied to the Field via
-                # weakref.finalize.
-                if output_dir is not None:
-                    persist_dir = Path(output_dir)
-                    persist_dir.mkdir(parents=True, exist_ok=True)
-                    field_finalizer = None
-                else:
-                    # Honour use_tmpfs (RAM-backed /dev/shm) so the
-                    # persisted .brc/.irc share the same medium as the
-                    # FileManager work_dir.
-                    tmp_root = '/dev/shm' if self.use_tmpfs else None
-                    persist_dir = Path(tempfile.mkdtemp(
-                        prefix='bounce_persist_', dir=tmp_root,
-                    ))
-                    field_finalizer = persist_dir
-
-                persisted_brc = persist_dir / brc_file.name
-                shutil.copy(brc_file, persisted_brc)
-                persisted_irc = None
-                if irc_file.exists():
-                    persisted_irc = persist_dir / irc_file.name
-                    shutil.copy(irc_file, persisted_irc)
-
-                result['brc_file'] = str(persisted_brc)
-                if persisted_irc is not None:
-                    result['irc_file'] = str(persisted_irc)
-
-                from uacpy.core.results import ReflectionCoefficient
-                frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
-
-                field = ReflectionCoefficient(
-                    theta=result.get('theta', np.array([])),
-                    R=result.get('R', np.array([])),
-                    phi=result.get('phi', np.array([])),
-                    **self._result_kwargs(
-                        source,
-                        frequencies=frequency,
-                        brc_file=result.get('brc_file'),
-                        irc_file=result.get('irc_file'),
-                        n_pts=result.get('n_pts', 0),
-                        c_low=self.c_low,
-                        c_high=self.c_high,
-                        rmax_m=self.rmax_m,
-                        volume_attenuation=self.volume_attenuation,
-                        full_result=result,
+            if not brc_file.exists():
+                exc = ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=(
+                        f"BOUNCE did not produce {brc_file}; "
+                        f"check {fm.work_dir}/{base_name}.prt for diagnostics."
                     ),
                 )
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
 
-                if field_finalizer is not None:
-                    weakref.finalize(
-                        field, shutil.rmtree, str(field_finalizer),
-                        ignore_errors=True,
-                    )
+            # bellhopcuda's strict monotonicity check on .brc/.irc rejects
+            # the duplicate near-zero angles bounce.f90 emits when many
+            # high-c samples round to the same kx — rewrite both files
+            # with a strictly-increasing angle axis.
+            self._dedupe_reflection_file(brc_file)
+            if irc_file.exists():
+                self._dedupe_reflection_file(irc_file)
 
-                self._log("BOUNCE simulation complete", level='info')
-                return field
+            self._log(f"Reading output: {brc_file}", level='info')
+            result = read_reflection_coefficient(str(brc_file), boundary='bottom')
 
-            finally:
-                if fm.cleanup:
-                    fm.cleanup_work_dir()
+            from uacpy.core.results import ReflectionCoefficient
+            frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
+
+            field = ReflectionCoefficient(
+                theta=result.get('theta', np.array([])),
+                R=result.get('R', np.array([])),
+                phi=result.get('phi', np.array([])),
+                **self._result_kwargs(
+                    source,
+                    frequencies=frequency,
+                    n_pts=result.get('n_pts', 0),
+                    c_low=self.c_low,
+                    c_high=self.c_high,
+                    rmax=rmax,
+                    volume_attenuation=self.volume_attenuation,
+                    full_result=result,
+                ),
+            )
+            self._attach_output_paths(
+                field, fm.work_dir, base_name,
+                primary_files=(
+                    ('brc_file', '.brc'),
+                    ('irc_file', '.irc'),
+                ),
+            )
+
+            self._log("Simulation complete", level='info')
+            return field
+
+        finally:
+            if fm.cleanup:
+                fm.cleanup_work_dir()
 
     def _write_bounce_input(
         self,
@@ -439,7 +447,7 @@ class Bounce(PropagationModel):
         receiver: Receiver,
         c_low: float,
         c_high: float,
-        rmax_m: float,
+        rmax: float,
         volume_attenuation: Optional[str] = None,
         francois_garrison_params: Optional[tuple] = None,
         bio_layers: Optional[list] = None,
@@ -450,7 +458,7 @@ class Bounce(PropagationModel):
 
         BOUNCE uses ENV format similar to KRAKEN with additional sections:
         - c_low, c_high (phase velocity bounds)
-        - RMax in km (for angular sampling) — converted from ``rmax_m``
+        - RMax in km (for angular sampling) — converted from ``rmax``
 
         BOUNCE does NOT call ``ReadSzRz``; its Fortran driver reads only
         TopOpt, SSP, BotOpt, cLow/cHigh, RMax. We therefore omit the
@@ -459,7 +467,7 @@ class Bounce(PropagationModel):
         # Parse types
         ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_type = parse_boundary_type(env.bottom.acoustic_type)
+        bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
 
         # Resolve volume attenuation
         vol_atten = None
@@ -503,6 +511,9 @@ class Bounce(PropagationModel):
                 roughness=0.0
             )
 
+            # Layered sediments (no-op when env.bottom is a plain halfspace).
+            write_layer_sections(f, env, env.depth)
+
             write_bottom_section(
                 f, env,
                 bottom_type=bottom_type,
@@ -516,7 +527,7 @@ class Bounce(PropagationModel):
             f.write(f"{c_low:.2f} {c_high:.2f}\n")
 
             # Maximum range in km (for angular sampling resolution)
-            f.write(f"{rmax_m / 1000.0:.2f}\n")
+            f.write(f"{rmax / 1000.0:.2f}\n")
 
             # BOUNCE does NOT read source/receiver depths — do NOT emit
             # them. AT's bounce.f90 stops after RMax.

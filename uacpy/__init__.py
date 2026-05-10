@@ -28,7 +28,7 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, PhaseReference,
-    TLField, PressureField, TransferFunction,
+    PressureField, TransferFunction,
     TimeSeriesField, TimeTrace,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
@@ -47,7 +47,7 @@ from uacpy.core.exceptions import (
 )
 
 from uacpy import models
-from uacpy.models.base import RunMode
+from uacpy.models.base import PropagationModel, RunMode
 from uacpy.visualization import plots as plot
 from uacpy import io
 
@@ -57,6 +57,8 @@ from uacpy import acoustic_signal as signal
 
 from uacpy import noise
 from uacpy.core import acoustics
+from uacpy.core import materials
+from uacpy.core.materials import MATERIALS, list_materials, get_material
 from uacpy.core.metrics import tl_rmse
 
 __all__ = [
@@ -71,7 +73,7 @@ __all__ = [
     'generate_sea_surface',
     'Receiver',
     'Result', 'PhaseReference',
-    'TLField', 'PressureField', 'TransferFunction',
+    'PressureField', 'TransferFunction',
     'TimeSeriesField', 'TimeTrace',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
@@ -84,12 +86,14 @@ __all__ = [
     'UnsupportedFeatureError',
     'ConfigurationError',
     'RunMode',
+    'PropagationModel',
     'models',
     'plot',
     'io',
     'signal',
     'noise',
     'acoustics',
+    'materials', 'MATERIALS', 'list_materials', 'get_material',
     'tl_rmse',
     '__version__',
 ]

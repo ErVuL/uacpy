@@ -5,40 +5,16 @@ import os
 import shutil
 import signal
 import subprocess
-from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Optional, List, Dict, Union
-from enum import Enum
 import warnings
-
-
-def _raise_stack_limit_at_import() -> None:
-    """Raise the parent's RLIMIT_STACK to its hard limit so children inherit
-    a generous stack — SPARC-class Fortran binaries can blow a default
-    8 MiB stack on first large alloc.
-    """
-    try:
-        import resource
-        _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-        target = (
-            resource.RLIM_INFINITY
-            if hard == resource.RLIM_INFINITY else hard
-        )
-        resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
-    except (ImportError, ValueError, OSError):
-        pass
-
-
-_raise_stack_limit_at_import()
+from abc import ABC, abstractmethod
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 
+import uacpy._stack  # noqa: F401 — side-effect: raise RLIMIT_STACK
 from uacpy.core.environment import Environment
-from uacpy.core.source import Source
-from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
@@ -46,42 +22,10 @@ from uacpy.core.exceptions import (
     ModelExecutionError,
     UnsupportedFeatureError,
 )
+from uacpy.core.receiver import Receiver
+from uacpy.core.results import Result
+from uacpy.core.source import Source
 from uacpy.io.file_manager import FileManager
-
-
-# Sentinel for "not provided" in run() overrides (distinct from None which means auto-compute)
-_UNSET = object()
-
-
-def _resolve_overrides(obj, **overrides):
-    """Resolve per-call overrides as a context manager.
-
-    For each override: if the supplied value is _UNSET, the attribute on
-    ``obj`` is left untouched; otherwise it is temporarily overwritten for
-    the duration of the ``with`` block so internal methods that read
-    ``self.<param>`` see the overridden value.  On exit the original
-    attribute values are restored unconditionally.
-
-    Returns
-    -------
-    context manager
-        A context manager that installs the overrides on entry and
-        restores the originals on exit.
-    """
-    @contextmanager
-    def override_context():
-        originals = {}
-        for name, value in overrides.items():
-            originals[name] = getattr(obj, name)
-            if value is not _UNSET:
-                setattr(obj, name, value)
-        try:
-            yield
-        finally:
-            for name, orig_value in originals.items():
-                setattr(obj, name, orig_value)
-
-    return override_context()
 
 
 class RunMode(Enum):
@@ -117,6 +61,18 @@ class RunMode(Enum):
     BROADBAND = 'broadband'
 
     REFLECTION = 'reflection'            # Plane-wave reflection coefficients (Bounce, OASR)
+
+
+DEFAULT_COLLAPSE: Dict[str, str] = {
+    'bathymetry': 'max',
+    'ssp': 'r0',
+    'bottom': 'r0',
+    'layered': 'halfspace',
+    'rd_layered_range': 'median',
+    'rd_layered_layers': 'halfspace',
+    'altimetry': 'drop',
+    'elastic': 'fluid',
+}
 
 
 class PropagationModel(ABC):
@@ -156,13 +112,7 @@ class PropagationModel(ABC):
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
-        bathymetry_collapse_method: str = 'max',
-        ssp_collapse_method: str = 'r0',
-        bottom_collapse_method: str = 'r0',
-        layered_collapse_method: str = 'halfspace',
-        rd_layered_collapse_method: str = 'halfspace',
-        altimetry_collapse_method: str = 'drop',
-        elastic_collapse_method: str = 'fluid',
+        collapse: Optional[Dict[str, str]] = None,
     ):
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
@@ -172,33 +122,34 @@ class PropagationModel(ABC):
         self.cleanup = (work_dir is None) if cleanup is None else bool(cleanup)
         self.timeout = float(timeout)
         # Per-feature collapse policies applied by ``_project_environment``
-        # when an env contains a feature this model doesn't support.
-        # Defaults preserve historical behaviour (range-0 / halfspace / drop)
-        # so existing callers are unaffected.
+        # when an env contains a feature this model doesn't support. Pass
+        # ``collapse={'bathymetry': 'min', 'ssp': 'mean', ...}`` to override
+        # any subset; missing keys keep the defaults.
         #
-        # bathymetry_collapse_method : 'max'|'median'|'mean'|'min'|'initial'
-        #     Single representative water depth for range-independent models.
-        # ssp_collapse_method : 'r0'|'rmax'|'mean'|'median'
-        #     Reduce 2-D SSP to 1-D.
-        # bottom_collapse_method : 'r0'|'rmax'|'mean'|'median'
-        #     Reduce ``RangeDependentBottom`` to a single ``BoundaryProperties``.
-        # layered_collapse_method : 'halfspace'|'top_layer'|'volume_average'
-        #     Reduce ``LayeredBottom`` to a single ``BoundaryProperties``.
-        # rd_layered_collapse_method : 'halfspace'|'top_layer'|'volume_average'
-        #     Layered method applied after picking a single profile from a
-        #     ``RangeDependentLayeredBottom``.
-        # altimetry_collapse_method : 'drop'
-        # elastic_collapse_method   : 'fluid' (zero shear) | 'vacuum'
-        #     Applied to BOTH env.surface and env.bottom whenever the
-        #     interface has shear_speed > 0 and the model does not support
-        #     elastic media.
-        self.bathymetry_collapse_method = bathymetry_collapse_method
-        self.ssp_collapse_method = ssp_collapse_method
-        self.bottom_collapse_method = bottom_collapse_method
-        self.layered_collapse_method = layered_collapse_method
-        self.rd_layered_collapse_method = rd_layered_collapse_method
-        self.altimetry_collapse_method = altimetry_collapse_method
-        self.elastic_collapse_method = elastic_collapse_method
+        # 'bathymetry'        : 'max'|'median'|'mean'|'min'|'initial'
+        # 'ssp'               : 'r0'|'rmax'|'mean'|'median'
+        # 'bottom'            : 'r0'|'rmax'|'mean'|'median'
+        # 'layered'           : 'halfspace'|'top_layer'|'volume_average'
+        # 'rd_layered_range'  : 'r0'|'rmax'|'median' — which range to
+        #                       sample for an RDLB env
+        # 'rd_layered_layers' : 'preserve'|'halfspace'|'top_layer'|
+        #                       'volume_average' — how to flatten the
+        #                       layer stack at that range. 'preserve'
+        #                       keeps the LayeredBottom and requires
+        #                       the model to support layered bottoms.
+        # 'altimetry'         : 'drop'
+        # 'elastic'           : 'fluid' (zero shear) | 'vacuum'
+        self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
+        self._user_collapse: Dict[str, str] = {}
+        if collapse:
+            unknown = set(collapse) - set(DEFAULT_COLLAPSE)
+            if unknown:
+                raise ConfigurationError(
+                    f"Unknown collapse keys: {sorted(unknown)}. "
+                    f"Valid keys: {sorted(DEFAULT_COLLAPSE)}"
+                )
+            self._collapse.update(collapse)
+            self._user_collapse = dict(collapse)
         self.file_manager = None
 
         # Subclasses override to declare the run modes they support.
@@ -222,25 +173,44 @@ class PropagationModel(ABC):
         self._supports_layered_bottom: bool = False
         self._supports_range_dependent_layered_bottom: bool = False
         self._supports_elastic_media: bool = False
-        # Per-feature suggestion strings appended to each warning. Override
-        # individual entries per subclass (e.g. Bellhop adds a
-        # ``run_with_bounce()`` hint to ``layered_bottom``).
-        self._unsupported_env_alternatives: Dict[str, str] = {
-            'altimetry': 'Bellhop or RAM (ramsurf backend)',
-            'range_dependent_bathymetry': (
-                'Bellhop, BellhopCUDA, KrakenField, or RAM'
-            ),
-            'range_dependent_ssp': (
-                'Bellhop (with ssp.interp=\'quad\'), KrakenField, or RAM'
-            ),
-            'range_dependent_bottom': 'Bellhop (long .bty) or RAM',
-            'layered_bottom': 'Kraken/KrakenC, Scooter, or OASES',
-            'range_dependent_layered_bottom': 'RAM',
-            'elastic_media': (
-                'Bellhop, KrakenC, KrakenField, Scooter, OASES, Bounce, '
-                'or RAM (auto-routes to rams0.5 for elastic bottom)'
-            ),
-        }
+        # Bellhop is the only model that runs one source-depth grid in
+        # a single binary call; everyone else loops in Python.
+        self._supports_multi_source_depth: bool = False
+
+    def _set_collapse_defaults(self, defaults: Dict[str, str]) -> None:
+        """Subclass hook: install model-specific collapse defaults.
+
+        Each ``(key, value)`` is applied only when the user did not pass
+        an explicit value for ``key`` in ``Model(collapse={...})``, so
+        user overrides always win. Use it to express physics-aware
+        defaults that differ from the global ``DEFAULT_COLLAPSE``.
+        """
+        for key, value in defaults.items():
+            if key not in self._user_collapse:
+                self._collapse[key] = value
+
+    def _resolve_run_mode(
+        self,
+        run_mode: Optional['RunMode'],
+        *,
+        default: Optional['RunMode'] = None,
+    ) -> 'RunMode':
+        """Default ``None`` to the model's first supported mode and then
+        validate that ``run_mode`` is in ``_supported_modes``. Raises
+        :class:`UnsupportedFeatureError` otherwise.
+
+        Pass ``default=`` to override the auto-pick when the model has a
+        smarter rule (e.g. KrakenField picks BROADBAND when a frequency
+        vector is supplied).
+        """
+        if run_mode is None:
+            run_mode = default if default is not None else self._supported_modes[0]
+        if not self.supports_mode(run_mode):
+            raise UnsupportedFeatureError(
+                self.model_name, str(run_mode),
+                alternatives=[str(m) for m in self._supported_modes],
+            )
+        return run_mode
 
     @property
     def supported_modes(self) -> List[RunMode]:
@@ -266,26 +236,24 @@ class PropagationModel(ABC):
         order: the common ``Environment`` / ``Source`` / ``Receiver``
         triple, followed by the optional ``run_mode``.
 
-        Model-specific settings come from two places:
-
-        1. **Constructor kwargs** — the long-lived configuration of the
-           model instance (e.g. ``RAM(dr=2.0, dz=0.5, np_pade=8)``).
-        2. **Per-call overrides via ``**kwargs``** — any keyword whose
-           name matches a constructor attribute is temporarily applied
-           for the duration of this call. This lets you reuse one
-           configured instance with localised tweaks.
+        Model configuration is **constructor-only** — every model knob
+        (e.g. ``RAM(dr=2.0, dz=0.5, np_pade=8)``,
+        ``Bellhop(beam_type='B', n_beams=500)``) is set when the model
+        instance is created. To sweep parameters, instantiate one model
+        per parameter set.
 
         Mode-specific kwargs follow a fixed convention: every
         TIME_SERIES-capable wrapper accepts ``source_waveform=`` and
         ``sample_rate=`` as explicit keyword arguments on ``run()``
         (Bellhop, Scooter, KrakenField, OASP, RAM); SPARC computes
-        p(t) from its native source pulse and ignores both. Models with
+        p(t) from its native source pulse and rejects both. Models with
         a broadband transfer-function path also accept ``frequencies=``
-        as an explicit override for ``source.frequencies``.
+        as an explicit override for ``source.frequencies``. Bounce takes
+        a required ``output_dir=`` for persisting ``.brc`` / ``.irc``.
 
-        Any kwarg not consumed by an explicit signature arg, an override,
-        or a documented writer/mode pass-through is reported via
-        ``_warn_unknown_kwargs`` (typo guard).
+        Unrecognised kwargs are silently ignored (per uacpy convention)
+        and otherwise threaded into the env-file writer for
+        model-specific format quirks (e.g. Bellhop's ``beam_shift``).
 
         Parameters
         ----------
@@ -300,27 +268,17 @@ class PropagationModel(ABC):
             default (typically ``RunMode.COHERENT_TL``). Each wrapper's
             :attr:`supported_modes` lists what it accepts.
         **kwargs
-            Per-call overrides (matching constructor attribute names) and
-            mode-specific extras. See subclass docstrings.
+            Mode-specific extras and writer pass-through. See subclass
+            docstrings.
 
         Returns
         -------
         result : Result
             One of the typed :mod:`uacpy.core.results` subclasses
-            (``TLField``, ``TransferFunction``, ``Modes``, …) determined
+            (``PressureField``, ``TransferFunction``, ``Modes``, …) determined
             by ``run_mode`` and the model.
         """
         pass
-
-    def _resolve(self, value, attr: str):
-        """Resolve a per-call override against the constructor default.
-
-        Returns ``value`` unchanged unless it is the ``_UNSET`` sentinel,
-        in which case ``getattr(self, attr)`` is returned. Used by
-        ``run()`` paths that pass resolved values straight to writers
-        (where the ``_resolve_overrides`` context manager doesn't apply).
-        """
-        return getattr(self, attr) if value is _UNSET else value
 
     # Modes that consume exactly one source frequency. Multi-frequency
     # Source passed to one of these is a configuration error — the user
@@ -331,19 +289,16 @@ class PropagationModel(ABC):
         RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS, RunMode.MODES,
     })
 
-    _supports_multi_source_depth: bool = False
-
-    def _warn_unknown_kwargs(self, kwargs: dict, allowed: tuple = ()):
-        """No-op. Unknown ``run()`` kwargs are silently ignored per uacpy
-        convention; model wrappers still invoke this helper after peeling
-        off explicit args.
-        """
-        return
-
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
-        parent); when ``None``, a fresh temp dir is created."""
+        parent); when ``None``, a fresh temp dir is created.
+
+        Auto-creates the user-pinned ``work_dir`` if it doesn't exist
+        yet, so callers can construct ``Model(work_dir='./out')`` without
+        a separate ``mkdir`` step.
+        """
         if self.work_dir is not None:
+            Path(self.work_dir).mkdir(parents=True, exist_ok=True)
             fm = FileManager(
                 use_tmpfs=False,
                 base_dir=self.work_dir,
@@ -351,7 +306,6 @@ class PropagationModel(ABC):
                 cleanup=getattr(self, 'cleanup', False),
             )
             fm.work_dir = Path(self.work_dir)
-            fm.work_dir.mkdir(parents=True, exist_ok=True)
         else:
             fm = FileManager(
                 use_tmpfs=self.use_tmpfs,
@@ -437,31 +391,19 @@ class PropagationModel(ABC):
         max_depth = env.depth
 
         if np.any(source.depths > max_depth):
-            self._log(
-                f"Source depth ({source.depths.max():.1f}m) exceeds maximum "
-                f"environment depth ({max_depth:.1f}m)",
-                level='error',
-            )
             raise InvalidDepthError(
                 float(source.depths.max()), max_depth, "Source",
             )
 
         if receiver.depth_max > max_depth:
-            self._log(
-                f"Receiver depth ({receiver.depth_max:.1f}m) exceeds maximum "
-                f"environment depth ({max_depth:.1f}m)",
-                level='error',
-            )
             raise InvalidDepthError(
                 float(receiver.depth_max), max_depth, "Receiver",
             )
 
         if np.any(source.depths < 0):
-            self._log("Source depths must be positive", level='error')
             raise ConfigurationError("Source depths must be positive")
 
         if receiver.depth_min < 0:
-            self._log("Receiver depths must be positive", level='error')
             raise ConfigurationError("Receiver depths must be positive")
 
     def compute_tl(
@@ -625,8 +567,8 @@ class PropagationModel(ABC):
         --------
         >>> kraken = Kraken()
         >>> modes = kraken.compute_modes(env, source, n_modes=50)
-        >>> wavenumbers = modes.metadata['k']
-        >>> mode_shapes = modes.metadata['phi']
+        >>> wavenumbers = modes.k
+        >>> mode_shapes = modes.phi
         """
         if not self.supports_mode(RunMode.MODES):
             raise UnsupportedFeatureError(
@@ -637,7 +579,7 @@ class PropagationModel(ABC):
 
         if env.is_range_dependent and self.model_name != 'KrakenField':
             # Range-independent mode solvers (Kraken, KrakenC) collapse
-            # the environment via ``bathymetry_collapse_method`` and warn,
+            # the environment via ``collapse={'bathymetry': …}`` and warn,
             # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
 
@@ -660,47 +602,27 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Optional[Receiver] = None,
-        range_m: Optional[float] = None,
-        depth_m: Optional[float] = None,
-        tolerance_m: Optional[float] = None,
-        max_rays: Optional[int] = None,
-        truncate: bool = True,
+        range: Optional[float] = None,
+        depth: Optional[float] = None,
         **kwargs,
     ) -> Result:
         """Compute eigenrays — rays that arrive at the receiver(s).
 
-        Runs the model's eigenray solver (Bellhop's ``RunType='E'``) and,
-        for a single-point query, sorts the returned rays by closest-
-        approach miss distance, drops any beyond ``tolerance_m`` (default:
-        one acoustic wavelength), caps to ``max_rays``, and (when
-        ``truncate=True``) trims each kept polyline at its closest-
-        approach index for clean display.
+        Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Accepts
+        either a ``Receiver`` directly or a single-point shortcut via
+        ``range=``/``depth=`` (a 1-point Receiver is built
+        internally). Returns the raw :class:`Rays` from the solver.
 
-        Two usage patterns:
+        Filtering / sorting / truncation lives on :class:`Rays`. To select
+        the closest paths, chain a Rays method:
 
-        * Single point — pass ``range_m`` and ``depth_m``. A 1-point
-          ``Receiver`` is built internally and the cosmetic post-filter
-          fires.
-        * Multi-receiver — pass a ``Receiver`` directly. The solver
-          targets every receiver point; the post-filter is skipped (no
-          single anchor) and ``tolerance_m`` / ``max_rays`` / ``truncate``
-          are ignored. To narrow afterwards, call ``compute_eigenrays``
-          again for the specific point of interest.
+        >>> rays = bellhop.compute_eigenrays(env, source, range=2000, depth=30)
+        >>> close = rays.top_n_by_miss(8).truncate_at_receiver()
+        >>> direct = rays.filter_by_bounces(kind='direct')
+        >>> within = rays.filter_by_miss_distance(max_miss=15.0)
 
-        ``**kwargs`` forwards to :meth:`run`, so the full per-model
-        configuration surface (beam type, step size, etc.) is available.
-
-        Examples
-        --------
-        >>> bellhop = Bellhop(verbose=False, alpha=(-20, 20), n_beams=51)
-        >>> rays = bellhop.compute_eigenrays(env, source,
-        ...                                   range_m=2000, depth_m=30,
-        ...                                   tolerance_m=15, max_rays=8)
-        >>> for r in rays.rays:
-        ...     print(r['miss_distance_m'])
+        ``**kwargs`` forwards to :meth:`run`.
         """
-        from uacpy.core.results import Rays as _Rays
-
         if not self.supports_mode(RunMode.EIGENRAYS):
             raise UnsupportedFeatureError(
                 self.model_name,
@@ -708,70 +630,24 @@ class PropagationModel(ABC):
                 alternatives=['Bellhop'],
             )
 
-        single_point = range_m is not None and depth_m is not None
+        single_point = range is not None and depth is not None
         if receiver is None:
             if not single_point:
                 raise ConfigurationError(
                     "compute_eigenrays requires either receiver=… or both "
-                    "range_m=… and depth_m=…"
+                    "range=… and depth=…"
                 )
             receiver = Receiver(
-                depths=np.array([float(depth_m)]),
-                ranges=np.array([float(range_m)]),
+                depths=np.array([float(depth)]),
+                ranges=np.array([float(range)]),
             )
         elif single_point:
             raise ConfigurationError(
-                "Pass either receiver=… OR (range_m, depth_m), not both."
+                "Pass either receiver=… OR (range, depth), not both."
             )
 
-        result = self.run(env, source, receiver,
-                          run_mode=RunMode.EIGENRAYS, **kwargs)
-
-        if not single_point:
-            return result
-
-        if tolerance_m is None:
-            f = float(np.atleast_1d(source.frequencies)[0])
-            tolerance_m = DEFAULT_SOUND_SPEED / f if f > 0 else float('inf')
-
-        rr_km = range_m / 1000.0
-        scored = []
-        for ray in result.rays:
-            r_km = np.asarray(ray.get('r', [])) / 1000.0
-            z = np.asarray(ray.get('z', []))
-            if len(r_km) == 0:
-                continue
-            d2 = (r_km - rr_km) ** 2 + ((z - depth_m) / 1000.0) ** 2
-            k = int(np.argmin(d2))
-            miss_m = float(np.sqrt(d2[k]) * 1000.0)
-            if miss_m > tolerance_m:
-                continue
-            ray = dict(ray)
-            if truncate and k + 1 < len(r_km):
-                ray['r'] = np.asarray(ray['r'])[: k + 1]
-                ray['z'] = np.asarray(ray['z'])[: k + 1]
-            ray['miss_distance_m'] = miss_m
-            scored.append((miss_m, ray))
-
-        scored.sort(key=lambda t: t[0])
-        if max_rays is not None:
-            scored = scored[:max_rays]
-
-        meta = dict(result.metadata)
-        meta['receiver_range_m'] = float(range_m)
-        meta['receiver_depth_m'] = float(depth_m)
-        meta['tolerance_m'] = tolerance_m
-        return _Rays(
-            rays=[r for _, r in scored],
-            is_eigen=True,
-            receiver_depths=np.array([float(depth_m)]),
-            receiver_ranges=np.array([float(range_m)]),
-            model=result.model,
-            backend=result.backend,
-            source_depths=result.source_depths,
-            frequencies=result.frequencies,
-            metadata=meta,
-        )
+        return self.run(env, source, receiver,
+                        run_mode=RunMode.EIGENRAYS, **kwargs)
 
     def compute_reflection(
         self,
@@ -1090,212 +966,218 @@ class PropagationModel(ABC):
 
     @staticmethod
     def _has_shear(boundary) -> bool:
-        """True if a ``BoundaryProperties`` carries a non-zero shear speed."""
-        cs = getattr(boundary, 'shear_speed', None)
-        return cs is not None and float(cs) > 0.0
+        """True if ``boundary`` carries any non-zero shear speed."""
+        from uacpy.core.environment import _boundary_has_shear
+        return _boundary_has_shear(boundary)
 
     @staticmethod
     def _collapse_elastic_boundary(boundary, method: str):
-        """Collapse an elastic ``BoundaryProperties`` per ``method``.
+        """Collapse elastic shear properties on ``boundary`` per ``method``.
 
         ``'fluid'``  : zero shear_speed and shear_attenuation; keep cp / ρ / α.
         ``'vacuum'`` : replace with default vacuum BoundaryProperties.
+
+        Walks layer/profile structure for :class:`LayeredBottom` and
+        :class:`RangeDependentLayeredBottom`.
         """
-        from uacpy.core.environment import BoundaryProperties
-        if method == 'fluid':
-            b = _copy.deepcopy(boundary)
-            b.shear_speed = 0.0
-            b.shear_attenuation = 0.0
-            return b
+        from uacpy.core.environment import (
+            BoundaryProperties, LayeredBottom, RangeDependentLayeredBottom,
+        )
+
+        def _zero_shear(b):
+            if hasattr(b, 'shear_speed'):
+                b.shear_speed = 0.0
+            if hasattr(b, 'shear_attenuation'):
+                b.shear_attenuation = 0.0
+
         if method == 'vacuum':
             return BoundaryProperties(acoustic_type='vacuum')
-        raise ConfigurationError(
-            f"Unknown elastic collapse method {method!r}. Use "
-            "'fluid' or 'vacuum'."
-        )
-
-    # Each axis: (alt_key, support_flag_attr, method_attr, detector,
-    #             collapser, log_label). detector(env) → bool. collapser
-    #             takes (self, env_in, e_out, method) → warning_message
-    #             (str). Walked once by ``_project_environment``.
-    @staticmethod
-    def _detect_altimetry(env):
-        return env.altimetry is not None
-
-    @staticmethod
-    def _detect_rd_bathy(env):
-        return env.has_range_dependent_bathymetry()
-
-    @staticmethod
-    def _detect_rd_ssp(env):
-        return env.has_range_dependent_ssp()
-
-    @staticmethod
-    def _detect_rd_bottom(env):
-        return env.has_range_dependent_bottom()
-
-    @staticmethod
-    def _detect_rd_layered(env):
-        return env.has_range_dependent_layered_bottom()
-
-    @staticmethod
-    def _detect_layered(env):
-        return env.has_layered_bottom()
-
-    def _collapse_altimetry(self, env_in, e, method, alts):
-        if method != 'drop':
+        if method != 'fluid':
             raise ConfigurationError(
-                f"Unknown altimetry_collapse_method {method!r}. "
-                "Currently only 'drop' is supported."
+                f"Unknown elastic collapse method {method!r}. Use "
+                "'fluid' or 'vacuum'."
             )
-        e.altimetry = None
-        return (
-            f"{self.model_name} does not support sea-surface altimetry; "
-            f"using flat surface (altimetry_collapse_method={method!r}). "
-            f"For rough-surface support use {alts['altimetry']}."
-        ), 'altimetry'
-
-    def _collapse_rd_bathy(self, env_in, e, method, alts):
-        new_depth = env_in.get_representative_depth(method)
-        e.bathymetry = np.array([[0.0, new_depth]], dtype=np.float64)
-        if e.ssp.depths[-1] < new_depth:
-            e.ssp = e.ssp.extend_to(new_depth)
-        min_d = float(env_in.bathymetry[:, 1].min())
-        max_d = float(env_in.bathymetry[:, 1].max())
-        msg = (
-            f"{self.model_name} does not support range-dependent "
-            f"bathymetry; collapsed to {new_depth:.1f} m "
-            f"(method={method!r}, range {min_d:.1f}–{max_d:.1f} m). "
-            f"For RD bathymetry use "
-            f"{alts['range_dependent_bathymetry']}. "
-            f"Override with `bathymetry_collapse_method='min'|'median'|"
-            f"'mean'|'max'|'initial'`."
-        )
-        return msg, f"bathymetry ({method} → {new_depth:.1f} m)"
-
-    def _collapse_rd_ssp(self, env_in, e, method, alts):
-        e.ssp = e.ssp.collapse(method)
-        return (
-            f"{self.model_name} does not support range-dependent SSP; "
-            f"collapsed to 1-D (ssp_collapse_method={method!r}). "
-            f"For RD SSP use {alts['range_dependent_ssp']}."
-        ), f"SSP ({method})"
-
-    def _collapse_rd_bottom(self, env_in, e, method, alts):
-        e.bottom = e.bottom_rd.collapse(method)
-        e.bottom_rd = None
-        return (
-            f"{self.model_name} does not support range-dependent bottom "
-            f"geoacoustics; collapsed to single profile "
-            f"(bottom_collapse_method={method!r}). "
-            f"For RD bottoms use {alts['range_dependent_bottom']}."
-        ), f"bottom_rd ({method})"
-
-    def _collapse_rd_layered(self, env_in, e, method, alts):
-        e.bottom = e.bottom_rd_layered.collapse(
-            layered_method=method, range_method='middle',
-        )
-        e.bottom_rd_layered = None
-        return (
-            f"{self.model_name} does not support range-dependent layered "
-            f"bottoms; collapsed to single boundary "
-            f"(rd_layered_collapse_method={method!r}). "
-            f"For RD-layered use "
-            f"{alts['range_dependent_layered_bottom']}."
-        ), f"bottom_rd_layered ({method})"
-
-    def _collapse_layered(self, env_in, e, method, alts):
-        e.bottom = e.bottom_layered.collapse(method)
-        e.bottom_layered = None
-        return (
-            f"{self.model_name} does not support layered (depth-"
-            f"dependent) bottoms; collapsed to single boundary "
-            f"(layered_collapse_method={method!r}). "
-            f"For layered bottoms use {alts['layered_bottom']}."
-        ), f"layered bottom ({method})"
-
-    @property
-    def _PROJECTION_AXES(self):
-        # (alt_key, support_flag_attr, method_attr, detector, collapser)
-        return (
-            ('altimetry', '_supports_altimetry',
-             'altimetry_collapse_method',
-             self._detect_altimetry, self._collapse_altimetry),
-            ('range_dependent_bathymetry',
-             '_supports_range_dependent_bathymetry',
-             'bathymetry_collapse_method',
-             self._detect_rd_bathy, self._collapse_rd_bathy),
-            ('range_dependent_ssp', '_supports_range_dependent_ssp',
-             'ssp_collapse_method',
-             self._detect_rd_ssp, self._collapse_rd_ssp),
-            ('range_dependent_bottom',
-             '_supports_range_dependent_bottom',
-             'bottom_collapse_method',
-             self._detect_rd_bottom, self._collapse_rd_bottom),
-            ('range_dependent_layered_bottom',
-             '_supports_range_dependent_layered_bottom',
-             'rd_layered_collapse_method',
-             self._detect_rd_layered, self._collapse_rd_layered),
-            ('layered_bottom', '_supports_layered_bottom',
-             'layered_collapse_method',
-             self._detect_layered, self._collapse_layered),
-        )
+        b = _copy.deepcopy(boundary)
+        if isinstance(b, RangeDependentLayeredBottom):
+            for prof in b.profiles:
+                for layer in prof.layers:
+                    _zero_shear(layer)
+                _zero_shear(prof.halfspace)
+        elif isinstance(b, LayeredBottom):
+            for layer in b.layers:
+                _zero_shear(layer)
+            _zero_shear(b.halfspace)
+        else:
+            _zero_shear(b)
+        return b
 
     def _project_environment(self, env: 'Environment') -> 'Environment':
         """Return a copy of ``env`` with every unsupported feature collapsed.
 
-        Walks the feature axes and applies the per-feature
-        ``*_collapse_method`` configured on the model. Emits one
-        ``UserWarning`` per dropped feature, citing the chosen method and
-        the alternative-model hint from
-        ``self._unsupported_env_alternatives``.
-
-        Models call this once at the top of ``run()`` instead of
-        inspecting the env themselves.
+        Each per-feature axis is checked against the matching
+        ``_supports_*`` flag and reduced via the matching key in the
+        configured ``collapse={…}`` dict. Emits one ``UserWarning`` per
+        dropped feature.
         """
         e = env.copy()
-        alts = self._unsupported_env_alternatives
 
-        for _key, support_attr, method_attr, detector, collapser in (
-            self._PROJECTION_AXES
-        ):
-            if detector(env) and not getattr(self, support_attr):
-                method = getattr(self, method_attr)
-                msg, log_label = collapser(env, e, method, alts)
-                warnings.warn(msg, UserWarning, stacklevel=3)
-                self._log(
-                    f"{self.model_name}: {log_label} dropped/collapsed.",
-                    level='warn',
+        if e.altimetry is not None and not self._supports_altimetry:
+            method = self._collapse["altimetry"]
+            if method != 'drop':
+                raise ConfigurationError(
+                    f"Unknown collapse['altimetry']={method!r}. "
+                    "Currently only 'drop' is supported."
                 )
+            e.altimetry = None
+            warnings.warn(
+                f"{self.model_name} does not support sea-surface altimetry; "
+                f"using flat surface (collapse['altimetry']={method!r}).",
+                UserWarning, stacklevel=3,
+            )
+
+        if e.has_range_dependent_bathymetry() and not self._supports_range_dependent_bathymetry:
+            method = self._collapse["bathymetry"]
+            new_depth = e.get_representative_depth(method)
+            min_d = float(e.bathymetry[:, 1].min())
+            max_d = float(e.bathymetry[:, 1].max())
+            e.bathymetry = np.array([[0.0, new_depth]], dtype=np.float64)
+            if e.ssp.depths[-1] < new_depth:
+                e.ssp = e.ssp.extend_to(new_depth)
+            warnings.warn(
+                f"{self.model_name} does not support range-dependent "
+                f"bathymetry; collapsed to {new_depth:.1f} m "
+                f"(method={method!r}, range {min_d:.1f}–{max_d:.1f} m). "
+                f"Override via `collapse={{'bathymetry': "
+                f"'min'|'median'|'mean'|'max'|'initial'}}`.",
+                UserWarning, stacklevel=3,
+            )
+
+        if e.has_range_dependent_ssp() and not self._supports_range_dependent_ssp:
+            method = self._collapse["ssp"]
+            e.ssp = e.ssp.collapse(method)
+            warnings.warn(
+                f"{self.model_name} does not support range-dependent SSP; "
+                f"collapsed to 1-D (collapse['ssp']={method!r}).",
+                UserWarning, stacklevel=3,
+            )
+
+        if e.has_range_dependent_bottom() and not self._supports_range_dependent_bottom:
+            method = self._collapse["bottom"]
+            e.bottom = e.bottom.collapse(method)
+            warnings.warn(
+                f"{self.model_name} does not support range-dependent bottom "
+                f"geoacoustics; collapsed to single profile "
+                f"(collapse['bottom']={method!r}).",
+                UserWarning, stacklevel=3,
+            )
+
+        if e.has_range_dependent_layered_bottom() and not self._supports_range_dependent_layered_bottom:
+            range_step = self._collapse["rd_layered_range"]
+            layers_method = self._collapse["rd_layered_layers"]
+            range_methods = ('r0', 'rmax', 'median')
+            layers_methods = ('preserve', 'halfspace', 'top_layer', 'volume_average')
+            if range_step not in range_methods:
+                raise ConfigurationError(
+                    f"Unknown collapse['rd_layered_range']={range_step!r}. "
+                    f"Valid: {range_methods}."
+                )
+            if layers_method not in layers_methods:
+                raise ConfigurationError(
+                    f"Unknown collapse['rd_layered_layers']={layers_method!r}. "
+                    f"Valid: {layers_methods}."
+                )
+            if layers_method == 'preserve':
+                if not self._supports_layered_bottom:
+                    raise ConfigurationError(
+                        f"{self.model_name} does not support layered bottoms, "
+                        f"so collapse['rd_layered_layers']='preserve' would "
+                        f"leave a LayeredBottom the model cannot consume. "
+                        f"Pick one of "
+                        f"{layers_methods[1:]!r} to also flatten the layers."
+                    )
+                e.bottom = e.bottom.to_profile(range_step)
+                warnings.warn(
+                    f"{self.model_name} does not support range-dependent "
+                    f"layered bottoms; selected the {range_step!r} layered "
+                    f"profile (collapse['rd_layered_range']={range_step!r}, "
+                    f"collapse['rd_layered_layers']='preserve').",
+                    UserWarning, stacklevel=3,
+                )
+            else:
+                e.bottom = e.bottom.to_profile(range_step).collapse(layers_method)
+                warnings.warn(
+                    f"{self.model_name} does not support range-dependent "
+                    f"layered bottoms; collapsed to single boundary "
+                    f"(collapse['rd_layered_range']={range_step!r}, "
+                    f"collapse['rd_layered_layers']={layers_method!r}).",
+                    UserWarning, stacklevel=3,
+                )
+
+        if e.has_layered_bottom() and not self._supports_layered_bottom:
+            method = self._collapse["layered"]
+            e.bottom = e.bottom.collapse(method)
+            warnings.warn(
+                f"{self.model_name} does not support layered (depth-"
+                f"dependent) bottoms; collapsed to single boundary "
+                f"(collapse['layered']={method!r}).",
+                UserWarning, stacklevel=3,
+            )
 
         if not self._supports_elastic_media:
             collapsed_at = []
             if e.surface is not None and self._has_shear(e.surface):
                 e.surface = self._collapse_elastic_boundary(
-                    e.surface, self.elastic_collapse_method,
+                    e.surface, self._collapse["elastic"],
                 )
                 collapsed_at.append('surface')
             if e.bottom is not None and self._has_shear(e.bottom):
                 e.bottom = self._collapse_elastic_boundary(
-                    e.bottom, self.elastic_collapse_method,
+                    e.bottom, self._collapse["elastic"],
                 )
                 collapsed_at.append('bottom')
             if collapsed_at:
-                method = self.elastic_collapse_method
+                method = self._collapse["elastic"]
                 where = '/'.join(collapsed_at)
                 warnings.warn(
                     f"{self.model_name} does not support elastic media; "
                     f"collapsed shear properties on {where} "
-                    f"(elastic_collapse_method={method!r}). "
-                    f"For elastic media use {alts['elastic_media']}.",
+                    f"(collapse['elastic']={method!r}).",
                     UserWarning, stacklevel=3,
-                )
-                self._log(
-                    f"{self.model_name}: elastic {where} collapsed ({method}).",
-                    level='warn',
                 )
 
         return e
+
+    def _attach_output_paths(
+        self,
+        result: 'Result',
+        work_dir: Path,
+        base_name: str,
+        *,
+        primary_files: tuple = (),
+    ) -> None:
+        """Attach work-dir output paths to ``result.metadata`` when they
+        will outlive ``run()``.
+
+        For each ``(key, suffix)`` in ``primary_files``, sets
+        ``result.metadata[key] = str(work_dir / f'{base_name}{suffix}')``
+        when the file exists. Also sets ``'prt_file'`` from the binary's
+        diagnostic log.
+
+        No-op when ``self.cleanup`` is ``True`` (the work dir is wiped
+        in the model's ``finally`` block, so surfacing paths would
+        mislead the user). The convention across all models is therefore:
+        **paths in ``metadata`` are valid when present; their absence
+        means the files were cleaned up**.
+        """
+        if self.cleanup:
+            return
+        for key, suffix in primary_files:
+            path = work_dir / f'{base_name}{suffix}'
+            if path.exists():
+                result.metadata[key] = str(path)
+        prt_path = work_dir / f'{base_name}.prt'
+        if prt_path.exists():
+            result.metadata['prt_file'] = str(prt_path)
 
     @staticmethod
     def _attach_prt_tail(exc, work_dir, base_name, n_chars: int = 2000):
@@ -1329,12 +1211,10 @@ class PropagationModel(ABC):
         """Pre-built kwargs for any :mod:`uacpy.core.results` constructor.
 
         ``frequencies`` is auto-wrapped to a 1-D ndarray (length ≥ 1) when
-        scalar; ``None`` is preserved for time-domain results.
+        scalar; ``None`` is preserved for time-domain results. Anything in
+        ``extra`` is stored on the result's ``metadata`` ad-hoc bag.
         """
-        md = dict(extra)
-        if phase_reference is not None:
-            md['phase_reference'] = phase_reference
-        return dict(
+        kw = dict(
             model=self.model_name,
             backend=backend or self.model_name,
             source_depths=np.atleast_1d(np.asarray(
@@ -1342,8 +1222,11 @@ class PropagationModel(ABC):
             )),
             frequencies=(np.atleast_1d(np.asarray(frequencies, dtype=float))
                          if frequencies is not None else None),
-            metadata=md,
+            metadata=dict(extra),
         )
+        if phase_reference is not None:
+            kw['phase_reference'] = phase_reference
+        return kw
 
     def _clip_receiver_depths(
         self, receiver: 'Receiver', env_depth: float, margin: float = 3.0

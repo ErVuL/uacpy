@@ -3,13 +3,10 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import TransferFunction, TimeSeriesField
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, KrakenField, Scooter, SPARC
+from uacpy.models import Kraken, KrakenC, KrakenField
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
 
 pytestmark = pytest.mark.requires_binary
 
@@ -20,7 +17,7 @@ class TestKrakenFieldBroadband:
     @pytest.mark.slow
     def test_krakenfield_broadband_returns_transfer_function(self):
         """KrakenField BROADBAND returns H(f) on the receiver grid."""
-        env = Environment(name="kf_bb", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="kf_bb", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
@@ -44,7 +41,7 @@ class TestKrakenFieldBroadband:
     @pytest.mark.slow
     def test_krakenfield_time_series_returns_time_series_field(self):
         """KrakenField TIME_SERIES with a tonal waveform returns TimeSeriesField."""
-        env = Environment(name="kf_ts", bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name="kf_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
             depths=np.array([50.0]),
@@ -71,7 +68,6 @@ class TestKrakenFieldBroadband:
         assert result.data.shape[2] > 0
         assert np.all(np.isfinite(result.data))
 
-
     """Test KrakenC for complex modes with elastic bottom."""
 
     @pytest.fixture
@@ -88,10 +84,9 @@ class TestKrakenFieldBroadband:
         return Environment(
             name="krakenc_test",
             bathymetry=100.0,
-            sound_speed=1500.0,
+            ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver(self):
@@ -109,11 +104,11 @@ class TestKrakenFieldBroadband:
         )
 
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert len(modes.metadata['k']) > 0
+        assert modes.k is not None
+        assert len(modes.k) > 0
 
         # Complex modes should have complex wavenumbers
-        k = modes.metadata['k']
+        k = modes.k
         assert np.any(np.imag(k) != 0), "Should have complex wavenumbers for elastic bottom"
 
 
@@ -135,7 +130,7 @@ class TestKrakenAttenuationUnit:
     def test_attenuation_unit_reaches_env_writer(self, tmp_path):
         from uacpy.core.constants import AttenuationUnits
         kraken = Kraken(attenuation_unit='M')
-        env = Environment(name='kr', bathymetry=100.0, sound_speed=1500.0)
+        env = Environment(name='kr', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[25.0, 50.0, 75.0], ranges=[1000.0])
         env_file = tmp_path / 'kraken.env'
@@ -177,7 +172,7 @@ class TestKrakenModePointsPerMeter:
 
         monkeypatch.setattr(Kraken, 'run', spy_run)
 
-        env = Environment(name='kr_modes', bathymetry=200.0, sound_speed=1500.0)
+        env = Environment(name='kr_modes', bathymetry=200.0, ssp=1500.0)
         source = Source(depths=100.0, frequencies=50.0)
         kraken = Kraken(mode_points_per_meter=5.0)
         with pytest.raises(RuntimeError, match='stop'):

@@ -48,31 +48,31 @@ import os
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pathlib import Path
+from pathlib import Path  # noqa: E402
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import uacpy
-from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField
-from uacpy.models.base import RunMode
+import uacpy  # noqa: E402
+from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField  # noqa: E402
+from uacpy.models.base import RunMode  # noqa: E402
 
 
 def main():
     # =========================================================================
     # 1. ENVIRONMENT SETUP
     # =========================================================================
-    print("=" * 70)
-    print("Example 19: Broadband Model Comparison")
-    print("=" * 70)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 19: Broadband Model Comparison")
+    print("═" * 80)
 
     env = uacpy.Environment(
         name='Pekeris Waveguide',
         bathymetry=100,
-        sound_speed=1500
+        ssp=1500
     )
 
     source = uacpy.Source(depths=36, frequencies=100)
@@ -136,11 +136,11 @@ def main():
     )
     env_mp = uacpy.Environment(
         name='Pekeris-fluid-flat', bathymetry=env.depth,
-        sound_speed=1500.0, bottom=fluid_bottom,
+        ssp=1500.0, bottom=fluid_bottom,
     )
     env_rs = uacpy.Environment(
         name='Pekeris-fluid-altimetry', bathymetry=env.depth,
-        sound_speed=1500.0, bottom=fluid_bottom,
+        ssp=1500.0, bottom=fluid_bottom,
         altimetry=[(0.0, 0.0), (8000.0, 0.0)],
     )
     elastic_tiny_shear = LayeredBottom(
@@ -156,7 +156,7 @@ def main():
     )
     env_ra = uacpy.Environment(
         name='Pekeris-elastic-tiny-shear', bathymetry=env.depth,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=elastic_tiny_shear,
     )
 
@@ -226,8 +226,7 @@ def main():
     # =========================================================================
     print("\n--- SPARC Time-Domain ---")
     try:
-        sparc = SPARC(verbose=False)
-        # SPARC needs a horizontal array (single depth, multiple ranges)
+        sparc = SPARC(verbose=False, n_t_out=1001, t_max=4.0)
         receiver_sparc = uacpy.Receiver(
             depths=np.array([50.0]),
             ranges=np.linspace(500, 5000, 5)
@@ -235,12 +234,10 @@ def main():
         result_sparc = sparc.run(
             env, source, receiver_sparc, run_mode=RunMode.TIME_SERIES,
             f_min=50.0, f_max=200.0,
-            n_t_out=1001,
-            t_max=4.0,
         )
         print(f"  Output shape: {result_sparc.data.shape} (n_depths x nr x nt)")
-        print(f"  Time step: {result_sparc.metadata['dt']*1000:.3f} ms")
-        print(f"  Duration: {result_sparc.metadata['time'][-1]*1000:.1f} ms")
+        print(f"  Time step: {result_sparc.dt*1000:.3f} ms")
+        print(f"  Duration: {result_sparc.time[-1]*1000:.1f} ms")
         results['SPARC'] = result_sparc
     except Exception as e:
         print(f"  SKIPPED: {e}")
@@ -270,12 +267,12 @@ def main():
             source_waveform=chirp,
             sample_rate=fs,
             depth=target_depth,
-            range_m=target_range,
+            range=target_range,
         )
         print(f"  Output type: {result_das.field_type}")
         print(f"  Shape: {result_das.data.shape}")
-        print(f"  Time: {result_das.metadata['time'][0]*1000:.1f} - "
-              f"{result_das.metadata['time'][-1]*1000:.1f} ms")
+        print(f"  Time: {result_das.time[0]*1000:.1f} - "
+              f"{result_das.time[-1]*1000:.1f} ms")
         print(f"  Max amplitude: {np.max(np.abs(result_das.data)):.6f}")
         results['Bellhop (chirp)'] = result_das
     except Exception as e:
@@ -294,26 +291,23 @@ def main():
     if tf_models:
         from uacpy.visualization.plots import plot_transfer_function
         depth_idx = receiver.depths.shape[0] // 2
-        depth_m = receiver.depths[depth_idx]
+        depth = receiver.depths[depth_idx]
         fig, _ = plot_transfer_function(
             tf_models, depth_idx=depth_idx, range_idx=0,
             show_phase=True, unwrap_phase=False,
-            title=f'Transfer functions — depth={depth_m:.0f} m, '
-                  f'range={target_range/1000:.0f} km',
+            title=f'Transfer functions — depth={depth:.0f} m, '
+            f'range={target_range/1000:.0f} km',
         )
         fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"\nSaved: {OUTPUT_DIR / 'example_19_transfer_functions.png'}")
+        print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_19_transfer_functions.png'}")
 
     # --- Plot B: TL vs depth comparison at center frequency ---
     fig, ax = plt.subplots(figsize=(8, 6))
 
     for name, result in tf_models.items():
-        freqs = result.frequencies
-        center_idx = np.argmin(np.abs(freqs - source.frequencies[0]))
-        # New shape (n_d, n_r, n_f) → pick first range, freq slice on axis 2.
-        tl_at_fc = -20 * np.log10(np.abs(result.data[:, 0, center_idx]) + 1e-30)
+        tl_at_fc = result.at(frequency=source.frequencies[0]).to_tl().tl
         ax.plot(tl_at_fc, result.depths, label=name, linewidth=1.5)
 
     ax.set_xlabel('Transmission Loss (dB)')
@@ -327,7 +321,7 @@ def main():
     fig.savefig(OUTPUT_DIR / 'example_19_tl_depth_comparison.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'example_19_tl_depth_comparison.png'}")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_tl_depth_comparison.png'}")
 
     # --- Plot C: TIME-SERIES COMPARISON (all models at same receiver) ---
     # Convert all transfer functions to time domain at the target point
@@ -346,7 +340,7 @@ def main():
     for name, result in tf_models.items():
         try:
             ts = result.to_time_trace(
-                depth=target_depth, range_m=target_range,
+                depth=target_depth, range=target_range,
                 t_start=t_start_common,
             )
             ts_results[name] = (ts.time * 1000, ts.data)
@@ -357,25 +351,24 @@ def main():
             print(f"  {name}: FAILED ({e})")
 
     # Add Bellhop delay-and-sum result. Bellhop TIME_SERIES returns a
-    # TimeSeriesField over a 1×1 grid → data shape (1, 1, n_t); pick the
-    # single trace.
+    # TimeSeriesField over a 1×1 grid; extract the single trace.
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        trace = r.data[0, 0, :] if r.data.ndim == 3 else r.data
-        ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, trace)
+        trace = r.at(depth=target_depth, range=target_range).data
+        ts_results['Bellhop (chirp)'] = (r.time * 1000, trace)
 
-    # Add SPARC (depth 0, last range). New shape: (n_d, n_r, n_t) — pick
-    # depth 0, last range, all time samples.
+    # Add SPARC at the first depth and last range.
     if 'SPARC' in results:
         r = results['SPARC']
-        ts_results['SPARC'] = (r.metadata['time'] * 1000, r.data[0, -1, :])
+        trace = r.at(depth=float(r.depths[0]), range=float(r.ranges[-1])).data
+        ts_results['SPARC'] = (r.time * 1000, trace)
 
     if ts_results:
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
         ir_results = {k: v for k, v in ts_results.items()
                       if k not in ('Bellhop (chirp)', 'SPARC')}
-        other_results = {k: v for k, v in ts_results.items()
-                         if k in ('Bellhop (chirp)', 'SPARC')}
+        {k: v for k, v in ts_results.items()
+         if k in ('Bellhop (chirp)', 'SPARC')}
 
         n_ts = len(ts_results)
         fig, axes = plt.subplots(n_ts, 1, figsize=(14, 2.5 * n_ts), squeeze=False)
@@ -418,14 +411,13 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_time_series_comparison.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_time_series_comparison.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_time_series_comparison.png'}")
 
     # --- Plot D: Bellhop delay-and-sum detail ---
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        t_ms = r.metadata['time'] * 1000
-        # Bellhop TIME_SERIES is a TimeSeriesField over a 1×1 grid → (1, 1, n_t).
-        data = r.data[0, 0, :] if r.data.ndim == 3 else r.data
+        t_ms = r.time * 1000
+        data = r.at(depth=target_depth, range=target_range).data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
 
@@ -451,12 +443,12 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_bellhop_chirp.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_bellhop_chirp.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_bellhop_chirp.png'}")
 
     # --- Plot E: SPARC waterfall (if available) ---
     if 'SPARC' in results:
         result_sparc = results['SPARC']
-        time_ms = result_sparc.metadata['time'] * 1000
+        time_ms = result_sparc.time * 1000
         # New shape (n_d, n_r, n_t) — depth 0 → (n_r, n_t).
         pressure = result_sparc.data[0]
 
@@ -480,7 +472,7 @@ def main():
         fig.savefig(OUTPUT_DIR / 'example_19_sparc_time_series.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved: {OUTPUT_DIR / 'example_19_sparc_time_series.png'}")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_sparc_time_series.png'}")
 
     # =========================================================================
     # 9. SUMMARY
@@ -495,16 +487,18 @@ def main():
         if result.field_type == 'transfer_function':
             notes = f'{len(result.frequencies)} freqs'
         elif result.field_type == 'time_series':
-            notes = f"dt={result.metadata['dt']*1000:.2f} ms"
+            notes = f"dt={result.dt*1000:.2f} ms"
         print(f"{name:<20} {result.field_type:<20} {str(result.data.shape):<25} {notes}")
 
-    print(f"\nModels with TIME_SERIES support:")
-    print(f"  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
-    print(f"  RAM         - native broadband PE (mpiramS), returns transfer_function")
-    print(f"  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
-    print(f"  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
-    print(f"  SPARC       - time-marched FFP (native time domain), returns time_series")
-    print(f"  OASP        - OASES PE broadband, returns transfer_function")
+    print("\nModels with TIME_SERIES support:")
+    print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
+    print("  RAM         - native broadband PE (mpiramS), returns transfer_function")
+    print("  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
+    print("  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
+    print("  SPARC       - time-marched FFP (native time domain), returns time_series")
+    print("  OASP        - OASES PE broadband, returns transfer_function")
+
+    print("\n✓ Example 19 complete\n")
 
 
 if __name__ == '__main__':

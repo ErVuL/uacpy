@@ -2,7 +2,6 @@
 Tests for I/O functions
 """
 
-import pytest
 import numpy as np
 from pathlib import Path
 import tempfile
@@ -84,7 +83,7 @@ class TestEnvironmentIO:
 
             env = uacpy.Environment(
                 name="Test",
-                sound_speed=1500.0,
+                ssp=1500.0,
                 bathymetry=bathymetry
             )
 
@@ -118,35 +117,35 @@ class TestFieldIO:
 
     def test_field_metadata_preservation(self):
         """Result subclasses preserve metadata + identification kwargs."""
-        from uacpy.core.results import TLField
-        field = TLField(
-            data=np.random.rand(10, 20),
-            ranges=np.linspace(100, 5000, 20),
-            depths=np.linspace(10, 90, 10),
-            model='Bellhop',
-            frequencies=100.0,
-            metadata={'source_depth': 50.0, 'custom_param': 'test_value'},
-        )
-        # ``model`` and ``frequencies`` are typed attributes; everything else
-        # lives in metadata. Both are also mirrored into metadata.
+        from uacpy.core.results import PressureField
+        field = PressureField(units="dB",
+                              data=np.random.rand(10, 20),
+                              ranges=np.linspace(100, 5000, 20),
+                              depths=np.linspace(10, 90, 10),
+                              model='Bellhop',
+                              frequencies=100.0,
+                              metadata={'source_depth': 50.0, 'custom_param': 'test_value'},
+                              )
+        # ``model``, ``frequencies``, ``source_depths`` are typed attributes;
+        # ad-hoc keys live in ``metadata``.
         assert field.model == 'Bellhop'
         assert field.f0 == 100.0
         assert list(field.frequencies) == [100.0]
-        assert field.metadata['model'] == 'Bellhop'
-        assert list(field.metadata['frequencies']) == [100.0]
+        assert field.metadata['source_depth'] == 50.0
         assert field.metadata['custom_param'] == 'test_value'
 
-    def test_field_copy_preserves_metadata(self):
-        """Result.copy() returns a deep copy with metadata preserved."""
-        from uacpy.core.results import TLField
-        field = TLField(
-            data=np.random.rand(10, 20),
-            ranges=np.linspace(100, 5000, 20),
-            depths=np.linspace(10, 90, 10),
-            model='Bellhop',
-            frequencies=100.0,
-            metadata={'test_key': 'test_value'},
-        )
-        field_copy = field.copy()
+    def test_field_deepcopy_preserves_metadata(self):
+        """copy.deepcopy(field) returns a deep copy with metadata preserved."""
+        import copy as _copy
+        from uacpy.core.results import PressureField
+        field = PressureField(units="dB",
+                              data=np.random.rand(10, 20),
+                              ranges=np.linspace(100, 5000, 20),
+                              depths=np.linspace(10, 90, 10),
+                              model='Bellhop',
+                              frequencies=100.0,
+                              metadata={'test_key': 'test_value'},
+                              )
+        field_copy = _copy.deepcopy(field)
         assert field_copy.metadata['test_key'] == 'test_value'
         assert field_copy.metadata is not field.metadata

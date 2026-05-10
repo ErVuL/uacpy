@@ -56,13 +56,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
-from example_helpers import create_example_report
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
+from example_helpers import create_example_report  # noqa: E402
+
 
 def main():
+    print("\n" + "═" * 80)
+    print("EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation")
+    print("═" * 80)
+
     # ═══════════════════════════════════════════════════════════════════════
     # ENVIRONMENT SETUP - Summer thermocline
     # ═══════════════════════════════════════════════════════════════════════
@@ -130,15 +135,15 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
     if any(r is not None for r in results.values()):
         create_example_report(
-            example_num=6,
+            example_num=3,
             title="Multi-Frequency Analysis - Broadband Propagation",
             description="Thermocline environment demonstrating frequency-dependent propagation, "
-                       "surface duct trapping, and modal characteristics across frequencies.",
+            "surface duct trapping, and modal characteristics across frequencies.",
             env=env,
             source=source,
             receiver=receiver,
             results=results,
-            output_prefix="example_06"
+            output_prefix="example_03"
         )
 
         print("\n" + "="*80)
@@ -154,7 +159,10 @@ def main():
         print("\n⚠ No models ran successfully!")
         return 1
 
+    print("\n✓ Example 03 complete\n")
+
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

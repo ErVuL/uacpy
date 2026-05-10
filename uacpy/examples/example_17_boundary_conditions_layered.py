@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import (
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import (  # noqa: E402
     BoundaryProperties, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, SoundSpeedProfile, generate_sea_surface,
 )
@@ -54,7 +54,7 @@ def example_rough_surface():
     """Rough sea surface from Pierson-Moskowitz spectrum (15 m/s wind)."""
     source, receiver = make_source_receiver()
     surface = generate_sea_surface(
-        max_range_m=10000, wind_speed_ms=15, n_points=300, seed=42,
+        max_range=10000, wind_speed_ms=15, n_points=300, seed=42,
     )
     env = uacpy.Environment(
         name='rough_surface',
@@ -147,6 +147,34 @@ def example_multi_layer_bottom():
     return env, source, receiver
 
 
+def example_preset_layered_bottom():
+    """Same shape as ``example_multi_layer_bottom`` but built from
+    :mod:`uacpy.materials` presets — class-typical clay/silt/sand
+    over a limestone halfspace, with no hand-typed property numbers.
+
+    Shears are zeroed via ``overrides`` so RAM dispatches to the fluid
+    mpiramS backend; the rams0.5 elastic PE backend is conservative on
+    its dz cap and would degrade accuracy at 200 Hz / 100 m water.
+    """
+    source, receiver = make_source_receiver()
+    fluid = {'shear_speed': 0.0, 'shear_attenuation': 0.0}
+    lb = LayeredBottom.from_presets(
+        layers=[
+            ('clay', 5.0, fluid),
+            ('silt', 15.0, fluid),
+            ('sand', 30.0, fluid),
+        ],
+        halfspace='limestone',
+        halfspace_overrides=fluid,
+    )
+    env = uacpy.Environment(
+        name='preset_layered_bottom', bathymetry=100,
+        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
+        bottom=lb,
+    )
+    return env, source, receiver
+
+
 # ── 3. Range-Dependent Layered Bottoms ───────────────────────────────────────
 
 def example_range_dependent_layered():
@@ -207,11 +235,13 @@ def main():
         ('Ice surface (Bellhop)',          example_ice_surface,             Bellhop),
         ('Single-layer bottom (RAM)',      example_single_layer_bottom,     RAM),
         ('Multi-layer bottom (RAM)',       example_multi_layer_bottom,      RAM),
+        ('Preset layered bottom (RAM)',    example_preset_layered_bottom,   RAM),
         ('Range-dep layered (RAM)',        example_range_dependent_layered, RAM),
     ]
 
-    print("Example 17: Boundary Conditions - Top BC and Layered Bottoms")
-    print("=" * 65)
+    print("\n" + "═" * 80)
+    print("EXAMPLE 17: Boundary Conditions - Top BC and Layered Bottoms")
+    print("═" * 80)
 
     fields = []
     envs_out = []
@@ -221,7 +251,7 @@ def main():
         model = model_cls(verbose=False, **kwargs)
         try:
             field = model.run(env, source, receiver)
-            tl = field.data
+            tl = field.tl
             print(f"  {label:40s}  TL: [{np.nanmin(tl):5.1f}, {np.nanmax(tl):5.1f}] dB")
             fields.append(field)
             envs_out.append(env)
@@ -230,7 +260,7 @@ def main():
             fields.append(None)
             envs_out.append(env)
 
-    all_tl = [f.data for f in fields if f is not None]
+    all_tl = [f.tl for f in fields if f is not None]
     if all_tl:
         vmin = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -239,7 +269,7 @@ def main():
     else:
         vmin, vmax = 40, 100
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 11))
     axes_flat = axes.flatten()
     tl_im = None
     for idx, (label, _, _) in enumerate(scenarios):
@@ -270,7 +300,7 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / 'example_17_boundary_conditions.png'
     fig.savefig(out_path, dpi=150)
-    print(f"\n  Figure saved to {out_path}")
+    print(f"\n  ✓ Saved: {out_path}")
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
         if env.has_range_dependent_layered_bottom():
@@ -278,10 +308,10 @@ def main():
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')
             plt.close(fig_b)
-            print(f"  Figure saved to {path}")
+            print(f"  ✓ Saved: {path}")
             break
 
-    print("Done.")
+    print("\n✓ Example 17 complete\n")
 
 
 if __name__ == '__main__':

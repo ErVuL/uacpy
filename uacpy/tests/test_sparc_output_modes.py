@@ -25,7 +25,7 @@ def sparc_simple_env():
     env = Environment(
         name="Test Environment",
         bathymetry=100.0,
-        sound_speed=1500.0
+        ssp=1500.0
     )
     # SPARC requires vacuum or rigid bottom
     env.bottom.acoustic_type = 'vacuum'
@@ -71,7 +71,7 @@ class TestSPARCOutputModes:
         assert result.data is not None
         assert result.data.shape == (len(receiver_grid.depths), len(receiver_grid.ranges))
         assert result.metadata.get('output_mode') == 'R'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -100,7 +100,7 @@ class TestSPARCOutputModes:
         assert result.data is not None
         assert result.data.shape == (len(depths), len(ranges))
         assert result.metadata.get('output_mode') == 'D'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
         assert result.metadata.get('n_range_runs') == len(ranges)
 
     @pytest.mark.requires_binary
@@ -126,7 +126,7 @@ class TestSPARCOutputModes:
         # Snapshot mode provides full 2D field
         assert result.data.ndim == 2
         assert result.metadata.get('output_mode') == 'S'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
         assert 'Hankel transform' in result.metadata.get('note', '')
 
 
@@ -142,7 +142,7 @@ class TestSPARCModeComparison:
         When computing a 2D field, both modes should produce similar TL values
         at the same (depth, range) points.
         """
-        sparc = SPARC()
+        SPARC()
 
         # Simple grid for comparison
         depths = np.array([30.0, 50.0, 70.0])
@@ -168,9 +168,8 @@ class TestSPARCModeComparison:
         # belongs in a dedicated benchmark with stored reference data.
         for r in (result_h, result_v):
             assert np.all(np.isfinite(r.data)), "non-finite TL"
-            assert np.all(r.data > 0), "non-positive TL"
-            assert np.all(r.data < 200), "TL exceeds 200 dB"
-
+            assert np.all(r.tl > 0), "non-positive TL"
+            assert np.all(r.tl < 200), "TL exceeds 200 dB"
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -198,8 +197,8 @@ class TestSPARCModeComparison:
         sparc_R = SPARC(verbose=False, output_mode='R')
         result_R = sparc_R.run(sparc_simple_env, source_50hz, receiver_R)
 
-        tl_S = np.asarray(result_S.data).reshape(-1)[:len(ranges)]
-        tl_R = np.asarray(result_R.data).reshape(-1)[:len(ranges)]
+        tl_S = np.asarray(result_S.tl).reshape(-1)[:len(ranges)]
+        tl_R = np.asarray(result_R.tl).reshape(-1)[:len(ranges)]
 
         # Both must be finite and physical.
         assert np.all(np.isfinite(tl_S)), "snapshot TL contains non-finite values"
@@ -232,17 +231,24 @@ class TestSPARCErrorHandling:
             SPARC(output_mode='X')  # Invalid mode
 
     @pytest.mark.requires_binary
+    @pytest.mark.filterwarnings(
+        "ignore:SPARC supports only.*bottom boundaries:UserWarning"
+    )
     def test_sparc_halfspace_warning(self, source_50hz, receiver_grid):
-        """Test that halfspace bottom generates warning."""
-        env = Environment(name="Test", bathymetry=100, sound_speed=1500)
+        """Halfspace bottom triggers SPARC's auto-conversion to rigid.
+
+        ``filterwarnings`` silences the per-depth-loop repetition from
+        the pytest warnings summary; ``pytest.warns`` inside the test
+        body still asserts the warning fires (``catch_warnings`` scope
+        overrides the filter for assertion purposes)."""
+        env = Environment(name="Test", bathymetry=100, ssp=1500)
         env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
 
         sparc = SPARC(verbose=False)
 
-        # SPARC converts halfspace to rigid and logs a warning
-        result = sparc.run(env, source_50hz, receiver_grid)
+        with pytest.warns(UserWarning, match="auto-converting the env's halfspace"):
+            result = sparc.run(env, source_50hz, receiver_grid)
 
-        # Should complete successfully with auto-conversion
         assert result is not None
 
 

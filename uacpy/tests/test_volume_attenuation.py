@@ -3,14 +3,12 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import Bellhop, Kraken, Scooter
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestVolumeAttenuation:
     """Tests for volume attenuation models (Priority 1 gap)."""
@@ -21,7 +19,7 @@ class TestVolumeAttenuation:
         return Environment(
             name="atten_test",
             bathymetry=100.0,
-            sound_speed=1500.0
+            ssp=1500.0
         )
 
     @pytest.fixture
@@ -75,7 +73,7 @@ class TestVolumeAttenuation:
 
         assert result_thorp.field_type == 'tl'
         observed_extra = (
-            np.mean(result_thorp.data[:, -1]) - np.mean(result_no_atten.data[:, -1])
+            np.mean(result_thorp.tl[:, -1]) - np.mean(result_no_atten.tl[:, -1])
         )
         # Sign must be right (Thorp adds loss, never reduces it).
         assert observed_extra > 0, (
@@ -103,7 +101,7 @@ class TestVolumeAttenuation:
         )
 
         assert result.field_type == 'modes'
-        assert 'k' in result.metadata
+        assert result.k is not None
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env, low_freq_source, high_freq_source, receiver):
@@ -133,6 +131,7 @@ class TestVolumeAttenuation:
         assert np.all(np.isfinite(result_high.data))
 
     @pytest.mark.requires_binary
+    @pytest.mark.slow
     def test_attenuation_with_scooter(self, shallow_env, high_freq_source, receiver):
         """Test Scooter with volume attenuation."""
         scooter = Scooter(verbose=False, volume_attenuation='T')

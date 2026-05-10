@@ -24,13 +24,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 
-import uacpy
-from uacpy.models import Bellhop, Kraken
-from uacpy.models.base import RunMode
-from uacpy.visualization import plot_time_series, plot_modes_heatmap
+import uacpy  # noqa: E402
+from uacpy.models import Bellhop, Kraken  # noqa: E402
+from uacpy.models.base import RunMode  # noqa: E402
+from uacpy.visualization import plot_time_series, plot_modes_heatmap  # noqa: E402
 
 
 def _ricker(fc: float, fs: float, duration: float = 0.04) -> np.ndarray:
@@ -50,7 +50,7 @@ def demo_stacked_time_series():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         bathymetry=100,
-        sound_speed=1500,
+        ssp=1500,
         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'),
     )
     source = uacpy.Source(depths=50, frequencies=100)
@@ -65,7 +65,7 @@ def demo_stacked_time_series():
     print("  Running Bellhop BROADBAND...", end=" ", flush=True)
     bellhop = Bellhop(verbose=False)
     tf = bellhop.run(env, source, receiver,
-                    run_mode=RunMode.BROADBAND, frequencies=frequencies)
+                     run_mode=RunMode.BROADBAND, frequencies=frequencies)
     print(f"✓  ({tf.data.shape[-1]} frequencies, "
           f"df={frequencies[1]-frequencies[0]:.3f} Hz)")
 
@@ -75,19 +75,19 @@ def demo_stacked_time_series():
     print("  Synthesising time series...", end=" ", flush=True)
     ts = tf.synthesize_time_series(source_waveform=waveform, sample_rate=fs)
     print(f"✓  shape={ts.data.shape}, "
-          f"duration={ts.metadata['time'][-1]:.3f} s")
+          f"duration={ts.time[-1]:.3f} s")
 
     fig, _ = plot_time_series(ts, stacked=True)
     out = OUTPUT_DIR / 'example_14_time_series_stacked.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
     fig, _ = plot_time_series(ts, stacked=False)
     out = OUTPUT_DIR / 'example_14_time_series_overlaid.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
 
 def demo_modes_heatmap():
@@ -99,7 +99,7 @@ def demo_modes_heatmap():
     env = uacpy.Environment(
         name='Pekeris waveguide',
         bathymetry=100,
-        sound_speed=1500,
+        ssp=1500,
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700,
@@ -118,35 +118,33 @@ def demo_modes_heatmap():
     kraken = Kraken(verbose=False)
     modes = kraken.run(env, source, receiver,
                        run_mode=RunMode.MODES, n_modes=50)
-    n_modes = len(modes.metadata.get('k', []))
+    n_modes = len(modes.k)
     print(f"✓  ({n_modes} modes)")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=None,
-                                   normalize=True, figsize=(14, 8))
+                                normalize=True, figsize=(14, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_all.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
-                                   normalize=True, figsize=(12, 8))
+                                normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ saved {out.name}")
+    print(f"  ✓ Saved: output/{out.name}")
 
 
 def main():
-    print("\n" + "═" * 70)
+    print("\n" + "═" * 80)
     print("EXAMPLE 14: plot_time_series & plot_modes_heatmap")
-    print("═" * 70)
+    print("═" * 80)
 
     demo_stacked_time_series()
     demo_modes_heatmap()
 
-    print("\n" + "═" * 70)
-    print("EXAMPLE 14 COMPLETE")
-    print("═" * 70)
+    print("\n✓ Example 14 complete\n")
     return 0
 
 

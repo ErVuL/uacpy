@@ -4,13 +4,16 @@ EXAMPLE 16: Bellhop + BOUNCE Integration, Layered Bottom, Range-Dependent Bottom
 ===============================================================================
 
 OBJECTIVE:
-    Demonstrate three key features added for range/depth-dependent modeling:
-    1. Bellhop.run_with_bounce() — one-call elastic bottom workflow
+    Demonstrate three key features for range/depth-dependent modeling:
+    1. Bellhop.run_with_bounce() — explicit BOUNCE control for elastic
+       bottoms. (Bellhop.run() already auto-routes through BOUNCE for
+       elastic / layered bottoms with a UserWarning; use
+       run_with_bounce when you need to pin c_low / c_high / rmax.)
     2. LayeredBottom — multi-layer sediment with Kraken
     3. Range-dependent bottom properties — with RAM and visualization
 
 FEATURES DEMONSTRATED:
-    - Bellhop.run_with_bounce() convenience method
+    - Bellhop.run_with_bounce() for explicit BOUNCE parameters
     - LayeredBottom + SedimentLayer for depth-dependent sediment
     - RangeDependentBottom with RAM (true Fortran RD support)
     - plot_transmission_loss(), plot_layered_bottom(), plot_rd_bottom()
@@ -23,19 +26,19 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import (
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import (  # noqa: E402
     RangeDependentBottom, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, BoundaryProperties,
 )
-from uacpy.models import Bellhop, RAM, RunMode
-from uacpy.visualization.plots import (
+from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_transmission_loss,
     plot_layered_bottom,
     plot_rd_layered_bottom,
@@ -67,7 +70,7 @@ def demo_bellhop_bounce():
     env = uacpy.Environment(
         name='Elastic Sandy Bottom',
         bathymetry=100,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=bottom,
     )
 
@@ -88,18 +91,18 @@ def demo_bellhop_bounce():
     result_bounce = bellhop.run_with_bounce(
         env, source, receiver,
         run_mode=RunMode.COHERENT_TL,
-        cmin=1400.0, cmax=10000.0, rmax_m=10000.0,
+        cmin=1400.0, cmax=10000.0, rmax=10000.0,
     )
 
     # Compare
-    tl_hs = result_hs.data
-    tl_bn = result_bounce.data
+    tl_hs = result_hs.tl
+    tl_bn = result_bounce.tl
     diff = tl_bn - tl_hs
     print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
     print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
     print(f"Max |diff|:    {np.nanmax(np.abs(diff)):.1f} dB")
 
-    from uacpy.visualization.plots import plot_tl_difference, compare_models
+    from uacpy.visualization.plots import plot_tl_difference
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     vmin, vmax = 40, 90
     plot_transmission_loss(result_hs, env, ax=axes[0],
@@ -130,13 +133,13 @@ def demo_bellhop_bounce():
         cax_dif = fig.add_axes([0.918, 0.51, 0.010, 0.35])
         fig.colorbar(diff_im, cax=cax_dif, label='Δ TL (dB)')
     fig.savefig(OUTPUT_DIR / 'example_16_bounce_comparison.png', dpi=150)
-    print(f"  Saved: example_16_bounce_comparison.png")
+    print("  ✓ Saved: output/example_16_bounce_comparison.png")
 
     # Also plot TL with contours using the plot function
     fig2, ax2 = plot_transmission_loss(result_bounce, env, contours=[60, 70, 80])
     ax2.set_title('Bellhop + BOUNCE TL with Contours')
     plt.savefig(OUTPUT_DIR / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_bounce_tl.png")
+    print("  ✓ Saved: output/example_16_bounce_tl.png")
 
     plt.close('all')
 
@@ -168,7 +171,7 @@ def demo_layered_bottom():
     env = uacpy.Environment(
         name='Continental Shelf - Layered Sediment',
         bathymetry=200.0,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=layered,
     )
     print(f"has_layered_bottom: {env.has_layered_bottom()}")
@@ -185,13 +188,13 @@ def demo_layered_bottom():
         from uacpy.models import Scooter
         scooter = Scooter(verbose=True)
         result = scooter.compute_tl(env, source, receiver)
-        print(f"Scooter TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"Scooter TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
         # Plot TL
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 80, 90])
         ax1.set_title('Scooter TL — Layered Sediment (3 layers + halfspace)')
         plt.savefig(OUTPUT_DIR / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
-        print(f"  Saved: example_16_layered_tl.png")
+        print("  ✓ Saved: output/example_16_layered_tl.png")
     except Exception as e:
         print(f"  Scooter error: {e}")
         import traceback
@@ -200,12 +203,12 @@ def demo_layered_bottom():
     # Plot layered bottom structure
     fig2, ax2 = plot_layered_bottom(env)
     plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_layered_structure.png")
+    print("  ✓ Saved: output/example_16_layered_structure.png")
 
     # Plot environment overview
     fig3, axes3 = plot_environment_advanced(env, source, receiver)
     plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_layered_env.png")
+    print("  ✓ Saved: output/example_16_layered_env.png")
 
     plt.close('all')
 
@@ -246,8 +249,8 @@ def demo_range_dependent_bottom():
     env = uacpy.Environment(
         name='Shelf Break: Mud to Sand',
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
-            interp='pchip',
-        ),
+                                      interp='pchip',
+                                      ),
         bathymetry=bathymetry_rd,
         bottom=bottom_rd,
     )
@@ -263,12 +266,12 @@ def demo_range_dependent_bottom():
     try:
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.data):.1f} to {np.nanmax(result.data):.1f} dB")
+        print(f"RAM TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
         plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
-        print(f"  Saved: example_16_rd_bottom_tl.png")
+        print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
     except Exception as e:
         print(f"  RAM error: {e}")
         import traceback
@@ -277,17 +280,17 @@ def demo_range_dependent_bottom():
     # Plot RD bottom properties
     fig2, _ = plot_rd_bottom(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_rd_bottom_props.png")
+    print("  ✓ Saved: output/example_16_rd_bottom_props.png")
 
     # Plot 2D SSP
     fig3, ax3 = plot_ssp_2d(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_rd_ssp.png")
+    print("  ✓ Saved: output/example_16_rd_ssp.png")
 
     # Plot full environment
     fig4, axes4 = plot_environment_advanced(env, source, receiver)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_16_rd_env.png")
+    print("  ✓ Saved: output/example_16_rd_env.png")
 
     plt.close('all')
 
@@ -357,7 +360,7 @@ def demo_rd_layered_bottom():
 
     env = uacpy.Environment(
         name='Shelf: Mud/Clay to Sand/Rock',
-        sound_speed=1500.0,
+        ssp=1500.0,
         bathymetry=rdl_bathymetry,
         bottom=rdl,
     )
@@ -376,14 +379,14 @@ def demo_rd_layered_bottom():
     try:
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.data):.1f} to "
-              f"{np.nanmax(result.data):.1f} dB")
+        print(f"RAM TL: {np.nanmin(result.tl):.1f} to "
+              f"{np.nanmax(result.tl):.1f} dB")
 
         fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
         plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
                     bbox_inches='tight')
-        print(f"  Saved: example_16_rdl_tl.png")
+        print("  ✓ Saved: output/example_16_rdl_tl.png")
     except Exception as e:
         print(f"  RAM error: {e}")
         import traceback
@@ -393,24 +396,21 @@ def demo_rd_layered_bottom():
     fig2, axes2 = plot_rd_layered_bottom(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rdl_structure.png', dpi=150,
                 bbox_inches='tight')
-    print(f"  Saved: example_16_rdl_structure.png")
+    print("  ✓ Saved: output/example_16_rdl_structure.png")
 
     plt.close('all')
 
 
 def main():
-    print("\n" + "=" * 80)
+    print("\n" + "═" * 80)
     print("EXAMPLE 16: Range/Depth-Dependent Features + Bellhop+BOUNCE")
-    print("=" * 80)
+    print("═" * 80)
 
     demo_bellhop_bounce()
     demo_layered_bottom()
     demo_range_dependent_bottom()
     demo_rd_layered_bottom()
 
-    print("\n" + "=" * 80)
-    print("EXAMPLE 16 COMPLETE")
-    print("=" * 80)
     print("\nFeatures demonstrated:")
     print("  - Bellhop.run_with_bounce() for elastic bottom")
     print("  - LayeredBottom with Scooter (NMEDIA > 1)")
@@ -422,6 +422,8 @@ def main():
     print("  - plot_rd_bottom() for RD bottom")
     print("  - plot_ssp_2d() for range-dependent SSP")
     print("  - plot_environment_advanced() for full overview")
+
+    print("\n✓ Example 16 complete\n")
     return 0
 
 

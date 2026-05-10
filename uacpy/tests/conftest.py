@@ -6,12 +6,12 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import tempfile
+import tempfile  # noqa: E402
 
-import numpy as np
-import pytest
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
-import uacpy
+import uacpy  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +42,7 @@ def simple_env():
     return uacpy.Environment(
         name="Test Environment",
         bathymetry=100.0,
-        sound_speed=1500.0,
+        ssp=1500.0,
     )
 
 
@@ -73,7 +73,7 @@ def range_dependent_env():
 
     return uacpy.Environment(
         name="Range Dependent",
-        sound_speed=1500.0,
+        ssp=1500.0,
         bathymetry=bathymetry,
     )
 
@@ -143,7 +143,7 @@ def pekeris_env(halfspace_bottom):
     return uacpy.Environment(
         name="Pekeris (fluid bottom)",
         bathymetry=100.0,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=halfspace_bottom,
     )
 
@@ -154,8 +154,6 @@ def elastic_env(elastic_bottom):
     return uacpy.Environment(
         name="Pekeris (elastic bottom)",
         bathymetry=100.0,
-        sound_speed=1500.0,
+        ssp=1500.0,
         bottom=elastic_bottom,
     )
-
-
