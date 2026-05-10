@@ -27,6 +27,8 @@ from uacpy.core.exceptions import (
 )
 
 from uacpy.core import acoustics
+from uacpy.core import materials
+from uacpy.core.materials import MATERIALS, list_materials, get_material
 
 __all__ = [
     'Source',
@@ -52,4 +54,5 @@ __all__ = [
     'UnsupportedFeatureError',
     'ConfigurationError',
     'acoustics',
+    'materials', 'MATERIALS', 'list_materials', 'get_material',
 ]

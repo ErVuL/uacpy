@@ -142,7 +142,7 @@ class TestSPARCModeComparison:
         When computing a 2D field, both modes should produce similar TL values
         at the same (depth, range) points.
         """
-        sparc = SPARC()
+        SPARC()
 
         # Simple grid for comparison
         depths = np.array([30.0, 50.0, 70.0])
@@ -170,7 +170,6 @@ class TestSPARCModeComparison:
             assert np.all(np.isfinite(r.data)), "non-finite TL"
             assert np.all(r.tl > 0), "non-positive TL"
             assert np.all(r.tl < 200), "TL exceeds 200 dB"
-
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -239,10 +238,9 @@ class TestSPARCErrorHandling:
 
         sparc = SPARC(verbose=False)
 
-        # SPARC converts halfspace to rigid and logs a warning
-        result = sparc.run(env, source_50hz, receiver_grid)
+        with pytest.warns(UserWarning, match="elastic halfspace bottom"):
+            result = sparc.run(env, source_50hz, receiver_grid)
 
-        # Should complete successfully with auto-conversion
         assert result is not None
 
 

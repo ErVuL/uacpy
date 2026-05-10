@@ -21,6 +21,11 @@ import numpy as np
 import struct
 import warnings
 
+from uacpy.io._fortran_helpers import (
+    read_fortran_record_marker as _read_fortran_record_marker,
+    read_fortran_record as _read_fortran_record,
+)
+
 
 def read_oast_tl(
     filepath: Union[str, Path],
@@ -136,7 +141,7 @@ def read_oast_tl(
             UserWarning, stacklevel=2
         )
         tl_values = np.pad(tl_values, (0, expected_total - len(tl_values)),
-                          mode='edge')
+                           mode='edge')
 
     # Take expected amount and reshape
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
@@ -466,12 +471,6 @@ def read_oasn_replicas(
         raise IOError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
-from uacpy.io._fortran_helpers import (
-    read_fortran_record_marker as _read_fortran_record_marker,
-    read_fortran_record as _read_fortran_record,
-)
-
-
 def read_oasp_trf(
     filepath: Union[str, Path]
 ) -> Dict:
@@ -538,8 +537,6 @@ def read_oasp_trf(
     raise IOError(
         f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
     )
-
-
 
 
 def _read_oasp_trf_binary(filepath: Path) -> Dict:

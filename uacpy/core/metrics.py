@@ -12,19 +12,17 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from uacpy.core.constants import PRESSURE_FLOOR
-from uacpy.core.results import PressureField
+from uacpy.core.results import PressureField, _complex_to_db
 
 
 def _to_db(field: PressureField) -> np.ndarray:
     """Return TL in dB at ``field.data.shape`` — does not squeeze, so
     metrics can pair this with the 2-D ``(depth, range)`` window mask
-    even when the field has a singleton axis. Mirrors :attr:`PressureField.tl`
-    for the dB conversion but skips the user-facing auto-squeeze."""
+    even when the field has a singleton axis. Bypasses the
+    :class:`SlicedPressureField` auto-squeeze on ``.tl``."""
     if field.units == 'dB':
         return np.asarray(field.data)
-    p_abs = np.maximum(np.abs(field.data), PRESSURE_FLOOR)
-    return -20.0 * np.log10(p_abs)
+    return _complex_to_db(field.data)
 
 
 def _resolve_window(

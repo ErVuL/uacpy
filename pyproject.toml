@@ -83,16 +83,3 @@ markers = [
     "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
     "integration: end-to-end tests that exercise multiple subsystems",
 ]
-# Silence the model UserWarnings that fire as expected per-test. These
-# document real behaviour to end-users (Lytaev grid clipping, mpiramS
-# range float-edge clamping, ramsurf surface-clamping); tests deliberately
-# exercise scenarios that trigger them. Anything not listed here still
-# surfaces — including new uacpy warnings, dependency deprecations, and
-# everything from third-party libs.
-filterwarnings = [
-    "ignore:RAM.*raised dz from:UserWarning",
-    "ignore:RAM.*Lytaev relaxed:UserWarning",
-    "ignore:Receiver ranges.*exceed PE computed range:UserWarning",
-    "ignore:ramsurf1\\.5 only models pressure-release:UserWarning",
-    "ignore:SPARC.*does not support elastic halfspace bottom:UserWarning",
-]

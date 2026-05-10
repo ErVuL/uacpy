@@ -12,7 +12,7 @@ and reduce code duplication.
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 from uacpy.visualization import (
     plot_transmission_loss,
@@ -76,19 +76,21 @@ def create_example_report(
     print(f"  Depth: {env.depth}m")
     print(f"  SSP type: {env.ssp.interp}")
     if env.is_range_dependent:
-        print(f"  Range-dependent: YES")
+        print("  Range-dependent: YES")
     else:
-        print(f"  Range-dependent: NO")
+        print("  Range-dependent: NO")
 
     # Source info
-    print(f"\nSource:")
+    print("\nSource:")
     print(f"  Depth: {source.depths[0]}m")
     print(f"  Frequency: {source.frequencies[0]}Hz")
 
     # Receiver info
-    print(f"\nReceivers:")
+    print("\nReceivers:")
     print(f"  Depths: {len(receiver.depths)} points ({receiver.depths[0]:.1f}m to {receiver.depths[-1]:.1f}m)")
-    print(f"  Ranges: {len(receiver.ranges)} points ({receiver.ranges[0]/1000:.1f}km to {receiver.ranges[-1]/1000:.1f}km)")
+    r0_km = receiver.ranges[0] / 1000
+    r1_km = receiver.ranges[-1] / 1000
+    print(f"  Ranges: {len(receiver.ranges)} points ({r0_km:.1f}km to {r1_km:.1f}km)")
 
     # Model results
     print(f"\nModels tested: {len(results)}")
@@ -99,7 +101,7 @@ def create_example_report(
             print(f"  {name:15s}: SKIPPED (returned None)")
 
     # Generate plots
-    print(f"\nGenerating plots...")
+    print("\nGenerating plots...")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 

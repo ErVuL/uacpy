@@ -1,14 +1,13 @@
 """Tests for exception handling and public exception types."""
 
 import pytest
-import numpy as np
 
 import uacpy
 from uacpy.core.exceptions import (
-    UACPYError, ExecutableNotFoundError, InvalidDepthError,
-    UnsupportedFeatureError, ConfigurationError, ModelExecutionError,
+    UACPYError, InvalidDepthError,
+    UnsupportedFeatureError,
 )
-from uacpy.models import Bellhop, Kraken
+from uacpy.models import Kraken
 
 
 class TestCustomExceptions:

@@ -3,16 +3,15 @@ Tests for the simplified UACPY API
 """
 
 import pytest
-
-pytestmark = pytest.mark.requires_binary
 import numpy as np
 import matplotlib.pyplot as plt
 
-import uacpy
 from uacpy.models import Bellhop, Kraken, KrakenField
-from uacpy.core.results import Result, PressureField, Modes
+from uacpy.core.results import PressureField, Modes
 from uacpy.visualization import plots
 from uacpy.models import RunMode
+
+pytestmark = pytest.mark.requires_binary
 
 
 class TestComputeAPI:
@@ -156,7 +155,7 @@ class TestRunModeAndComputeTl:
         """compute_tl and run(run_mode=COHERENT_TL) produce the same field."""
         bellhop = Bellhop(verbose=False)
         a = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
-                       run_mode=RunMode.COHERENT_TL)
+                        run_mode=RunMode.COHERENT_TL)
         b = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         # Bellhop has non-deterministic floating-point; compare loosely.
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)

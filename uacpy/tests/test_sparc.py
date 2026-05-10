@@ -3,15 +3,13 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import TimeSeriesField
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import SPARC
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver, BoundaryProperties
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestSPARCBasic:
     """Basic tests for SPARC model (seismo-acoustic PE)."""
@@ -23,7 +21,8 @@ class TestSPARCBasic:
         env = Environment(
             name="sparc_test",
             bathymetry=100.0,
-            ssp=1500.0
+            ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'),
         )
         source = Source(depths=50.0, frequencies=50.0)
         receiver = Receiver(
@@ -49,6 +48,7 @@ class TestSPARCTimeSeries:
             name="sparc_ts",
             bathymetry=100.0,
             ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'),
         )
         source = Source(depths=50.0, frequencies=50.0)
         receiver = Receiver(

@@ -114,7 +114,7 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
 
         assert field.field_type == 'tl'
         assert field.shape == (10, 20)
@@ -128,7 +128,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
         value = float(field.at(range=4500, depth=45).tl)
         assert 44 <= value <= 55
 
@@ -139,7 +139,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
         values = field.at(range=4500).tl
         assert len(values) == 10
         assert 50 <= values[5] <= 59
@@ -151,7 +151,7 @@ class TestField:
         depths = np.linspace(0, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
         values = field.at(depth=45).tl
         assert len(values) == 10
         assert 40 <= values[5] <= 49
@@ -163,7 +163,7 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
         field_copy = field.copy()
 
         assert type(field_copy) is type(field)
@@ -178,7 +178,7 @@ class TestField:
         depths = np.linspace(10, 90, 10)
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
-                        model='Test', frequencies=100.0)
+                              model='Test', frequencies=100.0)
         repr_str = repr(field)
         assert 'PressureField' in repr_str
         assert field.shape == (10, 20)
@@ -328,9 +328,8 @@ class TestArrivalsFilterChain:
 
 
 class TestTimeSeriesFieldChainAccessors:
-    """``TimeSeriesField.at`` / ``at_idx`` / ``max`` — label, integer
-    and global-argmax slicing. Both spatial axes collapsed → degrades
-    to :class:`TimeTrace`."""
+    """``TimeSeriesField.at`` / ``max`` — label and global-argmax slicing.
+    Both spatial axes collapsed → degrades to :class:`TimeTrace`."""
 
     def _ts(self):
         from uacpy.core.results import TimeSeriesField
@@ -360,16 +359,6 @@ class TestTimeSeriesFieldChainAccessors:
         assert trace.depth == ts.depths[1]
         assert trace.range == ts.ranges[1]
 
-    def test_at_idx_negative_wraps(self):
-        from uacpy.core.results import TimeTrace
-        ts = self._ts()
-        trace = ts.at_idx(depth_idx=-1, range_idx=-1, time_idx=-1)
-        assert isinstance(trace, TimeTrace)
-        assert trace.data.shape == (1,)
-        assert trace.depth == ts.depths[-1]
-        assert trace.range == ts.ranges[-1]
-        assert trace.time[0] == ts.time[-1]
-
     def test_max_returns_timetrace_at_loudest_sample(self):
         from uacpy.core.results import TimeSeriesField, TimeTrace
         rng = np.random.default_rng(0)
@@ -393,8 +382,8 @@ class TestTimeSeriesFieldChainAccessors:
 
 
 class TestTimeTraceChainAccessors:
-    """``TimeTrace.at(time=)`` / ``at_idx(time_idx=)`` — slice the time
-    axis, returning a 1-element :class:`TimeTrace`."""
+    """``TimeTrace.at(time=)`` — slice the time axis, returning a
+    1-element :class:`TimeTrace`."""
 
     def _trace(self):
         from uacpy.core.results import TimeTrace
@@ -414,21 +403,14 @@ class TestTimeTraceChainAccessors:
         # linspace(0, 0.49, 50) the step is 0.01; sample 25 = 0.25.
         assert sliced.time[0] == pytest.approx(0.25, abs=1e-6)
 
-    def test_at_idx_negative_wraps(self):
-        sliced = self._trace().at_idx(time_idx=-1)
-        assert sliced.data.shape == (1,)
-        assert sliced.time[0] == pytest.approx(0.49, abs=1e-6)
-
     def test_at_none_returns_self(self):
         tt = self._trace()
-        assert tt.at_idx(time_idx=None) is tt
         assert tt.at(time=None) is tt
 
 
 class TestReflectionCoefficientChainAccessors:
-    """``ReflectionCoefficient.at`` / ``at_idx`` — label and integer
-    slicing of the angle and frequency axes; broadband-only kwargs
-    raise on narrowband instances."""
+    """``ReflectionCoefficient.at`` — label slicing of the angle and
+    frequency axes; broadband-only kwargs raise on narrowband instances."""
 
     def _broadband_rc(self):
         from uacpy.core.results import ReflectionCoefficient
@@ -462,12 +444,6 @@ class TestReflectionCoefficientChainAccessors:
         sliced = rc.at(angle=45.0, frequency=100.0)
         assert sliced.theta.shape == (1,)
         assert sliced.R.shape == (1,)
-
-    def test_at_idx_negative_wraps(self):
-        rc = self._broadband_rc()
-        sliced = rc.at_idx(angle_idx=-1, frequency_idx=-1)
-        assert sliced.theta[0] == 90.0
-        assert float(sliced.frequencies[0]) == 200.0
 
     def test_at_frequency_on_narrowband_raises(self):
         from uacpy.core.results import ReflectionCoefficient

@@ -3,18 +3,15 @@
 import pytest
 import numpy as np
 
-import uacpy
 from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
-from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.models import Bellhop
+from uacpy.core import Environment, Receiver
 
 pytestmark = pytest.mark.requires_binary
 
+
 class TestSSPInterpolationMethods:
     """Test different SSP interpolation types."""
-
 
     @pytest.fixture
     def receiver(self):

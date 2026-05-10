@@ -3,14 +3,12 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import Bellhop, Kraken, Scooter
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestVolumeAttenuation:
     """Tests for volume attenuation models (Priority 1 gap)."""

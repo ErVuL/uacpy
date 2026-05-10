@@ -67,6 +67,29 @@ class SedimentLayer:
         if self.density <= 0:
             raise ValueError(f"SedimentLayer: density must be positive (g/cm^3); got {self.density}")
 
+    @classmethod
+    def from_preset(cls, name: str, *, thickness: float, **overrides) -> "SedimentLayer":
+        """Build a :class:`SedimentLayer` from a :mod:`uacpy.core.materials`
+        preset (``'sand'``, ``'silt'``, ``'clay'``, …).
+
+        ``thickness`` is required (presets only encode acoustic
+        properties, not layer geometry). Any additional kwargs override
+        the preset's ``sound_speed`` / ``density`` / ``attenuation`` /
+        ``shear_speed`` / ``shear_attenuation`` for site-specific tuning.
+        """
+        from uacpy.core.materials import get_material
+        m = get_material(name)
+        kwargs = dict(
+            thickness=thickness,
+            sound_speed=m['sound_speed'],
+            density=m['density'],
+            attenuation=m['attenuation'],
+            shear_speed=m['shear_speed'],
+            shear_attenuation=m['shear_attenuation'],
+        )
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
 
 @dataclass
 class BoundaryProperties:
@@ -149,7 +172,36 @@ class BoundaryProperties:
         if self.shear_speed < 0:
             raise ValueError(f"BoundaryProperties: shear_speed must be non-negative (m/s); got {self.shear_speed}")
         if self.shear_attenuation < 0:
-            raise ValueError(f"BoundaryProperties: shear_attenuation must be non-negative; got {self.shear_attenuation}")
+            raise ValueError(
+                f"BoundaryProperties: shear_attenuation must be non-negative; "
+                f"got {self.shear_attenuation}"
+            )
+
+    @classmethod
+    def from_preset(cls, name: str, **overrides) -> "BoundaryProperties":
+        """Build a :class:`BoundaryProperties` from a
+        :mod:`uacpy.core.materials` preset.
+
+        Picks ``acoustic_type='half-space'`` automatically, copies every
+        preset field that maps onto :class:`BoundaryProperties` (sound
+        speeds, density, attenuations, ``grain_size_phi`` if defined,
+        ``roughness``), and applies any ``**overrides`` last.
+        """
+        from uacpy.core.materials import get_material
+        m = get_material(name)
+        kwargs = dict(
+            acoustic_type='half-space',
+            sound_speed=m['sound_speed'],
+            density=m['density'],
+            attenuation=m['attenuation'],
+            shear_speed=m['shear_speed'],
+            shear_attenuation=m['shear_attenuation'],
+            roughness=m['roughness'],
+        )
+        if m['grain_size_phi'] is not None:
+            kwargs['grain_size_phi'] = m['grain_size_phi']
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
 
 @dataclass
@@ -512,6 +564,56 @@ class LayeredBottom:
             ),
         )
         return cls(layers=[layer], halfspace=_copy.deepcopy(halfspace))
+
+    @classmethod
+    def from_presets(
+        cls,
+        layers: List[Tuple],
+        *,
+        halfspace: str,
+        halfspace_overrides: Optional[Dict] = None,
+    ) -> 'LayeredBottom':
+        """Build a stratigraphic stack from :mod:`uacpy.core.materials`
+        preset names.
+
+        Parameters
+        ----------
+        layers : list of tuples
+            Each entry is ``(name, thickness)`` or
+            ``(name, thickness, overrides)`` where ``overrides`` is a
+            dict of per-layer field overrides.
+        halfspace : str
+            Preset name for the substrate half-space.
+        halfspace_overrides : dict, optional
+            Field overrides applied to the half-space.
+
+        Examples
+        --------
+        >>> LayeredBottom.from_presets(
+        ...     layers=[('clay', 5), ('silt', 15), ('sand', 30)],
+        ...     halfspace='limestone',
+        ... )
+        """
+        sediment_layers = []
+        for entry in layers:
+            if len(entry) == 2:
+                name, thickness = entry
+                overrides = {}
+            elif len(entry) == 3:
+                name, thickness, overrides = entry
+            else:
+                raise ValueError(
+                    f"LayeredBottom.from_presets: layer entry must be "
+                    f"(name, thickness) or (name, thickness, overrides); "
+                    f"got {entry!r}"
+                )
+            sediment_layers.append(
+                SedimentLayer.from_preset(name, thickness=thickness, **overrides)
+            )
+        hs = BoundaryProperties.from_preset(
+            halfspace, **(halfspace_overrides or {}),
+        )
+        return cls(layers=sediment_layers, halfspace=hs)
 
 
 @dataclass
@@ -988,6 +1090,65 @@ class SoundSpeedProfile:
             interp='munk',
         )
 
+    @classmethod
+    def from_isothermal(
+        cls, c: float = 1500.0, *, depth_max: float = 5000.0,
+        n_points: int = 2,
+    ) -> 'SoundSpeedProfile':
+        """Iso-velocity (Pekeris) water column with constant ``c`` (m/s)."""
+        depths = np.linspace(0.0, float(depth_max), int(n_points))
+        c_arr = np.full_like(depths, float(c))
+        return cls(
+            depths=depths, data=c_arr.reshape(-1, 1),
+            ranges=None, interp='isovelocity',
+        )
+
+    @classmethod
+    def from_temperature_salinity(
+        cls,
+        depths: np.ndarray,
+        temperature_c: np.ndarray,
+        salinity_psu: np.ndarray,
+    ) -> 'SoundSpeedProfile':
+        """Build a profile from in-situ ``T(z)`` and ``S(z)`` via Mackenzie's
+        nine-term seawater sound-speed equation.
+
+        ``c(T, S, z) = 1448.96 + 4.591·T − 5.304·10⁻²·T² + 2.374·10⁻⁴·T³``
+        ``           + 1.340·(S − 35) + 1.630·10⁻²·z + 1.675·10⁻⁷·z²``
+        ``           − 1.025·10⁻²·T·(S − 35) − 7.139·10⁻¹³·T·z³``
+
+        with ``T`` in °C, ``S`` in PSU, ``z`` in metres, ``c`` in m/s.
+        Valid range: ``T ∈ [−2, 30] °C``, ``S ∈ [25, 40] PSU``,
+        ``z ∈ [0, 8000] m`` (Mackenzie 1981).
+
+        ``depths``, ``temperature_c``, ``salinity_psu`` must be 1-D arrays
+        of equal length sampled at the same depth grid. Use
+        ``np.full_like(depths, T_const)`` if the column is isothermal/
+        isohaline.
+        """
+        z = np.asarray(depths, dtype=float).ravel()
+        T = np.asarray(temperature_c, dtype=float).ravel()
+        S = np.asarray(salinity_psu, dtype=float).ravel()
+        if not (T.shape == S.shape == z.shape):
+            raise ValueError(
+                "from_temperature_salinity: depths, temperature_c, "
+                f"salinity_psu must share shape; got {z.shape}, "
+                f"{T.shape}, {S.shape}"
+            )
+        ds = S - 35.0
+        c = (
+            1448.96
+            + 4.591 * T - 5.304e-2 * T ** 2 + 2.374e-4 * T ** 3
+            + 1.340 * ds
+            + 1.630e-2 * z + 1.675e-7 * z ** 2
+            - 1.025e-2 * T * ds
+            - 7.139e-13 * T * z ** 3
+        )
+        return cls(
+            depths=z, data=c.reshape(-1, 1),
+            ranges=None, interp='linear',
+        )
+
 
 def generate_sea_surface(
     max_range_m: float,
@@ -1131,7 +1292,10 @@ class Environment:
             SoundSpeedProfile,
         ]] = None,
         altimetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
-        bottom: Optional[Union[BoundaryProperties, RangeDependentBottom, 'LayeredBottom', 'RangeDependentLayeredBottom']] = None,
+        bottom: Optional[Union[
+            BoundaryProperties, RangeDependentBottom,
+            'LayeredBottom', 'RangeDependentLayeredBottom',
+        ]] = None,
         surface: Optional[BoundaryProperties] = None,
         volume_attenuation: float = 0.0,
         *,

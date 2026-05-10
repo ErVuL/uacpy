@@ -24,13 +24,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 
-import uacpy
-from uacpy.models import Bellhop, Kraken
-from uacpy.models.base import RunMode
-from uacpy.visualization import plot_time_series, plot_modes_heatmap
+import uacpy  # noqa: E402
+from uacpy.models import Bellhop, Kraken  # noqa: E402
+from uacpy.models.base import RunMode  # noqa: E402
+from uacpy.visualization import plot_time_series, plot_modes_heatmap  # noqa: E402
 
 
 def _ricker(fc: float, fs: float, duration: float = 0.04) -> np.ndarray:
@@ -65,7 +65,7 @@ def demo_stacked_time_series():
     print("  Running Bellhop BROADBAND...", end=" ", flush=True)
     bellhop = Bellhop(verbose=False)
     tf = bellhop.run(env, source, receiver,
-                    run_mode=RunMode.BROADBAND, frequencies=frequencies)
+                     run_mode=RunMode.BROADBAND, frequencies=frequencies)
     print(f"✓  ({tf.data.shape[-1]} frequencies, "
           f"df={frequencies[1]-frequencies[0]:.3f} Hz)")
 
@@ -122,14 +122,14 @@ def demo_modes_heatmap():
     print(f"✓  ({n_modes} modes)")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=None,
-                                   normalize=True, figsize=(14, 8))
+                                normalize=True, figsize=(14, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_all.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  ✓ Saved: output/{out.name}")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
-                                   normalize=True, figsize=(12, 8))
+                                normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)

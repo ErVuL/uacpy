@@ -57,6 +57,7 @@ from uacpy import acoustic_signal as signal
 
 from uacpy import noise
 from uacpy.core import acoustics
+from uacpy.core import materials
 from uacpy.core.metrics import tl_rmse
 
 __all__ = [
@@ -90,6 +91,7 @@ __all__ = [
     'signal',
     'noise',
     'acoustics',
+    'materials',
     'tl_rmse',
     '__version__',
 ]

@@ -32,7 +32,7 @@ from uacpy.io.oalib_reader import (
     read_rts_file, rts_to_tl, read_ts,
 )
 from uacpy.io.oalib_writer import (
-    get_top_bc_code, write_surface_halfspace, write_ssp,
+    write_ssp,
     write_header, write_fg_params, write_bio_layers, write_broadband_freqs,
     write_ssp_section, write_layer_sections, write_bottom_section,
     write_source_depths, write_receiver_depths, write_receiver_ranges,

@@ -16,13 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-from uacpy.acoustic_signal.generation import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+from uacpy.acoustic_signal.generation import (  # noqa: E402
     lfm_chirp, hfm_chirp, ricker_wavelet,
     gaussian_pulse, mseq
 )
-import os
+
 
 def main():
     print("\n" + "═" * 80)
@@ -115,6 +115,7 @@ def main():
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_10_signal_processing.png'}")
     print("\n✓ Example 10 complete\n")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

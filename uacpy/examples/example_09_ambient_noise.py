@@ -31,8 +31,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import uacpy
-from uacpy.noise import WenzNoise
+import uacpy  # noqa: E402
+from uacpy.noise import WenzNoise  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -110,7 +110,7 @@ def main():
     )
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
                 dpi=150, bbox_inches='tight')
-    #plt.close(fig)
+    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
@@ -136,7 +136,7 @@ def main():
     ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
     fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
                 dpi=150, bbox_inches='tight')
-    #plt.close(fig)
+    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ppsd.png")
 
     print("\n✓ Example 09 complete\n")

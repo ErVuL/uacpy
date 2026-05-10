@@ -17,12 +17,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 
-import uacpy
-from uacpy.core.environment import BoundaryProperties
-from uacpy.models import Bellhop, RunMode
+import uacpy  # noqa: E402
+from uacpy.core.environment import BoundaryProperties  # noqa: E402
+from uacpy.models import Bellhop, RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)

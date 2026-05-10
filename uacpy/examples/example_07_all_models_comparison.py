@@ -37,18 +37,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST
-from uacpy.visualization.plots import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_ssp_2d,
     plot_rd_bottom,
     plot_environment_advanced,
     compare_models,
 )
+
 
 def main():
     print("\n" + "═" * 80)
@@ -120,8 +121,8 @@ def main():
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
-            interp='pchip',
-        ),
+                                      interp='pchip',
+                                      ),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )
@@ -181,7 +182,7 @@ def main():
         scooter = Scooter(verbose=False)
         env_approx = env.get_range_independent_approximation(method='max')
         results['Scooter'] = scooter.run(env_approx, source, receiver,
-                                        volume_attenuation='T')
+                                         volume_attenuation='T')
         print("  ✓ Success (range-independent approximation)")
     except Exception as e:
         print(f"  ✗ {e}")
@@ -196,7 +197,6 @@ def main():
         print("  ✓ Success (range-independent approximation)")
     except Exception as e:
         print(f"  ✗ {e}")
-
 
     # ═══════════════════════════════════════════════════════════════════════
     # VISUALIZATION
@@ -280,6 +280,7 @@ def main():
     print("\n✓ Example 07 complete\n")
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

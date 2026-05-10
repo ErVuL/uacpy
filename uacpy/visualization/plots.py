@@ -24,7 +24,6 @@ from uacpy.visualization.style import (
     create_professional_colorbar,
     get_model_color,
     COLORMAPS,
-    BOTTOM_FILL_COLOR,
     BOTTOM_FILL_STYLE,
     BOTTOM_HALFSPACE_COLOR,
     BOTTOM_LINE_STYLE,
@@ -302,7 +301,7 @@ def plot_transmission_loss(
         else:
             fig = ax.get_figure()
         ax.text(0.5, 0.5, 'Model Failed', ha='center', va='center',
-               transform=ax.transAxes, fontsize=14, color='red')
+                transform=ax.transAxes, fontsize=14, color='red')
         ax.axis('off')
         return fig, ax
 
@@ -401,7 +400,7 @@ def plot_transmission_loss(
 
         # Add contour labels (inline, with background)
         ax.clabel(CS, inline=True, fontsize=9, fmt='%g dB',
-                 inline_spacing=10, use_clabeltext=True)
+                  inline_spacing=10, use_clabeltext=True)
 
     ax.grid(True, alpha=0.3, zorder=0)
 
@@ -520,7 +519,7 @@ def plot_rays(
         sd = np.atleast_1d(getattr(field, 'source_depths', []))
     if len(sd):
         src_handle = ax.plot(0.0, float(sd[0]), **SOURCE_MARKER_STYLE,
-                              zorder=ZORDER_RAYS + 10, label='Source')[0]
+                             zorder=ZORDER_RAYS + 10, label='Source')[0]
 
     if receiver is not None:
         rd = np.atleast_1d(getattr(receiver, 'depths', []))
@@ -536,8 +535,8 @@ def plot_rays(
     if len(rd) and len(rr):
         R, D = np.meshgrid(rr, rd)
         rcv_handle = ax.plot(R.ravel() / 1000.0, D.ravel(),
-                              **RECEIVER_MARKER_STYLE,
-                              zorder=ZORDER_RAYS + 10, label='Receiver')[0]
+                             **RECEIVER_MARKER_STYLE,
+                             zorder=ZORDER_RAYS + 10, label='Receiver')[0]
 
     if xlim is not None:
         ax.set_xlim(xlim)
@@ -646,7 +645,7 @@ def plot_ssp(
             nonzero_mask = env.shear_speed > 0
             if show_data_points:
                 ax.plot(env.shear_speed[nonzero_mask], depths[nonzero_mask],
-                       'ko', markersize=6, zorder=5)
+                        'ko', markersize=6, zorder=5)
 
             # Interpolate shear wave speed
             s_interp = np.interp(depths_interp, depths, env.shear_speed)
@@ -975,7 +974,7 @@ def plot_modes(
 
     # Plot wavenumber spectrum
     k_real = np.real(k)
-    k_imag = np.abs(np.imag(k))
+    np.abs(np.imag(k))
     phase_speed = 2 * np.pi * freq / k_real
 
     # Use different colors for different attenuation levels
@@ -983,8 +982,8 @@ def plot_modes(
 
     for i in range(M):
         ax2.scatter(phase_speed[i], k_real[i], s=150, c=[colors[i]],
-                   edgecolors='black', linewidths=1.5, alpha=0.8,
-                   label=f'Mode {i+1}' if i < 6 else None, zorder=3)
+                    edgecolors='black', linewidths=1.5, alpha=0.8,
+                    label=f'Mode {i+1}' if i < 6 else None, zorder=3)
 
     ax2.set_xlabel('Phase Speed (m/s)', fontsize=12)
     ax2.set_ylabel('Wavenumber k (1/m)', fontsize=12)
@@ -1167,12 +1166,12 @@ def plot_mode_wavenumbers(
         for i in range(n_annotate):
             # Offset annotation slightly to avoid overlap with marker
             ax.annotate(f'{i+1}',
-                       xy=(k_real[i], k_imag[i]),
-                       xytext=(5, 5), textcoords='offset points',
-                       fontsize=9, color='darkblue',
-                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                                edgecolor='gray', alpha=0.7),
-                       zorder=4)
+                        xy=(k_real[i], k_imag[i]),
+                        xytext=(5, 5), textcoords='offset points',
+                        fontsize=9, color='darkblue',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                  edgecolor='gray', alpha=0.7),
+                        zorder=4)
 
     # Add reference lines
     ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.3, zorder=1)  # Real axis
@@ -1182,7 +1181,7 @@ def plot_mode_wavenumbers(
     ax.set_xlabel('Real(k) (rad/m)', fontsize=12, fontweight='bold')
     ax.set_ylabel('Imag(k) (rad/m)', fontsize=12, fontweight='bold')
     ax.set_title(f'Mode Wavenumbers in Complex k-Plane\nf = {freq:.1f} Hz, {M} modes',
-                fontsize=14, fontweight='bold')
+                 fontsize=14, fontweight='bold')
 
     # Grid
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5, zorder=ZORDER_GRID)
@@ -1250,7 +1249,7 @@ def compare_models(
         figsize = (3.6 * ncols + 1.2, 4.2 * nrows + 1.0)
 
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize,
-                              sharey=(nrows == 1), squeeze=False)
+                             sharey=(nrows == 1), squeeze=False)
     axes_flat = axes.flatten()
 
     im = None
@@ -1259,7 +1258,7 @@ def compare_models(
 
         if field is None:
             ax.text(0.5, 0.5, f'{model_name}\n(Failed)', ha='center', va='center',
-                   transform=ax.transAxes, fontsize=14, color='red')
+                    transform=ax.transAxes, fontsize=14, color='red')
             ax.set_title(model_name, fontweight='bold')
             ax.axis('off')
             continue
@@ -1382,9 +1381,9 @@ def plot_dispersion_curves(
         if freqs:
             color = colors[mode_idx % len(colors)]
             ax1.plot(freqs, phase_speeds, 'o-', linewidth=2, markersize=6,
-                    color=color, label=f'Mode {mode_idx+1}')
+                     color=color, label=f'Mode {mode_idx+1}')
             ax2.semilogy(freqs, attenuations, 'o-', linewidth=2, markersize=6,
-                        color=color)
+                         color=color)
 
     # Plot number of modes vs frequency
     mode_counts = [modes_dict[f]['M'] for f in frequencies]
@@ -1408,8 +1407,6 @@ def plot_dispersion_curves(
     plt.tight_layout()
 
     return fig, (ax1, ax2, ax3)
-
-
 
 
 def plot_range_cut(
@@ -1467,7 +1464,7 @@ def plot_range_cut(
     ax.set_xlabel('Range (km)', fontsize=12)
     ax.set_ylabel('Transmission Loss (dB)', fontsize=12)
     ax.set_title(f'TL vs Range at {actual_depth:.1f} m depth',
-                fontsize=12, fontweight='bold')
+                 fontsize=12, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.invert_yaxis()
 
@@ -1528,7 +1525,7 @@ def plot_depth_cut(
     ax.set_xlabel('Transmission Loss (dB)', fontsize=12)
     ax.set_ylabel('Depth (m)', fontsize=12)
     ax.set_title(f'TL vs Depth at {actual_range/1000:.2f} km range',
-                fontsize=12, fontweight='bold')
+                 fontsize=12, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.invert_yaxis()
 
@@ -1584,7 +1581,7 @@ def compare_range_cuts(
         ranges_km = field.ranges / 1000.0
 
         ax.plot(ranges_km, tl, linewidth=2.5, label=model_name,
-               color=color, alpha=0.9)
+                color=color, alpha=0.9)
 
     actual_depth = field.depths[depth_idx]
 
@@ -1650,8 +1647,8 @@ def plot_model_statistics(
     for bar, time in zip(bars, times):
         width = bar.get_width()
         ax1.text(width, bar.get_y() + bar.get_height()/2,
-                f'{time:.3f}s', ha='left', va='center', fontsize=10,
-                fontweight='bold')
+                 f'{time:.3f}s', ha='left', va='center', fontsize=10,
+                 fontweight='bold')
 
     # 2. TL range comparison (collapse broadband 3-D to a 2-D slice first)
     slices_2d = [_select_2d_slice(field) for field in results.values()]
@@ -1661,9 +1658,9 @@ def plot_model_statistics(
     x = np.arange(len(model_names))
     width = 0.35
     ax2.bar(x - width/2, tl_mins, width, label='Min TL', color='lightblue',
-           edgecolor='black', alpha=0.7)
+            edgecolor='black', alpha=0.7)
     ax2.bar(x + width/2, tl_maxs, width, label='Max TL', color='coral',
-           edgecolor='black', alpha=0.7)
+            edgecolor='black', alpha=0.7)
     ax2.set_ylabel('Transmission Loss (dB)', fontsize=12)
     ax2.set_title('TL Range by Model', fontsize=12, fontweight='bold')
     ax2.set_xticks(x)
@@ -1685,8 +1682,8 @@ def plot_model_statistics(
     for bar, grid_size in zip(bars, grid_sizes):
         height = bar.get_height()
         ax3.text(bar.get_x() + bar.get_width()/2, height,
-                grid_size, ha='center', va='bottom', fontsize=9,
-                fontweight='bold')
+                 grid_size, ha='center', va='bottom', fontsize=9,
+                 fontweight='bold')
 
     # 4. Range cut comparison at mid-depth
     for idx, (model_name, field) in enumerate(results.items()):
@@ -1695,7 +1692,7 @@ def plot_model_statistics(
         tl = data2d[mid_depth_idx, :]
         ranges_km = field.ranges / 1000.0
         ax4.plot(ranges_km, tl, linewidth=2, label=model_name,
-                color=colors[idx], alpha=0.8)
+                 color=colors[idx], alpha=0.8)
 
     ax4.set_xlabel('Range (km)', fontsize=12)
     ax4.set_ylabel('Transmission Loss (dB)', fontsize=12)
@@ -1819,9 +1816,9 @@ def plot_model_comparison_matrix(
                         # Use smaller grid size for fair comparison
                         target_size = min(data_i.size, data_j.size)
                         data_i = np.interp(np.linspace(0, 1, target_size),
-                                          np.linspace(0, 1, data_i.size), data_i)
+                                           np.linspace(0, 1, data_i.size), data_i)
                         data_j = np.interp(np.linspace(0, 1, target_size),
-                                          np.linspace(0, 1, data_j.size), data_j)
+                                           np.linspace(0, 1, data_j.size), data_j)
 
                 # Remove NaN and Inf values
                 valid_mask = np.isfinite(data_i) & np.isfinite(data_j)
@@ -1889,8 +1886,8 @@ def plot_model_comparison_matrix(
                     text_color = 'white' if value > 0.5 else 'black'
 
                 ax.text(j, i, f'{value:.2f}',
-                       ha='center', va='center',
-                       color=text_color, fontsize=10, fontweight='bold')
+                        ha='center', va='center',
+                        color=text_color, fontsize=10, fontweight='bold')
 
     # Title
     metric_titles = {
@@ -1977,13 +1974,13 @@ def plot_comparison_curves(
         color = get_model_color(name)
 
         ax_range.plot(ranges_km, tl_vs_range, linewidth=2.5,
-                     label=f'{name} ({actual_depth:.1f}m)',
-                     color=color, alpha=0.85)
+                      label=f'{name} ({actual_depth:.1f}m)',
+                      color=color, alpha=0.85)
 
     ax_range.set_xlabel('Range (km)', fontsize=12, fontweight='bold')
     ax_range.set_ylabel('Transmission Loss (dB)', fontsize=12, fontweight='bold')
     ax_range.set_title(f'TL vs Range at {source_depth:.0f}m Depth',
-                      fontsize=13, fontweight='bold')
+                       fontsize=13, fontweight='bold')
     ax_range.legend(fontsize=10, loc='best', framealpha=0.9)
     ax_range.grid(True, alpha=0.3, linestyle='--')
 
@@ -2008,14 +2005,14 @@ def plot_comparison_curves(
         color = get_model_color(name)
 
         ax_depth.plot(tl_vs_depth, depths, linewidth=2.5,
-                     label=f'{name} ({actual_range_km:.1f}km)',
-                     color=color, alpha=0.85)
+                      label=f'{name} ({actual_range_km:.1f}km)',
+                      color=color, alpha=0.85)
 
     ax_depth.invert_yaxis()
     ax_depth.set_xlabel('Transmission Loss (dB)', fontsize=12, fontweight='bold')
     ax_depth.set_ylabel('Depth (m)', fontsize=12, fontweight='bold')
     ax_depth.set_title(f'TL vs Depth at {mid_range_km:.1f}km Range',
-                      fontsize=13, fontweight='bold')
+                       fontsize=13, fontweight='bold')
     ax_depth.legend(fontsize=10, loc='best', framealpha=0.9)
     ax_depth.grid(True, alpha=0.3, linestyle='--')
 
@@ -2102,7 +2099,7 @@ def plot_ssp_2d(
                  fontsize=14, fontweight='bold')
 
     # Colorbar
-    cbar = fig.colorbar(im, ax=ax, label='Sound Speed (m/s)')
+    fig.colorbar(im, ax=ax, label='Sound Speed (m/s)')
 
     ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
     if len(env.bathymetry) > 1:
@@ -2190,6 +2187,43 @@ def plot_bottom_properties(
     return fig, axes
 
 
+def plot_bottom_loss(
+    materials: Sequence[str],
+    *,
+    grazing_angles_deg: Optional[np.ndarray] = None,
+    water_speed: float = 1500.0,
+    water_density: float = 1.0,
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = (8, 6),
+) -> Tuple[Figure, Axes]:
+    """Overlay fluid–fluid bottom-loss curves for several preset materials.
+
+    Wraps :func:`uacpy.core.acoustics.bottom_loss_curve` per name and
+    plots loss-in-dB versus grazing angle on a single set of axes.
+    """
+    from uacpy.core.acoustics import bottom_loss_curve
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    for name in materials:
+        ang, loss = bottom_loss_curve(
+            name,
+            grazing_angles_deg=grazing_angles_deg,
+            water_speed=water_speed,
+            water_density=water_density,
+        )
+        ax.plot(ang, loss, lw=2, label=name)
+    ax.set_xlabel('Grazing angle (deg)')
+    ax.set_ylabel('Bottom loss (dB)')
+    ax.set_title('Plane-wave fluid–fluid bottom loss')
+    ax.set_xlim(0, 90)
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=9)
+    return fig, ax
+
+
 def plot_layered_bottom(
     env: Environment,
     figsize: Tuple[float, float] = (10, 8),
@@ -2217,7 +2251,6 @@ def plot_layered_bottom(
     ax : Axes
         Matplotlib axes
     """
-    from uacpy.core.environment import LayeredBottom
 
     if not env.has_layered_bottom():
         raise ValueError("Environment must have a LayeredBottom (env.bottom_layered)")
@@ -2685,7 +2718,6 @@ def plot_environment_advanced(
     return fig, axes
 
 
-
 def plot_transmission_loss_polar(
     field: Result,
     receiver_depth: Optional[float] = None,
@@ -2754,7 +2786,7 @@ def plot_transmission_loss_polar(
     theta = field.metadata.get('theta', None)
     if theta is None:
         raise ValueError("Field must have 'theta' in metadata for polar plots. "
-                        "This requires models with bearing/azimuth output (e.g., Bellhop3D).")
+                         "This requires models with bearing/azimuth output (e.g., Bellhop3D).")
 
     # Extract pressure data (shape depends on model)
     # Typically: pressure[theta, source_depth, receiver_depth, range]
@@ -2842,7 +2874,7 @@ def plot_transmission_loss_polar(
     ax.set_theta_direction(-1)  # Clockwise
     ax.set_xlabel('Range (km)', fontsize=11)
     ax.set_title(f'Transmission Loss (Polar)\nDepth = {receiver_depth:.1f} m',
-                fontsize=12, fontweight='bold', pad=20)
+                 fontsize=12, fontweight='bold', pad=20)
 
     # Colorbar
     cbar = None
@@ -2850,8 +2882,6 @@ def plot_transmission_loss_polar(
         cbar = create_professional_colorbar(fig, im, ax, label='TL (dB)')
 
     return fig, ax, cbar
-
-
 
 
 def plot_transfer_function(
@@ -2980,13 +3010,13 @@ def plot_transfer_function(
         mag_db = 20 * np.log10(np.abs(spectrum) + 1e-30)
         color = cmap(k % 10)
         ax_mag.plot(freqs, mag_db, color=color, linewidth=1.4,
-                     label=name, alpha=0.9)
+                    label=name, alpha=0.9)
         if ax_phs is not None:
             phs = np.angle(spectrum)
             if unwrap_phase:
                 phs = np.unwrap(phs)
             ax_phs.plot(freqs, phs, color=color, linewidth=1.4,
-                         label=name, alpha=0.9)
+                        label=name, alpha=0.9)
 
         if label_depth is None and len(fld.depths) > d_idx:
             label_depth = float(fld.depths[d_idx])
@@ -3478,13 +3508,13 @@ def plot_modes_heatmap(
     # This avoids edge calculation issues and matches MATLAB pcolor behavior
     # phi_plot is (n_depths, n_modes) which matches (len(z), len(mode_numbers))
     im = ax.pcolormesh(mode_numbers, z, phi_plot, shading='nearest', cmap=cmap,
-                      vmin=vmin, vmax=vmax)
+                       vmin=vmin, vmax=vmax)
 
     # Configure axes
     ax.set_xlabel('Mode Number', fontsize=12)
     ax.set_ylabel('Depth (m)', fontsize=12)
     ax.set_title(f'Mode Shapes Heatmap\nf = {freq:.1f} Hz, {n_modes_plot} modes',
-                fontsize=13, fontweight='bold')
+                 fontsize=13, fontweight='bold')
     # Ensure depth increases downward.  Matplotlib's default ordering for
     # pcolormesh is already "y increases upward"; we invert exactly once.
     if not ax.yaxis_inverted():
@@ -3493,7 +3523,7 @@ def plot_modes_heatmap(
 
     # Colorbar
     cbar_label = 'Normalized Amplitude' if normalize else 'Amplitude'
-    cbar = create_professional_colorbar(fig, im, ax, label=cbar_label)
+    create_professional_colorbar(fig, im, ax, label=cbar_label)
 
     # Add grid for mode boundaries
     ax.set_xticks(mode_numbers[::max(1, n_modes_plot // 10)])
@@ -3503,6 +3533,7 @@ def plot_modes_heatmap(
     fig.tight_layout()
 
     return fig, ax
+
 
 def plot_reflection_coefficient(
     field: 'Result',
@@ -3606,7 +3637,7 @@ def plot_reflection_coefficient(
                 crit_angle = angles[critical_idx[0]]
                 ax1.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
                 ax1.text(crit_angle + 2, 0.5, f'Critical angle\n≈{crit_angle:.1f}°',
-                        fontsize=9, color='red', fontweight='bold')
+                         fontsize=9, color='red', fontweight='bold')
 
         if not show_phase:
             ax1.set_xlabel('Grazing Angle (degrees)', fontsize=11, fontweight='bold')

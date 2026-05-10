@@ -28,6 +28,7 @@ from uacpy.visualization.plots import (
     plot_environment,
     plot_environment_advanced,
     plot_bottom_properties,
+    plot_bottom_loss,
     plot_layered_bottom,
     plot_rd_layered_bottom,
     plot_rd_bottom,
@@ -68,6 +69,7 @@ __all__ = [
     'plot_environment',
     'plot_environment_advanced',
     'plot_bottom_properties',
+    'plot_bottom_loss',
     'plot_layered_bottom',
     'plot_rd_layered_bottom',
     'plot_rd_bottom',
@@ -91,6 +93,7 @@ __all__ = [
     'plot_covariance',
     'plot_replicas',
     'plot_tl_difference',
+    'style',
     'quickplot',
     'apply_professional_style',
 ]

@@ -501,7 +501,7 @@ def write_bottom_section(
         else:
             alpha_s = 0.0
         f.write(f"  {z_bottom:.2f}  {cp:.2f}  {cs:.1f}  "
-               f"{rho:.2f}  {alpha:.2f}  {alpha_s:.2f} /\n")
+                f"{rho:.2f}  {alpha:.2f}  {alpha_s:.2f} /\n")
 
 
 def write_source_depths(f: TextIO, source: Source) -> None:

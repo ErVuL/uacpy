@@ -32,21 +32,20 @@ def _raise_stack_limit_at_import() -> None:
 
 _raise_stack_limit_at_import()
 
-import numpy as np
+import numpy as np  # noqa: E402
 
-from uacpy.core.environment import Environment
-from uacpy.core.source import Source
-from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.exceptions import (
+from uacpy.core.environment import Environment  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.results import Result  # noqa: E402
+from uacpy.core.exceptions import (  # noqa: E402
     ConfigurationError,
     ExecutableNotFoundError,
     InvalidDepthError,
     ModelExecutionError,
     UnsupportedFeatureError,
 )
-from uacpy.io.file_manager import FileManager
+from uacpy.io.file_manager import FileManager  # noqa: E402
 
 
 # Sentinel for "not provided" in run() overrides (distinct from None which means auto-compute)

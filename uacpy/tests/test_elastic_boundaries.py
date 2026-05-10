@@ -16,7 +16,7 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-from uacpy.core import Environment, Source, Receiver, BoundaryProperties
+from uacpy.core import Environment, Receiver, BoundaryProperties
 from uacpy.models import KrakenField, Bounce, Scooter
 
 # Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
@@ -60,7 +60,6 @@ class TestElasticBoundaryAutoDetection:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver_small(self):
@@ -131,7 +130,6 @@ class TestBounceReflectionCoefficients:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver_bounce(self):
@@ -228,7 +226,6 @@ class TestBounceToScooterWorkflow:
             bottom=bottom
         )
 
-
     @pytest.fixture
     def receiver_small(self):
         return Receiver(
@@ -304,7 +301,6 @@ class TestWorkflowComparison:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver_small(self):

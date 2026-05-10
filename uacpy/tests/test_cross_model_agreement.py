@@ -33,14 +33,15 @@ from uacpy.core.environment import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import (
-    Bellhop, Kraken, KrakenField, RAM, RunMode, Scooter,
+    Bellhop, KrakenField, RAM, RunMode, Scooter,
 )
+
 
 # Detect availability of compiled RAM-family binaries — env-dependent so
 # the rough-surface scenario can be skipped cleanly when ramsurf isn't built.
 def _has_ramsurf() -> bool:
     try:
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         ram._collins_binary('ramsurf')
         return True
     except FileNotFoundError:
@@ -93,7 +94,18 @@ def _bellhop_tl(env, src, rcv):
 
 def _ram_tl(env, src, rcv):
     """RAM dispatcher — picks mpiramS / rams / ramsurf based on env."""
-    return RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        # Lytaev grid-relaxation warnings are informational here and locally
+        # consumed; cross-model agreement tolerances absorb the small
+        # accuracy degradation.
+        _warnings.filterwarnings(
+            'ignore', message=r'RAM:.*raised dz from', category=UserWarning,
+        )
+        _warnings.filterwarnings(
+            'ignore', message=r'RAM:.*Lytaev relaxed', category=UserWarning,
+        )
+        return RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
 # ─── Scenarios ─────────────────────────────────────────────────────────────
@@ -237,7 +249,7 @@ def _altimetry_consistency() -> Scenario:
             # ~3 km as surface multipaths accumulate; 8 dB RMSE is the
             # empirical bar in 1-5 km. The test still catches sign flips
             # cleanly — an inverted surface produces RMSE > 25 dB.
-            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False).run(
+            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False, dr=20.0, dz=2.0).run(
                 env, s, r, run_mode=RunMode.COHERENT_TL), 8.0),
         ],
         tolerance_db=8.0,

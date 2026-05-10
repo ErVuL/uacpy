@@ -73,9 +73,9 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
         # Record 3: 7 int32 + freq0 (float64) + atten (float64)
         nfreq = struct.unpack("<i", f.read(4))[0]
-        ntheta = struct.unpack("<i", f.read(4))[0]
-        nsx = struct.unpack("<i", f.read(4))[0]
-        nsy = struct.unpack("<i", f.read(4))[0]
+        struct.unpack("<i", f.read(4))[0]
+        struct.unpack("<i", f.read(4))[0]
+        struct.unpack("<i", f.read(4))[0]
         nsd = struct.unpack("<i", f.read(4))[0]   # NSz
         nrd = struct.unpack("<i", f.read(4))[0]   # NRz
         nk = struct.unpack("<i", f.read(4))[0]    # NRr — number of k samples

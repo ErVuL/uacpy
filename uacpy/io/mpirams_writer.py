@@ -109,7 +109,7 @@ def write_inpe(
         attn[-1] = 5.0
 
     with open(filepath, 'w') as f:
-        f.write(f"0.0\n")  # dummy line (read and discarded by peramx.f90)
+        f.write("0.0\n")  # dummy line (read and discarded by peramx.f90)
         f.write(f"{fc}  {Q}\n")
         f.write(f"{T}\n")
         f.write(f"{zsrc}\n")

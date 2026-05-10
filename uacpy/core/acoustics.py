@@ -344,6 +344,59 @@ def reflection_coeff(
     return V.real if np.all(V.imag == 0) else V
 
 
+def bottom_loss_curve(
+    material: Union[str, dict],
+    *,
+    grazing_angles_deg: Optional[np.ndarray] = None,
+    water_speed: float = 1500.0,
+    water_density: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Plane-wave fluid–fluid bottom loss vs grazing angle.
+
+    Wraps :func:`reflection_coeff` with the property dict from
+    :mod:`uacpy.core.materials`, returning grazing-angle / loss-in-dB
+    arrays ready to plot. Shear is ignored (fluid–fluid only).
+
+    Parameters
+    ----------
+    material : str or dict
+        Preset name (``'sand'``, ``'silt'``, …) or a dict carrying
+        ``sound_speed`` (m/s), ``density`` (g/cm³), ``attenuation``
+        (dB/λ_p).
+    grazing_angles_deg : array_like, optional
+        Grazing-angle grid in degrees (``0`` = parallel to interface,
+        ``90`` = normal incidence). Default ``np.linspace(0, 90, 181)``.
+    water_speed, water_density : float
+        Water-column reference values (m/s, g/cm³).
+
+    Returns
+    -------
+    grazing_angles_deg : ndarray
+    loss_db : ndarray
+        Bottom loss ``-20·log10|R|`` at each angle.
+    """
+    if isinstance(material, str):
+        from uacpy.core.materials import get_material
+        m = get_material(material)
+    else:
+        m = dict(material)
+    if grazing_angles_deg is None:
+        grazing_angles_deg = np.linspace(0.0, 90.0, 181)
+    grazing = np.deg2rad(np.asarray(grazing_angles_deg, dtype=float))
+    angle_from_normal = np.pi / 2.0 - grazing
+    alpha = float(m['attenuation']) * np.log(10.0) / (40.0 * np.pi)
+    R = reflection_coeff(
+        angle=angle_from_normal,
+        rho1=float(m['density']) * 1000.0,
+        c1=float(m['sound_speed']),
+        alpha=alpha,
+        rho=float(water_density) * 1000.0,
+        c=float(water_speed),
+    )
+    loss_db = -20.0 * np.log10(np.abs(R) + 1e-300)
+    return np.asarray(grazing_angles_deg, dtype=float), np.asarray(loss_db, dtype=float)
+
+
 def bubble_resonance(
     radius: Union[float, np.ndarray],
     depth: float = 0.0,

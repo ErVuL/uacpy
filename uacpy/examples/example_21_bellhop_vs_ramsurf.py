@@ -18,15 +18,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from uacpy.core.environment import BoundaryProperties, Environment
-from uacpy.core.receiver import Receiver
-from uacpy.core.source import Source
-from uacpy.models import Bellhop, RAM, RunMode
+from uacpy.core.environment import BoundaryProperties, Environment  # noqa: E402
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 
 
 def main():

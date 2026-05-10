@@ -27,17 +27,17 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.models import Bellhop
-from uacpy.core.environment import BoundaryProperties
-from uacpy.visualization.plots import plot_transmission_loss
-from uacpy.models import RunMode
-import os
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.models import Bellhop  # noqa: E402
+from uacpy.core.environment import BoundaryProperties  # noqa: E402
+from uacpy.visualization.plots import plot_transmission_loss  # noqa: E402
+from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
+
 
 def main():
     print("\n" + "═" * 80)
@@ -66,10 +66,10 @@ def main():
         bottom=bottom             # Use BoundaryProperties object
     )
 
-    print(f"  ✓ Created Pekeris waveguide:")
+    print("  ✓ Created Pekeris waveguide:")
     print(f"    - Water depth: {env.depth}m")
     print(f"    - Sound speed: {float(env.ssp.data[0, 0])} m/s")
-    print(f"    - Bottom type: Fluid half-space")
+    print("    - Bottom type: Fluid half-space")
 
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 2: Define Source
@@ -82,7 +82,7 @@ def main():
         frequencies=100.0   # 100 Hz (typical low-frequency sonar)
     )
 
-    print(f"  ✓ Source configured:")
+    print("  ✓ Source configured:")
     print(f"    - Depth: {source.depths[0]}m")
     print(f"    - Frequency: {source.frequencies[0]} Hz")
 
@@ -94,12 +94,14 @@ def main():
 
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 95, 50),      # 50 depths from 5m to 95m
-        ranges=np.linspace(100, 10000, 100) # 100 ranges from 0.1km to 10km
+        ranges=np.linspace(100, 10000, 100)  # 100 ranges from 0.1km to 10km
     )
 
-    print(f"  ✓ Receiver grid:")
+    print("  ✓ Receiver grid:")
     print(f"    - Depths: {len(receiver.depths)} points ({receiver.depths[0]}m to {receiver.depths[-1]}m)")
-    print(f"    - Ranges: {len(receiver.ranges)} points ({receiver.ranges[0]/1000:.1f}km to {receiver.ranges[-1]/1000:.1f}km)")
+    r0_km = receiver.ranges[0] / 1000
+    r1_km = receiver.ranges[-1] / 1000
+    print(f"    - Ranges: {len(receiver.ranges)} points ({r0_km:.1f}km to {r1_km:.1f}km)")
     print(f"    - Total receivers: {len(receiver.depths) * len(receiver.ranges)}")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -131,10 +133,10 @@ def main():
 
     # Plot 1: TL field using NEW uacpy plotting module
     ax = axes[0, 0]
-    #Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
+    # Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
     _, _ = plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
     ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
-                fontweight='bold', fontsize=12)
+                 fontweight='bold', fontsize=12)
 
     # Plot 2: TL vs Range (at source depth)
     ax = axes[0, 1]
@@ -226,7 +228,7 @@ def main():
     print("\nResults:")
     print(f"  • TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
-    print(f"  • Computation time: < 1 second")
+    print("  • Computation time: < 1 second")
 
     print("\nWhat you learned:")
     print("  ✓ How to create a basic Environment")
@@ -248,6 +250,7 @@ def main():
     print("\n✓ Example 01 complete\n")
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -6,10 +6,10 @@ These tests validate qualitative physical behavior on canonical scenarios
 modes are positive, mode count scales with frequency, etc. They do NOT
 compare against stored reference numbers.
 
-For *quantitative* benchmarks against published reference solutions
-(ASA 1990, Jensen-Kuperman, etc.), see the roadmap item in README.md
-("add reference-case regressions"). That work is tracked separately and
-will live in benchmark_data/ + test_benchmarks.py when added.
+For *quantitative* benchmarks against canonical waveguides (Pekeris,
+Munk, layered fluids), see the roadmap item in README.md ("add
+reference-case regressions"). That work is tracked separately and will
+live in benchmark_data/ + test_benchmarks.py when added.
 """
 
 import pytest
@@ -255,7 +255,7 @@ class TestRangeDependentPhysicalSanity:
 
         RAM is specifically designed for range-dependent environments.
         """
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(slope_env, slope_source, slope_receiver)
 
         assert result.field_type == 'tl'

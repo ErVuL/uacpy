@@ -5,10 +5,9 @@ Tests for all UACPY propagation models
 import pytest
 
 import numpy as np
-import uacpy
 from uacpy.models import (
-    Bellhop, BellhopCUDA, RAM, Kraken, KrakenField,
-    Bounce, Scooter, SPARC,
+    Bellhop, RAM, Kraken, KrakenField,
+    Bounce, Scooter,
 )
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
@@ -188,7 +187,7 @@ class TestRAM:
 
     def test_ram_compute_tl(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         assert result.field_type == 'tl'
@@ -198,7 +197,7 @@ class TestRAM:
 
     def test_ram_broadband_mode(self, simple_env, source):
         """RAM BROADBAND returns the H(f) transfer function."""
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
             ranges=np.array([5000.0])
@@ -217,7 +216,7 @@ class TestRAM:
 
     def test_ram_time_series_requires_waveform(self, simple_env, source):
         """TIME_SERIES without source_waveform must raise."""
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(
             depths=np.array([50.0]),
             ranges=np.array([5000.0])
@@ -230,7 +229,7 @@ class TestRAM:
     def test_ram_compute_time_series_helper(self, simple_env, source):
         """Verify the convenience method ``RAM.compute_time_series`` runs."""
         from uacpy.core.results import TimeSeriesField
-        ram = RAM(Q=2.0, T=2.0, verbose=False)
+        ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
         fs = 4000.0
         nt = 64

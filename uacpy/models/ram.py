@@ -1056,7 +1056,7 @@ class RAM(PropagationModel):
         # uses mpiramS for fluid+flat (broadband + RD bottom support).
         names = {'rams': 'rams0.5', 'ramsurf': 'ramsurf1.5'}
         if kind not in names:
-            raise ValueError(f"Unknown Collins kind {kind!r}")
+            raise ConfigurationError(f"Unknown Collins kind {kind!r}")
         return self._find_executable_in_paths(
             names[kind],
             bin_subdirs=['ramsurf'],
@@ -1092,7 +1092,7 @@ class RAM(PropagationModel):
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
-        zs = float(np.atleast_1d(source.depths)[0])
+        float(np.atleast_1d(source.depths)[0])
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc,
             theta=self._theta_for_freq(fc),
@@ -1242,7 +1242,7 @@ class RAM(PropagationModel):
 
         if kind == 'ramsurf':
             if env.altimetry is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "ramsurf backend requires env.altimetry to be set; "
                     "got env.altimetry=None. Use the mpiramS backend "
                     "(no altimetry) or supply an altimetry profile."
@@ -1564,7 +1564,7 @@ class RAM(PropagationModel):
         wrapper that needs a synthetic sediment layer.
         """
         if env.bottom is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "RAM backend requires env.bottom (or env.bottom_layered)"
             )
         return LayeredBottom.from_halfspace(env.bottom, env.depth)
@@ -1582,7 +1582,6 @@ class RAM(PropagationModel):
         ('absorbing_layer_attn', 10.0),
         ('n_sed_points', 50),
     )
-
 
     def _drop_unsupported_surface_shear(self, env: Environment) -> Environment:
         """No RAM backend reads surface shear properties; warn and zero them."""
@@ -1705,7 +1704,7 @@ class RAM(PropagationModel):
             if res is not None:
                 break
         if res is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"RAM:{kind}: no Lytaev grid feasible even at ε=0.5, "
                 f"θ_max=10° for f={freq:.1f} Hz, x_max={max_range:.0f} m. "
                 f"Set ``dr``/``dz`` explicitly. Optimiser said: {last_exc}"
@@ -1903,7 +1902,6 @@ class RAM(PropagationModel):
         """
         start_time = time.time()
 
-
         freq = float(source.frequencies[0])
         zsrc = float(source.depths[0])
         ranges = receiver.ranges
@@ -1926,7 +1924,11 @@ class RAM(PropagationModel):
         # (Q→∞, T=1) unless the user widened it via Q=/T=.
         Q_tl = 1e6 if self.Q is None else float(self.Q)
         T_tl = 1.0 if self.T is None else float(self.T)
-        self._log(f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s", level='info')
+        self._log(
+            f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, "
+            f"dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s",
+            level='info',
+        )
         self._log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
 
         fm = self._setup_file_manager()
@@ -1982,7 +1984,7 @@ class RAM(PropagationModel):
             psif = result['psif']  # (nzo, nf, nr)
             zg = result['zg']
             rout = result['rout']
-            c0 = result['c0']
+            result['c0']
 
             # Extract center frequency (middle of frequency vector)
             center_idx = result['nf'] // 2
@@ -1995,9 +1997,14 @@ class RAM(PropagationModel):
             # out the sharp zeros in the field.
 
             rcv_depths = receiver.depths
-            # Warn if any receiver ranges exceed the PE computed range
-            if np.any(receiver.ranges > rout[-1]):
-                beyond = receiver.ranges[receiver.ranges > rout[-1]]
+            # Warn only when receiver ranges genuinely exceed the PE
+            # marched range; tolerate float-edge drift (rout[-1] often
+            # lands ~µm below the user's requested rmax due to dr×nstep
+            # accumulation).
+            dr_eff = rout[-1] - rout[-2] if rout.size >= 2 else 1.0
+            tol = max(1e-6, 0.5 * float(dr_eff))
+            if np.any(receiver.ranges > rout[-1] + tol):
+                beyond = receiver.ranges[receiver.ranges > rout[-1] + tol]
                 warnings.warn(
                     f"Receiver ranges {beyond} exceed PE computed range; "
                     f"clamped to {rout[-1]}",
@@ -2105,7 +2112,6 @@ class RAM(PropagationModel):
         """
         start_time = time.time()
 
-
         freq = float(source.frequencies[0])
         zsrc = float(source.depths[0])
         ranges = receiver.ranges
@@ -2124,7 +2130,11 @@ class RAM(PropagationModel):
 
         Q_bb = 2.0 if self.Q is None else float(self.Q)
         T_bb = 10.0 if self.T is None else float(self.T)
-        self._log(f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, dr={dr:.1f} m, dz={dz:.3f} m", level='info')
+        self._log(
+            f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
+            f"dr={dr:.1f} m, dz={dz:.3f} m",
+            level='info',
+        )
         self._log(f"Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
 
         fm = self._setup_file_manager()

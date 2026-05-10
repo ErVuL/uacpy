@@ -74,14 +74,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-from uacpy.core.attenuation import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+from uacpy.core.attenuation import (  # noqa: E402
     thorp_attenuation,
     francois_garrison,
     convert_attenuation_units
 )
-from uacpy.core.acoustics import soundspeed
+from uacpy.core.acoustics import soundspeed  # noqa: E402
 
 
 def scenario_a_model_comparison():
@@ -101,14 +101,14 @@ def scenario_a_model_comparison():
     pH = 8.0
     depth = 100       # meters
 
-    print(f"\n  Environmental conditions:")
+    print("\n  Environmental conditions:")
     print(f"    • Temperature: {temperature}°C")
     print(f"    • Salinity: {salinity} ppt")
     print(f"    • pH: {pH}")
     print(f"    • Depth: {depth} m")
 
     # Calculate attenuation for each model
-    print(f"\n  Computing attenuation models:")
+    print("\n  Computing attenuation models:")
 
     # Thorp
     print("    • Thorp (1967)...", end=" ", flush=True)
@@ -118,7 +118,7 @@ def scenario_a_model_comparison():
     # Francois-Garrison
     print("    • Francois-Garrison (1982)...", end=" ", flush=True)
     atten_fg = francois_garrison(frequencies, temperature, salinity,
-                                              pH, depth)
+                                 pH, depth)
     print("✓")
 
     # Plot comparison
@@ -234,7 +234,7 @@ def scenario_b_environmental_sensitivity():
     # ─────────────────────────────────────────────────────────────────────────
     temperatures = np.linspace(0, 30, 31)
     atten_vs_temp = [float(francois_garrison(freq, T, S_base,
-                                                    pH_base, depth_base))
+                                             pH_base, depth_base))
                      for T in temperatures]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ def scenario_b_environmental_sensitivity():
     # ─────────────────────────────────────────────────────────────────────────
     salinities = np.linspace(0, 40, 41)
     atten_vs_sal = [float(francois_garrison(freq, T_base, S,
-                                                   pH_base, depth_base))
+                                            pH_base, depth_base))
                     for S in salinities]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ def scenario_b_environmental_sensitivity():
     # ─────────────────────────────────────────────────────────────────────────
     pHs = np.linspace(7.5, 8.5, 21)
     atten_vs_pH = [float(francois_garrison(freq, T_base, S_base,
-                                                  pH, depth_base))
+                                           pH, depth_base))
                    for pH in pHs]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ def scenario_b_environmental_sensitivity():
     # ─────────────────────────────────────────────────────────────────────────
     depths = np.linspace(0, 6000, 61)
     atten_vs_depth = [float(francois_garrison(freq, T_base, S_base,
-                                                     pH_base, d))
+                                              pH_base, d))
                       for d in depths]
 
     # Plot results
@@ -298,7 +298,7 @@ def scenario_b_environmental_sensitivity():
     ax = axes[1, 1]
     ax.plot(depths, atten_vs_depth, 'm-', linewidth=2.5)
     ax.axvline(depth_base, color='k', linestyle='--', alpha=0.5,
-              label=f'Baseline ({depth_base} m)')
+               label=f'Baseline ({depth_base} m)')
     ax.set_xlabel('Depth (m)', fontweight='bold')
     ax.set_ylabel('Attenuation (dB/km)', fontweight='bold')
     ax.set_title(f'Depth Effect at {freq/1000:.0f} kHz', fontweight='bold', fontsize=12)
@@ -343,18 +343,18 @@ def scenario_c_unit_conversions():
     # Convert to different units
     alpha_dbpm = convert_attenuation_units(alpha_dbpkm, frequency, 'dB/km', 'dB/m', c)
     alpha_dbpwavelength = convert_attenuation_units(alpha_dbpkm, frequency, 'dB/km',
-                                                     'dB/wavelength', c)
+                                                    'dB/wavelength', c)
     alpha_nepers = convert_attenuation_units(alpha_dbpkm, frequency, 'dB/km',
-                                            'Nepers/m', c)
+                                             'Nepers/m', c)
 
-    print(f"\n  Conversions:")
+    print("\n  Conversions:")
     print(f"    • {alpha_dbpm:.7f} dB/m")
     print(f"    • {alpha_dbpwavelength:.7f} dB/wavelength")
     print(f"    • {alpha_nepers:.10f} Nepers/m")
 
     # Verification: Convert back
     alpha_back = convert_attenuation_units(alpha_dbpm, frequency, 'dB/m', 'dB/km', c)
-    print(f"\n  Verification (convert dB/m back to dB/km):")
+    print("\n  Verification (convert dB/m back to dB/km):")
     print(f"    • {alpha_back:.4f} dB/km")
     print(f"    • Match: {np.isclose(alpha_back, alpha_dbpkm)}")
 

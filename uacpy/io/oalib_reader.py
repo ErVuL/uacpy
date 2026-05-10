@@ -19,9 +19,9 @@ import numpy as np
 import struct
 import warnings
 from pathlib import Path
-from typing import Union, Tuple, Dict, List, Any, Optional
+from typing import Union, Tuple, Dict, Any, Optional
 
-from uacpy.core.results import PressureField, Arrivals, Rays, TimeSeriesField
+from uacpy.core.results import PressureField, Arrivals, Rays
 from uacpy.io._fortran_helpers import read_vector as _read_vector
 
 
@@ -519,7 +519,7 @@ def read_arr_file(filepath: Union[str, Path]):
                     sd_list = []
                     # Maximum number of arrivals for this source
                     f.seek(8 * marker_len, 0)
-                    narrmx = struct.unpack('i', f.read(4))[0]
+                    struct.unpack('i', f.read(4))[0]
 
                     for irz in range(nrd):
                         rd_list = []
@@ -616,7 +616,7 @@ def read_arr_file(filepath: Union[str, Path]):
                     for isd in range(nsd):
                         sd_list = []
                         # Maximum number of arrivals for this source
-                        narrmx = int(lines[idx].strip())
+                        int(lines[idx].strip())
                         idx += 1
 
                         for irz in range(nrd):
@@ -725,7 +725,7 @@ def read_ray_file(filepath: Union[str, Path]):
             # Line 6: Bottom depth
             f.readline()
             # Line 7: Coordinate system ('rz' or 'xyz')
-            coord_line = f.readline().strip()
+            f.readline().strip()
 
             # Read rays - format is:
             # alpha (launch angle - float, no quotes)
@@ -1300,7 +1300,6 @@ def _read_sz_rz(fid) -> Dict[str, np.ndarray]:
     rz, _ = _read_vector(fid)
 
     return {"sz": sz, "rz": rz}
-
 
 
 def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:

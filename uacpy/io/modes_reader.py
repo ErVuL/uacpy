@@ -8,9 +8,7 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 """
 
 import numpy as np
-import struct
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from uacpy.core.exceptions import ModelExecutionError
 
@@ -212,7 +210,7 @@ def read_modes_asc(
     try:
         with open(filename, "r") as fid:
             # Read record length (not used in ASCII)
-            lrecl = int(fid.readline().strip())
+            int(fid.readline().strip())
 
             # Read title
             pltitl = fid.readline().strip()

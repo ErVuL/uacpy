@@ -33,7 +33,12 @@ from uacpy.core.constants import (
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_reader import read_shd_file
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section
+from uacpy.io.oalib_writer import (
+    write_bio_layers, write_bottom_section, write_broadband_freqs,
+    write_fg_params, write_header, write_layer_sections,
+    write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
+    write_ssp_section,
+)
 
 
 class Scooter(PropagationModel):

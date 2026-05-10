@@ -46,13 +46,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.models import KrakenField, Bounce, Scooter, KrakenC
-from uacpy.core import BoundaryProperties
-import os
-import time
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.models import KrakenField, Bounce, Scooter  # noqa: E402
+from uacpy.core import BoundaryProperties  # noqa: E402
+import time  # noqa: E402
 
 
 def main():
@@ -119,7 +118,7 @@ def main():
 
     print(f"  ✓ KrakenField completed in {t_krakenfield:.2f}s")
     print(f"    - TL field shape: {result_krakenfield.data.shape}")
-    print(f"    - Used KrakenC internally for elastic bottom")
+    print("    - Used KrakenC internally for elastic bottom")
 
     # ═══════════════════════════════════════════════════════════════════════
     # APPROACH 2: BOUNCE → SCOOTER
@@ -177,7 +176,7 @@ def main():
         bottom=bottom_with_file
     )
 
-    print(f"  ✓ Environment created with acoustic_type='file'")
+    print("  ✓ Environment created with acoustic_type='file'")
 
     print("\n[3/3] Running SCOOTER with .brc file...")
     t_start = time.time()
@@ -205,23 +204,24 @@ def main():
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))
 
-    print(f"\nTL Comparison (KrakenField vs SCOOTER):")
+    print("\nTL Comparison (KrakenField vs SCOOTER):")
     print(f"  • Maximum difference: {max_diff:.2f} dB")
     print(f"  • Mean absolute difference: {mean_diff:.2f} dB")
     print(f"  • RMS difference: {rms_diff:.2f} dB")
 
-    print(f"\nPerformance:")
+    print("\nPerformance:")
     print(f"  • KrakenField: {t_krakenfield:.2f}s")
     print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.2f}s (BOUNCE: {t_bounce:.2f}s + SCOOTER: {t_scooter:.2f}s)")
-    print(f"  • Speedup: {t_bounce_total/t_krakenfield:.1f}x {'faster' if t_krakenfield < t_bounce_total else 'slower'}")
+    direction = 'faster' if t_krakenfield < t_bounce_total else 'slower'
+    print(f"  • Speedup: {t_bounce_total/t_krakenfield:.1f}x {direction}")
 
-    print(f"\nAccuracy:")
+    print("\nAccuracy:")
     if mean_diff < 2.0:
-        print(f"  ✓ Excellent agreement (mean diff < 2 dB)")
+        print("  ✓ Excellent agreement (mean diff < 2 dB)")
     elif mean_diff < 5.0:
-        print(f"  ✓ Good agreement (mean diff < 5 dB)")
+        print("  ✓ Good agreement (mean diff < 5 dB)")
     else:
-        print(f"  ⚠ Moderate differences (consider parameter tuning)")
+        print("  ⚠ Moderate differences (consider parameter tuning)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # VISUALIZATION
@@ -315,10 +315,10 @@ def main():
             crit_angle = angles[critical_idx[0]]
             ax4.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
             ax4.text(crit_angle + 2, 0.5, f'Critical\nangle\n≈{crit_angle:.1f}°',
-                    fontsize=9, color='red', ha='left')
+                     fontsize=9, color='red', ha='left')
     else:
         ax4.text(0.5, 0.5, 'Reflection coefficient\ndata not available',
-                ha='center', va='center', transform=ax4.transAxes, fontsize=11)
+                 ha='center', va='center', transform=ax4.transAxes, fontsize=11)
         ax4.set_title('BOUNCE: Bottom Reflection Coefficient', fontweight='bold')
 
     # ─────────────────────────────────────────────────────────────────────
@@ -327,9 +327,9 @@ def main():
     ax5 = fig.add_subplot(gs[1, 1])
 
     ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.at(depth=source.depths[0]).tl,
-            'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
+             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
     ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).tl,
-            'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
+             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax5.set_xlabel('Range (km)', fontweight='bold')
     ax5.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -346,9 +346,9 @@ def main():
     mid_range_km = np.median(result_krakenfield.ranges) / 1000
 
     ax6.plot(result_krakenfield.at(range=mid_range_km * 1000.0).tl, result_krakenfield.depths,
-            'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
+             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
     ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).tl, result_scooter.depths,
-            'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
+             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax6.invert_yaxis()
     ax6.set_xlabel('Transmission Loss (dB)', fontweight='bold')
@@ -379,8 +379,8 @@ def main():
     workflow1 += f"✓ Time: {t_krakenfield:.1f}s"
 
     ax7.text(0.05, 0.95, workflow1, transform=ax7.transAxes,
-            fontsize=8, verticalalignment='top', family='monospace',
-            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+             fontsize=8, verticalalignment='top', family='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 8: Workflow Diagram 2
@@ -406,8 +406,8 @@ def main():
     workflow2 += f"✓ Time: {t_bounce_total:.1f}s"
 
     ax8.text(0.05, 0.95, workflow2, transform=ax8.transAxes,
-            fontsize=8, verticalalignment='top', family='monospace',
-            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+             fontsize=8, verticalalignment='top', family='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 9: Summary & Recommendations
@@ -428,18 +428,18 @@ def main():
     summary += "  • Production workflows\n"
     summary += "  • Reusable coefficients\n"
     summary += "  • Sharing reflection data\n\n"
-    summary += f"ACCURACY:\n"
+    summary += "ACCURACY:\n"
     summary += f"  Mean diff: {mean_diff:.2f} dB\n"
     summary += f"  RMS diff: {rms_diff:.2f} dB\n"
     summary += f"  {'✓ Excellent' if mean_diff < 2 else '✓ Good'}"
 
     ax9.text(0.05, 0.95, summary, transform=ax9.transAxes,
-            fontsize=8, verticalalignment='top', family='monospace',
-            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
+             fontsize=8, verticalalignment='top', family='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
 
     # Main title
     fig.suptitle('EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison',
-                fontsize=14, fontweight='bold', y=0.995)
+                 fontsize=14, fontweight='bold', y=0.995)
 
     # Save
     output_file = OUTPUT_DIR / 'example_15_elastic_boundaries_comparison.png'
@@ -467,7 +467,7 @@ def main():
         print(f"  → KrakenField is {t_bounce_total/t_krakenfield:.1f}x faster for single runs")
     else:
         print(f"  → SCOOTER is {t_krakenfield/t_bounce_total:.1f}x faster for single runs")
-    print(f"  → But BOUNCE .brc can be reused for multiple runs!")
+    print("  → But BOUNCE .brc can be reused for multiple runs!")
 
     print("\nCHOOSE:")
     print("  • KrakenField Auto → For simple cases and single runs")

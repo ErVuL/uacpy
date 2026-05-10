@@ -48,17 +48,17 @@ import os
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pathlib import Path
+from pathlib import Path  # noqa: E402
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import uacpy
-from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField
-from uacpy.models.base import RunMode
+import uacpy  # noqa: E402
+from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField  # noqa: E402
+from uacpy.models.base import RunMode  # noqa: E402
 
 
 def main():
@@ -299,7 +299,7 @@ def main():
             tf_models, depth_idx=depth_idx, range_idx=0,
             show_phase=True, unwrap_phase=False,
             title=f'Transfer functions — depth={depth:.0f} m, '
-                  f'range={target_range/1000:.0f} km',
+            f'range={target_range/1000:.0f} km',
         )
         fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
                     dpi=150, bbox_inches='tight')
@@ -370,8 +370,8 @@ def main():
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
         ir_results = {k: v for k, v in ts_results.items()
                       if k not in ('Bellhop (chirp)', 'SPARC')}
-        other_results = {k: v for k, v in ts_results.items()
-                         if k in ('Bellhop (chirp)', 'SPARC')}
+        {k: v for k, v in ts_results.items()
+         if k in ('Bellhop (chirp)', 'SPARC')}
 
         n_ts = len(ts_results)
         fig, axes = plt.subplots(n_ts, 1, figsize=(14, 2.5 * n_ts), squeeze=False)
@@ -493,13 +493,13 @@ def main():
             notes = f"dt={result.metadata['dt']*1000:.2f} ms"
         print(f"{name:<20} {result.field_type:<20} {str(result.data.shape):<25} {notes}")
 
-    print(f"\nModels with TIME_SERIES support:")
-    print(f"  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
-    print(f"  RAM         - native broadband PE (mpiramS), returns transfer_function")
-    print(f"  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
-    print(f"  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
-    print(f"  SPARC       - time-marched FFP (native time domain), returns time_series")
-    print(f"  OASP        - OASES PE broadband, returns transfer_function")
+    print("\nModels with TIME_SERIES support:")
+    print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
+    print("  RAM         - native broadband PE (mpiramS), returns transfer_function")
+    print("  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
+    print("  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
+    print("  SPARC       - time-marched FFP (native time domain), returns time_series")
+    print("  OASP        - OASES PE broadband, returns transfer_function")
 
     print("\n✓ Example 19 complete\n")
 

@@ -98,13 +98,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop
-from uacpy.models import RunMode
-import os
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import Bellhop  # noqa: E402
+from uacpy.models import RunMode  # noqa: E402
 
 
 def scenario_a_tl_modes():
@@ -241,17 +240,17 @@ def scenario_a_tl_modes():
     plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"\n  TL statistics at channel axis (1000m depth):")
+    print("\n  TL statistics at channel axis (1000m depth):")
     print(f"    • Coherent    - Mean: {np.mean(tl_coherent):.1f} dB, "
           f"Std: {np.std(tl_coherent):.1f} dB")
     print(f"    • Incoherent  - Mean: {np.mean(tl_incoherent):.1f} dB, "
           f"Std: {np.std(tl_incoherent):.1f} dB")
     print(f"    • Semi-coh    - Mean: {np.mean(tl_semicoherent):.1f} dB, "
           f"Std: {np.std(tl_semicoherent):.1f} dB")
-    print(f"\n  Key observations:")
-    print(f"    • Coherent TL shows strong modal interference (high std dev)")
-    print(f"    • Incoherent TL is smoothest (phase-averaged)")
-    print(f"    • Semi-coherent is intermediate")
+    print("\n  Key observations:")
+    print("    • Coherent TL shows strong modal interference (high std dev)")
+    print("    • Incoherent TL is smoothest (phase-averaged)")
+    print("    • Semi-coherent is intermediate")
 
     print("\n  ✓ Saved: output/example_11a_tl_modes.png")
 
@@ -310,11 +309,11 @@ def scenario_b_ray_tracing():
                 bbox_inches='tight')
     plt.close()
 
-    print(f"\n  Ray tracing parameters:")
+    print("\n  Ray tracing parameters:")
     print(f"    • Number of rays: {len(source.angles)}")
     print(f"    • Launch angles: {source.angles[0]:.1f}° to {source.angles[-1]:.1f}°")
     print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
-    print(f"    • Maximum range: 100 km")
+    print("    • Maximum range: 100 km")
 
     print("\n  ✓ Saved: output/example_11b_ray_tracing.png")
 
@@ -406,7 +405,7 @@ def scenario_c_eigenrays_arrivals():
         plot_rays(result_eigen, env=env, source=source, receiver=receiver,
                   ax=ax_eigen, linewidth=1.5, alpha=0.9,
                   title=f'{n_eigenrays} eigenrays at receiver '
-                        f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
+                  f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
     else:
         ax_eigen.text(0.5, 0.5, 'No eigenrays returned',
                       ha='center', va='center', transform=ax_eigen.transAxes)
@@ -420,7 +419,7 @@ def scenario_c_eigenrays_arrivals():
                 bbox_inches='tight')
     plt.close(fig)
 
-    print(f"\n  Analysis complete:")
+    print("\n  Analysis complete:")
     print(f"    • Eigenrays found: {n_eigenrays}")
     if arrivals_ok:
         rec = result_arr.arrivals

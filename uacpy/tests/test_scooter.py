@@ -3,15 +3,14 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import TransferFunction, TimeSeriesField
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
+from uacpy.models import Scooter
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.core import Environment, Source, Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestScooterBasic:
     """Basic tests for Scooter model (wavenumber integration)."""

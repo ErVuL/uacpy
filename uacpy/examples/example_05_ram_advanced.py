@@ -37,17 +37,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import RAM
-from uacpy.visualization.plots import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import RAM  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_transmission_loss,
     plot_rd_bottom,
     plot_environment_advanced,
 )
+
 
 def main():
     print("\n" + "═" * 80)
@@ -104,7 +105,7 @@ def main():
         bottom=bottom_rd
     )
 
-    print(f"\n✓ Environment created:")
+    print("\n✓ Environment created:")
     print(f"    - is_range_dependent: {env.is_range_dependent}")
     print(f"    - has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
     print(f"    - has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
@@ -253,6 +254,7 @@ def main():
     print("\n✓ Example 05 complete\n")
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

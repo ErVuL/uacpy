@@ -18,11 +18,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import OAST, OASN, OASR, OASP
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.models import OAST, OASN, OASR, OASP  # noqa: E402
+
 
 def main():
     print("\n" + "═" * 80)
@@ -244,6 +245,7 @@ def main():
     print("  • Broadband and narrowband analysis")
     print("\n✓ Example 13 complete\n")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -14,11 +14,10 @@ systematic validation of all OASES variants:
 import pytest
 import numpy as np
 
-pytestmark = pytest.mark.requires_oases
-
 from uacpy.models import OAST, OASN, OASR, OASP, OASES, RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError
+
+pytestmark = pytest.mark.requires_oases
 
 
 class TestOAST:
@@ -39,7 +38,6 @@ class TestOAST:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver(self):
@@ -114,7 +112,6 @@ class TestOASN:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver(self):
@@ -202,7 +199,6 @@ class TestOASR:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver(self):

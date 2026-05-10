@@ -23,15 +23,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from uacpy.core.environment import BoundaryProperties, Environment
-from uacpy.core.receiver import Receiver
-from uacpy.core.source import Source
-from uacpy.models import RAM, RunMode
+from uacpy.core.environment import BoundaryProperties, Environment  # noqa: E402
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.models import RAM, RunMode  # noqa: E402
 
 
 def main():
@@ -70,7 +70,7 @@ def main():
 
     fields = {}
     print(f"\nRAM Lytaev grid on Pekeris {fc:.0f} Hz / {rmax/1000:.0f} km")
-    print(f"  backend: mpiramS (fluid + flat surface)")
+    print("  backend: mpiramS (fluid + flat surface)")
     print()
     for label, ram, _ in cases:
         field = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)

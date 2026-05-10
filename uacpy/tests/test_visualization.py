@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import uacpy
-from uacpy.models import Bellhop, RAM, Kraken, KrakenField
+from uacpy.models import Bellhop, RAM, Kraken
 from uacpy.visualization import plots, quickplot
 
 # Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
@@ -136,7 +136,7 @@ class TestCompareModels:
         )
 
         bellhop = Bellhop(verbose=False)
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
 
         results = {
             'Bellhop': bellhop.compute_tl(env, source, receiver),
@@ -287,6 +287,7 @@ class TestQuickplot:
         assert save_path.exists()
         plt.close(fig)
 
+
 class TestPlottingEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -339,9 +340,9 @@ class TestPlottingIntegration:
         base = np.broadcast_to(base, (depths.size, ranges.size)).copy()
 
         results = {
-            name: PressureField(units="dB", 
-                data=base + offset, depths=depths, ranges=ranges, model=name,
-            )
+            name: PressureField(units="dB",
+                                data=base + offset, depths=depths, ranges=ranges, model=name,
+                                )
             for name, offset in (('Bellhop', 0.0), ('RAM', 1.5), ('KrakenField', -1.5))
         }
 

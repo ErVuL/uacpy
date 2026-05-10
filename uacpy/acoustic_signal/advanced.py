@@ -27,7 +27,7 @@ in this file.
 
 import numpy as np
 import scipy.signal as sp
-from typing import Union, Optional, Callable, Tuple, Generator
+from typing import Union, Optional, Callable, Generator
 
 
 def time(n: Union[int, np.ndarray], fs: float) -> np.ndarray:
@@ -504,7 +504,7 @@ def nco(
     >>> y = nco(1000, fs=10000, func=np.cos)
     """
     if func is None:
-        func = lambda x: np.exp(1j * x)
+        def func(x): return np.exp(1j * x)
 
     fc = np.atleast_1d(fc)
 
@@ -560,7 +560,7 @@ def nco_gen(
     >>> samples = [next(gen) for _ in range(100)]
     """
     if func is None:
-        func = lambda x: np.exp(1j * x)
+        def func(x): return np.exp(1j * x)
 
     phase = phase0
     dphi = 2 * np.pi * fc / fs

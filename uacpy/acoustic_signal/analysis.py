@@ -15,7 +15,6 @@ from scipy.linalg import toeplitz
 from matplotlib.gridspec import GridSpec
 
 
-
 class PPSD:
     """Compute the probability density function of PSD levels.
 
@@ -98,7 +97,7 @@ class PPSD:
                 self.welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
 
             for i in range(0, len(sig) - chunk_size + 1, step):
-                chunk = sig[i : i + chunk_size]
+                chunk = sig[i: i + chunk_size]
                 freqs, psd = _sig.welch(chunk, fs, **self.welch_params)
                 psd_list.append(psd)
 
@@ -135,7 +134,7 @@ class PPSD:
         if vmax is None:
             vmax = 1 / self.binwidth_dB
 
-        fig, ax = plt.subplots(figsize=(10,6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         align_ybins = self.binwidth_dB / 2
 
         pcm = ax.pcolormesh(
@@ -162,7 +161,7 @@ class PPSD:
         ax.set_xlabel("Frequency [Hz]")
         ax.set_ylabel("Level [dB]")
         ax.set_xscale("log")
-        ax.set_xlim((np.max((self.frequencies[0],1)), self.frequencies[-1]))
+        ax.set_xlim((np.max((self.frequencies[0], 1)), self.frequencies[-1]))
         ax.set_ylim((ymin, ymax))
         ax.grid(which="both", alpha=0.5)
         ax.legend(loc="upper right")
@@ -468,7 +467,7 @@ class SEL:
 
         # Process data in chunks
         for i in range(0, len(data), chunk_size):
-            chunk = data[i : min(i + chunk_size, len(data))]
+            chunk = data[i: min(i + chunk_size, len(data))]
 
             if len(chunk) < nfft:
                 chunk = np.pad(chunk, (0, nfft - len(chunk)))
@@ -820,7 +819,7 @@ class FRF:
         n_meas = x.shape[0]
 
         # Initialize lists to store results from all measurements
-        m_list, freqs_list, tf_list, coh_list = [], [], [], []
+        m_list, tf_list, coh_list = [], [], []
 
         for i in range(n_meas):
             # Extract the i-th measurement
@@ -1481,6 +1480,7 @@ class FRF:
 
         return axes
 
+
 class FKTransform:
     """Frequency-Wavenumber (f-k) transform computation and visualization."""
 
@@ -1615,7 +1615,7 @@ class FKTransform:
         ax.set_xlim((self.wavenumbers[0], self.wavenumbers[-1]))
         ax.set_ylim((0, self.frequencies[-1]))
         ax.grid(alpha=0.3)
-        
+
         if self.ref == 1e-6:
             ref = "1µ"
         elif self.ref == 2e-5:
@@ -1628,4 +1628,3 @@ class FKTransform:
 
         plt.tight_layout()
         return fig, ax
-

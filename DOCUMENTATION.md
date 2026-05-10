@@ -295,13 +295,23 @@ env = uacpy.Environment(
     ssp=SoundSpeedProfile.from_pairs(profile, interp='linear'),
 )
 
-# 3. Analytic (Munk)
-env = uacpy.Environment(
-    name="munk", bathymetry=5000,
-    ssp=SoundSpeedProfile.from_munk(5000),
+# 3. Parametric / analytic factories
+ssp_iso  = SoundSpeedProfile.from_isothermal(c=1500.0, depth_max=2000.0)
+ssp_munk = SoundSpeedProfile.from_munk(depth_max=5000)
+
+# 4. From in-situ T(z), S(z) (Mackenzie 9-term seawater equation)
+z = np.linspace(0, 4000, 81)
+T = 4.0 + 11.0 * np.exp(-z / 500.0)        # warm surface, cold deep
+S = np.full_like(z, 35.0)                   # 35 PSU
+ssp_ts = SoundSpeedProfile.from_temperature_salinity(
+    depths=z, temperature_c=T, salinity_psu=S,
 )
 
-# 4. Range-dependent — c(depth, range)
+env = uacpy.Environment(
+    name="munk", bathymetry=5000, ssp=ssp_munk,
+)
+
+# 5. Range-dependent — c(depth, range)
 ranges_m  = np.array([0, 10000, 20000, 30000])  # metres
 depths_m  = np.linspace(0, 1000, 50)
 ssp_2d    = np.zeros((50, 4))  # fill in…
@@ -365,6 +375,82 @@ bot  = BoundaryProperties(acoustic_type='half-space',
 
 # Pre-computed reflection coefficients (from BOUNCE or OASR)
 bot  = BoundaryProperties(acoustic_type='file', reflection_file='bottom.brc')
+```
+
+### Sediment & rock presets
+
+`uacpy.materials` ships a small catalog of class-typical geoacoustic
+properties for the common bottom-material classes used in
+ocean-acoustics modelling. Each preset carries the full property set
+(compressional and shear speed/attenuation, density, porosity,
+Wentworth ϕ where defined).
+
+```python
+import uacpy
+
+uacpy.materials.list_materials()
+# ['basalt', 'chalk', 'clay', 'granite', 'gravel', 'limestone',
+#  'moraine', 'sand', 'silt']
+
+uacpy.materials.get_material('sand')
+# {'sound_speed': 1650.0, 'density': 1.9, 'attenuation': 0.8,
+#  'shear_speed': 110.0, 'shear_attenuation': 2.5,
+#  'porosity': 45.0, 'grain_size_phi': 2.0, 'roughness': 0.0}
+```
+
+Three factory methods route presets into `Environment` inputs. The
+naming follows one rule — `<Class>.from_preset(...)` for a single
+material, `<Class>.from_presets(...)` for a composition.
+
+```python
+from uacpy import BoundaryProperties, SedimentLayer, LayeredBottom
+
+# Half-space bottom from a preset (single material)
+sand_bottom = BoundaryProperties.from_preset('sand')
+sand_bottom = BoundaryProperties.from_preset('sand', attenuation=0.5)  # tweak
+
+# Single sediment layer
+layer = SedimentLayer.from_preset('silt', thickness=10.0)
+
+# Layered bottom — stratigraphic column from a list of preset names
+bot = LayeredBottom.from_presets(
+    layers=[
+        ('clay', 5),
+        ('silt', 15, {'attenuation': 1.5}),  # site-specific tweak
+        ('sand', 30),
+    ],
+    halfspace='limestone',
+    halfspace_overrides={'attenuation': 0.05},
+)
+```
+
+Available presets and their class-typical values:
+
+| Material   | c_p (m/s) | c_s (m/s) | ρ (g/cm³) | α_p (dB/λ) | α_s (dB/λ) | porosity (%) | ϕ |
+|------------|-----------|-----------|-----------|------------|------------|--------------|---|
+| clay       | 1500      | 80        | 1.5       | 0.2        | 1.0        | 70           | 9.0   |
+| silt       | 1575      | 80        | 1.7       | 1.0        | 1.5        | 55           | 6.0   |
+| sand       | 1650      | 110       | 1.9       | 0.8        | 2.5        | 45           | 2.0   |
+| gravel     | 1800      | 180       | 2.0       | 0.6        | 1.5        | 35           | -1.5  |
+| moraine    | 1950      | 600       | 2.1       | 0.4        | 1.0        | 25           | —     |
+| chalk      | 2400      | 1000      | 2.2       | 0.2        | 0.5        | —            | —     |
+| limestone  | 3000      | 1500      | 2.4       | 0.1        | 0.2        | —            | —     |
+| basalt     | 5250      | 2500      | 2.7       | 0.1        | 0.2        | —            | —     |
+| granite    | 5500      | 3000      | 2.7       | 0.1        | 0.2        | —            | —     |
+
+Values are class-typical. Shear speeds for unconsolidated sediments
+(silt/sand/gravel) actually grow with depth below the seabed
+(`c_s ≈ k·z^0.3`); the table reports the `z = 1 m` value. Override
+`shear_speed` directly when you need a different depth.
+
+**Bottom-loss curves** — `core.acoustics.bottom_loss_curve(name)`
+returns ``(grazing_angles_deg, loss_db)`` for the plane-wave fluid–
+fluid Rayleigh reflection. The matching plot helper overlays several
+materials at once:
+
+```python
+from uacpy.visualization import plot_bottom_loss
+fig, ax = plot_bottom_loss(['sand', 'silt', 'clay', 'limestone'])
 ```
 
 ### Range-dependent bottom (varies with range only)
@@ -1350,7 +1436,7 @@ result.amplitudes                 # ndarray of all amplitudes
 result.phases                     # ndarray of all phases (rad)
 
 # Per-arrival records:
-for arr in result.to_table():
+for arr in result:
     print(arr['delay'], arr['amplitude'], arr['kind'],
           arr['src_angle'], arr['rcv_angle'],
           arr['n_top_bounces'], arr['n_bot_bounces'],
@@ -1386,6 +1472,109 @@ produces the time-domain counterpart without an axis argument or a
 `moveaxis`. It also makes spatial slicing natural —
 `tf.data[d_idx, r_idx, :]` is the spectrum at one (depth, range), and
 `tf.data[..., k]` is a 2-D snapshot at one frequency.
+
+### Slicing contract
+
+Every grid `Result` exposes two label-based slicers — `.at()` and
+`.max()` — plus the raw `.data` ndarray as an escape hatch.
+
+| Method | Selector | Behavior |
+|---|---|---|
+| `.at(depth=, range=, frequency=, time=)` | label (metres / Hz / seconds) | **Nearest grid point** via `argmin(|axis - value|)`. Returns a typed slice (see degradation table). |
+| `.max()` | none | Global `argmax(|data|)` across **all** axes. For 3-D fields the frequency axis collapses to the bin where the max sits. |
+| `.data[…]` | numpy slicing | Raw ndarray. Loses axis labels and metadata; result is a bare ndarray. Use when you're already in numpy-land for vectorized math, or to grab the endpoint via `.data[..., -1]`. |
+
+**Auto-squeeze on slices.** A full grid (model output, or a user-built
+field) preserves its shape: `field.tl.shape == field.data.shape`. A
+*sliced* return is typed `SlicedPressureField` (or `_GridResult`'s
+sliced sibling) and **squeezes singleton axes on `.tl` / `.p`**, so:
+
+- `field.at(depth=z).tl` → `(n_r,)`, ready for `plt.plot`
+- `field.at(depth=z, range=r).tl` → 0-D scalar, `float()`-able
+- `field.at(frequency=f).tl` → `(n_d, n_r)` for a broadband field
+
+**Type degradation on `.at()`.** Slicing can degrade the concrete type
+when it no longer makes sense to keep the broader API:
+
+| Source | Slice | Result type |
+|---|---|---|
+| `PressureField` | any spatial / frequency `at()` | `SlicedPressureField` |
+| `TransferFunction` | any `at()` / `max()` | `SlicedPressureField` (synthesis only on the full TF) |
+| `TimeSeriesField` | both `depth=` and `range=` | `TimeTrace` |
+| `TimeSeriesField` | one spatial axis only | `TimeSeriesField` |
+| `RangeDependentBottom` | `at(range=r)` | `BoundaryProperties` |
+| `LayeredBottom` | `at(depth=z)` | dict layer record |
+| `Arrivals` | `filter*` / `top_n_by_amplitude` / `in_delay_window` | `Arrivals` (closed under filter) |
+
+**`Environment` classes split nearest vs interpolation:** results-side
+`.at()` is always nearest. On `SoundSpeedProfile` and
+`RangeDependentBottom`, `.at(...)` is nearest while `.eval(...)` does
+linear interpolation across the axis — pick by whether you need the
+exact stored sample or a smooth value between samples.
+
+**`.tl` vs `.data`.** Inside numerical code that needs to pair the
+field with a 2-D mask (window selection, cross-model differences),
+read `.data` (and convert via `_complex_to_db` if needed) — the
+auto-squeeze on `.tl` of a sliced field can drop axis identity.
+Plotting code should always use `.tl`; matplotlib expects the
+plot-friendly shape.
+
+### Indexing with `.data[…]`
+
+`.data` is a raw ndarray exposed for vectorized math, FFTs, and
+operations where you don't need axis labels. Shapes by class (axis
+arrays in parentheses are the labels you'd index against):
+
+| Class | `.data` shape | Axis arrays |
+|---|---|---|
+| `PressureField` (narrowband) | `(n_d, n_r)` | `.depths`, `.ranges` |
+| `PressureField` (broadband) | `(n_d, n_r, n_f)` | `.depths`, `.ranges`, `.frequencies` |
+| `TransferFunction` | `(n_d, n_r, n_f)` | `.depths`, `.ranges`, `.frequencies` |
+| `TimeSeriesField` | `(n_d, n_r, n_t)` | `.depths`, `.ranges`, `.time` |
+| `TimeTrace` | `(n_t,)` | `.time` |
+| `ReflectionCoefficient` (narrowband) | `(n_θ,)` (alias of `.R`) | `.theta` |
+| `ReflectionCoefficient` (broadband) | `(n_θ, n_f)` | `.theta`, `.frequencies` |
+
+Frequency-leading layouts (no `.data` alias — use the typed
+attribute):
+
+| Class | Native shape | Attribute |
+|---|---|---|
+| `Covariance` | `(n_f, n_rcv, n_rcv)` | `.covariance` |
+| `Replicas` | `(n_f, n_zr, n_xr, n_yr, n_rcv)` | `.replicas` |
+
+Result types that are **not** grids — there is no `.data` ndarray to
+index; use the listed access pattern:
+
+| Class | Access |
+|---|---|
+| `Arrivals` | iterate (`for arr in result`) or filter chain |
+| `Rays` | iterate `result.rays`; each ray is a dict with `r`, `z`, `alpha`, … |
+| `Modes` | `.eigenfunctions[depth_idx, mode_idx]`, `.wavenumbers[mode_idx]` |
+| `BoundaryProperties` | scalar attributes (`.sound_speed`, `.density`, …) |
+| `LayeredBottom` | `.layers` list + `.halfspace` |
+| `RangeDependentBottom` | iterate `.profiles` (list of `(range, BoundaryProperties)`) |
+| `bathymetry` / `altimetry` | `(N, 2)` ndarray of `(range, depth_or_height)` rows |
+
+**Label → index recipe.** When you need `.at()`-style nearest
+matching but plan to index with `.data[…]` directly:
+
+```python
+import numpy as np
+
+d_idx = int(np.argmin(np.abs(field.depths - 50.0)))         # nearest depth
+r_idx = int(np.argmin(np.abs(field.ranges - 2000.0)))       # nearest range
+f_idx = int(np.argmin(np.abs(tf.frequencies - 200.0)))      # nearest freq
+
+spectrum = tf.data[d_idx, r_idx, :]      # H(f) at one point — (n_f,)
+snapshot = tf.data[..., f_idx]            # 2-D field at one frequency
+last_r   = field.data[..., -1]            # endpoint via numpy negative idx
+```
+
+Negative indices wrap (numpy convention). For **monotonic** axes,
+`np.searchsorted(axis, value)` is faster than `argmin(abs(...))` and
+returns the insertion index — pair with `np.clip(idx, 0, len(axis)-1)`
+if you want nearest semantics.
 
 ### Common metadata keys
 
@@ -1459,6 +1648,28 @@ modes.k                          # complex wavenumbers, shape (M,)
 modes.phi                        # mode shapes, shape (nz, M)
 modes.depths                     # depth grid
 
+# Optional perturbations — accept either an explicit α(z) array (dB/m)
+# or a string flag matching Kraken's volume-attenuation convention.
+modes_α = modes.with_attenuation(
+    0.005,                       # uniform 0.005 dB/m
+    sound_speed_z=1500.0,        # c(z); pass per-depth array if non-uniform
+    density_z=1.0,               # ρ(z) in g/cm³ (matches BoundaryProperties)
+)
+modes_α = modes.with_attenuation(volume_attenuation='T')             # Thorp 1967
+modes_α = modes.with_attenuation(                                      # Francois-Garrison
+    volume_attenuation='F',
+    francois_garrison_params=(15.0, 35.0, 8.1, 50.0),  # T, S, pH, z̄
+)
+modes_α = modes.with_attenuation(                                      # bottom-tail
+    0.005, bottom=BoundaryProperties.from_preset('sand'),
+)
+field = modes_α.modal_propagation_loss(           # → coherent PressureField
+    source_depth=50.0,
+    receiver_depths=np.linspace(10, 90, 9),
+    ranges_m=np.linspace(500, 10_000, 100),
+    source_density=1.0,                            # g/cm³
+)
+
 # OASN spatial covariance — Covariance Result.
 cov = oasn.compute_covariance(env, source, receiver)
 cov.covariance                   # shape (n_frequencies, n_rcv, n_rcv) complex
@@ -1473,6 +1684,13 @@ rep = oasn.compute_replicas(
 )
 rep.replicas                     # shape (n_frequencies, n_z, n_x, n_y, n_rcv) complex
 rep.replica_z, rep.replica_x, rep.replica_y          # all in metres
+
+# Matched-field processors on the Covariance — pair with Replicas to
+# build a (n_freq, n_z, n_x, n_y) ambiguity surface ready to argmax.
+amb_bart = cov.bartlett(rep)                              # conventional
+amb_mvdr = cov.mvdr(rep, diagonal_loading=1e-2)           # Capon / MVDR
+amb_load = cov.mvdr_loaded(rep, loading=0.05)             # heavily-loaded
+                                                          # MVDR (smoother)
 
 # Transfer function (KrakenField / Scooter / RAM / OASP / Bellhop broadband)
 tf = bellhop.run(env, source, receiver, run_mode=RunMode.BROADBAND)
@@ -2141,7 +2359,7 @@ the four examples that need a longer subprocess timeout (see
 | 14 | `example_14_new_plotting_features.py`          | Visualization tour | |
 | 15 | `example_15_elastic_boundaries_comparison.py`  | Fluid vs elastic bottoms | |
 | 16 | `example_16_bellhop_bounce_integration.py`     | `Bellhop.run_with_bounce()` + `LayeredBottom` | |
-| 17 | `example_17_boundary_conditions_layered.py`    | Surface BC + layered bottoms (RD layered) | ✓ |
+| 17 | `example_17_boundary_conditions_layered.py`    | Surface BC + layered bottoms (RD layered, including a preset-built layered scenario) | ✓ |
 | 18 | `example_18_rd_bottom_krakenfield_vs_ram.py`   | RD layered bottom: adiabatic vs coupled vs RAM | |
 | 19 | `example_19_broadband_comparison.py`           | Multi-model H(f) + p(t) (Bellhop / RAM / Scooter / OASP / SPARC) | ✓ |
 | 20 | `example_20_ram_backends.py`                   | RAM dispatcher: mpiramS / rams / ramsurf | |
@@ -2149,6 +2367,7 @@ the four examples that need a longer subprocess timeout (see
 | 22 | `example_22_ram_lytaev_grid.py`                | RAM Lytaev (2023) Padé grid optimizer | ✓ |
 | 23 | `example_23_collapse_methods.py`               | Same RD env collapsed four ways via `collapse={…}` kwarg | |
 | 24 | `example_24_synthesize_time_series.py`         | Bellhop BROADBAND H(f) → IFFT → p(t) via `TransferFunction.synthesize_time_series` | |
+| 25 | `example_25_canonical_presets.py`              | Parametric SSP shapes (isothermal / linear / bilinear / n²-linear / Munk / Mackenzie T,S) + plane-wave bottom-loss overlay | |
 
 Smoke test:
 

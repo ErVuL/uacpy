@@ -27,7 +27,7 @@ def test_compute_windnoise_zero_wind(freqs):
 
 
 def test_compute_windnoise_increases_with_wind(freqs):
-    low  = compute_windnoise(freqs, u=5,  water_depth='deep')
+    low = compute_windnoise(freqs, u=5,  water_depth='deep')
     high = compute_windnoise(freqs, u=25, water_depth='deep')
     assert np.all(np.isfinite(low))
     assert np.all(np.isfinite(high))
@@ -36,7 +36,7 @@ def test_compute_windnoise_increases_with_wind(freqs):
 
 
 def test_compute_windnoise_shallow_louder_than_deep(freqs):
-    deep    = compute_windnoise(freqs, u=10, water_depth='deep')
+    deep = compute_windnoise(freqs, u=10, water_depth='deep')
     shallow = compute_windnoise(freqs, u=10, water_depth='shallow')
     band = (freqs >= 100) & (freqs <= 1500)
     assert np.mean(shallow[band]) > np.mean(deep[band])
@@ -86,15 +86,15 @@ def test_wenznoise_total_geq_components(freqs):
     wenz = WenzNoise(freqs, wind_speed=10, shipping_level='medium',
                      rain_rate='moderate')
     components = np.column_stack([wenz.shipping, wenz.wind, wenz.rain,
-                                   wenz.thermal, wenz.turbulence])
+                                  wenz.thermal, wenz.turbulence])
     # Total in dB must be ≥ each individual component everywhere.
     assert np.all(wenz.total + 1e-6 >= components.max(axis=1))
 
 
 def test_wenznoise_shipping_levels_ordered(freqs):
     band = (freqs >= 30) & (freqs <= 200)
-    low  = WenzNoise(freqs, wind_speed=5, shipping_level='low').total[band]
-    med  = WenzNoise(freqs, wind_speed=5, shipping_level='medium').total[band]
+    low = WenzNoise(freqs, wind_speed=5, shipping_level='low').total[band]
+    med = WenzNoise(freqs, wind_speed=5, shipping_level='medium').total[band]
     high = WenzNoise(freqs, wind_speed=5, shipping_level='high').total[band]
     assert np.mean(low) < np.mean(med) < np.mean(high)
 

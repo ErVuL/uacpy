@@ -5,10 +5,8 @@ Provides consistent, professional visualization across all examples.
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import uacpy
+from typing import Dict
 
 # Default output directory: next to this file, so examples drop plots under
 # uacpy/uacpy/examples/output/ regardless of the caller's cwd.
@@ -55,9 +53,11 @@ ZORDER = {
     'ANNOTATIONS': 15,       # Text annotations (top layer)
 }
 
+
 def apply_plot_style():
     """Apply consistent plot style"""
     plt.rcParams.update(PLOT_STYLE)
+
 
 def plot_bathymetry_overlay(ax, env, result, range_min_km=None, range_max_km=None, zorder_fill=10, zorder_line=11):
     """
@@ -99,7 +99,7 @@ def plot_bathymetry_overlay(ax, env, result, range_min_km=None, range_max_km=Non
 
         # Seafloor line on top
         ax.plot(bathy_ranges_extended, bathy_depths_extended, 'k-', linewidth=2.5,
-               label='Seafloor', zorder=zorder_line)
+                label='Seafloor', zorder=zorder_line)
     else:
         # Flat bottom case
         seafloor_depth = env.depth
@@ -110,7 +110,8 @@ def plot_bathymetry_overlay(ax, env, result, range_min_km=None, range_max_km=Non
 
         # Seafloor line
         ax.plot([range_min_km, range_max_km], [seafloor_depth, seafloor_depth],
-               'k-', linewidth=2.5, label='Seafloor', zorder=zorder_line)
+                'k-', linewidth=2.5, label='Seafloor', zorder=zorder_line)
+
 
 def plot_source_receiver_config(env, source, receiver):
     """
@@ -122,7 +123,7 @@ def plot_source_receiver_config(env, source, receiver):
 
     # Plot 1: Sound Speed Profile
     ax = axes[0]
-    ax.plot(env.ssp.to_pairs()[:,1], env.ssp.to_pairs()[:,0], 'b-', linewidth=2)
+    ax.plot(env.ssp.to_pairs()[:, 1], env.ssp.to_pairs()[:, 0], 'b-', linewidth=2)
     ax.axhline(source.depths[0], color='r', linestyle='--', linewidth=2, label='Source', alpha=0.7)
     for rd in receiver.depths[::len(receiver.depths)//5]:  # Show 5 receiver depths
         ax.axhline(rd, color='g', linestyle=':', linewidth=1, alpha=0.5)
@@ -137,9 +138,9 @@ def plot_source_receiver_config(env, source, receiver):
     # Plot 2: Bathymetry Profile
     ax = axes[1]
     if env.bathymetry is not None and len(env.bathymetry) > 1:
-        ax.plot(env.bathymetry[:,0]/1000, env.bathymetry[:,1], 'k-', linewidth=2)
-        ax.fill_between(env.bathymetry[:,0]/1000, env.bathymetry[:,1],
-                        np.max(env.bathymetry[:,1])*1.2, color='#8B4513', alpha=0.5)
+        ax.plot(env.bathymetry[:, 0]/1000, env.bathymetry[:, 1], 'k-', linewidth=2)
+        ax.fill_between(env.bathymetry[:, 0]/1000, env.bathymetry[:, 1],
+                        np.max(env.bathymetry[:, 1])*1.2, color='#8B4513', alpha=0.5)
     else:
         ax.axhline(env.depth, color='k', linewidth=2, label='Flat bottom')
         ax.fill_between([0, np.max(receiver.ranges)/1000], env.depth, env.depth*1.2,
@@ -162,7 +163,7 @@ def plot_source_receiver_config(env, source, receiver):
     ax.plot(0, source.depths[0], 'r*', markersize=20, label='Source')
 
     if env.bathymetry is not None and len(env.bathymetry) > 1:
-        ax.plot(env.bathymetry[:,0]/1000, env.bathymetry[:,1], 'k-', linewidth=2, label='Seafloor')
+        ax.plot(env.bathymetry[:, 0]/1000, env.bathymetry[:, 1], 'k-', linewidth=2, label='Seafloor')
     else:
         ax.axhline(env.depth, color='k', linewidth=2, label='Flat bottom')
 
@@ -175,6 +176,7 @@ def plot_source_receiver_config(env, source, receiver):
 
     plt.tight_layout()
     return fig
+
 
 def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
     """
@@ -229,8 +231,8 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
             # Interpolate bathymetry depth for each range
             from scipy.interpolate import interp1d
             bathy_interp = interp1d(env.bathymetry[:, 0], env.bathymetry[:, 1],
-                                   kind='linear', bounds_error=False,
-                                   fill_value=(env.bathymetry[0, 1], env.bathymetry[-1, 1]))
+                                    kind='linear', bounds_error=False,
+                                    fill_value=(env.bathymetry[0, 1], env.bathymetry[-1, 1]))
             seafloor_depths = bathy_interp(result.ranges)
 
             # Mask data below seafloor
@@ -244,7 +246,7 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
 
         # Plot TL field (with lower zorder so bathymetry appears on top)
         im = ax.pcolormesh(result.ranges/1000, result.depths, tl_data,
-                          cmap='viridis', vmin=vmin, vmax=vmax, shading='auto', zorder=1)
+                           cmap='viridis', vmin=vmin, vmax=vmax, shading='auto', zorder=1)
 
         # Colorbar
         cbar = plt.colorbar(im, ax=ax, label='Transmission Loss (dB)')
@@ -279,6 +281,7 @@ def plot_tl_field_comparison(results: Dict, env, source, vmin=None, vmax=None):
     plt.tight_layout()
     return fig
 
+
 def plot_tl_comparison_curves(results: Dict, source_depth: float):
     """
     Plot TL vs range and TL vs depth comparison curves.
@@ -298,7 +301,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
     for name, result in results.items():
         tl_vs_range = result.at(depth=source_depth).tl
         ax.plot(result.ranges/1000, tl_vs_range, linewidth=2.5,
-               label=name, color=COLORS.get(name, None), alpha=0.8)
+                label=name, color=COLORS.get(name, None), alpha=0.8)
 
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -312,7 +315,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
         mid_range_km = np.median(result.ranges) / 1000
         tl_vs_depth = result.at(range=mid_range_km * 1000.0).tl
         ax.plot(tl_vs_depth, result.depths, linewidth=2.5,
-               label=name, color=COLORS.get(name, None), alpha=0.8)
+                label=name, color=COLORS.get(name, None), alpha=0.8)
 
     ax.invert_yaxis()
     ax.set_xlabel('Transmission Loss (dB)', fontweight='bold')
@@ -323,6 +326,7 @@ def plot_tl_comparison_curves(results: Dict, source_depth: float):
 
     plt.tight_layout()
     return fig
+
 
 def plot_model_statistics(results: Dict, source_depth: float):
     """
@@ -348,8 +352,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
     x = np.arange(len(model_names))
     width = 0.35
 
-    bars1 = ax.bar(x - width/2, stats[:,0], width, label='Mean TL', alpha=0.8)
-    bars2 = ax.bar(x + width/2, stats[:,1], width, label='Std TL', alpha=0.8)
+    ax.bar(x - width/2, stats[:, 0], width, label='Mean TL', alpha=0.8)
+    ax.bar(x + width/2, stats[:, 1], width, label='Std TL', alpha=0.8)
 
     ax.set_xlabel('Model', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -383,13 +387,13 @@ def plot_model_statistics(results: Dict, source_depth: float):
                         else:
                             tl_i = np.interp(ranges_j, ranges_i, tl_i)
 
-                    rms_matrix[i,j] = np.sqrt(np.mean((tl_i - tl_j)**2))
+                    rms_matrix[i, j] = np.sqrt(np.mean((tl_i - tl_j)**2))
 
         # Compute colormap normalization from data
         rms_max = np.max(rms_matrix)
         vmax_rms = max(10, np.percentile(rms_matrix[rms_matrix > 0], 95)) if rms_max > 0 else 15
         im = ax.imshow(rms_matrix, cmap='RdYlGn_r', vmin=0, vmax=vmax_rms, interpolation='none')
-        cbar = plt.colorbar(im, ax=ax, label='RMS Error (dB)')
+        plt.colorbar(im, ax=ax, label='RMS Error (dB)')
 
         ax.set_xticks(range(n_models))
         ax.set_yticks(range(n_models))
@@ -401,20 +405,21 @@ def plot_model_statistics(results: Dict, source_depth: float):
         for i in range(n_models):
             for j in range(n_models):
                 if i != j:
-                    text_color = 'white' if rms_matrix[i,j] > (vmax_rms/2) else 'black'
-                    ax.text(j, i, f'{rms_matrix[i,j]:.1f}',
-                           ha='center', va='center', color=text_color, fontweight='bold')
+                    text_color = 'white' if rms_matrix[i, j] > (vmax_rms/2) else 'black'
+                    ax.text(j, i, f'{rms_matrix[i, j]:.1f}',
+                            ha='center', va='center', color=text_color, fontweight='bold')
     else:
         axes[1].text(0.5, 0.5, 'Need at least 2 models\nfor RMS comparison',
-                    ha='center', va='center', transform=axes[1].transAxes, fontsize=12)
+                     ha='center', va='center', transform=axes[1].transAxes, fontsize=12)
         axes[1].axis('off')
 
     plt.tight_layout()
     return fig
 
+
 def create_example_report(example_num: int, title: str, description: str,
-                         env, source, receiver, results: Dict,
-                         output_prefix: str, output_dir=None):
+                          env, source, receiver, results: Dict,
+                          output_prefix: str, output_dir=None):
     """
     Create complete report for an example with all plots.
 
@@ -444,17 +449,19 @@ def create_example_report(example_num: int, title: str, description: str,
     if env.is_range_dependent:
         print(f"  Range-dependent: YES (bathymetry points: {len(env.bathymetry)})")
     else:
-        print(f"  Range-dependent: NO")
+        print("  Range-dependent: NO")
 
     # Source info
-    print(f"\nSource:")
+    print("\nSource:")
     print(f"  Depth: {source.depths[0]}m")
     print(f"  Frequency: {source.frequencies[0]}Hz")
 
     # Receiver info
-    print(f"\nReceivers:")
+    print("\nReceivers:")
     print(f"  Depths: {len(receiver.depths)} points ({receiver.depths[0]:.1f}m to {receiver.depths[-1]:.1f}m)")
-    print(f"  Ranges: {len(receiver.ranges)} points ({receiver.ranges[0]/1000:.1f}km to {receiver.ranges[-1]/1000:.1f}km)")
+    r0_km = receiver.ranges[0] / 1000
+    r1_km = receiver.ranges[-1] / 1000
+    print(f"  Ranges: {len(receiver.ranges)} points ({r0_km:.1f}km to {r1_km:.1f}km)")
 
     # Model results
     print(f"\nModels tested: {len(results)}")
@@ -465,7 +472,7 @@ def create_example_report(example_num: int, title: str, description: str,
             print(f"  {name:15s}: Skipped")
 
     # Generate plots
-    print(f"\nGenerating plots...")
+    print("\nGenerating plots...")
 
     # Plot 1: Configuration
     fig = plot_source_receiver_config(env, source, receiver)

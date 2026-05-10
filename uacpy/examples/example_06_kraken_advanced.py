@@ -34,21 +34,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-import numpy as np
-import matplotlib.pyplot as plt
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy import RangeDependentBottom
-from uacpy.models import Kraken, KrakenField, KrakenC
-from uacpy.visualization.plots import (
+import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy.models import Kraken, KrakenField, KrakenC  # noqa: E402
+from uacpy.visualization.plots import (  # noqa: E402
     plot_transmission_loss,
     plot_modes,
-    plot_mode_functions,
     plot_mode_wavenumbers,
     plot_modes_heatmap,
-    plot_rd_bottom,
-    plot_environment_advanced
+    plot_rd_bottom
 )
+
 
 def main():
     print("\n" + "═" * 80)
@@ -191,12 +190,10 @@ def main():
         )
         n_complex = len(modes_complex.metadata['k'])
         print(f"  ✓ Computed {n_complex} complex modes")
-        print(f"  ✓ Supports elastic bottom with shear waves")
-        krakenc_success = True
+        print("  ✓ Supports elastic bottom with shear waves")
     except Exception as e:
         print(f"  ✗ KrakenC error: {e}")
         modes_complex = None
-        krakenc_success = False
 
     # ═══════════════════════════════════════════════════════════════════════
     # VISUALIZATION
@@ -250,20 +247,20 @@ def main():
     if modes_shallow is not None:
         print("\nGenerating advanced mode visualizations...")
 
-        #Use plot_mode_wavenumbers function for complex k-plane visualization
+        # Use plot_mode_wavenumbers function for complex k-plane visualization
         try:
             # compute_modes already returns a Field suitable for these plotters
             modes_field = modes_shallow
 
-            #plot_mode_wavenumbers - complex k-plane scatter plot
+            # plot_mode_wavenumbers - complex k-plane scatter plot
             fig2b, ax2b = plot_mode_wavenumbers(
                 modes_field,
                 annotate_modes=True,
                 max_annotations=15
             )
             ax2b.set_title('Mode Wavenumbers in Complex k-Plane\n' +
-                          f'Shallow Water - {M_s} modes',
-                          fontsize=14, fontweight='bold')
+                           f'Shallow Water - {M_s} modes',
+                           fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_wavenumbers.png', dpi=150, bbox_inches='tight')
             plt.close(fig2b)
             print("  ✓ Saved: example_06_wavenumbers.png (plot_mode_wavenumbers)")
@@ -271,15 +268,15 @@ def main():
         except Exception as e:
             print(f"  ! Warning: Could not create wavenumber plot: {e}")
 
-        #Use plot_modes with show_imaginary=True
+        # Use plot_modes with show_imaginary=True
         try:
             fig2c, (ax_modes, ax_k) = plot_modes(
                 modes_field,
-                show_imaginary=True  #Show imaginary parts as dashed lines
+                show_imaginary=True  # Show imaginary parts as dashed lines
             )
             fig2c.suptitle('Mode Shapes with Imaginary Parts\n' +
-                          'Shallow Water (solid=real, dashed=imaginary)',
-                          fontsize=14, fontweight='bold')
+                           'Shallow Water (solid=real, dashed=imaginary)',
+                           fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_mode_shapes.png', dpi=150, bbox_inches='tight')
             plt.close(fig2c)
             print("  ✓ Saved: example_06_mode_shapes.png (show_imaginary)")
@@ -287,7 +284,7 @@ def main():
         except Exception as e:
             print(f"  ! Warning: Could not create mode shapes plot: {e}")
 
-        #Use plot_modes_heatmap - Show all modes as 2D heatmap
+        # Use plot_modes_heatmap - Show all modes as 2D heatmap
         try:
             print("  Creating mode heatmap...", end=" ", flush=True)
             fig_heatmap, ax_heatmap = plot_modes_heatmap(
@@ -297,7 +294,7 @@ def main():
                 figsize=(14, 8)
             )
             plt.suptitle('All Mode Shapes - Continental Shelf Heatmap',
-                        fontsize=14, fontweight='bold')
+                         fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_modes_heatmap.png', dpi=150, bbox_inches='tight')
             plt.close(fig_heatmap)
             print("✓")
@@ -306,15 +303,15 @@ def main():
             print(f"\n  ! Warning: Could not create mode heatmap: {e}")
 
     # Plot 3: Coupled mode TL field
-    #Using auto TL limits and contour overlays
+    # Using auto TL limits and contour overlays
     if result is not None:
         fig3, ax3 = plot_transmission_loss(
             result, env,
-            contours=[70, 85, 100],  #Add labeled contours
+            contours=[70, 85, 100],  # Add labeled contours
             show_colorbar=True
         )
         ax3.set_title('KrakenField: Adiabatic Mode Coupling\nContinental Shelf Transition\n' +
-                     '(auto TL limits + contour overlays)')
+                      '(auto TL limits + contour overlays)')
 
         # Add segment indicators
         seg_ranges = np.linspace(0, 20, 11)
@@ -341,6 +338,7 @@ def main():
     print("\n✓ Example 06 complete\n")
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

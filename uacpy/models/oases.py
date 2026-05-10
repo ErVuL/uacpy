@@ -45,7 +45,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, PressureField, TransferFunction,
-    Modes, Covariance, Replicas, ReflectionCoefficient,
+    Covariance, Replicas, ReflectionCoefficient,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -936,6 +936,7 @@ class OASR(PropagationModel):
             raise
         if self.verbose and result.stdout:
             self._log(f"OASES output:\n{result.stdout}", level='debug')
+
 
 class OASP(PropagationModel):
     """

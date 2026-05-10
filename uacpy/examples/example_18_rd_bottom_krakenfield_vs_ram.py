@@ -22,14 +22,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import uacpy
-from uacpy.core.environment import (
+import numpy as np  # noqa: E402
+import uacpy  # noqa: E402
+from uacpy.core.environment import (  # noqa: E402
     BoundaryProperties, SedimentLayer, LayeredBottom,
     RangeDependentLayeredBottom, SoundSpeedProfile,
 )
-from uacpy.models.ram import RAM
-from uacpy.models.kraken import KrakenField
+from uacpy.models.ram import RAM  # noqa: E402
+from uacpy.models.kraken import KrakenField  # noqa: E402
 
 
 def make_base_env(bottom):
@@ -47,8 +47,8 @@ def make_base_env(bottom):
     env = uacpy.Environment(
         name='rd_comparison',
         ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
-            interp='linear',
-        ),
+                                      interp='linear',
+                                      ),
         bathymetry=bathymetry,
         bottom=bottom,
     )
@@ -133,7 +133,7 @@ def main():
         ranges=np.linspace(1000, 6000, 300),
     )
 
-    bathy_ranges_m = np.array([0, 5000, 10000, 15000, 20000.0])
+    np.array([0, 5000, 10000, 15000, 20000.0])
     bathy_depths_m = np.array([100, 120, 150, 180, 200.0])
 
     # ── Run both bottom cases with all three models ─────────────
@@ -215,7 +215,7 @@ def main():
             f = results[case_label].get(key)
             if f is not None:
                 plot_transmission_loss(f, env_plot, ax=ax, show_colorbar=False,
-                                      vmin=vmin_shared, vmax=vmax_shared)
+                                       vmin=vmin_shared, vmax=vmax_shared)
                 tl_im = ax.collections[0] if ax.collections else tl_im
             ax.set_title(f'{case_label} — {title_suffix}', fontsize=10,
                          fontweight='bold')

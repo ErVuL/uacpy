@@ -18,7 +18,7 @@ References:
 
 import warnings
 from pathlib import Path
-from typing import Callable, List, Optional, TextIO, Tuple, Union
+from typing import Callable, Optional, TextIO, Tuple, Union
 import numpy as np
 
 from uacpy.core.environment import BoundaryProperties, Environment
@@ -123,7 +123,7 @@ def _emit_bottom_layers(
     """
     if suffix_fn is None:
         static_trail = (' 0' * (1 + extra_columns))  # RG [IG [extra...]]
-        suffix_fn = lambda _i: static_trail  # noqa: E731  -- static-suffix shortcut
+        def suffix_fn(_i): return static_trail  # noqa: E731  -- static-suffix shortcut
 
     iface = iface_start
     if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
@@ -991,7 +991,7 @@ _REFL_TYPE_TO_OPTION = {
     'P-P': 'N',          # default — P-wave to P-wave reflection
     'P-SV': 'S',         # P-wave to vertical shear
     'P-Slow': 'B',       # P-wave to Biot slow wave
-    'transmission': 't', # transmission instead of reflection
+    'transmission': 't',  # transmission instead of reflection
 }
 
 

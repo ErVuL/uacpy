@@ -27,7 +27,11 @@ from uacpy.core.exceptions import (
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
-from uacpy.io.oalib_writer import write_bio_layers, write_fg_params, write_layer_sections, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section
+from uacpy.io.oalib_writer import (
+    write_bio_layers, write_fg_params, write_layer_sections,
+    write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
+    write_ssp_section,
+)
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
@@ -523,7 +527,7 @@ class SPARC(PropagationModel):
                     tl_field = np.vstack(tl_field)  # shape: (n_depths, n_ranges)
 
                 result = PressureField(
-            units="dB",
+                    units="dB",
                     data=tl_field,
                     ranges=ranges_out,
                     depths=receiver.depths,
@@ -599,7 +603,7 @@ class SPARC(PropagationModel):
                     tl_field = np.column_stack(tl_field)  # shape: (n_depths, n_ranges)
 
                 result = PressureField(
-            units="dB",
+                    units="dB",
                     data=tl_field,
                     ranges=receiver.ranges,
                     depths=depths_out,
@@ -785,7 +789,7 @@ class SPARC(PropagationModel):
             if len(receiver.depths) == 1:
                 # Single depth — SPARC interpolates a depth vector from
                 # (first, last); repeat the value so it stays constant.
-                f.write(f"1\n")
+                f.write("1\n")
                 f.write(f"{receiver.depths[0]:.6f} {receiver.depths[0]:.6f} /\n")
             else:
                 write_receiver_depths(f, receiver)
@@ -856,4 +860,3 @@ class SPARC(PropagationModel):
 
         if self.verbose and result.stdout:
             self._log(f"SPARC output:\n{result.stdout}", level='debug')
-

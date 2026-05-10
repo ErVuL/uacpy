@@ -3,14 +3,11 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, Scooter, SPARC
-from uacpy.models.base import RunMode
-from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
+from uacpy.models import RAM
+from uacpy.core import Environment, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
+
 
 class TestRAMAdvancedParameters:
     """Test RAM Pade orders and stability parameters."""
@@ -37,7 +34,7 @@ class TestRAMAdvancedParameters:
     @pytest.mark.parametrize('np_pade', [2, 6, 8])
     def test_ram_pade_order(self, ram_env, ram_source, ram_receiver, np_pade):
         """RAM converges across the supported Padé-coefficient counts."""
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(
             env=ram_env,
             source=ram_source,
@@ -49,7 +46,7 @@ class TestRAMAdvancedParameters:
 
     def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
         """Test RAM stability parameter."""
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(
             env=ram_env,
             source=ram_source,
@@ -61,7 +58,7 @@ class TestRAMAdvancedParameters:
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
         """Test RAM with custom range and depth steps."""
-        ram = RAM(verbose=False)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(
             env=ram_env,
             source=ram_source,
@@ -91,7 +88,7 @@ class TestRAMAdvancedParameters:
         monkeypatch.setattr(mpw, 'write_inpe', fake_write_inpe)
         monkeypatch.setattr(ram_mod, 'write_inpe', fake_write_inpe)
 
-        ram = RAM(Q=4.0, T=20.0, verbose=False)
+        ram = RAM(Q=4.0, T=20.0, dr=20.0, dz=2.0, verbose=False)
         with pytest.raises(RuntimeError, match="stop after writing in.pe"):
             ram.compute_tl(env=ram_env, source=ram_source, receiver=ram_receiver)
         assert captured['Q'] == 4.0
@@ -113,7 +110,7 @@ class TestRAMAdvancedParameters:
         monkeypatch.setattr(mpw, 'write_inpe', fake_write_inpe)
         monkeypatch.setattr(ram_mod, 'write_inpe', fake_write_inpe)
 
-        ram = RAM(Q=4.0, T=20.0, verbose=False)
+        ram = RAM(Q=4.0, T=20.0, dr=20.0, dz=2.0, verbose=False)
         with pytest.raises(RuntimeError, match="stop after writing in.pe"):
             ram.run(
                 env=ram_env, source=ram_source, receiver=ram_receiver,

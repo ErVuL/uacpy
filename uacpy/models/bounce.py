@@ -15,7 +15,6 @@ Note: SPARC does not support reflection coefficient files.
 
 import shutil
 import tempfile
-import warnings
 import weakref
 import numpy as np
 from pathlib import Path
@@ -25,15 +24,21 @@ from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overri
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, ReflectionCoefficient
+from uacpy.core.results import Result
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX,
     AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
-from uacpy.core.exceptions import UnsupportedFeatureError, ConfigurationError, ExecutableNotFoundError, ModelExecutionError
+from uacpy.core.exceptions import (
+    UnsupportedFeatureError, ConfigurationError,
+    ExecutableNotFoundError, ModelExecutionError,
+)
 from uacpy.io.refl_io import read_reflection_coefficient
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_fg_params, write_header, write_ssp_section
+from uacpy.io.oalib_writer import (
+    write_bio_layers, write_bottom_section, write_fg_params,
+    write_header, write_ssp_section,
+)
 
 
 class Bounce(PropagationModel):

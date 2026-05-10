@@ -67,7 +67,13 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
     UnsupportedFeatureError,
 )
-from uacpy.io.oalib_writer import write_bio_layers, write_bottom_section, write_broadband_freqs, write_fg_params, write_header, write_layer_sections, write_multi_profile_env, write_phase_speed_and_rmax, write_receiver_depths, write_source_depths, write_ssp_section, write_fieldflp
+from uacpy.io.oalib_writer import (
+    write_bio_layers, write_bottom_section, write_broadband_freqs,
+    write_fg_params, write_header, write_layer_sections,
+    write_multi_profile_env, write_phase_speed_and_rmax,
+    write_receiver_depths, write_source_depths, write_ssp_section,
+    write_fieldflp,
+)
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin
 from uacpy.models.coupled_modes import segment_environment_by_range
 
@@ -1444,5 +1450,3 @@ class KrakenField(_KrakenBase):
             n_modes=n_modes,
             **kwargs,
         )
-
-

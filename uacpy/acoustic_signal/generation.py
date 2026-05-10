@@ -9,9 +9,10 @@ commonly used in underwater acoustic applications including:
 """
 
 import numpy as np
-from typing import Tuple, Literal, Union
+from typing import Tuple, Literal
 import warnings
 import math
+
 
 def ssrp(Pxx, Fxx, duration=1, scale=1, *,
          n_fft=65536, fs=None, interp='linear'):
@@ -61,7 +62,7 @@ def ssrp(Pxx, Fxx, duration=1, scale=1, *,
     ...                 n_fft=2**16, fs=40_000, interp='log')
     """
     MAX_NFFT = 262144
-    
+
     Pxx = np.asarray(Pxx, dtype=float)
     Fxx = np.asarray(Fxx, dtype=float)
     if Pxx.ndim != 1 or Fxx.shape != Pxx.shape:
@@ -181,12 +182,15 @@ def _resample_psd(Pxx, Fxx, f_target, method):
         "valid: 'linear', 'log', 'pchip', 'nearest'."
     )
 
+
 def _is_power_of_two(x):
     return x > 0 and x.is_integer() and ((int(x) & (int(x) - 1)) == 0)
+
 
 def _closest_power_of_two(x):
     n = round(math.log2(x))
     return 2 ** n
+
 
 def cans(
     t: np.ndarray,

@@ -3,13 +3,10 @@
 import pytest
 import numpy as np
 
-import uacpy
-from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import TransferFunction, TimeSeriesField
-from uacpy.models import Bellhop, RAM, Kraken, KrakenC, KrakenField, Scooter, SPARC
+from uacpy.models import Kraken, KrakenC, KrakenField
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ExecutableNotFoundError, UnsupportedFeatureError
 
 pytestmark = pytest.mark.requires_binary
 
@@ -71,7 +68,6 @@ class TestKrakenFieldBroadband:
         assert result.data.shape[2] > 0
         assert np.all(np.isfinite(result.data))
 
-
     """Test KrakenC for complex modes with elastic bottom."""
 
     @pytest.fixture
@@ -91,7 +87,6 @@ class TestKrakenFieldBroadband:
             ssp=1500.0,
             bottom=bottom
         )
-
 
     @pytest.fixture
     def receiver(self):

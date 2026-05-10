@@ -908,7 +908,7 @@ class Bellhop(PropagationModel):
         arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
 
         arrivals_by_rcv = arr_field.metadata['arrivals_by_receiver']
-        sz = arr_field.metadata['source_depths']
+        arr_field.metadata['source_depths']
         rz = arr_field.metadata['receiver_depths']
         rr = arr_field.metadata['receiver_ranges']  # in meters
 

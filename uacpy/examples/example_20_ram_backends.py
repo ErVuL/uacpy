@@ -23,18 +23,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import matplotlib
+import numpy as np  # noqa: E402
+import matplotlib  # noqa: E402
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from uacpy.core.environment import (
+from uacpy.core.environment import (  # noqa: E402
     BoundaryProperties, Environment, LayeredBottom, SedimentLayer,
 )
-from uacpy.core.receiver import Receiver
-from uacpy.core.source import Source
-from uacpy.models import RAM, RunMode
-from uacpy.core.exceptions import UnsupportedFeatureError
+from uacpy.core.receiver import Receiver  # noqa: E402
+from uacpy.core.source import Source  # noqa: E402
+from uacpy.models import RAM, RunMode  # noqa: E402
+from uacpy.core.exceptions import UnsupportedFeatureError  # noqa: E402
 
 
 def main():

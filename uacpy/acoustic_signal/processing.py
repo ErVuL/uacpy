@@ -11,7 +11,7 @@ This module contains signal processing computations including:
 import warnings
 
 import numpy as np
-from typing import Union, Tuple, Optional
+from typing import Tuple, Optional
 from scipy.signal.windows import hann
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -184,8 +184,6 @@ def beamform(
     peak = np.max(power)
 
     return power, angles, peak
-
-
 
 
 def add_noise(
@@ -434,7 +432,7 @@ def fourier_synthesis(
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
-                                     np.exp(1j * 2 * np.pi * Tstart * freq_vec))
+                                      np.exp(1j * 2 * np.pi * Tstart * freq_vec))
     elif len(freq_vec) > 0 and freq_vec[0] > 0:
         warnings.warn(
             f"fourier_synthesis: freq_vec[0]={freq_vec[0]:.3g} Hz > 0 with "
@@ -471,5 +469,3 @@ def fourier_synthesis(
     time = np.linspace(0.0, Tmax - deltat, Nfreq)
 
     return rmod, time
-
-
