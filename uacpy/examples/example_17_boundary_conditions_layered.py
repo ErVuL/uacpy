@@ -54,7 +54,7 @@ def example_rough_surface():
     """Rough sea surface from Pierson-Moskowitz spectrum (15 m/s wind)."""
     source, receiver = make_source_receiver()
     surface = generate_sea_surface(
-        max_range_m=10000, wind_speed_ms=15, n_points=300, seed=42,
+        max_range=10000, wind_speed_ms=15, n_points=300, seed=42,
     )
     env = uacpy.Environment(
         name='rough_surface',

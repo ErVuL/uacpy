@@ -135,7 +135,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
     if any(r is not None for r in results.values()):
         create_example_report(
-            example_num=6,
+            example_num=3,
             title="Multi-Frequency Analysis - Broadband Propagation",
             description="Thermocline environment demonstrating frequency-dependent propagation, "
             "surface duct trapping, and modal characteristics across frequencies.",
@@ -143,7 +143,7 @@ def main():
             source=source,
             receiver=receiver,
             results=results,
-            output_prefix="example_06"
+            output_prefix="example_03"
         )
 
         print("\n" + "="*80)

@@ -226,8 +226,7 @@ def main():
     # =========================================================================
     print("\n--- SPARC Time-Domain ---")
     try:
-        sparc = SPARC(verbose=False)
-        # SPARC needs a horizontal array (single depth, multiple ranges)
+        sparc = SPARC(verbose=False, n_t_out=1001, t_max=4.0)
         receiver_sparc = uacpy.Receiver(
             depths=np.array([50.0]),
             ranges=np.linspace(500, 5000, 5)
@@ -235,12 +234,10 @@ def main():
         result_sparc = sparc.run(
             env, source, receiver_sparc, run_mode=RunMode.TIME_SERIES,
             f_min=50.0, f_max=200.0,
-            n_t_out=1001,
-            t_max=4.0,
         )
         print(f"  Output shape: {result_sparc.data.shape} (n_depths x nr x nt)")
-        print(f"  Time step: {result_sparc.metadata['dt']*1000:.3f} ms")
-        print(f"  Duration: {result_sparc.metadata['time'][-1]*1000:.1f} ms")
+        print(f"  Time step: {result_sparc.dt*1000:.3f} ms")
+        print(f"  Duration: {result_sparc.time[-1]*1000:.1f} ms")
         results['SPARC'] = result_sparc
     except Exception as e:
         print(f"  SKIPPED: {e}")
@@ -274,8 +271,8 @@ def main():
         )
         print(f"  Output type: {result_das.field_type}")
         print(f"  Shape: {result_das.data.shape}")
-        print(f"  Time: {result_das.metadata['time'][0]*1000:.1f} - "
-              f"{result_das.metadata['time'][-1]*1000:.1f} ms")
+        print(f"  Time: {result_das.time[0]*1000:.1f} - "
+              f"{result_das.time[-1]*1000:.1f} ms")
         print(f"  Max amplitude: {np.max(np.abs(result_das.data)):.6f}")
         results['Bellhop (chirp)'] = result_das
     except Exception as e:
@@ -358,13 +355,13 @@ def main():
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
         trace = r.at(depth=target_depth, range=target_range).data
-        ts_results['Bellhop (chirp)'] = (r.metadata['time'] * 1000, trace)
+        ts_results['Bellhop (chirp)'] = (r.time * 1000, trace)
 
     # Add SPARC at the first depth and last range.
     if 'SPARC' in results:
         r = results['SPARC']
         trace = r.at(depth=float(r.depths[0]), range=float(r.ranges[-1])).data
-        ts_results['SPARC'] = (r.metadata['time'] * 1000, trace)
+        ts_results['SPARC'] = (r.time * 1000, trace)
 
     if ts_results:
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
@@ -419,7 +416,7 @@ def main():
     # --- Plot D: Bellhop delay-and-sum detail ---
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        t_ms = r.metadata['time'] * 1000
+        t_ms = r.time * 1000
         data = r.at(depth=target_depth, range=target_range).data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
@@ -451,7 +448,7 @@ def main():
     # --- Plot E: SPARC waterfall (if available) ---
     if 'SPARC' in results:
         result_sparc = results['SPARC']
-        time_ms = result_sparc.metadata['time'] * 1000
+        time_ms = result_sparc.time * 1000
         # New shape (n_d, n_r, n_t) — depth 0 → (n_r, n_t).
         pressure = result_sparc.data[0]
 
@@ -490,7 +487,7 @@ def main():
         if result.field_type == 'transfer_function':
             notes = f'{len(result.frequencies)} freqs'
         elif result.field_type == 'time_series':
-            notes = f"dt={result.metadata['dt']*1000:.2f} ms"
+            notes = f"dt={result.dt*1000:.2f} ms"
         print(f"{name:<20} {result.field_type:<20} {str(result.data.shape):<25} {notes}")
 
     print("\nModels with TIME_SERIES support:")

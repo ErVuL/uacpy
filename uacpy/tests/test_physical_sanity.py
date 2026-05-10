@@ -129,11 +129,11 @@ class TestPekerisWaveguide:
         modes = kraken.compute_modes(pekeris_env, pekeris_source, n_modes=20)
 
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata, "Should have wavenumber data"
-        assert 'phi' in modes.metadata, "Should have mode functions"
+        assert modes.k is not None, "Should have wavenumber data"
+        assert modes.phi is not None, "Should have mode functions"
 
-        k = modes.metadata['k']
-        phi = modes.metadata['phi']
+        k = modes.k
+        phi = modes.phi
 
         # Mode validation
         assert len(k) > 0, "Should compute at least one mode"

@@ -4,13 +4,16 @@ EXAMPLE 16: Bellhop + BOUNCE Integration, Layered Bottom, Range-Dependent Bottom
 ===============================================================================
 
 OBJECTIVE:
-    Demonstrate three key features added for range/depth-dependent modeling:
-    1. Bellhop.run_with_bounce() — one-call elastic bottom workflow
+    Demonstrate three key features for range/depth-dependent modeling:
+    1. Bellhop.run_with_bounce() — explicit BOUNCE control for elastic
+       bottoms. (Bellhop.run() already auto-routes through BOUNCE for
+       elastic / layered bottoms with a UserWarning; use
+       run_with_bounce when you need to pin c_low / c_high / rmax.)
     2. LayeredBottom — multi-layer sediment with Kraken
     3. Range-dependent bottom properties — with RAM and visualization
 
 FEATURES DEMONSTRATED:
-    - Bellhop.run_with_bounce() convenience method
+    - Bellhop.run_with_bounce() for explicit BOUNCE parameters
     - LayeredBottom + SedimentLayer for depth-dependent sediment
     - RangeDependentBottom with RAM (true Fortran RD support)
     - plot_transmission_loss(), plot_layered_bottom(), plot_rd_bottom()
@@ -88,7 +91,7 @@ def demo_bellhop_bounce():
     result_bounce = bellhop.run_with_bounce(
         env, source, receiver,
         run_mode=RunMode.COHERENT_TL,
-        cmin=1400.0, cmax=10000.0, rmax_m=10000.0,
+        cmin=1400.0, cmax=10000.0, rmax=10000.0,
     )
 
     # Compare

@@ -104,11 +104,11 @@ class TestKrakenFieldBroadband:
         )
 
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert len(modes.metadata['k']) > 0
+        assert modes.k is not None
+        assert len(modes.k) > 0
 
         # Complex modes should have complex wavenumbers
-        k = modes.metadata['k']
+        k = modes.k
         assert np.any(np.imag(k) != 0), "Should have complex wavenumbers for elastic bottom"
 
 

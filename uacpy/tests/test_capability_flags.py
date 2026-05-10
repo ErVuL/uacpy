@@ -1,7 +1,6 @@
 """Capability-flag harmonization tests.
 
-Locks in the per-model `_supports_*` matrix and the per-feature
-``_unsupported_env_alternatives`` dict shape. If a model gains or loses
+Locks in the per-model `_supports_*` matrix. If a model gains or loses
 support for an Environment feature, the change must come with an update
 to this test so the public capability surface stays explicit.
 """
@@ -167,35 +166,4 @@ def test_capability_flag(model_name, feature):
     assert flag is expected[feature], (
         f"{model_name}._supports_{feature} = {flag}, "
         f"expected {expected[feature]}"
-    )
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_alternatives_dict_complete(model_name):
-    """Every model exposes a dict with one entry per feature axis."""
-    factory, _ = _EXPECTED[model_name]
-    try:
-        m = factory()
-    except FileNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    alts = m._unsupported_env_alternatives
-    assert isinstance(alts, dict), f"{model_name} alts is {type(alts)}"
-    assert set(alts.keys()) == set(_FEATURES), (
-        f"{model_name} alts keys {set(alts.keys())} != {set(_FEATURES)}"
-    )
-    for feature, hint in alts.items():
-        assert isinstance(hint, str) and hint, (
-            f"{model_name}.{feature} hint is empty/non-string"
-        )
-
-
-def test_bellhop_layered_alts_mention_run_with_bounce():
-    """Bellhop's layered-bottom suggestion includes the run_with_bounce hint."""
-    try:
-        b = Bellhop()
-    except FileNotFoundError:
-        pytest.skip("Bellhop binary not available")
-    assert 'run_with_bounce' in b._unsupported_env_alternatives['layered_bottom']
-    assert 'run_with_bounce' in (
-        b._unsupported_env_alternatives['range_dependent_layered_bottom']
     )

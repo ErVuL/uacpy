@@ -71,7 +71,7 @@ class TestSPARCOutputModes:
         assert result.data is not None
         assert result.data.shape == (len(receiver_grid.depths), len(receiver_grid.ranges))
         assert result.metadata.get('output_mode') == 'R'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -100,7 +100,7 @@ class TestSPARCOutputModes:
         assert result.data is not None
         assert result.data.shape == (len(depths), len(ranges))
         assert result.metadata.get('output_mode') == 'D'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
         assert result.metadata.get('n_range_runs') == len(ranges)
 
     @pytest.mark.requires_binary
@@ -126,7 +126,7 @@ class TestSPARCOutputModes:
         # Snapshot mode provides full 2D field
         assert result.data.ndim == 2
         assert result.metadata.get('output_mode') == 'S'
-        assert result.metadata.get('model') == 'SPARC'
+        assert result.model == 'SPARC'
         assert 'Hankel transform' in result.metadata.get('note', '')
 
 
@@ -231,14 +231,22 @@ class TestSPARCErrorHandling:
             SPARC(output_mode='X')  # Invalid mode
 
     @pytest.mark.requires_binary
+    @pytest.mark.filterwarnings(
+        "ignore:SPARC supports only.*bottom boundaries:UserWarning"
+    )
     def test_sparc_halfspace_warning(self, source_50hz, receiver_grid):
-        """Test that halfspace bottom generates warning."""
+        """Halfspace bottom triggers SPARC's auto-conversion to rigid.
+
+        ``filterwarnings`` silences the per-depth-loop repetition from
+        the pytest warnings summary; ``pytest.warns`` inside the test
+        body still asserts the warning fires (``catch_warnings`` scope
+        overrides the filter for assertion purposes)."""
         env = Environment(name="Test", bathymetry=100, ssp=1500)
         env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
 
         sparc = SPARC(verbose=False)
 
-        with pytest.warns(UserWarning, match="elastic halfspace bottom"):
+        with pytest.warns(UserWarning, match="auto-converting the env's halfspace"):
             result = sparc.run(env, source_50hz, receiver_grid)
 
         assert result is not None

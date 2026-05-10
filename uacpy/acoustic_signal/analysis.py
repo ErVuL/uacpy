@@ -247,8 +247,6 @@ class Spectrogram:
             raise RuntimeError(
                 "Spectrogram.plot: compute() must be called before plotting"
             )
-
-        # Convert to dB scale
         Sxx_db = 10 * np.log10(self.Sxx / (self.ref**2))
 
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -452,17 +450,11 @@ class SEL:
             nfft = fs
 
         window = _sig.windows.hann(nfft)
-
-        # Initialize frequency axis to determine band indices
         f = np.fft.rfftfreq(nfft, d=1 / fs)
-
-        # Initialize band indices
         band_indices = []
         for low, center, high in self.bands:
             idx = np.logical_and(f >= low, f < high)
             band_indices.append(idx)
-
-        # Initialize SEL accumulator
         self.sel = np.zeros(len(self.bands))
 
         # Process data in chunks
@@ -471,8 +463,6 @@ class SEL:
 
             if len(chunk) < nfft:
                 chunk = np.pad(chunk, (0, nfft - len(chunk)))
-
-            # Compute spectrogram for chunk
             f, t, Sxx = _sig.spectrogram(
                 chunk, fs, window=window, noverlap=0, nfft=nfft, scaling="spectrum"
             )
@@ -612,7 +602,6 @@ class PSD:
         psd : ndarray
             PSD values in linear scale (Pa^2/Hz).
         """
-        # Compute Welch periodogram
         freqs, Pxx = _sig.welch(data, fs, **self.welch_params)
 
         # Store frequencies and PSD values
@@ -637,11 +626,7 @@ class PSD:
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
             raise RuntimeError("PSD.plot: compute() must be called before plotting")
-
-        # Convert PSD to dB scale
         psd_db = 10 * np.log10(self.psd / (self.ref**2))
-
-        # Plot PSD
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.semilogx(self.frequencies, psd_db, label=label, **kwargs)
 
@@ -817,16 +802,12 @@ class FRF:
                 f"got x.shape[0]={x.shape[0]}, y.shape[0]={y.shape[0]}"
             )
         n_meas = x.shape[0]
-
-        # Initialize lists to store results from all measurements
         m_list, tf_list, coh_list = [], [], []
 
         for i in range(n_meas):
             # Extract the i-th measurement
             x_i = x[i, :].ravel()
             y_i = y[i, :].ravel()
-
-            # Compute FRF for this measurement
             if self.method == "welch":
                 freqs_i, tf_i, coh_i = self.compute_welch(x_i, y_i, fs)
                 coh_list.append(coh_i)
@@ -895,19 +876,13 @@ class FRF:
         coh : ndarray
             Array of coherence values.
         """
-
-        # Compute cross-spectral densities
         freqs, Pxx = _sig.welch(x, fs, scaling="density", **self.params)
         _, Pyy = _sig.welch(y, fs, scaling="density", **self.params)
         _, Pxy = _sig.csd(y, x, fs, scaling="density", **self.params)
-
-        # Compute transfer function based on estimator choice
         if self.estimator == "H2":
             tf = Pyy / Pxy
         else:  # Default to H1
             tf = np.conj(Pxy) / Pxx
-
-        # Compute coherence
         coh = abs(Pxy) ** 2 / (Pxx * Pyy)
 
         return freqs, tf, coh
@@ -960,18 +935,10 @@ class FRF:
         # Average over periods to reduce noise
         x_avg = np.mean(x_reshaped, axis=0)
         y_avg = np.mean(y_reshaped, axis=0)
-
-        # Compute FFT of averaged signals
         X = np.fft.rfft(x_avg) + np.finfo(float).eps
         Y = np.fft.rfft(y_avg) + np.finfo(float).eps
-
-        # Compute frequencies
         freqs = np.fft.rfftfreq(period, d=1 / fs)
-
-        # Initialize transfer function
         tf = np.zeros_like(X, dtype=complex)
-
-        # Compute transfer function where input has significant energy
         tf = Y / X
 
         return freqs, tf
@@ -1004,19 +971,13 @@ class FRF:
         min_len = min(len(x), len(y))
         x = x[:min_len]
         y = y[:min_len]
-
-        # Compute FFTs
         X = np.fft.rfft(x) + np.finfo(float).eps
         Y = np.fft.rfft(y)
 
         # Determine frequency grid based on n_freqs
         n_fft = min_len
         freqs = np.fft.rfftfreq(n_fft, d=1 / fs)
-
-        # Initialize transfer function
         tf = np.zeros_like(X, dtype=complex)
-
-        # Compute transfer function
         tf = Y / X
 
         return freqs, tf
@@ -1085,7 +1046,6 @@ class FRF:
 
             for m_candidate in range(1, m_max + 1):
                 try:
-                    # Compute information matrix and vector
                     u_temp = u[:N].copy()
                     phiuu = np.zeros(m_candidate)
                     phiuy = np.zeros(m_candidate)
@@ -1109,8 +1069,6 @@ class FRF:
                     Vinfo = phiuy - np.dot(W.T, y[: m_candidate - 1])
 
                     g = np.linalg.solve(Minfo, Vinfo)
-
-                    # Compute residuals
                     y_hat = np.convolve(u[:N], g, mode="full")[:N]
                     residuals = y[:N] - y_hat
                     sse = np.sum(residuals**2) / (N - m_candidate)
@@ -1229,25 +1187,17 @@ class FRF:
         axes : list of Axes
             List of [matrix_ax, vector_ax, impulse_ax].
         """
-
-        # Create figure and gridspec
         fig = plt.figure(figsize=figsize)
 
         # Define a 2x2 grid with adjusted height ratios
         gs = GridSpec(2, 2, width_ratios=[2, 1], height_ratios=[2, 1])
-
-        # Plot Minfo as heatmap
         ax1 = fig.add_subplot(gs[0, 0])
         im = ax1.imshow(self.Minfo, cmap="viridis", aspect="equal")
         ax1.set_title(f"[Information Matrix] {title}", loc="left")
         ax1.set_xlabel("Index j")
         ax1.set_ylabel("Index i")
-
-        # Add colorbar to Minfo plot
         cbar = plt.colorbar(im, ax=ax1, shrink=0.8)
         cbar.set_label("Correlation Value")
-
-        # Plot Vinfo as bar chart
         ax2 = fig.add_subplot(gs[0, 1])
         indices = np.arange(len(self.Vinfo))
         ax2.bar(indices, self.Vinfo, color="skyblue", edgecolor="navy")
@@ -1567,8 +1517,6 @@ class FKTransform:
 
         # Inverse 2D FFT
         data_rec = np.fft.ifft2(FK_unshifted)
-
-        # Return real-valued signal if applicable
         data_rec = np.real(data_rec)
 
         return data_rec

@@ -136,24 +136,23 @@ def main():
     )
 
     t_start = time.time()
-    bounce = Bounce(verbose=False)
+    bounce_output = Path(__file__).parent / 'output' / 'bounce_brc'
+    bounce = Bounce(
+        verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
+        work_dir=bounce_output,    # pinned work_dir ⇒ cleanup=False ⇒ .brc/.irc persist here
+    )
     bounce_result = bounce.run(
-        env=env,
-        source=source,
-        receiver=receiver_bounce,
-        c_low=1400.0,
-        c_high=10000.0,
-        rmax_m=10000.0
+        env=env, source=source, receiver=receiver_bounce,
     )
     t_bounce = time.time() - t_start
 
     print(f"  ✓ BOUNCE completed in {t_bounce:.2f}s")
     print(f"    - Output: {Path(bounce_result.metadata['brc_file']).name}")
 
-    has_rc_data = 'theta' in bounce_result.metadata and 'R' in bounce_result.metadata
+    has_rc_data = bounce_result.theta is not None and bounce_result.R is not None
     if has_rc_data:
-        angles = bounce_result.metadata['theta']
-        R_mag = bounce_result.metadata['R']
+        angles = bounce_result.theta
+        R_mag = bounce_result.R
         print(f"    - Reflection coefficient: {len(angles)} angles")
         print(f"    - |R| range: [{R_mag.min():.3f}, {R_mag.max():.3f}]")
 
@@ -166,7 +165,7 @@ def main():
         attenuation=0.2,
         reflection_cmin=bounce_result.metadata['c_low'],
         reflection_cmax=bounce_result.metadata['c_high'],
-        reflection_rmax_m=bounce_result.metadata['rmax_m']
+        reflection_rmax=bounce_result.metadata['rmax']
     )
 
     env_with_rc = uacpy.Environment(
@@ -396,7 +395,7 @@ def main():
     workflow2 += "Step 2: Create env with file\n"
     workflow2 += "  bottom = BoundaryProperties(\n"
     workflow2 += "    acoustic_type='file',\n"
-    workflow2 += "    reflection_file=rc.brc_file\n"
+    workflow2 += "    reflection_file=rc.metadata['brc_file']\n"
     workflow2 += "  )\n\n"
     workflow2 += "Step 3: Run SCOOTER\n"
     workflow2 += "  scooter = Scooter()\n"

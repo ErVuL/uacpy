@@ -135,7 +135,13 @@ def _arrival_window():
     return (RANGE_M / c_bottom - 0.05, RANGE_M / c_water + 0.20)
 
 
-@pytest.mark.parametrize('label', list(_RUNNERS))
+def _runner_param(label):
+    """Mark RAM-broadband variants slow (Python freq-loop is the bottleneck)."""
+    marks = (pytest.mark.slow,) if label == 'RAM' else ()
+    return pytest.param(label, marks=marks, id=label)
+
+
+@pytest.mark.parametrize('label', [_runner_param(lbl) for lbl in _RUNNERS])
 def test_broadband_transfer_function_magnitude(label):
     """|H(fc)| at the test cell is finite, positive, and within 6 dB of
     the Scooter reference (Scooter is the wavenumber-integration ground
@@ -161,7 +167,7 @@ def test_broadband_transfer_function_magnitude(label):
     )
 
 
-@pytest.mark.parametrize('label', list(_RUNNERS))
+@pytest.mark.parametrize('label', [_runner_param(lbl) for lbl in _RUNNERS])
 def test_broadband_time_series_envelope_peak_in_arrival_window(label):
     """The IFFT'd Gaussian-convolved trace's analytic envelope peaks
     inside the physically plausible early-arrival window. Catches sign
@@ -189,6 +195,7 @@ def test_broadband_time_series_envelope_peak_in_arrival_window(label):
     )
 
 
+@pytest.mark.slow
 def test_broadband_peak_times_agree_across_models():
     """Inter-model envelope-peak spread under 100 ms. Tight enough to
     catch a phase-convention regression on any model; loose enough to

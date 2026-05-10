@@ -131,7 +131,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
     if any(r is not None for r in results.values()):
         create_example_report(
-            example_num=12,
+            example_num=8,
             title="Deep Water Long Range - 100+ km Propagation",
             description="Very long-range propagation (150 km) in deep SOFAR channel. "
             "Demonstrates convergence zones, channel trapping, and model efficiency.",
@@ -139,7 +139,7 @@ def main():
             source=source,
             receiver=receiver,
             results=results,
-            output_prefix="example_12"
+            output_prefix="example_08"
         )
     else:
         print("\n⚠ No models ran successfully!")

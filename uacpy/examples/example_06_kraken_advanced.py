@@ -116,7 +116,11 @@ def main():
 
     # Francois-Garrison requires (T [°C], S [ppt], pH, z_bar [m])
     fg_params = (10.0, 35.0, 8.0, 50.0)
-    kraken = Kraken(verbose=False, francois_garrison_params=fg_params)
+    kraken = Kraken(
+        verbose=False,
+        volume_attenuation='F',
+        francois_garrison_params=fg_params,
+    )
 
     # Compute modes for first range (shallow water)
     env_shallow = uacpy.Environment(
@@ -125,15 +129,11 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
         ),
-        bottom=bottom_rd.at(range=0)
+        bottom=bottom_rd.eval(range=0, interp='nearest')
     )
 
-    modes_shallow = kraken.compute_modes(
-        env_shallow,
-        source,
-        volume_attenuation='F',
-    )
-    n_modes_shallow = len(modes_shallow.metadata['k'])
+    modes_shallow = kraken.compute_modes(env_shallow, source)
+    n_modes_shallow = len(modes_shallow.k)
     print(f"  ✓ Computed {n_modes_shallow} modes for shallow water")
 
     # Compute modes for last range (deep water)
@@ -141,17 +141,17 @@ def main():
         name="Slope (400m)",
         bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
-        bottom=bottom_rd.at(range=20000)
+        bottom=bottom_rd.eval(range=20000, interp='nearest')
     )
 
     # Deep environment has shear_speed > 0 (rocky bottom); use KrakenC for complex modes.
-    krakenc_deep = KrakenC(verbose=False, francois_garrison_params=fg_params)
-    modes_deep = krakenc_deep.compute_modes(
-        env_deep,
-        source,
+    krakenc_deep = KrakenC(
+        verbose=False,
         volume_attenuation='F',
+        francois_garrison_params=fg_params,
     )
-    n_modes_deep = len(modes_deep.metadata['k'])
+    modes_deep = krakenc_deep.compute_modes(env_deep, source)
+    n_modes_deep = len(modes_deep.k)
     print(f"  ✓ Computed {n_modes_deep} modes for deep water")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -165,7 +165,7 @@ def main():
         result = krakenfield.run(
             env, source, receiver
         )
-        print(f"  ✓ KrakenField completed with {result.metadata.get('n_segments', 5)} segments")
+        print(f"  ✓ KrakenField completed with {krakenfield.n_segments} segments")
         print(f"  ✓ TL range: {result.data.min():.1f} to {result.data.max():.1f} dB")
     except Exception as e:
         print(f"  ✗ KrakenField error: {e}")
@@ -180,15 +180,15 @@ def main():
     print("[3/4] Computing complex modes with KrakenC (elastic bottom)...")
 
     try:
-        krakenc = KrakenC(verbose=False, francois_garrison_params=fg_params)
+        krakenc = KrakenC(
+            verbose=False,
+            volume_attenuation='F',
+            francois_garrison_params=fg_params,
+        )
 
         # Use environment with elastic bottom for complex mode computation
-        modes_complex = krakenc.compute_modes(
-            env_shallow,  # Reuse shallow environment
-            source,
-            volume_attenuation='F',
-        )
-        n_complex = len(modes_complex.metadata['k'])
+        modes_complex = krakenc.compute_modes(env_shallow, source)
+        n_complex = len(modes_complex.k)
         print(f"  ✓ Computed {n_complex} complex modes")
         print("  ✓ Supports elastic bottom with shear waves")
     except Exception as e:
@@ -211,7 +211,7 @@ def main():
         fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
 
         # Shallow water modes
-        phi_s = modes_shallow.metadata['phi']
+        phi_s = modes_shallow.phi
         z_s = modes_shallow.depths
         M_s = phi_s.shape[1]
         n_show = min(5, M_s)
@@ -225,7 +225,7 @@ def main():
         axes2[0].grid(True, alpha=0.3)
 
         # Deep water modes
-        phi_d = modes_deep.metadata['phi']
+        phi_d = modes_deep.phi
         z_d = modes_deep.depths
         M_d = phi_d.shape[1]
         n_show = min(5, M_d)

@@ -477,8 +477,6 @@ def lfm_chirp(
 
     # Instantaneous frequency
     f_inst = fmin + (fmax - fmin) * time / (2 * T)
-
-    # Generate chirp
     s = np.sin(2.0 * np.pi * f_inst * time)
 
     return s, time
@@ -633,8 +631,6 @@ def bpsk_modulate(
 
     deltat = 1 / fs
     t_chip = np.arange(0, samples_per_chip * deltat, deltat)
-
-    # Generate one chip period of carrier
     sinwave = np.sin(2 * np.pi * fc * t_chip)
 
     # Outer product: each column is one chip
@@ -834,8 +830,6 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
     if Nreps < 1:
         Nreps = 1
     probe = np.tile(s, Nreps)
-
-    # Add leader
     leader = np.zeros(int(lead_time * fs))
     probe_max = np.max(np.abs(probe))
     if probe_max > 0:
@@ -894,8 +888,6 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     deltat = 1 / fs
     N = int(T / deltat)  # number of samples
     time = np.arange(0, T, deltat).reshape(-1, 1)  # column vector
-
-    # Generate baseband noise
     deltat2 = 1 / BW
     N2 = int(T / deltat2)
 
@@ -990,8 +982,6 @@ if __name__ == "__main__":
     print(f"  Cycles: {n_cycles}")
     print(f"  Duration: {t_tone[-1]:.4f} s")
     print(f"  Peak amplitude: {np.max(np.abs(s_tone)):.4f}")
-
-    # Generate comparison plot
     print("\n" + "=" * 70)
     print("Creating visualization...")
 

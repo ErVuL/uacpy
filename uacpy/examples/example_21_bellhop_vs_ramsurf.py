@@ -76,7 +76,7 @@ def main():
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
     tl_ram = res_ram.tl[0]
-    print(f"  → backend: {res_ram.metadata['backend']}")
+    print(f"  → backend: {res_ram.backend}")
     print()
 
     from uacpy.core.metrics import tl_rmse, tl_max_error, tl_bias

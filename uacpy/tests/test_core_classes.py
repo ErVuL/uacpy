@@ -156,7 +156,8 @@ class TestField:
         assert len(values) == 10
         assert 40 <= values[5] <= 49
 
-    def test_field_copy(self):
+    def test_field_deepcopy(self):
+        import copy as _copy
         from uacpy.core.results import PressureField
         data = np.random.rand(10, 20)
         ranges = np.linspace(100, 5000, 20)
@@ -164,7 +165,7 @@ class TestField:
 
         field = PressureField(units="dB", data=data, ranges=ranges, depths=depths,
                               model='Test', frequencies=100.0)
-        field_copy = field.copy()
+        field_copy = _copy.deepcopy(field)
 
         assert type(field_copy) is type(field)
         assert np.array_equal(field_copy.data, field.data)
@@ -470,10 +471,10 @@ class TestSoundSpeedProfileNearestVsInterp:
             interp='linear',
         )
 
-    def test_at_picks_nearest_depth(self):
+    def test_eval_nearest_picks_nearest_depth(self):
         ssp = self._ssp()
         # depth=51 is closer to 100 than to 0 → returns the 100m sample
-        sliced = ssp.at(depth=51.0)
+        sliced = ssp.eval(depth=51.0, interp='nearest')
         assert sliced.depths[0] == 100.0
         assert sliced.value == 1490.0
 
@@ -634,11 +635,9 @@ class TestTransferFunction:
         from uacpy.core.results import PressureField
         assert not isinstance(self._tf(), PressureField)
 
-    def test_tf_phase_reference_coerced_to_enum(self):
-        from uacpy.core.results import PhaseReference
+    def test_tf_phase_reference_normalized_to_string(self):
         tf = self._tf()
-        assert isinstance(tf.phase_reference, PhaseReference)
-        assert tf.phase_reference == PhaseReference.TRAVELLING_WAVE
+        assert tf.phase_reference == 'travelling_wave'
 
     def test_tf_tl_and_p_preserve_data_shape(self):
         tf = self._tf()
@@ -717,15 +716,15 @@ class TestTransferFunctionFromPressureField:
 
     def test_promotes_broadband_complex_field(self):
         from uacpy.core.results import (
-            PhaseReference, PressureField, TransferFunction,
+            PressureField, TransferFunction,
         )
         pf = self._broadband_pf()
         tf = TransferFunction.from_pressure_field(
             pf, phase_reference='travelling_wave',
         )
         assert isinstance(tf, TransferFunction)
-        assert not isinstance(tf, PressureField)   # sibling, not subclass
-        assert tf.phase_reference == PhaseReference.TRAVELLING_WAVE
+        assert not isinstance(tf, PressureField)
+        assert tf.phase_reference == 'travelling_wave'
         # axes / data / metadata round-trip
         np.testing.assert_array_equal(tf.data, pf.data)
         np.testing.assert_array_equal(tf.depths, pf.depths)

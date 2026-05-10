@@ -147,7 +147,6 @@ def read_oast_tl(
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 
     metadata = {
-        'model': 'OAST',
         'oast_grid_shape': (n_depths_oast, n_ranges_oast),
     }
     return tl_oast, np.asarray(receiver_depths, dtype=float), ranges_oast, metadata
@@ -657,7 +656,6 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         'transfer_function': transfer_function,
         'source_depth': float(sd),
         'center_frequency': float(freqs),
-        'model': 'OASP',
     }
 
 
@@ -812,7 +810,6 @@ def read_oasr_reflection_coefficients(
             'angles_or_slowness': angles_or_slowness_list,
             'magnitude': magnitude_list,
             'phase': phase_list,
-            'model': 'OASR'
         }
 
     except Exception as e:

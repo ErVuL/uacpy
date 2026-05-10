@@ -239,7 +239,7 @@ class TestCollinsBinaries:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
         assert result.field_type == 'tl'
-        assert result.metadata['backend'] == 'ramsurf'
+        assert result.backend == 'ramsurf'
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
         # Sensible TL range (no gain, bounded loss)
@@ -252,10 +252,11 @@ class TestCollinsBinaries:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
         assert result.field_type == 'tl'
-        assert result.metadata['backend'] == 'rams'
+        assert result.backend == 'rams'
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
 
+    @pytest.mark.slow
     def test_collins_backend_broadband_returns_transfer_function(self):
         """ramsurf BROADBAND emits the patched complex envelope and the
         wrapper assembles an engineering travelling-wave H(f), tagged
@@ -267,8 +268,8 @@ class TestCollinsBinaries:
                   Q=2.0, T=2.0)
         f = ram.run(env, src, rcv, run_mode=RunMode.BROADBAND)
         assert f.field_type == 'transfer_function'
-        assert f.metadata['backend'] == 'ramsurf'
-        assert f.metadata['phase_reference'] == 'travelling_wave'
+        assert f.backend == 'ramsurf'
+        assert f.phase_reference == 'travelling_wave'
         # Shape: (n_d, n_r, n_f) — trailing axis is variable.
         assert f.data.ndim == 3
         assert f.data.shape[0] == len(rcv.depths)
@@ -355,7 +356,7 @@ class TestRamPekerisReference:
             ram_field = RAM(verbose=False).run(
                 env, src, rcv, run_mode=RunMode.COHERENT_TL,
             )
-        assert ram_field.metadata['backend'] == 'mpiramS'
+        assert ram_field.backend == 'mpiramS'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
             ram_field, ref_field, tol_db=4.5, label='mpiramS',
@@ -368,7 +369,7 @@ class TestRamPekerisReference:
             ram_field = RAM(verbose=False).run(
                 env, src, rcv, run_mode=RunMode.COHERENT_TL,
             )
-        assert ram_field.metadata['backend'] == 'rams'
+        assert ram_field.backend == 'rams'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
             ram_field, ref_field, tol_db=4.5, label='rams0.5',
@@ -392,7 +393,7 @@ class TestRamPekerisReference:
             ram_field = RAM(verbose=False).run(
                 env_ram, src, rcv, run_mode=RunMode.COHERENT_TL,
             )
-        assert ram_field.metadata['backend'] == 'ramsurf'
+        assert ram_field.backend == 'ramsurf'
         ref_field = self._kraken_reference(env_ref, src, rcv)
         self._assert_window_agreement(
             ram_field, ref_field, tol_db=4.5, label='ramsurf1.5',

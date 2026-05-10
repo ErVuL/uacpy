@@ -104,15 +104,10 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     Npts = len(r_km)
 
     with open(filepath, "w") as fid:
-        # Write number of profiles
         fid.write(f"{Npts}")
-
-        # Write range vector
         for r in r_km:
             fid.write(f"{r:6.3f}  ")
         fid.write("\n")
-
-        # Write sound speed profiles (row by row)
         for i in range(c.shape[0]):
             for j in range(c.shape[1]):
                 fid.write(f"{c[i, j]:6.1f} ")
@@ -161,10 +156,7 @@ def write_header(
         Scooter's TopOpt(7:7)='0' to zero out stabilising attenuation —
         see ``scooter.f90:81``). Default: empty.
     """
-    # Title
     f.write(f"'{env.name}'\n")
-
-    # Frequency
     f.write(f"{source.frequencies[0]:.6f}\n")
 
     # Number of media: 1 (water column) + N sediment layers if layered bottom
@@ -172,8 +164,8 @@ def write_header(
         n_media = n_media_override
     else:
         n_media = 1
-        if env.bottom_layered is not None:
-            n_media += len(env.bottom_layered.layers)
+        if env.has_layered_bottom():
+            n_media += len(env.bottom.layers)
     f.write(f"{n_media}\n")
 
     # TopOpt string (>=6 characters): '<ssp_code><surface_code><atten_unit><vol_atten> <broadband>'
@@ -290,7 +282,8 @@ def write_phase_speed_and_rmax(
     else:
         ssp_pairs = env.ssp.to_pairs()
         c_min = float(ssp_pairs[:, 1].min())
-        c_max = max(float(ssp_pairs[:, 1].max()), env.bottom.sound_speed)
+        hs_c = env.halfspace_at_range(0.0).sound_speed
+        c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
         _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
         _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR
     f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
@@ -341,7 +334,7 @@ def write_layer_sections(
     f : TextIO
         Open file handle
     env : Environment
-        Environment with bottom_layered set
+        Environment with a LayeredBottom on env.bottom
     seafloor_depth : float
         Depth of the seafloor (bottom of water column)
     n_mesh : int, optional
@@ -354,10 +347,10 @@ def write_layer_sections(
         Depth of the bottom of the last sediment layer
         (i.e., top of the half-space)
     """
-    if env.bottom_layered is None:
+    if not env.has_layered_bottom():
         return seafloor_depth
 
-    layered = env.bottom_layered
+    layered = env.bottom
     # Round to .1f precision to match mesh line format — Kraken's parser
     # requires the last SSP depth to exactly match the mesh max depth.
     current_depth = float(f"{seafloor_depth:.1f}")
@@ -365,12 +358,7 @@ def write_layer_sections(
     for layer in layered.layers:
         top_depth = current_depth
         bottom_depth = float(f"{current_depth + layer.thickness:.1f}")
-
-        # Mesh params: n_mesh, sigma=0, max_depth
         f.write(f"{n_mesh}  0.0  {bottom_depth:.1f}\n")
-
-        # Isovelocity SSP within layer: top and bottom at same speed
-        # Format: depth  cp  cs  rho  ap  as /
         alpha_s = getattr(layer, 'shear_attenuation', 0.0)
         f.write(f"  {top_depth:.1f} {layer.sound_speed:.6f} "
                 f"{layer.shear_speed:.1f} {layer.density:.2f} "
@@ -428,35 +416,28 @@ def write_bottom_section(
         Scooter writes those bounds via ``write_phase_speed_and_rmax``
         instead and so passes ``False``.
     """
-    # Get bottom properties
+    hs = env.halfspace_at_range(0.0)
     if bottom_type is None:
-        bottom_type = parse_boundary_type(env.bottom.acoustic_type)
+        bottom_type = parse_boundary_type(hs.acoustic_type)
 
-    cp = cp_bottom if cp_bottom is not None else env.bottom.sound_speed
-    cs = cs_bottom if cs_bottom is not None else getattr(env.bottom, 'shear_speed', 0.0)
-    rho = rho_bottom if rho_bottom is not None else env.bottom.density
-    alpha = alpha_bottom if alpha_bottom is not None else env.bottom.attenuation
+    cp = cp_bottom if cp_bottom is not None else hs.sound_speed
+    cs = cs_bottom if cs_bottom is not None else getattr(hs, 'shear_speed', 0.0)
+    rho = rho_bottom if rho_bottom is not None else hs.density
+    alpha = alpha_bottom if alpha_bottom is not None else hs.attenuation
 
-    # Write bottom boundary condition
     bottom_code = bottom_type.to_acoustics_toolbox_code()
-    sigma = getattr(env.bottom, 'roughness', 0.0)  # Bottom roughness
+    sigma = getattr(hs, 'roughness', 0.0)
 
-    # Check for range-dependent bathymetry
     if len(env.bathymetry) > 1:
-        # Range-dependent: append '~' to indicate .bty file
         f.write(f"'{bottom_code}~' {sigma:.1f}\n")
     else:
-        # Range-independent
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
 
-    # Handle reflection coefficient file (type 'F')
     if bottom_code == 'F':
-        # Copy reflection file to working directory
-        if env.bottom.reflection_file and filepath is not None:
+        if hs.reflection_file and filepath is not None:
             import shutil
-            brc_source = Path(env.bottom.reflection_file)
+            brc_source = Path(hs.reflection_file)
             if brc_source.exists():
-                # Copy to same directory as .env file with matching base name
                 brc_dest = filepath.with_suffix('.brc')
                 shutil.copy(brc_source, brc_dest)
                 if verbose:
@@ -464,40 +445,33 @@ def write_bottom_section(
             else:
                 raise FileNotFoundError(
                     f"at_env_writer: reflection coefficient file not found: "
-                    f"{env.bottom.reflection_file}; "
+                    f"{hs.reflection_file}; "
                     f"generate it via BOUNCE or OASR first."
                 )
-        elif env.bottom.reflection_file is None:
+        elif hs.reflection_file is None:
             raise ValueError(
                 "at_env_writer: acoustic_type='file' requires reflection_file= "
                 "on the bottom BoundaryProperties (path to a .brc file)."
             )
 
         if emit_reflection_table_block:
-            # cmin/cmax/RMax line bounding the angles covered by the BRC
-            # reflection-coefficient table. Kraken/Bounce read this as
-            # part of the bottom block; Scooter consumes the same bounds
-            # via write_phase_speed_and_rmax instead.
-            cmin = getattr(env.bottom, 'reflection_cmin', 1400.0)
-            cmax = getattr(env.bottom, 'reflection_cmax', 10000.0)
-            rmax_m = getattr(env.bottom, 'reflection_rmax_m', 10000.0)
+            cmin = getattr(hs, 'reflection_cmin', 1400.0)
+            cmax = getattr(hs, 'reflection_cmax', 10000.0)
+            rmax_m = getattr(hs, 'reflection_rmax', 10000.0)
             f.write(f"{cmin:.2f}  {cmax:.2f}\n")
             f.write(f"{rmax_m / 1000.0:.2f}\n")
 
-    # Write halfspace parameters (type 'A')
     elif bottom_code == 'A':  # Half-space
         if halfspace_depth is not None:
             z_bottom = halfspace_depth
         else:
             z_bottom = env.depth
-            # If layered bottom, halfspace starts below all layers.
-            # Round to .1f to match layer section mesh line precision.
-            if env.bottom_layered is not None:
+            if env.has_layered_bottom():
                 z_bottom = float(f"{z_bottom:.1f}")
-                for layer in env.bottom_layered.layers:
+                for layer in env.bottom.layers:
                     z_bottom = float(f"{z_bottom + layer.thickness:.1f}")
         if halfspace_alpha_s_source == 'env':
-            alpha_s = getattr(env.bottom, 'shear_attenuation', 0.0)
+            alpha_s = getattr(hs, 'shear_attenuation', 0.0)
         else:
             alpha_s = 0.0
         f.write(f"  {z_bottom:.2f}  {cp:.2f}  {cs:.1f}  "
@@ -582,8 +556,6 @@ def write_multi_profile_env(
     c_low = kwargs.get('c_low', None)
     c_high = kwargs.get('c_high', None)
     rmax_m = kwargs.get('rmax_m', 100000.0)
-
-    # Ensure n_mesh > 0 for consistency across profiles.
     # If caller didn't specify, compute from max depth.
     if n_mesh <= 0:
         freq = float(source.frequencies[0])
@@ -593,9 +565,9 @@ def write_multi_profile_env(
     # Determine max NMedia across all segments so every profile
     # can be padded to the same number of media (=> same NTotal).
     def _n_media(env_seg):
-        n = 1  # water column
-        if hasattr(env_seg, 'bottom_layered') and env_seg.bottom_layered is not None:
-            n += len(env_seg.bottom_layered.layers)
+        n = 1
+        if env_seg.has_layered_bottom():
+            n += len(env_seg.bottom.layers)
         return n
 
     max_n_media = max(_n_media(seg) for _, seg in segments)
@@ -618,8 +590,8 @@ def write_multi_profile_env(
     # (see tests/wedge/runtests.m: total depth = 2000 m for all).
     def _total_depth(env_seg):
         d = env_seg.depth
-        if hasattr(env_seg, 'bottom_layered') and env_seg.bottom_layered is not None:
-            for layer in env_seg.bottom_layered.layers:
+        if env_seg.has_layered_bottom():
+            for layer in env_seg.bottom.layers:
                 d += layer.thickness
         return d
 
@@ -653,7 +625,7 @@ def write_multi_profile_env(
                 )
             else:
                 surface_type = BoundaryType.VACUUM
-            bottom_type = parse_boundary_type(env_seg.bottom.acoustic_type)
+            bottom_type = parse_boundary_type(env_seg.halfspace_at_range(0.0).acoustic_type)
 
             n_media_this = _n_media(env_seg)
             n_media_write = max_n_media
@@ -676,13 +648,16 @@ def write_multi_profile_env(
             # --- Sediment layers (media 2..n_media_this) ---
             # Collect real layers with their depths, then write
             # them together with any needed extensions.
-            hs = env_seg.bottom
+            # ``halfspace_at_range`` digs into ``LayeredBottom.halfspace`` so
+            # a per-segment LayeredBottom (from RDLB → to_profile) still
+            # exposes a flat halfspace for the padding-layer fields below.
+            hs = env_seg.halfspace_at_range(0.0)
             seafloor = float(f"{env_seg.depth:.1f}")
             current_depth = seafloor
             real_layers = []
 
-            if hasattr(env_seg, 'bottom_layered') and env_seg.bottom_layered is not None:
-                for layer in env_seg.bottom_layered.layers:
+            if env_seg.has_layered_bottom():
+                for layer in env_seg.bottom.layers:
                     top = current_depth
                     bot = float(f"{current_depth + layer.thickness:.1f}")
                     real_layers.append((top, bot, layer))
@@ -843,7 +818,6 @@ def write_fieldflp(
             raise ValueError("First profile range must be 0.0 km")
 
     with open(filepath, "w") as f:
-        # Title
         f.write(f"'{title}' ! Title \n")
 
         # Option

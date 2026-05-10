@@ -2,8 +2,8 @@
 Example helper functions for UACPY examples
 
 ⚠️ IMPORTANT: These are examples-only utilities for UACPY demonstration purposes.
-For production code, please use the official API from uacpy.visualization, particularly
-the quickplot() function and plot_* functions which provide the full feature set.
+For production code, use the official API from uacpy.visualization (the
+``plot_*`` and ``compare_*`` helpers).
 
 Provides common utilities for examples 01-10 to ensure consistency
 and reduce code duplication.
@@ -17,8 +17,8 @@ from typing import Dict
 from uacpy.visualization import (
     plot_transmission_loss,
     plot_environment_advanced,
-    plot_comparison_curves,
-    plot_model_comparison_matrix
+    compare_range_cuts,
+    plot_model_comparison_matrix,
 )
 
 # Resolve relative to this file so outputs always land next to the examples,
@@ -141,9 +141,9 @@ def create_example_report(
         plt.close(fig)
         print(f"  ✓ {fields_path}")
 
-    # Plot 3: Comparison curves (if multiple models)
+    # Plot 3: TL-vs-range overlay at source depth (if multiple models)
     if len(results) >= 2:
-        fig, axes = plot_comparison_curves(results, source_depth=source.depths[0])
+        fig, ax = compare_range_cuts(results, depth=float(source.depths[0]))
         curves_path = OUTPUT_DIR / f'{output_prefix}_curves.png'
         fig.savefig(curves_path, dpi=150, bbox_inches='tight')
         plt.close(fig)

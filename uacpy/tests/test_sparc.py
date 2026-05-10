@@ -68,4 +68,4 @@ class TestSPARCTimeSeries:
         assert result.data.shape[2] > 0
         assert np.isrealobj(result.data)
         assert np.all(np.isfinite(result.data))
-        assert 'time' in result.metadata or hasattr(result, 'time')
+        assert hasattr(result, 'time')

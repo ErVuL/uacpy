@@ -1,5 +1,5 @@
 """
-Tests for visualization module including plots and quickplot
+Tests for visualization module
 """
 
 import pytest
@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 import uacpy
 from uacpy.models import Bellhop, RAM, Kraken
-from uacpy.visualization import plots, quickplot
+from uacpy.visualization import plots
 
 # Visualization tests spawn Bellhop (and other models) via the basic_setup fixture
 pytestmark = pytest.mark.requires_binary
@@ -222,72 +222,6 @@ class TestFieldPlotMethod:
         plt.close(fig)
 
 
-class TestQuickplot:
-    """Tests for quickplot convenience functions."""
-
-    def test_quick_tl(self, basic_setup, tmp_path):
-        """Test quick_tl function."""
-        env, source, result = basic_setup
-
-        save_path = tmp_path / "test_tl.png"
-        fig, ax = quickplot.quick_tl(result, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_compare(self, basic_setup, tmp_path):
-        """Test quick_compare function."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        save_path = tmp_path / "test_compare.png"
-        fig, axes = quickplot.quick_compare(results, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_env(self, basic_setup, tmp_path):
-        """Test quick_env function."""
-        env, source, _ = basic_setup
-
-        save_path = tmp_path / "test_env.png"
-        fig, axes = quickplot.quick_env(env, source, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_cut(self, basic_setup, tmp_path):
-        """Test quick_cut function."""
-        env, source, result = basic_setup
-
-        save_path = tmp_path / "test_cut.png"
-        fig, ax = quickplot.quick_cut(result, depth=50, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-    def test_quick_analysis(self, basic_setup, tmp_path):
-        """Test quick_analysis function."""
-        env, source, result = basic_setup
-
-        save_prefix = str(tmp_path / "test")
-        fig = quickplot.quick_analysis(result, env, save_prefix=save_prefix)
-        assert fig is not None
-        assert (tmp_path / "test_analysis.png").exists()
-        plt.close(fig)
-
-    def test_quick_report(self, basic_setup, tmp_path):
-        """Test quick_report function."""
-        env, source, result = basic_setup
-
-        results = {'Bellhop': result}
-        save_path = tmp_path / "test_report.png"
-        fig = quickplot.quick_report(results, env, save=str(save_path))
-        assert fig is not None
-        assert save_path.exists()
-        plt.close(fig)
-
-
 class TestPlottingEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -357,11 +291,6 @@ class TestPlottingIntegration:
 
         fig, ax = plots.compare_range_cuts(results, depth=50)
         assert fig is not None
-        plt.close(fig)
-
-        save_path = tmp_path / "workflow_report.png"
-        fig = quickplot.quick_report(results, env, save=str(save_path))
-        assert fig is not None and save_path.exists()
         plt.close(fig)
 
 

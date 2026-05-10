@@ -112,7 +112,7 @@ def main():
                 shading='auto', cmap='jet_r', vmin=30, vmax=110,
             )
             ax.invert_yaxis()
-            ax.set_title(f"{label}\nbackend={field.metadata['backend']}")
+            ax.set_title(f"{label}\nbackend={field.backend}")
             ax.set_xlabel("Range (km)")
             if ax is axes[0]:
                 ax.set_ylabel("Depth (m)")

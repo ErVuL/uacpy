@@ -86,10 +86,9 @@ def main():
 
     print("[3/4] Running OASR (Reflection Coefficients)...", end=" ", flush=True)
     try:
-        oasr = OASR(verbose=False)
-        # OASR computes reflection coefficients as function of angle
         angles = np.linspace(0, 90, 91)
-        result_oasr = oasr.run(env, source, receiver, angles=angles)
+        oasr = OASR(verbose=False, angles=angles)
+        result_oasr = oasr.run(env, source, receiver)
         print("✓")
         oasr_success = True
     except Exception as e:
@@ -103,17 +102,14 @@ def main():
 
     print("[4/4] Running OASP (Pulse / Wideband TRF)...", end=" ", flush=True)
     try:
-        oasp = OASP(verbose=False)
+        oasp = OASP(verbose=False, n_time_samples=256, freq_max=120)
         receiver_small = uacpy.Receiver(
             depths=np.linspace(5, 95, 20),
             ranges=np.linspace(500, 15000, 30),
         )
-        # BROADBAND returns a TransferFunction H(d, r, f) so the example can
-        # render TL at center frequency and synthesize a time trace.
         result_oasp = oasp.run(
             env, source, receiver_small,
             run_mode=uacpy.RunMode.BROADBAND,
-            n_time_samples=256, freq_max=120,
         )
         print("✓")
         oasp_success = True

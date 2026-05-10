@@ -37,32 +37,31 @@ Hierarchy
     ├── Replicas                    (OASN MFP frequency-domain Green's-function templates)
     └── ReflectionCoefficient       (R(theta) at a boundary)
 
-Identification fields (``model``, ``backend``, ``source_depths``,
-``frequency``/``frequencies``) are also mirrored into ``metadata`` so
-callers can use either typed attributes or dict-style access.
+Identification and shape fields (``model``, ``backend``,
+``source_depths``, ``frequencies``, ``phase_reference``, ``time``,
+``dt``, ``n_t``, ``k``, ``phi``, ``depths``, ``arrivals``,
+``by_receiver``, ``rays``, ``theta``, ``R``, ``covariance``,
+``replicas``, …) are **typed attributes** on the result class —
+read them directly: ``result.model``, ``result.frequencies``,
+``modes.k``, etc. They are *not* mirrored into ``metadata``;
+``result.metadata['model']`` raises ``KeyError``.
 
-Canonical metadata keys
------------------------
-``Result.metadata`` is a free-form dict, but writers and readers stick
-to the following keys so dict-style consumers can rely on names:
+Ad-hoc bag — Result.metadata
+----------------------------
+``Result.metadata`` is a free-form dict reserved for genuinely
+model-specific outputs that don't have a typed attribute, e.g.
 
-* All Results — ``'model'``, ``'backend'``, ``'source_depths'``,
-  ``'frequencies'``.
-* :class:`TransferFunction` — ``'phase_reference'`` (the string form
-  of the :class:`PhaseReference` enum).
-* :class:`TimeSeriesField` / :class:`TimeTrace` — ``'time'`` (1-D
-  ndarray), ``'dt'``, ``'fs'``, ``'nt'``, ``'t_start'``.
-* :class:`Arrivals` — ``'arrivals'`` (the flat list itself),
-  ``'arrivals_by_receiver'`` (Bellhop's nested ``[src][depth][range]``
-  raw form, used by the broadband delay-and-sum path),
-  ``'receiver_depths'``, ``'receiver_ranges'``.
-* :class:`Rays` — ``'rays'``, ``'receiver_depths'``, ``'receiver_ranges'``.
-* :class:`Modes` — ``'k'`` (complex wavenumbers), ``'phi'`` (mode
-  shapes), ``'depths'``, ``'n_modes'``.
+* :class:`Bounce` ``ReflectionCoefficient`` — ``'brc_file'``,
+  ``'irc_file'``, ``'c_low'``, ``'c_high'``, ``'rmax'``.
+* :class:`OAST` ``PressureField`` — ``'oast_native_ranges'``,
+  ``'interpolated'``.
+* :class:`RAM` results — ``'c0'``, ``'dr'``, ``'dz'``, ``'zmax'``,
+  ``'Q'``, ``'T'``.
+* :class:`KrakenField` results — ``'mode_coupling'``, ``'n_profiles'``.
 
-Adding a new result type? Mirror the typed attributes into
-``metadata`` via ``setdefault`` so a key isn't clobbered when the
-caller built the object with an explicit ``metadata={...}``.
+Adding a new result type? Promote shape/identification fields to typed
+attributes; only put genuinely opaque per-model extras in
+``metadata``.
 """
 
 from __future__ import annotations
@@ -155,6 +154,7 @@ class Result:
         backend: Optional[str] = None,
         source_depths: Optional[np.ndarray] = None,
         frequencies: Optional[Union[float, np.ndarray]] = None,
+        phase_reference: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
         self.model = model
@@ -172,15 +172,8 @@ class Result:
             )
         else:
             self.frequencies = None
+        self.phase_reference: Optional[str] = phase_reference
         self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
-        if self.model:
-            self.metadata.setdefault('model', self.model)
-        if self.backend:
-            self.metadata.setdefault('backend', self.backend)
-        if self.source_depths is not None and len(self.source_depths):
-            self.metadata.setdefault('source_depths', self.source_depths)
-        if self.frequencies is not None:
-            self.metadata.setdefault('frequencies', self.frequencies)
 
     # Convenience ------------------------------------------------------------
 
@@ -205,11 +198,6 @@ class Result:
                 bits.append(f"n_f={len(self.frequencies)}")
         return f"{cls}({', '.join(bits)})"
 
-    def copy(self):
-        """Deep copy of the result. Preserves type."""
-        import copy as _copy
-        return _copy.deepcopy(self)
-
     def tag(
         self,
         *,
@@ -229,18 +217,14 @@ class Result:
         """
         if model is not None:
             self.model = model
-            self.metadata['model'] = model
         if backend is not None:
             self.backend = backend
-            self.metadata['backend'] = backend
         if source_depths is not None:
             self.source_depths = np.atleast_1d(np.asarray(source_depths, dtype=float))
-            self.metadata['source_depths'] = self.source_depths
         if frequencies is not None:
             self.frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
-            self.metadata['frequencies'] = self.frequencies
         if phase_reference is not None:
-            self.metadata['phase_reference'] = phase_reference
+            self.phase_reference = phase_reference
         for k, v in extra_metadata.items():
             self.metadata[k] = v
         return self
@@ -693,10 +677,7 @@ class TransferFunction(_GridResult):
                 f"TransferFunction: unknown phase_reference={phase_reference!r}; "
                 f"valid: {[m.value for m in PhaseReference]}"
             ) from None
-        self.phase_reference = ref
-        # Mirror the string form into ``metadata`` so dict-style consumers
-        # see the same value they wrote (``ref.value`` round-trips).
-        self.metadata.setdefault('phase_reference', ref.value)
+        self.phase_reference = ref.value
 
     @property
     def tl(self) -> np.ndarray:
@@ -864,10 +845,9 @@ class TransferFunction(_GridResult):
 class TimeSeriesField(_GridResult):
     """Real time-domain pressure on a ``(depth, range)`` grid.
 
-    ``data`` shape: ``(n_depths, n_ranges, n_t)`` real.
-
-    Time axis lives in ``self.time`` and ``self.metadata['time']`` (also
-    ``dt``, ``fs``, ``nt``, ``t_start``).
+    ``data`` shape: ``(n_depths, n_ranges, n_t)`` real. Time axis lives
+    in ``self.time``; ``self.dt``, ``self.fs``, and ``self.n_t`` are
+    derived properties.
     """
     field_type = "time_series"
 
@@ -895,13 +875,6 @@ class TimeSeriesField(_GridResult):
                 f"match len(time) ({len(time)})"
             )
         self.time = time
-        # Mirror time-axis info into ``metadata`` for dict-style consumers.
-        self.metadata.setdefault('time', time)
-        self.metadata.setdefault('nt', int(len(time)))
-        if len(time) >= 2:
-            self.metadata.setdefault('dt', float(time[1] - time[0]))
-            self.metadata.setdefault('fs', 1.0 / float(time[1] - time[0]))
-        self.metadata.setdefault('t_start', float(time[0]) if len(time) else 0.0)
 
     @property
     def n_t(self) -> int:
@@ -1024,8 +997,7 @@ class TimeSeriesField(_GridResult):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata={k: v for k, v in self.metadata.items()
-                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
+            metadata=dict(self.metadata),
         )
 
     def max(self) -> "TimeTrace":
@@ -1044,8 +1016,7 @@ class TimeSeriesField(_GridResult):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata={k: v for k, v in self.metadata.items()
-                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
+            metadata=dict(self.metadata),
         )
 
 
@@ -1086,14 +1057,6 @@ class TimeTrace(Result):
         self.time = time
         self.depth = float(depth)
         self.range = float(range)
-        self.metadata.setdefault('time', time)
-        self.metadata.setdefault('nt', int(len(time)))
-        self.metadata.setdefault('depth', self.depth)
-        self.metadata.setdefault('range', self.range)
-        if len(time) >= 2:
-            self.metadata.setdefault('dt', float(time[1] - time[0]))
-            self.metadata.setdefault('fs', 1.0 / float(time[1] - time[0]))
-        self.metadata.setdefault('t_start', float(time[0]) if len(time) else 0.0)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -1130,8 +1093,7 @@ class TimeTrace(Result):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata={k: v for k, v in self.metadata.items()
-                      if k not in ('time', 'nt', 'dt', 'fs', 't_start')},
+            metadata=dict(self.metadata),
         )
 
     # 1-element ndarrays for plotting helpers that expect a vector.
@@ -1199,21 +1161,13 @@ class Arrivals(Result):
         super().__init__(**kwargs)
         self.receiver_depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
         self.receiver_ranges = np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
-        # ``by_receiver`` is the nested ``[src][depth][range] -> dict``
-        # form that Bellhop's IO produces and the broadband
-        # delay-and-sum path needs. Kept around as an opaque attribute
-        # so ``models.bellhop`` and downstream IO consumers can still
-        # walk it without duplicating the structure in metadata.
+        # Nested ``[src][depth][range] -> dict`` form that Bellhop's IO
+        # produces and the broadband delay-and-sum path needs.
         self.by_receiver = by_receiver
         if arrivals is not None:
             self.arrivals = list(arrivals)
         else:
             self.arrivals = self._flatten_by_receiver(by_receiver)
-        self.metadata.setdefault('arrivals', self.arrivals)
-        if by_receiver is not None:
-            self.metadata.setdefault('arrivals_by_receiver', by_receiver)
-        self.metadata.setdefault('receiver_depths', self.receiver_depths)
-        self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
 
     @staticmethod
     def _flatten_by_receiver(by_receiver: Any) -> List[Dict[str, Any]]:
@@ -1403,18 +1357,6 @@ class Rays(Result):
             np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
             if receiver_ranges is not None else None
         )
-        # Mirror into ``metadata`` for dict-style access.
-        self.metadata.setdefault('rays', self.rays)
-        if self.receiver_depths is not None:
-            self.metadata.setdefault('receiver_depths', self.receiver_depths)
-        if self.receiver_ranges is not None:
-            self.metadata.setdefault('receiver_ranges', self.receiver_ranges)
-
-    # Convenience accessor.
-    @property
-    def ray_data(self) -> List[Any]:
-        """The ray list. Same as ``self.rays``."""
-        return self.rays
 
     # ------------------------------------------------------------------
     # Filtering helpers — pure data subsets. ``is_eigen`` is preserved
@@ -1545,11 +1487,11 @@ class Rays(Result):
 
     def filter_by_miss_distance(
         self,
-        max_miss_m: float,
+        max_miss: float,
         target_range_m: Optional[float] = None,
         target_depth_m: Optional[float] = None,
     ) -> 'Rays':
-        """Keep rays whose closest approach to the target is ``≤ max_miss_m``.
+        """Keep rays whose closest approach to the target is ``≤ max_miss``.
 
         Each kept ray gets a ``miss_distance_m`` entry attached. Target
         defaults to the single-point receiver this ``Rays`` was built for.
@@ -1558,7 +1500,7 @@ class Rays(Result):
         kept = []
         for ray in self.rays:
             miss, _ = self._miss_distance_to(ray, tr, td)
-            if miss <= max_miss_m:
+            if miss <= max_miss:
                 ray = dict(ray)
                 ray['miss_distance_m'] = miss
                 kept.append(ray)
@@ -1672,16 +1614,7 @@ class Modes(Result):
                 f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
-        self._n_modes = int(n_modes if n_modes is not None else len(self.k))
-        # Mirror modal data into ``metadata`` for dict-style access.
-        self.metadata.setdefault('k', self.k)
-        self.metadata.setdefault('phi', self.phi)
-        self.metadata.setdefault('depths', self.depths)
-        self.metadata.setdefault('n_modes', self._n_modes)
-
-    @property
-    def n_modes(self) -> int:
-        return self._n_modes
+        self.n_modes = int(n_modes if n_modes is not None else len(self.k))
 
     @property
     def data(self) -> np.ndarray:      # alias for plot helpers
@@ -1698,12 +1631,6 @@ class Modes(Result):
             return self
         new_k = self.k[:n]
         new_phi = self.phi[:, :n]
-        # Drop the parent's mirrored ``k`` / ``phi`` / ``n_modes`` from
-        # metadata so the new Modes' own __init__ writes the sliced
-        # values via setdefault.
-        new_meta = dict(self.metadata)
-        for stale in ('k', 'phi', 'n_modes'):
-            new_meta.pop(stale, None)
         return Modes(
             k=new_k,
             phi=new_phi,
@@ -1712,7 +1639,7 @@ class Modes(Result):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata=new_meta,
+            metadata=dict(self.metadata),
         )
 
     def compute_phase_speeds(self) -> np.ndarray:
@@ -1909,15 +1836,13 @@ class Modes(Result):
             )
             alpha_m = alpha_m + alpha_bottom / norm
         new_k = kr + 1j * alpha_m
-        new_meta = {k: v for k, v in self.metadata.items()
-                    if k not in ('k', 'phi', 'n_modes')}
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
             n_modes=self.n_modes,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
-            metadata=new_meta,
+            metadata=dict(self.metadata),
         )
 
     def modal_propagation_loss(
@@ -1999,8 +1924,7 @@ class Modes(Result):
             model=self.model, backend='modal_sum',
             source_depths=np.array([z_s]),
             frequencies=self.frequencies,
-            metadata={k_: v for k_, v in self.metadata.items()
-                      if k_ not in ('k', 'phi', 'n_modes')},
+            metadata=dict(self.metadata),
         )
 
 
@@ -2051,10 +1975,6 @@ class Covariance(Result):
             self.receiver_positions = rp
         else:
             self.receiver_positions = None
-        # Mirror into ``metadata`` for dict-style access.
-        self.metadata.setdefault('covariance', self.covariance)
-        if self.receiver_positions is not None:
-            self.metadata.setdefault('receiver_positions', self.receiver_positions)
 
     @property
     def n_frequencies(self) -> int:
@@ -2119,10 +2039,13 @@ class Covariance(Result):
     ) -> np.ndarray:
         """Minimum-Variance Distortionless-Response (Capon) MFP.
 
-        ``M(z, x, y; f) = 1 / (wᴴ · C(f)⁻¹ · w)``
-
-        ``diagonal_loading`` adds ``ε·trace(C)/N·I`` before inversion to
-        stabilise rank-deficient covariance estimates.
+        ``M(z, x, y; f) = 1 / (wᴴ · (C(f) + δ·I)⁻¹ · w)`` with
+        ``δ = diagonal_loading · trace(C(f))/N``. Small loading
+        (~1e-6) stabilises rank-deficient covariance for sharp Capon
+        peaks; larger loading (~0.1+) flattens the surface toward
+        Bartlett for mismatch robustness. This is *not* the
+        Cox/Zeskind/Owen white-noise-constrained processor (that
+        requires per-replica Lagrange-multiplier bisection).
         """
         flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
         out = np.empty((n_f, nz * nx * ny), dtype=float)
@@ -2130,36 +2053,6 @@ class Covariance(Result):
             C = self.covariance[f]
             tr = float(np.real(np.trace(C))) / max(C.shape[0], 1)
             Cload = C + diagonal_loading * tr * np.eye(C.shape[0])
-            Cinv = np.linalg.inv(Cload)
-            W = self._normalise_weights(flat[f])
-            denom = np.einsum('pr,rs,ps->p', W.conj(), Cinv, W)
-            out[f] = np.real(1.0 / np.where(np.abs(denom) > 0, denom, 1.0))
-        return out.reshape(n_f, nz, nx, ny)
-
-    def mvdr_loaded(
-        self,
-        replicas: "Replicas",
-        *,
-        loading: float = 0.1,
-    ) -> np.ndarray:
-        """MVDR with stronger diagonal loading for mismatch robustness.
-
-        ``M(z, x, y; f) = 1 / (wᴴ · (C(f) + δ·I)⁻¹ · w)`` with
-        ``δ = loading · trace(C(f))/N`` larger than the value used by
-        :meth:`mvdr`. Heavier loading flattens the ambiguity surface
-        toward Bartlett, trading peak sharpness for robustness against
-        replica/array mismatch. This is *not* the Cox/Zeskind/Owen
-        white-noise-constrained processor (that requires per-replica
-        Lagrange-multiplier bisection); use :meth:`mvdr_loaded` when you
-        want a smoothed Capon surface, not a guaranteed white-noise-gain
-        bound.
-        """
-        flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
-        out = np.empty((n_f, nz * nx * ny), dtype=float)
-        for f in range(n_f):
-            C = self.covariance[f]
-            tr = float(np.real(np.trace(C))) / max(C.shape[0], 1)
-            Cload = C + loading * tr * np.eye(C.shape[0])
             Cinv = np.linalg.inv(Cload)
             W = self._normalise_weights(flat[f])
             denom = np.einsum('pr,rs,ps->p', W.conj(), Cinv, W)
@@ -2229,12 +2122,6 @@ class Replicas(Result):
             self.receiver_positions = rp
         else:
             self.receiver_positions = None
-        self.metadata.setdefault('replicas', self.replicas)
-        self.metadata.setdefault('replica_z', self.replica_z)
-        self.metadata.setdefault('replica_x', self.replica_x)
-        self.metadata.setdefault('replica_y', self.replica_y)
-        if self.receiver_positions is not None:
-            self.metadata.setdefault('receiver_positions', self.receiver_positions)
 
     @property
     def n_frequencies(self) -> int:
@@ -2313,10 +2200,6 @@ class ReflectionCoefficient(Result):
                 f"ReflectionCoefficient.R: must be 1-D or 2-D; "
                 f"got shape {self.R.shape}"
             )
-        # Mirror into ``metadata`` for dict-style access.
-        self.metadata.setdefault('theta', self.theta)
-        self.metadata.setdefault('R', self.R)
-        self.metadata.setdefault('phi', self.phi)
 
     @property
     def n_angles(self) -> int:
@@ -2577,7 +2460,7 @@ def _synthesize_time_series(
             window=window, nfft=nfft, t_start=None,
             sample_rate=sample_rate,
         )
-        t_start = float(t0_trace.metadata['t_start'])
+        t_start = float(t0_trace.time[0]) if len(t0_trace.time) else 0.0
 
     out = None
     time_vec = None

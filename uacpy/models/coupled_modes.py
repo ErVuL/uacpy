@@ -8,13 +8,15 @@ range-independent Environment, for use by AT's multi-profile .env format.
 import numpy as np
 from typing import List, Tuple, Optional
 
-from uacpy.core.environment import Environment
+from uacpy.core.environment import (
+    Environment, RangeDependentBottom, RangeDependentLayeredBottom,
+)
 
 
 def segment_environment_by_range(
     env: Environment,
     n_segments: Optional[int] = None,
-    max_segment_length_m: float = 2000.0,
+    max_segment_length: float = 2000.0,
 ) -> List[Tuple[float, Environment]]:
     """
     Segment a range-dependent environment into range slices
@@ -25,7 +27,7 @@ def segment_environment_by_range(
         Range-dependent environment to segment
     n_segments : int, optional
         Number of segments. If None, automatically determined.
-    max_segment_length_m : float
+    max_segment_length : float
         Maximum segment length in metres (default 2000 m).
 
     Returns
@@ -46,10 +48,8 @@ def segment_environment_by_range(
 
     if env.ssp.is_range_dependent:
         max_range_m = max(max_range_m, float(env.ssp.ranges[-1]))
-    if env.bottom_rd is not None:
-        max_range_m = max(max_range_m, float(env.bottom_rd.ranges[-1]))
-    if env.bottom_rd_layered is not None:
-        max_range_m = max(max_range_m, float(env.bottom_rd_layered.ranges[-1]))
+    if isinstance(env.bottom, (RangeDependentBottom, RangeDependentLayeredBottom)):
+        max_range_m = max(max_range_m, float(env.bottom.ranges[-1]))
 
     if max_range_m <= 0:
         return [(0.0, env)]
@@ -60,28 +60,26 @@ def segment_environment_by_range(
         # Automatic segmentation: union the change-point ranges from
         # bathymetry, 2-D SSP, and RD-bottom axes; insert intermediate
         # points where the gap between consecutive change points exceeds
-        # ``max_segment_length_m``.
+        # ``max_segment_length``.
         key_ranges_m = set(bathy_ranges_m.tolist())
         if env.ssp.is_range_dependent:
             key_ranges_m.update(env.ssp.ranges.tolist())
-        if env.bottom_rd is not None:
-            key_ranges_m.update(env.bottom_rd.ranges.tolist())
-        if env.bottom_rd_layered is not None:
-            key_ranges_m.update(env.bottom_rd_layered.ranges.tolist())
+        if isinstance(env.bottom, (RangeDependentBottom, RangeDependentLayeredBottom)):
+            key_ranges_m.update(env.bottom.ranges.tolist())
         key_ranges_m = sorted(key_ranges_m)
 
         segment_ranges_m = [key_ranges_m[0]]
         for i in range(1, len(key_ranges_m)):
-            segment_ranges_m.append(key_ranges_m[i])
-            seg_length = key_ranges_m[i] - segment_ranges_m[-2]
-            if seg_length > max_segment_length_m:
-                n_subseg = int(np.ceil(seg_length / max_segment_length_m))
+            prev = key_ranges_m[i - 1]
+            curr = key_ranges_m[i]
+            seg_length = curr - prev
+            if seg_length > max_segment_length:
+                n_subseg = int(np.ceil(seg_length / max_segment_length))
                 subseg_ranges = np.linspace(
-                    segment_ranges_m[-2],
-                    key_ranges_m[i],
-                    n_subseg + 1,
+                    prev, curr, n_subseg + 1,
                 )[1:-1]
                 segment_ranges_m.extend(subseg_ranges)
+            segment_ranges_m.append(curr)
         segment_ranges_m = sorted(set(segment_ranges_m))
 
     segments = []

@@ -202,8 +202,7 @@ class TestBellhopRunModes:
         )
 
         assert result.field_type == 'arrivals'
-        # Check for arrival structure in metadata (nested per-receiver format)
-        assert 'arrivals_by_receiver' in result.metadata
+        assert result.by_receiver is not None
 
 
 class TestAdvancedBeamTypes:
@@ -297,13 +296,13 @@ class TestRunWithBounceConstructorPlumbing:
         with pytest.raises(RuntimeError, match='stop after Bounce __init__'):
             bellhop.run_with_bounce(
                 env=env, source=source, receiver=receiver,
-                c_low=1450.0, c_high=20000.0, rmax_m=42000.0,
+                c_low=1450.0, c_high=20000.0, rmax=42000.0,
             )
         assert captured.get('volume_attenuation') == 'F'
         assert captured.get('francois_garrison_params') == (10.0, 35.0, 8.0, 1000.0)
         assert captured.get('c_low') == 1450.0
         assert captured.get('c_high') == 20000.0
-        assert captured.get('rmax_m') == 42000.0
+        assert captured.get('rmax') == 42000.0
 
 
 class TestBounceConstructorAcceptsFGParams:

@@ -75,7 +75,7 @@ def demo_stacked_time_series():
     print("  Synthesising time series...", end=" ", flush=True)
     ts = tf.synthesize_time_series(source_waveform=waveform, sample_rate=fs)
     print(f"✓  shape={ts.data.shape}, "
-          f"duration={ts.metadata['time'][-1]:.3f} s")
+          f"duration={ts.time[-1]:.3f} s")
 
     fig, _ = plot_time_series(ts, stacked=True)
     out = OUTPUT_DIR / 'example_14_time_series_stacked.png'
@@ -118,7 +118,7 @@ def demo_modes_heatmap():
     kraken = Kraken(verbose=False)
     modes = kraken.run(env, source, receiver,
                        run_mode=RunMode.MODES, n_modes=50)
-    n_modes = len(modes.metadata.get('k', []))
+    n_modes = len(modes.k)
     print(f"✓  ({n_modes} modes)")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=None,

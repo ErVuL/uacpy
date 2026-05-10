@@ -149,19 +149,12 @@ def read_shd_bin(
     >>> shd = read_shd_bin('broadband.shd', freq=100.0)
     """
     with open(filename, "rb") as fid:
-        # Read record length
         recl = np.fromfile(fid, dtype=np.int32, count=1)[0]
-
-        # Read title (80 characters)
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
-
-        # Read plot type
         fid.seek(4 * recl, 0)
         plot_type_bytes = fid.read(10)
         PlotType = plot_type_bytes.decode("ascii", errors="ignore")
-
-        # Read dimensions
         fid.seek(2 * 4 * recl, 0)
         Nfreq = np.fromfile(fid, dtype=np.int32, count=1)[0]
         Ntheta = np.fromfile(fid, dtype=np.int32, count=1)[0]
@@ -172,56 +165,37 @@ def read_shd_bin(
         Nrr = np.fromfile(fid, dtype=np.int32, count=1)[0]
         freq0 = np.fromfile(fid, dtype=np.float64, count=1)[0]
         atten = np.fromfile(fid, dtype=np.float64, count=1)[0]
-
-        # Read frequency vector
         fid.seek(3 * 4 * recl, 0)
         freqVec = np.fromfile(fid, dtype=np.float64, count=Nfreq)
-
-        # Read theta
         fid.seek(4 * 4 * recl, 0)
         theta = np.fromfile(fid, dtype=np.float64, count=Ntheta)
-
-        # Read source positions
         if PlotType[:2] != "TL":
-            # Full format
             fid.seek(5 * 4 * recl, 0)
             s_x = np.fromfile(fid, dtype=np.float64, count=Nsx)
             fid.seek(6 * 4 * recl, 0)
             s_y = np.fromfile(fid, dtype=np.float64, count=Nsy)
         else:
-            # Compressed format for TL from FIELD3D
             fid.seek(5 * 4 * recl, 0)
             s_x_lim = np.fromfile(fid, dtype=np.float64, count=2)
             s_x = np.linspace(s_x_lim[0], s_x_lim[1], Nsx)
             fid.seek(6 * 4 * recl, 0)
             s_y_lim = np.fromfile(fid, dtype=np.float64, count=2)
             s_y = np.linspace(s_y_lim[0], s_y_lim[1], Nsy)
-
-        # Read source and receiver depths
         fid.seek(7 * 4 * recl, 0)
         s_z = np.fromfile(fid, dtype=np.float32, count=Nsz)
         fid.seek(8 * 4 * recl, 0)
         r_z = np.fromfile(fid, dtype=np.float32, count=Nrz)
-
-        # Read receiver ranges
         fid.seek(9 * 4 * recl, 0)
         r_r = np.fromfile(fid, dtype=np.float64, count=Nrr)
-
-        # Determine pressure array shape
         if PlotType.strip() == "irregular":
             pressure = np.zeros((Ntheta, Nsz, 1, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = 1
         else:
             pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = Nrz
-
-        # Determine which source to read
         if xs is None:
-            # Read all theta, sz, rz for first xs, ys
             idxX = 0
             idxY = 0
-
-            # Get frequency index
             ifreq = 0
             if freq is not None:
                 freq_diff = np.abs(freqVec - freq)
@@ -242,11 +216,8 @@ def read_shd_bin(
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
 
         else:
-            # Read for source at desired (xs, ys)
             if ys is None:
                 raise ValueError("ys must be provided if xs is specified")
-
-            # Find closest source
             x_diff = np.abs(s_x - xs * 1000.0)
             idxX = np.argmin(x_diff)
             y_diff = np.abs(s_y - ys * 1000.0)
@@ -331,15 +302,12 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     >>> # print(f"Frequency: {data['freq0']} Hz")
     """
     filepath = Path(filepath)
-    # Open file
     try:
         fid = open(filepath, "r")
     except FileNotFoundError:
         raise FileNotFoundError(
             "No shade file with that name exists; you must run a model first"
         )
-
-    # Read header
     title = fid.readline().strip()
     plot_type = fid.readline().strip()
 
@@ -355,8 +323,6 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     vals = np.fromstring(line, sep=" ", count=2)
     freq0 = vals[0]
     atten = vals[1]
-
-    # Read vectors
     freq_vec = np.zeros(Nfreq)
     for i in range(Nfreq):
         freq_vec[i] = float(fid.readline().strip())
@@ -376,20 +342,12 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     r_r = np.zeros(Nrr)
     for i in range(Nrr):
         r_r[i] = float(fid.readline().strip())
-
-    # Read pressure data (only first source depth)
-    # Data is interleaved: real1 imag1 real2 imag2 ...
-    # Array is (2*Nrr, Nrd)
     temp = np.zeros((2 * Nrr, Nrd))
     for j in range(Nrd):
         for i in range(2 * Nrr):
             temp[i, j] = float(fid.readline().strip())
 
     fid.close()
-
-    # Extract real and imaginary parts
-    # temp[0::2, :] = real parts
-    # temp[1::2, :] = imaginary parts
     pressure = temp[0::2, :].T + 1j * temp[1::2, :].T
 
     return {
@@ -414,21 +372,17 @@ def read_arr_file(filepath: Union[str, Path]):
 
     Returns
     -------
-    field : Field
-        Field object with arrivals data. The metadata contains:
-        - 'arrivals_by_receiver': nested list [isd][ird][irr] of per-receiver
-          arrival dicts, each with keys: amplitudes, phases, delays,
-          delay_imag, src_angles, rcv_angles, n_top_bounces, n_bot_bounces
-        - 'frequency': center frequency in Hz
-        - 'source_depths': array of source depths
-        - 'receiver_depths': array of receiver depths
-        - 'receiver_ranges': array of receiver ranges in meters
+    Arrivals
+        Typed result with:
+        - ``by_receiver``: nested list ``[isd][ird][irr]`` of per-receiver
+          arrival dicts (amplitudes, phases, delays, delay_imag,
+          src_angles, rcv_angles, n_top_bounces, n_bot_bounces).
+        - ``arrivals``: flat list of per-arrival records (same data,
+          un-nested) for filter/top_n/in_window chain methods.
+        - ``frequencies``, ``source_depths``, ``receiver_depths``,
+          ``receiver_ranges`` as typed attributes.
     """
     filepath = Path(filepath)
-
-    # Fortran record marker length (in 4-byte words)
-    # Most FORTRAN compilers use 1, some use 2
-    marker_len = 1
 
     with open(filepath, "rb") as f:
         # Check if binary or ASCII format. The ASCII arrivals file always
@@ -449,84 +403,61 @@ def read_arr_file(filepath: Union[str, Path]):
             is_binary = True
 
         if is_binary:
-            # Binary arrivals format: each arrival is written as its own
-            # Fortran unformatted sequential record (ArrMod.f90:164), so
-            # each read requires bracketing-marker handling — the existing
-            # implementation below treated arrivals as a single contiguous
-            # block, producing wrong offsets and values.  Rather than ship
-            # a half-verified rewrite, fail loudly and point users to the
-            # ASCII path which is well-tested.
             from uacpy.core.exceptions import ConfigurationError
             raise ConfigurationError(
                 "Binary arrivals format (.arr written by RunType 'a') is "
-                "not fully supported yet. Re-run Bellhop with "
+                "not supported. Re-run Bellhop with "
                 "arrivals_format='ascii' (RunType 'A'). See "
-                "ArrMod.f90:WriteArrivalsBinary for the authoritative "
-                "record layout if you wish to contribute a reader."
+                "ArrMod.f90:WriteArrivalsBinary for the record layout."
             )
-            # Unreachable — left as documentation of the historical code
-            # path until a verified implementation lands.
-            # Check if 2D or 3D format
-            f.seek(4 * marker_len, 0)  # Skip first record marker
-            flag = f.read(4).decode('ascii', errors='ignore')
 
-            if flag not in ["'2D'", "'3D'"]:
-                raise ValueError(f"Not a valid binary arrivals file: flag={repr(flag)}")
+        f.seek(0)
+        text_content = f.read(10).decode('ascii', errors='ignore')
 
-            is_3d = (flag == "'3D'")
+        if "'2D'" in text_content:
+            is_3d = False
+        elif "'3D'" in text_content:
+            is_3d = True
         else:
-            # ASCII format - read flag from text
-            f.seek(0)
-            text_content = f.read(10).decode('ascii', errors='ignore')
-
-            if "'2D'" in text_content:
-                is_3d = False
-                flag = "'2D'"
-            elif "'3D'" in text_content:
-                is_3d = True
-                flag = "'3D'"
-            else:
-                raise ValueError(f"Not a valid arrivals file: {repr(text_content)}")
+            raise ValueError(f"Not a valid arrivals file: {repr(text_content)}")
 
         if not is_3d:
-            # Read 2D format
-            if is_binary:
-                # Binary format reading
-                # Frequency
-                f.seek(8 * marker_len, 0)
-                freq = struct.unpack('f', f.read(4))[0]
+            f.close()
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+                idx = 1  # skip flag line
 
-                # Number of source depths
-                f.seek(8 * marker_len, 0)
-                nsd = struct.unpack('i', f.read(4))[0]
-                sz = np.frombuffer(f.read(4 * nsd), dtype='float32')
+                freq = float(lines[idx].strip())
+                idx += 1
 
-                # Number of receiver depths
-                f.seek(8 * marker_len, 0)
-                nrd = struct.unpack('i', f.read(4))[0]
-                rz = np.frombuffer(f.read(4 * nrd), dtype='float32')
+                tokens = lines[idx].strip().split()
+                nsd = int(tokens[0])
+                sz = np.array([float(t) for t in tokens[1:1+nsd]])
+                idx += 1
 
-                # Number of receiver ranges
-                f.seek(8 * marker_len, 0)
-                nrr = struct.unpack('i', f.read(4))[0]
-                rr = np.frombuffer(f.read(8 * nrr), dtype='float64')
+                tokens = lines[idx].strip().split()
+                nrd = int(tokens[0])
+                rz = np.array([float(t) for t in tokens[1:1+nrd]])
+                idx += 1
 
-                # Per-receiver structured arrivals
+                tokens = lines[idx].strip().split()
+                nrr = int(tokens[0])
+                rr = np.array([float(t) for t in tokens[1:1+nrr]])
+                idx += 1
+
                 arrivals_by_receiver = []
 
-                # Read arrivals for each source depth
                 for isd in range(nsd):
                     sd_list = []
-                    # Maximum number of arrivals for this source
-                    f.seek(8 * marker_len, 0)
-                    struct.unpack('i', f.read(4))[0]
+                    # Skip the per-source max-narr line.
+                    int(lines[idx].strip())
+                    idx += 1
 
                     for irz in range(nrd):
                         rd_list = []
                         for irr in range(nrr):
-                            # Number of arrivals at this receiver
-                            f.seek(8 * marker_len, 0)
-                            narr = struct.unpack('i', f.read(4))[0]
+                            narr = int(lines[idx].strip())
+                            idx += 1
 
                             rcv_arrivals = {
                                 "amplitudes": np.array([], dtype='float64'),
@@ -541,132 +472,34 @@ def read_arr_file(filepath: Union[str, Path]):
                             }
 
                             if narr > 0:
-                                # Read arrival data (8 floats per arrival + markers)
-                                # Format: amp, phase, delay_real, delay_imag, src_angle, rcv_angle, n_top, n_bot
-                                data = np.frombuffer(
-                                    f.read(4 * (8 + 2 * marker_len) * narr),
-                                    dtype='float32'
-                                ).reshape(narr, 8 + 2 * marker_len)
+                                amps = []
+                                phases = []
+                                delays_r = []
+                                delays_i = []
+                                src_angs = []
+                                rcv_angs = []
+                                n_tops = []
+                                n_bots = []
 
-                                # Discard record markers
-                                data = data[:, 2 * marker_len:]
+                                for ia in range(narr):
+                                    values = lines[idx].strip().split()
+                                    idx += 1
 
-                                # Extract fields
-                                amp = data[:, 0].astype('float64')
-                                phase = data[:, 1].astype('float64')
-                                delay_real = data[:, 2].astype('float64')
-                                delay_imag = data[:, 3].astype('float64')
-                                src_angle = data[:, 4].astype('float64')
-                                rcv_angle = data[:, 5].astype('float64')
-                                n_top = data[:, 6].astype('int32')
-                                n_bot = data[:, 7].astype('int32')
-
-                                rcv_arrivals = {
-                                    "amplitudes": amp,
-                                    "phases": phase,
-                                    "delays": delay_real,
-                                    "delay_imag": delay_imag,
-                                    "src_angles": src_angle,
-                                    "rcv_angles": rcv_angle,
-                                    "n_top_bounces": n_top,
-                                    "n_bot_bounces": n_bot,
-                                    "n_arrivals": narr,
-                                }
-
-                            rd_list.append(rcv_arrivals)
-                        sd_list.append(rd_list)
-                    arrivals_by_receiver.append(sd_list)
-            else:
-                # ASCII format reading
-                f.close()
-                with open(filepath, 'r') as f:
-                    # Read all lines
-                    lines = f.readlines()
-                    idx = 0
-
-                    # Skip flag line
-                    idx += 1
-
-                    # Parse header - read all values from space-separated lines
-                    freq = float(lines[idx].strip())
-                    idx += 1
-
-                    # Number of source depths and values
-                    tokens = lines[idx].strip().split()
-                    nsd = int(tokens[0])
-                    sz = np.array([float(t) for t in tokens[1:1+nsd]])
-                    idx += 1
-
-                    # Number of receiver depths and values
-                    tokens = lines[idx].strip().split()
-                    nrd = int(tokens[0])
-                    rz = np.array([float(t) for t in tokens[1:1+nrd]])
-                    idx += 1
-
-                    # Number of receiver ranges and values
-                    tokens = lines[idx].strip().split()
-                    nrr = int(tokens[0])
-                    rr = np.array([float(t) for t in tokens[1:1+nrr]])
-                    idx += 1
-
-                    # Per-receiver structured arrivals
-                    arrivals_by_receiver = []
-
-                    # Read arrivals for each source depth
-                    for isd in range(nsd):
-                        sd_list = []
-                        # Maximum number of arrivals for this source
-                        int(lines[idx].strip())
-                        idx += 1
-
-                        for irz in range(nrd):
-                            rd_list = []
-                            for irr in range(nrr):
-                                # Number of arrivals at this receiver
-                                narr = int(lines[idx].strip())
-                                idx += 1
+                                    amps.append(float(values[0]))
+                                    phases.append(float(values[1]))
+                                    delays_r.append(float(values[2]))
+                                    delays_i.append(float(values[3]))
+                                    src_angs.append(float(values[4]))
+                                    rcv_angs.append(float(values[5]))
+                                    n_tops.append(int(float(values[6])))
+                                    n_bots.append(int(float(values[7])))
 
                                 rcv_arrivals = {
-                                    "amplitudes": np.array([], dtype='float64'),
-                                    "phases": np.array([], dtype='float64'),
-                                    "delays": np.array([], dtype='float64'),
-                                    "delay_imag": np.array([], dtype='float64'),
-                                    "src_angles": np.array([], dtype='float64'),
-                                    "rcv_angles": np.array([], dtype='float64'),
-                                    "n_top_bounces": np.array([], dtype='int32'),
-                                    "n_bot_bounces": np.array([], dtype='int32'),
-                                    "n_arrivals": 0,
-                                }
-
-                                if narr > 0:
-                                    amps = []
-                                    phases = []
-                                    delays_r = []
-                                    delays_i = []
-                                    src_angs = []
-                                    rcv_angs = []
-                                    n_tops = []
-                                    n_bots = []
-
-                                    for ia in range(narr):
-                                        values = lines[idx].strip().split()
-                                        idx += 1
-
-                                        amps.append(float(values[0]))
-                                        phases.append(float(values[1]))
-                                        delays_r.append(float(values[2]))
-                                        delays_i.append(float(values[3]))
-                                        src_angs.append(float(values[4]))
-                                        rcv_angs.append(float(values[5]))
-                                        n_tops.append(int(float(values[6])))
-                                        n_bots.append(int(float(values[7])))
-
-                                    rcv_arrivals = {
-                                        "amplitudes": np.array(amps),
-                                        "phases": np.array(phases),
-                                        "delays": np.array(delays_r),
-                                        "delay_imag": np.array(delays_i),
-                                        "src_angles": np.array(src_angs),
+                                    "amplitudes": np.array(amps),
+                                    "phases": np.array(phases),
+                                    "delays": np.array(delays_r),
+                                    "delay_imag": np.array(delays_i),
+                                    "src_angles": np.array(src_angs),
                                         "rcv_angles": np.array(rcv_angs),
                                         "n_top_bounces": np.array(n_tops, dtype='int32'),
                                         "n_bot_bounces": np.array(n_bots, dtype='int32'),
@@ -677,7 +510,6 @@ def read_arr_file(filepath: Union[str, Path]):
                             sd_list.append(rd_list)
                         arrivals_by_receiver.append(sd_list)
         else:
-            # 3D format - similar structure but with more dimensions
             raise NotImplementedError("3D arrivals format not yet implemented")
 
     return Arrivals(
@@ -702,8 +534,8 @@ def read_ray_file(filepath: Union[str, Path]):
 
     Returns
     -------
-    field : Field
-        Field object with ray paths
+    Rays
+        Typed result with the parsed ray paths on ``.rays``.
     """
     filepath = Path(filepath)
 
@@ -711,44 +543,23 @@ def read_ray_file(filepath: Union[str, Path]):
 
     try:
         with open(filepath, "r") as f:
-            # Read header
-            # Line 1: Title (with quotes)
             f.readline()
-            # Line 2: Frequency
             f.readline()
-            # Line 3: NSx, NSy, NSz (number of sources)
             f.readline()
-            # Line 4: Nalpha, Nbeta (number of angles)
             f.readline()
-            # Line 5: Top depth
             f.readline()
-            # Line 6: Bottom depth
             f.readline()
-            # Line 7: Coordinate system ('rz' or 'xyz')
             f.readline().strip()
-
-            # Read rays - format is:
-            # alpha (launch angle - float, no quotes)
-            # n_points n_top_bounces n_bot_bounces (3 integers)
-            # Then n_points lines of ray data
             while True:
-                # Try to read angle line
                 angle_line = f.readline()
                 if not angle_line:
                     break
-
-                # Skip empty lines
                 if not angle_line.strip():
                     continue
-
-                # Try to parse as angle (float)
                 try:
                     alpha = float(angle_line.strip())
                 except ValueError:
-                    # Not a valid angle, skip
                     continue
-
-                # Read n_points, n_top_bounces, n_bot_bounces
                 counts_line = f.readline()
                 if not counts_line:
                     break
@@ -758,7 +569,6 @@ def read_ray_file(filepath: Union[str, Path]):
                     continue
 
                 n_points = int(counts[0])
-                # Parse bounce counts if present
                 n_top_bounces = int(counts[1]) if len(counts) > 1 else 0
                 n_bot_bounces = int(counts[2]) if len(counts) > 2 else 0
 
@@ -822,9 +632,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
     rays = []
 
     with open(filepath, "rb") as f:
-        # Read header
         recl = struct.unpack("i", f.read(4))[0]
-        # Skip header info
         f.seek(recl * 4)
 
         truncated_after = None
@@ -914,18 +722,10 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     with open(filepath, "r") as fid:
-        # Read number of profiles
         n_prof = int(fid.readline().strip())
-
-        # Read range values
         r_prof = np.array([float(fid.readline().strip()) for _ in range(n_prof)])
-
-        # Read sound speed matrix
-        # Read all remaining data and reshape
         remaining = fid.read().split()
         c_data = np.array([float(x) for x in remaining])
-
-        # Reshape to (n_prof, n_depth), then transpose to (n_depth, n_prof)
         n_depth = len(c_data) // n_prof
         c_mat = c_data.reshape((n_prof, n_depth), order="F").T
 
@@ -989,28 +789,18 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     with open(filepath, "r") as fid:
-        # Read x segments
         Nx = int(fid.readline().strip())
         Segx = np.array([float(fid.readline().strip()) for _ in range(Nx)])
-
-        # Read y segments
         Ny = int(fid.readline().strip())
         Segy = np.array([float(fid.readline().strip()) for _ in range(Ny)])
-
-        # Read z (depth) values
         Nz = int(fid.readline().strip())
         Segz = np.array([float(fid.readline().strip()) for _ in range(Nz)])
-
-        # Read sound speed data
         c_mat = np.zeros((Nz, Ny, Nx))
 
         for iz in range(Nz):
-            # Read Nx*Ny values for this depth
             data = []
             for _ in range(Nx * Ny):
                 data.append(float(fid.readline().strip()))
-
-            # Reshape to (Nx, Ny) then transpose to (Ny, Nx)
             c_mat_2d = np.array(data).reshape((Nx, Ny), order="F").T
             c_mat[iz, :, :] = c_mat_2d
 
@@ -1102,17 +892,13 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         filepath = fileroot
 
     with open(filepath, "r") as f:
-        # Read title
         title = f.readline().strip()
         if "'" in title:
-            # Extract text between quotes
             start = title.find("'") + 1
             end = title.find("'", start)
             title = title[start:end]
         if verbose:
             print(f"Title: {title}")
-
-        # Read options
         opt = f.readline().strip()
         if "'" in opt:
             start = opt.find("'") + 1
@@ -1135,13 +921,9 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         # it verbatim rather than inventing a "P" default that wasn't in
         # the file — downstream code can distinguish ' ' vs 'P'.
         comp = opt[2]
-
-        # Read MLimit
         M_limit = int(f.readline().strip())
         if verbose:
             print(f"MLimit = {M_limit}\n")
-
-        # Read profile ranges using _read_vector
         r_prof, N_prof = _read_vector(f)
         if verbose:
             print(f"\nNumber of profiles, NProf = {N_prof}")
@@ -1151,15 +933,9 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
                     print(f"{r:8.2f}")
             else:
                 print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
-
-        # Read receiver ranges
         r_rcv, _ = _read_vector(f)
         r_rcv = r_rcv * 1000.0  # Convert km to m
-
-        # Read source and receiver depths
         pos_temp = _read_sz_rz(f)
-
-        # Read receiver range offsets (array tilt)
         r_offsets, N_offsets = _read_vector(f)
 
         if verbose:
@@ -1226,14 +1002,11 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
         filepath = fileroot
 
     with open(filepath, "r") as f:
-        # Read title
         title = f.readline().strip()
         if "'" in title:
             start = title.find("'") + 1
             end = title.find("'", start)
             title = title[start:end]
-
-        # Read options
         opt = f.readline().strip()
         if "'" in opt:
             start = opt.find("'") + 1
@@ -1247,22 +1020,12 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
 
         # See read_flp: column 3 is the elastic component / SBP flag.
         comp = opt[2]
-
-        # Read MLimit
         M_limit = int(f.readline().strip())
-
-        # Read profile info (ranges and bearings)
         r_prof, N_r_prof = _read_vector(f)
         theta_prof, N_theta_prof = _read_vector(f)
-
-        # Read receiver ranges and bearings
         r_rcv, _ = _read_vector(f)
         theta_rcv, _ = _read_vector(f)
-
-        # Read source and receiver depths
         pos_temp = _read_sz_rz(f)
-
-        # Read range offsets
         r_offsets, N_offsets = _read_vector(f)
 
     return {
@@ -1293,10 +1056,7 @@ def _read_sz_rz(fid) -> Dict[str, np.ndarray]:
 
     Helper function for read_flp.
     """
-    # Read source depths
     sz, _ = _read_vector(fid)
-
-    # Read receiver depths
     rz, _ = _read_vector(fid)
 
     return {"sz": sz, "rz": rz}
@@ -1359,8 +1119,6 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
             title = line1[1:-1]
         else:
             title = line1
-
-        # Read remaining tokens as a flat stream.
         raw_tokens = []
         for line in f:
             raw_tokens.extend(line.strip().split())
@@ -1391,8 +1149,6 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     time = np.array(time_list)
     p = np.array(pressure_list)  # shape (nt, nr)
-
-    # Calculate dt
     if nt > 1:
         dt = time[1] - time[0]
     else:
@@ -1411,14 +1167,14 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
 def rts_to_tl(rts_data: Dict[str, Any], freq: float, method: str = "fft") -> Tuple[np.ndarray, np.ndarray]:
     """
-    Convert time series to transmission loss at specified frequency.
+    Convert SPARC time-series data to transmission loss at one frequency.
 
-    .. deprecated::
-        Use :meth:`uacpy.core.results.TimeSeriesField.extract_tone` —
-        build a ``TimeSeriesField`` from :func:`read_rts_file` and call
-        ``ts.extract_tone(freq)`` to recover complex pressure (then
-        ``.tl`` for dB). This wrapper is kept only as a transitional
-        shim until SPARC and ``io/__init__.py`` consumers migrate.
+    ``method='fft'`` extracts the spectral bin nearest ``freq`` from a
+    Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
+    single-bin DFT. Both return ``(tl_db, ranges)``.
+
+    Used by :class:`uacpy.models.SPARC` to project the native
+    time-domain pressure onto a TL field at the source frequency.
     """
     p = rts_data["p"]
     dt = rts_data["dt"]
@@ -1507,8 +1263,6 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     read_rts_file : Read binary RTS format from SPARC
     """
     filepath = Path(filepath)
-
-    # Check for .mat file (MATLAB format)
     if filepath.suffix == '.mat':
         import scipy.io
         mat_data = scipy.io.loadmat(str(filepath))
@@ -1518,22 +1272,13 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
             'tout': mat_data['tout'].ravel(),
             'RTS': mat_data['RTS'].T  # MATLAB stores transposed
         }
-
-    # Read ASCII format
     with open(filepath, 'r') as f:
-        # Read title
         plot_title = f.readline().strip()
-
-        # Read number of receiver depths
         nrd = int(f.readline().strip())
-
-        # Read receiver depths
         rd = np.array([float(x) for x in f.readline().strip().split()])
 
         if len(rd) != nrd:
             raise ValueError(f"Expected {nrd} receiver depths, got {len(rd)}")
-
-        # Read time series data
         data = []
         for line in f:
             line = line.strip()
@@ -1542,9 +1287,6 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
                 data.append(values)
 
     data = np.array(data)
-
-    # Extract time and RTS
-    # Column 0 is time, columns 1:nrd+1 are RTS values
     tout = data[:, 0]
     RTS = data[:, 1:nrd+1]
 

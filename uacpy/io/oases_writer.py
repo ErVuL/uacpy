@@ -70,20 +70,13 @@ def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) 
 
 
 def _extract_bottom_props(bottom: BoundaryProperties) -> dict:
-    """Pull the geoacoustic fallback values from a ``BoundaryProperties``-
-    like object. Used by every OAS[TNPR] writer to fill in defaults when an
-    attribute is missing or zero. Defaults match Schmidt's typical "1.5 g/cm³,
-    1600 m/s sand, no shear" base case.
-    """
+    """Pull geoacoustic values from a ``BoundaryProperties`` for OAS[TNPR] writers."""
     return dict(
-        rho=bottom.density if hasattr(bottom, 'density') else 1.5,
-        c_p=bottom.sound_speed if hasattr(bottom, 'sound_speed') else 1600.0,
-        c_s=bottom.shear_speed if hasattr(bottom, 'shear_speed') else 0.0,
-        alpha_p=bottom.attenuation if hasattr(bottom, 'attenuation') else 0.5,
-        alpha_s=(
-            bottom.shear_attenuation
-            if hasattr(bottom, 'shear_attenuation') else 0.0
-        ),
+        rho=bottom.density,
+        c_p=bottom.sound_speed,
+        c_s=bottom.shear_speed,
+        alpha_p=bottom.attenuation,
+        alpha_s=bottom.shear_attenuation,
     )
 
 
@@ -103,9 +96,10 @@ def _emit_bottom_layers(
 ) -> None:
     """Emit sediment layers + bottom halfspace to an OASES input file.
 
-    Writes one interface line per SedimentLayer in ``env.bottom_layered``
-    followed by the halfspace at the correct depth. Falls back to a single
-    halfspace line from ``env.bottom`` when ``env.bottom_layered`` is None.
+    Writes one interface line per SedimentLayer when ``env.bottom`` is a
+    :class:`LayeredBottom`, followed by the halfspace at the correct depth.
+    Falls back to a single halfspace line when ``env.bottom`` is a plain
+    :class:`BoundaryProperties`.
 
     OASES interface format: D CC CS AC AS RO RG [IG]  (extra ``IG`` appended
     when ``extra_columns`` > 0 — required by some OASP/OASN writers).
@@ -126,8 +120,8 @@ def _emit_bottom_layers(
         def suffix_fn(_i): return static_trail  # noqa: E731  -- static-suffix shortcut
 
     iface = iface_start
-    if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
-        lb = env.bottom_layered
+    if env.has_layered_bottom():
+        lb = env.bottom
         current_depth = water_depth
         for layer in lb.layers:
             layer_as = getattr(layer, 'shear_attenuation', 0.0) or 0.0
@@ -222,9 +216,9 @@ def _oases_wavenumber_bounds(
 
 
 def _count_bottom_layers(env: Environment) -> int:
-    """Number of sediment layers (not counting halfspace) in env.bottom_layered."""
-    if hasattr(env, 'bottom_layered') and env.bottom_layered is not None:
-        return len(env.bottom_layered.layers)
+    """Number of sediment layers (not counting halfspace) when env.bottom is layered."""
+    if env.has_layered_bottom():
+        return len(env.bottom.layers)
     return 0
 
 
@@ -389,7 +383,7 @@ def write_oast_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.bottom
+    bottom = env.halfspace_at_range(0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -651,7 +645,7 @@ def write_oasn_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.bottom
+    bottom = env.halfspace_at_range(0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -876,7 +870,7 @@ def write_oasp_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.bottom
+    bottom = env.halfspace_at_range(0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -1095,7 +1089,7 @@ def write_oasr_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.bottom
+    bottom = env.halfspace_at_range(0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']

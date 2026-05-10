@@ -606,3 +606,51 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
     """
     rmsx = np.sqrt(np.mean(np.abs(x) ** 2))
     return 20 * np.log10(rmsx / ref)
+
+
+def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
+    """
+    Return the Pekeris branch of the complex square root.
+
+    Selects the branch of sqrt(gamma2) that enforces the radiation
+    condition in a halfspace (outgoing waves for propagating modes,
+    exponential decay for evanescent modes).
+
+    Parameters
+    ----------
+    gamma2 : ndarray, complex
+        Squared vertical wavenumber, ``gamma^2 = k^2 - k_halfspace^2``.
+    tol : float, optional
+        Tolerance for branch-cut detection (default: 1e-10).
+
+    Returns
+    -------
+    gamma : ndarray, complex
+        Vertical wavenumber on the correct branch.
+
+    References
+    ----------
+    Pekeris, C.L., "Theory of propagation of explosive sound in shallow
+    water," Geol. Soc. Am. Mem. 27 (1948).
+    """
+    gamma2 = np.asarray(gamma2, dtype=complex)
+    gamma = np.sqrt(gamma2)
+
+    re_gamma2 = np.real(gamma2)
+    im_gamma2 = np.imag(gamma2)
+
+    needs_flip = np.zeros(gamma2.shape, dtype=bool)
+
+    mask_propagating = re_gamma2 > tol
+    needs_flip |= mask_propagating & (np.real(gamma) < 0)
+
+    mask_evanescent = re_gamma2 < -tol
+    needs_flip |= mask_evanescent & (np.imag(gamma) > 0)
+
+    mask_critical = np.abs(re_gamma2) <= tol
+    needs_flip |= mask_critical & (im_gamma2 >= 0) & (np.imag(gamma) > 0)
+    needs_flip |= mask_critical & (im_gamma2 < 0) & (np.imag(gamma) < 0)
+
+    gamma[needs_flip] = -gamma[needs_flip]
+
+    return gamma

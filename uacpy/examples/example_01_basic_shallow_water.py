@@ -243,9 +243,9 @@ def main():
 
     print("\nNext steps:")
     print("  • Try example_02 for different sound speed profiles")
-    print("  • Try example_03 for range-dependent bathymetry")
-    print("  • Try example_11 to compare multiple models")
-    print("  • Try example_21 for all new plotting features")
+    print("  • Try example_03 for multi-frequency analysis")
+    print("  • Try example_07 to compare multiple models")
+    print("  • Try example_14 for the visualization tour")
 
     print("\n✓ Example 01 complete\n")
 

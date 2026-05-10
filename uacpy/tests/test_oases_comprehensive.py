@@ -214,11 +214,8 @@ class TestOASR:
     def test_oasr_reflection_coefficients(self, oasr_env, source, receiver):
         """OASR populates the typed ReflectionCoefficient attributes."""
         from uacpy import ReflectionCoefficient
-        oasr = OASR(verbose=False)
-        result = oasr.run(
-            env=oasr_env, source=source, receiver=receiver,
-            angles=np.linspace(0.0, 90.0, 91),
-        )
+        oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 91))
+        result = oasr.run(env=oasr_env, source=source, receiver=receiver)
 
         assert isinstance(result, ReflectionCoefficient)
         assert result.field_type == 'reflection_coefficients'
@@ -230,25 +227,17 @@ class TestOASR:
     @pytest.mark.requires_binary
     def test_oasr_angle_resolution(self, oasr_env, source, receiver):
         """Test OASR with different angle resolutions."""
-        oasr = OASR(verbose=False)
-
-        # Test with coarse angle resolution
-        result = oasr.run(
-            env=oasr_env,
-            source=source,
-            receiver=receiver,
-            angles=np.linspace(0.0, 90.0, 19),
-        )
+        oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 19))
+        result = oasr.run(env=oasr_env, source=source, receiver=receiver)
 
         assert result.field_type == 'reflection_coefficients'
 
     @pytest.mark.requires_binary
     def test_oasr_compute_reflection_helper(self, oasr_env, source, receiver):
         """Verify the convenience method ``OASR.compute_reflection`` runs."""
-        oasr = OASR(verbose=False)
+        oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 31))
         result = oasr.compute_reflection(
             env=oasr_env, source=source, receiver=receiver,
-            angles=np.linspace(0.0, 90.0, 31),
         )
         assert result.field_type == 'reflection_coefficients'
 
@@ -380,11 +369,11 @@ class TestOASESFactory:
     def test_coherent_tl_broadband_routes_to_oasp(self):
         assert isinstance(OASES(broadband=True), OASP)
 
-    def test_unknown_kwarg_silently_ignored(self):
-        """uacpy convention: unknown kwargs are silently dropped."""
-        m = OASES(verbose=False, angles=np.linspace(0, 90, 10))
-        assert isinstance(m, OAST)
-        assert not hasattr(m, 'angles') or getattr(m, 'angles', None) is None
+    def test_unknown_kwarg_raises(self):
+        """OASES() forwards kwargs to the chosen sub-class; mistypes
+        surface as ``TypeError`` instead of being silently dropped."""
+        with pytest.raises(TypeError):
+            OASES(verbose=False, angles=np.linspace(0, 90, 10))
 
     def test_volume_attenuation_propagates(self):
         m = OASES(

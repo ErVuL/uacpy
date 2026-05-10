@@ -150,9 +150,8 @@ def main():
     print("\n[1/5] Bellhop (Gaussian beams + Thorp attenuation)...")
     try:
         bellhop = Bellhop(verbose=False, volume_attenuation='T')
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['Bellhop'] = bellhop.compute_tl(env_approx, source, receiver)
-        print("  ✓ Success (range-independent approximation)")
+        results['Bellhop'] = bellhop.compute_tl(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
 
@@ -179,22 +178,18 @@ def main():
     # Scooter with volume attenuation
     print("[4/5] Scooter (volume attenuation)...")
     try:
-        scooter = Scooter(verbose=False)
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['Scooter'] = scooter.run(env_approx, source, receiver,
-                                         volume_attenuation='T')
-        print("  ✓ Success (range-independent approximation)")
+        scooter = Scooter(verbose=False, volume_attenuation='T')
+        results['Scooter'] = scooter.run(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
 
     # OAST with volume attenuation
     print("[5/5] OAST (wavenumber integration)...")
     try:
-        oast = OAST(verbose=False)
-        env_approx = env.get_range_independent_approximation(method='max')
-        results['OAST'] = oast.run(env_approx, source, receiver,
-                                   volume_attenuation='T')
-        print("  ✓ Success (range-independent approximation)")
+        oast = OAST(verbose=False, volume_attenuation='T')
+        results['OAST'] = oast.run(env, source, receiver)
+        print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
         print(f"  ✗ {e}")
 

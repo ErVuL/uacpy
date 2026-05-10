@@ -101,18 +101,16 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\n[1/4] Running Bellhop with Thorp volume attenuation...")
-    bellhop = Bellhop(verbose=False)
+    bellhop_thorp = Bellhop(
+        verbose=False,
+        beam_type='B', source_type='R', grid_type='R',
+        volume_attenuation='T',
+        n_beams=500, alpha=(-85, 85),
+    )
 
     try:
-        result_thorp = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,            # Coherent TL
-            beam_type='B',           # Gaussian beams
-            source_type='R',         # Point source (cylindrical)
-            grid_type='R',           # Rectilinear grid
-            volume_attenuation='T',  # Thorp formula
-            n_beams=500,             # High beam count for accuracy
-            alpha=(-85, 85),         # Wide angle coverage
+        result_thorp = bellhop_thorp.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -125,24 +123,19 @@ def main():
 
     print("[2/4] Running Bellhop with Cerveny beams...")
 
+    bellhop_cerveny = Bellhop(
+        verbose=False,
+        beam_type='C', source_type='R', grid_type='R',
+        volume_attenuation='T',
+        n_beams=500, alpha=(-85, 85),
+        beam_width_type='M', beam_curvature='Z',
+        eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
+    )
+
     try:
-        result_cerveny = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,
-            beam_type='C',           # Cerveny Cartesian beams
-            source_type='R',
-            grid_type='R',
-            beam_shift=True,         # Enable beam shift
-            volume_attenuation='T',
-            n_beams=500,
-            alpha=(-85, 85),
-            # Cerveny parameters
-            beam_width_type='M',     # Minimum width beams
-            beam_curvature='Z',      # Zero curvature (for grazing angles)
-            eps_multiplier=0.7,      # Narrower beams
-            r_loop=10.0,             # Control up to 10 km
-            n_image=2,               # Include 2 images
-            ib_win=4                 # Beam windowing
+        result_cerveny = bellhop_cerveny.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
+            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -155,15 +148,15 @@ def main():
 
     print("[3/4] Running Bellhop with line source...")
 
+    bellhop_line = Bellhop(
+        verbose=False,
+        beam_type='B', source_type='X', grid_type='R',
+        volume_attenuation='T', n_beams=500,
+    )
+
     try:
-        result_line = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,
-            beam_type='B',
-            source_type='X',         # Line source (Cartesian)
-            grid_type='R',
-            volume_attenuation='T',
-            n_beams=500,
+        result_line = bellhop_line.run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -176,16 +169,16 @@ def main():
 
     print("[4/4] Running ray trace with beam shift...")
 
+    bellhop_rays = Bellhop(
+        verbose=False,
+        beam_type='g', source_type='R', grid_type='R',
+        n_beams=50, alpha=(-80, 80),
+    )
+
     try:
-        result_rays = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.RAYS,            # Ray trace
-            beam_type='g',           # Geometric hat beams
-            source_type='R',
-            grid_type='R',
-            beam_shift=True,         # Beam shift enabled
-            n_beams=50,              # Fewer beams for ray trace
-            alpha=(-80, 80),
+        result_rays = bellhop_rays.run(
+            env, source, receiver, run_mode=RunMode.RAYS,
+            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:

@@ -73,21 +73,19 @@ class TestMVDR:
         assert loaded_cv < loose_cv
 
 
-class TestMVDRLoaded:
+class TestMVDRHeavyLoading:
     def test_peaks_at_true_source(self):
         cov, rep, src = _synthetic_mfp(noise_level=0.05)
-        amb = cov.mvdr_loaded(rep, loading=0.05)
+        amb = cov.mvdr(rep, diagonal_loading=0.05)
         peak = np.unravel_index(np.argmax(amb[0]), amb.shape[1:])
         assert peak == src
 
     def test_heavy_loading_correlates_with_bartlett(self):
         # Heavy diagonal loading collapses the MVDR surface onto the
-        # Bartlett surface (the constraint becomes inactive). A simple
-        # invariant that distinguishes mvdr_loaded from real MVDR.
+        # Bartlett surface (the constraint becomes inactive).
         cov, rep, _ = _synthetic_mfp(noise_level=0.1)
         bart = cov.bartlett(rep)[0].ravel()
-        loaded = cov.mvdr_loaded(rep, loading=100.0)[0].ravel()
-        # Pearson correlation between the two flat surfaces
+        loaded = cov.mvdr(rep, diagonal_loading=100.0)[0].ravel()
         r = np.corrcoef(bart, loaded)[0, 1]
         assert r > 0.95
 

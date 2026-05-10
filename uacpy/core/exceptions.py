@@ -107,5 +107,8 @@ class UnsupportedFeatureError(UACPYError):
 
 
 class ConfigurationError(UACPYError):
-    """Raised for invalid or unreadable configuration files."""
+    """Raised when user-supplied inputs to a model wrapper or core class
+    fail validation (bad parameter values, illegal combinations of
+    flags, missing required kwargs, malformed envs, etc.). The generic
+    "bad inputs" exception across the package."""
     pass

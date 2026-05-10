@@ -316,15 +316,11 @@ def plot_transmission_loss(
     # Use professional colormap
     if cmap is None:
         cmap = get_cmap_for_field('tl')
-
-    # Convert ranges to km for display
     ranges_km = field.ranges / 1000.0
     depths = field.depths
 
     # Select 2-D slice (handles broadband 3-D arrays)
     data2d = _select_2d_slice(field, frequency=frequency)
-
-    # Create meshgrid
     R, Z = np.meshgrid(ranges_km, depths)
 
     vmin, vmax = _auto_tl_limits(data2d, vmin, vmax, tl_span, tl_round)
@@ -387,7 +383,6 @@ def plot_transmission_loss(
     # Contour overlay (AT standard: black lines with labels)
     # Contours drawn BEFORE bathymetry so seafloor masks them
     if contours is not None and len(contours) > 0:
-        # Create contour lines
         CS = ax.contour(
             R, Z, data2d,
             levels=contours,
@@ -446,7 +441,7 @@ def plot_rays(
     else:
         fig = ax.get_figure()
 
-    rays = field.rays if hasattr(field, 'rays') else field.metadata.get('rays', [])
+    rays = getattr(field, 'rays', [])
 
     if not rays:
         warnings.warn("No ray data found in field", UserWarning, stacklevel=2)
@@ -623,13 +618,9 @@ def plot_ssp(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.get_figure()
-
-    # Plot SSP
     _ssp_pairs = env.ssp.to_pairs()
     depths = _ssp_pairs[:, 0]
     sound_speeds = _ssp_pairs[:, 1]
-
-    # Plot compression wave speed
     if show_data_points:
         ax.plot(sound_speeds, depths, 'ko', markersize=6, label='Data points', zorder=5)
 
@@ -692,8 +683,6 @@ def plot_bathymetry(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.get_figure()
-
-    # Plot bathymetry
     ranges_km = env.bathymetry[:, 0] / 1000.0
     depths = env.bathymetry[:, 1]
 
@@ -832,8 +821,6 @@ def plot_environment(
     ax_env = fig.add_subplot(gs[1, 1])
 
     max_depth = env.depth
-
-    # Plot bathymetry
     if len(env.bathymetry) > 1:
         ranges_km = env.bathymetry[:, 0] / 1000.0
         depths = env.bathymetry[:, 1]
@@ -871,7 +858,6 @@ def plot_environment(
         )
 
     ax_env.invert_yaxis()
-    # Set proper y-limits
     ax_env.set_ylim([max_depth * 1.15, -max_depth * 0.05])
     ax_env.set_xlabel('Range (km)', fontsize=12)
     ax_env.set_ylabel('Depth (m)', fontsize=12)
@@ -923,29 +909,16 @@ def plot_modes(
     if not isinstance(modes, Modes):
         raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
-    # Accept either typed Modes attributes or a dict-style
-    # ``metadata['phi']`` (e.g. when the caller hand-built the result).
-    phi = getattr(modes, 'phi', None)
-    if phi is None:
-        phi = modes.metadata.get('phi', modes.data)
-    z = getattr(modes, 'z', None)
-    if z is None:
-        z = modes.metadata.get('z', modes.depths)
-    k = getattr(modes, 'k', None)
-    if k is None or (hasattr(k, '__len__') and len(k) == 0):
-        k = modes.metadata.get('k', np.array([]))
+    phi = getattr(modes, 'phi', modes.data)
+    z = getattr(modes, 'z', modes.depths)
+    k = getattr(modes, 'k', np.array([]))
     M = len(k)
-    freq = (
-        modes.f0 if modes.f0 is not None
-        else modes.metadata.get('frequency', 0.0)
-    )
+    freq = modes.f0 if modes.f0 is not None else 0.0
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
 
     if n_modes is None:
         n_modes = min(6, M)
-
-    # Plot mode shapes
     for i in range(n_modes):
         # Normalize mode shape for visualization
         phi_real = phi[:, i].real
@@ -971,8 +944,6 @@ def plot_modes(
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='best', fontsize=9)
     ax1.axvline(0, color='k', linewidth=0.5, linestyle='--')
-
-    # Plot wavenumber spectrum
     k_real = np.real(k)
     np.abs(np.imag(k))
     phase_speed = 2 * np.pi * freq / k_real
@@ -1031,22 +1002,11 @@ def plot_mode_functions(
     if not isinstance(modes, Modes):
         raise ValueError("plot_modes/plot_mode_* requires a Modes Result")
 
-    # Accept either typed Modes attributes or a dict-style
-    # ``metadata['phi']`` (e.g. when the caller hand-built the result).
-    phi = getattr(modes, 'phi', None)
-    if phi is None:
-        phi = modes.metadata.get('phi', modes.data)
-    z = getattr(modes, 'z', None)
-    if z is None:
-        z = modes.metadata.get('z', modes.depths)
-    k = getattr(modes, 'k', None)
-    if k is None or (hasattr(k, '__len__') and len(k) == 0):
-        k = modes.metadata.get('k', np.array([]))
+    phi = getattr(modes, 'phi', modes.data)
+    z = getattr(modes, 'z', modes.depths)
+    k = getattr(modes, 'k', np.array([]))
     M = len(k)
-    freq = (
-        modes.f0 if modes.f0 is not None
-        else modes.metadata.get('frequency', 0.0)
-    )
+    freq = modes.f0 if modes.f0 is not None else 0.0
 
     if mode_indices is None:
         mode_indices = list(range(min(4, M)))
@@ -1141,16 +1101,9 @@ def plot_mode_wavenumbers(
     """
     if not isinstance(modes, Modes):
         raise ValueError("plot_mode_wavenumbers requires a Modes Result")
-    k = getattr(modes, 'k', None)
-    if k is None or (hasattr(k, '__len__') and len(k) == 0):
-        k = modes.metadata.get('k', np.array([]))
-    freq = (
-        modes.f0 if modes.f0 is not None
-        else modes.metadata.get('frequency', 0.0)
-    )
+    k = getattr(modes, 'k', np.array([]))
+    freq = modes.f0 if modes.f0 is not None else 0.0
     M = len(k)
-
-    # Create figure
     fig, ax = plt.subplots(figsize=figsize)
 
     # Extract real and imaginary parts
@@ -1172,8 +1125,6 @@ def plot_mode_wavenumbers(
                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
                                   edgecolor='gray', alpha=0.7),
                         zorder=4)
-
-    # Add reference lines
     ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.3, zorder=1)  # Real axis
     ax.axvline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.3, zorder=1)  # Imaginary axis
 
@@ -1185,8 +1136,6 @@ def plot_mode_wavenumbers(
 
     # Grid
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5, zorder=ZORDER_GRID)
-
-    # Add text box with information
     textstr = f'Modes: {M}\n'
     textstr += f'Frequency: {freq:.1f} Hz\n'
     textstr += f'k range: [{k_real.min():.4f}, {k_real.max():.4f}] rad/m'
@@ -1384,8 +1333,6 @@ def plot_dispersion_curves(
                      color=color, label=f'Mode {mode_idx+1}')
             ax2.semilogy(freqs, attenuations, 'o-', linewidth=2, markersize=6,
                          color=color)
-
-    # Plot number of modes vs frequency
     mode_counts = [modes_dict[f]['M'] for f in frequencies]
     ax3.plot(frequencies, mode_counts, 'ko-', linewidth=2, markersize=8)
 
@@ -1599,113 +1546,6 @@ def compare_range_cuts(
     return fig, ax
 
 
-def plot_model_statistics(
-    results: dict,
-    compute_times: dict,
-    figsize: Tuple[float, float] = (14, 10),
-) -> Tuple[Figure, Axes]:
-    """
-    Plot comprehensive statistics for multiple model results
-
-    Parameters
-    ----------
-    results : dict
-        Dictionary with model names as keys and Result objects as values
-    compute_times : dict
-        Dictionary with model names as keys and computation times (s) as values
-    figsize : tuple, optional
-        Figure size. Default is (14, 10).
-
-    Returns
-    -------
-    fig : Figure
-        Matplotlib figure
-    axes : array of Axes
-        Matplotlib axes array
-
-    Examples
-    --------
-    >>> results = {'RAM': field1, 'Bellhop': field2}
-    >>> times = {'RAM': 1.5, 'Bellhop': 0.3}
-    >>> fig, axes = plot_model_statistics(results, times)
-    >>> plt.show()
-    """
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
-    ax1, ax2, ax3, ax4 = axes.flatten()
-
-    model_names = list(results.keys())
-    colors = plt.cm.tab10(np.linspace(0, 1, len(model_names)))
-
-    # 1. Computation time comparison
-    times = [compute_times[name] for name in model_names]
-    bars = ax1.barh(model_names, times, color=colors, alpha=0.7, edgecolor='black')
-    ax1.set_xlabel('Computation Time (s)', fontsize=12)
-    ax1.set_title('Model Performance', fontsize=12, fontweight='bold')
-    ax1.grid(True, alpha=0.3, axis='x')
-
-    # Add time labels on bars
-    for bar, time in zip(bars, times):
-        width = bar.get_width()
-        ax1.text(width, bar.get_y() + bar.get_height()/2,
-                 f'{time:.3f}s', ha='left', va='center', fontsize=10,
-                 fontweight='bold')
-
-    # 2. TL range comparison (collapse broadband 3-D to a 2-D slice first)
-    slices_2d = [_select_2d_slice(field) for field in results.values()]
-    tl_mins = [np.min(s[np.isfinite(s)]) for s in slices_2d]
-    tl_maxs = [np.max(s[np.isfinite(s)]) for s in slices_2d]
-
-    x = np.arange(len(model_names))
-    width = 0.35
-    ax2.bar(x - width/2, tl_mins, width, label='Min TL', color='lightblue',
-            edgecolor='black', alpha=0.7)
-    ax2.bar(x + width/2, tl_maxs, width, label='Max TL', color='coral',
-            edgecolor='black', alpha=0.7)
-    ax2.set_ylabel('Transmission Loss (dB)', fontsize=12)
-    ax2.set_title('TL Range by Model', fontsize=12, fontweight='bold')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(model_names, rotation=45, ha='right')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3, axis='y')
-
-    # 3. Grid size comparison (use 2-D slice so labels stay readable)
-    grid_sizes = [f"{s.shape[0]}×{s.shape[1]}" for s in slices_2d]
-    n_points = [s.size for s in slices_2d]
-
-    bars = ax3.bar(model_names, n_points, color=colors, alpha=0.7, edgecolor='black')
-    ax3.set_ylabel('Number of Grid Points', fontsize=12)
-    ax3.set_title('Grid Resolution', fontsize=12, fontweight='bold')
-    ax3.set_xticklabels(model_names, rotation=45, ha='right')
-    ax3.grid(True, alpha=0.3, axis='y')
-
-    # Add grid size labels on bars
-    for bar, grid_size in zip(bars, grid_sizes):
-        height = bar.get_height()
-        ax3.text(bar.get_x() + bar.get_width()/2, height,
-                 grid_size, ha='center', va='bottom', fontsize=9,
-                 fontweight='bold')
-
-    # 4. Range cut comparison at mid-depth
-    for idx, (model_name, field) in enumerate(results.items()):
-        mid_depth_idx = len(field.depths) // 2
-        data2d = slices_2d[idx]
-        tl = data2d[mid_depth_idx, :]
-        ranges_km = field.ranges / 1000.0
-        ax4.plot(ranges_km, tl, linewidth=2, label=model_name,
-                 color=colors[idx], alpha=0.8)
-
-    ax4.set_xlabel('Range (km)', fontsize=12)
-    ax4.set_ylabel('Transmission Loss (dB)', fontsize=12)
-    ax4.set_title('TL Comparison at Mid-Depth', fontsize=12, fontweight='bold')
-    ax4.grid(True, alpha=0.3)
-    ax4.legend(loc='best', fontsize=9)
-    ax4.invert_yaxis()
-
-    fig.tight_layout()
-
-    return fig, axes
-
-
 def plot_model_comparison_matrix(
     results: dict,
     comparison_metric: str = 'rms',
@@ -1772,11 +1612,7 @@ def plot_model_comparison_matrix(
                 fontsize=14, fontweight='bold')
         ax.axis('off')
         return fig, ax
-
-    # Initialize comparison matrix
     comparison_matrix = np.zeros((n_models, n_models))
-
-    # Compute pairwise comparisons
     for i in range(n_models):
         for j in range(n_models):
             if i == j:
@@ -1828,8 +1664,6 @@ def plot_model_comparison_matrix(
                 if len(data_i) == 0:
                     comparison_matrix[i, j] = np.nan
                     continue
-
-                # Compute comparison metric
                 if comparison_metric == 'rms':
                     # RMS error in dB
                     comparison_matrix[i, j] = np.sqrt(np.mean((data_i - data_j)**2))
@@ -1867,14 +1701,10 @@ def plot_model_comparison_matrix(
     # Colorbar
     cbar = plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=10)
-
-    # Set ticks and labels
     ax.set_xticks(range(n_models))
     ax.set_yticks(range(n_models))
     ax.set_xticklabels(model_names, rotation=45, ha='right', fontsize=11)
     ax.set_yticklabels(model_names, fontsize=11)
-
-    # Add value annotations
     for i in range(n_models):
         for j in range(n_models):
             if i != j and np.isfinite(comparison_matrix[i, j]):
@@ -1908,117 +1738,6 @@ def plot_model_comparison_matrix(
     fig.tight_layout()
 
     return fig, ax
-
-
-def plot_comparison_curves(
-    results: dict,
-    source_depth: float,
-    mid_range_km: Optional[float] = None,
-    figsize: Tuple[float, float] = (14, 6),
-    frequency: Optional[float] = None,
-) -> Tuple[Figure, np.ndarray]:
-    """
-    Plot TL comparison curves: TL vs range and TL vs depth
-
-    Creates side-by-side plots showing transmission loss profiles for all models.
-    Essential for quantitative comparison of model behavior and identifying
-    differences in propagation characteristics.
-
-    Parameters
-    ----------
-    results : dict
-        Dictionary with model names as keys and Result objects as values
-    source_depth : float
-        Depth in meters for TL vs range plot
-    mid_range_km : float, optional
-        Range in km for TL vs depth plot. If None, uses median range.
-    figsize : tuple, optional
-        Figure size. Default is (14, 6).
-
-    Returns
-    -------
-    fig : Figure
-        Matplotlib figure
-    axes : ndarray
-        Array of matplotlib axes [ax_range, ax_depth]
-
-    Examples
-    --------
-    >>> results = {'Bellhop': field1, 'RAM': field2}
-    >>> fig, axes = plot_comparison_curves(results, source_depth=50.0)
-    >>> plt.show()
-
-    Notes
-    -----
-    - Left plot: TL vs range at specified source depth
-    - Right plot: TL vs depth at mid-range (or specified range)
-    - Uses consistent color scheme for models across both plots
-    """
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-    ax_range, ax_depth = axes
-
-    # Plot 1: TL vs Range at source depth
-    for name, field in results.items():
-        # Skip None fields (models that couldn't run)
-        if field is None:
-            continue
-        # Find closest depth to source_depth
-        depth_idx = np.argmin(np.abs(field.depths - source_depth))
-        actual_depth = field.depths[depth_idx]
-
-        data2d = _select_2d_slice(field, frequency=frequency)
-        tl_vs_range = data2d[depth_idx, :]
-        ranges_km = field.ranges / 1000.0
-
-        # Centralized model palette (style.MODEL_COLORS via get_model_color).
-        color = get_model_color(name)
-
-        ax_range.plot(ranges_km, tl_vs_range, linewidth=2.5,
-                      label=f'{name} ({actual_depth:.1f}m)',
-                      color=color, alpha=0.85)
-
-    ax_range.set_xlabel('Range (km)', fontsize=12, fontweight='bold')
-    ax_range.set_ylabel('Transmission Loss (dB)', fontsize=12, fontweight='bold')
-    ax_range.set_title(f'TL vs Range at {source_depth:.0f}m Depth',
-                       fontsize=13, fontweight='bold')
-    ax_range.legend(fontsize=10, loc='best', framealpha=0.9)
-    ax_range.grid(True, alpha=0.3, linestyle='--')
-
-    # Plot 2: TL vs Depth at mid-range
-    # Determine mid-range if not specified
-    if mid_range_km is None:
-        all_ranges = np.concatenate([field.ranges for field in results.values() if field is not None])
-        mid_range_km = np.median(all_ranges) / 1000.0
-
-    for name, field in results.items():
-        # Skip None fields (models that couldn't run)
-        if field is None:
-            continue
-        # Find closest range to mid_range_km
-        range_idx = np.argmin(np.abs(field.ranges/1000.0 - mid_range_km))
-        actual_range_km = field.ranges[range_idx] / 1000.0
-
-        data2d = _select_2d_slice(field, frequency=frequency)
-        tl_vs_depth = data2d[:, range_idx]
-        depths = field.depths
-
-        color = get_model_color(name)
-
-        ax_depth.plot(tl_vs_depth, depths, linewidth=2.5,
-                      label=f'{name} ({actual_range_km:.1f}km)',
-                      color=color, alpha=0.85)
-
-    ax_depth.invert_yaxis()
-    ax_depth.set_xlabel('Transmission Loss (dB)', fontsize=12, fontweight='bold')
-    ax_depth.set_ylabel('Depth (m)', fontsize=12, fontweight='bold')
-    ax_depth.set_title(f'TL vs Depth at {mid_range_km:.1f}km Range',
-                       fontsize=13, fontweight='bold')
-    ax_depth.legend(fontsize=10, loc='best', framealpha=0.9)
-    ax_depth.grid(True, alpha=0.3, linestyle='--')
-
-    fig.tight_layout()
-
-    return fig, axes
 
 
 def plot_ssp_2d(
@@ -2071,11 +1790,7 @@ def plot_ssp_2d(
     ranges_km = env.ssp.ranges / 1000.0
     ssp_matrix = env.ssp.data
     depths = env.ssp.depths
-
-    # Create meshgrid
     R, Z = np.meshgrid(ranges_km, depths)
-
-    # Plot heatmap
     im = ax.pcolormesh(R, Z, ssp_matrix, cmap=cmap, shading='auto')
 
     # Overlay bathymetry if available
@@ -2120,7 +1835,7 @@ def plot_bottom_properties(
     Parameters
     ----------
     env : Environment
-        Environment with range-dependent bottom (bottom_rd)
+        Environment with a RangeDependentBottom
     figsize : tuple, optional
         Figure size. Default is (14, 10).
 
@@ -2138,12 +1853,12 @@ def plot_bottom_properties(
     >>> plt.show()
     """
     if not env.has_range_dependent_bottom():
-        raise ValueError("Environment must have range-dependent bottom (bottom_rd)")
+        raise ValueError("Environment must have a RangeDependentBottom")
 
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     axes = axes.flatten()
 
-    bottom_rd = env.bottom_rd
+    bottom_rd = env.bottom
     ranges_km = bottom_rd.ranges / 1000.0
     seafloor = np.asarray(env.bathymetry_at_range(bottom_rd.ranges))
 
@@ -2238,7 +1953,7 @@ def plot_layered_bottom(
     Parameters
     ----------
     env : Environment
-        Environment with a LayeredBottom (env.bottom_layered).
+        Environment with a LayeredBottom on env.bottom.
     figsize : tuple, optional
         Figure size. Default is (10, 8).
     ax : Axes, optional
@@ -2253,9 +1968,9 @@ def plot_layered_bottom(
     """
 
     if not env.has_layered_bottom():
-        raise ValueError("Environment must have a LayeredBottom (env.bottom_layered)")
+        raise ValueError("Environment must have a LayeredBottom")
 
-    lb = env.bottom_layered
+    lb = env.bottom
     seafloor = env.depth
 
     if ax is None:
@@ -2339,7 +2054,7 @@ def plot_rd_layered_bottom(
     if not env.has_range_dependent_layered_bottom():
         raise ValueError("Environment must have a RangeDependentLayeredBottom")
 
-    rdl = env.bottom_rd_layered
+    rdl = env.bottom
     rdl_km = rdl.ranges / 1000.0
     n_ranges = len(rdl.ranges)
     seafloor_at_profile = np.array([
@@ -2479,7 +2194,7 @@ def plot_rd_bottom(
     """
     if not env.has_range_dependent_bottom():
         raise ValueError("Environment must have a RangeDependentBottom")
-    rd = env.bottom_rd
+    rd = env.bottom
     ranges_km = np.asarray(rd.ranges / 1000.0)
     seafloor_nodes = np.asarray(env.bathymetry_at_range(rd.ranges))
 
@@ -2628,7 +2343,7 @@ def plot_environment_advanced(
         ax_rho = fig.add_subplot(gs[1, 1])
         ax_atten = fig.add_subplot(gs[1, 2])
 
-        bottom_rd = env.bottom_rd
+        bottom_rd = env.bottom
         ranges_km = bottom_rd.ranges / 1000.0
 
         ax_cs.plot(ranges_km, bottom_rd.sound_speed, 'o-', linewidth=2, color='darkblue')
@@ -2651,8 +2366,6 @@ def plot_environment_advanced(
 
         # Bottom row: Setup overview
         ax_setup = fig.add_subplot(gs[2, :])
-
-        # Plot bathymetry
         if len(env.bathymetry) > 1:
             bathy_ranges = env.bathymetry[:, 0] / 1000.0
             bathy_depths = env.bathymetry[:, 1]
@@ -2736,8 +2449,9 @@ def plot_transmission_loss_polar(
 
     Parameters
     ----------
-    field : Field
-        TL field with theta data in metadata['theta']
+    field : Result
+        TL field carrying ``theta`` (azimuth/bearing) in
+        ``metadata['theta']`` for 3-D / Bellhop3D outputs.
     receiver_depth : float, optional
         Receiver depth to extract (m). If None, uses first depth.
     vmin, vmax : float, optional
@@ -2793,8 +2507,6 @@ def plot_transmission_loss_polar(
     pressure = field.metadata.get('pressure', None)
     if pressure is None:
         raise ValueError("Field must have complex 'pressure' in metadata for polar plots.")
-
-    # Get receiver depths
     receiver_depths = field.depths
     if receiver_depth is None:
         receiver_depth = receiver_depths[0]
@@ -2817,8 +2529,6 @@ def plot_transmission_loss_polar(
             p_slice = pressure[0, depth_idx, :]
     else:
         raise ValueError(f"Unexpected pressure shape: {pressure.shape}")
-
-    # Convert to TL
     tl = np.abs(p_slice)
     tl[tl < PRESSURE_FLOOR] = PRESSURE_FLOOR
     tl = -20.0 * np.log10(tl)
@@ -2831,14 +2541,10 @@ def plot_transmission_loss_polar(
         if np.abs((theta[-1] + d_theta - theta[0]) % 360.0) < 0.01:
             theta = np.append(theta, theta[-1] + d_theta)
             tl = np.vstack([tl, tl[0:1, :]])
-
-    # Convert theta to radians
     theta_rad = np.deg2rad(theta)
 
     # Get range grid (convert to km to match other TL plots)
     ranges = field.ranges / 1000.0
-
-    # Create meshgrid for polar plot
     Theta, R = np.meshgrid(theta_rad, ranges, indexing='ij')
 
     # Auto-compute color limits if not provided
@@ -2852,8 +2558,6 @@ def plot_transmission_loss_polar(
                 vmax = 10 * np.round(vmax / 10)
             if vmin is None:
                 vmin = vmax - 50
-
-    # Create figure with polar projection
     if ax is None:
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111, projection='polar')
@@ -3120,9 +2824,10 @@ def plot_time_series(
 
     Parameters
     ----------
-    field : Result, optional
-        Result with time series data in metadata['time_series'].
-        Either field or time_series_data must be provided.
+    field : TimeSeriesField or TimeTrace, optional
+        Time-domain Result with ``data`` shaped ``(n_d, n_r, n_t)`` and
+        a ``time`` axis (typed attribute). Either ``field`` or
+        ``time_series_data`` must be provided.
     time_series_data : dict, optional
         Direct time series data dict with keys 'time', 'pressure', 'receiver_depth'.
         Alternative to passing field.
@@ -3154,7 +2859,7 @@ def plot_time_series(
     Examples
     --------
     >>> # From SPARC model output
-    >>> result = sparc.compute_tl(env, source, receiver)
+    >>> result = sparc.run(env, source, receiver, run_mode=RunMode.TIME_SERIES)
     >>> fig, ax = plot_time_series(result)
     >>> plt.show()
 
@@ -3205,22 +2910,21 @@ def plot_time_series(
                 pressure_arr = data[0].T               # (nt, nr)
             else:
                 pressure_arr = data
+            receiver_depth = field.metadata.get(
+                'receiver_depth',
+                float(field.depths[0]) if hasattr(field, 'depths') and len(field.depths) else None,
+            )
             ts_data = {
-                'time': field.metadata['time'],
+                'time': field.time,
                 'pressure': pressure_arr,
-                'dt': field.metadata.get('dt', None),
-                'receiver_depth': field.metadata.get(
-                    'receiver_depth',
-                    float(field.depths[0]) if hasattr(field, 'depths') and len(field.depths) else None,
-                ),
+                'dt': getattr(field, 'dt', None),
+                'receiver_depth': receiver_depth,
             }
         else:
-            ts_data = field.metadata.get('time_series', None)
-            if ts_data is None:
-                raise ValueError(
-                    "Result must be a TimeSeriesField or TimeTrace (e.g. from "
-                    "``SPARC.run(run_mode=RunMode.TIME_SERIES)``)."
-                )
+            raise ValueError(
+                "Result must be a TimeSeriesField or TimeTrace (e.g. from "
+                "``SPARC.run(run_mode=RunMode.TIME_SERIES)``)."
+            )
     elif time_series_data is not None:
         ts_data = time_series_data
     else:
@@ -3280,8 +2984,6 @@ def plot_time_series(
         pressure = pressure[:, indices]
         rd = rd[indices]
         nrd = len(indices)
-
-    # Create figure
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -3302,7 +3004,6 @@ def plot_time_series(
         elif len(unique_depths) == 1:
             # Single depth but no range info - use indices as stack values
             stack_by_range = False
-            # Create artificial spacing based on trace index
             rd = np.arange(nrd, dtype=float)
 
     # Always stack (never use overlaid mode when stacked=True)
@@ -3347,11 +3048,7 @@ def plot_time_series(
 
             # Determine trace color
             trace_color = color if color is not None else f'C{ird % 10}'
-
-            # Plot the waveform
             ax.plot(time, p_offset, linewidth=0.8, color=trace_color, label=trace_label if ird < 10 else '')
-
-            # Add a reference line
             ax.axhline(stack_values[ird], color='gray', linewidth=0.3, alpha=0.3, linestyle='--', zorder=0)
 
         ax.set_ylabel(ylabel, fontsize=12)
@@ -3453,20 +3150,11 @@ def plot_modes_heatmap(
     if cmap is None:
         cmap = COLORMAPS.get('modes', 'RdBu_r')
 
-    phi = getattr(modes, 'phi', None)
-    if phi is None:
-        phi = modes.metadata.get('phi', modes.data)
-    z = getattr(modes, 'z', None)
-    if z is None:
-        z = modes.metadata.get('z', modes.depths)
-    k = getattr(modes, 'k', None)
-    if k is None or (hasattr(k, '__len__') and len(k) == 0):
-        k = modes.metadata.get('k', np.array([]))
+    phi = getattr(modes, 'phi', modes.data)
+    z = getattr(modes, 'z', modes.depths)
+    k = getattr(modes, 'k', np.array([]))
     M = len(k)
-    freq = (
-        modes.f0 if modes.f0 is not None
-        else modes.metadata.get('frequency', 0.0)
-    )
+    freq = modes.f0 if modes.f0 is not None else 0.0
 
     # Select mode range
     if mode_range is None:
@@ -3486,8 +3174,6 @@ def plot_modes_heatmap(
             max_val = np.max(np.abs(phi_plot[:, i]))
             if max_val > 0:
                 phi_plot[:, i] = phi_plot[:, i] / max_val
-
-    # Create figure
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -3495,8 +3181,6 @@ def plot_modes_heatmap(
 
     # Create mode number array for x-axis (centers)
     mode_numbers = np.arange(mode_start + 1, mode_end + 1)  # 1-indexed for display
-
-    # Plot heatmap
     # MATLAB: pcolor(x, Modes.z, real(phi)) where phi is (n_depths, n_modes)
     if normalize:
         vmin, vmax = -1, 1
@@ -3524,8 +3208,6 @@ def plot_modes_heatmap(
     # Colorbar
     cbar_label = 'Normalized Amplitude' if normalize else 'Amplitude'
     create_professional_colorbar(fig, im, ax, label=cbar_label)
-
-    # Add grid for mode boundaries
     ax.set_xticks(mode_numbers[::max(1, n_modes_plot // 10)])
     ax.grid(True, alpha=0.2, axis='x')
 
@@ -3592,18 +3274,12 @@ def plot_reflection_coefficient(
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # Extract reflection coefficient data from field metadata
     if not isinstance(field, ReflectionCoefficient):
         raise ValueError("plot_reflection_coefficient requires a ReflectionCoefficient Result")
 
-    if 'theta' not in field.metadata or 'R' not in field.metadata:
-        raise ValueError("Result metadata must contain 'theta' (angles) and 'R' (magnitude)")
-
-    angles = field.metadata['theta']  # Grazing angles (degrees)
-    R_mag = field.metadata['R']       # Magnitude
-    R_phase = field.metadata.get('phi', None)  # Phase (radians)
-
-    # Create figure
+    angles = field.theta
+    R_mag = field.R
+    R_phase = field.phi
     if show_phase and show_magnitude:
         if ax is None:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True)
@@ -3619,8 +3295,6 @@ def plot_reflection_coefficient(
             fig = ax.get_figure()
             ax1 = ax
         ax2 = None
-
-    # Plot magnitude
     if show_magnitude:
         ax1.plot(angles, R_mag, 'b-', linewidth=2.5, label='|R|')
         ax1.set_ylabel('Reflection Coefficient Magnitude |R|', fontsize=11, fontweight='bold')
@@ -3651,10 +3325,7 @@ def plot_reflection_coefficient(
             else:
                 title = 'Bottom Reflection Coefficient (BOUNCE)'
         ax1.set_title(title, fontsize=12, fontweight='bold')
-
-    # Plot phase
     if show_phase and R_phase is not None:
-        # Convert phase from radians to degrees
         phase_deg = np.degrees(R_phase)
         ax2.plot(angles, phase_deg, 'g-', linewidth=2.5, label='Phase')
         ax2.set_xlabel('Grazing Angle (degrees)', fontsize=11, fontweight='bold')

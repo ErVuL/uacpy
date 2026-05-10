@@ -56,7 +56,7 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.has_range_dependent_bottom()
-        assert len(env.bottom_rd.ranges) == 3
+        assert len(env.bottom.ranges) == 3
 
         # Test getting bottom at specific range
         bottom_at_2km = env.bottom_at_range(2000)
@@ -421,15 +421,14 @@ class TestLayeredBottom:
 
         assert env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
-        assert env.bottom_layered is lb
-        # env.bottom exposes the halfspace for range-independent model consumers
-        assert env.bottom.sound_speed == 1800
+        assert env.bottom is lb
+        assert env.bottom.halfspace.sound_speed == 1800
 
     def test_environment_plain_boundary_properties(self):
         """Plain BoundaryProperties bottom has no layered/RD bottom attached."""
         env = uacpy.Environment(name='test', bathymetry=100)
         assert not env.has_layered_bottom()
-        assert env.bottom_layered is None
+        assert isinstance(env.bottom, uacpy.BoundaryProperties)
 
 
 class TestRangeDependentLayeredBottom:
@@ -551,8 +550,8 @@ class TestWarnings:
             except (FileNotFoundError, RuntimeError):
                 pass
 
-    def test_bellhop_warns_layered_bottom(self):
-        """Bellhop should warn about layered bottom."""
+    def test_bellhop_auto_routes_layered_bottom_through_bounce(self):
+        """Bellhop auto-routes a layered bottom through BOUNCE."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -562,7 +561,7 @@ class TestWarnings:
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bellhop = Bellhop(verbose=False)
-        with pytest.warns(UserWarning, match="layered"):
+        with pytest.warns(UserWarning, match="auto-routing through BOUNCE"):
             try:
                 bellhop.run(env, source, receiver)
             except (FileNotFoundError, RuntimeError):

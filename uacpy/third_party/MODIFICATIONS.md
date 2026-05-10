@@ -971,11 +971,11 @@ to sweep ~500 frequencies per COHERENT_TL call.
 ### Scooter BRC RMax — wrapper bug fix
 
 `models/scooter.py:_write_scooter_env` previously fed
-`BoundaryProperties.reflection_rmax_m` directly as Scooter's spectral
+`BoundaryProperties.reflection_rmax` directly as Scooter's spectral
 RMax for `acoustic_type='file'` bottoms. Those are different concepts:
-`reflection_rmax_m` bounds the BRC tabulation, while Scooter's RMax
+`reflection_rmax` bounds the BRC tabulation, while Scooter's RMax
 sets the wavenumber-integration grid via `Δk = π / RMax`. With
-`reflection_rmax_m=10` (a typical BRC sampling), Scooter computed
+`reflection_rmax=10` (a typical BRC sampling), Scooter computed
 `Nk=2` and stabilising `atten ≈ 0.3` — the in-tree Hankel transform
 then overflowed `exp(atten · r)` past machine range at any meaningful
 receiver distance.

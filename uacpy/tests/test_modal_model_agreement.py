@@ -59,7 +59,7 @@ class TestModalModelAgreement:
         kraken = Kraken(verbose=False)
         result = kraken.run(simple_environment, simple_source, receiver)
 
-        k = result.metadata['k']
+        k = result.k
 
         # Check that we have modes
         assert len(k) > 0, "No modes computed"
@@ -177,7 +177,7 @@ class TestModalModelAgreement:
             kraken = Kraken(verbose=False)
             result = kraken.run(simple_environment, simple_source, receiver)
 
-            k = result.metadata['k']
+            k = result.k
             n_valid = sum(1 for k_val in k if np.abs(k_val) >= 1e-10 and np.imag(k_val) <= 0)
             mode_counts.append(n_valid)
 

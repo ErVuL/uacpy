@@ -36,8 +36,10 @@ from pathlib import Path
 from typing import Optional, List
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
-from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
-from uacpy.core.environment import Environment, LayeredBottom
+from uacpy.models.base import PropagationModel, RunMode
+from uacpy.core.environment import (
+    Environment, LayeredBottom, RangeDependentLayeredBottom,
+)
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, PressureField, TransferFunction
@@ -255,9 +257,13 @@ class RAM(PropagationModel):
         rs_stability : float, optional
             Stability range (m). None = max output range. Default: None.
         Q : float, optional
-            Q value for broadband bandwidth (fc/Q). Default: 2.0.
+            Q value for broadband bandwidth (fc/Q). Default: ``None``,
+            which resolves to ``2.0`` for broadband paths and to
+            ``1e6`` for COHERENT_TL (effectively single-frequency).
         T : float, optional
-            Time window width (s). Default: 10.0.
+            Time window width (s). Default: ``None``, which resolves
+            to ``10.0`` for broadband paths and to ``1.0`` for
+            COHERENT_TL.
         depth_decimation : int, optional
             Output depth decimation factor. Default: 1.
         flat_earth : bool, optional
@@ -326,6 +332,7 @@ class RAM(PropagationModel):
         # supported by any backend. _drop_unsupported_surface_shear() in
         # run() warns + zeros surface shear when present.
         self._supports_elastic_media = True
+        self._supports_multi_source_depth = False
 
         if executable is not None:
             self.executable = Path(executable)
@@ -447,17 +454,26 @@ class RAM(PropagationModel):
             return float(self.c0)
         from uacpy.models._pade_optimizer import optimal_c0
         speeds = [float(c) for c in env.ssp.data[:, 0]]
-        b = getattr(env, 'bottom', None)
-        if b is not None and getattr(b, 'sound_speed', None):
-            speeds.append(float(b.sound_speed))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, RangeDependentLayeredBottom):
+            for prof in b.profiles:
+                for layer in prof.layers:
+                    if getattr(layer, 'sound_speed', None):
+                        speeds.append(float(layer.sound_speed))
+                if getattr(prof.halfspace, 'sound_speed', None):
+                    speeds.append(float(prof.halfspace.sound_speed))
+        elif isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 if getattr(layer, 'sound_speed', None):
                     speeds.append(float(layer.sound_speed))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None and getattr(hs, 'sound_speed', None):
-                speeds.append(float(hs.sound_speed))
+            if getattr(b.halfspace, 'sound_speed', None):
+                speeds.append(float(b.halfspace.sound_speed))
+        elif b is not None and getattr(b, 'sound_speed', None) is not None:
+            cs = b.sound_speed
+            if hasattr(cs, '__len__'):
+                speeds.extend(float(c) for c in cs)
+            else:
+                speeds.append(float(cs))
         if not speeds:
             return DEFAULT_SOUND_SPEED
         c_min = float(min(speeds))
@@ -604,9 +620,8 @@ class RAM(PropagationModel):
         # Use thin sediment layer for sharp interface (≈ half-space)
         sedlayer = self._effective_dz(env)
 
-        if env.bottom_rd_layered is not None and work_dir is not None:
-            # Range-dependent layered bottom
-            rdl = env.bottom_rd_layered
+        if env.has_range_dependent_layered_bottom() and work_dir is not None:
+            rdl = env.bottom
             n_ranges = len(rdl.ranges)
             sedlayer_rdl = max(rdl.max_total_thickness(), self._effective_dz(env))
 
@@ -660,9 +675,8 @@ class RAM(PropagationModel):
             attn_arr = attn_profiles[:, 0].copy()
             return sedlayer_rdl, nzs, cs, rho_arr, attn_arr, 1, sed_filename
 
-        if env.bottom_layered is not None:
-            # Range-independent layered bottom: sample at nzs depths
-            layered = env.bottom_layered
+        if env.has_layered_bottom():
+            layered = env.bottom
             total_thick = layered.total_thickness()
             sedlayer_lay = max(total_thick, self._effective_dz(env))
 
@@ -688,9 +702,8 @@ class RAM(PropagationModel):
 
             return sedlayer_lay, nzs, cs, rho_arr, attn_arr, 0, ''
 
-        if env.bottom_rd is not None and work_dir is not None:
-            # Range-dependent halfspace bottom
-            bottom_rd = env.bottom_rd
+        if env.has_range_dependent_bottom() and work_dir is not None:
+            bottom_rd = env.bottom
             n_ranges = len(bottom_rd.ranges)
 
             cs_profiles = np.zeros((nzs, n_ranges))
@@ -740,10 +753,10 @@ class RAM(PropagationModel):
         attn_val = 0.5
 
         if env.bottom is not None:
-            bottom = env.bottom
-            cb_val = getattr(bottom, 'sound_speed', 1600.0) or 1600.0
-            rho_val = getattr(bottom, 'density', 1.2) or 1.2
-            attn_val = getattr(bottom, 'attenuation', 0.5) or 0.5
+            hs = env.halfspace_at_range(0.0)
+            cb_val = float(getattr(hs, 'sound_speed', 1600.0) or 1600.0)
+            rho_val = float(getattr(hs, 'density', 1.2) or 1.2)
+            attn_val = float(getattr(hs, 'attenuation', 0.5) or 0.5)
             cs_offset = cb_val - cwg_bottom
 
         cs = np.zeros(nzs)
@@ -790,22 +803,6 @@ class RAM(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        zmax=_UNSET,
-        dr=_UNSET,
-        dz=_UNSET,
-        np_pade=_UNSET,
-        ns_stability=_UNSET,
-        rs_stability=_UNSET,
-        Q=_UNSET,
-        T=_UNSET,
-        depth_decimation=_UNSET,
-        n_sed_points=_UNSET,
-        absorbing_layer_width=_UNSET,
-        absorbing_layer_attn=_UNSET,
-        c0=_UNSET,
-        accuracy=_UNSET,
-        theta_max=_UNSET,
-        timeout=_UNSET,
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
@@ -840,10 +837,6 @@ class RAM(PropagationModel):
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
-        zmax, dr, dz, np_pade, ns_stability, rs_stability, Q, T,
-        depth_decimation, n_sed_points, absorbing_layer_width,
-        absorbing_layer_attn, c0, accuracy, theta_max : optional
-            Per-call overrides for the matching constructor argument.
         **kwargs
             Silently ignored (warns on unknown kwargs).
 
@@ -853,10 +846,7 @@ class RAM(PropagationModel):
             :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
             for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
         """
-        if run_mode is None:
-            run_mode = RunMode.COHERENT_TL
-
-        self._warn_unknown_kwargs(kwargs)
+        run_mode = self._resolve_run_mode(run_mode)
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -867,84 +857,66 @@ class RAM(PropagationModel):
                 )
             source = Source(depths=source.depths, frequencies=freqs_arr)
 
-        with _resolve_overrides(
-            self,
-            zmax=zmax,
-            dr=dr,
-            dz=dz,
-            np_pade=np_pade,
-            ns_stability=ns_stability,
-            rs_stability=rs_stability,
-            Q=Q,
-            T=T,
-            depth_decimation=depth_decimation,
-            n_sed_points=n_sed_points,
-            absorbing_layer_width=absorbing_layer_width,
-            absorbing_layer_attn=absorbing_layer_attn,
-            c0=c0,
-            accuracy=accuracy,
-            theta_max=theta_max,
-            timeout=timeout,
-        ):
-            env = self._project_environment(env)
-            self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        env = self._project_environment(env)
+        self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-            backend = self.select_backend(env)
-            elastic = self._env_has_elastic_bottom(env)
-            rough = getattr(env, 'altimetry', None) is not None
-            self._log(
-                f"Dispatching to {backend} backend "
-                f"(elastic_bottom={elastic}, altimetry={rough})",
-                level='info',
-            )
-            self._warn_on_mpirams_only_overrides(backend)
-            env = self._drop_unsupported_surface_shear(env)
+        backend = self.select_backend(env)
+        elastic = self._env_has_elastic_bottom(env)
+        rough = getattr(env, 'altimetry', None) is not None
+        self._log(
+            f"Dispatching to {backend} backend "
+            f"(elastic_bottom={elastic}, altimetry={rough})",
+            level='info',
+        )
+        self._warn_on_mpirams_only_overrides(backend)
+        env = self._drop_unsupported_surface_shear(env)
 
-            if backend == 'mpiramS':
-                if run_mode == RunMode.BROADBAND:
-                    return self._run_broadband(env, source, receiver)
-                if run_mode == RunMode.TIME_SERIES:
-                    if source_waveform is None or sample_rate is None:
-                        raise ConfigurationError(
-                            "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
-                            "and sample_rate. For the broadband transfer function "
-                            "H(f), use run_mode=RunMode.BROADBAND."
-                        )
-                    tf = self._run_broadband(env, source, receiver)
-                    return tf.synthesize_time_series(
-                        source_waveform=source_waveform,
-                        sample_rate=sample_rate,
-                    )
-                return self._run_tl(env, source, receiver)
-
-            # Collins backends: rams0.5 / ramsurf1.5 are single-frequency
-            # PE solvers but uacpy's local patch dumps the complex
-            # envelope (see third_party/MODIFICATIONS.md), so BROADBAND is
-            # implemented as a Python-side frequency loop and TIME_SERIES
-            # builds on top of that via TransferFunction.synthesize_time_series.
-            if run_mode == RunMode.COHERENT_TL:
-                return self._run_collins(env, source, receiver, kind=backend)
+        if backend == 'mpiramS':
             if run_mode == RunMode.BROADBAND:
-                return self._run_collins_broadband(
-                    env, source, receiver, kind=backend
-                )
+                return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
                 if source_waveform is None or sample_rate is None:
                     raise ConfigurationError(
-                        f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
-                        f"source_waveform and sample_rate. For the broadband "
-                        f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+                        "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
+                        "and sample_rate. For the broadband transfer function "
+                        "H(f), use run_mode=RunMode.BROADBAND."
                     )
-                tf = self._run_collins_broadband(
-                    env, source, receiver, kind=backend,
-                )
+                tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            raise ConfigurationError(
-                f"Unsupported run_mode {run_mode} for RAM:{backend}"
+            return self._run_tl(env, source, receiver)
+
+        # Collins backends: rams0.5 / ramsurf1.5 are single-frequency
+        # PE solvers but uacpy's local patch dumps the complex
+        # envelope (see third_party/MODIFICATIONS.md), so BROADBAND is
+        # implemented as a Python-side frequency loop and TIME_SERIES
+        # builds on top of that via TransferFunction.synthesize_time_series.
+        if run_mode == RunMode.COHERENT_TL:
+            return self._run_collins(env, source, receiver, kind=backend)
+        if run_mode == RunMode.BROADBAND:
+            return self._run_collins_broadband(
+                env, source, receiver, kind=backend
             )
+        if run_mode == RunMode.TIME_SERIES:
+            if source_waveform is None or sample_rate is None:
+                raise ConfigurationError(
+                    f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
+                    f"source_waveform and sample_rate. For the broadband "
+                    f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+                )
+            tf = self._run_collins_broadband(
+                env, source, receiver, kind=backend,
+            )
+            return tf.synthesize_time_series(
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            )
+        raise UnsupportedFeatureError(
+            f"RAM:{backend}", str(run_mode),
+            alternatives=[str(m) for m in self._supported_modes],
+        )
 
     @staticmethod
     def _min_shear_speed(env: Environment) -> float:
@@ -966,49 +938,19 @@ class RAM(PropagationModel):
                 if v > 0:
                     speeds.append(float(v))
 
-        b = getattr(env, 'bottom', None)
-        if b is not None:
-            _maybe_add(getattr(b, 'shear_speed', None))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 _maybe_add(getattr(layer, 'shear_speed', None))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None:
-                _maybe_add(getattr(hs, 'shear_speed', None))
+            _maybe_add(getattr(b.halfspace, 'shear_speed', None))
+        elif b is not None:
+            _maybe_add(getattr(b, 'shear_speed', None))
         return min(speeds) if speeds else 0.0
 
     @staticmethod
     def _env_has_elastic_bottom(env: Environment) -> bool:
         """Return True if any bottom container carries shear_speed > 0."""
-        def has_shear(obj):
-            cs = getattr(obj, 'shear_speed', None)
-            if cs is None:
-                return False
-            try:
-                arr = np.atleast_1d(cs).astype(float)
-                return bool(np.any(arr > 0))
-            except (TypeError, ValueError):
-                return False
-
-        candidates = []
-        for attr in ('bottom', 'bottom_rd', 'bottom_layered'):
-            obj = getattr(env, attr, None)
-            if obj is None:
-                continue
-            candidates.append(obj)
-            if hasattr(obj, 'layers'):
-                candidates.extend(obj.layers or [])
-            if hasattr(obj, 'profiles'):
-                for prof in obj.profiles or []:
-                    candidates.append(prof)
-                    if hasattr(prof, 'layers'):
-                        candidates.extend(prof.layers or [])
-            halfspace = getattr(obj, 'halfspace', None)
-            if halfspace is not None:
-                candidates.append(halfspace)
-
-        return any(has_shear(c) for c in candidates)
+        return env.has_elastic_bottom()
 
     def select_backend(self, env: Environment) -> str:
         """Inspect which RAM-family binary will run for a given environment.
@@ -1092,7 +1034,6 @@ class RAM(PropagationModel):
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
-        float(np.atleast_1d(source.depths)[0])
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc,
             theta=self._theta_for_freq(fc),
@@ -1175,11 +1116,10 @@ class RAM(PropagationModel):
                 f"shear, no altimetry).",
                 UserWarning, stacklevel=3,
             )
-        if getattr(env, 'bottom_rd_layered', None) is not None:
-            # expected; not in filterwarnings — emerges to user
+        if env.has_range_dependent_layered_bottom():
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 layered bottom only — "
-                f"env.bottom_rd_layered range-dependence is dropped.",
+                f"env.bottom range-dependence is dropped.",
                 UserWarning, stacklevel=3,
             )
 
@@ -1278,8 +1218,8 @@ class RAM(PropagationModel):
         )
 
         layered = (
-            getattr(env, 'bottom_layered', None)
-            or self._fallback_layered_from_bottom(env)
+            env.bottom if isinstance(env.bottom, LayeredBottom)
+            else self._fallback_layered_from_bottom(env)
         )
 
         if kind == 'rams':
@@ -1495,8 +1435,10 @@ class RAM(PropagationModel):
                 zmax_override=zmax_band,
             )
             zmax_used = raw['zmax']
-            dr_first = dr_first or raw['dr']
-            dz_first = dz_first or raw['dz']
+            if dr_first is None:
+                dr_first = raw['dr']
+            if dz_first is None:
+                dz_first = raw['dz']
 
             # Out-of-grid receivers → NaN so the resulting H(f) cell is
             # NaN (transparent in plots) instead of 0 (which clips TL to
@@ -1565,9 +1507,11 @@ class RAM(PropagationModel):
         """
         if env.bottom is None:
             raise ConfigurationError(
-                "RAM backend requires env.bottom (or env.bottom_layered)"
+                "RAM backend requires env.bottom"
             )
-        return LayeredBottom.from_halfspace(env.bottom, env.depth)
+        if isinstance(env.bottom, LayeredBottom):
+            return env.bottom
+        return LayeredBottom.from_halfspace(env.halfspace_at_range(0.0), env.depth)
 
     # Settings that only the mpiramS backend consumes. When the dispatcher
     # picks rams0.5 / ramsurf1.5 and one of these has been overridden from
@@ -1643,17 +1587,26 @@ class RAM(PropagationModel):
         speeds = [c0_pe]
         for c in env.ssp.data[:, 0]:
             speeds.append(float(c))
-        b = getattr(env, 'bottom', None)
-        if b is not None and getattr(b, 'sound_speed', None):
-            speeds.append(float(b.sound_speed))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, RangeDependentLayeredBottom):
+            for prof in b.profiles:
+                for layer in prof.layers:
+                    if getattr(layer, 'sound_speed', None):
+                        speeds.append(float(layer.sound_speed))
+                if getattr(prof.halfspace, 'sound_speed', None):
+                    speeds.append(float(prof.halfspace.sound_speed))
+        elif isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 if getattr(layer, 'sound_speed', None):
                     speeds.append(float(layer.sound_speed))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None and getattr(hs, 'sound_speed', None):
-                speeds.append(float(hs.sound_speed))
+            if getattr(b.halfspace, 'sound_speed', None):
+                speeds.append(float(b.halfspace.sound_speed))
+        elif b is not None and getattr(b, 'sound_speed', None) is not None:
+            cs = b.sound_speed
+            if hasattr(cs, '__len__'):
+                speeds.extend(float(c) for c in cs)
+            else:
+                speeds.append(float(cs))
         c_min = float(min(speeds))
         c_max = float(max(speeds))
 
@@ -1857,16 +1810,13 @@ class RAM(PropagationModel):
             if cp_attr:
                 speeds.append(float(cp_attr))
 
-        b = getattr(env, 'bottom', None)
-        if b is not None:
-            _add(getattr(b, 'sound_speed', None))
-        bl = getattr(env, 'bottom_layered', None)
-        if bl is not None:
-            for layer in (getattr(bl, 'layers', None) or []):
+        b = env.bottom
+        if isinstance(b, LayeredBottom):
+            for layer in b.layers:
                 _add(getattr(layer, 'sound_speed', None))
-            hs = getattr(bl, 'halfspace', None)
-            if hs is not None:
-                _add(getattr(hs, 'sound_speed', None))
+            _add(getattr(b.halfspace, 'sound_speed', None))
+        elif b is not None:
+            _add(getattr(b, 'sound_speed', None))
         c_min = min(speeds)
         wavelength = c_min / max(freq, 1.0)
         target = float(np.clip(wavelength / LAMBDA_PER_DZ_FLOOR, 0.05, 1.0))
@@ -1895,10 +1845,9 @@ class RAM(PropagationModel):
         """
         Run in narrowband TL mode.
 
-        Honours ``self.Q`` / ``self.T`` (after any per-call ``run(Q=…, T=…)``
-        override applied via ``_resolve_overrides``). For a single-frequency
-        TL grid the conventional choice is a very large Q so the bandwidth
-        collapses, but the user is free to widen it.
+        Honours ``self.Q`` / ``self.T``. For a single-frequency TL grid the
+        conventional choice is a very large Q so the bandwidth collapses,
+        but the user is free to widen it.
         """
         start_time = time.time()
 
@@ -1977,14 +1926,11 @@ class RAM(PropagationModel):
 
             # Run mpiramS
             self._run_binary(work_dir)
-
-            # Read output
             result = read_psif(work_dir)
 
             psif = result['psif']  # (nzo, nf, nr)
             zg = result['zg']
             rout = result['rout']
-            result['c0']
 
             # Extract center frequency (middle of frequency vector)
             center_idx = result['nf'] // 2
@@ -2006,8 +1952,8 @@ class RAM(PropagationModel):
             if np.any(receiver.ranges > rout[-1] + tol):
                 beyond = receiver.ranges[receiver.ranges > rout[-1] + tol]
                 warnings.warn(
-                    f"Receiver ranges {beyond} exceed PE computed range; "
-                    f"clamped to {rout[-1]}",
+                    f"{self.model_name}: receiver ranges {beyond} exceed "
+                    f"PE computed range; clamped to {rout[-1]}",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -2061,9 +2007,10 @@ class RAM(PropagationModel):
             if log_ranges.size > 0 and log_ranges[0] <= 0.0:
                 # expected; not in filterwarnings — emerges to user
                 warnings.warn(
-                    f"Receiver range at index 0 is {log_ranges[0]}; "
-                    f"clipping to dr={dr} for TL conversion to avoid "
-                    f"log(0). The receiver.ranges array is not modified.",
+                    f"{self.model_name}: receiver range at index 0 is "
+                    f"{log_ranges[0]}; clipping to dr={dr} for TL "
+                    f"conversion to avoid log(0). The receiver.ranges "
+                    f"array is not modified.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -2098,7 +2045,12 @@ class RAM(PropagationModel):
                     c0=self._resolve_c0(env),
                 ),
             )
-            return field.mask_below_seafloor(env.bathymetry)
+            field = field.mask_below_seafloor(env.bathymetry)
+            self._attach_output_paths(
+                field, fm.work_dir, '',
+                primary_files=(('psif_file', 'psif.dat'),),
+            )
+            return field
 
         finally:
             if fm.cleanup:
@@ -2258,6 +2210,10 @@ class RAM(PropagationModel):
             for j, bd in enumerate(seafloor):
                 mask = out_depths > bd
                 tf.data[mask, j, :] = np.nan
+            self._attach_output_paths(
+                tf, fm.work_dir, '',
+                primary_files=(('psif_file', 'psif.dat'),),
+            )
             return tf
 
         finally:

@@ -358,8 +358,8 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 24 example scripts numbered
-sequentially (`example_01_*.py` through `example_24_*.py`); the full
+Inside `uacpy/uacpy/examples/` you will find 25 example scripts numbered
+sequentially (`example_01_*.py` through `example_25_*.py`); the full
 suite runs in a few minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
@@ -502,9 +502,8 @@ Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit
 
 Mandar Chitre (Acoustic Research Lab, National University of Singapore) --- https://github.com/org-arl/arlpy
 
-Utility functions adapted into `uacpy/core/acoustics.py` and
-`uacpy/acoustic_signal/advanced.py` preserve Mandar Chitre's 2016
-copyright header and cite arlpy as the source.
+Utility functions adapted into `uacpy/core/acoustics.py` preserve Mandar
+Chitre's 2016 copyright header and cite arlpy as the source.
 
 
 ## 📄 Licensing
@@ -520,7 +519,7 @@ when redistributing or modifying UACPY or its outputs.
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
-| arlpy utilities (Chitre)   | `uacpy/core/`, `uacpy/acoustic_signal/` | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
+| arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 

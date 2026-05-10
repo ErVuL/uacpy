@@ -29,6 +29,9 @@ from uacpy.core.exceptions import (
 from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
+from uacpy.core.constants import (
+    AttenuationUnits, VolumeAttenuation, BoundaryType,
+)
 
 __all__ = [
     'Source',
@@ -55,4 +58,5 @@ __all__ = [
     'ConfigurationError',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
+    'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
 ]

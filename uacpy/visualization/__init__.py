@@ -3,7 +3,6 @@ Visualization tools for underwater acoustics
 
 Available modules:
 - plots: Full-featured plotting functions with extensive customization
-- quickplot: Ultra-simple plotting functions for rapid visualization
 - style: Professional matplotlib styling configuration
 
 The uacpy rcParams are an opt-in. To use them, call
@@ -39,9 +38,7 @@ from uacpy.visualization.plots import (
     plot_range_cut,
     plot_depth_cut,
     compare_range_cuts,
-    plot_model_statistics,
     plot_model_comparison_matrix,
-    plot_comparison_curves,
     plot_reflection_coefficient,
     plot_reflection_coefficient_heatmap,
     plot_mode_wavenumbers,
@@ -53,8 +50,6 @@ from uacpy.visualization.plots import (
     plot_replicas,
     plot_tl_difference,
 )
-
-from uacpy.visualization import quickplot
 
 __all__ = [
     'plot_transmission_loss',
@@ -80,9 +75,7 @@ __all__ = [
     'plot_range_cut',
     'plot_depth_cut',
     'compare_range_cuts',
-    'plot_model_statistics',
     'plot_model_comparison_matrix',
-    'plot_comparison_curves',
     'plot_reflection_coefficient',
     'plot_reflection_coefficient_heatmap',
     'plot_mode_wavenumbers',
@@ -94,6 +87,5 @@ __all__ = [
     'plot_replicas',
     'plot_tl_difference',
     'style',
-    'quickplot',
     'apply_professional_style',
 ]

@@ -33,8 +33,8 @@ class TestComputeAPI:
 
         assert isinstance(modes, Modes)
         assert modes.field_type == 'modes'
-        assert 'k' in modes.metadata
-        assert 'phi' in modes.metadata
+        assert modes.k is not None
+        assert modes.phi is not None
 
     def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""

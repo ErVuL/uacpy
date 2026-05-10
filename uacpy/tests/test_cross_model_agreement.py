@@ -74,6 +74,7 @@ class Scenario:
     comparisons: List[Tuple] = field(default_factory=list)
     tolerance_db: float = 3.0
     range_window_m: Tuple[float, float] = (1000.0, 8000.0)
+    slow: bool = False         # adds ``@pytest.mark.slow`` to the generated params
 
 
 # ─── Reference / comparison runners ───────────────────────────────────────
@@ -352,6 +353,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         comparisons=[('RAM(rams0.5) broadband', rams_bb, 4.0)],
         tolerance_db=4.0,
         range_window_m=(1000.0, 7000.0),
+        slow=True,                    # rams0.5 broadband Python freq-loop
     )
 
 
@@ -407,6 +409,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         comparisons=[('RAM(ramsurf1.5) broadband', ramsurf_bb, 9.0)],
         tolerance_db=9.0,
         range_window_m=(1000.0, 5000.0),
+        slow=True,                    # ramsurf1.5 broadband Python freq-loop
     )
 
 
@@ -437,7 +440,12 @@ def _comparison_pairs():
                     f"Scenario {s.name!r}: comparison entry must be "
                     f"(label, fn) or (label, fn, tolerance_db); got {entry!r}"
                 )
-            out.append(pytest.param(s, label, fn, tol, id=f"{s.name}::{label}"))
+            marks = (pytest.mark.slow,) if s.slow else ()
+            out.append(pytest.param(
+                s, label, fn, tol,
+                id=f"{s.name}::{label}",
+                marks=marks,
+            ))
     return out
 
 

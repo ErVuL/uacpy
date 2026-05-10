@@ -101,7 +101,7 @@ class TestVolumeAttenuation:
         )
 
         assert result.field_type == 'modes'
-        assert 'k' in result.metadata
+        assert result.k is not None
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env, low_freq_source, high_freq_source, receiver):
@@ -131,6 +131,7 @@ class TestVolumeAttenuation:
         assert np.all(np.isfinite(result_high.data))
 
     @pytest.mark.requires_binary
+    @pytest.mark.slow
     def test_attenuation_with_scooter(self, shallow_env, high_freq_source, receiver):
         """Test Scooter with volume attenuation."""
         scooter = Scooter(verbose=False, volume_attenuation='T')

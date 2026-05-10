@@ -72,7 +72,7 @@ def main():
     # 3. Synthesize p(t) = IFFT(H · S)
     ts = H.synthesize_time_series(p_src, sample_rate=fs)
     print(f"TimeSeriesField shape: {ts.data.shape}, "
-          f"dt={ts.metadata['dt']*1e3:.3f} ms, nt={ts.n_t}")
+          f"dt={ts.dt*1e3:.3f} ms, nt={ts.n_t}")
 
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))

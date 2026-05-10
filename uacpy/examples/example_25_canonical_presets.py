@@ -36,15 +36,15 @@ def main():
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 8))
 
-    iso = SoundSpeedProfile.from_isothermal(c=1500.0, depth_max=4000.0)
+    iso = SoundSpeedProfile.from_isovelocity(depth_max=4000.0, sound_speed=1500.0)
     munk = SoundSpeedProfile.from_munk(depth_max=4000.0, n_points=81)
     z = np.linspace(0.0, 4000.0, 161)
     T = 4.0 + 14.0 * np.exp(-z / 400.0)
     S = 35.0 - 0.5 * np.exp(-z / 300.0)
-    mackenzie = SoundSpeedProfile.from_temperature_salinity(z, T, S)
+    mackenzie = SoundSpeedProfile.from_mackenzie(z, T, S)
 
     for label, ssp, style in [
-        ('isothermal',     iso,        '-'),
+        ('isovelocity',    iso,        '-'),
         ('Munk',           munk,       '--'),
         ('Mackenzie T,S',  mackenzie,  '-.'),
     ]:

@@ -127,7 +127,7 @@ class BoundaryProperties:
     reflection_cmax : float, optional
         Maximum phase velocity (m/s) for reflection coefficient table.
         Used when acoustic_type='file'. Default: 10000.0
-    reflection_rmax_m : float, optional
+    reflection_rmax : float, optional
         Maximum range (m) for reflection coefficient sampling.
         Used when acoustic_type='file'. Default: 10000.0
 
@@ -135,11 +135,12 @@ class BoundaryProperties:
     --------
     Using pre-computed reflection coefficients from BOUNCE:
 
-    >>> # First, compute reflection coefficients
+    >>> # First, compute reflection coefficients (output_dir is required)
     >>> from uacpy.models import Bounce
+    >>> from pathlib import Path
     >>> bounce = Bounce()
-    >>> result = bounce.run(env, source, receiver)
-    >>> brc_file = result.data['brc_file']
+    >>> result = bounce.run(env, source, receiver, output_dir=Path('./bounce_out'))
+    >>> brc_file = result.metadata['brc_file']
     >>>
     >>> # Then use in Bellhop/Kraken/Scooter
     >>> bottom = BoundaryProperties(
@@ -160,7 +161,7 @@ class BoundaryProperties:
     reflection_file: Optional[str] = None
     reflection_cmin: float = 1400.0
     reflection_cmax: float = 10000.0
-    reflection_rmax_m: float = 10000.0
+    reflection_rmax: float = 10000.0
 
     def __post_init__(self):
         if self.density <= 0:
@@ -278,25 +279,27 @@ class RangeDependentBottom:
         if self.shear_attenuation is None:
             self.shear_attenuation = np.zeros(n)
 
-    def at(self, *, range: float) -> BoundaryProperties:
-        """``BoundaryProperties`` at the **nearest** stored range (m).
-        :meth:`at` returns the nearest stored sample; :meth:`eval`
-        linearly interpolates across all five per-range arrays.
-        """
-        idx = int(np.argmin(np.abs(self.ranges - range)))
-        return BoundaryProperties(
-            acoustic_type=self.acoustic_type,
-            sound_speed=float(self.sound_speed[idx]),
-            density=float(self.density[idx]),
-            attenuation=float(self.attenuation[idx]),
-            shear_speed=float(self.shear_speed[idx]),
-            shear_attenuation=float(self.shear_attenuation[idx]),
-        )
+    def eval(self, *, range: float, interp: str = 'linear') -> BoundaryProperties:
+        """``BoundaryProperties`` at the requested range (m).
 
-    def eval(self, *, range: float) -> BoundaryProperties:
-        """Evaluate as a continuous function via linear interpolation
-        between stored ranges across all five per-range arrays.
-        Companion to :meth:`at` (nearest sample)."""
+        ``interp='linear'`` (default) interpolates between stored samples;
+        ``interp='nearest'`` returns the nearest stored sample.
+        """
+        if interp == 'nearest':
+            idx = int(np.argmin(np.abs(self.ranges - range)))
+            return BoundaryProperties(
+                acoustic_type=self.acoustic_type,
+                sound_speed=float(self.sound_speed[idx]),
+                density=float(self.density[idx]),
+                attenuation=float(self.attenuation[idx]),
+                shear_speed=float(self.shear_speed[idx]),
+                shear_attenuation=float(self.shear_attenuation[idx]),
+            )
+        if interp != 'linear':
+            raise ValueError(
+                f"RangeDependentBottom.eval: interp must be 'linear' or "
+                f"'nearest'; got {interp!r}"
+            )
         ranges = self.ranges
         return BoundaryProperties(
             acoustic_type=self.acoustic_type,
@@ -321,9 +324,9 @@ class RangeDependentBottom:
         ``'median'`` : per-property median across ranges.
         """
         if method == 'r0':
-            return self.at(range=float(self.ranges[0]))
+            return self.eval(range=float(self.ranges[0]))
         if method == 'rmax':
-            return self.at(range=float(self.ranges[-1]))
+            return self.eval(range=float(self.ranges[-1]))
         if method == 'mean':
             reduce = np.mean
         elif method == 'median':
@@ -518,12 +521,17 @@ class LayeredBottom:
                 [layer.shear_speed for layer in self.layers]
                 + [self.halfspace.shear_speed]
             )
+            alpha_shear = np.array(
+                [layer.shear_attenuation for layer in self.layers]
+                + [self.halfspace.shear_attenuation]
+            )
             return BoundaryProperties(
                 acoustic_type=self.halfspace.acoustic_type,
                 sound_speed=float(np.average(cs, weights=weights)),
                 density=float(np.average(rho, weights=weights)),
                 attenuation=float(np.average(alpha, weights=weights)),
                 shear_speed=float(np.average(cs_shear, weights=weights)),
+                shear_attenuation=float(np.average(alpha_shear, weights=weights)),
             )
         raise ValueError(
             f"LayeredBottom.collapse: unknown method={method!r}; "
@@ -744,31 +752,35 @@ class RangeDependentLayeredBottom:
 
         return cs, rho, attn
 
-    def collapse(
-        self,
-        layered_method: str = 'halfspace',
-        range_method: str = 'r0',
-    ) -> BoundaryProperties:
-        """Collapse to a single ``BoundaryProperties``.
+    def to_profile(self, method: str = 'r0') -> 'LayeredBottom':
+        """Pick one ``LayeredBottom`` profile from the range axis.
 
-        Selects one ``LayeredBottom`` profile via ``range_method`` and
-        then collapses its layers via ``layered_method``.
-
-        Range methods: ``'r0'`` | ``'rmax'`` | ``'middle'`` (median index).
-        Layered methods: see :meth:`LayeredBottom.collapse`.
+        ``method`` ∈ ``'r0'`` | ``'rmax'`` | ``'median'``.
         """
-        if range_method == 'r0':
+        if method == 'r0':
             idx = 0
-        elif range_method == 'rmax':
+        elif method == 'rmax':
             idx = len(self.profiles) - 1
-        elif range_method == 'middle':
+        elif method == 'median':
             idx = len(self.profiles) // 2
         else:
             raise ValueError(
-                f"RangeDependentLayeredBottom.collapse: unknown "
-                f"range_method={range_method!r}; valid: 'r0', 'rmax', 'middle'"
+                f"RangeDependentLayeredBottom.to_profile: unknown "
+                f"method={method!r}; valid: 'r0', 'rmax', 'median'"
             )
-        return self.profiles[idx].collapse(layered_method)
+        return self.profiles[idx]
+
+    def collapse(self, method: str = 'halfspace') -> BoundaryProperties:
+        """Full collapse to a single ``BoundaryProperties``.
+
+        Selects the median-range profile, then collapses its layers via
+        ``method`` (see :meth:`LayeredBottom.collapse`). The median range
+        matches what :meth:`PropagationModel._project_environment` uses
+        when it auto-collapses an RDLB env. For control over the
+        range-axis selection, chain explicitly:
+        ``rdl.to_profile('rmax').collapse('top_layer')``.
+        """
+        return self.to_profile('median').collapse(method)
 
 
 _VALID_SSP_INTERP = (
@@ -859,61 +871,40 @@ class SoundSpeedProfile:
         """
         return np.column_stack([self.depths, self.data[:, 0]])
 
-    def at(
-        self,
-        *,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-    ) -> 'SoundSpeedProfile':
-        """Label-based **nearest-sample** slice along the depth and/or
-        range axis. Picks the closest stored grid sample on each axis
-        — does not interpolate. For continuous evaluation between
-        stored samples, use :meth:`eval`.
-        """
-        sliced = self
-        if range is not None:
-            if not self.is_range_dependent:
-                sliced = SoundSpeedProfile(
-                    depths=self.depths.copy(),
-                    data=self.data[:, :1].copy(),
-                    ranges=None,
-                    interp=self.interp,
-                )
-            else:
-                r_idx = int(np.argmin(np.abs(self.ranges - range)))
-                sliced = SoundSpeedProfile(
-                    depths=self.depths.copy(),
-                    data=self.data[:, r_idx:r_idx + 1].copy(),
-                    ranges=None,
-                    interp=self.interp,
-                )
-        if depth is None:
-            return sliced
-        d_idx = int(np.argmin(np.abs(sliced.depths - depth)))
-        return SoundSpeedProfile(
-            depths=np.array([float(sliced.depths[d_idx])]),
-            data=sliced.data[d_idx:d_idx + 1, :].copy(),
-            ranges=None,
-            interp=sliced.interp,
-        )
-
     def eval(
         self,
         *,
         depth: Optional[float] = None,
         range: Optional[float] = None,
+        interp: str = 'linear',
     ) -> 'SoundSpeedProfile':
-        """Evaluate the SSP as a continuous function via linear
-        interpolation along depth and/or range. Constant extrapolation
-        outside ``[ranges[0], ranges[-1]]``. :meth:`at` returns the
-        nearest stored sample; :meth:`eval` interpolates between them.
+        """Slice the SSP at the requested depth and/or range.
+
+        ``interp='linear'`` (default) interpolates along range and depth,
+        with constant extrapolation outside ``[ranges[0], ranges[-1]]``.
+        ``interp='nearest'`` returns the closest stored grid sample on
+        each axis without interpolation.
         """
+        if interp not in ('linear', 'nearest'):
+            raise ValueError(
+                f"SoundSpeedProfile.eval: interp must be 'linear' or "
+                f"'nearest'; got {interp!r}"
+            )
+
         if range is None:
             sliced = self
         elif not self.is_range_dependent:
             sliced = SoundSpeedProfile(
                 depths=self.depths.copy(),
                 data=self.data[:, :1].copy(),
+                ranges=None,
+                interp=self.interp,
+            )
+        elif interp == 'nearest':
+            r_idx = int(np.argmin(np.abs(self.ranges - range)))
+            sliced = SoundSpeedProfile(
+                depths=self.depths.copy(),
+                data=self.data[:, r_idx:r_idx + 1].copy(),
                 ranges=None,
                 interp=self.interp,
             )
@@ -935,6 +926,14 @@ class SoundSpeedProfile:
             )
         if depth is None:
             return sliced
+        if interp == 'nearest':
+            d_idx = int(np.argmin(np.abs(sliced.depths - depth)))
+            return SoundSpeedProfile(
+                depths=np.array([float(sliced.depths[d_idx])]),
+                data=sliced.data[d_idx:d_idx + 1, :].copy(),
+                ranges=None,
+                interp=sliced.interp,
+            )
         c = float(np.interp(depth, sliced.depths, sliced.data[:, 0]))
         return SoundSpeedProfile(
             depths=np.array([float(depth)]),
@@ -1091,20 +1090,7 @@ class SoundSpeedProfile:
         )
 
     @classmethod
-    def from_isothermal(
-        cls, c: float = 1500.0, *, depth_max: float = 5000.0,
-        n_points: int = 2,
-    ) -> 'SoundSpeedProfile':
-        """Iso-velocity (Pekeris) water column with constant ``c`` (m/s)."""
-        depths = np.linspace(0.0, float(depth_max), int(n_points))
-        c_arr = np.full_like(depths, float(c))
-        return cls(
-            depths=depths, data=c_arr.reshape(-1, 1),
-            ranges=None, interp='isovelocity',
-        )
-
-    @classmethod
-    def from_temperature_salinity(
+    def from_mackenzie(
         cls,
         depths: np.ndarray,
         temperature_c: np.ndarray,
@@ -1113,45 +1099,30 @@ class SoundSpeedProfile:
         """Build a profile from in-situ ``T(z)`` and ``S(z)`` via Mackenzie's
         nine-term seawater sound-speed equation.
 
-        ``c(T, S, z) = 1448.96 + 4.591·T − 5.304·10⁻²·T² + 2.374·10⁻⁴·T³``
-        ``           + 1.340·(S − 35) + 1.630·10⁻²·z + 1.675·10⁻⁷·z²``
-        ``           − 1.025·10⁻²·T·(S − 35) − 7.139·10⁻¹³·T·z³``
-
-        with ``T`` in °C, ``S`` in PSU, ``z`` in metres, ``c`` in m/s.
-        Valid range: ``T ∈ [−2, 30] °C``, ``S ∈ [25, 40] PSU``,
-        ``z ∈ [0, 8000] m`` (Mackenzie 1981).
-
         ``depths``, ``temperature_c``, ``salinity_psu`` must be 1-D arrays
         of equal length sampled at the same depth grid. Use
         ``np.full_like(depths, T_const)`` if the column is isothermal/
-        isohaline.
+        isohaline. Valid range: ``T ∈ [−2, 30] °C``,
+        ``S ∈ [25, 40] PSU``, ``z ∈ [0, 8000] m`` (Mackenzie 1981).
         """
+        from uacpy.core.acoustics import soundspeed
         z = np.asarray(depths, dtype=float).ravel()
         T = np.asarray(temperature_c, dtype=float).ravel()
         S = np.asarray(salinity_psu, dtype=float).ravel()
         if not (T.shape == S.shape == z.shape):
             raise ValueError(
-                "from_temperature_salinity: depths, temperature_c, "
-                f"salinity_psu must share shape; got {z.shape}, "
-                f"{T.shape}, {S.shape}"
+                "from_mackenzie: depths, temperature_c, salinity_psu must "
+                f"share shape; got {z.shape}, {T.shape}, {S.shape}"
             )
-        ds = S - 35.0
-        c = (
-            1448.96
-            + 4.591 * T - 5.304e-2 * T ** 2 + 2.374e-4 * T ** 3
-            + 1.340 * ds
-            + 1.630e-2 * z + 1.675e-7 * z ** 2
-            - 1.025e-2 * T * ds
-            - 7.139e-13 * T * z ** 3
-        )
+        c = soundspeed(temperature=T, salinity=S, depth=z)
         return cls(
-            depths=z, data=c.reshape(-1, 1),
+            depths=z, data=np.asarray(c).reshape(-1, 1),
             ranges=None, interp='linear',
         )
 
 
 def generate_sea_surface(
-    max_range_m: float,
+    max_range: float,
     wind_speed_ms: float = 10.0,
     n_points: int = 500,
     seed: Optional[int] = None,
@@ -1161,7 +1132,7 @@ def generate_sea_surface(
 
     Parameters
     ----------
-    max_range_m : float
+    max_range : float
         Maximum range in meters.
     wind_speed_ms : float
         Wind speed at 10 m height in m/s. Typical values:
@@ -1183,7 +1154,7 @@ def generate_sea_surface(
     g = 9.81
     rng = np.random.default_rng(seed)
 
-    ranges = np.linspace(0, max_range_m, n_points)
+    ranges = np.linspace(0, max_range, n_points)
     dx = ranges[1] - ranges[0]
 
     # Spatial frequency grid (cycles/m)
@@ -1208,12 +1179,48 @@ def generate_sea_surface(
     amplitude = np.sqrt(2 * S_k * dk)
     phase = rng.uniform(0, 2 * np.pi, len(k))
 
-    # Synthesize surface via inverse Fourier (sum of sinusoids)
-    surface = np.zeros(n_points)
-    for i, ki in enumerate(k):
-        surface += amplitude[i] * np.cos(2 * np.pi * ki * ranges + phase[i])
+    surface = (
+        amplitude[None, :]
+        * np.cos(2 * np.pi * np.outer(ranges, k) + phase[None, :])
+    ).sum(axis=1)
 
     return np.column_stack([ranges, surface])
+
+
+def _boundary_has_shear(boundary) -> bool:
+    """Shared helper: does this boundary carry any non-zero shear speed?
+
+    Handles ``BoundaryProperties``, ``RangeDependentBottom``,
+    ``LayeredBottom``, and ``RangeDependentLayeredBottom``. ``None``
+    returns ``False`` so callers can pass ``env.surface`` directly.
+    """
+    if boundary is None:
+        return False
+
+    def _scalar(b) -> bool:
+        cs = getattr(b, 'shear_speed', None)
+        if cs is None:
+            return False
+        try:
+            arr = np.atleast_1d(np.asarray(cs, dtype=float))
+        except (TypeError, ValueError):
+            return False
+        return bool(np.any(arr > 0))
+
+    if isinstance(boundary, RangeDependentLayeredBottom):
+        for prof in boundary.profiles:
+            for layer in prof.layers:
+                if _scalar(layer):
+                    return True
+            if _scalar(prof.halfspace):
+                return True
+        return False
+    if isinstance(boundary, LayeredBottom):
+        for layer in boundary.layers:
+            if _scalar(layer):
+                return True
+        return _scalar(boundary.halfspace)
+    return _scalar(boundary)
 
 
 class Environment:
@@ -1364,9 +1371,6 @@ class Environment:
         else:
             self.surface = surface
 
-        self.bottom_layered = None
-        self.bottom_rd = None
-        self.bottom_rd_layered = None
         if bottom is None:
             self.bottom = BoundaryProperties(
                 acoustic_type='half-space',
@@ -1374,19 +1378,15 @@ class Environment:
                 sound_speed=1600.0,
                 attenuation=0.5,
             )
-        elif isinstance(bottom, RangeDependentBottom):
-            self.bottom_rd = bottom
-            median_range_m = float(np.median(bottom.ranges))
-            self.bottom = bottom.at(range=median_range_m)
-        elif isinstance(bottom, RangeDependentLayeredBottom):
-            self.bottom_rd_layered = bottom
-            mid_idx = len(bottom.profiles) // 2
-            self.bottom = _copy.deepcopy(bottom.profiles[mid_idx].halfspace)
-        elif isinstance(bottom, LayeredBottom):
-            self.bottom_layered = bottom
-            self.bottom = _copy.deepcopy(bottom.halfspace)
+        elif isinstance(bottom, (BoundaryProperties, RangeDependentBottom,
+                                 LayeredBottom, RangeDependentLayeredBottom)):
+            self.bottom = bottom
         else:
-            self.bottom = _copy.deepcopy(bottom)
+            raise TypeError(
+                f"Environment: bottom must be BoundaryProperties, "
+                f"RangeDependentBottom, LayeredBottom, or "
+                f"RangeDependentLayeredBottom; got {type(bottom).__name__}"
+            )
 
     @property
     def depth(self) -> float:
@@ -1411,52 +1411,77 @@ class Environment:
             return np.full_like(range, self.bathymetry[0, 1])
         return np.interp(range, self.bathymetry[:, 0], self.bathymetry[:, 1])
 
+    def halfspace_at_range(self, range: float) -> 'BoundaryProperties':
+        """Return the *halfspace* :class:`BoundaryProperties` at ``range`` (m).
+
+        Always returns a flat :class:`BoundaryProperties` regardless of
+        the bottom flavour: for :class:`LayeredBottom` and
+        :class:`RangeDependentLayeredBottom` this is the underlying
+        halfspace beneath all sediment layers; for
+        :class:`RangeDependentBottom` it is the linearly-interpolated
+        sample; for a plain :class:`BoundaryProperties` it is the
+        bottom itself. Used by env-file writers that emit a single
+        bottom row (acoustic_type / sound_speed / density / ...).
+        """
+        b = self.bottom
+        if isinstance(b, RangeDependentLayeredBottom):
+            return b.at(range=range).halfspace
+        if isinstance(b, LayeredBottom):
+            return b.halfspace
+        if isinstance(b, RangeDependentBottom):
+            return b.eval(range=range)
+        return b
+
     def bottom_at_range(self, range: float):
-        """Bottom properties at the requested range — dispatches across
-        ``bottom_rd_layered`` / ``bottom_layered`` / ``bottom_rd`` /
-        ``bottom`` (whichever the environment holds) so callers don't
-        need to know which storage axis is range-dependent. Returns
+        """Bottom properties at the requested range. Returns
         :class:`LayeredBottom` for layered envs, otherwise
         :class:`BoundaryProperties`."""
-        if self.bottom_rd_layered is not None:
-            return self.bottom_rd_layered.at(range=range)
-        if self.bottom_layered is not None:
-            return self.bottom_layered
-        if self.bottom_rd is not None:
-            return self.bottom_rd.eval(range=range)
+        if isinstance(self.bottom, RangeDependentLayeredBottom):
+            return self.bottom.at(range=range)
+        if isinstance(self.bottom, RangeDependentBottom):
+            return self.bottom.eval(range=range)
         return self.bottom
 
     def has_range_dependent_bathymetry(self) -> bool:
-        """True if bathymetry has more than one point with non-constant depth."""
         if len(self.bathymetry) <= 1:
             return False
         depths = self.bathymetry[:, 1]
         return not bool(np.allclose(depths, depths[0]))
 
     def has_range_dependent_ssp(self) -> bool:
-        """Return True if the environment has a range-dependent SSP."""
         return self.ssp.is_range_dependent
 
     def has_range_dependent_bottom(self) -> bool:
-        """Return True if bottom properties vary with range."""
-        return self.bottom_rd is not None
+        return isinstance(self.bottom, RangeDependentBottom)
 
     def has_layered_bottom(self) -> bool:
-        """Return True if the environment has a layered (depth-dependent) bottom."""
-        return self.bottom_layered is not None
+        return isinstance(self.bottom, LayeredBottom)
 
     def has_range_dependent_layered_bottom(self) -> bool:
-        """Return True if the environment has a range-dependent layered bottom."""
-        return self.bottom_rd_layered is not None
+        return isinstance(self.bottom, RangeDependentLayeredBottom)
+
+    def has_elastic_bottom(self) -> bool:
+        """``True`` iff any sample of ``self.bottom`` carries non-zero shear.
+
+        Walks the layer/profile structure of :class:`LayeredBottom` and
+        :class:`RangeDependentLayeredBottom` so a stratified env with a
+        single elastic layer reports ``True``. For
+        :class:`RangeDependentBottom`, ``True`` iff *any* range sample has
+        ``shear_speed > 0``.
+        """
+        return _boundary_has_shear(self.bottom)
+
+    def has_elastic_surface(self) -> bool:
+        """``True`` iff ``self.surface`` carries non-zero shear."""
+        return _boundary_has_shear(self.surface)
 
     @property
     def is_range_dependent(self) -> bool:
-        """True if any of bathymetry, SSP, or bottom varies with range."""
         return (
             self.has_range_dependent_bathymetry()
             or self.ssp.is_range_dependent
-            or self.bottom_rd is not None
-            or self.bottom_rd_layered is not None
+            or isinstance(self.bottom, (RangeDependentBottom,
+                                        RangeDependentLayeredBottom))
         )
 
     def __repr__(self) -> str:
@@ -1516,62 +1541,11 @@ class Environment:
                 "valid: 'max', 'median', 'mean', 'min', 'initial'"
             )
 
-    def get_range_independent_approximation(self, method: str = 'max'):
-        """Create a range-independent approximation of this environment.
-
-        Bathymetry collapses to a single depth via ``method`` (see
-        :meth:`get_representative_depth`). The SSP collapses to its
-        range-0 column (equivalent to ``ssp.collapse('r0')``) and is
-        truncated/extended to the representative depth using the same
-        constant-extrapolation rule applied at construction.
-        """
-        representative_depth = self.get_representative_depth(method)
-
-        ssp_1d = self.ssp.collapse('r0') if self.ssp.is_range_dependent else self.ssp
-
-        depths = ssp_1d.depths
-        speeds = ssp_1d.data[:, 0]
-        if representative_depth > depths[-1]:
-            depths = np.append(depths, representative_depth)
-            speeds = np.append(speeds, speeds[-1])
-        elif representative_depth < depths[-1]:
-            mask = depths <= representative_depth
-            kept_depths = depths[mask]
-            kept_speeds = speeds[mask]
-            if kept_depths[-1] < representative_depth:
-                if ssp_1d.interp == 'pchip':
-                    from scipy.interpolate import PchipInterpolator
-                    c_at = float(PchipInterpolator(depths, speeds)(representative_depth))
-                else:
-                    c_at = float(np.interp(
-                        representative_depth, depths, speeds
-                    ))
-                kept_depths = np.append(kept_depths, representative_depth)
-                kept_speeds = np.append(kept_speeds, c_at)
-            depths, speeds = kept_depths, kept_speeds
-
-        adjusted_ssp = SoundSpeedProfile(
-            depths=depths,
-            data=speeds.reshape(-1, 1),
-            ranges=None,
-            interp=ssp_1d.interp,
-        )
-
-        return Environment(
-            name=f"{self.name} (range-independent approx)",
-            bathymetry=representative_depth,
-            ssp=adjusted_ssp,
-            bottom=self.bottom,
-            surface=self.surface,
-            volume_attenuation=self.volume_attenuation,
-        )
-
     def copy(self):
         """Deep copy of the environment.
 
         Uses ``copy.deepcopy`` so every field — including ``ssp``,
-        ``altimetry``, ``bottom_layered``, ``bottom_rd_layered``, and
-        ``bottom_rd`` — is duplicated without aliasing back to the
-        original instance.
+        ``altimetry``, and ``bottom`` — is duplicated without aliasing
+        back to the original instance.
         """
         return _copy.deepcopy(self)

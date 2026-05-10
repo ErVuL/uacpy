@@ -25,7 +25,7 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
-from uacpy.models.base import PropagationModel, RunMode, _UNSET, _resolve_overrides
+from uacpy.models.base import PropagationModel, RunMode
 from uacpy.io.oalib_reader import read_rts_file, rts_to_tl
 from uacpy.io.oalib_writer import (
     write_bio_layers, write_fg_params, write_layer_sections,
@@ -119,26 +119,63 @@ class SPARC(PropagationModel):
 
     Parameters
     ----------
-    verbose : bool, optional
-        Enable verbose output. Default is True.
+    executable : Path, optional
+        Path to ``sparc.exe``. Auto-detected if ``None``.
+    c_low, c_high : float, optional
+        Phase-speed bounds (m/s). ``None`` ⇒ auto. Default ``None``.
+    n_mesh : int, optional
+        Mesh points per medium. ``0`` ⇒ auto. Default ``0``.
+    roughness : float, optional
+        Bottom RMS roughness (m). Default ``0``.
+    output_mode : str, optional
+        ``'R'`` horizontal array (default) | ``'D'`` vertical array | ``'S'`` snapshot.
+    pulse_type : str, optional
+        4-character source-pulse code per ``sourceMod.f90``. Default ``'PN+B'``.
+        Position 1 = pulse shape (``PRASHNGFBMTC``), 2 = post-process,
+        3 = sign, 4 = filter. See `sourceMod.f90` for the full alphabet.
+    n_t_out : int, optional
+        Number of output time samples. Default ``501``.
+    t_max : float, optional
+        Maximum simulated time (s). ``None`` ⇒ ``2.5 ×`` travel time.
+    t_start : float, optional
+        Integration start time (s). Default ``-0.1``.
+    t_mult : float, optional
+        Integration time multiplier. Default ``0.999``.
+    max_depths : int, optional
+        Cap on receiver depths (looped in wrapper). Default ``20``.
+    rmax_safety_margin : float, optional
+        Margin so SPARC's RMax > max receiver range. Default ``1.0001``.
+    volume_attenuation : str, optional
+        ``None`` | ``'T'`` | ``'F'`` | ``'B'``.
+    francois_garrison_params, bio_layers : optional
+        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
+    timeout : float, optional
+        Subprocess timeout per run (s). Default ``180.0``.
+    use_tmpfs, verbose, work_dir, cleanup, collapse : optional
+        Standard plumbing (see :class:`PropagationModel`).
+
+    Notes
+    -----
+    Range-independent time-marched FFP. Only ``Vacuum`` / ``Rigid``
+    bottom interfaces are supported (the writer auto-converts
+    halfspaces to rigid). ``RunMode.TIME_SERIES`` returns a
+    :class:`TimeSeriesField` directly; ``source_waveform`` /
+    ``sample_rate`` on ``run()`` are silently ignored — SPARC drives
+    the source pulse via ``pulse_type``.
+
+    ``output_mode='S'`` requires ``n_t_out`` large enough that the
+    source frequency stays below the snapshot Nyquist (``0.5/dt``);
+    the wrapper raises a ``ValueError`` otherwise.
+
+    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
+    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
+    ``'rd_layered_layers': 'preserve'`` (SPARC consumes ``LayeredBottom``
+    natively).
 
     Examples
     --------
-    >>> import uacpy
-    >>> from uacpy.models.sparc import SPARC
-    >>>
-    >>> # Create simple environment
-    >>> env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
-    >>>
-    >>> source = uacpy.Source(depths=50.0, frequencies=100.0)
-    >>> receiver = uacpy.Receiver(
-    ...     depths=[50.0],  # Single depth for SPARC
-    ...     ranges=np.linspace(100, 5000, 50)
-    ... )
-    >>>
     >>> sparc = SPARC(verbose=False)
     >>> result = sparc.run(env, source, receiver)
-    >>> print(f"TL range: {result.data.min():.1f} to {result.data.max():.1f} dB")
     """
 
     def __init__(
@@ -250,7 +287,21 @@ class SPARC(PropagationModel):
         # SPARC's run() auto-converts halfspace bottoms to rigid (line ~650),
         # so elastic_bottom flag is False — collapse to fluid up front so
         # the user gets a uniform warning instead of a silent rigidify.
+        self._supports_altimetry = False
+        self._supports_range_dependent_bathymetry = False
+        self._supports_range_dependent_ssp = False
+        self._supports_range_dependent_bottom = False
         self._supports_layered_bottom = True
+        self._supports_range_dependent_layered_bottom = False
+        self._supports_elastic_media = False
+        self._supports_multi_source_depth = False
+        # Range-independent time-marched FFP — single solve over the
+        # whole spectrum. Median/mean samples represent the path.
+        self._set_collapse_defaults({
+            'ssp': 'mean',
+            'bottom': 'median',
+            'rd_layered_layers': 'preserve',
+        })
 
         if executable is None:
             self.executable = self._find_executable_in_paths(
@@ -272,20 +323,6 @@ class SPARC(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        output_mode=_UNSET,
-        pulse_type=_UNSET,
-        n_t_out=_UNSET,
-        t_max=_UNSET,
-        t_start=_UNSET,
-        t_mult=_UNSET,
-        max_depths=_UNSET,
-        rmax_safety_margin=_UNSET,
-        c_low=_UNSET,
-        c_high=_UNSET,
-        n_mesh=_UNSET,
-        roughness=_UNSET,
-        volume_attenuation=_UNSET,
-        timeout=_UNSET,
         source_waveform=None,
         sample_rate=None,
         **kwargs
@@ -304,9 +341,6 @@ class SPARC(PropagationModel):
         run_mode : RunMode, optional
             COHERENT_TL (default): compute transmission loss via FFT of time-series.
             TIME_SERIES: return raw pressure time-series.
-        output_mode, pulse_type, n_t_out, t_max, t_start, t_mult, max_depths,
-        c_low, c_high, n_mesh, roughness, volume_attenuation : optional
-            Per-call overrides for constructor defaults.
         **kwargs
             Additional parameters for ENV file generation
 
@@ -320,49 +354,13 @@ class SPARC(PropagationModel):
         SPARC is range-independent. If a range-dependent environment is provided,
         it will automatically use a median-depth approximation with a warning.
         """
-        # Validate output_mode override if provided
-        if output_mode is not _UNSET and output_mode not in ('R', 'D', 'S'):
-            raise ConfigurationError(
-                f"Invalid output mode '{output_mode}'. "
-                f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
-            )
+        run_mode = self._resolve_run_mode(run_mode)
 
-        # Validate and normalize pulse_type override if provided
-        if pulse_type is not _UNSET:
-            pulse_type = _validate_pulse_type(pulse_type)
-
-        if run_mode is None:
-            run_mode = RunMode.COHERENT_TL
-
-        if source_waveform is not None or sample_rate is not None:
-            raise ConfigurationError(
-                "SPARC drives the source pulse via the constructor "
-                "``pulse_type`` argument, not via run() kwargs. Set "
-                "``SPARC(pulse_type=…)`` (e.g. 'PN+B' for a Hanning-windowed "
-                "pulse) and let SPARC compute p(t) natively. "
-                "``source_waveform`` / ``sample_rate`` are accepted on the "
-                "run() signature only for API uniformity with the other "
-                "TIME_SERIES-capable models."
-            )
-
-        # Mode-mismatch guard: t_max/t_start/n_t_out/rmax_safety_margin
-        # only apply to TIME_SERIES paths.
-        self._warn_unknown_kwargs(kwargs)
-
-        # Apply per-call overrides (temporarily sets self.* for internal methods)
-        _overrides = _resolve_overrides(
-            self, output_mode=output_mode, pulse_type=pulse_type,
-            n_t_out=n_t_out, t_max=t_max, t_start=t_start, t_mult=t_mult,
-            max_depths=max_depths, rmax_safety_margin=rmax_safety_margin,
-            c_low=c_low, c_high=c_high, n_mesh=n_mesh,
-            roughness=roughness, volume_attenuation=volume_attenuation,
-            timeout=timeout,
-        )
-        with _overrides:
-            return self._run_impl(env, source, receiver, run_mode, **kwargs)
-
-    def _run_impl(self, env, source, receiver, run_mode, **kwargs):
-        """Internal run implementation (called within the override context)."""
+        # SPARC drives its source pulse via the constructor ``pulse_type``
+        # kwarg, not via ``source_waveform``/``sample_rate``. Accept those
+        # on the run() signature for API uniformity with the other
+        # TIME_SERIES-capable models, but ignore them silently per the
+        # uacpy convention that irrelevant run() kwargs are dropped.
         env = self._project_environment(env)
         receiver = self._clip_receiver_depths(receiver, env.depth)
 
@@ -403,11 +401,7 @@ class SPARC(PropagationModel):
                     # Write environment file
                     env_file = fm.get_path(f'{base_name}.env')
                     self._write_sparc_env(env_file, env, source, receiver, **kwargs)
-
-                    # Run SPARC
                     self._run_sparc(base_name, fm.work_dir)
-
-                    # Read output
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
                         exc = ModelExecutionError(
@@ -470,8 +464,6 @@ class SPARC(PropagationModel):
                         if self.verbose:
                             self._log(f"  Depth {idx+1}/{len(receiver.depths)}: {depth:.1f}m")
                         self._run_sparc(depth_base, fm.work_dir)
-
-                        # Read output
                         rts_file = fm.get_path(f'{depth_base}.rts')
                         if not rts_file.exists():
                             exc = ModelExecutionError(
@@ -627,8 +619,6 @@ class SPARC(PropagationModel):
                 # Write environment file
                 env_file = fm.get_path(f'{base_name}.env')
                 self._write_sparc_env(env_file, env, source, receiver, **kwargs)
-
-                # Run SPARC
                 self._run_sparc(base_name, fm.work_dir)
 
                 # Read Green's function file
@@ -663,21 +653,33 @@ class SPARC(PropagationModel):
                 result = sparc_snapshot_to_field(
                     grn_data, receiver.ranges, frequency=freq,
                 )
-                result.tag(
-                    model=self.model_name,
+                kw = self._result_kwargs(
+                    source,
                     backend='sparc.exe',
-                    source_depths=source.depths,
                     frequencies=freq,
                     phase_reference='travelling_wave',
                     output_mode='S',
                     note='Snapshot mode: time-FFT then Hankel transform',
                 )
+                extras = kw.pop('metadata', {})
+                result.tag(**kw, **extras)
 
             else:
                 raise ConfigurationError(
                     f"Invalid output mode '{self.output_mode}'. "
                     f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
                 )
+
+            # output_mode='S' writes a snapshot .grn; 'R'/'D' write
+            # per-depth/per-range .rts files inside loops. Expose
+            # whatever exists at the wrapper base_name.
+            self._attach_output_paths(
+                result, fm.work_dir, base_name,
+                primary_files=(
+                    ('grn_file', '.grn'),
+                    ('rts_file', '.rts'),
+                ),
+            )
 
             self._log("Simulation complete")
             return result
@@ -702,25 +704,27 @@ class SPARC(PropagationModel):
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 
         # SPARC limitation: only supports Vacuum and Rigid boundaries
-        bottom_acoustic_type = env.bottom.acoustic_type.lower()
+        hs = env.halfspace_at_range(0.0)
+        bottom_acoustic_type = hs.acoustic_type.lower()
         if bottom_acoustic_type in ['half-space', 'halfspace', 'a']:
             warnings.warn(
-                "SPARC: does not support elastic halfspace bottom boundaries. "
-                "Automatically converting to 'rigid' boundary. "
-                "For full elastic bottom support, use Bellhop, Kraken, OASES, or Scooter. "
-                "To suppress this warning, explicitly set env.bottom.acoustic_type='rigid' before running SPARC.",
+                "SPARC supports only 'vacuum' / 'rigid' bottom boundaries; "
+                "auto-converting the env's halfspace to 'rigid'. For "
+                "physically meaningful halfspace reflection (fluid or "
+                "elastic), use Bellhop / Kraken / Scooter / OASES. To "
+                "suppress this warning, set the bottom acoustic_type to "
+                "'rigid' (or 'vacuum') before constructing the env.",
                 UserWarning, stacklevel=2,
             )
             bottom_acoustic_type = 'rigid'
 
-        # Map to BoundaryType
         if bottom_acoustic_type == 'vacuum':
             bottom_type = BoundaryType.VACUUM
         elif bottom_acoustic_type == 'rigid':
             bottom_type = BoundaryType.RIGID
         else:
             raise ConfigurationError(
-                f"Invalid bottom boundary type '{env.bottom.acoustic_type}' for SPARC. "
+                f"Invalid bottom boundary type '{hs.acoustic_type}' for SPARC. "
                 f"Only 'vacuum' and 'rigid' are supported."
             )
 
@@ -764,7 +768,7 @@ class SPARC(PropagationModel):
 
             # Write bottom section (SPARC only supports V and R)
             bottom_code = bottom_type.to_acoustics_toolbox_code()
-            sigma = getattr(env.bottom, 'roughness', 0.0)
+            sigma = getattr(env.halfspace_at_range(0.0), 'roughness', 0.0)
             f.write(f"'{bottom_code}' {sigma:.1f}\n")
             # Note: No halfspace parameters since SPARC doesn't support them
 
