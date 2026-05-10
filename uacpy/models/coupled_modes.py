@@ -95,6 +95,11 @@ def segment_environment_by_range(
         ssp_for_segment = ssp_at_range[ssp_at_range[:, 0] < depth_rounded].copy()
         c_at_depth = float(np.interp(depth_rounded, ssp_at_range[:, 0], ssp_at_range[:, 1]))
         ssp_for_segment = np.vstack([ssp_for_segment, [depth_rounded, c_at_depth]])
+        # Kraken needs ≥2 samples per medium; on shoaling segments where the
+        # seafloor is shallower than every SSP sample, prepend the surface.
+        if len(ssp_for_segment) < 2:
+            c_at_surface = float(np.interp(0.0, ssp_at_range[:, 0], ssp_at_range[:, 1]))
+            ssp_for_segment = np.vstack([[0.0, c_at_surface], ssp_for_segment])
 
         from uacpy.core.environment import SoundSpeedProfile
         seg_ssp = SoundSpeedProfile.from_pairs(
