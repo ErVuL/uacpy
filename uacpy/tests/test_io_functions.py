@@ -105,7 +105,7 @@ class TestEnvironmentIO:
         env = uacpy.Environment(
             name="Test",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip')
+            ssp=SoundSpeedProfile.from_pairs(ssp_data)
         )
 
         assert len(env.ssp.to_pairs()) == 11

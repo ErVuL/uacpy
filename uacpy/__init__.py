@@ -20,7 +20,6 @@ except Exception:
 __author__ = 'ErVuL'
 
 from uacpy._log import install_warning_formatter as _install_warning_formatter
-_install_warning_formatter()
 
 from uacpy.core.source import Source
 from uacpy.core.environment import (
@@ -106,3 +105,6 @@ __all__ = [
     'tl_rmse',
     '__version__',
 ]
+
+
+_install_warning_formatter()

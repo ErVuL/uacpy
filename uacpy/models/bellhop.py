@@ -307,7 +307,9 @@ class Bellhop(PropagationModel):
         r_box: Optional[float] = None,
         source_type: str = 'R',
         grid_type: str = 'R',
-        bty_interp_type: str = 'L',
+        interp_ssp: Optional[str] = None,
+        interp_bathymetry: str = 'linear',
+        interp_altimetry: str = 'linear',
         source_beam_pattern_file: Optional[Path] = None,
         arrivals_format: str = 'ascii',
         beam_width_type: str = 'F',
@@ -351,10 +353,18 @@ class Bellhop(PropagationModel):
             Source type: 'R' (point, cylindrical), 'X' (line, Cartesian). Default: 'R'.
         grid_type : str
             Receiver grid: 'R' (rectilinear), 'I' (irregular). Default: 'R'.
-        bty_interp_type : str, optional
-            Interpolation type used for BOTH ``.bty`` (bathymetry) and
-            ``.ati`` (altimetry) files. 'L' (linear, default) or 'C'
-            (curvilinear).
+        interp_ssp : str, optional
+            SSP connection scheme. ``None`` (default) auto-picks
+            ``'quad'`` for a range-dependent ``env.ssp`` and ``'linear'``
+            otherwise. Explicit values: ``'linear'``, ``'pchip'``,
+            ``'cubic'``, ``'quad'``, ``'n2linear'``, ``'analytic'``.
+            ``env.ssp.shape='isovelocity'`` always forces ``'C'`` regardless.
+        interp_bathymetry : str, optional
+            ``.bty`` interpolation. ``'linear'`` (default) or
+            ``'curvilinear'``.
+        interp_altimetry : str, optional
+            ``.ati`` interpolation. ``'linear'`` (default) or
+            ``'curvilinear'``.
         source_beam_pattern_file : Path or ndarray, optional
             Source beam pattern. Either a path to an existing ``.sbp`` file
             (copied to ``<work_dir>/<base>.sbp``) or a 2-column array of
@@ -433,7 +443,9 @@ class Bellhop(PropagationModel):
         self.r_box = r_box
         self.source_type = source_type
         self.grid_type = grid_type
-        self.bty_interp_type = bty_interp_type
+        self.interp_ssp = interp_ssp
+        self.interp_bathymetry = interp_bathymetry
+        self.interp_altimetry = interp_altimetry
         self.source_beam_pattern_file = (
             Path(source_beam_pattern_file)
             if isinstance(source_beam_pattern_file, (str, Path))
@@ -617,17 +629,26 @@ class Bellhop(PropagationModel):
                 UserWarning, stacklevel=2,
             )
 
-        if env.has_range_dependent_ssp() and env.ssp.interp != 'quad':
+        from uacpy.io.oalib_writer import resolve_ssp_interp
+        effective_interp = resolve_ssp_interp(env, self.interp_ssp)
+        if self.interp_ssp is None:
+            self._log(
+                f"interp_ssp auto-picked = {effective_interp!r} "
+                f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp()})"
+            )
+        if env.has_range_dependent_ssp() and effective_interp != 'quad':
             method = self._collapse['ssp']
             env = env.copy()
             env.ssp = env.ssp.collapse(method)
             warnings.warn(
                 f"Bellhop reads range-dependent SSP only when "
-                f"ssp.interp='quad' (external .ssp file). With "
-                f"ssp.interp={env.ssp.interp!r} the SSP is collapsed to 1-D "
-                f"(collapse['ssp']={method!r}). Set interp='quad' on the "
-                f"SoundSpeedProfile to enable the 2-D profile.",
-                UserWarning, stacklevel=2
+                f"interp_ssp='quad' (external .ssp file). With "
+                f"interp_ssp={self.interp_ssp!r} (resolved to "
+                f"{effective_interp!r}) the SSP is collapsed to 1-D "
+                f"(collapse['ssp']={method!r}). Pass "
+                f"``Bellhop(interp_ssp='quad')`` (or leave the default "
+                f"``None`` for auto-detection) to enable the 2-D profile.",
+                UserWarning, stacklevel=2,
             )
 
         env = self._project_environment(env)
@@ -655,7 +676,9 @@ class Bellhop(PropagationModel):
         self.file_manager = fm
 
         extra_writer_kwargs = {
-            'bty_interp_type': self.bty_interp_type,
+            'interp_ssp': self.interp_ssp,
+            'interp_bathymetry': self.interp_bathymetry,
+            'interp_altimetry': self.interp_altimetry,
         }
 
         sbp_spec = self.source_beam_pattern_file

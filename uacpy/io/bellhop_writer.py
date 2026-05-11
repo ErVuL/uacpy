@@ -37,7 +37,9 @@ def write_bellhop_env_file(
     beam_type: str = "B",
     source_type: str = "R",
     grid_type: str = "R",
-    bty_interp_type: str = 'L',
+    interp_ssp: str = 'linear',
+    interp_bathymetry: str = 'linear',
+    interp_altimetry: str = 'linear',
     source_beam_pattern: bool = False,
     beam_shift: bool = False,
     n_beams: int = 0,
@@ -90,10 +92,14 @@ def write_bellhop_env_file(
         Source type (position 4): 'R' (point), 'X' (line). Default is 'R'.
     grid_type : str, optional
         Grid type (position 5): 'R' (rectilinear), 'I' (irregular). Default is 'R'.
-    bty_interp_type : str, optional
-        Interpolation type for both the ``.bty`` (bathymetry) and
-        ``.ati`` (altimetry) files: 'L' (linear, default) or 'C'
-        (curvilinear). The same value is used for both files.
+    interp_ssp : str, optional
+        SSP connection scheme when ``env.ssp.shape == 'measured'``
+        (drives ``TopOpt(1)``): ``'linear'`` (default), ``'pchip'``,
+        ``'cubic'``, ``'quad'``, ``'n2linear'``.
+    interp_bathymetry : str, optional
+        ``.bty`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
+    interp_altimetry : str, optional
+        ``.ati`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
     source_beam_pattern : bool, optional
         When True, emits '*' in RunType position 3 so Bellhop reads
         ``<base>.sbp`` (source beam pattern file). The caller is
@@ -156,8 +162,22 @@ def write_bellhop_env_file(
         # Number of media (1 for simple case)
         f.write("1\n")
 
-        from uacpy.core.constants import parse_ssp_type
-        interp_char = parse_ssp_type(env.ssp.interp).to_acoustics_toolbox_code()
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        interp_char = resolve_ssp_topopt(env, interp_ssp)
+
+        _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
+        bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
+        ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
+        if bty_code is None:
+            raise ValueError(
+                f"interp_bathymetry must be 'linear' or 'curvilinear'; "
+                f"got {interp_bathymetry!r}"
+            )
+        if ati_code is None:
+            raise ValueError(
+                f"interp_altimetry must be 'linear' or 'curvilinear'; "
+                f"got {interp_altimetry!r}"
+            )
 
         # Top boundary (surface)
         top_bc = get_top_bc_code(env)
@@ -190,7 +210,7 @@ def write_bellhop_env_file(
             ati_filepath = filepath.with_suffix(".ati")
             ati_data = env.altimetry.copy()
             ati_data[:, 1] = -ati_data[:, 1]
-            write_ati_file(ati_filepath, ati_data, interp_type=bty_interp_type)
+            write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
             log_message('bellhop_writer',
                         f"wrote altimetry file: {ati_filepath}",
                         verbose=verbose)
@@ -284,17 +304,17 @@ def write_bellhop_env_file(
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
             # auto-selected by the writer: write_bty_long_format emits
-            # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. Callers only pick
-            # the 1st char (interpolation) via bty_interp_type.
+            # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. The first char
+            # is the interpolation chosen via ``interp_bathymetry``.
             if isinstance(env.bottom, RangeDependentBottom) and len(env.bottom.ranges) > 0:
                 write_bty_long_format(
                     bty_filepath, env.bathymetry, env.bottom,
-                    interp_type=bty_interp_type,
+                    interp_type=bty_code,
                 )
             else:
                 write_bty_file(
                     bty_filepath, env.bathymetry,
-                    interp_type=bty_interp_type,
+                    interp_type=bty_code,
                 )
             bottom_type_with_bathy = f"{bottom_type}~"
             # 2nd field on this BOT line is sigma (top-of-bottom RMS

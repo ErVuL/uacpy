@@ -263,17 +263,30 @@ the classmethod factories:
 from uacpy import SoundSpeedProfile
 
 SoundSpeedProfile.from_isovelocity(depth_max=2000.0, sound_speed=1500.0)
-SoundSpeedProfile.from_pairs([(0,1540),(50,1520),(200,1505)], interp='linear')
+SoundSpeedProfile.from_pairs([(0,1540),(50,1520),(200,1505)])
 SoundSpeedProfile.from_munk(depth_max=5000)
 SoundSpeedProfile.from_mackenzie(depths=z, temperature_c=T, salinity_psu=S)
-SoundSpeedProfile.from_2d(depths=z, ranges=r, matrix=ssp_2d, interp='quad')
+SoundSpeedProfile.from_2d(depths=z, ranges=r, matrix=ssp_2d)
 ```
 
-`interp` is the writer hint:
-`isovelocity | linear | bilinear | munk | pchip | cubic | analytic |
-n2linear | quad`. **Bellhop honours range-dependent SSP only when
-`interp='quad'`** (writes the external `.ssp` file); other interpolations
-fall back to the model's `collapse['ssp']` policy with a tailored warning.
+The SSP carries a **shape** declaration (env-level metadata): one of
+`'measured'` (default), `'isovelocity'`, `'munk'`, `'analytic'`,
+`'n2linear'`. The factory methods set this automatically
+(``from_isovelocity`` → ``'isovelocity'``, ``from_munk`` → ``'munk'``,
+others → ``'measured'``).
+
+The **sample-connection scheme** is a model-level kwarg
+``Model(interp_ssp='linear'|'pchip'|'cubic'|'quad'|'n2linear'|...)``.
+Each AT-family wrapper exposes it; values map onto AT's ``TopOpt(1)``
+character. When ``env.ssp.shape`` implies a code (``'munk'`` →
+``'A'`` for Bellhop's native Munk path, ``'n2linear'`` → ``'N'``,
+``'isovelocity'`` → ``'C'``, ``'analytic'`` → ``'A'``), the shape wins
+over the model's ``interp_ssp``.
+
+**Bellhop honours range-dependent SSP only when
+``Bellhop(interp_ssp='quad')``** (writes the external ``.ssp`` file);
+any other ``interp_ssp`` collapses the SSP to 1-D via the model's
+``collapse['ssp']`` policy with one tailored warning.
 
 Useful methods:
 - `eval(range=…, depth=…, interp='linear'|'nearest')` — label-based
@@ -588,9 +601,9 @@ trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
 ```
 
 **Caveats:**
-- Range-dependent SSP is honoured only when `ssp.interp='quad'`; other
-  interpolations are collapsed via `collapse['ssp']` with a tailored
-  warning.
+- Range-dependent SSP is honoured only when `Bellhop(interp_ssp='quad')`;
+  any other ``interp_ssp`` collapses the 2-D profile to 1-D via
+  ``collapse['ssp']`` with a tailored warning.
 - Layered / RDLB / elastic bottoms auto-route through BOUNCE (§5.2).
 - `Bellhop3D` is a stub — the env writer is 2-D only, 3-D arrivals
   parsing is not implemented.

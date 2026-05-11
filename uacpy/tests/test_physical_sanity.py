@@ -347,7 +347,7 @@ class TestInterpolationAccuracy:
         env = uacpy.Environment(
             name='Test',
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
+            ssp=SoundSpeedProfile.from_pairs(ssp_data)
         )
 
         # At exact points, should return exact values
@@ -364,7 +364,7 @@ class TestInterpolationAccuracy:
         env = uacpy.Environment(
             name='Test',
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='linear')
+            ssp=SoundSpeedProfile.from_pairs(ssp_data)
         )
 
         # Interpolate at intermediate points

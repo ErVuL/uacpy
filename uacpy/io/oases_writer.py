@@ -395,7 +395,6 @@ def write_oast_input(
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
     plot_rmin = kwargs.get('plot_rmin', 0.0)            # metres (public API)
     plot_rmax = kwargs.get('plot_rmax', r_max)          # metres (public API)
-    
 
     # Get reference sound speed for plot axes
     c_ref = float(ssp_data[0, 1])  # Sound speed at surface
@@ -655,7 +654,7 @@ def write_oasn_input(
     # Options string
     if options is None:
         options = 'N J'  # Covariance output, complex contour
-    
+
     options = _inject_volume_attenuation(options, env)
 
     # Integration parameters
@@ -911,7 +910,7 @@ def write_oasp_input(
     # Options string
     if options is None:
         options = 'N V J'  # Normal stress, vertical velocity, complex contour
-    
+
     options = _inject_volume_attenuation(options, env)
 
     with open(filepath, 'w') as f:
@@ -1140,7 +1139,7 @@ def write_oasr_input(
     if options is None:
         opt_letter = _REFL_TYPE_TO_OPTION[reflection_type]
         options = f"{opt_letter} T"
-    
+
     options = _inject_volume_attenuation(options, env)
 
     # Interface roughness (RG / CL / M) per interface (B13 #6).

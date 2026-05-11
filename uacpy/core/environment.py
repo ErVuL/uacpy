@@ -830,9 +830,8 @@ class RangeDependentLayeredBottom:
         return self.to_profile('median').collapse(method)
 
 
-_VALID_SSP_INTERP = (
-    'isovelocity', 'linear', 'bilinear', 'munk',
-    'pchip', 'cubic', 'analytic', 'n2linear', 'quad',
+_VALID_SSP_SHAPES = (
+    'measured', 'isovelocity', 'munk', 'analytic', 'n2linear',
 )
 
 
@@ -854,15 +853,19 @@ class SoundSpeedProfile:
         Sound speed in m/s. ``M = 1`` for 1-D profiles.
     ranges : ndarray, shape (M,), optional
         Range axis in **metres**, monotonically increasing. ``None`` for 1-D.
-    interp : str
-        Interpolation/profile-shape hint consumed by writers:
-        ``'isovelocity' | 'linear' | 'bilinear' | 'munk' | 'pchip' |
-        'cubic' | 'analytic' | 'n2linear' | 'quad'``.
+    shape : str
+        Declaration of what the data represents:
+        ``'measured'`` (default), ``'isovelocity'``, ``'munk'``,
+        ``'analytic'`` or ``'n2linear'``. Drives the AT ``TopOpt(1)``
+        character when the chosen value implies it (e.g. ``'munk'`` and
+        ``'analytic'`` → ``'A'``, ``'n2linear'`` → ``'N'``,
+        ``'isovelocity'`` → ``'C'``); for ``'measured'`` the model's
+        own ``interp_ssp`` kwarg drives the choice.
     """
     depths: np.ndarray
     data: np.ndarray
     ranges: Optional[np.ndarray] = None
-    interp: str = 'linear'
+    shape: str = 'measured'
 
     def __post_init__(self):
         self.depths = np.asarray(self.depths, dtype=float).reshape(-1)
@@ -894,11 +897,11 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: ranges=None requires single-column data; "
                 f"got shape {self.data.shape}"
             )
-        self.interp = str(self.interp).lower()
-        if self.interp not in _VALID_SSP_INTERP:
+        self.shape = str(self.shape).lower()
+        if self.shape not in _VALID_SSP_SHAPES:
             raise ValueError(
-                f"SoundSpeedProfile: interp={self.interp!r} not in "
-                f"{_VALID_SSP_INTERP}"
+                f"SoundSpeedProfile: shape={self.shape!r} not in "
+                f"{_VALID_SSP_SHAPES}"
             )
 
     @property
@@ -949,7 +952,7 @@ class SoundSpeedProfile:
                 depths=self.depths.copy(),
                 data=self.data[:, :1].copy(),
                 ranges=None,
-                interp=self.interp,
+                shape=self.shape,
             )
         elif interp == 'nearest':
             r_idx = int(np.argmin(np.abs(self.ranges - range)))
@@ -957,7 +960,7 @@ class SoundSpeedProfile:
                 depths=self.depths.copy(),
                 data=self.data[:, r_idx:r_idx + 1].copy(),
                 ranges=None,
-                interp=self.interp,
+                shape=self.shape,
             )
         else:
             if range <= self.ranges[0]:
@@ -973,7 +976,7 @@ class SoundSpeedProfile:
                 depths=self.depths.copy(),
                 data=col.reshape(-1, 1),
                 ranges=None,
-                interp=self.interp,
+                shape=self.shape,
             )
         if depth is None:
             return sliced
@@ -983,14 +986,14 @@ class SoundSpeedProfile:
                 depths=np.array([float(sliced.depths[d_idx])]),
                 data=sliced.data[d_idx:d_idx + 1, :].copy(),
                 ranges=None,
-                interp=sliced.interp,
+                shape=sliced.shape,
             )
         c = float(np.interp(depth, sliced.depths, sliced.data[:, 0]))
         return SoundSpeedProfile(
             depths=np.array([float(depth)]),
             data=np.array([[c]]),
             ranges=None,
-            interp=sliced.interp,
+            shape=sliced.shape,
         )
 
     @property
@@ -1034,7 +1037,7 @@ class SoundSpeedProfile:
             depths=self.depths.copy(),
             data=col.reshape(-1, 1),
             ranges=None,
-            interp=self.interp,
+            shape=self.shape,
         )
 
     def extend_to(self, depth_max: float) -> 'SoundSpeedProfile':
@@ -1071,7 +1074,7 @@ class SoundSpeedProfile:
             depths=new_depths,
             data=new_data,
             ranges=(self.ranges.copy() if self.ranges is not None else None),
-            interp=self.interp,
+            shape=self.shape,
         )
 
     @classmethod
@@ -1082,16 +1085,21 @@ class SoundSpeedProfile:
             depths=np.array([0.0, float(depth_max)]),
             data=np.full((2, 1), float(sound_speed)),
             ranges=None,
-            interp='isovelocity',
+            shape='isovelocity',
         )
 
     @classmethod
     def from_pairs(
         cls,
         pairs: Union[List[Tuple[float, float]], np.ndarray],
-        interp: str = 'linear',
+        shape: str = 'measured',
     ) -> 'SoundSpeedProfile':
-        """Build a 1-D profile from ``[(depth, c), …]`` pairs."""
+        """Build a 1-D profile from ``[(depth, c), …]`` pairs.
+
+        ``shape`` is informational metadata (``'measured'`` default);
+        see :class:`SoundSpeedProfile`. The model's ``ssp_interp`` kwarg
+        drives the sample-connection scheme.
+        """
         arr = np.asarray(pairs, dtype=float)
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ValueError(
@@ -1102,7 +1110,7 @@ class SoundSpeedProfile:
             depths=arr[:, 0],
             data=arr[:, 1].reshape(-1, 1),
             ranges=None,
-            interp=interp,
+            shape=shape,
         )
 
     @classmethod
@@ -1111,15 +1119,19 @@ class SoundSpeedProfile:
         depths: np.ndarray,
         ranges: np.ndarray,
         matrix: np.ndarray,
-        interp: str = 'quad',
+        shape: str = 'measured',
     ) -> 'SoundSpeedProfile':
         """Build a 2-D profile from a depth axis, range axis (metres),
-        and ``c(depth, range)`` matrix of shape ``(n_depth, n_range)``."""
+        and ``c(depth, range)`` matrix of shape ``(n_depth, n_range)``.
+
+        For Bellhop, pair with ``Bellhop(interp_ssp='quad')`` to enable
+        the external ``.ssp`` (quad) file format.
+        """
         return cls(
             depths=np.asarray(depths, dtype=float),
             data=np.asarray(matrix, dtype=float),
             ranges=np.asarray(ranges, dtype=float),
-            interp=interp,
+            shape=shape,
         )
 
     @classmethod
@@ -1137,7 +1149,7 @@ class SoundSpeedProfile:
             depths=depths,
             data=c.reshape(-1, 1),
             ranges=None,
-            interp='munk',
+            shape='munk',
         )
 
     @classmethod
@@ -1168,7 +1180,7 @@ class SoundSpeedProfile:
         c = soundspeed(temperature=T, salinity=S, depth=z)
         return cls(
             depths=z, data=np.asarray(c).reshape(-1, 1),
-            ranges=None, interp='linear',
+            ranges=None,
         )
 
 
@@ -1329,7 +1341,7 @@ class Environment:
     >>> env = Environment(
     ...     name='test', bathymetry=200,
     ...     ssp=SoundSpeedProfile.from_pairs(
-    ...         [(0, 1520), (200, 1480)], interp='linear'),
+    ...         [(0, 1520), (200, 1480)]),
     ... )
 
     Munk:
@@ -1557,7 +1569,7 @@ class Environment:
     def __repr__(self) -> str:
         range_dep = "range-dep" if self.is_range_dependent else "range-indep"
         return (f"Environment(name='{self.name}', depth={self.depth:.1f}m, "
-                f"ssp='{self.ssp.interp}', {range_dep})")
+                f"ssp='{self.ssp.shape}', {range_dep})")
 
     def get_representative_depth(self, method: str = 'max') -> float:
         """

@@ -276,7 +276,6 @@ class TestRunWithBounceConstructorPlumbing:
         from uacpy.core.absorption import FrancoisGarrison
 
         captured = {}
-        original_run = bounce_mod.Bounce.run
 
         def spy_run(self_, env, source, receiver, **kwargs):
             captured['absorption'] = env.absorption

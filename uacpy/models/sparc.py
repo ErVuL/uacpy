@@ -17,7 +17,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, PressureField, TimeSeriesField
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
-    parse_ssp_type, parse_boundary_type,
+    parse_boundary_type,
     DEFAULT_SOUND_SPEED,
 )
 from uacpy.core.exceptions import (
@@ -189,6 +189,7 @@ class SPARC(PropagationModel):
         c_high: Optional[float] = None,
         n_mesh: int = 0,
         roughness: float = 0.0,
+        interp_ssp: Optional[str] = None,
         output_mode: str = 'R',
         pulse_type: str = 'PN+B',
         n_t_out: int = 501,
@@ -258,6 +259,7 @@ class SPARC(PropagationModel):
             )
         self.n_mesh = n_mesh
         self.roughness = roughness
+        self.interp_ssp = interp_ssp
         if output_mode not in ('R', 'D', 'S'):
             raise ConfigurationError(
                 f"Invalid output mode '{output_mode}'. "
@@ -718,8 +720,8 @@ class SPARC(PropagationModel):
         - Time output parameters
         - Integration parameters
         """
-        # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp.interp)
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        ssp_code = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 
         hs = env.halfspace_at_range(0.0)
@@ -740,7 +742,6 @@ class SPARC(PropagationModel):
             f.write(f"{source.frequencies[0]:.6f}\n")
             f.write("1\n")
 
-            ssp_code = ssp_type.to_acoustics_toolbox_code()
             surface_code = surface_type.to_acoustics_toolbox_code()
             atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
             vol_atten_code = (

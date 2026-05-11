@@ -24,7 +24,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import (
     DEFAULT_C_MIN, DEFAULT_C_MAX,
-    parse_ssp_type, parse_boundary_type,
+    parse_boundary_type,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -171,6 +171,7 @@ class Bounce(PropagationModel):
         c_high: float = DEFAULT_C_MAX,
         rmax: Optional[float] = None,
         n_angles: Optional[int] = None,
+        interp_ssp: Optional[str] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -204,6 +205,7 @@ class Bounce(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
+        self.interp_ssp = interp_ssp
 
         # BOUNCE produces ONE BRC consumed across the whole range axis;
         # the median sample is the most representative single profile.
@@ -457,7 +459,8 @@ class Bounce(PropagationModel):
         TopOpt, SSP, BotOpt, cLow/cHigh, RMax. We therefore omit the
         source/receiver depth blocks.
         """
-        ssp_type = parse_ssp_type(env.ssp.interp)
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
 
@@ -469,7 +472,7 @@ class Bounce(PropagationModel):
         with open(filepath, 'w') as f:
             write_header(
                 f, env, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
             )
             write_absorption_block(f, env)

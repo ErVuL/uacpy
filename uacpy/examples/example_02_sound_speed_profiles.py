@@ -290,7 +290,7 @@ def scenario_c_thermocline():
     env = uacpy.Environment(
         name="Coastal - Thermocline with Surface Duct",
         bathymetry=200.0,
-        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='bilinear'),
+        ssp=SoundSpeedProfile.from_pairs(ssp_data),
         surface=uacpy.BoundaryProperties(
             acoustic_type='vacuum'
         ),

@@ -186,8 +186,7 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 1000.0, 2000.0]),
         matrix=np.array([[1500.0, 1510.0, 1520.0],
-                         [1500.0, 1510.0, 1520.0]]),
-        interp='linear',
+                         [1500.0, 1510.0, 1520.0]])
     )
     env = Environment(
         name='rd-ssp', bathymetry=100.0, ssp=ssp_2d,

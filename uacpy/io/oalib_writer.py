@@ -31,8 +31,8 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
-    SSPType, BoundaryType, AttenuationUnits,
-    parse_ssp_type, parse_boundary_type,
+    BoundaryType, AttenuationUnits,
+    parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR,
 )
 from uacpy._log import log_message
@@ -45,6 +45,56 @@ _BOUNDARY_TYPE_MAP = {
     "file": "F", "precalc": "P",
     "grain-size": "G", "grain_size": "G", "grain": "G",
 }
+
+
+_AT_INTERP_TO_CODE = {
+    'linear': 'C',
+    'c-linear': 'C',
+    'clin': 'C',
+    'bilinear': 'C',
+    'n2linear': 'N',
+    'pchip': 'P',
+    'cubic': 'S',
+    'spline': 'S',
+    'quad': 'Q',
+    'analytic': 'A',
+}
+
+
+def resolve_ssp_interp(env: Environment, model_interp) -> str:
+    """Return the user-facing ``interp_ssp`` value after auto-resolution.
+
+    ``None`` means *auto*: pick ``'quad'`` when the env has a
+    range-dependent SSP (matching Bellhop's ``.ssp`` quad-file path),
+    otherwise ``'linear'``. Explicit values pass through unchanged.
+    """
+    if model_interp is None:
+        return 'quad' if env.has_range_dependent_ssp() else 'linear'
+    return str(model_interp).lower()
+
+
+def resolve_ssp_topopt(env: Environment, model_interp) -> str:
+    """Pick the AT ``TopOpt(1)`` character for an env / model pair.
+
+    The model's ``interp_ssp`` (``None`` → auto / ``'linear'`` /
+    ``'pchip'`` / ``'cubic'`` / ``'quad'`` / ``'n2linear'`` /
+    ``'analytic'`` / …) drives the character via :data:`_AT_INTERP_TO_CODE`.
+    The only env-side override is ``shape='isovelocity'`` which forces
+    ``'C'`` (any connection scheme over constant data is constant). All
+    other shape values (``'munk'``, ``'analytic'``, ``'n2linear'``,
+    ``'measured'``) are informational — the model decides how to connect
+    the samples.
+    """
+    shape = getattr(env.ssp, 'shape', 'measured')
+    if shape == 'isovelocity':
+        return 'C'
+    key = resolve_ssp_interp(env, model_interp)
+    if key not in _AT_INTERP_TO_CODE:
+        raise ValueError(
+            f"interp_ssp={model_interp!r} not recognised. Valid: "
+            f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
+        )
+    return _AT_INTERP_TO_CODE[key]
 
 
 def get_top_bc_code(env: Environment) -> str:
@@ -120,7 +170,7 @@ def write_header(
     f: TextIO,
     env: Environment,
     source: Source,
-    ssp_type: SSPType,
+    ssp_topopt: str,
     surface_type: BoundaryType,
     frequencies: Optional[np.ndarray] = None,
     n_media_override: Optional[int] = None,
@@ -146,8 +196,9 @@ def write_header(
         Environment configuration (``env.absorption`` drives TopOpt(4))
     source : Source
         Source configuration
-    ssp_type : SSPType
-        SSP interpolation type
+    ssp_topopt : str
+        Pre-resolved single-character ``TopOpt(1)`` code (typically
+        from :func:`resolve_ssp_topopt`).
     surface_type : BoundaryType
         Surface boundary condition
     frequencies : ndarray, optional
@@ -172,7 +223,7 @@ def write_header(
             n_media += len(env.bottom.layers)
     f.write(f"{n_media}\n")
 
-    ssp_code = ssp_type.to_acoustics_toolbox_code()
+    ssp_code = ssp_topopt
     surface_code = surface_type.to_acoustics_toolbox_code()
     atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
     vol_atten_code = (
@@ -675,14 +726,11 @@ def write_multi_profile_env(
     # or padding layer.
     max_total_rounded = float(f"{max_total_depth:.1f}")
 
+    interp_ssp = kwargs.get('interp_ssp', 'linear')
+
     with open(filepath, 'w') as f:
         for i, (_range_km, env_seg) in enumerate(segments):
-            ssp_type = parse_ssp_type(env_seg.ssp.interp)
-            # Respect the user's surface BC rather than silently
-            # forcing every profile to VACUUM. segment_environment_by_range
-            # copies env.surface onto each segment (see coupled_modes.py),
-            # so env_seg.surface is always populated. Fall back to VACUUM
-            # if a caller ever built a segment without one.
+            ssp_topopt = resolve_ssp_topopt(env_seg, interp_ssp)
             surface_obj = getattr(env_seg, 'surface', None)
             if surface_obj is not None:
                 surface_type = parse_boundary_type(
@@ -697,7 +745,7 @@ def write_multi_profile_env(
 
             write_header(
                 f, env_seg, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
                 n_media_override=n_media_write,
             )

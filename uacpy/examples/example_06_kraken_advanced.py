@@ -90,7 +90,7 @@ def main():
 
     env = uacpy.Environment(
         name="Continental Shelf - Mode Coupling",
-        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
+        ssp=SoundSpeedProfile.from_pairs(ssp_data),
         bathymetry=bathymetry,
         bottom=bottom_rd,
     )
@@ -127,7 +127,7 @@ def main():
         name="Shelf (100m)",
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
-            ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
+            ssp_data[ssp_data[:, 0] <= 100],
         ),
         bottom=bottom_rd.eval(range=0, interp='nearest'),
         absorption=fg,
@@ -141,7 +141,7 @@ def main():
     env_deep = uacpy.Environment(
         name="Slope (400m)",
         bathymetry=400.0,
-        ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
+        ssp=SoundSpeedProfile.from_pairs(ssp_data),
         bottom=bottom_rd.eval(range=20000, interp='nearest'),
         absorption=fg,
     )

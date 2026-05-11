@@ -22,7 +22,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import (
-    parse_ssp_type, parse_boundary_type,
+    parse_boundary_type,
     DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
@@ -105,6 +105,7 @@ class Scooter(PropagationModel):
         n_mesh: int = 0,
         roughness: float = 0.0,
         rmax_multiplier: float = 2.0,
+        interp_ssp: Optional[str] = None,
         source_type: str = 'R',
         spectrum: str = 'positive',
         stabilizing_attenuation_off: bool = False,
@@ -164,6 +165,7 @@ class Scooter(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        self.interp_ssp = interp_ssp
         if c_low is not None and c_high is not None and c_low >= c_high:
             raise ConfigurationError(
                 f"Scooter spectral phase-velocity band requires "
@@ -397,8 +399,8 @@ class Scooter(PropagationModel):
         - Receiver ranges (not in standard Kraken format)
         - Supports shear wave parameters in bottom halfspace
         """
-        # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp.interp)
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
 
@@ -406,13 +408,13 @@ class Scooter(PropagationModel):
 
         # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
         # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
-        # reader then keeps Atten=Deltak (the default stabiliser).
+        # reader keeps Atten=Deltak (the default stabiliser).
         topopt_extra = '0' if self.stabilizing_attenuation_off else ''
 
         with open(filepath, 'w') as f:
             write_header(
                 f, env, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
                 frequencies=frequencies,
                 topopt_extra=topopt_extra,

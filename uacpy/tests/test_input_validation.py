@@ -180,8 +180,7 @@ def test_warn_when_receiver_overruns_ssp_ranges():
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 2_000.0]),
-        matrix=np.array([[1500.0, 1495.0], [1480.0, 1475.0]]),
-        interp='quad',
+        matrix=np.array([[1500.0, 1495.0], [1480.0, 1475.0]])
     )
     env = Environment(bathymetry=100.0, ssp=ssp)
     src = uacpy.Source(depths=10.0, frequencies=100.0)
@@ -235,8 +234,7 @@ def test_bellhop_env_ssp_block_uses_range_zero_profile(tmp_path):
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
         ranges=np.array([1_000.0, 5_000.0]),
-        matrix=np.array([[1500.0, 1480.0], [1490.0, 1470.0]]),
-        interp='quad',
+        matrix=np.array([[1500.0, 1480.0], [1490.0, 1470.0]])
     )
     env = Environment(bathymetry=100.0, ssp=ssp)
     src = uacpy.Source(depths=10.0, frequencies=100.0)
@@ -270,8 +268,7 @@ def test_ssp_eval_interpolates_off_grid_range():
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 4_000.0, 10_000.0]),
         matrix=np.array([[1500.0, 1490.0, 1480.0],
-                         [1480.0, 1470.0, 1460.0]]),
-        interp='quad',
+                         [1480.0, 1470.0, 1460.0]])
     )
     sliced = ssp.eval(range=2_000.0)
     assert sliced.data[0, 0] == pytest.approx(1495.0)
@@ -282,8 +279,7 @@ def test_ssp_eval_clamps_beyond_last_range():
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 4_000.0]),
-        matrix=np.array([[1500.0, 1490.0], [1480.0, 1470.0]]),
-        interp='quad',
+        matrix=np.array([[1500.0, 1490.0], [1480.0, 1470.0]])
     )
     sliced = ssp.eval(range=10_000.0)
     assert sliced.data[0, 0] == pytest.approx(1490.0)
@@ -319,8 +315,7 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
         depths=np.array([0.0, 200.0]),
         ranges=np.array([0.0, 5_000.0, 12_000.0]),
         matrix=np.array([[1500.0, 1495.0, 1490.0],
-                         [1480.0, 1475.0, 1470.0]]),
-        interp='quad',
+                         [1480.0, 1475.0, 1470.0]])
     )
     rd_bot = RangeDependentBottom(
         ranges=np.array([0.0, 3_000.0, 6_000.0, 9_000.0]),
@@ -370,8 +365,7 @@ def test_kraken_collapses_rd_env_with_warning(simple_env):
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 5_000.0]),
-        matrix=np.array([[1500.0, 1480.0], [1490.0, 1470.0]]),
-        interp='quad',
+        matrix=np.array([[1500.0, 1480.0], [1490.0, 1470.0]])
     )
     env = Environment(
         bathymetry=[(0.0, 100.0), (5_000.0, 200.0)],
@@ -416,8 +410,7 @@ def test_kraken_segmentation_unions_distinct_axes():
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 200.0]),
         ranges=np.array([0.0, 2_000.0, 4_000.0, 6_000.0, 10_000.0]),
-        matrix=np.tile(np.array([[1500.0], [1480.0]]), (1, 5)),
-        interp='quad',
+        matrix=np.tile(np.array([[1500.0], [1480.0]]), (1, 5))
     )
     env = Environment(
         bathymetry=[(0.0, 100.0), (5_000.0, 150.0), (10_000.0, 200.0)],
@@ -440,15 +433,14 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 1_000.0, 5_000.0]),
         matrix=np.array([[1500.0, 1495.0, 1485.0],
-                         [1480.0, 1475.0, 1465.0]]),
-        interp='quad',
+                         [1480.0, 1475.0, 1465.0]])
     )
     env = Environment(bathymetry=100.0, ssp=ssp)
     src = uacpy.Source(depths=10.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.array([2_000.0]))
     env_path = tmp_path / 'rdssp.env'
-    write_bellhop_env_file(env_path, env, src, rcv)
+    write_bellhop_env_file(env_path, env, src, rcv, interp_ssp='quad')
     ssp_path = env_path.with_suffix('.ssp')
     assert ssp_path.exists()
     contents = ssp_path.read_text().split()
@@ -456,4 +448,3 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     assert n_profiles == 3
     ranges_km = list(map(float, contents[1:1 + n_profiles]))
     assert ranges_km == [0.0, 1.0, 5.0]
-

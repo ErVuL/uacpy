@@ -57,7 +57,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Modes, PressureField, TransferFunction
 from uacpy.core.constants import (
-    parse_ssp_type, parse_boundary_type,
+    parse_boundary_type,
     DEFAULT_SOUND_SPEED,
 )
 import inspect
@@ -121,6 +121,7 @@ class _KrakenBase(PropagationModel):
         c_high: Optional[float] = None,
         n_mesh: int = 0,
         roughness: float = 0.0,
+        interp_ssp: Optional[str] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
         use_tmpfs: bool = False,
@@ -131,6 +132,7 @@ class _KrakenBase(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
+        self.interp_ssp = interp_ssp
         self.c_low = c_low
         self.c_high = c_high
         self.n_mesh = n_mesh
@@ -161,20 +163,25 @@ class _KrakenBase(PropagationModel):
                 f"c_high ({ch}) must be strictly greater than c_low ({cl})"
             )
 
-    def _check_kraken_ssp_type(self, env):
-        """Reject SSP interpolation types kraken does not implement.
+    def _check_kraken_ssp_type(self):
+        """Reject SSP interpolation choices kraken does not implement.
 
         Per AT ``sspMod.f90:61-89`` kraken accepts codes A (analytic),
         N (N^2-linear), C (C-linear), P (PCHIP), S (spline). The 'Q'
         quadrilateral code is Bellhop-only (see RangeDepSSPFile.htm).
+
+        Default ``self.interp_ssp=None`` resolves to 'linear' for
+        Kraken's env (auto-quad only applies to Bellhop), so the
+        rejection only fires on explicit 'quad'.
         """
-        val = env.ssp.interp
-        if val in ('q', 'quad', 'quadratic', 'ssptype.quadratic'):
+        if self.interp_ssp is None:
+            return
+        if str(self.interp_ssp).lower() in ('q', 'quad', 'quadratic'):
             raise ConfigurationError(
-                "Kraken/KrakenC/KrakenField do not support the 'Q' "
-                "(quadrilateral/quadratic) SSP interpolation type — it is "
-                "Bellhop-only. Use one of: 'c-linear', 'n2linear', 'pchip', "
-                "'spline', or 'analytic'."
+                "Kraken/KrakenC/KrakenField do not support the 'quad' "
+                "SSP interpolation — it is Bellhop-only. Pick one of "
+                "'linear' (C-linear), 'n2linear', 'pchip', 'cubic' / "
+                "'spline'."
             )
 
     def _build_modes_field(self, modes, n_modes, source):
@@ -232,13 +239,13 @@ class _KrakenBase(PropagationModel):
         - Maximum range (RMax)
         - Optional broadband frequency vector (TopOpt(6)='B')
         """
-        # Reject Q/quad SSP type (Bellhop-only)
-        self._check_kraken_ssp_type(env)
+        # Reject 'quad' SSP interp (Bellhop-only)
+        self._check_kraken_ssp_type()
         # Re-validate in case caller mutated attributes after __init__
         self._validate_phase_speed_limits()
 
-        # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp.interp)
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
         bottom_type = parse_boundary_type(bottom_acoustic_type)
@@ -268,7 +275,7 @@ class _KrakenBase(PropagationModel):
         with open(filepath, 'w') as f:
             write_header(
                 f, env, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
                 frequencies=frequencies,
             )
@@ -1222,6 +1229,7 @@ class KrakenField(_KrakenBase):
                     segments=segments,
                     source=source,
                     receiver=receiver_for_modes,
+                    interp_ssp=self.interp_ssp,
                     n_mesh=n_mesh_fixed,
                     roughness=self.roughness,
                     c_low=self.c_low,

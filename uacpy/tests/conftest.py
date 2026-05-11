@@ -59,7 +59,7 @@ def munk_env():
         name="Munk Profile",
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
-            np.column_stack([depths, sound_speeds]), interp='pchip',
+            np.column_stack([depths, sound_speeds])
         ),
     )
 

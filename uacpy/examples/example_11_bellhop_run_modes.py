@@ -335,7 +335,7 @@ def scenario_c_eigenrays_arrivals():
         name="Shallow Water - Eigenrays",
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
-            [(0, 1500), (100, 1520)], interp='linear',
+            [(0, 1500), (100, 1520)],
         ),
     )
 
