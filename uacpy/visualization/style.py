@@ -180,12 +180,18 @@ BOTTOM_FILL_STYLE = {
     'linewidth': 0.4,
 }
 
-# Solid black seafloor edge — applied above ``BOTTOM_FILL_STYLE`` at the
-# water-sediment interface for both flat and range-dependent bathymetries.
+# Seafloor edge styles — applied above ``BOTTOM_FILL_STYLE`` at the
+# water-sediment interface. RD bathymetry traces the actual seafloor and
+# is drawn solid; a flat bottom is an idealization and is drawn dashed.
 BOTTOM_LINE_STYLE = {
     'color': 'k',
     'linewidth': 2.0,
     'linestyle': '-',
+}
+BOTTOM_LINE_STYLE_FLAT = {
+    'color': 'k',
+    'linewidth': 2.0,
+    'linestyle': '--',
 }
 
 # Source/receiver marker styles — applied via ``ax.plot(..., **STYLE)``.

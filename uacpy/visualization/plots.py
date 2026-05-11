@@ -27,6 +27,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE,
     BOTTOM_HALFSPACE_COLOR,
     BOTTOM_LINE_STYLE,
+    BOTTOM_LINE_STYLE_FLAT,
     SOURCE_MARKER_STYLE,
     RECEIVER_MARKER_STYLE,
 )
@@ -143,7 +144,7 @@ def _overlay_bathymetry(
             ranges_km, env.depth, fill_bottom,
             **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5,
         )
-        ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
+        ax.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT,
                    zorder=ZORDER_SEDIMENT + 6)
     return max_depth
 
@@ -830,7 +831,7 @@ def plot_environment(
             **BOTTOM_FILL_STYLE, zorder=1
         )
     else:
-        ax_env.axhline(env.depth, **BOTTOM_LINE_STYLE, zorder=3, label='Bottom')
+        ax_env.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=3, label='Bottom')
         # Fill is applied below, after xlim is established by source/receiver.
 
     if source is not None:
@@ -3420,7 +3421,7 @@ def plot_tl_difference(
                             env.depth, max_depth * 1.05,
                             **BOTTOM_FILL_STYLE,
                             zorder=ZORDER_SEDIMENT + 5, )
-            ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
+            ax.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT,
                        zorder=ZORDER_SEDIMENT + 6)
 
     cbar = None
