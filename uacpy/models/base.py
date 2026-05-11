@@ -87,8 +87,11 @@ class PropagationModel(ABC):
     ----------
     use_tmpfs : bool, optional
         Use a RAM-backed filesystem for I/O. Default is False.
-    verbose : bool, optional
-        Print verbose output. Default is False.
+    verbose : bool or str, optional
+        Status-output gate. ``False`` (default) prints only ``WARN`` and
+        ``ERROR``. ``True`` or ``'info'`` also prints ``INFO``. ``'debug'``
+        additionally prints ``DEBUG`` (per-subprocess command lines,
+        grid-resolution choices, etc.). See :mod:`uacpy._log`.
     work_dir : str or Path, optional
         Working directory for files. If ``None``, a temporary directory is
         created per run.
@@ -99,8 +102,8 @@ class PropagationModel(ABC):
         Name of the model (class name).
     use_tmpfs : bool
         Whether tmpfs is used.
-    verbose : bool
-        Verbose output flag.
+    verbose : bool or str
+        Verbose-output gate (see constructor).
     file_manager : FileManager
         File manager instance (populated during ``run``).
     """
@@ -108,12 +111,14 @@ class PropagationModel(ABC):
     def __init__(
         self,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
     ):
+        from uacpy._log import _resolve_threshold
+        _resolve_threshold(verbose)  # validate up front
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
         self.verbose = verbose
@@ -318,24 +323,14 @@ class PropagationModel(ABC):
         return fm
 
     def _log(self, message: str, level: str = "info"):
-        """Print ``message`` tagged with model + level. WARN/ERROR always
-        print; INFO/DEBUG only when ``self.verbose``."""
-        from datetime import datetime, timezone
-        lvl = level.lower()
-        if lvl in ('warn', 'warning'):
-            label = 'WARN'
-        elif lvl == 'error':
-            label = 'ERROR'
-        elif lvl == 'debug':
-            if not self.verbose:
-                return
-            label = 'DEBUG'
-        else:
-            if not self.verbose:
-                return
-            label = 'INFO'
-        ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
-        print(f"[{ts}] [{label}] [{self.model_name}] {message}")
+        """Emit a tagged line through :func:`uacpy._log.log_message`.
+        ``WARN`` / ``ERROR`` always print; ``INFO`` / ``DEBUG`` only when
+        ``self.verbose``."""
+        from uacpy._log import log_message
+        log_message(
+            self.model_name, message,
+            verbose=self.verbose, level=level,
+        )
 
     def validate_inputs(
         self,
@@ -405,6 +400,94 @@ class PropagationModel(ABC):
 
         if receiver.depth_min < 0:
             raise ConfigurationError("Receiver depths must be positive")
+
+        self._check_per_range_receiver_depth(env, receiver)
+        self._warn_on_range_coverage(env, receiver)
+
+    def _check_per_range_receiver_depth(
+        self, env: 'Environment', receiver: 'Receiver',
+    ) -> None:
+        """Emit a ``UserWarning`` if any receiver sits below the local
+        seafloor in a range-dependent bathymetry. The flat-bathy case is
+        already a hard ``InvalidDepthError`` via the global
+        ``receiver.depth_max <= env.depth`` check above. We only warn
+        here because several models (Bellhop, RAM) accept below-seafloor
+        receivers natively (infinite TL, PE absorbing region).
+        """
+        if not env.has_range_dependent_bathymetry():
+            return
+        depths = np.atleast_1d(receiver.depths).astype(float)
+        ranges = np.atleast_1d(receiver.ranges).astype(float)
+        seafloor = np.asarray(env.bathymetry_at_range(ranges), dtype=float)
+
+        if receiver.receiver_type == 'line':
+            below = depths > seafloor
+            if np.any(below):
+                idx = int(np.argmax(below))
+                warnings.warn(
+                    f"{self.model_name}: receiver at "
+                    f"(range={ranges[idx]:.1f} m, depth={depths[idx]:.1f} m) "
+                    f"sits below the local seafloor "
+                    f"({seafloor[idx]:.1f} m). Results at that point will "
+                    f"reflect the model's below-bottom behaviour (e.g. "
+                    f"infinite TL, PE absorbing layer).",
+                    UserWarning, stacklevel=3,
+                )
+            return
+
+        below_any = False
+        for sf, r in zip(seafloor, ranges):
+            mask = depths > sf
+            if np.any(mask):
+                idx = int(np.argmax(mask))
+                below_any = True
+                first_r, first_z, first_sf = r, depths[idx], sf
+                break
+        if below_any:
+            warnings.warn(
+                f"{self.model_name}: receiver depth {first_z:.1f} m sits "
+                f"below the local seafloor ({first_sf:.1f} m) at range "
+                f"{first_r:.1f} m. Results there will reflect the model's "
+                f"below-bottom behaviour (e.g. infinite TL, PE absorbing "
+                f"layer).",
+                UserWarning, stacklevel=3,
+            )
+
+    def _warn_on_range_coverage(
+        self, env: 'Environment', receiver: 'Receiver',
+    ) -> None:
+        """Emit one ``UserWarning`` per range-dependent axis whose extent
+        falls short of ``receiver.range_max``. Constant extrapolation is
+        what every downstream writer / interpolator does in that case;
+        this surfaces it instead of leaving it silent.
+        """
+        from uacpy.core.environment import (
+            RangeDependentBottom, RangeDependentLayeredBottom,
+        )
+
+        r_target = float(receiver.range_max)
+        if r_target <= 0:
+            return
+
+        def _check(axis_name: str, axis_max: float) -> None:
+            if axis_max < r_target:
+                warnings.warn(
+                    f"{self.model_name}: {axis_name} extent "
+                    f"({axis_max:.1f} m) is shorter than receiver.range_max "
+                    f"({r_target:.1f} m); values beyond {axis_max:.1f} m are "
+                    f"constant-extrapolated from the last sample.",
+                    UserWarning, stacklevel=3,
+                )
+
+        if env.has_range_dependent_bathymetry():
+            _check("env.bathymetry", float(env.bathymetry[-1, 0]))
+        if env.ssp.is_range_dependent:
+            _check("env.ssp.ranges", float(env.ssp.ranges[-1]))
+        if isinstance(env.bottom, (RangeDependentBottom,
+                                   RangeDependentLayeredBottom)):
+            _check("env.bottom.ranges", float(env.bottom.ranges[-1]))
+        if env.altimetry is not None and len(env.altimetry) > 1:
+            _check("env.altimetry ranges", float(env.altimetry[-1, 0]))
 
     def compute_tl(
         self,
@@ -942,28 +1025,6 @@ class PropagationModel(ABC):
             )
         return result
 
-    def _validate_volume_attenuation_params(self):
-        """
-        Validate that `volume_attenuation='F'`/`'B'` is accompanied by its
-        follow-up params. Intended for models whose __init__ stores
-        `volume_attenuation`, `francois_garrison_params`, `bio_layers` as
-        instance attributes. No-op if `volume_attenuation` is None.
-        """
-        va = getattr(self, 'volume_attenuation', None)
-        if va is None:
-            return
-        code = va.upper() if isinstance(va, str) else va
-        if code == 'F' and getattr(self, 'francois_garrison_params', None) is None:
-            raise ConfigurationError(
-                f"{self.model_name}: volume_attenuation='F' requires "
-                "francois_garrison_params=(T, S, pH, z_bar)",
-            )
-        if code == 'B' and not getattr(self, 'bio_layers', None):
-            raise ConfigurationError(
-                f"{self.model_name}: volume_attenuation='B' requires "
-                "bio_layers=[(Z1, Z2, f0, Q, a0), ...]",
-            )
-
     @staticmethod
     def _has_shear(boundary) -> bool:
         """True if ``boundary`` carries any non-zero shear speed."""
@@ -1254,9 +1315,18 @@ class PropagationModel(ABC):
         """
         max_receiver_depth = receiver.depths.max()
         if max_receiver_depth > env_depth - margin:
+            clipped = np.clip(
+                receiver.depths, receiver.depths.min(), env_depth - margin,
+            )
+            unique = np.unique(clipped)
+            if receiver.receiver_type == 'grid':
+                new_depths = unique
+            else:
+                new_depths = clipped
             receiver = Receiver(
-                depths=np.clip(receiver.depths, receiver.depths.min(), env_depth - margin),
-                ranges=receiver.ranges
+                depths=new_depths,
+                ranges=receiver.ranges,
+                receiver_type=receiver.receiver_type,
             )
             if self.verbose:
                 self._log(

@@ -16,8 +16,9 @@ Adoption across uacpy model wrappers:
   (BRC) and ``'A'`` halfspace formats slightly differ.
 - ``write_source_depths`` / ``write_receiver_depths`` /
   ``write_receiver_ranges``: every AT-family wrapper, including Bellhop.
-- ``write_fg_params`` / ``write_bio_layers``: every wrapper that exposes
-  volume_attenuation, including Bellhop.
+- ``write_absorption_block`` (calls ``write_fg_params`` / ``write_bio_layers``):
+  every AT-family wrapper including Bellhop. Drives output from
+  ``env.absorption``.
 - ``_BOUNDARY_TYPE_MAP`` / ``get_top_bc_code`` /
   ``write_surface_halfspace``: all AT-family wrappers including Bellhop.
 """
@@ -30,10 +31,11 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
-    SSPType, BoundaryType, AttenuationUnits, VolumeAttenuation,
-    parse_ssp_type, parse_boundary_type,
+    BoundaryType, AttenuationUnits,
+    parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR,
 )
+from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
 
 
@@ -43,6 +45,56 @@ _BOUNDARY_TYPE_MAP = {
     "file": "F", "precalc": "P",
     "grain-size": "G", "grain_size": "G", "grain": "G",
 }
+
+
+_AT_INTERP_TO_CODE = {
+    'linear': 'C',
+    'c-linear': 'C',
+    'clin': 'C',
+    'bilinear': 'C',
+    'n2linear': 'N',
+    'pchip': 'P',
+    'cubic': 'S',
+    'spline': 'S',
+    'quad': 'Q',
+    'analytic': 'A',
+}
+
+
+def resolve_ssp_interp(env: Environment, model_interp) -> str:
+    """Return the user-facing ``interp_ssp`` value after auto-resolution.
+
+    ``None`` means *auto*: pick ``'quad'`` when the env has a
+    range-dependent SSP (matching Bellhop's ``.ssp`` quad-file path),
+    otherwise ``'linear'``. Explicit values pass through unchanged.
+    """
+    if model_interp is None:
+        return 'quad' if env.has_range_dependent_ssp() else 'linear'
+    return str(model_interp).lower()
+
+
+def resolve_ssp_topopt(env: Environment, model_interp) -> str:
+    """Pick the AT ``TopOpt(1)`` character for an env / model pair.
+
+    The model's ``interp_ssp`` (``None`` → auto / ``'linear'`` /
+    ``'pchip'`` / ``'cubic'`` / ``'quad'`` / ``'n2linear'`` /
+    ``'analytic'`` / …) drives the character via :data:`_AT_INTERP_TO_CODE`.
+    The only env-side override is ``shape='isovelocity'`` which forces
+    ``'C'`` (any connection scheme over constant data is constant). All
+    other shape values (``'munk'``, ``'analytic'``, ``'n2linear'``,
+    ``'measured'``) are informational — the model decides how to connect
+    the samples.
+    """
+    shape = getattr(env.ssp, 'shape', 'measured')
+    if shape == 'isovelocity':
+        return 'C'
+    key = resolve_ssp_interp(env, model_interp)
+    if key not in _AT_INTERP_TO_CODE:
+        raise ValueError(
+            f"interp_ssp={model_interp!r} not recognised. Valid: "
+            f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
+        )
+    return _AT_INTERP_TO_CODE[key]
 
 
 def get_top_bc_code(env: Environment) -> str:
@@ -118,36 +170,40 @@ def write_header(
     f: TextIO,
     env: Environment,
     source: Source,
-    ssp_type: SSPType,
+    ssp_topopt: str,
     surface_type: BoundaryType,
-    attenuation_unit: AttenuationUnits = AttenuationUnits.DB_PER_WAVELENGTH,
-    volume_attenuation: Optional[VolumeAttenuation] = None,
     frequencies: Optional[np.ndarray] = None,
     n_media_override: Optional[int] = None,
     topopt_extra: str = '',
 ) -> None:
     """
-    Write header section (title, frequency, TopOpt)
+    Write header section (title, frequency, TopOpt).
+
+    TopOpt position 3 is hardwired to ``'W'`` (dB/wavelength) — uacpy's
+    documented unit convention for every attenuation field. Position 4 is
+    taken from ``env.absorption``: ``Thorp`` → ``'T'``,
+    ``FrancoisGarrison`` → ``'F'``, ``Biological`` → ``'B'``,
+    ``ConstantAbsorption`` or ``None`` → ``' '``. Per-formula follow-up
+    lines (FG params, bio block) are emitted by
+    :func:`write_absorption_block`, called separately by the caller
+    immediately after this function.
 
     Parameters
     ----------
     f : TextIO
         Open file handle
     env : Environment
-        Environment configuration
+        Environment configuration (``env.absorption`` drives TopOpt(4))
     source : Source
         Source configuration
-    ssp_type : SSPType
-        SSP interpolation type
+    ssp_topopt : str
+        Pre-resolved single-character ``TopOpt(1)`` code (typically
+        from :func:`resolve_ssp_topopt`).
     surface_type : BoundaryType
         Surface boundary condition
-    attenuation_unit : AttenuationUnits
-        Attenuation units (default: dB/wavelength)
-    volume_attenuation : VolumeAttenuation, optional
-        Volume attenuation formula
     frequencies : ndarray, optional
         Frequency vector for broadband runs. If provided, TopOpt(6) is set
-        to 'B' and the frequency vector is written after TopOpt.
+        to ``'B'`` and the frequency vector is written after TopOpt.
     n_media_override : int, optional
         Override NMedia value. Used by multi-profile writer to ensure
         all profiles have the same NMedia.
@@ -159,7 +215,6 @@ def write_header(
     f.write(f"'{env.name}'\n")
     f.write(f"{source.frequencies[0]:.6f}\n")
 
-    # Number of media: 1 (water column) + N sediment layers if layered bottom
     if n_media_override is not None:
         n_media = n_media_override
     else:
@@ -168,20 +223,35 @@ def write_header(
             n_media += len(env.bottom.layers)
     f.write(f"{n_media}\n")
 
-    # TopOpt string (>=6 characters): '<ssp_code><surface_code><atten_unit><vol_atten> <broadband>'
-    # plus any model-specific ``topopt_extra`` (e.g. Scooter TopOpt(7)).
-    ssp_code = ssp_type.to_acoustics_toolbox_code()
+    ssp_code = ssp_topopt
     surface_code = surface_type.to_acoustics_toolbox_code()
-    atten_code = attenuation_unit.to_char()
-    vol_atten_code = volume_attenuation.to_char() if volume_attenuation else ' '
+    atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
+    vol_atten_code = (
+        env.absorption.topopt_code() if env.absorption is not None else ' '
+    )
 
     broadband_code = 'B' if frequencies is not None and len(frequencies) > 1 else ' '
 
     topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code} {broadband_code}{topopt_extra}"
     f.write(f"'{topopt}'\n")
 
-    # Write surface halfspace properties when top BC is 'A'
     write_surface_halfspace(f, env)
+
+
+def write_absorption_block(f: TextIO, env: Environment) -> None:
+    """Emit the post-TopOpt absorption block (FG params or bio layers).
+
+    For ``env.absorption`` of type :class:`FrancoisGarrison` writes one
+    record ``T S pH z_bar``; for :class:`Biological` writes the layer
+    count followed by one ``Z1 Z2 f0 Q a0`` record per layer. Other
+    absorption types (Thorp, ConstantAbsorption, None) emit nothing.
+    """
+    from uacpy.core.absorption import Biological, FrancoisGarrison
+    absorption = env.absorption
+    if isinstance(absorption, FrancoisGarrison):
+        write_fg_params(f, absorption.as_at_tuple())
+    elif isinstance(absorption, Biological):
+        write_bio_layers(f, absorption.as_at_tuples())
 
 
 def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> None:
@@ -202,7 +272,7 @@ def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> Non
     """
     if params is None or len(params) != 4:
         raise ValueError(
-            "francois_garrison_params must be a 4-tuple (T, S, pH, z_bar)"
+            "write_fg_params: params must be a 4-tuple (T, S, pH, z_bar)"
         )
     T, S, pH, z_bar = params
     f.write(f"{T:.4f} {S:.4f} {pH:.4f} {z_bar:.4f}\n")
@@ -255,6 +325,33 @@ def write_broadband_freqs(f: TextIO, frequencies: np.ndarray) -> None:
     f.write(f"{freq_str} /\n")
 
 
+def resolve_phase_speed_bounds(
+    env: Environment,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Resolve effective ``(c_low, c_high)`` for an AT-family run.
+
+    Precedence (same logic used by :func:`write_phase_speed_and_rmax`):
+      1. Explicit caller values win.
+      2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
+         ``c_high = max(c_max, env.bottom.sound_speed) · C_HIGH_FACTOR``.
+
+    Useful for model wrappers that want to log the resolved values
+    before handing them to the writer.
+    """
+    if c_low is not None and c_high is not None:
+        return float(c_low), float(c_high)
+    ssp_pairs = env.ssp.to_pairs()
+    c_min = float(ssp_pairs[:, 1].min())
+    hs_c = env.halfspace_at_range(0.0).sound_speed
+    c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
+    return (
+        float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
+        float(c_high) if c_high is not None else c_max * C_HIGH_FACTOR,
+    )
+
+
 def write_phase_speed_and_rmax(
     f: TextIO,
     env: Environment,
@@ -262,34 +359,20 @@ def write_phase_speed_and_rmax(
     rmax_m: float,
     c_low: Optional[float] = None,
     c_high: Optional[float] = None,
-    brc_overrides: Optional[Tuple[float, float]] = None,
     rmax_format: str = "{:.1f}",
 ) -> None:
     """Write the cLow/cHigh phase-speed line and the RMax (km) line.
 
     cLow/cHigh resolve in this order:
       1. Explicit ``c_low`` / ``c_high`` (caller-supplied user override).
-      2. ``brc_overrides=(cmin, cmax)`` for ``F``-table bottoms.
-      3. SSP-derived: ``c_min·C_LOW_FACTOR`` and
+      2. SSP-derived: ``c_min·C_LOW_FACTOR`` and
          ``max(c_max, env.bottom.sound_speed)·C_HIGH_FACTOR``.
 
     ``rmax_m`` is converted to km. ``rmax_format`` controls the Fortran
     print width (Scooter/SPARC use ``"{:.6f}"`` to preserve sub-km
     precision; Kraken/KrakenField use the ``"{:.1f}"`` default).
     """
-    if c_low is not None and c_high is not None:
-        _c_low, _c_high = c_low, c_high
-    elif brc_overrides is not None:
-        brc_low, brc_high = brc_overrides
-        _c_low = c_low if c_low is not None else brc_low
-        _c_high = c_high if c_high is not None else brc_high
-    else:
-        ssp_pairs = env.ssp.to_pairs()
-        c_min = float(ssp_pairs[:, 1].min())
-        hs_c = env.halfspace_at_range(0.0).sound_speed
-        c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
-        _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
-        _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR
+    _c_low, _c_high = resolve_phase_speed_bounds(env, c_low, c_high)
     f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
     f.write(rmax_format.format(rmax_m / 1000.0) + "\n")
 
@@ -311,12 +394,18 @@ def write_ssp_section(
     ``bottom_depth``, or extends by constant extrapolation when it falls
     short.
     """
+    from uacpy.core.absorption import ConstantAbsorption
     bottom_depth_rounded = float(f"{bottom_depth:.1f}")
     f.write(f"{n_mesh}  {roughness:.1f}  {bottom_depth_rounded}\n")
 
+    baseline = (
+        env.absorption.value_db_per_wavelength
+        if isinstance(env.absorption, ConstantAbsorption)
+        else 0.0
+    )
     for depth, c in env.ssp.extend_to(bottom_depth_rounded).to_pairs():
-        if env.volume_attenuation > 0:
-            f.write(f"  {depth:.6f} {c:.6f} {env.volume_attenuation:.6f} /\n")
+        if baseline > 0:
+            f.write(f"  {depth:.6f} {c:.6f} {baseline:.6f} /\n")
         else:
             f.write(f"  {depth:.6f} {c:.6f} /\n")
 
@@ -389,6 +478,9 @@ def write_bottom_section(
     halfspace_depth: Optional[float] = None,
     halfspace_alpha_s_source: str = 'zero',
     emit_reflection_table_block: bool = True,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    rmax: Optional[float] = None,
 ) -> None:
     """
     Write bottom boundary section
@@ -419,6 +511,10 @@ def write_bottom_section(
         emit the cmin/cmax/RMax bounds line that Kraken/Bounce expect.
         Scooter writes those bounds via ``write_phase_speed_and_rmax``
         instead and so passes ``False``.
+    c_low, c_high, rmax : float, required when
+        ``emit_reflection_table_block`` is ``True`` AND the bottom is type
+        ``'F'``. Phase-velocity sampling bounds (m/s) and angle-resolution
+        range (m) for the model that reads the ``.brc`` table.
     """
     hs = env.halfspace_at_range(0.0)
     if bottom_type is None:
@@ -444,8 +540,9 @@ def write_bottom_section(
             if brc_source.exists():
                 brc_dest = filepath.with_suffix('.brc')
                 shutil.copy(brc_source, brc_dest)
-                if verbose:
-                    print(f"at_env_writer: copied reflection file: {brc_source} -> {brc_dest}")
+                log_message('oalib_writer',
+                            f"copied reflection file: {brc_source} -> {brc_dest}",
+                            verbose=verbose)
             else:
                 raise FileNotFoundError(
                     f"at_env_writer: reflection coefficient file not found: "
@@ -459,11 +556,14 @@ def write_bottom_section(
             )
 
         if emit_reflection_table_block:
-            cmin = getattr(hs, 'reflection_cmin', 1400.0)
-            cmax = getattr(hs, 'reflection_cmax', 10000.0)
-            rmax_m = getattr(hs, 'reflection_rmax', 10000.0)
-            f.write(f"{cmin:.2f}  {cmax:.2f}\n")
-            f.write(f"{rmax_m / 1000.0:.2f}\n")
+            if c_low is None or c_high is None or rmax is None:
+                raise ValueError(
+                    "write_bottom_section: acoustic_type='file' with "
+                    "emit_reflection_table_block=True requires "
+                    "c_low, c_high, rmax to be passed by the caller."
+                )
+            f.write(f"{float(c_low):.2f}  {float(c_high):.2f}\n")
+            f.write(f"{float(rmax) / 1000.0:.2f}\n")
 
     elif bottom_code == 'A':  # Half-space
         if halfspace_depth is not None:
@@ -517,7 +617,6 @@ def write_multi_profile_env(
     segments: List[Tuple[float, 'Environment']],
     source: Source,
     receiver: Receiver,
-    volume_attenuation: Optional[VolumeAttenuation] = None,
     **kwargs
 ) -> None:
     """
@@ -550,10 +649,10 @@ def write_multi_profile_env(
         Source configuration (frequency, depth)
     receiver : Receiver
         Receiver configuration (depths for mode computation)
-    volume_attenuation : VolumeAttenuation, optional
-        Volume attenuation formula
     **kwargs
-        n_mesh, roughness, c_low, c_high, rmax_m passed through
+        n_mesh, roughness, c_low, c_high, rmax_m passed through.
+        TopOpt position 4 is taken from each segment env's ``absorption``
+        field via :func:`write_header`.
     """
     n_mesh = kwargs.get('n_mesh', 0)
     roughness = kwargs.get('roughness', 0.0)
@@ -614,14 +713,11 @@ def write_multi_profile_env(
     # or padding layer.
     max_total_rounded = float(f"{max_total_depth:.1f}")
 
+    interp_ssp = kwargs.get('interp_ssp', 'linear')
+
     with open(filepath, 'w') as f:
         for i, (_range_km, env_seg) in enumerate(segments):
-            ssp_type = parse_ssp_type(env_seg.ssp.interp)
-            # Respect the user's surface BC rather than silently
-            # forcing every profile to VACUUM. segment_environment_by_range
-            # copies env.surface onto each segment (see coupled_modes.py),
-            # so env_seg.surface is always populated. Fall back to VACUUM
-            # if a caller ever built a segment without one.
+            ssp_topopt = resolve_ssp_topopt(env_seg, interp_ssp)
             surface_obj = getattr(env_seg, 'surface', None)
             if surface_obj is not None:
                 surface_type = parse_boundary_type(
@@ -636,11 +732,11 @@ def write_multi_profile_env(
 
             write_header(
                 f, env_seg, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
-                volume_attenuation=volume_attenuation,
-                n_media_override=n_media_write
+                n_media_override=n_media_write,
             )
+            write_absorption_block(f, env_seg)
 
             # --- Water column (medium 1) ---
             write_ssp_section(
@@ -724,6 +820,7 @@ def write_multi_profile_env(
                 filepath=filepath,
                 verbose=kwargs.get('verbose', False),
                 halfspace_depth=hs_depth,
+                emit_reflection_table_block=False,
             )
 
             write_phase_speed_and_rmax(
@@ -761,10 +858,11 @@ def write_fieldflp(
           'S' = scaled-cylindrical point source.
         - Pos 2 (coupling, for NProf > 1):
           'C' = coupled modes, 'A' = adiabatic.
-        - Pos 3 (shared column): either
-          '*' to apply a ``.sbp`` source beam pattern, OR
-          an elastic component selector 'P'/'H'/'V'/'T'/'N'
-          ('P' = acoustic pressure).
+        - Pos 3: either ``'*'`` to apply a ``.sbp`` source beam pattern
+          or ``' '`` for omnidirectional. ``field.exe`` (``field.f90:83-90``)
+          only accepts ``{' ', 'O', '*'}`` through this writer; elastic
+          component selectors (``'P'``/``'H'``/``'V'``/``'T'``/``'N'``)
+          are not reachable from uacpy.
         - Pos 4 (summation): 'C' = coherent, 'I' = incoherent.
     pos : dict
         Position dictionary with:

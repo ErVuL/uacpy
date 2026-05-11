@@ -33,11 +33,13 @@ from uacpy.io.oalib_reader import (
 )
 from uacpy.io.oalib_writer import (
     write_ssp,
-    write_header, write_fg_params, write_bio_layers, write_broadband_freqs,
+    write_header, write_absorption_block,
+    write_fg_params, write_bio_layers, write_broadband_freqs,
     write_ssp_section, write_layer_sections, write_bottom_section,
     write_source_depths, write_receiver_depths, write_receiver_ranges,
     write_multi_profile_env,
     write_fieldflp, write_field3dflp,
+    resolve_ssp_interp, resolve_ssp_topopt, resolve_phase_speed_bounds,
 )
 from uacpy.io.modes_reader import (
     read_modes, read_modes_bin, read_modes_asc, get_component,
@@ -75,11 +77,13 @@ __all__ = [
     "FileManager",
     # OALIB writers
     "write_ssp",
-    "write_header", "write_fg_params", "write_bio_layers",
+    "write_header", "write_absorption_block",
+    "write_fg_params", "write_bio_layers",
     "write_broadband_freqs", "write_ssp_section", "write_layer_sections",
     "write_bottom_section", "write_source_depths", "write_receiver_depths",
     "write_receiver_ranges", "write_multi_profile_env",
     "write_fieldflp", "write_field3dflp",
+    "resolve_ssp_interp", "resolve_ssp_topopt", "resolve_phase_speed_bounds",
     # Bellhop writer
     "write_bellhop_env_file",
     # Boundary auxiliary I/O

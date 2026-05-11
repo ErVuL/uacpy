@@ -19,11 +19,17 @@ except Exception:
     __version__ = 'unknown'
 __author__ = 'ErVuL'
 
+from uacpy._log import install_warning_formatter as _install_warning_formatter
+
 from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
     SoundSpeedProfile, generate_sea_surface,
+)
+from uacpy.core.absorption import (
+    Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
+    ConstantAbsorption,
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
@@ -35,7 +41,7 @@ from uacpy.core.results import (
     ReflectionCoefficient,
 )
 from uacpy.core.constants import (
-    AttenuationUnits, VolumeAttenuation, BoundaryType,
+    AttenuationUnits, BoundaryType,
 )
 from uacpy.core.exceptions import (
     UACPYError,
@@ -71,6 +77,8 @@ __all__ = [
     'RangeDependentLayeredBottom',
     'SoundSpeedProfile',
     'generate_sea_surface',
+    'Absorption', 'Thorp', 'FrancoisGarrison',
+    'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
     'Result', 'PhaseReference',
     'PressureField', 'TransferFunction',
@@ -78,7 +86,7 @@ __all__ = [
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
-    'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
+    'AttenuationUnits', 'BoundaryType',
     'UACPYError',
     'ExecutableNotFoundError',
     'ModelExecutionError',
@@ -97,3 +105,6 @@ __all__ = [
     'tl_rmse',
     '__version__',
 ]
+
+
+_install_warning_formatter()

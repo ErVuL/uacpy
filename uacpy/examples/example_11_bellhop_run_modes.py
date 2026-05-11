@@ -275,7 +275,6 @@ def scenario_b_ray_tracing():
     source = uacpy.Source(
         depths=1000.0,       # At channel axis
         frequencies=50.0,
-        angles=np.linspace(-15, 15, 31)  # 31 rays from -15° to +15°
     )
 
     # For ray tracing, we need to specify ray output
@@ -299,7 +298,7 @@ def scenario_b_ray_tracing():
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10))
     plot_rays(result, env=env, source=source, ax=axes[0],
-              title=f'Ray Paths ({len(source.angles)} rays, ±15° launch angles)',
+              title=f'Ray Paths ({bellhop.n_beams} rays, ±15° launch angles)',
               xlim=(0, 100))
     plot_rays(result, env=env, source=source, ax=axes[1],
               title='Ray Paths — Zoomed View (First Convergence Zone)',
@@ -310,8 +309,8 @@ def scenario_b_ray_tracing():
     plt.close()
 
     print("\n  Ray tracing parameters:")
-    print(f"    • Number of rays: {len(source.angles)}")
-    print(f"    • Launch angles: {source.angles[0]:.1f}° to {source.angles[-1]:.1f}°")
+    print(f"    • Number of rays: {bellhop.n_beams}")
+    print(f"    • Launch angles: {bellhop.alpha[0]:.1f}° to {bellhop.alpha[1]:.1f}°")
     print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
     print("    • Maximum range: 100 km")
 
@@ -335,7 +334,7 @@ def scenario_c_eigenrays_arrivals():
         name="Shallow Water - Eigenrays",
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
-            [(0, 1500), (100, 1520)], interp='linear',
+            [(0, 1500), (100, 1520)],
         ),
     )
 

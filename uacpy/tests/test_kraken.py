@@ -113,23 +113,11 @@ class TestKrakenFieldBroadband:
 
 
 class TestKrakenAttenuationUnit:
-    """B1: Kraken / KrakenC / KrakenField accept attenuation_unit kwarg."""
+    """TopOpt position 3 is hardwired to ``'W'`` (dB/wavelength) — uacpy's
+    documented convention. There is no per-model unit override."""
 
-    @pytest.mark.parametrize('cls', [Kraken, KrakenC, KrakenField])
-    def test_default_is_db_per_wavelength(self, cls):
-        from uacpy.core.constants import AttenuationUnits
-        m = cls()
-        assert m.attenuation_unit == AttenuationUnits.DB_PER_WAVELENGTH
-
-    @pytest.mark.parametrize('cls', [Kraken, KrakenC, KrakenField])
-    def test_constructor_kwarg_accepted(self, cls):
-        from uacpy.core.constants import AttenuationUnits
-        m = cls(attenuation_unit='M')
-        assert m.attenuation_unit == AttenuationUnits.from_string('M')
-
-    def test_attenuation_unit_reaches_env_writer(self, tmp_path):
-        from uacpy.core.constants import AttenuationUnits
-        kraken = Kraken(attenuation_unit='M')
+    def test_writer_emits_W_for_attenuation_unit(self, tmp_path):
+        kraken = Kraken()
         env = Environment(name='kr', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[25.0, 50.0, 75.0], ranges=[1000.0])
@@ -139,13 +127,10 @@ class TestKrakenAttenuationUnit:
             receiver_obj=receiver,
             receiver_depths=receiver.depths,
         )
-        # 'M' is the AT code for dB per meter; check the TopOpt line has it.
         text = env_file.read_text()
-        # TopOpt is on line 3 (after title + freq + nmedia).
         topopt_line = text.splitlines()[3]
-        # Position 3 (0-indexed 2) is the attenuation-units character.
-        # AttenuationUnits.from_string('M').value should equal 'M'.
-        assert AttenuationUnits.from_string('M').value in topopt_line
+        # Position 3 (0-indexed 2 inside the quotes) is the unit char.
+        assert "'CV W" in topopt_line or topopt_line[3] == 'W'
 
 
 class TestKrakenModePointsPerMeter:

@@ -9,7 +9,7 @@ and broadband time-series output.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 
@@ -21,15 +21,11 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
-from uacpy.core.constants import (
-    AttenuationUnits, VolumeAttenuation,
-    parse_ssp_type, parse_boundary_type,
-    DEFAULT_C_MIN, DEFAULT_C_MAX,
-)
+from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import (
-    write_bio_layers, write_bottom_section, write_broadband_freqs,
-    write_fg_params, write_header, write_layer_sections,
+    write_absorption_block, write_bottom_section, write_broadband_freqs,
+    write_header, write_layer_sections,
     write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
     write_ssp_section,
 )
@@ -56,12 +52,6 @@ class Scooter(PropagationModel):
     rmax_multiplier : float, optional
         Padding for k-resolution; Scooter's spectral RMax becomes
         ``receiver.range.max() * rmax_multiplier``. Default ``2.0``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
-    attenuation_unit : AttenuationUnits, optional
-        SSP attenuation unit. Default ``DB_PER_WAVELENGTH``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     source_type : str, optional
         FLP Opt(1): ``'R'`` cylindrical (default) | ``'X'`` Cartesian.
     spectrum : str, optional
@@ -88,6 +78,16 @@ class Scooter(PropagationModel):
     ``'rd_layered_layers': 'preserve'`` (Scooter consumes
     ``LayeredBottom`` natively).
 
+    Defaults auto-derived at ``run()`` time:
+
+    - ``c_low=None`` → ``min(env.ssp) × 0.95``
+    - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
+    - Spectral ``RMax = receiver.range_max × rmax_multiplier``
+    - ``n_mesh=0`` → Scooter picks from frequency / wavelength.
+    - TopOpt position 4 reads ``env.absorption``.
+
+    With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
+
     Examples
     --------
     >>> scooter = Scooter()
@@ -102,16 +102,13 @@ class Scooter(PropagationModel):
         n_mesh: int = 0,
         roughness: float = 0.0,
         rmax_multiplier: float = 2.0,
-        volume_attenuation: Optional[str] = None,
-        attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
+        interp_ssp: Optional[str] = None,
         source_type: str = 'R',
         spectrum: str = 'positive',
         stabilizing_attenuation_off: bool = False,
         field_interp: str = 'O',
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -130,16 +127,6 @@ class Scooter(PropagationModel):
             Bottom roughness (m). Default: 0.0.
         rmax_multiplier : float, optional
             Multiply max receiver range for wavenumber resolution. Default: 2.0.
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
-        francois_garrison_params : tuple, optional
-            Required when ``volume_attenuation='F'``. Tuple
-            ``(T, S, pH, z_bar)``: temperature (degC), salinity (psu), pH,
-            mean depth (m).
-        bio_layers : list of tuples, optional
-            Required when ``volume_attenuation='B'``. List of per-layer
-            5-tuples ``(Z1, Z2, f0, Q, a0)``: depth range (m),
-            resonance frequency (Hz), quality factor, absorption coefficient.
         source_type : {'R', 'X'}, optional
             FLP Option(1:1). 'R' = cylindrical (point source, default),
             'X' = Cartesian (line source). The in-tree Hankel transform
@@ -175,6 +162,7 @@ class Scooter(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        self.interp_ssp = interp_ssp
         if c_low is not None and c_high is not None and c_low >= c_high:
             raise ConfigurationError(
                 f"Scooter spectral phase-velocity band requires "
@@ -183,10 +171,6 @@ class Scooter(PropagationModel):
         self.n_mesh = n_mesh
         self.roughness = roughness
         self.rmax_multiplier = rmax_multiplier
-        self.volume_attenuation = volume_attenuation
-        self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
 
         if source_type not in ('R', 'X'):
             raise ConfigurationError(
@@ -241,8 +225,6 @@ class Scooter(PropagationModel):
 
         if not self.executable.exists():
             raise ExecutableNotFoundError('Scooter', str(self.executable))
-
-        self._validate_volume_attenuation_params()
 
     def run(
         self,
@@ -350,7 +332,7 @@ class Scooter(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
 
-            self._log("Reading Green's function...", level='info')
+            self._log("Reading Green's function...")
             grn_data = read_grn_file(grn_file)
 
             if grn_data['nk'] == 0:
@@ -414,43 +396,27 @@ class Scooter(PropagationModel):
         - Receiver ranges (not in standard Kraken format)
         - Supports shear wave parameters in bottom halfspace
         """
-        # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
-        ssp_type = parse_ssp_type(env.ssp.interp)
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
 
-        # Parse volume attenuation from instance attribute
-        vol_atten = None
-        if self.volume_attenuation:
-            vol_atten = VolumeAttenuation.from_string(self.volume_attenuation)
-
-        # Get kwargs
         frequencies = kwargs.get('frequencies', None)
 
         # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
         # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
-        # reader then keeps Atten=Deltak (the default stabiliser).
+        # reader keeps Atten=Deltak (the default stabiliser).
         topopt_extra = '0' if self.stabilizing_attenuation_off else ''
 
         with open(filepath, 'w') as f:
-            # Write standard ENV sections using ATEnvWriter
             write_header(
                 f, env, source,
-                ssp_type=ssp_type,
+                ssp_topopt=ssp_topopt,
                 surface_type=surface_type,
-                attenuation_unit=self.attenuation_unit,
-                volume_attenuation=vol_atten,
                 frequencies=frequencies,
                 topopt_extra=topopt_extra,
             )
-
-            # Francois-Garrison / Biological follow-up lines (after TopOpt,
-            # before SSP). ReadTopOpt in AT reads these immediately when
-            # TopOpt(4)='F'/'B'.
-            if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                write_fg_params(f, self.francois_garrison_params)
-            elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                write_bio_layers(f, self.bio_layers)
+            write_absorption_block(f, env)
 
             write_ssp_section(
                 f, env, env.depth,
@@ -461,10 +427,9 @@ class Scooter(PropagationModel):
             # Write sediment layers if layered bottom
             write_layer_sections(f, env, env.depth)
 
-            # Bottom section. Scooter honours real shear attenuation on the
-            # 'A' halfspace line and writes its own cLow/cHigh/RMax block,
-            # so the F-type reflection-table bounds line is suppressed.
-            bottom_code = bottom_type.to_acoustics_toolbox_code()
+            # Scooter honours real shear attenuation on the 'A' halfspace
+            # line and writes cLow/cHigh/RMax via write_phase_speed_and_rmax,
+            # so the F-type reflection-table bounds line is suppressed here.
             write_bottom_section(
                 f, env,
                 bottom_type=bottom_type,
@@ -474,19 +439,17 @@ class Scooter(PropagationModel):
             )
 
             rmax_m = float(receiver.ranges.max()) * self.rmax_multiplier
-            if bottom_code == 'F':
-                hs = env.halfspace_at_range(0.0)
-                brc_overrides = (
-                    getattr(hs, 'reflection_cmin', DEFAULT_C_MIN),
-                    getattr(hs, 'reflection_cmax', DEFAULT_C_MAX),
+            from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+            if self.c_low is None or self.c_high is None:
+                self._log(
+                    f"c_low / c_high auto-derived = "
+                    f"{cl:.1f} / {ch:.1f} m/s"
                 )
-            else:
-                brc_overrides = None
             write_phase_speed_and_rmax(
                 f, env,
                 rmax_m=rmax_m,
-                c_low=self.c_low, c_high=self.c_high,
-                brc_overrides=brc_overrides,
+                c_low=cl, c_high=ch,
                 rmax_format="{:.6f}",
             )
 

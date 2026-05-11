@@ -35,32 +35,32 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_linear(self, source, receiver):
-        """Test linear SSP interpolation."""
+        """Bellhop with linear-connected SSP samples."""
         depths = np.array([0, 50, 100])
         speeds = np.array([1500, 1490, 1480])
 
         env = Environment(
             name="linear_test",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='linear')
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds])),
         )
 
-        bellhop = Bellhop(verbose=False)
+        bellhop = Bellhop(verbose=False, interp_ssp='linear')
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'
 
     @pytest.mark.requires_binary
     def test_ssp_cubic(self, source, receiver):
-        """Test cubic spline SSP interpolation."""
+        """Bellhop with cubic-spline-connected SSP samples."""
         depths = np.array([0, 25, 50, 75, 100])
         speeds = np.array([1500, 1495, 1490, 1485, 1480])
 
         env = Environment(
             name="cubic_test",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds]), interp='cubic')
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds])),
         )
 
-        bellhop = Bellhop(verbose=False)
+        bellhop = Bellhop(verbose=False, interp_ssp='cubic')
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
         assert result.field_type == 'tl'

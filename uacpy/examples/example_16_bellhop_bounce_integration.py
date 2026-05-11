@@ -249,7 +249,6 @@ def demo_range_dependent_bottom():
     env = uacpy.Environment(
         name='Shelf Break: Mud to Sand',
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
-                                      interp='pchip',
                                       ),
         bathymetry=bathymetry_rd,
         bottom=bottom_rd,

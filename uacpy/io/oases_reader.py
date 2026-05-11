@@ -21,6 +21,7 @@ import numpy as np
 import struct
 import warnings
 
+from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
     read_fortran_record_marker as _read_fortran_record_marker,
     read_fortran_record as _read_fortran_record,
@@ -104,7 +105,7 @@ def read_oast_tl(
     # without .plp we have no way to know what range each TL value
     # corresponds to. Raise rather than fabricate.
     if not plp_file.exists():
-        raise IOError(
+        raise OSError(
             f"OAST .plp grid file not found: {plp_file}. "
             "Without it the native range grid cannot be reconstructed."
         )
@@ -129,7 +130,7 @@ def read_oast_tl(
     tl_values = np.array(tl_values)
 
     if len(tl_values) == 0:
-        raise IOError(f"No TL data found in {tl_data_file}")
+        raise OSError(f"No TL data found in {tl_data_file}")
 
     # OAST outputs data as: all ranges for depth 1, all ranges for depth 2, etc.
     expected_total = n_depths_oast * n_ranges_oast
@@ -217,7 +218,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
         }
 
     except Exception as e:
-        raise IOError(f"Failed to parse OAST .plp file: {e}") from e
+        raise OSError(f"Failed to parse OAST .plp file: {e}") from e
 
 
 def read_oasn_covariance(
@@ -332,7 +333,7 @@ def read_oasn_covariance(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASN covariance file {filepath}: {e}") from e
+        raise OSError(f"Failed to read OASN covariance file {filepath}: {e}") from e
 
 
 def read_oasn_replicas(
@@ -467,7 +468,7 @@ def read_oasn_replicas(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASN replica file {filepath}: {e}") from e
+        raise OSError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
 def read_oasp_trf(
@@ -533,7 +534,7 @@ def read_oasp_trf(
         errors.append(('ascii', e))
 
     err_msg = '\n'.join(f"  {k}: {v}" for k, v in errors)
-    raise IOError(
+    raise OSError(
         f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
     )
 
@@ -577,12 +578,12 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         try:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:
-            raise IOError(
+            raise OSError(
                 f"Cannot open {filepath} as Fortran-unformatted TRF: {e}"
             ) from e
         fileid = fileid_raw.decode('ascii', errors='ignore').strip()
         if 'PULSETRF' not in fileid:
-            raise IOError(
+            raise OSError(
                 f"Expected 'PULSETRF' in first record, got {fileid!r}"
             )
 
@@ -670,15 +671,17 @@ def _read_oasp_trf_ascii(filepath: Path) -> Dict:
 
     Raises
     ------
-    RuntimeError
+    UnsupportedFeatureError
         Always. Either re-run OASES with binary TRF (default) or extend this
         reader to parse the ASCII payload.
     """
-    raise RuntimeError(
-        f"ASCII TRF reader not implemented for {filepath}. "
-        "OASES must be run with binary (Fortran-unformatted) TRF output — "
-        "that is the default; do not pass any ASCII conversion option. "
-        "ASCII TRF payload parsing is not implemented; pass a binary TRF file."
+    raise UnsupportedFeatureError(
+        "oases_reader",
+        f"ASCII TRF reader for {filepath}",
+        alternatives=[
+            "Re-run OASES with binary (Fortran-unformatted) TRF output — "
+            "the default; do not pass any ASCII conversion option."
+        ],
     )
 
 
@@ -813,7 +816,7 @@ def read_oasr_reflection_coefficients(
         }
 
     except Exception as e:
-        raise IOError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
+        raise OSError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
 
 
 def _trf_regression_selftest(tmp_path=None):

@@ -21,6 +21,7 @@ import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 
+from uacpy._log import log_message
 from uacpy.core.results import PressureField, Arrivals, Rays
 from uacpy.io._fortran_helpers import read_vector as _read_vector
 
@@ -614,7 +615,7 @@ def read_ray_file(filepath: Union[str, Path]):
         warnings.warn(
             f"read_ray_file: ASCII parse failed ({type(e).__name__}: {e}); "
             f"falling back to binary reader for {filepath}",
-            stacklevel=2,
+            UserWarning, stacklevel=2,
         )
         rays = _read_ray_file_binary(filepath)
 
@@ -903,15 +904,13 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
             start = title.find("'") + 1
             end = title.find("'", start)
             title = title[start:end]
-        if verbose:
-            print(f"Title: {title}")
+        log_message('oalib_reader', f"Title: {title}", verbose=verbose)
         opt = f.readline().strip()
         if "'" in opt:
             start = opt.find("'") + 1
             end = opt.find("'", start)
             opt = opt[start:end]
-        if verbose:
-            print(f"Options: {opt}")
+        log_message('oalib_reader', f"Options: {opt}", verbose=verbose)
 
         # Fill missing option columns with reasonable placeholders.
         # pos 3 is the elastic-component / beam-pattern column; we fill
@@ -928,30 +927,32 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         # the file — downstream code can distinguish ' ' vs 'P'.
         comp = opt[2]
         M_limit = int(f.readline().strip())
-        if verbose:
-            print(f"MLimit = {M_limit}\n")
+        log_message('oalib_reader', f"MLimit = {M_limit}", verbose=verbose)
         r_prof, N_prof = _read_vector(f)
-        if verbose:
-            print(f"\nNumber of profiles, NProf = {N_prof}")
-            print("Profile ranges, rProf (km)")
-            if N_prof < 10:
-                for r in r_prof:
-                    print(f"{r:8.2f}")
-            else:
-                print(f"{r_prof[0]:8.2f} ... {r_prof[-1]:8.2f}")
+        log_message('oalib_reader', f"Number of profiles, NProf = {N_prof}",
+                    verbose=verbose)
+        if N_prof < 10:
+            preview = ", ".join(f"{r:.2f}" for r in r_prof)
+        else:
+            preview = f"{r_prof[0]:.2f} … {r_prof[-1]:.2f}"
+        log_message('oalib_reader', f"profile ranges rProf (km): {preview}",
+                    verbose=verbose, level='debug')
+
         r_rcv, _ = _read_vector(f)
-        r_rcv = r_rcv * 1000.0  # Convert km to m
+        r_rcv = r_rcv * 1000.0  # km → m
         pos_temp = _read_sz_rz(f)
         r_offsets, N_offsets = _read_vector(f)
 
-        if verbose:
-            print(f"\nNumber of receiver range offsets = {N_offsets}")
-            print("Receiver range offsets, Rro (m)")
-            if N_offsets < 10:
-                for ro in r_offsets:
-                    print(f"{ro:8.2f}")
-            else:
-                print(f"{r_offsets[0]:8.2f} ... {r_offsets[-1]:8.2f}")
+        log_message('oalib_reader',
+                    f"Number of receiver range offsets = {N_offsets}",
+                    verbose=verbose)
+        if N_offsets < 10:
+            preview = ", ".join(f"{ro:.2f}" for ro in r_offsets)
+        else:
+            preview = f"{r_offsets[0]:.2f} … {r_offsets[-1]:.2f}"
+        log_message('oalib_reader',
+                    f"receiver range offsets Rro (m): {preview}",
+                    verbose=verbose, level='debug')
 
         if np.max(np.abs(r_offsets)) > 0.0:
             warnings.warn(

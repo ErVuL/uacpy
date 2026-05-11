@@ -78,8 +78,7 @@ class TestRangeDependentEnvironment:
         env = uacpy.Environment(
             name="RD SSP",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
-                                          interp='pchip',
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix
                                           ),
         )
 
@@ -100,8 +99,7 @@ class TestRangeDependentEnvironment:
 
         env = uacpy.Environment(
             name="Combined RD",
-            ssp=SoundSpeedProfile.from_2d(depths=depths_ssp, ranges=ranges_ssp, matrix=ssp_matrix,
-                                          interp='pchip',
+            ssp=SoundSpeedProfile.from_2d(depths=depths_ssp, ranges=ranges_ssp, matrix=ssp_matrix
                                           ),
             bathymetry=bathymetry,
         )
@@ -132,7 +130,7 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Linear Gradient",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='linear')
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]))
         )
 
         assert env.ssp.to_pairs()[0, 1] == 1480.0
@@ -152,7 +150,7 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Munk Profile",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='pchip')
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]))
         )
 
         # Check that sound speed minimum is near axis depth
@@ -168,7 +166,7 @@ class TestDepthDependentSSP:
         env = uacpy.Environment(
             name="Negative Gradient",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]), interp='linear')
+            ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, sound_speeds]))
         )
 
         assert env.ssp.to_pairs()[0, 1] > env.ssp.to_pairs()[-1, 1]
@@ -218,8 +216,7 @@ class TestModelWithRangeDependence:
         env = uacpy.Environment(
             name="RD SSP",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
-                                          interp='linear',
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix
                                           ),
         )
 
@@ -331,8 +328,7 @@ class TestRangeDependentConsistency:
         env = uacpy.Environment(
             name="Test",
             bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix,
-                                          interp='pchip',
+            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix
                                           ),
         )
 
@@ -505,8 +501,12 @@ class TestRangeDependentLayeredBottom:
         assert env.bathymetry[1, 1] == 300
 
     @pytest.mark.requires_binary
+    @pytest.mark.filterwarnings("ignore:.*below the local seafloor.*:UserWarning")
     def test_ram_with_rdl(self):
-        """RAM should handle RangeDependentLayeredBottom."""
+        """RAM should handle RangeDependentLayeredBottom. The deepest
+        receivers sit below the seafloor at the near ranges where the
+        bathy shoals to 100 m — that's exactly the PE absorbing-layer
+        regime, hence the targeted filterwarnings above."""
         rdl = self._make_rdl()
         bathymetry = np.column_stack([
             rdl.ranges,
@@ -700,7 +700,7 @@ class TestATEnvWriterLayered:
         """AT env writer should set NMEDIA > 1 for layered bottom."""
         import io
         from uacpy.io.oalib_writer import write_header
-        from uacpy.core.constants import SSPType, BoundaryType
+        from uacpy.core.constants import BoundaryType
 
         lb = LayeredBottom(
             layers=[
@@ -714,7 +714,7 @@ class TestATEnvWriterLayered:
 
         buf = io.StringIO()
         write_header(buf, env, source,
-                     ssp_type=SSPType.ISOVELOCITY,
+                     ssp_topopt='C',
                      surface_type=BoundaryType.VACUUM)
         content = buf.getvalue()
 

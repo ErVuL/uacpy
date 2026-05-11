@@ -103,7 +103,7 @@ def segment_environment_by_range(
 
         from uacpy.core.environment import SoundSpeedProfile
         seg_ssp = SoundSpeedProfile.from_pairs(
-            ssp_for_segment, interp=env.ssp.interp,
+            ssp_for_segment, shape=env.ssp.shape,
         )
         env_segment = Environment(
             name=f"{env.name} @ {r / 1000.0:.1f}km",
@@ -111,7 +111,7 @@ def segment_environment_by_range(
             bathymetry=depth_at_range,
             bottom=bottom_segment,
             surface=env.surface,
-            volume_attenuation=env.volume_attenuation,
+            absorption=env.absorption,
         )
 
         segments.append((r, env_segment))

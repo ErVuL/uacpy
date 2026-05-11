@@ -46,8 +46,7 @@ def make_base_env(bottom):
 
     env = uacpy.Environment(
         name='rd_comparison',
-        ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d,
-                                      interp='linear',
+        ssp=SoundSpeedProfile.from_2d(depths=ssp_depths, ranges=ssp_ranges_m, matrix=ssp_2d
                                       ),
         bathymetry=bathymetry,
         bottom=bottom,

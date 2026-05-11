@@ -20,7 +20,7 @@ def read_fortran_record_marker(f) -> int:
     """
     marker_bytes = f.read(4)
     if len(marker_bytes) < 4:
-        raise IOError("Unexpected end of file while reading record marker")
+        raise OSError("Unexpected end of file while reading record marker")
     return struct.unpack('i', marker_bytes)[0]
 
 
@@ -51,23 +51,23 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     """
     head = f.read(4)
     if len(head) < 4:
-        raise IOError("Unexpected EOF reading Fortran record head")
+        raise OSError("Unexpected EOF reading Fortran record head")
     (nbytes,) = struct.unpack(endian + 'i', head)
     if nbytes < 0 or nbytes > (1 << 28):
-        raise IOError(
+        raise OSError(
             f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
         )
     payload = f.read(nbytes)
     if len(payload) < nbytes:
-        raise IOError(
+        raise OSError(
             f"Short read: expected {nbytes} bytes, got {len(payload)}"
         )
     tail = f.read(4)
     if len(tail) < 4:
-        raise IOError("Unexpected EOF reading Fortran record tail")
+        raise OSError("Unexpected EOF reading Fortran record tail")
     (ntail,) = struct.unpack(endian + 'i', tail)
     if ntail != nbytes:
-        raise IOError(
+        raise OSError(
             f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
             "(wrong endianness or truncated file)"
         )
@@ -75,7 +75,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         return payload
     expected = struct.calcsize(endian + fmt)
     if expected != nbytes:
-        raise IOError(
+        raise OSError(
             f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
         )
     return struct.unpack(endian + fmt, payload)

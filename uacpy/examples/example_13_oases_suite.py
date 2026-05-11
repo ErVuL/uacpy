@@ -35,7 +35,7 @@ def main():
         name="OASES Demonstration",
         bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs(
-            [(0, 1500), (100, 1520)], interp='linear',
+            [(0, 1500), (100, 1520)],
         ),
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',

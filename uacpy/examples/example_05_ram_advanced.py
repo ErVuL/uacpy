@@ -100,7 +100,7 @@ def main():
 
     env = uacpy.Environment(
         name="Sediment Transition with Sloping Shelf",
-        ssp=SoundSpeedProfile.from_pairs(ssp_1d, interp='pchip'),
+        ssp=SoundSpeedProfile.from_pairs(ssp_1d),
         bathymetry=bathymetry,
         bottom=bottom_rd
     )

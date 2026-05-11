@@ -6,6 +6,7 @@ import numpy as np
 from uacpy.models import Bellhop, Kraken, Scooter
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
+from uacpy.core.absorption import Thorp
 
 pytestmark = pytest.mark.requires_binary
 
@@ -15,11 +16,21 @@ class TestVolumeAttenuation:
 
     @pytest.fixture
     def shallow_env(self):
-        """Shallow water environment for attenuation tests."""
+        """Shallow water environment without volume absorption."""
         return Environment(
             name="atten_test",
             bathymetry=100.0,
-            ssp=1500.0
+            ssp=1500.0,
+        )
+
+    @pytest.fixture
+    def shallow_env_thorp(self):
+        """Shallow water environment with Thorp volume absorption."""
+        return Environment(
+            name="atten_test_thorp",
+            bathymetry=100.0,
+            ssp=1500.0,
+            absorption=Thorp(),
         )
 
     @pytest.fixture
@@ -37,7 +48,8 @@ class TestVolumeAttenuation:
         return Receiver(depths=[50.0], ranges=[1000.0, 3000.0, 5000.0])
 
     @pytest.mark.requires_binary
-    def test_bellhop_thorp_attenuation(self, shallow_env, high_freq_source, receiver):
+    def test_bellhop_thorp_attenuation(self, shallow_env, shallow_env_thorp,
+                                       high_freq_source, receiver):
         """Test Bellhop with Thorp attenuation formula.
 
         At 10 kHz, Thorp absorption ≈ 0.6 dB/km; over the test ranges
@@ -46,15 +58,14 @@ class TestVolumeAttenuation:
         the predicted-times-[0.1, 10] band — a sign-error or unit
         confusion would not satisfy that band.
         """
-        bellhop_no_atten = Bellhop(verbose=False)
-        bellhop_thorp = Bellhop(verbose=False, volume_attenuation='T')
+        bellhop = Bellhop(verbose=False)
 
-        result_no_atten = bellhop_no_atten.run(
+        result_no_atten = bellhop.run(
             env=shallow_env, source=high_freq_source, receiver=receiver,
             run_mode=RunMode.COHERENT_TL,
         )
-        result_thorp = bellhop_thorp.run(
-            env=shallow_env, source=high_freq_source, receiver=receiver,
+        result_thorp = bellhop.run(
+            env=shallow_env_thorp, source=high_freq_source, receiver=receiver,
             run_mode=RunMode.COHERENT_TL,
         )
 
@@ -89,42 +100,39 @@ class TestVolumeAttenuation:
         )
 
     @pytest.mark.requires_binary
-    def test_kraken_thorp_attenuation(self, shallow_env, high_freq_source, receiver):
+    def test_kraken_thorp_attenuation(self, shallow_env_thorp,
+                                      high_freq_source, receiver):
         """Test Kraken with Thorp attenuation formula."""
-        kraken = Kraken(verbose=False, volume_attenuation='T')
-
-        # Compute modes with attenuation
+        kraken = Kraken(verbose=False)
         result = kraken.run(
-            env=shallow_env,
+            env=shallow_env_thorp,
             source=high_freq_source,
             receiver=receiver,
         )
-
         assert result.field_type == 'modes'
         assert result.k is not None
 
     @pytest.mark.requires_binary
-    def test_frequency_dependent_attenuation(self, shallow_env, low_freq_source, high_freq_source, receiver):
+    def test_frequency_dependent_attenuation(self, shallow_env_thorp,
+                                             low_freq_source, high_freq_source,
+                                             receiver):
         """Test that attenuation increases with frequency."""
-        bellhop = Bellhop(verbose=False, volume_attenuation='T')
+        bellhop = Bellhop(verbose=False)
 
-        # Low frequency with Thorp
         result_low = bellhop.run(
-            env=shallow_env,
+            env=shallow_env_thorp,
             source=low_freq_source,
             receiver=receiver,
             run_mode=RunMode.COHERENT_TL,
         )
 
-        # High frequency with Thorp
         result_high = bellhop.run(
-            env=shallow_env,
+            env=shallow_env_thorp,
             source=high_freq_source,
             receiver=receiver,
             run_mode=RunMode.COHERENT_TL,
         )
 
-        # Both should complete successfully
         assert result_low.field_type == 'tl'
         assert result_high.field_type == 'tl'
         assert np.all(np.isfinite(result_low.data))
@@ -132,15 +140,14 @@ class TestVolumeAttenuation:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_attenuation_with_scooter(self, shallow_env, high_freq_source, receiver):
+    def test_attenuation_with_scooter(self, shallow_env_thorp,
+                                      high_freq_source, receiver):
         """Test Scooter with volume attenuation."""
-        scooter = Scooter(verbose=False, volume_attenuation='T')
-
+        scooter = Scooter(verbose=False)
         result = scooter.run(
-            env=shallow_env,
+            env=shallow_env_thorp,
             source=high_freq_source,
             receiver=receiver,
         )
-
         assert result.field_type == 'tl'
         assert np.all(np.isfinite(result.data))

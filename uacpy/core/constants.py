@@ -6,7 +6,6 @@ conversions used by writers and model wrappers.
 """
 
 from enum import Enum
-from typing import Dict
 
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
@@ -21,84 +20,6 @@ DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
 # Floor applied whenever we take 20*log10(|p|).
 PRESSURE_FLOOR = 1e-30
-
-
-class SSPType(Enum):
-    """
-    Sound speed profile types and interpolation methods.
-
-    Maps user-facing names to internal representations used by environment
-    writers.
-    """
-    ISOVELOCITY = 'isovelocity'
-    LINEAR = 'linear'
-    BILINEAR = 'bilinear'
-    MUNK = 'munk'
-
-    N2LINEAR = 'n2linear'       # N²-linear approximation
-    C_LINEAR = 'c-linear'       # C-linear approximation
-    CLIN = 'clin'               # C-linear (alias)
-    PCHIP = 'pchip'             # PCHIP cubic spline
-    CUBIC = 'cubic'             # Cubic spline
-    SPLINE = 'spline'           # Spline (alias)
-    QUADRATIC = 'quad'          # Quadratic interpolation
-    ANALYTIC = 'analytic'       # Analytic profile
-
-    @classmethod
-    def from_string(cls, value: str) -> 'SSPType':
-        """
-        Parse a string (or existing ``SSPType``) into an ``SSPType``.
-
-        Parameters
-        ----------
-        value : str or SSPType
-            Case-insensitive type name or enum value.
-
-        Returns
-        -------
-        SSPType
-            Parsed enum value.
-        """
-        if isinstance(value, SSPType):
-            return value
-        try:
-            return cls[value.upper().replace('-', '_')]
-        except KeyError:
-            for ssp in cls:
-                if ssp.value == value.lower():
-                    return ssp
-            raise ValueError(
-                f"invalid SSP type {value!r}; valid options: "
-                f"{[s.value for s in cls]}"
-            )
-
-    def to_acoustics_toolbox_code(self) -> str:
-        """
-        Return the single-character Acoustics Toolbox SSP code.
-
-        Returns
-        -------
-        str
-            One of 'N', 'C', 'P', 'S', 'Q', or 'A'.
-        """
-        return AT_SSP_CODE_MAP[self]
-
-
-# Profile types default to C-linear; interpolation methods map to their AT code.
-AT_SSP_CODE_MAP: Dict[SSPType, str] = {
-    SSPType.ISOVELOCITY: 'C',
-    SSPType.LINEAR: 'C',
-    SSPType.BILINEAR: 'C',
-    SSPType.MUNK: 'C',
-    SSPType.N2LINEAR: 'N',
-    SSPType.C_LINEAR: 'C',
-    SSPType.CLIN: 'C',
-    SSPType.PCHIP: 'P',
-    SSPType.CUBIC: 'S',
-    SSPType.SPLINE: 'S',
-    SSPType.QUADRATIC: 'Q',
-    SSPType.ANALYTIC: 'A',
-}
 
 
 class BoundaryType(Enum):
@@ -208,66 +129,6 @@ class AttenuationUnits(Enum):
     def to_char(self) -> str:
         """Return the single-character Acoustics Toolbox code."""
         return self.value
-
-
-class VolumeAttenuation(Enum):
-    """Volume attenuation formulas."""
-    NONE = ''                   # No volume attenuation
-    THORP = 'T'                 # Thorp formula
-    FRANCOIS_GARRISON = 'F'     # Francois-Garrison formula
-    BIOLOGICAL = 'B'            # Biological attenuation
-
-    @classmethod
-    def from_string(cls, value: str) -> 'VolumeAttenuation':
-        """
-        Parse a string (or existing enum) into a ``VolumeAttenuation``.
-
-        Parameters
-        ----------
-        value : str, VolumeAttenuation, or None
-            Case-insensitive formula name or single-character code.
-            ``None`` or empty string maps to ``NONE``.
-
-        Returns
-        -------
-        VolumeAttenuation
-            Parsed enum value.
-        """
-        if value is None or value == '':
-            return cls.NONE
-        if isinstance(value, VolumeAttenuation):
-            return value
-        for va in cls:
-            if va.value == value.upper():
-                return va
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(f"invalid volume attenuation: {value!r}")
-
-    def to_char(self) -> str:
-        """Return the single-character Acoustics Toolbox code."""
-        return self.value
-
-
-def parse_ssp_type(value) -> SSPType:
-    """
-    Parse an SSP interpolation type string.
-
-    Parameters
-    ----------
-    value : str or None
-        SSP type string (e.g., 'c_linear', 'n2_linear') or ``None`` for
-        the default.
-
-    Returns
-    -------
-    SSPType
-        Parsed enum value; ``None`` maps to ``ISOVELOCITY``.
-    """
-    if value is None:
-        return SSPType.ISOVELOCITY
-    return SSPType.from_string(value)
 
 
 def parse_boundary_type(value) -> BoundaryType:

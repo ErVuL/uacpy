@@ -17,7 +17,7 @@ import shutil
 import warnings
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
@@ -27,7 +27,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, TimeSeriesField, TransferFunction
 from uacpy.core.constants import (
-    AttenuationUnits, DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -231,16 +231,6 @@ class Bellhop(PropagationModel):
         ``'R'`` point/cylindrical (default) | ``'X'`` line/Cartesian.
     grid_type : str, optional
         ``'R'`` rectilinear (default) | ``'I'`` irregular (paired depth/range).
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
-    attenuation_unit : AttenuationUnits or str, optional
-        Bellhop SSP attenuation unit. Default ``DB_PER_WAVELENGTH``.
-    francois_garrison_params : tuple, optional
-        ``(T, S, pH, z_bar)`` — required when ``volume_attenuation='F'``.
-    bio_layers : list, optional
-        ``[(Z1, Z2, f0, Q, a0), ...]`` — required when ``volume_attenuation='B'``.
-    bty_interp_type : str, optional
-        ``.bty`` / ``.ati`` interpolation: ``'L'`` linear (default) | ``'C'`` curvilinear.
     source_beam_pattern_file : Path or array, optional
         ``.sbp`` path or ``(angle_deg, level_dB)`` array; sets ``RunType(3)='*'``.
     arrivals_format : str, optional
@@ -263,6 +253,22 @@ class Bellhop(PropagationModel):
         regardless of this flag.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
+
+    Notes
+    -----
+    Defaults auto-derived from inputs (no need to override unless tuning):
+
+    - ``n_beams=0`` → Bellhop auto-picks the beam count.
+    - ``step=0.0`` → Bellhop auto-picks the ray step from geometry.
+    - ``z_box=None`` → ``1.2 × env.depth``.
+    - ``r_box=None`` → ``1.2 × receiver.range_max`` (or 10 km if 0).
+    - ``TopOpt`` position 4 reads from ``env.absorption``
+      (``Thorp`` → ``'T'``, ``FrancoisGarrison`` → ``'F'`` + params,
+      ``Biological`` → ``'B'`` + layers, ``ConstantAbsorption`` /
+      ``None`` → ``' '``).
+    - Bottom reflection: when ``env.bottom`` is layered / elastic and
+      ``auto_bounce=True``, BOUNCE is invoked transparently to derive
+      the ``.brc`` reflection coefficient table.
 
     Notes
     -----
@@ -301,11 +307,9 @@ class Bellhop(PropagationModel):
         r_box: Optional[float] = None,
         source_type: str = 'R',
         grid_type: str = 'R',
-        volume_attenuation: Optional[str] = None,
-        attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
-        bty_interp_type: str = 'L',
+        interp_ssp: Optional[str] = None,
+        interp_bathymetry: str = 'linear',
+        interp_altimetry: str = 'linear',
         source_beam_pattern_file: Optional[Path] = None,
         arrivals_format: str = 'ascii',
         beam_width_type: str = 'F',
@@ -317,7 +321,7 @@ class Bellhop(PropagationModel):
         component: str = 'P',
         auto_bounce: bool = True,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -334,9 +338,7 @@ class Bellhop(PropagationModel):
             'S' (simple Gaussian). Default: 'B'.
         n_beams : int
             Number of beams. Passing 0 defers to Bellhop's conservative
-            auto-selection (NBEAMS<=0 in the Fortran reader); uacpy
-            writes the value through as-is rather than substituting
-            ``source.n_angles``. Default: 0.
+            auto-selection (NBEAMS<=0 in the Fortran reader). Default: 0.
         alpha : tuple
             Launch angle limits (min, max) in degrees. Default: (-80, 80).
         step : float
@@ -349,23 +351,18 @@ class Bellhop(PropagationModel):
             Source type: 'R' (point, cylindrical), 'X' (line, Cartesian). Default: 'R'.
         grid_type : str
             Receiver grid: 'R' (rectilinear), 'I' (irregular). Default: 'R'.
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
-        attenuation_unit : AttenuationUnits or str, optional
-            Attenuation unit (TopOpt pos. 3). Accepts an
-            :class:`AttenuationUnits` member or the equivalent letter:
-            'W' dB/wavelength (default), 'N' nepers/m, 'F' dB/kmHz,
-            'M' dB/m, 'Q' Q-factor, 'L' loss tangent, 'm' dB/m with
-            per-SSP BETA/fT pair.
-        francois_garrison_params : tuple, optional
-            Defaults used for ``volume_attenuation='F'``: (T, S, pH, z_bar).
-        bio_layers : list, optional
-            Defaults used for ``volume_attenuation='B'``: list of
-            (Z1, Z2, f0, Q, a0).
-        bty_interp_type : str, optional
-            Interpolation type used for BOTH ``.bty`` (bathymetry) and
-            ``.ati`` (altimetry) files. 'L' (linear, default) or 'C'
-            (curvilinear).
+        interp_ssp : str, optional
+            SSP connection scheme. ``None`` (default) auto-picks
+            ``'quad'`` for a range-dependent ``env.ssp`` and ``'linear'``
+            otherwise. Explicit values: ``'linear'``, ``'pchip'``,
+            ``'cubic'``, ``'quad'``, ``'n2linear'``, ``'analytic'``.
+            ``env.ssp.shape='isovelocity'`` always forces ``'C'`` regardless.
+        interp_bathymetry : str, optional
+            ``.bty`` interpolation. ``'linear'`` (default) or
+            ``'curvilinear'``.
+        interp_altimetry : str, optional
+            ``.ati`` interpolation. ``'linear'`` (default) or
+            ``'curvilinear'``.
         source_beam_pattern_file : Path or ndarray, optional
             Source beam pattern. Either a path to an existing ``.sbp`` file
             (copied to ``<work_dir>/<base>.sbp``) or a 2-column array of
@@ -444,12 +441,9 @@ class Bellhop(PropagationModel):
         self.r_box = r_box
         self.source_type = source_type
         self.grid_type = grid_type
-        self.volume_attenuation = volume_attenuation
-        self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
-        self._validate_volume_attenuation_params()
-        self.bty_interp_type = bty_interp_type
+        self.interp_ssp = interp_ssp
+        self.interp_bathymetry = interp_bathymetry
+        self.interp_altimetry = interp_altimetry
         self.source_beam_pattern_file = (
             Path(source_beam_pattern_file)
             if isinstance(source_beam_pattern_file, (str, Path))
@@ -477,7 +471,7 @@ class Bellhop(PropagationModel):
             raise ExecutableNotFoundError("Bellhop", str(self.executable))
 
         if verbose and self.version != "custom":
-            self._log(f"Using Bellhop {self.version}: {self.executable}", level='info')
+            self._log(f"Using Bellhop {self.version}: {self.executable}")
 
     def _find_bellhop_executable(self) -> Path:
         """Locate the Bellhop binary using the base class helper.
@@ -633,17 +627,26 @@ class Bellhop(PropagationModel):
                 UserWarning, stacklevel=2,
             )
 
-        if env.has_range_dependent_ssp() and env.ssp.interp != 'quad':
+        from uacpy.io.oalib_writer import resolve_ssp_interp
+        effective_interp = resolve_ssp_interp(env, self.interp_ssp)
+        if self.interp_ssp is None:
+            self._log(
+                f"interp_ssp auto-picked = {effective_interp!r} "
+                f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp()})"
+            )
+        if env.has_range_dependent_ssp() and effective_interp != 'quad':
             method = self._collapse['ssp']
             env = env.copy()
             env.ssp = env.ssp.collapse(method)
             warnings.warn(
                 f"Bellhop reads range-dependent SSP only when "
-                f"ssp.interp='quad' (external .ssp file). With "
-                f"ssp.interp={env.ssp.interp!r} the SSP is collapsed to 1-D "
-                f"(collapse['ssp']={method!r}). Set interp='quad' on the "
-                f"SoundSpeedProfile to enable the 2-D profile.",
-                UserWarning, stacklevel=2
+                f"interp_ssp='quad' (external .ssp file). With "
+                f"interp_ssp={self.interp_ssp!r} (resolved to "
+                f"{effective_interp!r}) the SSP is collapsed to 1-D "
+                f"(collapse['ssp']={method!r}). Pass "
+                f"``Bellhop(interp_ssp='quad')`` (or leave the default "
+                f"``None`` for auto-detection) to enable the 2-D profile.",
+                UserWarning, stacklevel=2,
             )
 
         env = self._project_environment(env)
@@ -671,10 +674,9 @@ class Bellhop(PropagationModel):
         self.file_manager = fm
 
         extra_writer_kwargs = {
-            'attenuation_unit': AttenuationUnits.from_string(self.attenuation_unit),
-            'francois_garrison_params': self.francois_garrison_params,
-            'bio_layers': self.bio_layers,
-            'bty_interp_type': self.bty_interp_type,
+            'interp_ssp': self.interp_ssp,
+            'interp_bathymetry': self.interp_bathymetry,
+            'interp_altimetry': self.interp_altimetry,
         }
 
         sbp_spec = self.source_beam_pattern_file
@@ -682,7 +684,7 @@ class Bellhop(PropagationModel):
         try:
             base_name = 'model'
             env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}", level='info')
+            self._log(f"Writing environment file: {env_file}")
 
             # Stage source beam pattern file. Bellhop reads by base name
             # (<base>.sbp) when RunType position 3 is '*'.
@@ -709,9 +711,7 @@ class Bellhop(PropagationModel):
                         sbp_dest, arr[:, 0], arr[:, 1]
                     )
                 use_sbp = True
-                if self.verbose:
-                    self._log(f"Wrote source beam pattern: {sbp_dest}",
-                              level='info')
+                self._log(f"Wrote source beam pattern: {sbp_dest}")
 
             # Beam advanced kwargs: per-call user kwargs (in `kwargs`)
             # win over constructor defaults.
@@ -736,7 +736,6 @@ class Bellhop(PropagationModel):
                 beam_type=self.beam_type,
                 source_type=self.source_type,
                 grid_type=self.grid_type,
-                volume_attenuation=self.volume_attenuation,
                 verbose=self.verbose,
                 n_beams=self.n_beams,
                 alpha=self.alpha,
@@ -749,7 +748,7 @@ class Bellhop(PropagationModel):
             )
 
             # Run Bellhop
-            self._log("Running Bellhop...", level='info')
+            self._log("Running Bellhop...")
             self._run_bellhop(base_name, fm.work_dir)
 
             # Read output based on run type. Uppercase covers 'A'
@@ -808,7 +807,7 @@ class Bellhop(PropagationModel):
                 ),
             )
 
-            self._log("Simulation complete", level='info')
+            self._log("Simulation complete")
             return result
 
         finally:
@@ -863,16 +862,13 @@ class Bellhop(PropagationModel):
         from uacpy.models.bounce import Bounce
         import tempfile
 
-        self._log("Running BOUNCE to compute reflection coefficients...", level='info')
+        self._log("Running BOUNCE to compute reflection coefficients...")
         bounce_work_dir = Path(tempfile.mkdtemp(prefix='bellhop_bounce_'))
         bounce = Bounce(
             verbose=self.verbose,
             c_low=c_low,
             c_high=c_high,
             rmax=rmax,
-            volume_attenuation=self.volume_attenuation,
-            francois_garrison_params=self.francois_garrison_params,
-            bio_layers=self.bio_layers,
             collapse=dict(self._user_collapse) or None,
             work_dir=bounce_work_dir,
             cleanup=False,            # we own bounce_work_dir; cleaned up below
@@ -891,12 +887,9 @@ class Bellhop(PropagationModel):
             env_bounce.bottom = BoundaryProperties(
                 acoustic_type='file',
                 reflection_file=brc_file,
-                reflection_cmin=c_low,
-                reflection_cmax=c_high,
-                reflection_rmax=rmax,
             )
 
-            self._log("Running Bellhop with BOUNCE reflection coefficients...", level='info')
+            self._log("Running Bellhop with BOUNCE reflection coefficients...")
             result = self.run(
                 env_bounce, source, receiver,
                 run_mode=run_mode,
@@ -1003,7 +996,7 @@ class Bellhop(PropagationModel):
         fc = float(np.atleast_1d(source.frequencies)[0])
 
         # Step 1: Run Bellhop in arrivals mode
-        self._log("Running in arrivals mode (broadband path)...", level='info')
+        self._log("Running in arrivals mode (broadband path)...")
         arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
 
         arrivals_by_rcv = arr_field.by_receiver
@@ -1021,10 +1014,7 @@ class Bellhop(PropagationModel):
                     "sample_rate is required when source_waveform is provided"
                 )
 
-            self._log(
-                f"Delay-and-sum over {nrd}×{nrr} receiver grid",
-                level='info',
-            )
+            self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
             # Lock the time window using the first cell so all traces share
             # a clock; reuse it for every subsequent cell via ``t_start``.
@@ -1091,8 +1081,7 @@ class Bellhop(PropagationModel):
                 )
 
         self._log(f"Built transfer function "
-                  f"({nrd} depths x {n_freq} freqs x {nrr} ranges)",
-                  level='info')
+                  f"({nrd} depths x {n_freq} freqs x {nrr} ranges)")
 
         c0 = float(env.ssp.data[0, 0])
 

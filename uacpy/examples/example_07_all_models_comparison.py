@@ -121,10 +121,10 @@ def main():
     env = uacpy.Environment(
         name="Continental Margin - Frontal Zone",
         ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_m, matrix=ssp_2d_matrix,
-                                      interp='pchip',
                                       ),
         bathymetry=bathymetry,
-        bottom=bottom_rd
+        bottom=bottom_rd,
+        absorption=uacpy.Thorp(),
     )
 
     print(f"  ✓ is_range_dependent: {env.is_range_dependent}")
@@ -149,7 +149,7 @@ def main():
 
     print("\n[1/5] Bellhop (Gaussian beams + Thorp attenuation)...")
     try:
-        bellhop = Bellhop(verbose=False, volume_attenuation='T')
+        bellhop = Bellhop(verbose=False)
         results['Bellhop'] = bellhop.compute_tl(env, source, receiver)
         print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
@@ -178,7 +178,7 @@ def main():
     # Scooter with volume attenuation
     print("[4/5] Scooter (volume attenuation)...")
     try:
-        scooter = Scooter(verbose=False, volume_attenuation='T')
+        scooter = Scooter(verbose=False)
         results['Scooter'] = scooter.run(env, source, receiver)
         print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:
@@ -187,7 +187,7 @@ def main():
     # OAST with volume attenuation
     print("[5/5] OAST (wavenumber integration)...")
     try:
-        oast = OAST(verbose=False, volume_attenuation='T')
+        oast = OAST(verbose=False)
         results['OAST'] = oast.run(env, source, receiver)
         print("  ✓ Success — uacpy auto-collapses unsupported axes")
     except Exception as e:

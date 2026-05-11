@@ -15,7 +15,7 @@ class TestEnvironment:
         assert simple_env.name == "Test Environment"
         assert simple_env.depth == 100.0
         assert float(simple_env.ssp.data[0, 0]) == 1500.0
-        assert simple_env.ssp.interp == 'isovelocity'
+        assert simple_env.ssp.shape == 'isovelocity'
         assert not simple_env.is_range_dependent
 
     def test_create_munk_environment(self, munk_env):
@@ -23,7 +23,7 @@ class TestEnvironment:
         assert munk_env.name == "Munk Profile"
         assert munk_env.depth == 100.0
         assert munk_env.ssp.n_depths == 21
-        assert munk_env.ssp.interp == 'pchip'
+        assert munk_env.ssp.shape == 'measured'
 
     def test_range_dependent_environment(self, range_dependent_env):
         """Test range-dependent environment."""
@@ -467,8 +467,7 @@ class TestSoundSpeedProfileNearestVsInterp:
         from uacpy.core.environment import SoundSpeedProfile
         return SoundSpeedProfile(
             depths=np.array([0.0, 100.0, 200.0]),
-            data=np.array([[1500.0], [1490.0], [1480.0]]),
-            interp='linear',
+            data=np.array([[1500.0], [1490.0], [1480.0]])
         )
 
     def test_eval_nearest_picks_nearest_depth(self):
@@ -481,7 +480,7 @@ class TestSoundSpeedProfileNearestVsInterp:
     def test_interp_linear(self):
         ssp = self._ssp()
         # depth=50 is halfway between (0, 1500) and (100, 1490) → 1495
-        sliced = ssp.eval(depth=50.0)
+        sliced = ssp.eval(depth=50.0, interp='linear')
         assert sliced.depths[0] == 50.0
         assert sliced.value == pytest.approx(1495.0)
 
@@ -495,8 +494,7 @@ class TestSoundSpeedProfileExtendTo:
         from uacpy.core.environment import SoundSpeedProfile
         return SoundSpeedProfile(
             depths=np.asarray(depths, dtype=float),
-            data=np.asarray(speeds, dtype=float).reshape(-1, 1),
-            interp='linear',
+            data=np.asarray(speeds, dtype=float).reshape(-1, 1)
         )
 
     def test_noop_when_depth_max_equals_deepest(self):

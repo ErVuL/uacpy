@@ -375,14 +375,28 @@ class TestOASESFactory:
         with pytest.raises(TypeError):
             OASES(verbose=False, angles=np.linspace(0, 90, 10))
 
-    def test_volume_attenuation_propagates(self):
-        m = OASES(
-            run_mode=RunMode.COHERENT_TL,
-            volume_attenuation='F',
-            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+    def test_env_absorption_propagates_to_options_string(self, tmp_path):
+        """Francois–Garrison from env.absorption appends 'F' to the OAST
+        options string written to disk (oases.tex docs treat the letter
+        as a UNKNOWN OPTION that does not affect the run but flags the
+        chosen formula in the .dat file)."""
+        from uacpy.core import Environment, Source, Receiver
+        from uacpy.core.absorption import FrancoisGarrison
+        from uacpy.io.oases_writer import write_oast_input
+
+        env = Environment(
+            name='atten', bathymetry=100.0, ssp=1500.0,
+            absorption=FrancoisGarrison(
+                temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=1000.0,
+            ),
         )
-        assert m.volume_attenuation == 'F'
-        assert m.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        dat = tmp_path / 'oast.dat'
+        write_oast_input(dat, env, source, receiver)
+        contents = dat.read_text()
+        # The single-letter formula marker appears on the options line.
+        assert ' F' in contents.splitlines()[1]
 
 
 # Integration test to verify all OASES models can be imported and instantiated

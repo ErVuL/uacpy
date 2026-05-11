@@ -8,6 +8,10 @@ from uacpy.core.environment import (
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
     SoundSpeedProfile, generate_sea_surface,
 )
+from uacpy.core.absorption import (
+    Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
+    ConstantAbsorption,
+)
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
     Result, PhaseReference,
@@ -30,7 +34,7 @@ from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 from uacpy.core.constants import (
-    AttenuationUnits, VolumeAttenuation, BoundaryType,
+    AttenuationUnits, BoundaryType,
 )
 
 __all__ = [
@@ -43,6 +47,8 @@ __all__ = [
     'RangeDependentLayeredBottom',
     'SoundSpeedProfile',
     'generate_sea_surface',
+    'Absorption', 'Thorp', 'FrancoisGarrison',
+    'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
     'Result', 'PhaseReference',
     'PressureField', 'TransferFunction',
@@ -58,5 +64,5 @@ __all__ = [
     'ConfigurationError',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
-    'AttenuationUnits', 'VolumeAttenuation', 'BoundaryType',
+    'AttenuationUnits', 'BoundaryType',
 ]

@@ -94,6 +94,10 @@ class Receiver:
                         "For receiver_type='line', depths and ranges must have "
                         "same length or one must be scalar"
                     )
+        else:
+            from uacpy.core.environment import _require_strictly_increasing
+            _require_strictly_increasing(self.depths, "Receiver.depths")
+            _require_strictly_increasing(self.ranges, "Receiver.ranges")
 
     @property
     def n_depths(self) -> int:

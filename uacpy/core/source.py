@@ -3,15 +3,15 @@ Source class for defining acoustic sources in underwater environments
 """
 
 import numpy as np
-from typing import Union, List, Optional
+from typing import Union, List
 
 
 class Source:
     """
     Acoustic source definition
 
-    Represents one or more acoustic sources with specified depths, frequencies,
-    and (for ray models) launch angles.
+    Represents one or more acoustic sources with specified depths and
+    frequencies.
 
     Parameters
     ----------
@@ -19,9 +19,6 @@ class Source:
         Source depth(s) in meters. Positive down from surface.
     frequencies : float or array-like
         Source frequency or frequencies in Hz
-    angles : array-like, optional
-        Launch angles in degrees. Used for ray-tracing models.
-        Default is [-80, 80] with 361 angles.
     source_type : str, optional
         Type of source: 'point' (default) or 'line'. Used by Bellhop/Scooter
         to select point (cylindrical) vs. line (Cartesian) geometry.
@@ -32,8 +29,6 @@ class Source:
         Source depth(s)
     frequencies : ndarray
         Source frequency/frequencies
-    angles : ndarray
-        Launch angles for ray tracing
     source_type : str
         Source type
 
@@ -46,18 +41,12 @@ class Source:
     Vertical source array:
 
     >>> source = Source(depths=[10, 20, 30], frequencies=200)
-
-    Custom launch angles:
-
-    >>> source = Source(depths=50, frequencies=100,
-    ...                 angles=np.linspace(-45, 45, 91))
     """
 
     def __init__(
         self,
         depths: Union[float, List[float], np.ndarray],
         frequencies: Union[float, List[float], np.ndarray],
-        angles: Optional[Union[List[float], np.ndarray]] = None,
         source_type: str = 'point',
     ):
         self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
@@ -73,12 +62,6 @@ class Source:
                 f"source frequencies must be strictly positive (Hz), got {self.frequencies.tolist()}"
             )
 
-        if angles is None:
-            self.angles = np.linspace(-80, 80, 361)
-        else:
-            self.angles = np.array(angles, dtype=np.float64)
-
-        # Only 'point' and 'line' are consumed by writers.
         valid_types = ['point', 'line']
         if source_type not in valid_types:
             raise ValueError(f"source_type must be one of {valid_types}")
@@ -94,11 +77,6 @@ class Source:
         """Number of frequencies."""
         return len(self.frequencies)
 
-    @property
-    def n_angles(self) -> int:
-        """Number of launch angles."""
-        return len(self.angles)
-
     def __repr__(self) -> str:
         if self.n_sources == 1:
             depth_str = f"{self.depths[0]:.1f}m"
@@ -110,14 +88,12 @@ class Source:
         else:
             freq_str = f"{self.n_frequencies} frequencies"
 
-        return (f"Source({depth_str}, {freq_str}, "
-                f"{self.n_angles} angles, type='{self.source_type}')")
+        return (f"Source({depth_str}, {freq_str}, type='{self.source_type}')")
 
     def copy(self):
         """Return a deep copy of the source."""
         return Source(
             depths=self.depths.copy(),
             frequencies=self.frequencies.copy(),
-            angles=self.angles.copy(),
             source_type=self.source_type,
         )

@@ -83,8 +83,7 @@ def main():
         name="Summer Thermocline - Multi-Frequency",
         bathymetry=200.0,
         ssp=SoundSpeedProfile.from_pairs(
-            [(0, 1525), (25, 1525), (60, 1490), (200, 1490)],
-            interp='linear',
+            [(0, 1525), (25, 1525), (60, 1490), (200, 1490)]
         ),
         bottom=bottom_props
     )

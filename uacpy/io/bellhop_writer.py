@@ -10,8 +10,9 @@ specifications, and run-type / beam-parameter configuration.
 
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
+from uacpy._log import log_message
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -21,7 +22,7 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.io.oalib_writer import (
-    _BOUNDARY_TYPE_MAP, get_top_bc_code, write_bio_layers, write_fg_params,
+    _BOUNDARY_TYPE_MAP, get_top_bc_code,
     write_receiver_depths, write_receiver_ranges, write_source_depths,
     write_surface_halfspace,
 )
@@ -36,11 +37,9 @@ def write_bellhop_env_file(
     beam_type: str = "B",
     source_type: str = "R",
     grid_type: str = "R",
-    volume_attenuation: Optional[str] = None,
-    attenuation_unit='W',
-    francois_garrison_params: Optional[tuple] = None,
-    bio_layers: Optional[list] = None,
-    bty_interp_type: str = 'L',
+    interp_ssp: str = 'linear',
+    interp_bathymetry: str = 'linear',
+    interp_altimetry: str = 'linear',
     source_beam_pattern: bool = False,
     beam_shift: bool = False,
     n_beams: int = 0,
@@ -64,7 +63,7 @@ def write_bellhop_env_file(
     env : Environment
         Environment definition (SSP, bathymetry, boundaries)
     source : Source
-        Source definition (depth, frequency, beam angles)
+        Source definition (depths, frequencies, source geometry)
     receiver : Receiver
         Receiver definition (depths, ranges)
     run_type : str, optional
@@ -93,27 +92,14 @@ def write_bellhop_env_file(
         Source type (position 4): 'R' (point), 'X' (line). Default is 'R'.
     grid_type : str, optional
         Grid type (position 5): 'R' (rectilinear), 'I' (irregular). Default is 'R'.
-    volume_attenuation : str, optional
-        Volume attenuation formula: 'T' (Thorp), 'F' (Francois-Garrison),
-        'B' (Biological), or None. Default is None.
-    attenuation_unit : str, optional
-        Attenuation unit (TopOpt position 3): 'N' (nepers/m), 'F' (dB/kmHz),
-        'M' (dB/m), 'W' (dB/wavelength, default), 'Q' (quality factor),
-        'L' (loss tangent). 'm' (dB/m with per-SSP power-law BETA/fT)
-        is rejected because uacpy has no Environment field for the
-        power-law exponent yet.
-    francois_garrison_params : tuple, optional
-        (T, S, pH, z_bar): temperature (degC), salinity (ppt), pH, and
-        mean depth (m) for the Francois-Garrison volume-attenuation formula.
-        Required when ``volume_attenuation='F'``.
-    bio_layers : list of tuples, optional
-        Biological attenuation layers when ``volume_attenuation='B'``.
-        Each entry is (Z1, Z2, f0, Q, a0): top depth, bottom depth,
-        resonance frequency, quality factor, absorption coefficient.
-    bty_interp_type : str, optional
-        Interpolation type for both the ``.bty`` (bathymetry) and
-        ``.ati`` (altimetry) files: 'L' (linear, default) or 'C'
-        (curvilinear). The same value is used for both files.
+    interp_ssp : str, optional
+        SSP connection scheme when ``env.ssp.shape == 'measured'``
+        (drives ``TopOpt(1)``): ``'linear'`` (default), ``'pchip'``,
+        ``'cubic'``, ``'quad'``, ``'n2linear'``.
+    interp_bathymetry : str, optional
+        ``.bty`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
+    interp_altimetry : str, optional
+        ``.ati`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
     source_beam_pattern : bool, optional
         When True, emits '*' in RunType position 3 so Bellhop reads
         ``<base>.sbp`` (source beam pattern file). The caller is
@@ -123,8 +109,8 @@ def write_bellhop_env_file(
         on boundary reflections per Beam%Type(4:4)
         (ReadEnvironmentBell.f90:159-166). Default: False (no shift).
     n_beams : int, optional
-        Number of beams. If 0, uses source.n_angles. Bellhop picks a
-        conservative default in that case.
+        Number of beams. ``0`` defers to Bellhop's conservative
+        auto-selection (NBEAMS<=0 in the Fortran reader).
     alpha : tuple, optional
         Launch angle limits (min, max) in degrees. Default is (-80, 80).
     step : float, optional
@@ -153,10 +139,6 @@ def write_bellhop_env_file(
     For range-dependent bathymetry, automatically generates a .bty file.
     For range-dependent SSP with Quad interpolation, generates a .ssp file.
     """
-    # Bellhop treats NBEAMS <= 0 as "pick conservatively" (it auto-
-    # selects based on geometry). Honor the user's intent: passing
-    # n_beams=0 defers to Bellhop rather than silently substituting
-    # source.n_angles.
     if n_beams is None:
         n_beams = 0
 
@@ -176,60 +158,34 @@ def write_bellhop_env_file(
         # Number of media (1 for simple case)
         f.write("1\n")
 
-        from uacpy.core.constants import parse_ssp_type
-        interp_char = parse_ssp_type(env.ssp.interp).to_acoustics_toolbox_code()
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        interp_char = resolve_ssp_topopt(env, interp_ssp)
+
+        _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
+        bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
+        ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
+        if bty_code is None:
+            raise ValueError(
+                f"interp_bathymetry must be 'linear' or 'curvilinear'; "
+                f"got {interp_bathymetry!r}"
+            )
+        if ati_code is None:
+            raise ValueError(
+                f"interp_altimetry must be 'linear' or 'curvilinear'; "
+                f"got {interp_altimetry!r}"
+            )
 
         # Top boundary (surface)
         top_bc = get_top_bc_code(env)
 
-        # Attenuation units (2-character field)
-        # Position 3: Unit type. Accepted Bellhop codes (ReadEnvironmentBell
-        #   .f90 284-299): 'N' nepers/m, 'F' dB/kmHz, 'M' dB/m,
-        #   'W' dB/wavelength, 'Q' quality factor, 'L' loss tangent.
-        #   ('m' dB/m with per-SSP BETA/fT power-law is parsed by
-        #   Bellhop but requires a separate exponent that uacpy's
-        #   Environment does not expose; rejected below.)
-        # Position 4: Volume attenuation formula: T/F/B/' '.
+        # TopOpt(3) = 'W' (dB/wavelength, uacpy convention).
+        # TopOpt(4) from env.absorption.
         from uacpy.core.constants import AttenuationUnits
-        if isinstance(attenuation_unit, AttenuationUnits):
-            atten_unit_char = attenuation_unit.to_char()
-        else:
-            atten_unit_char = attenuation_unit if attenuation_unit in (
-                'N', 'F', 'M', 'W', 'Q', 'L', 'm') else 'W'
-        # 'm' (dB/m with per-SSP BETA/fT power-law) requires a
-        # separate power-law exponent (BETA) and reference frequency
-        # (fT), which are distinct from env.volume_attenuation. uacpy's
-        # Environment does not expose a power-law exponent field, so
-        # emitting 'm' here would mis-use env.volume_attenuation as BETA
-        # (ssp_mod.f90 / EnvironmentalFile.html:411-424).  Fail loudly
-        # until a dedicated field is added.
-        if atten_unit_char == 'm':
-            from uacpy.core.exceptions import ConfigurationError
-            raise ConfigurationError(
-                "attenuation_unit='m' (dB/m with power-law BETA/fT) "
-                "requires a dedicated power-law exponent and "
-                "transition frequency that uacpy's Environment does "
-                "not yet expose. Please use one of 'N', 'F', 'M', "
-                "'W', 'Q', or 'L', or contribute an "
-                "Environment.attenuation_exponent field."
-            )
-        vol_atten_char = volume_attenuation.upper() if volume_attenuation else ' '
+        atten_unit_char = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
+        vol_atten_char = (
+            env.absorption.topopt_code() if env.absorption is not None else ' '
+        )
         atten_unit = f"{atten_unit_char}{vol_atten_char}"
-
-        # Validate F/B required params up-front so the user sees a clear
-        # error instead of a Bellhop parse failure.
-        if vol_atten_char == 'F' and francois_garrison_params is None:
-            from uacpy.core.exceptions import ConfigurationError
-            raise ConfigurationError(
-                "volume_attenuation='F' (Francois-Garrison) requires "
-                "francois_garrison_params=(T, S, pH, z_bar)."
-            )
-        if vol_atten_char == 'B' and not bio_layers:
-            from uacpy.core.exceptions import ConfigurationError
-            raise ConfigurationError(
-                "volume_attenuation='B' (biological) requires a non-empty "
-                "bio_layers list of (Z1, Z2, f0, Q, a0) tuples."
-            )
 
         # Position 5: Altimetry flag ('~' = read .ati file, ' ' = flat surface)
         has_altimetry = getattr(env, 'altimetry', None) is not None and len(env.altimetry) > 1
@@ -237,24 +193,23 @@ def write_bellhop_env_file(
 
         # SSP option string (pad to 6 chars for Fortran compatibility)
         ssp_options = f"{interp_char}{top_bc}{atten_unit}{alti_char}"
-        ssp_options = ssp_options.ljust(6)  # Pad with spaces to 6 characters
+        ssp_options = ssp_options.ljust(6)
         f.write(f"'{ssp_options}'\n")
 
         write_surface_halfspace(f, env)
 
-        if vol_atten_char == 'F':
-            write_fg_params(f, francois_garrison_params)
-        elif vol_atten_char == 'B':
-            write_bio_layers(f, bio_layers)
+        from uacpy.io.oalib_writer import write_absorption_block
+        write_absorption_block(f, env)
 
         # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
             ati_filepath = filepath.with_suffix(".ati")
             ati_data = env.altimetry.copy()
             ati_data[:, 1] = -ati_data[:, 1]
-            write_ati_file(ati_filepath, ati_data, interp_type=bty_interp_type)
-            if verbose:
-                print(f"bellhop_writer: wrote altimetry file: {ati_filepath}")
+            write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
+            log_message('bellhop_writer',
+                        f"wrote altimetry file: {ati_filepath}",
+                        verbose=verbose)
 
         # If the surface boundary is a reflection file ('F'), copy the
         # .trc file alongside the .env so Bellhop can read it by base
@@ -275,9 +230,9 @@ def write_bellhop_env_file(
                 )
             dest = filepath.with_suffix('.trc')
             shutil.copy(src, dest)
-            if verbose:
-                print(f"bellhop_writer: copied top reflection file: "
-                      f"{src} -> {dest}")
+            log_message('bellhop_writer',
+                        f"copied top reflection file: {src} -> {dest}",
+                        verbose=verbose)
 
         # Handle range-dependent SSP if using Quad interpolation
         if interp_char == 'Q' and env.has_range_dependent_ssp():
@@ -285,8 +240,9 @@ def write_bellhop_env_file(
             ssp_file = filepath.with_suffix('.ssp')
             # write_ssp (.ssp file format) expects ranges in km.
             write_ssp(ssp_file, env.ssp.ranges / 1000.0, env.ssp.data)
-            if verbose:
-                print(f"bellhop_writer: wrote range-dependent SSP file: {ssp_file}")
+            log_message('bellhop_writer',
+                        f"wrote range-dependent SSP file: {ssp_file}",
+                        verbose=verbose)
 
         # Extend SSP above MSL to cover any wave crests (env.altimetry
         # positive-up, SSP z-axis positive-down).
@@ -302,7 +258,11 @@ def write_bellhop_env_file(
         # the parser sees aligned depths.
         z_max = float(f"{env.depth:.1f}")
 
-        ssp_data_extended = env.ssp.extend_to(z_max).to_pairs()
+        if env.ssp.is_range_dependent:
+            ssp_block = env.ssp.eval(range=0.0).extend_to(z_max)
+        else:
+            ssp_block = env.ssp.extend_to(z_max)
+        ssp_data_extended = ssp_block.to_pairs()
         if z_min < ssp_data_extended[0, 0]:
             first_c = ssp_data_extended[0, 1]
             ssp_data_extended = np.vstack([[z_min, first_c], ssp_data_extended])
@@ -314,22 +274,24 @@ def write_bellhop_env_file(
         # are handled via the .ati file, not via this slot.
         f.write(f"{n_ssp}  0.0  {z_max:.1f},\n")
 
-        # Bellhop SSP format: z alphaR betaR rhoR alphaI betaI /
-        # When top BC is elastic halfspace, Fortran READ keeps previous
-        # values for unspecified columns — so we must write all 6 to
-        # prevent ice properties from bleeding into the water column.
-        # (attenuation_unit='m' would require an additional (BETA, fT)
-        # pair; that path is rejected above with ConfigurationError.)
+        # SSP row: z alphaR betaR rhoR alphaI betaI /
+        # Emit all 6 columns so an elastic top halfspace doesn't leak ice
+        # properties into the water column via Fortran's READ.
+        from uacpy.core.absorption import ConstantAbsorption
+        alpha_i = (
+            env.absorption.value_db_per_wavelength
+            if isinstance(env.absorption, ConstantAbsorption)
+            else 0.0
+        )
         for depth, c in ssp_data_extended:
             f.write(
                 f"{depth:.6f} {c:.6f} 0.0 1.0 "
-                f"{env.volume_attenuation:.6f} 0.0 /\n"
+                f"{alpha_i:.6f} 0.0 /\n"
             )
 
         bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
         bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
 
-        # Check if bathymetry is range-dependent (more than 1 point)
         is_range_dependent_bathy = len(env.bathymetry) > 1
 
         from uacpy.core.environment import RangeDependentBottom
@@ -338,17 +300,17 @@ def write_bellhop_env_file(
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
             # auto-selected by the writer: write_bty_long_format emits
-            # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. Callers only pick
-            # the 1st char (interpolation) via bty_interp_type.
+            # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. The first char
+            # is the interpolation chosen via ``interp_bathymetry``.
             if isinstance(env.bottom, RangeDependentBottom) and len(env.bottom.ranges) > 0:
                 write_bty_long_format(
                     bty_filepath, env.bathymetry, env.bottom,
-                    interp_type=bty_interp_type,
+                    interp_type=bty_code,
                 )
             else:
                 write_bty_file(
                     bty_filepath, env.bathymetry,
-                    interp_type=bty_interp_type,
+                    interp_type=bty_code,
                 )
             bottom_type_with_bathy = f"{bottom_type}~"
             # 2nd field on this BOT line is sigma (top-of-bottom RMS
@@ -373,8 +335,9 @@ def write_bellhop_env_file(
                 if brc_source.exists():
                     brc_dest = filepath.with_suffix('.brc')
                     shutil.copy(brc_source, brc_dest)
-                    if verbose:
-                        print(f"bellhop_writer: copied reflection file: {brc_source} -> {brc_dest}")
+                    log_message('bellhop_writer',
+                                f"copied reflection file: {brc_source} -> {brc_dest}",
+                                verbose=verbose)
                 else:
                     raise FileNotFoundError(
                         f"bellhop_writer: reflection coefficient file not found: "

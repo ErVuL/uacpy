@@ -163,9 +163,6 @@ def main():
         sound_speed=1600.0,
         density=1.8,
         attenuation=0.2,
-        reflection_cmin=bounce_result.metadata['c_low'],
-        reflection_cmax=bounce_result.metadata['c_high'],
-        reflection_rmax=bounce_result.metadata['rmax']
     )
 
     env_with_rc = uacpy.Environment(
@@ -179,7 +176,11 @@ def main():
 
     print("\n[3/3] Running SCOOTER with .brc file...")
     t_start = time.time()
-    scooter = Scooter(verbose=False)
+    scooter = Scooter(
+        verbose=False,
+        c_low=bounce_result.metadata['c_low'],
+        c_high=bounce_result.metadata['c_high'],
+    )
     result_scooter = scooter.compute_tl(env_with_rc, source, receiver)
     t_scooter = time.time() - t_start
 
