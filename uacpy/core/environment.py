@@ -856,11 +856,11 @@ class SoundSpeedProfile:
     shape : str
         Declaration of what the data represents:
         ``'measured'`` (default), ``'isovelocity'``, ``'munk'``,
-        ``'analytic'`` or ``'n2linear'``. Drives the AT ``TopOpt(1)``
-        character when the chosen value implies it (e.g. ``'munk'`` and
-        ``'analytic'`` → ``'A'``, ``'n2linear'`` → ``'N'``,
-        ``'isovelocity'`` → ``'C'``); for ``'measured'`` the model's
-        own ``interp_ssp`` kwarg drives the choice.
+        ``'analytic'`` or ``'n2linear'``. Only ``'isovelocity'``
+        actually overrides ``TopOpt(1)`` (forces ``'C'`` — any connection
+        scheme over constant data is constant). The other values are
+        informational metadata; the model's ``interp_ssp`` kwarg drives
+        the AT character.
     """
     depths: np.ndarray
     data: np.ndarray

@@ -276,17 +276,20 @@ The SSP carries a **shape** declaration (env-level metadata): one of
 others → ``'measured'``).
 
 The **sample-connection scheme** is a model-level kwarg
-``Model(interp_ssp='linear'|'pchip'|'cubic'|'quad'|'n2linear'|...)``.
+``Model(interp_ssp=None|'linear'|'pchip'|'cubic'|'quad'|'n2linear'|'analytic')``.
+``None`` (default) auto-picks ``'quad'`` when ``env.has_range_dependent_ssp()``
+is true (Bellhop's external ``.ssp`` path) and ``'linear'`` otherwise.
 Each AT-family wrapper exposes it; values map onto AT's ``TopOpt(1)``
-character. When ``env.ssp.shape`` implies a code (``'munk'`` →
-``'A'`` for Bellhop's native Munk path, ``'n2linear'`` → ``'N'``,
-``'isovelocity'`` → ``'C'``, ``'analytic'`` → ``'A'``), the shape wins
-over the model's ``interp_ssp``.
+character. Only ``env.ssp.shape == 'isovelocity'`` overrides the
+model's choice (forces ``'C'`` — any connection scheme over constant
+data is constant). The other shapes (``'munk'``, ``'analytic'``,
+``'n2linear'``, ``'measured'``) are informational metadata.
 
-**Bellhop honours range-dependent SSP only when
-``Bellhop(interp_ssp='quad')``** (writes the external ``.ssp`` file);
-any other ``interp_ssp`` collapses the SSP to 1-D via the model's
-``collapse['ssp']`` policy with one tailored warning.
+**Bellhop honours range-dependent SSP only when the effective
+``interp_ssp`` is ``'quad'``** (``None`` auto-picks it when the env is
+RD-SSP; ``'quad'`` can also be set explicitly). Any other effective
+value collapses the SSP to 1-D via the model's ``collapse['ssp']``
+policy with one tailored warning.
 
 Useful methods:
 - `eval(range=…, depth=…, interp='linear'|'nearest')` — label-based

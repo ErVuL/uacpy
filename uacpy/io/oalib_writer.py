@@ -272,7 +272,7 @@ def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> Non
     """
     if params is None or len(params) != 4:
         raise ValueError(
-            "francois_garrison_params must be a 4-tuple (T, S, pH, z_bar)"
+            "write_fg_params: params must be a 4-tuple (T, S, pH, z_bar)"
         )
     T, S, pH, z_bar = params
     f.write(f"{T:.4f} {S:.4f} {pH:.4f} {z_bar:.4f}\n")
