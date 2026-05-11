@@ -294,7 +294,8 @@ class _KrakenBase(PropagationModel):
 
             write_bottom_section(
                 f, env,
-                bottom_type=bottom_type
+                bottom_type=bottom_type,
+                emit_reflection_table_block=False,
             )
 
             # KRAKEN-SPECIFIC SECTIONS

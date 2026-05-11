@@ -329,15 +329,12 @@ def resolve_phase_speed_bounds(
     env: Environment,
     c_low: Optional[float] = None,
     c_high: Optional[float] = None,
-    brc_overrides: Optional[Tuple[float, float]] = None,
 ) -> Tuple[float, float]:
     """Resolve effective ``(c_low, c_high)`` for an AT-family run.
 
     Precedence (same logic used by :func:`write_phase_speed_and_rmax`):
       1. Explicit caller values win.
-      2. ``brc_overrides=(cmin, cmax)`` fills missing values for ``F``-table
-         bottoms.
-      3. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
+      2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
          ``c_high = max(c_max, env.bottom.sound_speed) · C_HIGH_FACTOR``.
 
     Useful for model wrappers that want to log the resolved values
@@ -345,12 +342,6 @@ def resolve_phase_speed_bounds(
     """
     if c_low is not None and c_high is not None:
         return float(c_low), float(c_high)
-    if brc_overrides is not None:
-        brc_low, brc_high = brc_overrides
-        return (
-            float(c_low) if c_low is not None else float(brc_low),
-            float(c_high) if c_high is not None else float(brc_high),
-        )
     ssp_pairs = env.ssp.to_pairs()
     c_min = float(ssp_pairs[:, 1].min())
     hs_c = env.halfspace_at_range(0.0).sound_speed
@@ -368,34 +359,20 @@ def write_phase_speed_and_rmax(
     rmax_m: float,
     c_low: Optional[float] = None,
     c_high: Optional[float] = None,
-    brc_overrides: Optional[Tuple[float, float]] = None,
     rmax_format: str = "{:.1f}",
 ) -> None:
     """Write the cLow/cHigh phase-speed line and the RMax (km) line.
 
     cLow/cHigh resolve in this order:
       1. Explicit ``c_low`` / ``c_high`` (caller-supplied user override).
-      2. ``brc_overrides=(cmin, cmax)`` for ``F``-table bottoms.
-      3. SSP-derived: ``c_min·C_LOW_FACTOR`` and
+      2. SSP-derived: ``c_min·C_LOW_FACTOR`` and
          ``max(c_max, env.bottom.sound_speed)·C_HIGH_FACTOR``.
 
     ``rmax_m`` is converted to km. ``rmax_format`` controls the Fortran
     print width (Scooter/SPARC use ``"{:.6f}"`` to preserve sub-km
     precision; Kraken/KrakenField use the ``"{:.1f}"`` default).
     """
-    if c_low is not None and c_high is not None:
-        _c_low, _c_high = c_low, c_high
-    elif brc_overrides is not None:
-        brc_low, brc_high = brc_overrides
-        _c_low = c_low if c_low is not None else brc_low
-        _c_high = c_high if c_high is not None else brc_high
-    else:
-        ssp_pairs = env.ssp.to_pairs()
-        c_min = float(ssp_pairs[:, 1].min())
-        hs_c = env.halfspace_at_range(0.0).sound_speed
-        c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
-        _c_low = c_low if c_low is not None else c_min * C_LOW_FACTOR
-        _c_high = c_high if c_high is not None else c_max * C_HIGH_FACTOR
+    _c_low, _c_high = resolve_phase_speed_bounds(env, c_low, c_high)
     f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
     f.write(rmax_format.format(rmax_m / 1000.0) + "\n")
 
@@ -501,6 +478,9 @@ def write_bottom_section(
     halfspace_depth: Optional[float] = None,
     halfspace_alpha_s_source: str = 'zero',
     emit_reflection_table_block: bool = True,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    rmax: Optional[float] = None,
 ) -> None:
     """
     Write bottom boundary section
@@ -531,6 +511,10 @@ def write_bottom_section(
         emit the cmin/cmax/RMax bounds line that Kraken/Bounce expect.
         Scooter writes those bounds via ``write_phase_speed_and_rmax``
         instead and so passes ``False``.
+    c_low, c_high, rmax : float, required when
+        ``emit_reflection_table_block`` is ``True`` AND the bottom is type
+        ``'F'``. Phase-velocity sampling bounds (m/s) and angle-resolution
+        range (m) for the model that reads the ``.brc`` table.
     """
     hs = env.halfspace_at_range(0.0)
     if bottom_type is None:
@@ -572,11 +556,14 @@ def write_bottom_section(
             )
 
         if emit_reflection_table_block:
-            cmin = getattr(hs, 'reflection_cmin', 1400.0)
-            cmax = getattr(hs, 'reflection_cmax', 10000.0)
-            rmax_m = getattr(hs, 'reflection_rmax', 10000.0)
-            f.write(f"{cmin:.2f}  {cmax:.2f}\n")
-            f.write(f"{rmax_m / 1000.0:.2f}\n")
+            if c_low is None or c_high is None or rmax is None:
+                raise ValueError(
+                    "write_bottom_section: acoustic_type='file' with "
+                    "emit_reflection_table_block=True requires "
+                    "c_low, c_high, rmax to be passed by the caller."
+                )
+            f.write(f"{float(c_low):.2f}  {float(c_high):.2f}\n")
+            f.write(f"{float(rmax) / 1000.0:.2f}\n")
 
     elif bottom_code == 'A':  # Half-space
         if halfspace_depth is not None:
@@ -833,6 +820,7 @@ def write_multi_profile_env(
                 filepath=filepath,
                 verbose=kwargs.get('verbose', False),
                 halfspace_depth=hs_depth,
+                emit_reflection_table_block=False,
             )
 
             write_phase_speed_and_rmax(

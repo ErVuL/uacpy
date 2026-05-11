@@ -313,9 +313,6 @@ class TestModelConsistency:
             reflection_file=brc_file,
             sound_speed=1600,
             density=1.8,
-            reflection_cmin=bounce_result.metadata['c_low'],
-            reflection_cmax=bounce_result.metadata['c_high'],
-            reflection_rmax=bounce_result.metadata['rmax'],
         )
         env_with_rc = Environment(
             name="test_with_rc",
@@ -324,17 +321,26 @@ class TestModelConsistency:
             bottom=bottom_with_rc,
         )
 
+        c_low_brc = bounce_result.metadata['c_low']
+        c_high_brc = bounce_result.metadata['c_high']
+
         if downstream == "KrakenC":
-            modes = KrakenC(verbose=False).run(
-                env=env_with_rc, source=source, receiver=receiver_small,
-            )
+            modes = KrakenC(
+                verbose=False, c_low=c_low_brc, c_high=c_high_brc,
+            ).run(env=env_with_rc, source=source, receiver=receiver_small)
             assert modes.field_type == 'modes'
             assert modes.k is not None and len(modes.k) > 0
             assert modes.phi.shape[1] == len(modes.k)
             assert np.all(np.isfinite(modes.k))
         else:
             model_cls = {"Bellhop": Bellhop, "Scooter": Scooter}[downstream]
-            result = model_cls(verbose=False).compute_tl(
+            if downstream == "Scooter":
+                model = model_cls(
+                    verbose=False, c_low=c_low_brc, c_high=c_high_brc,
+                )
+            else:
+                model = model_cls(verbose=False)
+            result = model.compute_tl(
                 env=env_with_rc, source=source, receiver=receiver_small,
             )
             assert result.field_type == 'tl'

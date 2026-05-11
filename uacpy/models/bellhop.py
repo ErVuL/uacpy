@@ -338,9 +338,7 @@ class Bellhop(PropagationModel):
             'S' (simple Gaussian). Default: 'B'.
         n_beams : int
             Number of beams. Passing 0 defers to Bellhop's conservative
-            auto-selection (NBEAMS<=0 in the Fortran reader); uacpy
-            writes the value through as-is rather than substituting
-            ``source.n_angles``. Default: 0.
+            auto-selection (NBEAMS<=0 in the Fortran reader). Default: 0.
         alpha : tuple
             Launch angle limits (min, max) in degrees. Default: (-80, 80).
         step : float
@@ -889,9 +887,6 @@ class Bellhop(PropagationModel):
             env_bounce.bottom = BoundaryProperties(
                 acoustic_type='file',
                 reflection_file=brc_file,
-                reflection_cmin=c_low,
-                reflection_cmax=c_high,
-                reflection_rmax=rmax,
             )
 
             self._log("Running Bellhop with BOUNCE reflection coefficients...")

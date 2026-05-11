@@ -63,7 +63,7 @@ def write_bellhop_env_file(
     env : Environment
         Environment definition (SSP, bathymetry, boundaries)
     source : Source
-        Source definition (depth, frequency, beam angles)
+        Source definition (depths, frequencies, source geometry)
     receiver : Receiver
         Receiver definition (depths, ranges)
     run_type : str, optional
@@ -109,8 +109,8 @@ def write_bellhop_env_file(
         on boundary reflections per Beam%Type(4:4)
         (ReadEnvironmentBell.f90:159-166). Default: False (no shift).
     n_beams : int, optional
-        Number of beams. If 0, uses source.n_angles. Bellhop picks a
-        conservative default in that case.
+        Number of beams. ``0`` defers to Bellhop's conservative
+        auto-selection (NBEAMS<=0 in the Fortran reader).
     alpha : tuple, optional
         Launch angle limits (min, max) in degrees. Default is (-80, 80).
     step : float, optional
@@ -139,10 +139,6 @@ def write_bellhop_env_file(
     For range-dependent bathymetry, automatically generates a .bty file.
     For range-dependent SSP with Quad interpolation, generates a .ssp file.
     """
-    # Bellhop treats NBEAMS <= 0 as "pick conservatively" (it auto-
-    # selects based on geometry). Honor the user's intent: passing
-    # n_beams=0 defers to Bellhop rather than silently substituting
-    # source.n_angles.
     if n_beams is None:
         n_beams = 0
 

@@ -21,10 +21,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
-from uacpy.core.constants import (
-    parse_boundary_type,
-    DEFAULT_C_MIN, DEFAULT_C_MAX,
-)
+from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import (
     write_absorption_block, write_bottom_section, write_broadband_freqs,
@@ -430,10 +427,9 @@ class Scooter(PropagationModel):
             # Write sediment layers if layered bottom
             write_layer_sections(f, env, env.depth)
 
-            # Bottom section. Scooter honours real shear attenuation on the
-            # 'A' halfspace line and writes its own cLow/cHigh/RMax block,
-            # so the F-type reflection-table bounds line is suppressed.
-            bottom_code = bottom_type.to_acoustics_toolbox_code()
+            # Scooter honours real shear attenuation on the 'A' halfspace
+            # line and writes cLow/cHigh/RMax via write_phase_speed_and_rmax,
+            # so the F-type reflection-table bounds line is suppressed here.
             write_bottom_section(
                 f, env,
                 bottom_type=bottom_type,
@@ -443,19 +439,8 @@ class Scooter(PropagationModel):
             )
 
             rmax_m = float(receiver.ranges.max()) * self.rmax_multiplier
-            if bottom_code == 'F':
-                hs = env.halfspace_at_range(0.0)
-                brc_overrides = (
-                    getattr(hs, 'reflection_cmin', DEFAULT_C_MIN),
-                    getattr(hs, 'reflection_cmax', DEFAULT_C_MAX),
-                )
-            else:
-                brc_overrides = None
             from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-            cl, ch = resolve_phase_speed_bounds(
-                env, self.c_low, self.c_high,
-                brc_overrides=brc_overrides,
-            )
+            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
             if self.c_low is None or self.c_high is None:
                 self._log(
                     f"c_low / c_high auto-derived = "
@@ -465,7 +450,6 @@ class Scooter(PropagationModel):
                 f, env,
                 rmax_m=rmax_m,
                 c_low=cl, c_high=ch,
-                brc_overrides=brc_overrides,
                 rmax_format="{:.6f}",
             )
 

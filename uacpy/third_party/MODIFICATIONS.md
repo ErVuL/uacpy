@@ -970,23 +970,19 @@ to sweep ~500 frequencies per COHERENT_TL call.
 
 ### Scooter BRC RMax — wrapper bug fix
 
-`models/scooter.py:_write_scooter_env` previously fed
-`BoundaryProperties.reflection_rmax` directly as Scooter's spectral
-RMax for `acoustic_type='file'` bottoms. Those are different concepts:
-`reflection_rmax` bounds the BRC tabulation, while Scooter's RMax
-sets the wavenumber-integration grid via `Δk = π / RMax`. With
-`reflection_rmax=10` (a typical BRC sampling), Scooter computed
-`Nk=2` and stabilising `atten ≈ 0.3` — the in-tree Hankel transform
-then overflowed `exp(atten · r)` past machine range at any meaningful
-receiver distance.
+`models/scooter.py:_write_scooter_env` derives Scooter's spectral
+RMax from `receiver.ranges.max() * rmax_multiplier` for all bottom
+types, matching `ReadEnvironmentMod.f90:133-140`. Scooter's RMax
+sets the wavenumber-integration grid via `Δk = π / RMax`, so the
+value must reflect the receiver geometry, not any tabulation-side
+parameter.
 
-The writer now derives RMax from `receiver.ranges.max() *
-rmax_multiplier` for all bottom types, matching `ReadEnvironmentMod.f90:
-133-140`. `reflection_cmin/cmax` are still used as the phase-speed
-window when the bottom is `'F'` (BRC tabulation only spans those
-phase speeds).
+For `acoustic_type='file'` bottoms, the phase-velocity window
+(`c_low`, `c_high`) is set on the consuming model
+(`Scooter(c_low=…, c_high=…)`); it is independent of the BRC
+tabulation grid.
 
-- `models/scooter.py:565-577` — unconditional spectral RMax derivation
+- `models/scooter.py` — unconditional spectral RMax derivation
 - `tests/test_elastic_boundaries.py` — regression test gating this
 
 ### `output_reader.py` shim removed

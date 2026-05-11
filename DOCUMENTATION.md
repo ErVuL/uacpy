@@ -72,7 +72,7 @@ Environment + Source + Receiver  →  Model.run()  →  Result
 ```
 
 - **`Environment`** — water column: bathymetry, SSP, surface, bottom.
-- **`Source`** — depth(s), frequency(ies), launch angles, beam pattern.
+- **`Source`** — depth(s), frequency(ies), source geometry ('point' / 'line').
 - **`Receiver`** — grid or paired line of hydrophones.
 - **`Result`** — concrete typed subclass, one per output kind (see §6).
 
@@ -311,12 +311,13 @@ BoundaryProperties(
     shear_attenuation=0.0,       # dB/λ
     grain_size_phi=1.0,          # acoustic_type='grain-size'
     reflection_file=None,        # acoustic_type='file' → .brc / .trc path
-    reflection_cmin=1400.0,      # tabulation bounds for reflection_file
-    reflection_cmax=10000.0,
-    reflection_rmax=10000.0,
     roughness=0.0,               # RMS (m)
 )
 ```
+
+Phase-velocity sampling bounds for ``acoustic_type='file'`` live on the
+consuming model (``Kraken(c_low=…, c_high=…)``, ``Scooter(c_low=…,
+c_high=…)``), not on this object.
 
 ### Materials catalog
 

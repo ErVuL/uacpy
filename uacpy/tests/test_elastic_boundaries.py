@@ -248,9 +248,6 @@ class TestBounceToScooterWorkflow:
             sound_speed=1600.0,
             density=1.8,
             attenuation=0.2,
-            reflection_cmin=1400.0,
-            reflection_cmax=10000.0,
-            reflection_rmax=10.0
         )
 
         env_with_rc = Environment(
@@ -260,7 +257,7 @@ class TestBounceToScooterWorkflow:
             bottom=bottom_with_file
         )
 
-        scooter = Scooter(verbose=False)
+        scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
         result_with_file = scooter.compute_tl(env_with_rc, source, receiver_small)
 
         # Workflow 2: Direct elastic
@@ -325,9 +322,6 @@ class TestWorkflowComparison:
             sound_speed=1600.0,
             density=1.8,
             attenuation=0.2,
-            reflection_cmin=1400.0,
-            reflection_cmax=10000.0,
-            reflection_rmax=10.0
         )
 
         env_with_rc = Environment(
@@ -337,7 +331,7 @@ class TestWorkflowComparison:
             bottom=bottom_with_file
         )
 
-        scooter = Scooter(verbose=False)
+        scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
         result_scooter = scooter.compute_tl(env_with_rc, source, receiver_small)
 
         # Both should produce valid results
