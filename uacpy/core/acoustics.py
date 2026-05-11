@@ -64,11 +64,38 @@ def soundspeed(
     >>> c = soundspeed(temperature=25, depth=20)
     >>> print(f"Sound speed: {c:.1f} m/s")
 
+    Notes
+    -----
+    Mackenzie's nine-term formula is validated for
+    ``temperature ∈ [-2, 30] °C``, ``salinity ∈ [25, 40] PSU``,
+    ``depth ∈ [0, 8000] m``. Values outside these ranges trigger a
+    :class:`UserWarning` and the formula's output should be treated as
+    extrapolation.
+
     References
     ----------
     Mackenzie, K. V. (1981). "Nine-term equation for sound speed in the oceans".
     The Journal of the Acoustical Society of America, 70(3), 807-812.
     """
+    import warnings as _warnings
+    if np.any(np.asarray(temperature) < -2) or np.any(np.asarray(temperature) > 30):
+        _warnings.warn(
+            "Mackenzie soundspeed: temperature outside validated range "
+            "[-2, 30] °C; treating as extrapolation.",
+            UserWarning, stacklevel=2,
+        )
+    if np.any(np.asarray(salinity) < 25) or np.any(np.asarray(salinity) > 40):
+        _warnings.warn(
+            "Mackenzie soundspeed: salinity outside validated range "
+            "[25, 40] PSU; treating as extrapolation.",
+            UserWarning, stacklevel=2,
+        )
+    if np.any(np.asarray(depth) < 0) or np.any(np.asarray(depth) > 8000):
+        _warnings.warn(
+            "Mackenzie soundspeed: depth outside validated range "
+            "[0, 8000] m; treating as extrapolation.",
+            UserWarning, stacklevel=2,
+        )
     c = (
         1448.96
         + 4.591 * temperature

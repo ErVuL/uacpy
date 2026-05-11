@@ -36,35 +36,30 @@ def _write_oases_header(
     f.write(f"{options}\n")
 
 
-def _inject_volume_attenuation(options: str, volume_attenuation: Optional[str]) -> str:
-    """Append a volume-attenuation marker character to the OASES option string.
+def _inject_volume_attenuation(options: str, env: 'Environment') -> str:
+    """Append the ``env.absorption`` marker character to the OASES option string.
 
     OASES itself does not implement dedicated T (Thorp) / F (Francois-Garrison) /
     B (biological) option letters — empirical Skretting & Leroy attenuation is
-    applied automatically to any water layer with AC=0. This helper ensures the
-    uacpy-level ``volume_attenuation`` parameter flows through to the option
-    string so downstream tools and the user can still see that a specific model
-    was requested. OASES prints ``UNKNOWN OPTION`` for letters it does not
-    recognise but still runs to completion.
+    applied automatically to any water layer with AC=0. This helper records the
+    user's chosen formula in the option string so downstream tools and the user
+    can still see what was requested. OASES prints ``UNKNOWN OPTION`` for
+    letters it does not recognise but still runs to completion.
 
     Parameters
     ----------
     options : str
         Existing option string. May contain whitespace separators.
-    volume_attenuation : str or None
-        One of 'T', 'F', 'B' (case-insensitive) or None.
+    env : Environment
+        Environment whose ``absorption`` field drives the marker.
     """
-    if volume_attenuation is None:
+    absorption = getattr(env, 'absorption', None)
+    if absorption is None:
         return options
-    marker = str(volume_attenuation).strip()
-    if not marker:
+    marker = absorption.topopt_code()
+    if marker not in ('T', 'F', 'B'):
         return options
-    marker = marker[0]  # single-letter option
-    if marker not in ('T', 'F', 'B', 't', 'f', 'b'):
-        return options
-    # Only append if not already present as a standalone letter.
-    tokens = options.split()
-    if marker in tokens:
+    if marker in options.split():
         return options
     return options + ' ' + marker
 
@@ -236,10 +231,10 @@ def _format_upper_halfspace(env: Environment) -> str:
     else:
         atype = str(acoustic_type).lower()
 
+    # OASES layer format: D CC CS AC AS RO RG IG (8 columns).
     if 'vacuum' in atype:
-        return "0 0 0 0 0 0 0"
+        return "0 0 0 0 0 0 0 0"
 
-    # Elastic / half-space / rigid surface (e.g. ice)
     c_p = getattr(surface, 'sound_speed', 0.0) or 0.0
     c_s = getattr(surface, 'shear_speed', 0.0) or 0.0
     alpha_p = getattr(surface, 'attenuation', 0.0) or 0.0
@@ -247,9 +242,6 @@ def _format_upper_halfspace(env: Environment) -> str:
     rho = getattr(surface, 'density', 0.0) or 0.0
 
     if 'rigid' in atype:
-        # OASES has no native "rigid" upper-halfspace token; the closest
-        # representation is a high-impedance halfspace. Emit one and warn
-        # so the user knows the BC is not strictly rigid.
         warnings.warn(
             "OASES does not natively support a rigid upper halfspace; "
             "emitting a high-impedance fluid halfspace (cp=4000, rho=2.5) "
@@ -258,10 +250,10 @@ def _format_upper_halfspace(env: Environment) -> str:
             "physically exact OASES top BCs.",
             UserWarning, stacklevel=3,
         )
-        return "0 4000.0 0.0 0.000 0.000 2.50 0"
+        return "0 4000.0 0.0 0.000 0.000 2.50 0 0"
 
     return (f"0 {c_p:.2f} {c_s:.2f} {alpha_p:.3f} "
-            f"{alpha_s:.3f} {rho:.2f} 0")
+            f"{alpha_s:.3f} {rho:.2f} 0 0")
 
 
 def _receiver_block_lines(
@@ -403,7 +395,7 @@ def write_oast_input(
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
     plot_rmin = kwargs.get('plot_rmin', 0.0)            # metres (public API)
     plot_rmax = kwargs.get('plot_rmax', r_max)          # metres (public API)
-    volume_attenuation = kwargs.get('volume_attenuation', None)
+    
 
     # Get reference sound speed for plot axes
     c_ref = float(ssp_data[0, 1])  # Sound speed at surface
@@ -411,7 +403,7 @@ def write_oast_input(
     # Options string
     if options is None:
         options = 'N J T'  # Normal stress, complex contour, TL vs range
-    options = _inject_volume_attenuation(options, volume_attenuation)
+    options = _inject_volume_attenuation(options, env)
 
     freq_min, freq_max, nfreq = _resolve_freq_sweep(source, freq)
 
@@ -663,8 +655,8 @@ def write_oasn_input(
     # Options string
     if options is None:
         options = 'N J'  # Covariance output, complex contour
-    volume_attenuation = kwargs.get('volume_attenuation', None)
-    options = _inject_volume_attenuation(options, volume_attenuation)
+    
+    options = _inject_volume_attenuation(options, env)
 
     # Integration parameters
     integration_offset = kwargs.get('integration_offset', 0)
@@ -688,7 +680,7 @@ def write_oasn_input(
         f.write(f"{n_layers}\n")
 
         # Upper halfspace (from env.surface)
-        f.write(f"{_format_upper_halfspace(env)} 0\n")
+        f.write(f"{_format_upper_halfspace(env)}\n")
 
         # Water layers from SSP using OASES Airy-layer convention.
         # Per oaseun31.f:160-192, the SSP-gradient signal is:
@@ -919,8 +911,8 @@ def write_oasp_input(
     # Options string
     if options is None:
         options = 'N V J'  # Normal stress, vertical velocity, complex contour
-    volume_attenuation = kwargs.get('volume_attenuation', None)
-    options = _inject_volume_attenuation(options, volume_attenuation)
+    
+    options = _inject_volume_attenuation(options, env)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OASP Simulation via UACPY")
@@ -937,7 +929,7 @@ def write_oasp_input(
         f.write(f"{n_layers}\n")
 
         # Upper halfspace (from env.surface)
-        f.write(f"{_format_upper_halfspace(env)} 0\n")
+        f.write(f"{_format_upper_halfspace(env)}\n")
 
         # Water layers from SSP
         for i in range(len(ssp_data)):
@@ -1148,8 +1140,8 @@ def write_oasr_input(
     if options is None:
         opt_letter = _REFL_TYPE_TO_OPTION[reflection_type]
         options = f"{opt_letter} T"
-    volume_attenuation = kwargs.get('volume_attenuation', None)
-    options = _inject_volume_attenuation(options, volume_attenuation)
+    
+    options = _inject_volume_attenuation(options, env)
 
     # Interface roughness (RG / CL / M) per interface (B13 #6).
     # Indexed starting at 0 = upper-halfspace/surface interface; None -> no roughness.

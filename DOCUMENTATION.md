@@ -109,7 +109,10 @@ emits reflection coefficients).
 ```python
 Model(
     use_tmpfs=False,          # tmpfs scratch I/O (Linux, faster)
-    verbose=False,            # per-step progress
+    verbose=False,            # bool | 'off'/'silent' | 'info' | 'debug'.
+                              #   False ⇒ WARN+ERROR only; True/'info' ⇒ +INFO;
+                              #   'debug' ⇒ +DEBUG (subprocess command lines,
+                              #   per-frequency grid resolution, etc.)
     work_dir=None,            # pin scratch dir; None ⇒ temp dir
     cleanup=None,             # None ⇒ True iff uacpy owns the work dir
     timeout=600.0,            # subprocess timeout (s) per binary call
@@ -127,11 +130,16 @@ Model(
 ```
 
 **Configuration is constructor-only.** Every tuning knob (beam_type, dr,
-volume_attenuation, …) is set when you build the wrapper. To sweep
-parameters, construct one model per parameter set. `run()` accepts only
-the standard `(env, source, receiver, run_mode, frequencies,
-source_waveform, sample_rate)` plus narrow per-model writer
-pass-through.
+…) is set when you build the wrapper. To sweep parameters, construct one
+model per parameter set. `run()` accepts only the standard
+`(env, source, receiver, run_mode, frequencies, source_waveform,
+sample_rate)` plus narrow per-model writer pass-through.
+
+Volume absorption is environmental, not model-level: attach a
+`Thorp()` / `FrancoisGarrison(...)` / `Biological(...)` /
+`ConstantAbsorption(...)` to `env.absorption` once and every model
+inspects it to write TopOpt(4) and the supporting per-formula lines.
+See *Volume Absorption* below.
 
 **Mode-specific kwargs.** Every `RunMode.TIME_SERIES`-capable wrapper
 (Bellhop, Scooter, KrakenField, OASP, RAM) takes `source_waveform=` +
@@ -191,6 +199,25 @@ Scooter / Kraken / KrakenC). Bellhop's auto-route through BOUNCE
 handles its own work-dir lifecycle internally; the user never needs
 to manage it.
 
+### Status output
+
+Status text from every uacpy module — models, writers, readers — flows
+through a single `uacpy._log.log_message(source, message, *, verbose,
+level)` helper. `WARN` / `ERROR` always print; `INFO` / `DEBUG` print
+only when `verbose` opts in. Format:
+
+```
+[YYYY/MM/DD HH:MM:SS UTC] [LEVEL] [source] message
+```
+
+User-facing problems still go through `warnings.warn(UserWarning, ...)`
+so `pytest.warns(...)`, `simplefilter('error')`, and
+`@pytest.mark.filterwarnings(...)` keep working. uacpy installs a custom
+`warnings.formatwarning` at import time that renders warnings in the
+same `[ts] [WARN] [module:lineno] message` shape as `log_message`, so
+your run-log reads uniformly without losing any of Python's warning
+machinery.
+
 ### Typed exceptions (all inherit `UACPYError`)
 
 | Exception | Raised when |
@@ -219,7 +246,8 @@ uacpy.Environment(
     bottom = None,              # BoundaryProperties / RD / Layered / RDL
                                 #   (default: fluid half-space c=1600, ρ=1.5, α=0.5)
     surface = None,             # BoundaryProperties (default: vacuum / pressure-release)
-    volume_attenuation = 0.0,   # water-column attenuation (dB/λ)
+    absorption = None,          # Absorption: Thorp / FrancoisGarrison /
+                                #   Biological / ConstantAbsorption (default: None)
     *, name = 'unnamed',
 )
 ```
@@ -383,6 +411,48 @@ Per-feature collapse is the canonical path: pass `collapse={…}` on the
 model constructor (see §5.2). uacpy auto-collapses any axis the chosen
 model can't honour natively, with one `UserWarning` per axis.
 
+### Volume absorption
+
+Water-column absorption is environmental: attach an `Absorption`
+subclass to `env.absorption`. Every AT-family model reads it to set
+TopOpt position 4 and write the supporting per-formula lines.
+
+```python
+from uacpy import (
+    Thorp, FrancoisGarrison, Biological, BiologicalLayer,
+    ConstantAbsorption,
+)
+
+env = uacpy.Environment(bathymetry=100, ssp=1500,
+                        absorption=Thorp())                 # TopOpt(4)='T'
+
+env = uacpy.Environment(bathymetry=100, ssp=1500,
+                        absorption=FrancoisGarrison(        # TopOpt(4)='F'
+                            temperature_c=10, salinity_psu=35,
+                            pH=8.0, z_bar_m=100))
+
+env = uacpy.Environment(bathymetry=100, ssp=1500,
+                        absorption=Biological([             # TopOpt(4)='B'
+                            BiologicalLayer(z_top_m=10, z_bottom_m=60,
+                                            f0_hz=400.0, Q=5.0, a0=0.6),
+                        ]))
+
+env = uacpy.Environment(bathymetry=100, ssp=1500,
+                        absorption=ConstantAbsorption(0.3)) # alphaI baseline
+```
+
+`None` (default) means no volume absorption. `ConstantAbsorption(v)`
+writes the value into every SSP row's `alphaI` column (dB/wavelength) —
+useful when you have a calibrated value that isn't Thorp/FG. The choice
+is read by Bellhop, Kraken, KrakenC, KrakenField, Scooter, SPARC, Bounce,
+OAST, OASN, OASR, OASP. RAM uses Q/T attenuation envelopes internally
+and ignores this field.
+
+For modal-perturbation post-processing, `Modes.with_attenuation` accepts
+either `alpha_db_per_m=` (a scalar or `α(z)` array) or
+`absorption=Thorp()` / `absorption=FrancoisGarrison(...)`. Other
+Absorption subclasses are not supported by the modal kernel.
+
 ---
 
 ## 4. Source & Receiver
@@ -507,7 +577,6 @@ and broadband synthesis via the arrivals → `H(f)` → IFFT pipeline.
 from uacpy.models import Bellhop, RunMode
 bh = Bellhop(beam_type='B',          # B Gaussian | R ray-centered | C Cartesian | g/G geometric
              alpha=(-80, 80),         # launch-angle limits (deg)
-             volume_attenuation=None, # 'T' Thorp | 'F' Francois–Garrison | 'B' Biological
              arrivals_format='ascii') # 'binary' (Fortran unformatted) is not parseable
 field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
@@ -525,8 +594,6 @@ trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
 - Layered / RDLB / elastic bottoms auto-route through BOUNCE (§5.2).
 - `Bellhop3D` is a stub — the env writer is 2-D only, 3-D arrivals
   parsing is not implemented.
-- `attenuation_unit='m'` (power-law) is rejected — uacpy has no env
-  field for the BETA exponent.
 - Bellhop is the only model that natively writes a multi-source-depth
   grid; everyone else loops in Python.
 
@@ -541,10 +608,9 @@ arithmetic. **Kraken auto-routes to `krakenc.exe`** when it sees
 
 ```python
 from uacpy.models import Kraken, KrakenC
-modes = Kraken(c_low=None, c_high=None,        # None ⇒ 0.95 × min SSP / 1.05 × max SSP+bottom
-               n_mesh=0,                        # 0 ⇒ auto
-               leaky_modes=False,               # True ⇒ override c_high to 1e9
-               volume_attenuation=None) \
+modes = Kraken(c_low=None, c_high=None,   # None ⇒ 0.95 × min SSP / 1.05 × max SSP+bottom
+               n_mesh=0,                   # 0 ⇒ auto
+               leaky_modes=False) \
         .run(env, source, receiver)
 modes.k          # complex wavenumbers, shape (M,)
 modes.phi        # (n_z, M) eigenfunctions
@@ -726,9 +792,11 @@ Examples: 15, 16.
 
 ### 5.10 OASES — OAST / OASN / OASR / OASP
 
-Four sub-models mirror the OASES Fortran utilities. All four take the
-standard `volume_attenuation` / `francois_garrison_params` /
-`bio_layers` triple plus the usual plumbing kwargs.
+Four sub-models mirror the OASES Fortran utilities. Volume absorption is
+read from `env.absorption` like every other AT-family model; the chosen
+formula's single-letter marker is appended to the OASES options string
+(OASES uses empirical Skretting–Leroy internally, so the marker is
+informational rather than a physics switch).
 
 ```python
 from uacpy.models import OAST, OASN, OASR, OASP, OASES
@@ -1100,7 +1168,7 @@ Example: 09.
 | Frequency / sample rate | Hz | |
 | Time | s | |
 | Launch / grazing angle | degrees | negative = upward, 0 = horizontal |
-| Attenuation | dB / wavelength (dB/λ) | Acoustics-Toolbox standard |
+| Attenuation | dB / wavelength (dB/λ) | uacpy stores **every** attenuation field in this unit. AT TopOpt(3) is hard-wired to ``'W'``. |
 | Transmission loss | dB | TL = −20·log₁₀(\|p\|/\|p₀\|) |
 | Density | g/cm³ | water ≈ 1.0; sediment 1.2–2.5 |
 | Source level | dB re 1 µPa @ 1 m | |

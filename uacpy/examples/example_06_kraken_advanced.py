@@ -92,7 +92,7 @@ def main():
         name="Continental Shelf - Mode Coupling",
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
         bathymetry=bathymetry,
-        bottom=bottom_rd
+        bottom=bottom_rd,
     )
 
     print(f"  ✓ Range-dependent: {env.is_range_dependent}")
@@ -114,12 +114,12 @@ def main():
 
     print("\n[1/4] Computing modes with Francois-Garrison attenuation...")
 
-    # Francois-Garrison requires (T [°C], S [ppt], pH, z_bar [m])
-    fg_params = (10.0, 35.0, 8.0, 50.0)
+    # Francois-Garrison: (T °C, S PSU, pH, z_bar m) lives on Environment
+    fg = uacpy.FrancoisGarrison(
+        temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
+    )
     kraken = Kraken(
         verbose=False,
-        volume_attenuation='F',
-        francois_garrison_params=fg_params,
     )
 
     # Compute modes for first range (shallow water)
@@ -129,7 +129,8 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100], interp='pchip',
         ),
-        bottom=bottom_rd.eval(range=0, interp='nearest')
+        bottom=bottom_rd.eval(range=0, interp='nearest'),
+        absorption=fg,
     )
 
     modes_shallow = kraken.compute_modes(env_shallow, source)
@@ -141,14 +142,13 @@ def main():
         name="Slope (400m)",
         bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data, interp='pchip'),
-        bottom=bottom_rd.eval(range=20000, interp='nearest')
+        bottom=bottom_rd.eval(range=20000, interp='nearest'),
+        absorption=fg,
     )
 
     # Deep environment has shear_speed > 0 (rocky bottom); use KrakenC for complex modes.
     krakenc_deep = KrakenC(
         verbose=False,
-        volume_attenuation='F',
-        francois_garrison_params=fg_params,
     )
     modes_deep = krakenc_deep.compute_modes(env_deep, source)
     n_modes_deep = len(modes_deep.k)
@@ -182,8 +182,6 @@ def main():
     try:
         krakenc = KrakenC(
             verbose=False,
-            volume_attenuation='F',
-            francois_garrison_params=fg_params,
         )
 
         # Use environment with elastic bottom for complex mode computation

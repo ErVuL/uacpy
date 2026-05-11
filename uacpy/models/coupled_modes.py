@@ -111,7 +111,7 @@ def segment_environment_by_range(
             bathymetry=depth_at_range,
             bottom=bottom_segment,
             surface=env.surface,
-            volume_attenuation=env.volume_attenuation,
+            absorption=env.absorption,
         )
 
         segments.append((r, env_segment))

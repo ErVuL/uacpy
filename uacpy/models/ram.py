@@ -33,7 +33,7 @@ import os
 import time
 import warnings
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Union
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from uacpy.models.base import PropagationModel, RunMode
@@ -194,6 +194,21 @@ class RAM(PropagationModel):
         Print detailed output. Default: False.
     work_dir : Path, optional
         Working directory. If None, creates temporary.
+
+    Notes
+    -----
+    Defaults auto-derived at ``run()`` time:
+
+    - ``dr=None`` / ``dz=None`` → Lytaev (2023) Padé-error optimizer
+      picks the coarsest grid that meets ``accuracy``.
+    - ``zmax=None`` → ``_compute_zmax`` (water + absorbing layer).
+    - ``c0=None`` → Lytaev Eq. (15) from speed spectrum.
+    - ``Q`` / ``T`` → narrowband ``(1e6, 1.0)`` for ``COHERENT_TL``,
+      broadband ``(2.0, 10.0)`` for ``BROADBAND`` / ``TIME_SERIES``.
+    - Backend (mpiramS / rams0.5 / ramsurf1.5) picked by :meth:`select_backend`
+      from ``env`` shape.
+
+    With ``verbose='info'`` the resolved Padé grid is logged per frequency.
     """
 
     def __init__(
@@ -232,9 +247,9 @@ class RAM(PropagationModel):
         # long-range or unusually noisy runs.
         rams_dr_safety_factor: float = 5.0,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
-        **kwargs,
+        **kwargs
     ):
         """
         Parameters
@@ -308,7 +323,7 @@ class RAM(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            timeout=timeout, **kwargs,
+            timeout=timeout, **kwargs
         )
 
         self._supported_modes = [
@@ -429,7 +444,7 @@ class RAM(PropagationModel):
                 "domain bottom may contaminate the field. Typical values "
                 "are 5-10 dB/wavelength.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=2
             )
 
     def _resolve_c0(self, env: Environment) -> float:
@@ -539,7 +554,7 @@ class RAM(PropagationModel):
         ssp_filename = 'ssp.dat'
 
         if env.ssp.is_range_dependent:
-            self._log("Using 2D SSP matrix", level='info')
+            self._log("Using 2D SSP matrix")
             ranges_m = env.ssp.ranges.copy()
             ssp_depths = env.ssp.depths
 
@@ -575,7 +590,7 @@ class RAM(PropagationModel):
         return bth_filename, 1
 
     def _get_water_speed_at_bottom(
-        self, env: Environment, range: Optional[float] = None,
+        self, env: Environment, range: Optional[float] = None
     ) -> float:
         """
         Get the water-column sound speed at the nominal seafloor depth.
@@ -668,7 +683,7 @@ class RAM(PropagationModel):
             )
 
             self._log(f"Range-dependent layered sediment: {n_ranges} profiles, "
-                      f"nzs={nzs}, sedlayer={sedlayer_rdl:.1f} m", level='info')
+                      f"nzs={nzs}, sedlayer={sedlayer_rdl:.1f} m")
 
             cs = cs_profiles[:, 0].copy()
             rho_arr = rho_profiles[:, 0].copy()
@@ -698,7 +713,7 @@ class RAM(PropagationModel):
             attn_arr[-1] = self.absorbing_layer_attn
 
             self._log(f"Layered bottom: {len(layered.layers)} layers, "
-                      f"nzs={nzs}, sedlayer={sedlayer_lay:.1f} m", level='info')
+                      f"nzs={nzs}, sedlayer={sedlayer_lay:.1f} m")
 
             return sedlayer_lay, nzs, cs, rho_arr, attn_arr, 0, ''
 
@@ -740,7 +755,7 @@ class RAM(PropagationModel):
                 cs_profiles, rho_profiles, attn_profiles
             )
 
-            self._log(f"Range-dependent sediment: {n_ranges} profiles, nzs={nzs}", level='info')
+            self._log(f"Range-dependent sediment: {n_ranges} profiles, nzs={nzs}")
 
             cs = cs_profiles[:, 0].copy()
             rho_arr = rho_profiles[:, 0].copy()
@@ -865,8 +880,7 @@ class RAM(PropagationModel):
         rough = getattr(env, 'altimetry', None) is not None
         self._log(
             f"Dispatching to {backend} backend "
-            f"(elastic_bottom={elastic}, altimetry={rough})",
-            level='info',
+            f"(elastic_bottom={elastic}, altimetry={rough})"
         )
         self._warn_on_mpirams_only_overrides(backend)
         env = self._drop_unsupported_surface_shear(env)
@@ -884,7 +898,7 @@ class RAM(PropagationModel):
                 tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
-                    sample_rate=sample_rate,
+                    sample_rate=sample_rate
                 )
             return self._run_tl(env, source, receiver)
 
@@ -907,15 +921,15 @@ class RAM(PropagationModel):
                     f"transfer function H(f), use run_mode=RunMode.BROADBAND."
                 )
             tf = self._run_collins_broadband(
-                env, source, receiver, kind=backend,
+                env, source, receiver, kind=backend
             )
             return tf.synthesize_time_series(
                 source_waveform=source_waveform,
-                sample_rate=sample_rate,
+                sample_rate=sample_rate
             )
         raise UnsupportedFeatureError(
             f"RAM:{backend}", str(run_mode),
-            alternatives=[str(m) for m in self._supported_modes],
+            alternatives=[str(m) for m in self._supported_modes]
         )
 
     @staticmethod
@@ -984,7 +998,7 @@ class RAM(PropagationModel):
                     "OASES (range-independent elastic + rough)",
                     "drop env.altimetry to use rams0.5 (Collins elastic PE)",
                     "fluidise the bottom (set shear_speed=0) to use ramsurf1.5",
-                ],
+                ]
             )
         if elastic:
             return 'rams'
@@ -1002,7 +1016,7 @@ class RAM(PropagationModel):
         return self._find_executable_in_paths(
             names[kind],
             bin_subdirs=['ramsurf'],
-            dev_subdir='ramsurf',
+            dev_subdir='ramsurf'
         )
 
     def _theta_for_freq(self, freq: float) -> float:
@@ -1024,7 +1038,7 @@ class RAM(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        kind: str,
+        kind: str
     ) -> Result:
         """Run a Collins-family binary (rams0.5 / ramsurf1.5) at the
         source's centre frequency and return a TL Field.
@@ -1036,7 +1050,7 @@ class RAM(PropagationModel):
         fc = float(np.atleast_1d(source.frequencies)[0])
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc,
-            theta=self._theta_for_freq(fc),
+            theta=self._theta_for_freq(fc)
         )
 
         n_nonfinite = int(np.count_nonzero(~np.isfinite(raw['tl'])))
@@ -1047,7 +1061,7 @@ class RAM(PropagationModel):
                 f"are NaN/inf (Padé instability or PE divergence) and "
                 f"have been clamped to {TL_MAX_DB} dB. Try a smaller dr "
                 f"or larger np_pade.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
         tl_clamped = np.where(np.isfinite(raw['tl']), raw['tl'], TL_MAX_DB)
         # Receivers outside the PE output grid get NaN so pcolormesh and
@@ -1056,7 +1070,7 @@ class RAM(PropagationModel):
         # the grid via the np.where above for non-finite samples.
         interp = RegularGridInterpolator(
             (raw['depths'], raw['ranges']), tl_clamped,
-            bounds_error=False, fill_value=np.nan,
+            bounds_error=False, fill_value=np.nan
         )
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
         rcv_r = np.atleast_1d(receiver.ranges).astype(float)
@@ -1073,16 +1087,16 @@ class RAM(PropagationModel):
                 backend=kind,
                 frequencies=fc,
                 dr=raw['dr'], dz=raw['dz'], zmax=raw['zmax'],
-                c0=self._resolve_c0(env),
-            ),
+                c0=self._resolve_c0(env)
+            )
         )
         self._attach_output_paths(
             field, raw['work_dir'], '',
             primary_files=(
                 ('tl_grid_file', 'tl.grid'),
                 ('pcomplex_file', 'pcomplex.bin'),
-                ('in_file', raw['in_name']),
-            ),
+                ('in_file', raw['in_name'])
+            )
         )
         return field
 
@@ -1097,7 +1111,7 @@ class RAM(PropagationModel):
         theta: float,
         dr_override: Optional[float] = None,
         dz_override: Optional[float] = None,
-        zmax_override: Optional[float] = None,
+        zmax_override: Optional[float] = None
     ) -> dict:
         """Execute a Collins-family binary once at ``freq`` and read both
         outputs. Returns a dict with raw arrays (no Field wrapping).
@@ -1123,13 +1137,21 @@ class RAM(PropagationModel):
                 f"range-dependent SSP from env is dropped. For range-dependent "
                 f"fluid PE, use the mpiramS backend (env.bottom without "
                 f"shear, no altimetry).",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
         if env.has_range_dependent_layered_bottom():
             warnings.warn(
                 f"RAM:{kind} backend uses the range-0 layered bottom only — "
                 f"env.bottom range-dependence is dropped.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
+            )
+        if env.has_range_dependent_bottom():
+            warnings.warn(
+                f"RAM:{kind} backend uses the range-0 bottom geoacoustics only — "
+                f"env.bottom range-dependence is dropped. For range-dependent "
+                f"fluid PE, use the mpiramS backend (env.bottom without "
+                f"shear, no altimetry).",
+                UserWarning, stacklevel=3
             )
 
         fc = float(freq)
@@ -1151,7 +1173,7 @@ class RAM(PropagationModel):
 
         if dr is None or dz is None:
             dr_auto, dz_auto = self._compute_grid_lytaev(
-                env, fc, max_range=max_range, kind=kind,
+                env, fc, max_range=max_range, kind=kind
             )
             if dr is None:
                 dr = dr_auto
@@ -1175,7 +1197,7 @@ class RAM(PropagationModel):
                 f"exceed the PE domain (zmax={zmax:.1f} m); TL is extrapolated "
                 f"and clamped to {TL_MAX_DB} dB outside the domain. Increase "
                 f"zmax to cover all receiver depths.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
 
         target_depth = float(np.atleast_1d(receiver.depths)[0])
@@ -1211,7 +1233,7 @@ class RAM(PropagationModel):
                     f"below z=0 (zsrf >= 0). {len(crests)} altimetry sample(s) "
                     f"with height > 0 (wave crests above mean sea level) "
                     f"clamped to z=0. For two-sided wave fields use Bellhop.",
-                    UserWarning, stacklevel=3,
+                    UserWarning, stacklevel=3
                 )
                 zsrf = [(r, max(0.0, z)) for r, z in zsrf]
             surface = zsrf
@@ -1223,7 +1245,7 @@ class RAM(PropagationModel):
         properties_fluid = ('sound_speed', 'density', 'attenuation')
         properties_elastic = (
             'sound_speed', 'shear_speed',
-            'density', 'attenuation', 'shear_attenuation',
+            'density', 'attenuation', 'shear_attenuation'
         )
 
         layered = (
@@ -1235,7 +1257,7 @@ class RAM(PropagationModel):
             bp = layered.to_piecewise_breakpoints(
                 seafloor_depth=env.depth,
                 zmax=zmax,
-                properties=properties_elastic,
+                properties=properties_elastic
             )
             seg = dict(
                 range=0.0,
@@ -1244,20 +1266,20 @@ class RAM(PropagationModel):
                 bottom_cs=bp['shear_speed'],
                 bottom_rho=bp['density'],
                 bottom_attn=bp['attenuation'],
-                bottom_attns=bp['shear_attenuation'],
+                bottom_attns=bp['shear_attenuation']
             )
         else:
             bp = layered.to_piecewise_breakpoints(
                 seafloor_depth=env.depth,
                 zmax=zmax,
-                properties=properties_fluid,
+                properties=properties_fluid
             )
             seg = dict(
                 range=0.0,
                 water_ssp=[(float(d), float(c)) for d, c in env.ssp.to_pairs()],
                 bottom_c=bp['sound_speed'],
                 bottom_rho=bp['density'],
-                bottom_attn=bp['attenuation'],
+                bottom_attn=bp['attenuation']
             )
 
         # Bottom depth in Collins format is referenced from z=0 (top of
@@ -1285,14 +1307,14 @@ class RAM(PropagationModel):
                 bathymetry=bathymetry,
                 surface=surface,
                 range_segments=[seg],
-                title=f"uacpy {kind} run @ {fc:.1f} Hz",
+                title=f"uacpy {kind} run @ {fc:.1f} Hz"
             )
 
-            self._log(f"Executing: {binary} (cwd={fm.work_dir})", level='info')
+            self._log(f"Executing: {binary} (cwd={fm.work_dir})")
             proc_result = self._run_subprocess(
                 [str(binary)],
                 cwd=fm.work_dir,
-                timeout=self.timeout,
+                timeout=self.timeout
             )
 
             tlgrid = fm.work_dir / 'tl.grid'
@@ -1304,10 +1326,10 @@ class RAM(PropagationModel):
                     stderr=(
                         f"{kind}: tl.grid not produced (cwd={fm.work_dir})\n"
                         + (proc_result.stderr or "")
-                    ),
+                    )
                 )
             ranges, depths, tl = read_tl_grid(
-                tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+                tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz
             )
 
             # The patched outpt (third_party/ramsurf/{rams0.5,ramsurf1.5}.f
@@ -1323,10 +1345,10 @@ class RAM(PropagationModel):
                         f"binaries via install.sh so the patched outpt "
                         f"routine emits the complex envelope.\n"
                         + (proc_result.stderr or "")
-                    ),
+                    )
                 )
             _, _, pcomplex = read_pcomplex_grid(
-                pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+                pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz
             )
 
             return {
@@ -1348,7 +1370,7 @@ class RAM(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        kind: str,
+        kind: str
     ) -> Result:
         """Loop a Collins binary over the broadband frequency vector and
         assemble a transfer-function Field.
@@ -1377,7 +1399,7 @@ class RAM(PropagationModel):
         # Symmetric grid centred on fc, like mpiramS' peramx.f90.
         frequencies = np.array(
             [(ii - nf1) * df + fc for ii in range(2 * nf1 + 1)],
-            dtype=float,
+            dtype=float
         )
         # Drop non-positive (fc - bw can dip below 0 for small Q).
         frequencies = frequencies[frequencies > 0.0]
@@ -1400,11 +1422,11 @@ class RAM(PropagationModel):
         # independent Lytaev calls.
         if dr_band is None:
             dr_band, _ = self._compute_grid_lytaev(
-                env, f_min, max_range=rmax_band, kind=kind,
+                env, f_min, max_range=rmax_band, kind=kind
             )
         if dz_band is None:
             _, dz_band = self._compute_grid_lytaev(
-                env, f_max, max_range=rmax_band, kind=kind,
+                env, f_max, max_range=rmax_band, kind=kind
             )
         zmax_band = (float(self.zmax) if self.zmax is not None
                      else self._compute_zmax(env, f_min))
@@ -1413,8 +1435,7 @@ class RAM(PropagationModel):
             f"{kind} broadband: {len(frequencies)} frequencies, "
             f"{frequencies[0]:.2f}-{frequencies[-1]:.2f} Hz, "
             f"df={df:.2f} Hz, bw={bw:.2f} Hz, "
-            f"dr={dr_band:.2f}m, dz={dz_band:.3f}m, zmax={zmax_band:.0f}m",
-            level='info',
+            f"dr={dr_band:.2f}m, dz={dz_band:.3f}m, zmax={zmax_band:.0f}m"
         )
 
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
@@ -1435,15 +1456,14 @@ class RAM(PropagationModel):
             if self.verbose and (k % log_every == 0 or k == len(frequencies) - 1):
                 self._log(
                     f"{kind} broadband: freq {k + 1}/{len(frequencies)} "
-                    f"({float(freq):.2f} Hz)",
-                    level='info',
+                    f"({float(freq):.2f} Hz)"
                 )
             theta_k = self._theta_for_freq(float(freq))
             raw = self._run_collins_one_freq(
                 env, source, receiver,
                 kind=kind, freq=float(freq), theta=theta_k,
                 dr_override=dr_band, dz_override=dz_band,
-                zmax_override=zmax_band,
+                zmax_override=zmax_band
             )
             zmax_used = raw['zmax']
             if dr_first is None:
@@ -1457,12 +1477,12 @@ class RAM(PropagationModel):
             interp_re = RegularGridInterpolator(
                 (raw['depths'], raw['ranges']),
                 np.real(raw['pcomplex']),
-                bounds_error=False, fill_value=np.nan,
+                bounds_error=False, fill_value=np.nan
             )
             interp_im = RegularGridInterpolator(
                 (raw['depths'], raw['ranges']),
                 np.imag(raw['pcomplex']),
-                bounds_error=False, fill_value=np.nan,
+                bounds_error=False, fill_value=np.nan
             )
             pts = np.stack([DD.ravel(), RR.ravel()], axis=-1)
             re = interp_re(pts).reshape(DD.shape)
@@ -1505,16 +1525,16 @@ class RAM(PropagationModel):
                 bw=bw, df=df,
                 dr=dr_first, dz=dz_first, zmax=zmax_used,
                 c0=c0,
-                cmin=c0,
-            ),
+                cmin=c0
+            )
         )
         self._attach_output_paths(
             field, raw['work_dir'], '',
             primary_files=(
                 ('tl_grid_file', 'tl.grid'),
                 ('pcomplex_file', 'pcomplex.bin'),
-                ('in_file', raw['in_name']),
-            ),
+                ('in_file', raw['in_name'])
+            )
         )
         return field
 
@@ -1544,7 +1564,7 @@ class RAM(PropagationModel):
         ('flat_earth', True),
         ('absorbing_layer_width', 20.0),
         ('absorbing_layer_attn', 10.0),
-        ('n_sed_points', 50),
+        ('n_sed_points', 50)
     )
 
     def _drop_unsupported_surface_shear(self, env: Environment) -> Environment:
@@ -1556,7 +1576,7 @@ class RAM(PropagationModel):
         import warnings as _w
         e = env.copy()
         e.surface = self._collapse_elastic_boundary(
-            e.surface, self._collapse["elastic"],
+            e.surface, self._collapse["elastic"]
         )
         _w.warn(
             "RAM: surface shear is not supported by any backend "
@@ -1564,7 +1584,7 @@ class RAM(PropagationModel):
             "pressure-release); collapsed surface shear "
             f"(collapse['elastic']={self._collapse['elastic']!r}). "
             "For an elastic surface use Bellhop or KrakenC.",
-            UserWarning, stacklevel=3,
+            UserWarning, stacklevel=3
         )
         return e
 
@@ -1581,12 +1601,12 @@ class RAM(PropagationModel):
                 f"(left at their effective default in the Collins binary): "
                 f"{', '.join(nondefault)}. See the RAM constructor docstring "
                 f"for the per-backend applicability.",
-                UserWarning, stacklevel=4,
+                UserWarning, stacklevel=4
             )
 
     def _compute_grid_lytaev(
         self, env: 'Environment', freq: float,
-        *, max_range: float, kind: str,
+        *, max_range: float, kind: str
     ) -> 'tuple[float, float]':
         """Padé-error-based ``(dr, dz)`` selection following Lytaev
         (2023, https://doi.org/10.3390/jmse11030496).
@@ -1666,7 +1686,7 @@ class RAM(PropagationModel):
                         theta_max=np.deg2rad(theta_used),
                         eps=eps_used,
                         p=int(self.np_pade),
-                        alpha=0.0,
+                        alpha=0.0
                     )
                     break
                 except RuntimeError as exc:
@@ -1688,7 +1708,7 @@ class RAM(PropagationModel):
                 f"θ_max={theta0:.0f}°→{theta_used:.0f}° to find a feasible "
                 f"grid at f={freq:.1f} Hz, x_max={max_range:.0f} m. "
                 f"Expect TL errors larger than your original target.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
 
         dr_opt, dz_opt = float(res['dr']), float(res['dz'])
@@ -1713,8 +1733,7 @@ class RAM(PropagationModel):
             self._log(
                 f"rams: tightened dr from {dr_pre:.2f} m to "
                 f"{dr_opt:.2f} m (safety={dr_safety:.2f}, "
-                f"λ-cap={dr_cap:.2f}; {limit} active).",
-                level='info',
+                f"λ-cap={dr_cap:.2f}; {limit} active)."
             )
 
         # Snap dz to a depth-grid-aligned value so the seafloor lands on
@@ -1745,7 +1764,7 @@ class RAM(PropagationModel):
                 f"(seafloor depth {h:.0f} m). Lytaev accuracy budget "
                 f"ε={self.accuracy:.0e} is no longer met. Reduce "
                 f"``theta_max`` or set dr/dz explicitly to override.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
 
         if dz_floor > 0 and dz_opt < dz_floor:
@@ -1769,7 +1788,7 @@ class RAM(PropagationModel):
                 f"ε={self.accuracy:.0e} is no longer met — expect TL "
                 f"errors larger than the target. Set dr/dz explicitly "
                 f"to override.",
-                UserWarning, stacklevel=3,
+                UserWarning, stacklevel=3
             )
 
         c0_origin = 'user' if self.c0 is not None else 'Lytaev Eq.15'
@@ -1778,8 +1797,7 @@ class RAM(PropagationModel):
             f"dz={dz_opt:.3f} m (predicted error "
             f"{res['predicted_error']:.2e}, c₀={c0_pe:.1f} m/s "
             f"[{c0_origin}], θ_max={self.theta_max:.0f}°, "
-            f"ε={self.accuracy:.0e}).",
-            level='info',
+            f"ε={self.accuracy:.0e})."
         )
         return dr_opt, dz_opt
 
@@ -1882,7 +1900,7 @@ class RAM(PropagationModel):
         dz = float(self.dz) if self.dz is not None else None
         if dr is None or dz is None:
             dr_auto, dz_auto = self._compute_grid_lytaev(
-                env, freq, max_range=rmax, kind='mpiramS',
+                env, freq, max_range=rmax, kind='mpiramS'
             )
             if dr is None:
                 dr = dr_auto
@@ -1895,10 +1913,9 @@ class RAM(PropagationModel):
         T_tl = 1.0 if self.T is None else float(self.T)
         self._log(
             f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, "
-            f"dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s",
-            level='info',
+            f"dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s"
         )
-        self._log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths", level='info')
+        self._log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths")
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -1941,7 +1958,7 @@ class RAM(PropagationModel):
                 attn=attn_arr,
                 isedrd=isedrd,
                 sed_filename=sed_filename,
-                c0_user=self._resolve_c0(env),
+                c0_user=self._resolve_c0(env)
             )
 
             # Run mpiramS
@@ -1975,7 +1992,7 @@ class RAM(PropagationModel):
                     f"{self.model_name}: receiver ranges {beyond} exceed "
                     f"PE computed range; clamped to {rout[-1]}",
                     UserWarning,
-                    stacklevel=2,
+                    stacklevel=2
                 )
             rcv_ranges = np.clip(receiver.ranges, rout[0], rout[-1])
 
@@ -1991,7 +2008,7 @@ class RAM(PropagationModel):
                     f"RAM:mpiramS broadband: {n_nan_p}/{pressure.size} "
                     f"complex samples are NaN/inf and have been zeroed "
                     f"for interpolation. Inspect the result before use.",
-                    UserWarning, stacklevel=2,
+                    UserWarning, stacklevel=2
                 )
             # Receivers outside the PE output domain return NaN pressure
             # so the resulting TL row is NaN (transparent in pcolormesh)
@@ -1999,12 +2016,12 @@ class RAM(PropagationModel):
             interp_re = RegularGridInterpolator(
                 (zg.astype(np.float64), rout.astype(np.float64)),
                 np.nan_to_num(pressure.real).astype(np.float64),
-                method='linear', bounds_error=False, fill_value=np.nan,
+                method='linear', bounds_error=False, fill_value=np.nan
             )
             interp_im = RegularGridInterpolator(
                 (zg.astype(np.float64), rout.astype(np.float64)),
                 np.nan_to_num(pressure.imag).astype(np.float64),
-                method='linear', bounds_error=False, fill_value=np.nan,
+                method='linear', bounds_error=False, fill_value=np.nan
             )
 
             range_mesh, depth_mesh = np.meshgrid(rcv_ranges, rcv_depths)
@@ -2032,7 +2049,7 @@ class RAM(PropagationModel):
                     f"conversion to avoid log(0). The receiver.ranges "
                     f"array is not modified.",
                     UserWarning,
-                    stacklevel=2,
+                    stacklevel=2
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
@@ -2050,7 +2067,7 @@ class RAM(PropagationModel):
             pressure_field = p_mag.astype(np.complex128)
 
             elapsed = time.time() - start_time
-            self._log(f"TL completed in {elapsed:.2f}s", level='info')
+            self._log(f"TL completed in {elapsed:.2f}s")
 
             field = PressureField(
                 units="complex",
@@ -2062,13 +2079,13 @@ class RAM(PropagationModel):
                     backend='mpiramS',
                     frequencies=float(freq),
                     dr=float(dr), dz=float(dz),
-                    c0=self._resolve_c0(env),
-                ),
+                    c0=self._resolve_c0(env)
+                )
             )
             field = field.mask_below_seafloor(env.bathymetry)
             self._attach_output_paths(
                 field, fm.work_dir, '',
-                primary_files=(('psif_file', 'psif.dat'),),
+                primary_files=(('psif_file', 'psif.dat'),)
             )
             return field
 
@@ -2093,7 +2110,7 @@ class RAM(PropagationModel):
         dz = float(self.dz) if self.dz is not None else None
         if dr is None or dz is None:
             dr_auto, dz_auto = self._compute_grid_lytaev(
-                env, freq, max_range=rmax, kind='mpiramS',
+                env, freq, max_range=rmax, kind='mpiramS'
             )
             if dr is None:
                 dr = dr_auto
@@ -2104,10 +2121,9 @@ class RAM(PropagationModel):
         T_bb = 10.0 if self.T is None else float(self.T)
         self._log(
             f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
-            f"dr={dr:.1f} m, dz={dz:.3f} m",
-            level='info',
+            f"dr={dr:.1f} m, dz={dz:.3f} m"
         )
-        self._log(f"Bandwidth: {freq/Q_bb:.2f} Hz", level='info')
+        self._log(f"Bandwidth: {freq/Q_bb:.2f} Hz")
 
         fm = self._setup_file_manager()
         work_dir = fm.work_dir
@@ -2148,7 +2164,7 @@ class RAM(PropagationModel):
                 attn=attn_arr,
                 isedrd=isedrd,
                 sed_filename=sed_filename,
-                c0_user=self._resolve_c0(env),
+                c0_user=self._resolve_c0(env)
             )
 
             self._run_binary(work_dir)
@@ -2176,7 +2192,7 @@ class RAM(PropagationModel):
                     f"(min={float(rout_safe.min())}); clipping to "
                     f"{clip_to} for the 1/sqrt(r) scaling. The returned "
                     f"`ranges` array is not modified.",
-                    UserWarning, stacklevel=2,
+                    UserWarning, stacklevel=2
                 )
                 rout_safe[rout_safe <= 0.0] = clip_to
             scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(rout_safe)
@@ -2199,8 +2215,8 @@ class RAM(PropagationModel):
                 out_depths = zg
 
             elapsed = time.time() - start_time
-            self._log(f"Broadband completed in {elapsed:.2f}s", level='info')
-            self._log(f"Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges", level='info')
+            self._log(f"Broadband completed in {elapsed:.2f}s")
+            self._log(f"Output: {len(out_depths)} depths x {result['nf']} freqs x {result['nr']} ranges")
 
             # (n_d, n_r, n_f).
             pressure = np.moveaxis(pressure, 1, 2)
@@ -2219,8 +2235,8 @@ class RAM(PropagationModel):
                     fs=result['fs'],
                     Q=result['Q'],
                     c0=result['c0'],
-                    cmin=result['cmin'],
-                ),
+                    cmin=result['cmin']
+                )
             )
             # Mask sub-bottom samples with NaN for consistency with _run_tl.
             # RAM computes valid fields in the sediment, but other uacpy
@@ -2232,7 +2248,7 @@ class RAM(PropagationModel):
                 tf.data[mask, j, :] = np.nan
             self._attach_output_paths(
                 tf, fm.work_dir, '',
-                primary_files=(('psif_file', 'psif.dat'),),
+                primary_files=(('psif_file', 'psif.dat'),)
             )
             return tf
 
@@ -2251,15 +2267,14 @@ class RAM(PropagationModel):
         self._log(
             f"Executing mpiramS: {self.executable} "
             f"(cwd={work_dir}, OMP_NUM_THREADS={env['OMP_NUM_THREADS']} "
-            f"{omp_source})",
-            level='info',
+            f"{omp_source})"
         )
 
         result = self._run_subprocess(
             [str(self.executable)],
             cwd=work_dir,
             timeout=self.timeout,
-            env=env,
+            env=env
         )
 
         if self.verbose and result.stdout:
@@ -2274,5 +2289,5 @@ class RAM(PropagationModel):
                 stderr=(
                     "mpiramS produced no output file (psif.dat). "
                     "Check input parameters.\n" + (result.stderr or "")
-                ),
+                )
             )

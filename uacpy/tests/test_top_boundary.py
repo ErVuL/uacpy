@@ -75,7 +75,7 @@ def test_bellhop_env_writes_top_bc_and_surface_props(tmp_path, src_rcv):
 
 
 @pytest.mark.parametrize("surface,expected", [
-    (BoundaryProperties(acoustic_type='vacuum'), '0 0 0 0 0 0 0'),
+    (BoundaryProperties(acoustic_type='vacuum'), '0 0 0 0 0 0 0 0'),
     (_ice(),                                     None),  # ice props checked
 ])
 def test_oases_format_upper_halfspace(surface, expected):

@@ -37,7 +37,7 @@ result = oasp.run(env, source, receiver)
 
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
@@ -164,10 +164,6 @@ class OAST(PropagationModel):
     ----------
     executable : Path, optional
         Path to OAST binary. Auto-detected if ``None``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     compute_contour : bool, optional
         Add ``'C'`` option (range-depth contour plot). Default ``False``.
     compute_depth_average : bool, optional
@@ -194,14 +190,11 @@ class OAST(PropagationModel):
     def __init__(
         self,
         executable: Optional[Path] = None,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         compute_contour: bool = False,
         compute_depth_average: bool = False,
         complex_contour: bool = True,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -209,13 +202,9 @@ class OAST(PropagationModel):
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             **kwargs,
         )
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
         self.compute_contour = bool(compute_contour)
         self.compute_depth_average = bool(compute_depth_average)
         self.complex_contour = bool(complex_contour)
-        self._validate_volume_attenuation_params()
 
         self._supported_modes = [RunMode.COHERENT_TL]
         # OAST: range-independent wavenumber integration; multi-layer
@@ -306,9 +295,6 @@ class OAST(PropagationModel):
                 env=env,
                 source=source,
                 receiver=receiver,
-                volume_attenuation=self.volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
                 options=user_options,
                 **kwargs,
             )
@@ -416,10 +402,6 @@ class OASN(PropagationModel):
     ----------
     executable : Path, optional
         Path to OASN binary. Auto-detected if ``None``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` | ``'F'`` | ``'B'``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -446,21 +428,14 @@ class OASN(PropagationModel):
     def __init__(
         self,
         executable: Optional[Path] = None,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
-        self._validate_volume_attenuation_params()
 
         self._supported_modes = [RunMode.COVARIANCE, RunMode.REPLICA]
         # OASN: range-independent covariance / replica field; multi-layer
@@ -556,9 +531,6 @@ class OASN(PropagationModel):
                 env=env,
                 source=source,
                 receiver=receiver,
-                volume_attenuation=self.volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
                 options=options,
                 **kwargs,
             )
@@ -697,10 +669,6 @@ class OASR(PropagationModel):
         ``'P-P'`` (default) | ``'P-SV'`` | ``'P-Slow'`` (Biot only) |
         ``'transmission'``. Translates to OASR option letter
         (``'N'`` / ``'S'`` / ``'B'`` / ``'t'``).
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` | ``'F'`` | ``'B'``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -730,11 +698,8 @@ class OASR(PropagationModel):
         angles: Optional[np.ndarray] = None,
         angle_type: str = 'grazing',
         reflection_type: str = 'P-P',
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -753,12 +718,6 @@ class OASR(PropagationModel):
             One of 'P-P' (default), 'P-SV', 'P-Slow' (Biot only), or
             'transmission'. Translates to the OASR option letter
             ('N' / 'S' / 'B' / 't').
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
-        francois_garrison_params : tuple, optional
-            (T, S, pH, z_bar) required when ``volume_attenuation='F'``.
-        bio_layers : list, optional
-            [(Z1, Z2, f0, Q, a0), ...] required when ``volume_attenuation='B'``.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
@@ -766,10 +725,6 @@ class OASR(PropagationModel):
         self.angles = angles
         self.angle_type = angle_type
         self.reflection_type = reflection_type
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
-        self._validate_volume_attenuation_params()
 
         # OASR is strictly a boundary-reflection solver; it does not produce
         # transmission loss. Declare that explicitly.
@@ -834,7 +789,6 @@ class OASR(PropagationModel):
         angles = self.angles
         angle_type = self.angle_type
         reflection_type = self.reflection_type
-        volume_attenuation = self.volume_attenuation
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -880,9 +834,6 @@ class OASR(PropagationModel):
                 angles=angles,
                 angle_type=angle_type,
                 reflection_type=reflection_type,
-                volume_attenuation=volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
                 **kwargs,
             )
 
@@ -985,10 +936,6 @@ class OASP(PropagationModel):
         Number of FFT time samples. Default ``4096``.
     freq_max : float, optional
         Maximum FFT frequency (Hz). Default ``250.0``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` | ``'F'`` | ``'B'``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -1017,11 +964,8 @@ class OASP(PropagationModel):
         executable: Optional[Path] = None,
         n_time_samples: int = 4096,
         freq_max: float = 250.0,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -1034,12 +978,6 @@ class OASP(PropagationModel):
             Number of time samples for FFT. Default: 4096.
         freq_max : float, optional
             Maximum frequency for FFT (Hz). Default: 250.
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
-        francois_garrison_params : tuple, optional
-            (T, S, pH, z_bar) required when ``volume_attenuation='F'``.
-        bio_layers : list, optional
-            [(Z1, Z2, f0, Q, a0), ...] required when ``volume_attenuation='B'``.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -1047,10 +985,6 @@ class OASP(PropagationModel):
         )
         self.n_time_samples = n_time_samples
         self.freq_max = freq_max
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
-        self._validate_volume_attenuation_params()
 
         self._supported_modes = [
             RunMode.COHERENT_TL,
@@ -1124,7 +1058,6 @@ class OASP(PropagationModel):
         """
         n_time_samples = self.n_time_samples
         freq_max = self.freq_max
-        volume_attenuation = self.volume_attenuation
 
         run_mode = self._resolve_run_mode(run_mode)
 
@@ -1178,9 +1111,6 @@ class OASP(PropagationModel):
                 receiver=receiver,
                 n_time_samples=n_time_samples,
                 freq_max=freq_max,
-                volume_attenuation=volume_attenuation,
-                francois_garrison_params=self.francois_garrison_params,
-                bio_layers=self.bio_layers,
                 **kwargs
             )
 

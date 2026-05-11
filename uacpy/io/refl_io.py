@@ -13,6 +13,8 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Union
 
+from uacpy._log import log_message
+
 
 def read_reflection_coefficient(
     filename: str, boundary: str = "bottom"
@@ -110,7 +112,11 @@ def read_reflection_coefficient(
         )
 
 
-def read_source_beam_pattern(filepath: Union[str, Path], sbp_option: str = "O") -> np.ndarray:
+def read_source_beam_pattern(
+    filepath: Union[str, Path],
+    sbp_option: str = "O",
+    verbose: bool = False,
+) -> np.ndarray:
     """
     Read source beam pattern from file.
 
@@ -144,27 +150,33 @@ def read_source_beam_pattern(filepath: Union[str, Path], sbp_option: str = "O") 
     Translated from OALIB readpat.m
     """
     if sbp_option == "*":
-        print("-----------------------------------")
-        print("Using source beam pattern file")
+        log_message('refl_io', "Reading source beam pattern file",
+                    verbose=verbose)
 
         filepath = Path(filepath)
         sbp_file = str(filepath) + ".sbp"
         with open(sbp_file, "r") as fid:
-            # Read number of points
             line = fid.readline()
             NSBPPts = int(line.strip())
-            print(f"Number of source beam pattern points = {NSBPPts}")
+            log_message('refl_io',
+                        f"Number of source beam pattern points = {NSBPPts}",
+                        verbose=verbose)
 
-            # Read angle and power data
             beam_pattern = np.zeros((NSBPPts, 2))
-            print(" ")
-            print(" Angle (degrees)  Power (dB)")
-
             for i in range(NSBPPts):
                 line = fid.readline()
                 vals = np.fromstring(line, sep=" ", count=2)
                 beam_pattern[i, :] = vals
-                print(f" {vals[0]:7.2f}         {vals[1]:6.2f}")
+            log_message(
+                'refl_io',
+                f"angle (deg): {beam_pattern[:, 0].tolist()}",
+                verbose=verbose, level='debug',
+            )
+            log_message(
+                'refl_io',
+                f"power (dB): {beam_pattern[:, 1].tolist()}",
+                verbose=verbose, level='debug',
+            )
 
     else:
         # Omni-directional pattern

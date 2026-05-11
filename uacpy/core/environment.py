@@ -9,8 +9,47 @@ configurations.
 
 import copy as _copy
 import numpy as np
-from typing import Union, List, Tuple, Optional, Dict
+from typing import TYPE_CHECKING, Union, List, Tuple, Optional, Dict
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from uacpy.core.absorption import Absorption  # noqa: F401
+
+
+def _validate_acoustic_type(value, label: str) -> None:
+    """Reject unrecognized ``acoustic_type`` strings up front, so a typo
+    like ``'halfspace'`` (vs. ``'half-space'``) fails at construction
+    instead of producing a wrong Acoustics-Toolbox bottom-type code
+    deep inside a writer.
+    """
+    from uacpy.core.constants import BoundaryType
+    try:
+        BoundaryType.from_string(value)
+    except (ValueError, KeyError, AttributeError) as exc:
+        valid = sorted({bt.value for bt in BoundaryType})
+        raise ValueError(
+            f"{label}: acoustic_type={value!r} is not recognized. "
+            f"Valid values (plus the aliases handled by "
+            f"BoundaryType.from_string): {valid}"
+        ) from exc
+
+
+def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
+    """Raise ``ValueError`` if ``values`` is not strictly monotonically
+    increasing. Used to guard every range / depth axis that feeds into
+    ``np.interp``, which silently produces garbage on unsorted ``xp``.
+    """
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size <= 1:
+        return
+    diffs = np.diff(arr)
+    if not np.all(diffs > 0):
+        bad = int(np.argmin(diffs))
+        raise ValueError(
+            f"{label} must be strictly increasing; "
+            f"got {arr[bad]} >= {arr[bad + 1]} at index {bad + 1} "
+            f"(full axis: {arr.tolist()})"
+        )
 
 
 def _sanitize_title(name: str) -> str:
@@ -177,6 +216,7 @@ class BoundaryProperties:
                 f"BoundaryProperties: shear_attenuation must be non-negative; "
                 f"got {self.shear_attenuation}"
             )
+        _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
 
     @classmethod
     def from_preset(cls, name: str, **overrides) -> "BoundaryProperties":
@@ -264,6 +304,9 @@ class RangeDependentBottom:
 
     def __post_init__(self):
         """Validate array lengths and set defaults."""
+        _validate_acoustic_type(self.acoustic_type, "RangeDependentBottom")
+        self.ranges = np.asarray(self.ranges, dtype=float).ravel()
+        _require_strictly_increasing(self.ranges, "RangeDependentBottom.ranges")
         n = len(self.ranges)
 
         for attr_name in ['sound_speed', 'density', 'attenuation']:
@@ -674,15 +717,19 @@ class RangeDependentLayeredBottom:
     profiles: List[LayeredBottom]
 
     def __post_init__(self):
+        self.ranges = np.asarray(self.ranges, dtype=float).ravel()
         n = len(self.ranges)
+        if n < 1:
+            raise ValueError(
+                "RangeDependentLayeredBottom: at least one range point is required"
+            )
+        _require_strictly_increasing(
+            self.ranges, "RangeDependentLayeredBottom.ranges",
+        )
         if len(self.profiles) != n:
             raise ValueError(
                 f"RangeDependentLayeredBottom: profiles length ({len(self.profiles)}) "
                 f"must match ranges length ({n})"
-            )
-        if n < 1:
-            raise ValueError(
-                "RangeDependentLayeredBottom: at least one range point is required"
             )
 
     def max_total_thickness(self) -> float:
@@ -831,6 +878,7 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: data rows ({self.data.shape[0]}) must match "
                 f"depths length ({self.depths.size})"
             )
+        _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths")
         if self.ranges is not None:
             self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != self.data.shape[1]:
@@ -838,6 +886,9 @@ class SoundSpeedProfile:
                     f"SoundSpeedProfile: ranges length ({self.ranges.size}) must "
                     f"match data columns ({self.data.shape[1]})"
                 )
+            _require_strictly_increasing(
+                self.ranges, "SoundSpeedProfile.ranges",
+            )
         elif self.data.shape[1] != 1:
             raise ValueError(
                 f"SoundSpeedProfile: ranges=None requires single-column data; "
@@ -1258,8 +1309,14 @@ class Environment:
         pass ``BoundaryProperties(acoustic_type='rigid')``.
     surface : BoundaryProperties, optional
         Surface boundary properties. Default vacuum (pressure release).
-    volume_attenuation : float, optional
-        Water-column volume attenuation in dB/wavelength. Default 0.0.
+    absorption : Absorption, optional
+        Water-column volume-absorption model — one of
+        :class:`uacpy.core.absorption.Thorp`,
+        :class:`uacpy.core.absorption.FrancoisGarrison`,
+        :class:`uacpy.core.absorption.Biological`, or
+        :class:`uacpy.core.absorption.ConstantAbsorption`. Default ``None``
+        (no volume absorption). Models inspect this field to set
+        ``TopOpt`` position 4 and write the supporting per-formula lines.
 
     Examples
     --------
@@ -1304,12 +1361,19 @@ class Environment:
             'LayeredBottom', 'RangeDependentLayeredBottom',
         ]] = None,
         surface: Optional[BoundaryProperties] = None,
-        volume_attenuation: float = 0.0,
+        absorption: Optional['Absorption'] = None,
         *,
         name: str = 'unnamed',
     ):
+        from uacpy.core.absorption import Absorption
+        if absorption is not None and not isinstance(absorption, Absorption):
+            raise TypeError(
+                f"Environment: absorption must be an Absorption subclass "
+                f"(Thorp / FrancoisGarrison / Biological / ConstantAbsorption); "
+                f"got {type(absorption).__name__}"
+            )
+        self.absorption = absorption
         self.name = _sanitize_title(name)
-        self.volume_attenuation = volume_attenuation
 
         if np.isscalar(bathymetry):
             water_depth = float(bathymetry)
@@ -1332,6 +1396,9 @@ class Environment:
                     f"Environment: bathymetry depths must be positive (m); "
                     f"got {self.bathymetry[:, 1].tolist()}"
                 )
+            _require_strictly_increasing(
+                self.bathymetry[:, 0], "Environment.bathymetry ranges",
+            )
 
         max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
 
@@ -1360,6 +1427,9 @@ class Environment:
                     f"Environment: altimetry must have shape (N, 2) as "
                     f"(range, height_m); got shape {self.altimetry.shape}"
                 )
+            _require_strictly_increasing(
+                self.altimetry[:, 0], "Environment.altimetry ranges",
+            )
         else:
             self.altimetry = None
 

@@ -210,46 +210,6 @@ class AttenuationUnits(Enum):
         return self.value
 
 
-class VolumeAttenuation(Enum):
-    """Volume attenuation formulas."""
-    NONE = ''                   # No volume attenuation
-    THORP = 'T'                 # Thorp formula
-    FRANCOIS_GARRISON = 'F'     # Francois-Garrison formula
-    BIOLOGICAL = 'B'            # Biological attenuation
-
-    @classmethod
-    def from_string(cls, value: str) -> 'VolumeAttenuation':
-        """
-        Parse a string (or existing enum) into a ``VolumeAttenuation``.
-
-        Parameters
-        ----------
-        value : str, VolumeAttenuation, or None
-            Case-insensitive formula name or single-character code.
-            ``None`` or empty string maps to ``NONE``.
-
-        Returns
-        -------
-        VolumeAttenuation
-            Parsed enum value.
-        """
-        if value is None or value == '':
-            return cls.NONE
-        if isinstance(value, VolumeAttenuation):
-            return value
-        for va in cls:
-            if va.value == value.upper():
-                return va
-        try:
-            return cls[value.upper()]
-        except KeyError:
-            raise ValueError(f"invalid volume attenuation: {value!r}")
-
-    def to_char(self) -> str:
-        """Return the single-character Acoustics Toolbox code."""
-        return self.value
-
-
 def parse_ssp_type(value) -> SSPType:
     """
     Parse an SSP interpolation type string.

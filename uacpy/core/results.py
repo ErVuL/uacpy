@@ -68,7 +68,10 @@ from __future__ import annotations
 
 from enum import Enum
 import numpy as np
-from typing import Optional, Dict, Any, List, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Tuple, Union
+
+if TYPE_CHECKING:
+    from uacpy.core.absorption import Absorption  # noqa: F401
 
 from uacpy.core.constants import PRESSURE_FLOOR, DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
@@ -1696,8 +1699,7 @@ class Modes(Result):
         self,
         alpha_db_per_m: Optional[Union[float, np.ndarray]] = None,
         *,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[Tuple[float, float, float, float]] = None,
+        absorption: Optional['Absorption'] = None,
         sound_speed_z: Union[float, np.ndarray] = 1500.0,
         density_z: Union[float, np.ndarray] = 1.0,
         bottom=None,
@@ -1715,20 +1717,19 @@ class Modes(Result):
         Pass volume attenuation in one of two equivalent ways:
 
         - ``alpha_db_per_m`` — explicit scalar or ``α(z)`` array (dB/m).
-        - ``volume_attenuation='T' | 'F'`` — same string-flag convention
-          as :class:`Kraken`. ``'T'`` is Thorp 1967; ``'F'`` is
-          Francois-Garrison and requires
-          ``francois_garrison_params=(T_°C, S_psu, pH, mean_depth_m)``.
+        - ``absorption`` — a :class:`uacpy.core.absorption.Thorp` or
+          :class:`FrancoisGarrison` instance (the same objects you would
+          attach to ``env.absorption``). Other Absorption subclasses are
+          not supported by the modal perturbation kernel.
 
         Parameters
         ----------
         alpha_db_per_m : float or ndarray, optional
             Per-depth volume attenuation in dB/m. Mutually exclusive
-            with ``volume_attenuation``.
-        volume_attenuation : {'T', 'F', None}, optional
-            Formula flag matching :class:`Kraken`'s constructor.
-        francois_garrison_params : (T, S, pH, z_bar), optional
-            Required when ``volume_attenuation='F'``.
+            with ``absorption``.
+        absorption : Absorption, optional
+            ``Thorp()`` or ``FrancoisGarrison(...)``. Mutually exclusive
+            with ``alpha_db_per_m``.
         sound_speed_z : float or ndarray
             ``c(z)`` in m/s. Defaults to 1500.
         density_z : float or ndarray
@@ -1745,20 +1746,28 @@ class Modes(Result):
         Modes
             New :class:`Modes` instance with updated complex ``k``.
         """
-        if (alpha_db_per_m is None) == (volume_attenuation is None):
+        if (alpha_db_per_m is None) == (absorption is None):
             raise ValueError(
                 "Modes.with_attenuation: pass exactly one of "
-                "alpha_db_per_m or volume_attenuation."
+                "alpha_db_per_m or absorption."
             )
         omega = 2.0 * np.pi * float(self.f0 or 0.0)
         if omega == 0.0:
             raise ValueError(
                 "Modes.with_attenuation: requires Modes.f0 to be set."
             )
-        if volume_attenuation is not None:
-            flag = str(volume_attenuation).strip().upper()
+        if absorption is not None:
+            from uacpy.core.absorption import (
+                Thorp, FrancoisGarrison, Absorption as _Absorption,
+            )
+            if not isinstance(absorption, _Absorption):
+                raise TypeError(
+                    "Modes.with_attenuation: absorption must be an "
+                    "Absorption subclass; got "
+                    f"{type(absorption).__name__}"
+                )
             f0 = float(self.f0)
-            if flag == 'T':
+            if isinstance(absorption, Thorp):
                 f_khz = f0 / 1000.0
                 a_db_per_km = (
                     0.11 * f_khz ** 2 / (1.0 + f_khz ** 2)
@@ -1768,26 +1777,22 @@ class Modes(Result):
                 )
                 a_const = a_db_per_km / 1000.0
                 a = np.full_like(self.depths, a_const)
-            elif flag == 'F':
-                if francois_garrison_params is None:
-                    raise ValueError(
-                        "Modes.with_attenuation: volume_attenuation='F' "
-                        "requires francois_garrison_params=(T, S, pH, z_bar)."
-                    )
-                T_c, S_psu, pH, _ = francois_garrison_params
-                from uacpy.core.acoustics import absorption
+            elif isinstance(absorption, FrancoisGarrison):
+                from uacpy.core.acoustics import absorption as _fg_attn
                 a = np.empty_like(self.depths)
                 for i, z in enumerate(self.depths):
-                    ratio = float(absorption(
+                    ratio = float(_fg_attn(
                         frequency=f0, distance=1000.0,
-                        temperature=T_c, salinity=S_psu,
-                        depth=float(z), pH=pH,
+                        temperature=absorption.temperature_c,
+                        salinity=absorption.salinity_psu,
+                        depth=float(z), pH=absorption.pH,
                     ))
                     a[i] = -20.0 * np.log10(ratio) / 1000.0
             else:
                 raise ValueError(
-                    f"Modes.with_attenuation: volume_attenuation must be "
-                    f"'T' or 'F'; got {volume_attenuation!r}."
+                    f"Modes.with_attenuation: only Thorp and "
+                    f"FrancoisGarrison are supported; got "
+                    f"{type(absorption).__name__}."
                 )
         else:
             a = np.asarray(alpha_db_per_m, dtype=float).ravel()

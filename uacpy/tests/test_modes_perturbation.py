@@ -43,25 +43,29 @@ class TestWithAttenuation:
         expected = (k0 / modes.k.real) * alpha_np_m
         assert np.allclose(out.k.imag, expected, rtol=1e-6)
 
-    def test_thorp_string_flag(self):
+    def test_thorp_absorption(self):
+        from uacpy.core.absorption import Thorp
         modes = _pekeris_modes(freq=1000.0)
-        out = modes.with_attenuation(volume_attenuation='T')
+        out = modes.with_attenuation(absorption=Thorp())
         assert np.all(out.k.imag > 0)
 
-    def test_francois_garrison_string_flag(self):
+    def test_francois_garrison_absorption(self):
+        from uacpy.core.absorption import FrancoisGarrison
         modes = _pekeris_modes(freq=1000.0)
         out = modes.with_attenuation(
-            volume_attenuation='F',
-            francois_garrison_params=(15.0, 35.0, 8.1, 50.0),
+            absorption=FrancoisGarrison(
+                temperature_c=15.0, salinity_psu=35.0, pH=8.1, z_bar_m=50.0,
+            ),
         )
         assert np.all(out.k.imag > 0)
 
     def test_one_of_attenuation_args_required(self):
+        from uacpy.core.absorption import Thorp
         modes = _pekeris_modes()
         with pytest.raises(ValueError, match="exactly one of"):
             modes.with_attenuation()
         with pytest.raises(ValueError, match="exactly one of"):
-            modes.with_attenuation(0.005, volume_attenuation='T')
+            modes.with_attenuation(0.005, absorption=Thorp())
 
     def test_depth_dependent_alpha_weighted_by_phi_square(self):
         modes = _pekeris_modes()

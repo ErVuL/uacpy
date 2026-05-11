@@ -8,7 +8,7 @@ as Scooter but with support for elastic media.
 
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 import numpy as np
 
 from uacpy.core.environment import Environment
@@ -16,7 +16,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, PressureField, TimeSeriesField
 from uacpy.core.constants import (
-    BoundaryType, AttenuationUnits, VolumeAttenuation,
+    BoundaryType, AttenuationUnits,
     parse_ssp_type, parse_boundary_type,
     DEFAULT_SOUND_SPEED,
 )
@@ -28,7 +28,7 @@ from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
 from uacpy.io.oalib_writer import (
-    write_bio_layers, write_fg_params, write_layer_sections,
+    write_absorption_block, write_layer_sections,
     write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
     write_ssp_section,
 )
@@ -145,10 +145,6 @@ class SPARC(PropagationModel):
         Cap on receiver depths (looped in wrapper). Default ``20``.
     rmax_safety_margin : float, optional
         Margin so SPARC's RMax > max receiver range. Default ``1.0001``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` | ``'F'`` | ``'B'``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     timeout : float, optional
         Subprocess timeout per run (s). Default ``180.0``.
     use_tmpfs, verbose, work_dir, cleanup, collapse : optional
@@ -172,6 +168,14 @@ class SPARC(PropagationModel):
     ``'rd_layered_layers': 'preserve'`` (SPARC consumes ``LayeredBottom``
     natively).
 
+    Defaults auto-derived at ``run()`` time:
+
+    - ``n_mesh=0`` → SPARC picks per frequency / wavelength.
+    - ``c_low`` / ``c_high`` → from env SSP and bottom speed.
+    - ``rmax`` written as ``receiver.range_max × rmax_safety_margin``.
+    - ``dt`` / ``dr`` derived from CFL stability and the source pulse.
+    - TopOpt position 4 reads ``env.absorption``.
+
     Examples
     --------
     >>> sparc = SPARC(verbose=False)
@@ -193,12 +197,9 @@ class SPARC(PropagationModel):
         t_mult: float = 0.999,
         max_depths: int = 20,
         rmax_safety_margin: float = 1.0001,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         timeout: float = 180.0,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -240,15 +241,6 @@ class SPARC(PropagationModel):
             the user asks for ranges equal to the max). Default: 1.0001
             (0.01% margin). Distinct from Scooter's ``rmax_multiplier``
             which doubles the simulated range to absorb wraparound.
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
-        francois_garrison_params : tuple, optional
-            Required when ``volume_attenuation='F'``. Tuple
-            ``(T, S, pH, z_bar)``: temperature (degC), salinity (psu), pH,
-            mean depth (m).
-        bio_layers : list of tuples, optional
-            Required when ``volume_attenuation='B'``. List of per-layer
-            5-tuples ``(Z1, Z2, f0, Q, a0)``.
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """
@@ -279,9 +271,6 @@ class SPARC(PropagationModel):
         self.t_mult = t_mult
         self.max_depths = max_depths
         self.rmax_safety_margin = rmax_safety_margin
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
 
         # Declare supported modes for SPARC
         self._supported_modes = [
@@ -318,9 +307,6 @@ class SPARC(PropagationModel):
 
         if not self.executable.exists():
             raise ExecutableNotFoundError('SPARC', str(self.executable))
-
-        # Inherits base validation (PropagationModel._validate_volume_attenuation_params)
-        self._validate_volume_attenuation_params()
 
     def run(
         self,
@@ -367,6 +353,7 @@ class SPARC(PropagationModel):
         # TIME_SERIES-capable models, but ignore them silently per the
         # uacpy convention that irrelevant run() kwargs are dropped.
         env = self._project_environment(env)
+        env = self._sparc_rigidify_halfspace(env)
         receiver = self._clip_receiver_depths(receiver, env.depth)
 
         # SPARC limitation: horizontal array mode requires one run per depth
@@ -696,6 +683,30 @@ class SPARC(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _sparc_rigidify_halfspace(self, env: Environment) -> Environment:
+        """Rewrite an env's halfspace bottom to 'rigid' so SPARC's
+        ``Vacuum`` / ``Rigid``-only writer accepts it. Emits one
+        :class:`UserWarning` per run regardless of how many depths are
+        looped — the per-depth writer used to fire the warning N times.
+        """
+        hs = env.halfspace_at_range(0.0)
+        kind = (hs.acoustic_type or '').lower()
+        if kind not in ('half-space', 'halfspace', 'a'):
+            return env
+        warnings.warn(
+            "SPARC supports only 'vacuum' / 'rigid' bottom boundaries; "
+            "auto-converting the env's halfspace to 'rigid'. For "
+            "physically meaningful halfspace reflection (fluid or "
+            "elastic), use Bellhop / Kraken / Scooter / OASES. To "
+            "suppress this warning, set the bottom acoustic_type to "
+            "'rigid' (or 'vacuum') before constructing the env.",
+            UserWarning, stacklevel=2,
+        )
+        e = env.copy()
+        if hasattr(e.bottom, 'acoustic_type'):
+            e.bottom.acoustic_type = 'rigid'
+        return e
+
     def _write_sparc_env(self, filepath, env, source, receiver, **kwargs):
         """
         Write SPARC environment file using shared ATEnvWriter
@@ -711,21 +722,8 @@ class SPARC(PropagationModel):
         ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 
-        # SPARC limitation: only supports Vacuum and Rigid boundaries
         hs = env.halfspace_at_range(0.0)
         bottom_acoustic_type = hs.acoustic_type.lower()
-        if bottom_acoustic_type in ['half-space', 'halfspace', 'a']:
-            warnings.warn(
-                "SPARC supports only 'vacuum' / 'rigid' bottom boundaries; "
-                "auto-converting the env's halfspace to 'rigid'. For "
-                "physically meaningful halfspace reflection (fluid or "
-                "elastic), use Bellhop / Kraken / Scooter / OASES. To "
-                "suppress this warning, set the bottom acoustic_type to "
-                "'rigid' (or 'vacuum') before constructing the env.",
-                UserWarning, stacklevel=2,
-            )
-            bottom_acoustic_type = 'rigid'
-
         if bottom_acoustic_type == 'vacuum':
             bottom_type = BoundaryType.VACUUM
         elif bottom_acoustic_type == 'rigid':
@@ -736,33 +734,22 @@ class SPARC(PropagationModel):
                 f"Only 'vacuum' and 'rigid' are supported."
             )
 
-        # Parse volume attenuation from instance attribute
-        vol_atten = None
-        if self.volume_attenuation:
-            vol_atten = VolumeAttenuation.from_string(self.volume_attenuation)
-
         with open(filepath, 'w') as f:
-            # SPARC-specific header with output mode in TopOpt
-            # Write title, frequency, media count
+            # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
             f.write(f"'{env.name}'\n")
             f.write(f"{source.frequencies[0]:.6f}\n")
             f.write("1\n")
 
-            # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
             ssp_code = ssp_type.to_acoustics_toolbox_code()
             surface_code = surface_type.to_acoustics_toolbox_code()
             atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
-            vol_atten_code = vol_atten.to_char() if vol_atten else ' '
+            vol_atten_code = (
+                env.absorption.topopt_code() if env.absorption is not None else ' '
+            )
             topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code}{self.output_mode}".ljust(6)
             f.write(f"'{topopt}'\n")
 
-            # Francois-Garrison / Biological follow-up lines (after TopOpt,
-            # before SSP). ReadTopOpt in AT reads these immediately when
-            # TopOpt(4)='F'/'B'.
-            if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                write_fg_params(f, self.francois_garrison_params)
-            elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                write_bio_layers(f, self.bio_layers)
+            write_absorption_block(f, env)
 
             # Write SSP section
             write_ssp_section(

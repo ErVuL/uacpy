@@ -269,56 +269,48 @@ class TestRunWithBounceConstructorPlumbing:
     """Verify Bellhop.run_with_bounce passes through volume-attenuation /
     c_low / c_high to the spawned Bounce instance."""
 
-    def test_bounce_inherits_parent_volume_attenuation(self, monkeypatch):
-        """Parent Bellhop's volume_attenuation / FG params reach Bounce."""
+    def test_bounce_sees_env_absorption(self, monkeypatch):
+        """env.absorption (Francois-Garrison) flows through Bellhop's
+        auto-BOUNCE call into the Bounce subprocess."""
         from uacpy.models import bounce as bounce_mod
+        from uacpy.core.absorption import FrancoisGarrison
 
         captured = {}
-        original_init = bounce_mod.Bounce.__init__
+        original_run = bounce_mod.Bounce.run
 
-        def spy_init(self_, *args, **kwargs):
+        def spy_run(self_, env, source, receiver, **kwargs):
+            captured['absorption'] = env.absorption
             captured.update(kwargs)
-            original_init(self_, *args, **kwargs)
-            # Stop early so we don't actually run BOUNCE.
-            raise RuntimeError("stop after Bounce __init__")
+            raise RuntimeError("stop after Bounce.run capture")
 
-        monkeypatch.setattr(bounce_mod.Bounce, '__init__', spy_init)
+        monkeypatch.setattr(bounce_mod.Bounce, 'run', spy_run)
 
-        bellhop = Bellhop(
-            verbose=False,
-            volume_attenuation='F',
-            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
-            bio_layers=None,
+        fg = FrancoisGarrison(
+            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=1000.0,
         )
-        env = Environment(name='b', bathymetry=100.0, ssp=1500.0)
+        bellhop = Bellhop(verbose=False)
+        env = Environment(
+            name='b', bathymetry=100.0, ssp=1500.0, absorption=fg,
+        )
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
-        with pytest.raises(RuntimeError, match='stop after Bounce __init__'):
+        with pytest.raises(RuntimeError, match='stop after Bounce.run capture'):
             bellhop.run_with_bounce(
                 env=env, source=source, receiver=receiver,
                 c_low=1450.0, c_high=20000.0, rmax=42000.0,
             )
-        assert captured.get('volume_attenuation') == 'F'
-        assert captured.get('francois_garrison_params') == (10.0, 35.0, 8.0, 1000.0)
-        assert captured.get('c_low') == 1450.0
-        assert captured.get('c_high') == 20000.0
-        assert captured.get('rmax') == 42000.0
+        assert isinstance(captured.get('absorption'), FrancoisGarrison)
+        assert captured['absorption'].temperature_c == 10.0
+        assert captured['absorption'].salinity_psu == 35.0
 
 
-class TestBounceConstructorAcceptsFGParams:
-    """B2: Bounce.__init__ now accepts francois_garrison_params / bio_layers."""
+class TestFrancoisGarrisonValidation:
+    """FrancoisGarrison validates its own params at construction."""
 
-    def test_bounce_accepts_fg_params_kwarg(self):
-        from uacpy.models import Bounce
-        b = Bounce(
-            volume_attenuation='F',
-            francois_garrison_params=(10.0, 35.0, 8.0, 1000.0),
+    def test_francois_garrison_constructs(self):
+        from uacpy.core.absorption import FrancoisGarrison
+        fg = FrancoisGarrison(
+            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=1000.0,
         )
-        assert b.francois_garrison_params == (10.0, 35.0, 8.0, 1000.0)
-        assert b.volume_attenuation == 'F'
-
-    def test_bounce_validates_F_requires_fg(self):
-        from uacpy.models import Bounce
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):
-            Bounce(volume_attenuation='F')
+        assert fg.topopt_code() == 'F'
+        assert fg.as_at_tuple() == (10.0, 35.0, 8.0, 1000.0)

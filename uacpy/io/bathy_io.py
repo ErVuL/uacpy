@@ -16,12 +16,23 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
 
+from uacpy._log import log_message
 from uacpy.core.exceptions import ModelExecutionError
 from uacpy.io._fortran_helpers import read_vector
 
 
+def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
+    """Compact one-line preview of a numeric axis for debug logging."""
+    n = len(arr)
+    if n <= head + 1:
+        return "[" + ", ".join(fmt.format(v).strip() for v in arr) + f"] ({n} pts)"
+    body = ", ".join(fmt.format(v).strip() for v in arr[:head])
+    tail = fmt.format(arr[-1]).strip()
+    return f"[{body}, …, {tail}] ({n} pts)"
+
+
 def read_boundary_3d(
-    filename: str, verbose: bool = True
+    filename: str, verbose: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Read 3D boundary (bathymetry/altimetry) file for BELLHOP3D.
@@ -35,7 +46,7 @@ def read_boundary_3d(
         Boundary filename (.bty for bathymetry, .ati for altimetry)
         Extension should be included
     verbose : bool, optional
-        Print file contents to console (default: True)
+        Print file contents to console (default: False)
 
     Returns
     -------
@@ -76,35 +87,32 @@ def read_boundary_3d(
             else:
                 raise ValueError(f"Cannot parse boundary type from: {bdry_type_line}")
 
-            if verbose:
-                if bdry_type == "R":
-                    print("Piecewise-linear approximation to boundary")
-                elif bdry_type == "C":
-                    print("Curvilinear approximation to boundary")
-                else:
-                    raise ValueError(f"Unknown boundary type: {bdry_type}")
+            if bdry_type == "R":
+                log_message('bathy_io',
+                            "Piecewise-linear approximation to boundary",
+                            verbose=verbose)
+            elif bdry_type == "C":
+                log_message('bathy_io',
+                            "Curvilinear approximation to boundary",
+                            verbose=verbose)
+            else:
+                raise ValueError(f"Unknown boundary type: {bdry_type}")
 
             x_bot, n_x = read_vector(fid)
 
-            if verbose:
-                print(f"Number of boundary points in x = {n_x}\n")
-                print(" x (km)")
-                for i, x_val in enumerate(x_bot):
-                    if i < 50 or i == n_x - 1:
-                        print(f"{x_val:9.5g}")
-                    elif i == 50:
-                        print("   ...")
+            log_message('bathy_io',
+                        f"Number of boundary points in x = {n_x}",
+                        verbose=verbose)
+            log_message('bathy_io', f"x (km): {_summarize_axis(x_bot)}",
+                        verbose=verbose, level='debug')
 
             y_bot, n_y = read_vector(fid)
 
-            if verbose:
-                print(f"Number of boundary points in y = {n_y}\n")
-                print(" y (km)")
-                for i, y_val in enumerate(y_bot):
-                    if i < 50 or i == n_y - 1:
-                        print(f"{y_val:9.5g}")
-                    elif i == 50:
-                        print("   ...")
+            log_message('bathy_io',
+                        f"Number of boundary points in y = {n_y}",
+                        verbose=verbose)
+            log_message('bathy_io', f"y (km): {_summarize_axis(y_bot)}",
+                        verbose=verbose, level='debug')
 
             z_values = []
             for line in fid:
@@ -124,7 +132,7 @@ def read_boundary_3d(
     return x_bot, y_bot, z_bot, n_x, n_y
 
 
-def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np.ndarray, str]:
+def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read bathymetry data from BELLHOP .bty file.
 
@@ -136,7 +144,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
     filepath : str or Path
         Path to bathymetry file (.bty extension).
     verbose : bool, optional
-        If True, print bathymetry information. Default is True.
+        If True, print bathymetry information. Default is False.
 
     Returns
     -------
@@ -168,9 +176,8 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
         filepath = filepath.with_suffix(".bty")
 
     with open(filepath, "r") as fid:
-        if verbose:
-            print("\n_______________________")
-            print("Using bottom-bathymetry file")
+        log_message('bathy_io', "Reading bottom-bathymetry file",
+                    verbose=verbose)
 
         line = fid.readline().strip()
         if "'" in line:
@@ -185,30 +192,33 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
                 f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
             )
 
-        if verbose:
-            if bty_type == "L":
-                print("Piecewise-linear approximation to bathymetry")
-            else:
-                print("Curvilinear approximation to bathymetry")
+        if bty_type == "L":
+            log_message('bathy_io',
+                        "Piecewise-linear approximation to bathymetry",
+                        verbose=verbose)
+        else:
+            log_message('bathy_io',
+                        "Curvilinear approximation to bathymetry",
+                        verbose=verbose)
 
         n_pts = int(fid.readline().strip())
-
-        if verbose:
-            print(f"Number of bathymetry points = {n_pts}\n")
-            print(" Range (km)     Depth (m)")
+        log_message('bathy_io', f"Number of bathymetry points = {n_pts}",
+                    verbose=verbose)
 
         bty_data = []
-        for i in range(n_pts):
+        for _ in range(n_pts):
             parts = fid.readline().split()
             range_km, depth = float(parts[0]), float(parts[1])
             bty_data.append([range_km, depth])
 
-            if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth:9.5g}")
-            elif verbose and i == 10:
-                print("    ...")
-
         bty_data = np.array(bty_data).T
+
+        log_message('bathy_io',
+                    f"range (km): {_summarize_axis(bty_data[0])}",
+                    verbose=verbose, level='debug')
+        log_message('bathy_io',
+                    f"depth (m): {_summarize_axis(bty_data[1])}",
+                    verbose=verbose, level='debug')
 
     bty_data[0, :] *= 1000.0
 
@@ -226,7 +236,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[n
     return bty, bty_type
 
 
-def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np.ndarray, str]:
+def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read altimetry data from BELLHOP .ati file.
 
@@ -238,7 +248,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
     filepath : str or Path
         Path to altimetry file (.ati extension).
     verbose : bool, optional
-        If True, print altimetry information. Default is True.
+        If True, print altimetry information. Default is False.
 
     Returns
     -------
@@ -267,9 +277,8 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
         filepath = filepath.with_suffix(".ati")
 
     with open(filepath, "r") as fid:
-        if verbose:
-            print("\n_______________________")
-            print("Using top-altimetry file")
+        log_message('bathy_io', "Reading top-altimetry file",
+                    verbose=verbose)
 
         line = fid.readline().strip()
         if "'" in line:
@@ -282,30 +291,33 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = True) -> Tuple[np
         if ati_type not in ["L", "C"]:
             raise ValueError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
 
-        if verbose:
-            if ati_type == "L":
-                print("Piecewise-linear approximation to altimetry")
-            else:
-                print("Curvilinear approximation to altimetry")
+        if ati_type == "L":
+            log_message('bathy_io',
+                        "Piecewise-linear approximation to altimetry",
+                        verbose=verbose)
+        else:
+            log_message('bathy_io',
+                        "Curvilinear approximation to altimetry",
+                        verbose=verbose)
 
         n_pts = int(fid.readline().strip())
-
-        if verbose:
-            print(f"Number of altimetry points = {n_pts}\n")
-            print(" Range (km)     Depth (m)")
+        log_message('bathy_io', f"Number of altimetry points = {n_pts}",
+                    verbose=verbose)
 
         ati_data = []
-        for i in range(n_pts):
+        for _ in range(n_pts):
             parts = fid.readline().split()
             range_km, depth = float(parts[0]), float(parts[1])
             ati_data.append([range_km, depth])
 
-            if verbose and (i < 10 or i == n_pts - 1):
-                print(f"{range_km:9.5g}    {depth:9.5g}")
-            elif verbose and i == 10:
-                print("    ...")
-
         ati_data = np.array(ati_data).T
+
+        log_message('bathy_io',
+                    f"range (km): {_summarize_axis(ati_data[0])}",
+                    verbose=verbose, level='debug')
+        log_message('bathy_io',
+                    f"depth (m): {_summarize_axis(ati_data[1])}",
+                    verbose=verbose, level='debug')
 
     ati_data[0, :] *= 1000.0
 

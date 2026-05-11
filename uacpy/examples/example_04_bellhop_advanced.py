@@ -79,7 +79,8 @@ def main():
         name="Continental Shelf - Munk Profile",
         ssp=SoundSpeedProfile.from_munk(500.0),
         bathymetry=bathymetry,
-        bottom=bottom_rd
+        bottom=bottom_rd,
+        absorption=uacpy.Thorp(),
     )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -104,7 +105,6 @@ def main():
     bellhop_thorp = Bellhop(
         verbose=False,
         beam_type='B', source_type='R', grid_type='R',
-        volume_attenuation='T',
         n_beams=500, alpha=(-85, 85),
     )
 
@@ -126,7 +126,6 @@ def main():
     bellhop_cerveny = Bellhop(
         verbose=False,
         beam_type='C', source_type='R', grid_type='R',
-        volume_attenuation='T',
         n_beams=500, alpha=(-85, 85),
         beam_width_type='M', beam_curvature='Z',
         eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
@@ -151,7 +150,7 @@ def main():
     bellhop_line = Bellhop(
         verbose=False,
         beam_type='B', source_type='X', grid_type='R',
-        volume_attenuation='T', n_beams=500,
+        n_beams=500,
     )
 
     try:

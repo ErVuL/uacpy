@@ -15,7 +15,7 @@ Note: SPARC does not support reflection coefficient files.
 
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
@@ -24,7 +24,6 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import (
     DEFAULT_C_MIN, DEFAULT_C_MAX,
-    AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
 )
 from uacpy.core.exceptions import (
@@ -32,7 +31,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.refl_io import read_reflection_coefficient
 from uacpy.io.oalib_writer import (
-    write_bio_layers, write_bottom_section, write_fg_params,
+    write_absorption_block, write_bottom_section,
     write_header, write_layer_sections, write_ssp_section,
 )
 
@@ -60,12 +59,10 @@ class Bounce(PropagationModel):
         is a valid recommendation for ~full 90° coverage. Defaults
         ``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX``.
     rmax : float, optional
-        Max range (m) for angular sampling. Default ``10000``. Ignored
-        when ``n_angles`` is provided.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
+        Max range (m) for angular sampling. ``None`` (default) auto-
+        derives from ``receiver.range_max`` at ``run()`` time, falling
+        back to ``10000`` m when no receiver range is available.
+        Ignored when ``n_angles`` is provided.
     n_angles : int, optional
         Explicit number of angular samples (``NkTab`` in
         ``bounce.f90``). When provided, uacpy back-derives ``rmax`` to
@@ -150,6 +147,16 @@ class Bounce(PropagationModel):
       coefficient path
     - For KRAKEN, use .irc files (internal reflection coefficient)
 
+    Defaults auto-derived at ``run()`` time:
+
+    - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
+    - ``c_low`` / ``c_high`` constructor defaults
+      (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX``) bracket trapped+leaky modes
+      for the typical seawater range; override for narrowband studies.
+    - TopOpt position 4 reads ``env.absorption``.
+
+    With ``verbose='info'`` the resolved ``rmax`` is logged.
+
     References
     ----------
     - Porter, M.B., "The KRAKEN Normal Mode Program", SACLANT Undersea Research
@@ -162,13 +169,10 @@ class Bounce(PropagationModel):
         executable: Optional[Path] = None,
         c_low: float = DEFAULT_C_MIN,
         c_high: float = DEFAULT_C_MAX,
-        rmax: float = 10000.0,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
+        rmax: Optional[float] = None,
         n_angles: Optional[int] = None,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs,
     ):
@@ -190,8 +194,6 @@ class Bounce(PropagationModel):
             Maximum range (m) for angular sampling. Default: 10000. Ignored
             when ``n_angles`` is provided. (Internally converted to km
             because BOUNCE's input format is in km.)
-        volume_attenuation : str, optional
-            'T' (Thorp), 'F' (Francois-Garrison), 'B' (Biological). Default: None.
         n_angles : int, optional
             Explicit override for the number of angular samples (``NkTab``
             in AT's bounce). If None (default), bounce computes NkTab
@@ -215,11 +217,7 @@ class Bounce(PropagationModel):
         self.c_low = c_low
         self.c_high = c_high
         self.rmax = rmax
-        self.volume_attenuation = volume_attenuation
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
         self.n_angles = n_angles
-        self._validate_volume_attenuation_params()
 
         # Validate phase velocity bounds up front
         if self.c_low <= 0:
@@ -286,8 +284,7 @@ class Bounce(PropagationModel):
             or ``None`` (defaults to REFLECTION). Other values raise
             :class:`UnsupportedFeatureError`.
         **kwargs
-            Additional parameters passed to the ENV file writer
-            (``francois_garrison_params``, ``bio_layers``, …).
+            Additional parameters passed to the ENV file writer.
 
         Returns
         -------
@@ -320,15 +317,23 @@ class Bounce(PropagationModel):
                 f"c_low ({self.c_low})."
             )
 
-        # n_angles → rmax: bounce.f90:49 sets
-        #     NkTab = INT(1000 * RMax_km * (kMax - kMin) / (2*pi))
-        # with kMax = omega/cLow, kMin = omega/cHigh (or 0 if cHigh
-        # is "infinity"). Inverting:
-        #     RMax_m = NkTab * 2*pi / (omega * (1/cLow - 1/cHigh))
-        # Derive into a per-call local — keep ``self`` unmutated so
-        # successive ``run()`` calls with different sources stay
-        # consistent and the instance remains thread-safe.
-        rmax = self.rmax
+        # Per-call rmax. ``n_angles`` (below) overrides via the inverse of
+        # bounce.f90:49  NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π)).
+        if self.rmax is not None:
+            rmax = float(self.rmax)
+        else:
+            recv_rmax = float(receiver.range_max) if receiver is not None else 0.0
+            if recv_rmax > 0:
+                rmax = recv_rmax
+                self._log(
+                    f"rmax auto-derived from receiver.range_max = "
+                    f"{rmax:.1f} m"
+                )
+            else:
+                rmax = 10000.0
+                self._log(
+                    "rmax auto-derived = 10000.0 m (no receiver range available)"
+                )
         if self.n_angles is not None:
             if self.n_angles <= 0:
                 raise ConfigurationError(
@@ -358,12 +363,7 @@ class Bounce(PropagationModel):
             base_name = 'bounce_run'
             input_file = fm.get_path(f'{base_name}.env')
 
-            self._log(f"Writing input file: {input_file}", level='info')
-            # Caller-supplied francois_garrison_params / bio_layers in
-            # run() override the constructor defaults.
-            fg = kwargs.pop('francois_garrison_params',
-                            self.francois_garrison_params)
-            bl = kwargs.pop('bio_layers', self.bio_layers)
+            self._log(f"Writing input file: {input_file}")
             self._write_bounce_input(
                 filepath=input_file,
                 env=env,
@@ -372,13 +372,10 @@ class Bounce(PropagationModel):
                 c_low=self.c_low,
                 c_high=self.c_high,
                 rmax=rmax,
-                volume_attenuation=self.volume_attenuation,
-                francois_garrison_params=fg,
-                bio_layers=bl,
                 **kwargs
             )
 
-            self._log("Running...", level='info')
+            self._log("Running...")
             self._execute(input_file, fm.work_dir)
 
             brc_file = fm.get_path(f'{base_name}.brc')
@@ -403,7 +400,7 @@ class Bounce(PropagationModel):
             if irc_file.exists():
                 self._dedupe_reflection_file(irc_file)
 
-            self._log(f"Reading output: {brc_file}", level='info')
+            self._log(f"Reading output: {brc_file}")
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
 
             from uacpy.core.results import ReflectionCoefficient
@@ -420,7 +417,6 @@ class Bounce(PropagationModel):
                     c_low=self.c_low,
                     c_high=self.c_high,
                     rmax=rmax,
-                    volume_attenuation=self.volume_attenuation,
                     full_result=result,
                 ),
             )
@@ -432,7 +428,7 @@ class Bounce(PropagationModel):
                 ),
             )
 
-            self._log("Simulation complete", level='info')
+            self._log("Simulation complete")
             return field
 
         finally:
@@ -448,9 +444,6 @@ class Bounce(PropagationModel):
         c_low: float,
         c_high: float,
         rmax: float,
-        volume_attenuation: Optional[str] = None,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         **kwargs
     ):
         """
@@ -464,46 +457,22 @@ class Bounce(PropagationModel):
         TopOpt, SSP, BotOpt, cLow/cHigh, RMax. We therefore omit the
         source/receiver depth blocks.
         """
-        # Parse types
         ssp_type = parse_ssp_type(env.ssp.interp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
 
-        # Resolve volume attenuation
-        vol_atten = None
-        if volume_attenuation:
-            vol_atten = VolumeAttenuation.from_string(volume_attenuation)
-
-        # Calculate dense mesh for BOUNCE (needs ~20 points per wavelength)
         frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
         c_water = float(env.ssp.to_pairs()[0, 1])
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
 
         with open(filepath, 'w') as f:
-            # Write standard ENV sections using ATEnvWriter
             write_header(
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
-                attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
-                volume_attenuation=vol_atten,
             )
-
-            # F/B volume-attenuation parameter blocks (after TopOpt)
-            if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                if francois_garrison_params is None:
-                    raise ConfigurationError(
-                        "volume_attenuation='F' requires "
-                        "francois_garrison_params=(T, S, pH, z_bar)",
-                    )
-                write_fg_params(f, francois_garrison_params)
-            elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                if not bio_layers:
-                    raise ConfigurationError(
-                        "volume_attenuation='B' requires bio_layers",
-                    )
-                write_bio_layers(f, bio_layers)
+            write_absorption_block(f, env)
 
             write_ssp_section(
                 f, env, env.depth,

@@ -505,8 +505,12 @@ class TestRangeDependentLayeredBottom:
         assert env.bathymetry[1, 1] == 300
 
     @pytest.mark.requires_binary
+    @pytest.mark.filterwarnings("ignore:.*below the local seafloor.*:UserWarning")
     def test_ram_with_rdl(self):
-        """RAM should handle RangeDependentLayeredBottom."""
+        """RAM should handle RangeDependentLayeredBottom. The deepest
+        receivers sit below the seafloor at the near ranges where the
+        bathy shoals to 100 m — that's exactly the PE absorbing-layer
+        regime, hence the targeted filterwarnings above."""
         rdl = self._make_rdl()
         bathymetry = np.column_stack([
             rdl.ranges,

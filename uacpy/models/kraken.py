@@ -49,7 +49,7 @@ import re
 import warnings
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
 
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
@@ -57,7 +57,6 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Modes, PressureField, TransferFunction
 from uacpy.core.constants import (
-    AttenuationUnits, VolumeAttenuation,
     parse_ssp_type, parse_boundary_type,
     DEFAULT_SOUND_SPEED,
 )
@@ -67,8 +66,8 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
 from uacpy.io.oalib_writer import (
-    write_bio_layers, write_bottom_section, write_broadband_freqs,
-    write_fg_params, write_header, write_layer_sections,
+    write_absorption_block, write_bottom_section, write_broadband_freqs,
+    write_header, write_layer_sections,
     write_multi_profile_env, write_phase_speed_and_rmax,
     write_receiver_depths, write_source_depths, write_ssp_section,
     write_fieldflp,
@@ -96,27 +95,24 @@ class _KrakenBase(PropagationModel):
         point count per medium.
     roughness : float, optional
         Bottom roughness (m). Default: 0.0.
-    volume_attenuation : str, optional
-        Volume attenuation formula: 'T' (Thorp), 'F' (Francois-Garrison),
-        'B' (Biological), or None (no volume attenuation). Default: None.
-    attenuation_unit : AttenuationUnits or str, optional
-        Units for the SSP attenuation column written into the .env header
-        (TopOpt position 3). Default: ``DB_PER_WAVELENGTH``. Accepts the
-        same string aliases as ``AttenuationUnits.from_string`` (``'W'``,
-        ``'M'``, ``'F'``, ``'N'``, ``'Q'``, ``'L'``).
-    francois_garrison_params : tuple, optional
-        (T, S, pH, z_bar) required when ``volume_attenuation='F'``:
-        temperature (degC), salinity (psu), pH, mean depth (m).
-    bio_layers : list of tuples, optional
-        Biological attenuation layers when ``volume_attenuation='B'``.
-        Each entry is (Z1, Z2, f0, Q, a0): top depth (m), bottom depth (m),
-        resonance frequency (Hz), quality factor, absorption coefficient.
     leaky_modes : bool, optional
         If True, override ``c_high`` to 1e9 so Kraken/KrakenC attempt to
         compute leaky modes (trapped modes with phase speeds above the
         halfspace P-wave speed). KrakenC is strongly recommended in this
         mode because it handles complex wavenumbers. See the Kraken doc:
         "CHIGH will attempt to compute leaky modes...". Default: False.
+
+    Notes
+    -----
+    Defaults auto-derived at ``run()`` time (override only when tuning):
+
+    - ``c_low=None`` → ``min(env.ssp) × 0.95``
+    - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
+    - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
+    - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
+      / ``Biological`` / ``ConstantAbsorption`` / ``None``).
+
+    With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
     """
 
     def __init__(
@@ -125,14 +121,10 @@ class _KrakenBase(PropagationModel):
         c_high: Optional[float] = None,
         n_mesh: int = 0,
         roughness: float = 0.0,
-        volume_attenuation: Optional[str] = None,
-        attenuation_unit=AttenuationUnits.DB_PER_WAVELENGTH,
-        francois_garrison_params: Optional[tuple] = None,
-        bio_layers: Optional[list] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
         use_tmpfs: bool = False,
-        verbose: bool = False,
+        verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         **kwargs
     ):
@@ -143,10 +135,6 @@ class _KrakenBase(PropagationModel):
         self.c_high = c_high
         self.n_mesh = n_mesh
         self.roughness = roughness
-        self.volume_attenuation = volume_attenuation
-        self.attenuation_unit = AttenuationUnits.from_string(attenuation_unit)
-        self.francois_garrison_params = francois_garrison_params
-        self.bio_layers = bio_layers
         self.leaky_modes = leaky_modes
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
@@ -159,9 +147,6 @@ class _KrakenBase(PropagationModel):
 
         # CLOW/CHIGH validation (Kraken doc: 0 <= cLow < cHigh)
         self._validate_phase_speed_limits()
-
-        # Inherits base validation (PropagationModel._validate_volume_attenuation_params)
-        self._validate_volume_attenuation_params()
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
@@ -251,7 +236,6 @@ class _KrakenBase(PropagationModel):
         self._check_kraken_ssp_type(env)
         # Re-validate in case caller mutated attributes after __init__
         self._validate_phase_speed_limits()
-        self._validate_volume_attenuation_params()
 
         # Parse types (parse_* normalises string aliases like 'halfspace' vs 'half-space')
         ssp_type = parse_ssp_type(env.ssp.interp)
@@ -274,12 +258,6 @@ class _KrakenBase(PropagationModel):
             trc_dest = Path(filepath).with_suffix('.trc')
             shutil.copy(src, trc_dest)
 
-        # Parse volume attenuation from instance attribute
-        vol_atten = None
-        if self.volume_attenuation:
-            vol_atten = VolumeAttenuation.from_string(self.volume_attenuation)
-
-        # Use instance attributes for model tuning parameters
         receiver_obj = kwargs.get('receiver_obj', None)
         receiver_depths = kwargs.get('receiver_depths', [100.0])
         rmax_m = kwargs.get('rmax_m', None)
@@ -288,21 +266,13 @@ class _KrakenBase(PropagationModel):
         frequencies = kwargs.get('frequencies', None)
 
         with open(filepath, 'w') as f:
-            # Write standard ENV sections using ATEnvWriter
             write_header(
                 f, env, source,
                 ssp_type=ssp_type,
                 surface_type=surface_type,
-                attenuation_unit=self.attenuation_unit,
-                volume_attenuation=vol_atten,
                 frequencies=frequencies,
             )
-
-            # Francois-Garrison / Biological follow-up lines (after TopOpt)
-            if vol_atten == VolumeAttenuation.FRANCOIS_GARRISON:
-                write_fg_params(f, self.francois_garrison_params)
-            elif vol_atten == VolumeAttenuation.BIOLOGICAL:
-                write_bio_layers(f, self.bio_layers)
+            write_absorption_block(f, env)
 
             write_ssp_section(
                 f, env, env.depth,
@@ -322,10 +292,17 @@ class _KrakenBase(PropagationModel):
 
             # KRAKEN-SPECIFIC SECTIONS
 
+            from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+            if self.c_low is None or self.c_high is None:
+                self._log(
+                    f"c_low / c_high auto-derived from env.ssp + bottom = "
+                    f"{cl:.1f} / {ch:.1f} m/s"
+                )
             write_phase_speed_and_rmax(
                 f, env,
                 rmax_m=rmax_m,
-                c_low=self.c_low, c_high=self.c_high,
+                c_low=cl, c_high=ch,
             )
 
             # Source depths (use ATEnvWriter helper for full non-uniform support)
@@ -527,12 +504,6 @@ class Kraken(_KrakenBase):
         Mesh points per medium. ``0`` ⇒ Kraken auto-picks. Default ``0``.
     roughness : float, optional
         Bottom RMS roughness (m). Default ``0``.
-    volume_attenuation : str, optional
-        ``None`` | ``'T'`` Thorp | ``'F'`` Francois–Garrison | ``'B'`` Biological.
-    attenuation_unit : AttenuationUnits, optional
-        SSP attenuation unit. Default ``DB_PER_WAVELENGTH``.
-    francois_garrison_params, bio_layers : optional
-        Required when ``volume_attenuation`` is ``'F'`` / ``'B'``.
     leaky_modes : bool, optional
         Override ``c_high`` to ``1e9`` so kraken attempts leaky modes.
         KrakenC is recommended in this mode (complex arithmetic).
@@ -647,7 +618,7 @@ class Kraken(_KrakenBase):
 
         try:
             env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}", level='info')
+            self._log(f"Writing environment file: {env_file}")
             self._write_kraken_env(
                 env_file, env, source,
                 receiver_obj=receiver,
@@ -655,14 +626,14 @@ class Kraken(_KrakenBase):
                 **kwargs,
             )
 
-            self._log("Running Kraken...", level='info')
+            self._log("Running Kraken...")
             self._run_kraken_executable(base_name, fm.work_dir)
 
             modes_file = fm.get_path(base_name)
-            self._log(f"Reading mode file: {modes_file}.mod", level='info')
+            self._log(f"Reading mode file: {modes_file}.mod")
             modes = self._read_modes_file(modes_file)
 
-            self._log("Simulation complete", level='info')
+            self._log("Simulation complete")
 
             field = self._build_modes_field(modes, n_modes, source)
             self._attach_output_paths(
@@ -690,8 +661,7 @@ class KrakenC(_KrakenBase):
     Parameters
     ----------
     Same as :class:`Kraken` (``executable``, ``mode_points_per_meter``,
-    ``c_low``, ``c_high``, ``n_mesh``, ``roughness``, ``volume_attenuation``,
-    ``attenuation_unit``, ``francois_garrison_params``, ``bio_layers``,
+    ``c_low``, ``c_high``, ``n_mesh``, ``roughness``,
     ``leaky_modes``, ``top_reflection_file`` plus standard plumbing).
     The default ``executable`` resolves to ``krakenc.exe``.
 
@@ -775,7 +745,7 @@ class KrakenC(_KrakenBase):
 
         try:
             env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}", level='info')
+            self._log(f"Writing environment file: {env_file}")
             self._write_kraken_env(
                 env_file, env, source,
                 receiver_obj=receiver,
@@ -783,14 +753,14 @@ class KrakenC(_KrakenBase):
                 **kwargs,
             )
 
-            self._log("Running KrakenC...", level='info')
+            self._log("Running KrakenC...")
             self._run_kraken_executable(base_name, fm.work_dir)
 
             modes_file = fm.get_path(base_name)
-            self._log(f"Reading mode file: {modes_file}.mod", level='info')
+            self._log(f"Reading mode file: {modes_file}.mod")
             modes = self._read_modes_file(modes_file)
 
-            self._log("Simulation complete", level='info')
+            self._log("Simulation complete")
 
             field = self._build_modes_field(modes, n_modes, source)
             self._attach_output_paths(
@@ -841,9 +811,7 @@ class KrakenField(_KrakenBase):
         Cartesian line | ``'S'`` scaled-cylindrical.
     executable, field_executable : Path, optional
         ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
-    c_low, c_high, n_mesh, roughness, volume_attenuation,
-    attenuation_unit, francois_garrison_params, bio_layers,
-    leaky_modes, top_reflection_file : optional
+    c_low, c_high, n_mesh, roughness, leaky_modes, top_reflection_file : optional
         Inherited from :class:`_KrakenBase` — same semantics as :class:`Kraken`.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
@@ -1207,7 +1175,7 @@ class KrakenField(_KrakenBase):
 
                 profile_ranges_m = np.array([s[0] for s in segments])
                 self._log(f"Range-dependent: {n_profiles} profiles, "
-                          f"mode_coupling={self.mode_coupling}", level='info')
+                          f"mode_coupling={self.mode_coupling}")
             else:
                 max_total_depth = self._total_media_depth(env)
 
@@ -1254,7 +1222,6 @@ class KrakenField(_KrakenBase):
                     segments=segments,
                     source=source,
                     receiver=receiver_for_modes,
-                    volume_attenuation=None,
                     n_mesh=n_mesh_fixed,
                     roughness=self.roughness,
                     c_low=self.c_low,
@@ -1273,7 +1240,7 @@ class KrakenField(_KrakenBase):
 
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
             kraken_exe = self._select_kraken_exe(env)
-            self._log(f"Running {kraken_exe.name}...", level='info')
+            self._log(f"Running {kraken_exe.name}...")
             try:
                 self._run_subprocess(
                     [str(kraken_exe), base_name],
@@ -1319,7 +1286,7 @@ class KrakenField(_KrakenBase):
             # Catch only ``ModelExecutionError`` and warn so any wider
             # failure (e.g. ``FileNotFoundError`` for the binary itself)
             # still propagates.
-            self._log(f"Running field.exe (option='{option}')...", level='info')
+            self._log(f"Running field.exe (option='{option}')...")
             try:
                 self._run_subprocess(
                     [str(self._field_exe), base_name],
@@ -1417,7 +1384,7 @@ class KrakenField(_KrakenBase):
                 ),
             )
 
-            self._log("KrakenField simulation complete", level='info')
+            self._log("KrakenField simulation complete")
             return field
 
         finally:
