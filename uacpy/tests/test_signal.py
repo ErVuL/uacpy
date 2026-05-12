@@ -51,6 +51,24 @@ class TestGenerators:
         peak = freqs[np.argmax(np.abs(S))]
         assert abs(peak - f) < (fs / len(s)) * 2
 
+    def test_tone_burst_dt_equals_inverse_sample_rate(self):
+        """``tone_burst`` builds ``time`` so ``dt == 1 / sample_rate``
+        exactly, which keeps round-trip Fourier identities
+        (``np.fft.rfftfreq(N, dt)``) honest."""
+        fs = 48_000.0
+        s, t = tone_burst(frequency=1000.0, n_cycles=5, sample_rate=fs)
+        # Identical length.
+        assert len(s) == len(t)
+        # First sample sits at t=0 (no spurious offset).
+        assert t[0] == 0.0
+        # ``dt`` exact to float precision — no rescaling.
+        dt = t[1] - t[0]
+        assert dt == 1.0 / fs
+        # Uniform spacing across the whole vector (tolerant of the
+        # 1-ulp roundoff that ``np.diff`` introduces on a stride-built
+        # array).
+        np.testing.assert_allclose(np.diff(t), 1.0 / fs, rtol=1e-12, atol=0)
+
 
 class TestProcessing:
     """Processing helpers don't blow up on synthetic signals."""

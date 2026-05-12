@@ -74,6 +74,26 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
     'elastic': 'fluid',
 }
 
+# Allowed method strings per collapse key (validated at construction in
+# ``PropagationModel.__init__`` so bad values fail loudly rather than deep
+# inside a writer at ``run()``-time).
+VALID_COLLAPSE_METHODS: Dict[str, frozenset] = {
+    'bathymetry':        frozenset({'max', 'median', 'mean', 'min', 'initial'}),
+    'ssp':               frozenset({'r0', 'rmax', 'mean', 'median'}),
+    'bottom':            frozenset({'r0', 'rmax', 'mean', 'median'}),
+    'layered':           frozenset({'halfspace', 'top_layer', 'volume_average'}),
+    'rd_layered_range':  frozenset({'r0', 'rmax', 'median'}),
+    'rd_layered_layers': frozenset({'preserve', 'halfspace', 'top_layer', 'volume_average'}),
+    'altimetry':         frozenset({'drop'}),
+    'elastic':           frozenset({'fluid', 'vacuum'}),
+}
+assert set(VALID_COLLAPSE_METHODS) == set(DEFAULT_COLLAPSE), (
+    "VALID_COLLAPSE_METHODS keys must match DEFAULT_COLLAPSE keys"
+)
+assert all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COLLAPSE), (
+    "DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS"
+)
+
 
 class PropagationModel(ABC):
     """
@@ -153,6 +173,12 @@ class PropagationModel(ABC):
                     f"Unknown collapse keys: {sorted(unknown)}. "
                     f"Valid keys: {sorted(DEFAULT_COLLAPSE)}"
                 )
+            for key, value in collapse.items():
+                if value not in VALID_COLLAPSE_METHODS[key]:
+                    raise ConfigurationError(
+                        f"Invalid collapse value for {key!r}: {value!r}. "
+                        f"Valid values: {sorted(VALID_COLLAPSE_METHODS[key])}"
+                    )
             self._collapse.update(collapse)
             self._user_collapse = dict(collapse)
         self.file_manager = None
@@ -196,7 +222,7 @@ class PropagationModel(ABC):
 
     def _resolve_run_mode(
         self,
-        run_mode: Optional['RunMode'],
+        run_mode: Optional[Union['RunMode', str]],
         *,
         default: Optional['RunMode'] = None,
     ) -> 'RunMode':
@@ -204,16 +230,29 @@ class PropagationModel(ABC):
         validate that ``run_mode`` is in ``_supported_modes``. Raises
         :class:`UnsupportedFeatureError` otherwise.
 
+        Strings matching a :class:`RunMode` value (e.g. ``'coherent_tl'``)
+        are coerced to the corresponding enum member.
+
         Pass ``default=`` to override the auto-pick when the model has a
         smarter rule (e.g. KrakenField picks BROADBAND when a frequency
         vector is supplied).
         """
         if run_mode is None:
             run_mode = default if default is not None else self._supported_modes[0]
+        if isinstance(run_mode, str):
+            try:
+                run_mode = RunMode(run_mode)
+            except ValueError:
+                raise UnsupportedFeatureError(
+                    self.model_name, repr(run_mode),
+                    alternatives=[str(m) for m in self._supported_modes],
+                    alternatives_label='run modes',
+                )
         if not self.supports_mode(run_mode):
             raise UnsupportedFeatureError(
                 self.model_name, str(run_mode),
                 alternatives=[str(m) for m in self._supported_modes],
+                alternatives_label='run modes',
             )
         return run_mode
 
@@ -1047,9 +1086,15 @@ class PropagationModel(ABC):
 
         def _zero_shear(b):
             if hasattr(b, 'shear_speed'):
-                b.shear_speed = 0.0
+                cs = b.shear_speed
+                b.shear_speed = (
+                    np.zeros_like(cs) if isinstance(cs, np.ndarray) else 0.0
+                )
             if hasattr(b, 'shear_attenuation'):
-                b.shear_attenuation = 0.0
+                cas = b.shear_attenuation
+                b.shear_attenuation = (
+                    np.zeros_like(cas) if isinstance(cas, np.ndarray) else 0.0
+                )
 
         if method == 'vacuum':
             return BoundaryProperties(acoustic_type='vacuum')

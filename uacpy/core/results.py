@@ -311,12 +311,13 @@ class _GridResult(Result):
 class PressureField(_GridResult):
     """Acoustic pressure on a ``(depth, range)`` grid.
 
+    Strictly 2-D, narrowband, single-source — ``data.shape == (n_depths, n_ranges)``.
+    Broadband uses :class:`TransferFunction` (3-D ``(n_d, n_r, n_f)``);
+    multi-source-depth runs return a :class:`ResultStack` of
+    :class:`PressureField` slabs keyed by source depth.
+
     Carries either complex pressure (``units='complex'``) or transmission
     loss in dB (``units='dB'``).
-
-    ``data`` shape:
-      * narrowband: ``(n_depths, n_ranges)``
-      * broadband : ``(n_depths, n_ranges, n_frequencies)``
 
     Units
     -----
@@ -347,50 +348,50 @@ class PressureField(_GridResult):
             raise ConfigurationError(
                 f"PressureField.units: must be 'complex' or 'dB', got {units!r}"
             )
+        self._validate_data_shape(data)
         self.units = units
         super().__init__(
             data=data, depths=depths, ranges=ranges, **kwargs,
         )
 
+    def _validate_data_shape(self, data: np.ndarray) -> None:
+        """Enforce strict 2-D ``(n_depths, n_ranges)``. Sliced views
+        relax this in :class:`SlicedPressureField`."""
+        if data.ndim != 2:
+            raise ValueError(
+                f"PressureField.data: must be 2-D (n_d, n_r); got shape "
+                f"{data.shape}. Use TransferFunction for broadband, or "
+                f"bundle per-source slabs into a ResultStack for "
+                f"multi-source results."
+            )
+
     field_type = 'tl'
 
-    @property
-    def is_broadband(self) -> bool:
-        return self.data.ndim == 3
-
-    # Unified label-based selection — xarray-style. Pass any subset of
-    # ``depth``, ``range``, ``frequency``; each picks the nearest grid
-    # sample and collapses that axis to size 1. The selected axis stays
-    # in ``.data.shape`` (so the returned ``SlicedPressureField`` keeps
-    # its declared dimensionality), but ``.tl`` / ``.p`` squeeze size-1
-    # axes for plot-friendly shapes.
     def at(
         self,
         *,
         depth: Optional[float] = None,
         range: Optional[float] = None,
-        frequency: Optional[float] = None,
     ) -> "SlicedPressureField":
+        """Label-based slicing along the depth and/or range axis.
+
+        Each kwarg picks the nearest grid sample and collapses that axis
+        to size 1. The selected axis stays in ``.data.shape`` (so the
+        returned :class:`SlicedPressureField` keeps its declared
+        dimensionality), but ``.tl`` / ``.p`` squeeze size-1 axes for
+        plot-friendly shapes.
+        """
         sliced = self.data
         new_depths = self.depths
         new_ranges = self.ranges
-        new_freqs = self.frequencies
         if depth is not None:
             d_idx = int(np.argmin(np.abs(self.depths - depth)))
-            sliced = sliced[d_idx:d_idx + 1, ...]
+            sliced = sliced[d_idx:d_idx + 1, :]
             new_depths = np.array([float(self.depths[d_idx])])
         if range is not None:
             r_idx = int(np.argmin(np.abs(self.ranges - range)))
-            sliced = sliced[:, r_idx:r_idx + 1, ...]
+            sliced = sliced[:, r_idx:r_idx + 1]
             new_ranges = np.array([float(self.ranges[r_idx])])
-        if frequency is not None:
-            if self.frequencies is None or self.data.ndim < 3:
-                raise ValueError(
-                    "PressureField.at: frequency= requires a broadband (3-D) field"
-                )
-            f_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
-            sliced = sliced[..., f_idx:f_idx + 1]
-            new_freqs = np.array([float(self.frequencies[f_idx])])
         return SlicedPressureField(
             data=sliced,
             depths=new_depths,
@@ -398,25 +399,21 @@ class PressureField(_GridResult):
             units=self.units,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=new_freqs,
+            frequencies=self.frequencies,
             metadata=dict(self.metadata),
         )
 
     def max(self) -> "SlicedPressureField":
-        """Slice at the global argmax of ``|data|`` across **every** axis.
-        Returns a 1×1 (or 1×1×1) :class:`SlicedPressureField` — ``.tl`` /
-        ``.p`` are 0-D scalars (``float()``-able). Read ``.depths[0]`` /
-        ``.ranges[0]`` / ``.frequencies[0]`` for the location of the max.
+        """Slice at the global argmax of ``|data|``.
+
+        Returns a 1×1 :class:`SlicedPressureField` — ``.tl`` / ``.p`` are
+        0-D scalars (``float()``-able). Read ``.depths[0]`` /
+        ``.ranges[0]`` for the location of the max.
         """
-        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
-        d_idx, r_idx = idx[0], idx[1]
-        if self.data.ndim == 3:
-            f_idx = idx[2]
-            sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx:f_idx + 1]
-            freqs = np.array([float(self.frequencies[f_idx])])
-        else:
-            sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
-            freqs = self.frequencies
+        d_idx, r_idx = np.unravel_index(
+            np.argmax(np.abs(self.data)), self.data.shape,
+        )
+        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
         return SlicedPressureField(
             data=sliced,
             depths=np.array([float(self.depths[d_idx])]),
@@ -424,7 +421,7 @@ class PressureField(_GridResult):
             units=self.units,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=freqs,
+            frequencies=self.frequencies,
             metadata=dict(self.metadata),
         )
 
@@ -483,20 +480,25 @@ class PressureField(_GridResult):
             )
         return self.data
 
-    def mask_below_seafloor(self, bathymetry: np.ndarray) -> "PressureField":
+    def mask_below_seafloor(self, bathymetry) -> "PressureField":
         """Return a copy with samples below the seafloor set to NaN.
 
-        ``bathymetry`` is an ``(N, 2)`` array of ``(range, depth)``
-        pairs (the same shape carried by ``Environment.bathymetry``). The
-        seafloor depth at each receiver range is linearly interpolated from
-        the bathymetry; receiver depths exceeding that local depth are
-        masked.
+        Accepts either an :class:`Environment` (its ``.bathymetry`` is
+        used) or a raw ``(N, 2)`` array of ``(range, depth)`` pairs in
+        the same shape carried by :attr:`Environment.bathymetry`. The
+        seafloor depth at each receiver range is linearly interpolated
+        from the bathymetry; receiver depths exceeding that local depth
+        are masked with NaN.
         """
+        # Late import to avoid the results <-> environment cycle at module load.
+        from uacpy.core.environment import Environment
+        if isinstance(bathymetry, Environment):
+            bathymetry = bathymetry.bathymetry
         bathy = np.asarray(bathymetry, dtype=float)
         if bathy.ndim != 2 or bathy.shape[1] != 2:
             raise ValueError(
                 f"PressureField.mask_below_seafloor: bathymetry must be "
-                f"shape (N, 2); got {bathy.shape}"
+                f"shape (N, 2) or an Environment; got array shape {bathy.shape}"
             )
         seafloor = np.interp(self.ranges, bathy[:, 0], bathy[:, 1])
         new_data = self.data.astype(
@@ -505,7 +507,7 @@ class PressureField(_GridResult):
         )
         for j, bd in enumerate(seafloor):
             mask = self.depths > bd
-            new_data[mask, j, ...] = np.nan
+            new_data[mask, j] = np.nan
         return PressureField(
             data=new_data,
             depths=self.depths,
@@ -533,46 +535,28 @@ class PressureField(_GridResult):
         from scipy.interpolate import RegularGridInterpolator
         new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
-        # Build the same target mesh shape regardless of broadband-ness;
-        # the trailing axis is preserved by interpolating each frequency
-        # slice independently.
-        if self.data.ndim == 2:
-            slices = [self.data]
-        elif self.data.ndim == 3:
-            slices = [self.data[..., k] for k in range(self.data.shape[2])]
-        else:
-            raise ValueError(
-                f"PressureField.resample_to: unsupported ndim={self.data.ndim}"
-            )
 
         DD, RR = np.meshgrid(new_depths, new_ranges, indexing='ij')
         query = np.stack([DD.ravel(), RR.ravel()], axis=-1)
 
-        out_slices = []
-        is_complex = np.iscomplexobj(self.data)
-        for sl in slices:
-            if is_complex:
-                interp_re = RegularGridInterpolator(
-                    (self.depths, self.ranges), sl.real,
-                    method=method, bounds_error=False, fill_value=np.nan,
-                )
-                interp_im = RegularGridInterpolator(
-                    (self.depths, self.ranges), sl.imag,
-                    method=method, bounds_error=False, fill_value=np.nan,
-                )
-                vals = interp_re(query) + 1j * interp_im(query)
-            else:
-                interp = RegularGridInterpolator(
-                    (self.depths, self.ranges), sl,
-                    method=method, bounds_error=False, fill_value=np.nan,
-                )
-                vals = interp(query)
-            out_slices.append(vals.reshape(len(new_depths), len(new_ranges)))
-
-        if self.data.ndim == 2:
-            new_data = out_slices[0]
+        if np.iscomplexobj(self.data):
+            interp_re = RegularGridInterpolator(
+                (self.depths, self.ranges), self.data.real,
+                method=method, bounds_error=False, fill_value=np.nan,
+            )
+            interp_im = RegularGridInterpolator(
+                (self.depths, self.ranges), self.data.imag,
+                method=method, bounds_error=False, fill_value=np.nan,
+            )
+            vals = interp_re(query) + 1j * interp_im(query)
         else:
-            new_data = np.stack(out_slices, axis=-1)
+            interp = RegularGridInterpolator(
+                (self.depths, self.ranges), self.data,
+                method=method, bounds_error=False, fill_value=np.nan,
+            )
+            vals = interp(query)
+
+        new_data = vals.reshape(len(new_depths), len(new_ranges))
 
         return PressureField(
             data=new_data,
@@ -604,14 +588,26 @@ class PressureField(_GridResult):
 
 class SlicedPressureField(PressureField):
     """Returned by :meth:`PressureField.at` / :meth:`PressureField.max`
-    (and the same methods on :class:`TransferFunction`). Same as
-    :class:`PressureField` except ``.tl`` / ``.p`` apply
+    (and the same methods on :class:`TransferFunction`).
+
+    Same data semantics as :class:`PressureField`, but ``data`` may be
+    2-D ``(n_d, n_r)`` *or* 3-D ``(n_d, n_r, n_frequencies)`` — the
+    extra axis preserves the frequency dimension of a sliced
+    :class:`TransferFunction`. ``.tl`` / ``.p`` apply
     :func:`numpy.squeeze` so chain calls give plot-friendly shapes
     (``(N,)`` for line cuts, 0-D scalars for point queries) without
     manual ``.squeeze()`` / ``.item()`` at the call site. Internal —
-    model wrappers always emit full :class:`PressureField` instances;
-    only slicing produces this subtype.
+    model wrappers always emit full :class:`PressureField` /
+    :class:`TransferFunction` instances; only slicing produces this
+    subtype.
     """
+
+    def _validate_data_shape(self, data: np.ndarray) -> None:
+        if data.ndim not in (2, 3):
+            raise ValueError(
+                f"SlicedPressureField.data: must be 2-D or 3-D; got "
+                f"shape {data.shape}"
+            )
 
     @property
     def tl(self) -> np.ndarray:
@@ -620,6 +616,162 @@ class SlicedPressureField(PressureField):
     @property
     def p(self) -> np.ndarray:
         return np.squeeze(PressureField.p.fget(self))
+
+
+# Per-coordinate metadata invariants. The stacking axis is the *only*
+# axis along which slabs are allowed to differ. Other axes that live
+# on a :class:`Result` (``frequencies``, ``source_depths``) must agree
+# across slabs *unless* they are the stacking axis itself.
+_RESULTSTACK_VARYING_ATTR = {
+    'source_depth': 'source_depths',
+    'frequency':    'frequencies',
+}
+
+
+class ResultStack:
+    """Generic stack of typed :class:`Result` slabs along one coordinate.
+
+    Composition wrapper that bundles a list of slabs together with the
+    coordinate vector along which they are stacked. The coordinate can
+    be a :class:`Result` field (``source_depth``, ``frequency``) or an
+    external parameter the user varied (``wind_speed``, ``azimuth``,
+    …). Every slab carries the same concrete type, ``model``, and
+    ``backend`` — and the same metadata along every axis *except* the
+    stacking axis.
+
+    Construction
+    ------------
+    ``ResultStack(slabs, coordinate, coordinate_name='source_depth')``
+
+    Access
+    ------
+    ``stack[i]``                              i-th slab (typed :class:`Result`)
+    ``for c, slab in stack: …``               iterate ``(coordinate, slab)`` pairs
+    ``stack.at(<coordinate_name>=value)``     nearest-label lookup
+    ``len(stack)``                            number of slabs
+
+    The stack does NOT expose slab-typed accessors (``.tl``, ``.rays``,
+    …); read those off the slab directly:
+    ``stack[0].tl``, ``stack.at(source_depth=50).tl``,
+    ``[slab.tl for c, slab in stack]``.
+    """
+
+    field_type = 'stack'
+
+    def __init__(
+        self,
+        slabs: List[Result],
+        coordinate: Union[List[float], np.ndarray],
+        *,
+        coordinate_name: str = 'source_depth',
+    ):
+        if len(slabs) == 0:
+            raise ValueError("ResultStack: requires at least one slab")
+        coord = np.atleast_1d(np.asarray(coordinate, dtype=float))
+        if coord.size != len(slabs):
+            raise ValueError(
+                f"ResultStack: coordinate length ({coord.size}) does not "
+                f"match number of slabs ({len(slabs)})"
+            )
+        types = {type(s) for s in slabs}
+        if len(types) != 1:
+            raise TypeError(
+                f"ResultStack: every slab must have the same concrete "
+                f"type; got {sorted(t.__name__ for t in types)}"
+            )
+
+        # The stacking axis is allowed to differ across slabs; every
+        # other metadata field must agree.
+        varying_attr = _RESULTSTACK_VARYING_ATTR.get(str(coordinate_name))
+        shared_attrs = ['model', 'backend']
+        for attr in ('frequencies', 'source_depths'):
+            if attr != varying_attr:
+                shared_attrs.append(attr)
+
+        first = slabs[0]
+
+        def _arrays_equal(a, b):
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            a = np.asarray(a)
+            b = np.asarray(b)
+            return a.shape == b.shape and np.array_equal(a, b)
+
+        for attr in shared_attrs:
+            ref = getattr(first, attr, None)
+            eq = _arrays_equal if isinstance(ref, np.ndarray) else (lambda a, b: a == b)
+            for i, s in enumerate(slabs[1:], start=1):
+                val = getattr(s, attr, None)
+                if not eq(ref, val):
+                    raise ValueError(
+                        f"ResultStack: slabs[0].{attr}={ref!r} but "
+                        f"slabs[{i}].{attr}={val!r} — every slab must "
+                        f"share the same {attr} (stacking axis is "
+                        f"{coordinate_name!r})"
+                    )
+
+        self.slabs: List[Result] = list(slabs)
+        self.coordinate: np.ndarray = coord
+        self.coordinate_name: str = str(coordinate_name)
+
+    @property
+    def slab_type(self) -> type:
+        """Concrete :class:`Result` subclass of every slab."""
+        return type(self.slabs[0])
+
+    @property
+    def n_slabs(self) -> int:
+        return int(self.coordinate.size)
+
+    # Universally-shared metadata. Stacking-axis-dependent attributes
+    # (``frequencies``, ``source_depths``) are intentionally NOT
+    # exposed at the stack level: read them off ``slabs[0]`` if they
+    # are shared, or off ``coordinate`` if they are the stacking axis.
+    @property
+    def model(self) -> str:
+        return self.slabs[0].model
+
+    @property
+    def backend(self) -> str:
+        return self.slabs[0].backend
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        return self.slabs[0].metadata
+
+    def __len__(self) -> int:
+        return self.n_slabs
+
+    def __getitem__(self, index: int) -> Result:
+        return self.slabs[int(index)]
+
+    def __iter__(self):
+        for c, slab in zip(self.coordinate, self.slabs):
+            yield float(c), slab
+
+    def at(self, **kwargs) -> Result:
+        """Return the slab whose coordinate is closest to the value
+        passed under ``coordinate_name``. Exactly one keyword argument
+        is accepted, and its name must match :attr:`coordinate_name`.
+        """
+        if len(kwargs) != 1 or self.coordinate_name not in kwargs:
+            raise TypeError(
+                f"ResultStack.at(): pass exactly the stacking-axis "
+                f"keyword ({self.coordinate_name}=<value>); got "
+                f"{list(kwargs)}"
+            )
+        target = float(kwargs[self.coordinate_name])
+        idx = int(np.argmin(np.abs(self.coordinate - target)))
+        return self.slabs[idx]
+
+    def __repr__(self) -> str:
+        return (
+            f"ResultStack[{self.slab_type.__name__}]"
+            f"(n_slabs={self.n_slabs}, "
+            f"{self.coordinate_name}={self.coordinate.tolist()})"
+        )
 
 
 class TransferFunction(_GridResult):
@@ -693,47 +845,6 @@ class TransferFunction(_GridResult):
     def p(self) -> np.ndarray:
         """Complex transfer-function values, shape ``data.shape``."""
         return self.data
-
-    @classmethod
-    def from_pressure_field(
-        cls,
-        pf: "PressureField",
-        *,
-        phase_reference: Union[PhaseReference, str],
-    ) -> "TransferFunction":
-        """Promote a 3-D complex :class:`PressureField` to a
-        :class:`TransferFunction` by attaching a ``phase_reference``.
-
-        ``pf`` must satisfy ``pf.units == 'complex'`` and
-        ``pf.data.ndim == 3`` (broadband H(d, r, f)). Axes / data /
-        frequencies / model identity / metadata round-trip; only the
-        type and the ``phase_reference`` field change.
-        """
-        if not isinstance(pf, PressureField):
-            raise TypeError(
-                f"TransferFunction.from_pressure_field: pf must be a "
-                f"PressureField; got {type(pf).__name__}"
-            )
-        if pf.units != 'complex':
-            raise ValueError(
-                f"TransferFunction.from_pressure_field: pf must have "
-                f"units='complex'; got units={pf.units!r}"
-            )
-        if pf.data.ndim != 3:
-            raise ValueError(
-                f"TransferFunction.from_pressure_field: pf.data must be "
-                f"3-D (n_d, n_r, n_f); got shape {pf.data.shape}"
-            )
-        return cls(
-            data=pf.data,
-            depths=pf.depths,
-            ranges=pf.ranges,
-            frequencies=pf.frequencies,
-            phase_reference=phase_reference,
-            model=pf.model, backend=pf.backend,
-            source_depths=pf.source_depths,
-            metadata=dict(pf.metadata),
-        )
 
     # Time-domain conversion ------------------------------------------------
     def to_time_trace(
@@ -1339,7 +1450,13 @@ class Rays(Result):
     ----------
     rays : list
         Ray dicts with ``r``, ``z``, ``alpha``, ``n_top_bounces``,
-        ``n_bot_bounces``.
+        ``n_bot_bounces``. **Polyline coordinates ``r`` (range) and
+        ``z`` (depth) are in metres**; ``alpha`` is the launch angle
+        in degrees. The Bellhop reader
+        (:func:`uacpy.io.oalib_reader.read_ray_file`) preserves
+        Bellhop's native metre output, so downstream helpers such as
+        :meth:`filter_by_miss_distance` work in metres without any
+        unit detection.
     is_eigen : bool
         ``True`` for output of Bellhop's eigenray solver (``RunType='E'``),
         ``False`` for a regular ray fan (``RunType='R'``). Set by the
@@ -1457,20 +1574,18 @@ class Rays(Result):
     def _miss_distance_to(
         self, ray, target_range_m: float, target_depth_m: float,
     ) -> Tuple[float, int]:
-        """Closest-approach miss distance and its index along the polyline."""
+        """Closest-approach miss distance and its index along the polyline.
+
+        Ray polylines are required to carry ``r`` / ``z`` in **metres**
+        (see :class:`Rays` docstring). The Bellhop reader in
+        :mod:`uacpy.io.oalib_reader` already preserves Bellhop's native
+        metres, so no unit-detection heuristic is needed here.
+        """
         r = np.asarray(ray.get('r', []))
         z = np.asarray(ray.get('z', []))
         if len(r) == 0:
             return float('inf'), 0
-        # km internally on r — but we accept whatever the polyline carries.
-        # Stay in metres consistently: assume r is metres if all values are
-        # >> 1, else km. Heuristic-free: convert km to m if max(r) < 100
-        # (no realistic ocean ray path is < 100 m).
-        if r.max() < 100.0:
-            r_m = r * 1000.0
-        else:
-            r_m = r
-        d2 = (r_m - target_range_m) ** 2 + (z - target_depth_m) ** 2
+        d2 = (r - target_range_m) ** 2 + (z - target_depth_m) ** 2
         k = int(np.argmin(d2))
         return float(np.sqrt(d2[k])), k
 
@@ -1657,7 +1772,21 @@ class Modes(Result):
         )
 
     def compute_phase_speeds(self) -> np.ndarray:
-        omega = 2.0 * np.pi * (self.f0 or 0.0)
+        """Mode phase speeds ``v_p = ω / Re(k_r)`` in m/s.
+
+        Raises
+        ------
+        ValueError
+            If this :class:`Modes` instance has no frequency context
+            (``self.f0 is None``); without a frequency the phase speed
+            is undefined. Pass ``frequencies=…`` to the wrapper that
+            built this object, or set it on the instance, before calling.
+        """
+        if self.f0 is None:
+            raise ValueError(
+                "Modes.compute_phase_speeds requires frequencies; got None"
+            )
+        omega = 2.0 * np.pi * self.f0
         return omega / np.real(self.k)
 
     def compute_group_velocity(self, other: "Modes") -> np.ndarray:

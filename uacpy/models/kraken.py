@@ -529,9 +529,14 @@ class Kraken(_KrakenBase):
 
     Notes
     -----
-    **Auto-route to KrakenC.** When ``env`` carries ``shear_speed > 0``
-    anywhere or ``leaky_modes=True``, ``kraken.exe`` is swapped for
-    ``krakenc.exe`` (complex arithmetic) with one ``UserWarning``.
+    **No auto-route to KrakenC.** If the env carries elastic media
+    (``shear_speed > 0``) or ``leaky_modes=True`` is set, ``kraken.exe``
+    will likely fail to find modes; the wrapper inspects the ``.prt``
+    log and raises ``ModelExecutionError`` with a message suggesting
+    KrakenC. Instantiate ``KrakenC`` directly for elastic / leaky-mode
+    environments. (``KrakenField`` *does* auto-route internally because
+    it owns the modes-solve step; ``Kraken`` is the stand-alone modes
+    solver and leaves the choice to the user.)
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     Modes solve an eigenproblem of the whole water column — no
@@ -554,7 +559,11 @@ class Kraken(_KrakenBase):
         super().__init__(**kwargs)
         self.mode_points_per_meter = float(mode_points_per_meter)
         self._supported_modes = [RunMode.MODES]
-        # Elastic media auto-route to krakenc.exe via _select_kraken_exe.
+        # Elastic media are flagged supported because KrakenC handles
+        # them; the stand-alone ``Kraken`` (real-arithmetic) class will
+        # fail at runtime on elastic envs and the wrapper's PRT-aware
+        # error message tells the user to switch to KrakenC. (Auto-route
+        # lives inside KrakenField only — see KrakenField._select_kraken_exe.)
         self._supports_altimetry = False
         self._supports_range_dependent_bathymetry = False
         self._supports_range_dependent_ssp = False

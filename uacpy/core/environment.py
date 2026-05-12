@@ -1046,9 +1046,13 @@ class SoundSpeedProfile:
           ``depth_max`` so writers that require ``ssp[-1] == env.depth``
           (Bellhop / Kraken) round-trip without manual alignment.
         """
-        if depth_max == self.depths[-1]:
+        # Tolerant float compare — caller may pass in e.g. ``env.depth``
+        # that's been round-tripped through I/O and differs by a few
+        # ulps from ``self.depths[-1]``.
+        last = float(self.depths[-1])
+        if np.isclose(depth_max, last, rtol=1e-9, atol=1e-9):
             return self
-        if depth_max > self.depths[-1]:
+        if depth_max > last:
             new_depths = np.append(self.depths, depth_max)
             new_data = np.vstack([self.data, self.data[-1:, :]])
         else:
@@ -1088,7 +1092,7 @@ class SoundSpeedProfile:
         """Build a 1-D profile from ``[(depth, c), …]`` pairs.
 
         ``shape`` is informational metadata (``'measured'`` default);
-        see :class:`SoundSpeedProfile`. The model's ``ssp_interp`` kwarg
+        see :class:`SoundSpeedProfile`. The model's ``interp_ssp`` kwarg
         drives the sample-connection scheme.
         """
         arr = np.asarray(pairs, dtype=float)
@@ -1393,6 +1397,11 @@ class Environment:
                     f"Environment: bathymetry must be a positive scalar or shape "
                     f"(N, 2) as [(range, depth), ...]; got shape "
                     f"{self.bathymetry.shape} (example: [(0, 100), (5000, 200)])"
+                )
+            if np.any(self.bathymetry[:, 0] < 0):
+                raise ValueError(
+                    f"Environment: bathymetry ranges must be non-negative (m); "
+                    f"got {self.bathymetry[:, 0].tolist()}"
                 )
             if np.any(self.bathymetry[:, 1] <= 0):
                 raise ValueError(

@@ -35,6 +35,8 @@ result = oasp.run(env, source, receiver)
 ```
 """
 
+import warnings
+
 import numpy as np
 from pathlib import Path
 from typing import Optional, Union
@@ -59,6 +61,51 @@ from uacpy.io.oases_reader import (
     read_oasp_trf,
     read_oasr_reflection_coefficients,
 )
+
+
+def _oases_resample_frequencies(
+    freqs: np.ndarray, model_name: str,
+) -> tuple[float, float, int, bool]:
+    """Convert an arbitrary user ``frequencies=`` vector to the
+    ``(fmin, fmax, N)`` triple OASR/OASP write into the input file.
+
+    OASR's ``.dat`` and OASP's broadband kernel both express their
+    frequency axis as a min/max/count, which implies equispaced
+    sampling. If the user passes a non-equispaced vector we warn and
+    auto-resample onto ``np.linspace(fmin, fmax, N)`` so the result's
+    ``Result.frequencies`` reflects what the model actually saw.
+
+    Returns
+    -------
+    fmin, fmax : float
+    n : int
+        Number of equispaced bins.
+    resampled : bool
+        True iff the user vector was non-equispaced and got resampled.
+    """
+    freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
+    fmin = float(freqs.min())
+    fmax = float(freqs.max())
+    n = int(freqs.size)
+    resampled = False
+    if n > 1:
+        diffs = np.diff(freqs)
+        # Equispaced if all diffs match the mean diff within tolerance
+        # (rtol scaled to the band; atol is a tiny absolute floor).
+        target = (fmax - fmin) / (n - 1)
+        if not np.allclose(diffs, target, rtol=1e-6, atol=1e-9):
+            resampled = True
+            warnings.warn(
+                f"{model_name}: frequencies= vector is non-equispaced; "
+                f"OASES expresses the frequency axis as (fmin, fmax, N) "
+                f"so the vector has been resampled onto "
+                f"np.linspace({fmin}, {fmax}, {n}). "
+                f"Result.frequencies will be the resampled grid, not "
+                f"your input. Pass an equispaced vector (or "
+                f"freq_min/freq_max/n_frequencies) to suppress.",
+                UserWarning, stacklevel=3,
+            )
+    return fmin, fmax, n, resampled
 
 
 def _stack_oasr_data(data: dict):
@@ -803,9 +850,12 @@ class OASR(PropagationModel):
                         f"OASR.run: pass either frequencies=… or "
                         f"{sweep_key}=…, not both."
                     )
-            kwargs['freq_min'] = float(freqs_arr.min())
-            kwargs['freq_max'] = float(freqs_arr.max())
-            kwargs['n_frequencies'] = int(freqs_arr.size)
+            fmin, fmax, n_freq, _ = _oases_resample_frequencies(
+                freqs_arr, 'OASR',
+            )
+            kwargs['freq_min'] = fmin
+            kwargs['freq_max'] = fmax
+            kwargs['n_frequencies'] = n_freq
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -1071,13 +1121,19 @@ class OASP(PropagationModel):
             # OASP rebuilds its own (n_time_samples, freq_max) grid; an
             # explicit ``frequencies=`` vector overrides ``freq_max`` to the
             # user's max and ``n_time_samples`` so the resulting OASP bins
-            # span at least the requested band.
-            freq_max = float(freqs_arr.max())
-            df_user = (
-                float(np.diff(freqs_arr).min())
-                if freqs_arr.size > 1
-                else float(freqs_arr[0])
+            # span at least the requested band. The (fmin, fmax, N) triple
+            # is OASP's internal language — warn if the user vector is
+            # non-equispaced so they know the resulting bins won't match
+            # their input one-to-one.
+            fmin_user, freq_max, n_user, _ = _oases_resample_frequencies(
+                freqs_arr, 'OASP',
             )
+            if n_user > 1:
+                # df implied by the equispaced (fmin, fmax, N) grid that
+                # OASES will actually run.
+                df_user = (freq_max - fmin_user) / (n_user - 1)
+            else:
+                df_user = float(freqs_arr[0])
             if df_user > 0:
                 # OASP requires NT = 2^M (oasp.tex:129); round up.
                 target = max(int(n_time_samples or 0),
@@ -1267,5 +1323,19 @@ def OASES(
         raise UnsupportedFeatureError(
             'OASES', str(run_mode),
             alternatives=[str(m) for m in dispatch],
+            alternatives_label='run modes',
         )
-    return cls(**kwargs)
+    # Per uacpy convention "irrelevant kwargs are silently ignored":
+    # drop kwargs that aren't explicit parameters of either the chosen
+    # sub-class __init__ or PropagationModel.__init__ (the base that the
+    # sub-class forwards **kwargs to). Subclass-specific kwargs that the
+    # *other* sub-classes accept (e.g. ``angles=`` for OASR, or
+    # ``compute_contour=`` for OAST) are quietly dropped when routing
+    # elsewhere instead of raising ``TypeError``.
+    import inspect
+    allowed = set(inspect.signature(cls.__init__).parameters)
+    allowed |= set(inspect.signature(PropagationModel.__init__).parameters)
+    allowed.discard('self')
+    allowed.discard('kwargs')
+    filtered = {k: v for k, v in kwargs.items() if k in allowed}
+    return cls(**filtered)

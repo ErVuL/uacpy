@@ -688,9 +688,16 @@ class SPARC(PropagationModel):
     def _sparc_rigidify_halfspace(self, env: Environment) -> Environment:
         """Rewrite an env's halfspace bottom to 'rigid' so SPARC's
         ``Vacuum`` / ``Rigid``-only writer accepts it. Emits one
-        :class:`UserWarning` per run regardless of how many depths are
-        looped — the per-depth writer used to fire the warning N times.
+        :class:`UserWarning` per run.
+
+        For ``LayeredBottom`` / ``RangeDependentLayeredBottom`` the
+        ``acoustic_type`` lives on the inner ``.halfspace`` (and per
+        range profile for RDL), not on the outer container; the walk
+        flips it everywhere.
         """
+        from uacpy.core.environment import (
+            LayeredBottom, RangeDependentLayeredBottom,
+        )
         hs = env.halfspace_at_range(0.0)
         kind = (hs.acoustic_type or '').lower()
         if kind not in ('half-space', 'halfspace', 'a'):
@@ -705,7 +712,12 @@ class SPARC(PropagationModel):
             UserWarning, stacklevel=2,
         )
         e = env.copy()
-        if hasattr(e.bottom, 'acoustic_type'):
+        if isinstance(e.bottom, RangeDependentLayeredBottom):
+            for prof in e.bottom.profiles:
+                prof.halfspace.acoustic_type = 'rigid'
+        elif isinstance(e.bottom, LayeredBottom):
+            e.bottom.halfspace.acoustic_type = 'rigid'
+        elif hasattr(e.bottom, 'acoustic_type'):
             e.bottom.acoustic_type = 'rigid'
         return e
 
@@ -740,7 +752,11 @@ class SPARC(PropagationModel):
             # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
             f.write(f"'{env.name}'\n")
             f.write(f"{source.frequencies[0]:.6f}\n")
-            f.write("1\n")
+            # NMedia = water column + one medium per sediment layer.
+            n_media = 1
+            if env.has_layered_bottom():
+                n_media += len(env.bottom.layers)
+            f.write(f"{n_media}\n")
 
             surface_code = surface_type.to_acoustics_toolbox_code()
             atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()

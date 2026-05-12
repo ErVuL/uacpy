@@ -313,3 +313,225 @@ class TestFrancoisGarrisonValidation:
         )
         assert fg.topopt_code() == 'F'
         assert fg.as_at_tuple() == (10.0, 35.0, 8.0, 1000.0)
+
+
+class TestBellhopRangeDependentSSP:
+    """Bellhop with ``interp_ssp='quad'`` reads the ``.ssp`` file emitted
+    by uacpy: ``Npts`` on its own line, range vector on the next, depth
+    rows after — matching the AT LDIFile record convention."""
+
+    @pytest.fixture
+    def rd_ssp_env(self):
+        from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties
+        z = np.linspace(0.0, 100.0, 21)
+        # SSP range must extend past the receiver max range or Bellhop's
+        # rays exit the "soundspeed box" with a FATAL ERROR.
+        r = np.array([0.0, 4000.0, 8000.0, 12000.0])
+        c2d = (1500.0
+               + 5.0 * np.sin(np.pi * z[:, None] / 100.0)
+               - 5e-5 * r[None, :])
+        return Environment(
+            name='rd-ssp-e2e',
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_2d(z, r, c2d),
+            bottom=BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=1700.0, density=1.8, attenuation=0.5,
+            ),
+        )
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('prefer_cuda', [False, True])
+    def test_rd_ssp_quad_runs_end_to_end(self, rd_ssp_env, prefer_cuda):
+        src = Source(depths=20.0, frequencies=200.0)
+        rcv = Receiver(
+            depths=np.linspace(5.0, 95.0, 19),
+            ranges=np.linspace(100.0, 8000.0, 41),
+        )
+        bh = Bellhop(verbose=False, interp_ssp='quad', prefer_cuda=prefer_cuda)
+        res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        tl = np.asarray(res.tl)
+        # Drop the 600 dB shadow sentinels Bellhop fills in.
+        real = tl[(tl > 0) & (tl < 500)]
+        assert real.size > tl.size * 0.5, (
+            'most cells should carry real TL values'
+        )
+        assert real.min() > 0
+        assert real.max() < 200
+
+
+# ---------------------------------------------------------------------
+# Bellhop multi-source-depth: result-type dispatch and stack semantics.
+# ---------------------------------------------------------------------
+
+class TestBellhopMultiSourceDepth:
+    """Bellhop's ``.shd`` carries one slab per source depth. Single-source
+    runs return a :class:`PressureField`; multi-source runs return a
+    :class:`ResultStack` of :class:`PressureField` slabs keyed by
+    source depth."""
+
+    @pytest.mark.requires_binary
+    def test_multi_source_returns_result_stack(self):
+        from uacpy.core.results import PressureField, ResultStack
+        env = Environment(
+            name='multi-src-shape', bathymetry=100.0, ssp=1500.0,
+        )
+        source = Source(depths=[30.0, 50.0, 70.0], frequencies=100.0)
+        receiver = Receiver(
+            depths=np.linspace(10.0, 90.0, 9),
+            ranges=np.linspace(100.0, 5000.0, 11),
+        )
+        bh = Bellhop(verbose=False)
+        result = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+        assert isinstance(result, ResultStack)
+        assert result.slab_type is PressureField
+        np.testing.assert_allclose(
+            np.sort(result.coordinate), np.array([30.0, 50.0, 70.0])
+        )
+        assert result.coordinate_name == 'source_depth'
+        assert result.n_slabs == 3
+        assert len(result) == 3
+        # Each slab is a 2-D PressureField on the same receiver grid.
+        for sd, slab in result:
+            assert isinstance(slab, PressureField)
+            assert slab.data.shape == (9, 11)
+
+    @pytest.mark.requires_binary
+    def test_single_source_returns_pressure_field(self):
+        from uacpy.core.results import PressureField, ResultStack
+        env = Environment(
+            name='single-src-shape', bathymetry=100.0, ssp=1500.0,
+        )
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(
+            depths=np.linspace(10.0, 90.0, 9),
+            ranges=np.linspace(100.0, 5000.0, 11),
+        )
+        bh = Bellhop(verbose=False)
+        result = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+        assert isinstance(result, PressureField)
+        assert not isinstance(result, ResultStack)
+        assert result.data.shape == (9, 11)
+
+    @pytest.mark.requires_binary
+    def test_multi_source_per_slab_tl_physically_plausible(self):
+        """Each source slab in the stack produces finite,
+        physically-sensible TL (positive, < 200 dB)."""
+        env = Environment(
+            name='multi-src-physics', bathymetry=100.0, ssp=1500.0,
+        )
+        source = Source(depths=[30.0, 50.0, 70.0], frequencies=100.0)
+        receiver = Receiver(
+            depths=np.linspace(10.0, 90.0, 9),
+            ranges=np.linspace(500.0, 5000.0, 10),
+        )
+        bh = Bellhop(verbose=False)
+        stack = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+        for sd_value, slab in stack:
+            assert slab.data.shape == (9, 10)
+            tl = slab.tl
+            real = tl[(tl > 0) & (tl < 500)]
+            assert real.size > tl.size * 0.5
+            assert real.min() > 0
+            assert real.max() < 200
+
+    @pytest.mark.requires_binary
+    def test_at_source_depth_recovers_middle_slab(self):
+        """``stack.at(source_depth=z)`` returns the matching
+        :class:`PressureField` slab, and that slab's TL matches a
+        single-source run at the same depth (within Bellhop's beam-
+        partitioning round-off)."""
+        from uacpy.core.results import PressureField
+        env = Environment(
+            name='multi-src-at', bathymetry=100.0, ssp=1500.0,
+        )
+        receiver = Receiver(
+            depths=np.linspace(10.0, 90.0, 9),
+            ranges=np.linspace(500.0, 5000.0, 10),
+        )
+        bh = Bellhop(verbose=False)
+        stack = bh.run(
+            env,
+            Source(depths=[30.0, 50.0, 70.0], frequencies=100.0),
+            receiver, run_mode=RunMode.COHERENT_TL,
+        )
+        slab = stack.at(source_depth=50.0)
+        assert isinstance(slab, PressureField)
+        assert slab.data.shape == (9, 10)
+
+        single = bh.run(
+            env, Source(depths=50.0, frequencies=100.0),
+            receiver, run_mode=RunMode.COHERENT_TL,
+        )
+        np.testing.assert_allclose(slab.tl, single.tl, rtol=1e-4, atol=1e-3)
+
+    @pytest.mark.requires_binary
+    def test_multi_source_rays_returns_stack(self):
+        """RAYS mode: one binary call, reader splits the deterministic
+        ``NSz × Nalpha`` block layout into one :class:`Rays` slab per
+        source depth."""
+        from uacpy.core.results import Rays, ResultStack
+        env = Environment(name='multi-rays', bathymetry=100.0, ssp=1500.0)
+        receiver = Receiver(depths=np.array([30.0, 60.0]),
+                            ranges=np.array([200.0, 1000.0]))
+        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        stack = bh.run(
+            env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
+            receiver, run_mode=RunMode.RAYS,
+        )
+        assert isinstance(stack, ResultStack)
+        assert stack.slab_type is Rays
+        assert stack.n_slabs == 3
+        np.testing.assert_allclose(stack.coordinate,
+                                   np.array([20.0, 50.0, 80.0]))
+        # Every slab carries the same Nalpha = 20 rays.
+        for sd, slab in stack:
+            assert len(slab.rays) == 20
+            assert slab.is_eigen is False
+
+    @pytest.mark.requires_binary
+    def test_multi_source_arrivals_returns_stack(self):
+        """ARRIVALS mode: one binary call, reader splits the
+        ``by_receiver[isd]`` axis it already parses."""
+        from uacpy.core.results import Arrivals, ResultStack
+        env = Environment(name='multi-arr', bathymetry=100.0, ssp=1500.0)
+        receiver = Receiver(depths=np.array([30.0, 60.0]),
+                            ranges=np.array([500.0, 1000.0]))
+        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        stack = bh.run(
+            env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
+            receiver, run_mode=RunMode.ARRIVALS,
+        )
+        assert isinstance(stack, ResultStack)
+        assert stack.slab_type is Arrivals
+        assert stack.n_slabs == 3
+        np.testing.assert_allclose(stack.coordinate,
+                                   np.array([20.0, 50.0, 80.0]))
+        # Each slab's by_receiver is shaped (1, n_rd, n_rr) — one
+        # source-depth axis, two receiver depths, two ranges.
+        for sd, slab in stack:
+            assert len(slab.by_receiver) == 1
+            assert len(slab.by_receiver[0]) == 2
+            assert len(slab.by_receiver[0][0]) == 2
+
+    @pytest.mark.requires_binary
+    def test_multi_source_eigenrays_returns_stack(self):
+        """EIGENRAYS mode: Bellhop reorders α for its bracketing
+        heuristic, so the ``.ray`` file isn't splittable per source.
+        The wrapper loops in Python — N binary calls — and bundles the
+        result into a :class:`ResultStack` with the right slab type."""
+        from uacpy.core.results import Rays, ResultStack
+        env = Environment(name='multi-eig', bathymetry=100.0, ssp=1500.0)
+        receiver = Receiver(depths=50.0, ranges=1000.0)
+        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        stack = bh.run(
+            env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
+            receiver, run_mode=RunMode.EIGENRAYS,
+        )
+        assert isinstance(stack, ResultStack)
+        assert stack.slab_type is Rays
+        assert stack.n_slabs == 3
+        np.testing.assert_allclose(stack.coordinate,
+                                   np.array([20.0, 50.0, 80.0]))
+        for sd, slab in stack:
+            assert slab.is_eigen is True

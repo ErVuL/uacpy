@@ -106,6 +106,35 @@ class BiologicalLayer:
     Q: float
     a0: float
 
+    def __post_init__(self):
+        # Mirror SedimentLayer.__post_init__ shape: surface area first,
+        # then layer geometry.
+        if self.z_bottom_m <= self.z_top_m:
+            raise ValueError(
+                "BiologicalLayer: z_bottom_m must be strictly greater than "
+                f"z_top_m (got z_top_m={self.z_top_m}, "
+                f"z_bottom_m={self.z_bottom_m})"
+            )
+        # Layer thickness positive (a free consequence of the bound check
+        # above, but stated for symmetry with SedimentLayer's docstring).
+        if (self.z_bottom_m - self.z_top_m) <= 0:
+            raise ValueError(
+                "BiologicalLayer: layer thickness must be positive (m); "
+                f"got {self.z_bottom_m - self.z_top_m}"
+            )
+        if self.f0_hz <= 0:
+            raise ValueError(
+                f"BiologicalLayer: f0_hz must be positive (Hz); got {self.f0_hz}"
+            )
+        if self.Q <= 0:
+            raise ValueError(
+                f"BiologicalLayer: Q must be positive (dimensionless); got {self.Q}"
+            )
+        if self.a0 <= 0:
+            raise ValueError(
+                f"BiologicalLayer: a0 must be positive (dB/m); got {self.a0}"
+            )
+
 
 @dataclass
 class Biological(Absorption):

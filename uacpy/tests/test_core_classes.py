@@ -47,6 +47,45 @@ class TestEnvironment:
         with pytest.raises(ValueError):
             uacpy.Environment(name="Test", bathymetry=-10, ssp=1500)
 
+    def test_bathymetry_rejects_negative_range(self):
+        """Bathymetry ranges are measured from the source; they cannot
+        be negative."""
+        with pytest.raises(ValueError, match="ranges must be non-negative"):
+            uacpy.Environment(
+                name="Test",
+                bathymetry=[[-100.0, 80.0], [5000.0, 90.0]],
+                ssp=1500,
+            )
+
+
+class TestBiologicalLayerValidation:
+    """:class:`BiologicalLayer` rejects impossible inputs at construction,
+    matching the validation pattern on :class:`SedimentLayer`."""
+
+    def test_valid_biological_layer(self):
+        from uacpy.core.absorption import BiologicalLayer
+        layer = BiologicalLayer(
+            z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=20.0, a0=0.5,
+        )
+        assert layer.f0_hz == 200.0
+
+    @pytest.mark.parametrize("kwargs,match", [
+        (dict(z_top_m=50.0, z_bottom_m=10.0, f0_hz=200.0, Q=20.0, a0=0.5),
+         "z_bottom_m"),
+        (dict(z_top_m=10.0, z_bottom_m=10.0, f0_hz=200.0, Q=20.0, a0=0.5),
+         "z_bottom_m"),
+        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=-1.0, Q=20.0, a0=0.5),
+         "f0_hz"),
+        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=0.0, a0=0.5),
+         "Q"),
+        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=20.0, a0=-0.1),
+         "a0"),
+    ])
+    def test_biological_layer_rejects_invalid(self, kwargs, match):
+        from uacpy.core.absorption import BiologicalLayer
+        with pytest.raises(ValueError, match=match):
+            BiologicalLayer(**kwargs)
+
 
 class TestSource:
     """Tests for Source class."""
@@ -76,6 +115,23 @@ class TestSource:
         assert len(source.frequencies) == 3
 
 
+@pytest.mark.parametrize("ctor,kwargs", [
+    # Source / Receiver reject NaN or inf in any
+    # ``depths``/``frequencies``/``ranges`` array.
+    (uacpy.Source, dict(depths=[10, np.nan], frequencies=100)),
+    (uacpy.Source, dict(depths=10, frequencies=[100, np.nan])),
+    (uacpy.Receiver, dict(depths=[10, 20], ranges=[100, np.nan])),
+    (uacpy.Receiver, dict(depths=[np.nan], ranges=[100])),
+    (uacpy.Source, dict(depths=[10, np.inf], frequencies=100)),
+    (uacpy.Receiver, dict(depths=[10], ranges=[np.inf])),
+])
+def test_source_receiver_reject_non_finite(ctor, kwargs):
+    """Source and Receiver reject NaN / inf at construction so
+    non-finite values cannot leak into env-file writers."""
+    with pytest.raises(ValueError, match="finite"):
+        ctor(**kwargs)
+
+
 class TestReceiver:
     """Tests for Receiver class."""
 
@@ -102,6 +158,18 @@ class TestReceiver:
         )
         assert len(receiver.depths) == 1
         assert len(receiver.ranges) == 100
+
+    def test_receiver_type_rejects_unknown(self):
+        """Unknown ``receiver_type`` strings raise :class:`ValueError`,
+        mirroring the validation on ``Source.source_type``."""
+        with pytest.raises(ValueError, match="receiver_type"):
+            uacpy.Receiver(depths=50, ranges=1000, receiver_type='gird')
+
+    def test_receiver_type_accepts_grid_and_line(self):
+        rx = uacpy.Receiver(depths=50, ranges=1000, receiver_type='grid')
+        assert rx.receiver_type == 'grid'
+        rx = uacpy.Receiver(depths=50, ranges=1000, receiver_type='line')
+        assert rx.receiver_type == 'line'
 
 
 class TestField:
@@ -216,6 +284,60 @@ class TestModesFieldType:
     def test_modes_field_type_value(self):
         from uacpy.core.results import Modes
         assert Modes.field_type == "modes"
+
+
+class TestModesComputePhaseSpeeds:
+    """``Modes.compute_phase_speeds`` requires a frequency context;
+    without one it raises :class:`ValueError`."""
+
+    def _build_modes(self, *, frequencies):
+        from uacpy.core.results import Modes
+        depths = np.linspace(0, 100, 11)
+        # Two trivial modes; numbers don't matter.
+        k = np.array([0.4 + 0.0j, 0.3 + 0.0j])
+        phi = np.zeros((len(depths), 2))
+        return Modes(
+            k=k, phi=phi, depths=depths,
+            model='Test', frequencies=frequencies,
+        )
+
+    def test_phase_speeds_raises_without_frequency(self):
+        modes = self._build_modes(frequencies=None)
+        with pytest.raises(ValueError, match='requires frequencies'):
+            modes.compute_phase_speeds()
+
+    def test_phase_speeds_with_frequency_is_omega_over_k(self):
+        modes = self._build_modes(frequencies=100.0)
+        v_p = modes.compute_phase_speeds()
+        omega = 2.0 * np.pi * 100.0
+        expected = omega / np.array([0.4, 0.3])
+        np.testing.assert_allclose(v_p, expected, rtol=1e-12)
+
+
+class TestRaysMissDistanceUnits:
+    """Ray polylines are in metres; ``Rays._miss_distance_to`` consumes
+    them verbatim with no unit rescaling."""
+
+    def test_short_polyline_in_metres_is_not_rescaled(self):
+        from uacpy.core.results import Rays
+        r_m = np.linspace(0.0, 10.0, 11)
+        z_m = np.linspace(0.0, 5.0, 11)
+        rays = Rays(
+            rays=[{
+                'r': r_m, 'z': z_m,
+                'alpha': 0.0,
+                'n_top_bounces': 0, 'n_bot_bounces': 0,
+            }],
+            is_eigen=False,
+            receiver_depths=np.array([5.0]),
+            receiver_ranges=np.array([10.0]),
+            model='Test', frequencies=100.0,
+        )
+        # The polyline passes exactly through (r=10, z=5), so miss == 0
+        # in metres. (No km->m rescale: that would blow the miss up to
+        # ~10 km.)
+        miss, _ = rays._miss_distance_to(rays.rays[0], 10.0, 5.0)
+        assert miss == pytest.approx(0.0, abs=1e-12)
 
 
 class TestArrivalsFlatListKeys:
@@ -518,6 +640,17 @@ class TestSoundSpeedProfileExtendTo:
         assert out.depths[-1] == 150.0
         assert out.data[-1, 0] == pytest.approx(1485.0)
 
+    def test_noop_under_floating_point_drift(self):
+        """``extend_to`` is a no-op when the requested depth matches the
+        deepest sample to within a small relative tolerance — a 1-ulp
+        drift (from e.g. a round trip through I/O) must not rewrite the
+        bottom sample."""
+        ssp = self._profile([0, 100, 200], [1500, 1490, 1485])
+        # Smallest perturbation that survives a few arithmetic ops:
+        perturbed = 200.0 + 1e-12
+        out = ssp.extend_to(perturbed)
+        assert out is ssp
+
 
 class TestPressureFieldChainAccessors:
     """``PressureField`` slicing returns ``SlicedPressureField`` whose
@@ -585,31 +718,6 @@ class TestPressureFieldChainAccessors:
         d_idx, r_idx = np.unravel_index(flat, f.data.shape)
         assert m.depths[0] == f.depths[d_idx]
         assert m.ranges[0] == f.ranges[r_idx]
-
-    def test_max_on_3d_collapses_frequency_axis(self):
-        """3-D broadband fields: get_max picks the global argmax across
-        all three axes — depth, range AND frequency — and the picked
-        frequency lands in .frequencies[0]."""
-        from uacpy.core.results import PressureField, SlicedPressureField
-        rng = np.random.default_rng(0)
-        data = (rng.standard_normal((3, 4, 5))
-                + 1j * rng.standard_normal((3, 4, 5)))
-        # Spike one specific (d, r, f) cell.
-        data[2, 1, 3] = 100.0 + 0j
-        pf = PressureField(
-            data=data,
-            depths=np.linspace(10, 90, 3),
-            ranges=np.linspace(100, 1000, 4),
-            units='complex',
-            frequencies=np.linspace(50, 250, 5),
-            model='Test',
-        )
-        m = pf.max()
-        assert isinstance(m, SlicedPressureField)
-        assert m.tl.shape == ()
-        assert m.depths[0] == pf.depths[2]
-        assert m.ranges[0] == pf.ranges[1]
-        assert m.frequencies[0] == pf.frequencies[3]
 
 
 class TestTransferFunction:
@@ -695,73 +803,126 @@ class TestTransferFunctionSlicing:
         assert view.units == 'dB'
 
 
-class TestTransferFunctionFromPressureField:
-    """``TransferFunction.from_pressure_field(pf, phase_reference=...)``
-    promotes a 3-D complex :class:`PressureField` to a transfer function."""
+class TestResultStackInvariants:
+    """:class:`ResultStack` is a thin composition wrapper. The
+    constructor enforces uniform slab type, uniform model / backend /
+    frequencies, and matching ``len(slabs) == len(source_depths)`` so
+    the stack's read-through properties (``stack.model``,
+    ``stack.frequencies``) never silently disagree with a slab."""
 
-    def _broadband_pf(self):
+    @staticmethod
+    def _slab(*, depths=2, ranges=3, frequencies=100.0, model='Test',
+              source_depth=50.0):
         from uacpy.core.results import PressureField
-        data = (np.arange(24).reshape(2, 3, 4) + 1j).astype(complex)
         return PressureField(
-            data=data,
-            depths=np.array([10., 20.]),
-            ranges=np.array([100., 200., 300.]),
+            data=np.ones((depths, ranges), dtype=complex),
+            depths=np.arange(depths, dtype=float),
+            ranges=np.arange(ranges, dtype=float) * 100.0,
             units='complex',
-            frequencies=np.array([100., 200., 300., 400.]),
-            model='Pekeris', backend='bellhop',
-            metadata={'extra': 'roundtrip'},
+            model=model,
+            frequencies=frequencies,
+            source_depths=np.array([float(source_depth)]),
         )
 
-    def test_promotes_broadband_complex_field(self):
-        from uacpy.core.results import (
-            PressureField, TransferFunction,
-        )
-        pf = self._broadband_pf()
-        tf = TransferFunction.from_pressure_field(
-            pf, phase_reference='travelling_wave',
-        )
-        assert isinstance(tf, TransferFunction)
-        assert not isinstance(tf, PressureField)
-        assert tf.phase_reference == 'travelling_wave'
-        # axes / data / metadata round-trip
-        np.testing.assert_array_equal(tf.data, pf.data)
-        np.testing.assert_array_equal(tf.depths, pf.depths)
-        np.testing.assert_array_equal(tf.ranges, pf.ranges)
-        np.testing.assert_array_equal(tf.frequencies, pf.frequencies)
-        assert tf.model == pf.model
-        assert tf.metadata['extra'] == 'roundtrip'
+    def test_requires_at_least_one_slab(self):
+        from uacpy.core.results import ResultStack
+        with pytest.raises(ValueError, match="at least one slab"):
+            ResultStack(slabs=[], coordinate=[])
 
-    def test_rejects_db_units(self):
-        from uacpy.core.results import PressureField, TransferFunction
-        pf = PressureField(
-            data=np.zeros((2, 3, 4)),
-            depths=np.array([10., 20.]),
-            ranges=np.array([100., 200., 300.]),
-            units='dB',
-            frequencies=np.array([100., 200., 300., 400.]),
-        )
-        with pytest.raises(ValueError, match="units='complex'"):
-            TransferFunction.from_pressure_field(
-                pf, phase_reference='travelling_wave',
-            )
+    def test_rejects_length_mismatch(self):
+        from uacpy.core.results import ResultStack
+        with pytest.raises(ValueError, match="coordinate length"):
+            ResultStack(slabs=[self._slab(source_depth=10.0)],
+                        coordinate=[10.0, 20.0])
 
-    def test_rejects_narrowband_field(self):
-        from uacpy.core.results import PressureField, TransferFunction
-        pf = PressureField(
-            data=np.zeros((2, 3), dtype=complex),
-            depths=np.array([10., 20.]),
-            ranges=np.array([100., 200., 300.]),
-            units='complex',
-            frequencies=100.0,
-        )
-        with pytest.raises(ValueError, match="3-D"):
-            TransferFunction.from_pressure_field(
-                pf, phase_reference='travelling_wave',
-            )
+    def test_rejects_mixed_slab_types(self):
+        from uacpy.core.results import Rays, ResultStack
+        pf = self._slab(source_depth=10.0)
+        ry = Rays(rays=[], model='Test', backend='')
+        with pytest.raises(TypeError, match="same concrete type"):
+            ResultStack(slabs=[pf, ry], coordinate=[10.0, 20.0])
 
-    def test_rejects_non_pressurefield(self):
-        from uacpy.core.results import TransferFunction
-        with pytest.raises(TypeError):
-            TransferFunction.from_pressure_field(
-                object(), phase_reference='travelling_wave',
-            )
+    def test_rejects_disagreeing_frequencies(self):
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0, frequencies=100.0)
+        b = self._slab(source_depth=20.0, frequencies=200.0)
+        with pytest.raises(ValueError, match="frequencies"):
+            ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+
+    def test_rejects_disagreeing_model(self):
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0, model='Bellhop')
+        b = self._slab(source_depth=20.0, model='Kraken')
+        with pytest.raises(ValueError, match="model"):
+            ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+
+    def test_accepts_uniform_slabs(self):
+        from uacpy.core.results import PressureField, ResultStack
+        a = self._slab(source_depth=10.0)
+        b = self._slab(source_depth=20.0)
+        stack = ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+        assert stack.slab_type is PressureField
+        assert stack.coordinate_name == 'source_depth'
+        assert stack.n_slabs == 2
+        assert len(stack) == 2
+        # Universally-shared metadata reads through from slab[0].
+        assert stack.model == 'Test'
+        np.testing.assert_array_equal(
+            stack.coordinate, np.array([10.0, 20.0]))
+
+    def test_iteration_and_label_select_share_slab_identity(self):
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0)
+        b = self._slab(source_depth=20.0)
+        stack = ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+        # __getitem__ returns the same object stored in slabs[i].
+        assert stack[0] is a
+        assert stack[1] is b
+        # at(source_depth=z) routes to the nearest slab by label.
+        assert stack.at(source_depth=20.0) is b
+        # Iteration yields (source_depth, slab) pairs.
+        pairs = list(stack)
+        assert pairs == [(10.0, a), (20.0, b)]
+
+    def test_frequency_axis_stack(self):
+        """Stacking along ``frequency`` is just a coordinate-name swap.
+        Slabs may now legitimately differ on ``frequencies`` (the
+        stacking axis) while sharing ``source_depths`` and ``model``."""
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=50.0, frequencies=100.0)
+        b = self._slab(source_depth=50.0, frequencies=200.0)
+        stack = ResultStack(slabs=[a, b], coordinate=[100.0, 200.0],
+                            coordinate_name='frequency')
+        assert stack.coordinate_name == 'frequency'
+        assert stack.at(frequency=200.0) is b
+        # Mis-keyed kwarg → clear TypeError.
+        with pytest.raises(TypeError, match="frequency"):
+            stack.at(source_depth=200.0)
+
+    def test_frequency_axis_rejects_disagreeing_source_depths(self):
+        """When stacking by ``frequency`` the slabs must still agree on
+        ``source_depths`` (it's no longer the varying axis)."""
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0, frequencies=100.0)
+        b = self._slab(source_depth=99.0, frequencies=200.0)
+        with pytest.raises(ValueError, match="source_depths"):
+            ResultStack(slabs=[a, b], coordinate=[100.0, 200.0],
+                        coordinate_name='frequency')
+
+    def test_external_coordinate_axis(self):
+        """An external coordinate (e.g. wind speed) requires both
+        ``frequencies`` and ``source_depths`` to agree across slabs;
+        ``at(<coordinate_name>=…)`` keys off the custom name."""
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=50.0, frequencies=100.0)
+        b = self._slab(source_depth=50.0, frequencies=100.0)
+        stack = ResultStack(slabs=[a, b], coordinate=[5.0, 15.0],
+                            coordinate_name='wind_speed')
+        assert stack.coordinate_name == 'wind_speed'
+        assert stack.at(wind_speed=15.0) is b
+        # Disagreeing source_depth is now rejected (external coord
+        # requires both internal axes to agree).
+        c = self._slab(source_depth=99.0, frequencies=100.0)
+        with pytest.raises(ValueError, match="source_depths"):
+            ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
+                        coordinate_name='wind_speed')

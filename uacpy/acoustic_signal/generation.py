@@ -452,10 +452,12 @@ def lfm_chirp(
 
     Notes
     -----
-    The instantaneous frequency is:
-        f(t) = fmin + (fmax - fmin) * t / (2*T)
-
-    This is a standard chirp used in sonar and radar applications.
+    The signal is the conventional linear sweep ``s(t) = sin(2π φ(t))``
+    with quadratic phase ``φ(t) = fmin·t + (fmax - fmin)·t² / (2·T)``;
+    the instantaneous frequency ``dφ/dt = fmin + (fmax - fmin)·t / T``
+    therefore ramps linearly from ``fmin`` at ``t = 0`` to ``fmax`` at
+    ``t = T``. This is a standard chirp used in sonar and radar
+    applications.
 
     Examples
     --------
@@ -516,9 +518,15 @@ def tone_burst(
     """
     from scipy.signal.windows import hann
 
+    # ``T`` is the requested burst duration in seconds; the sample count
+    # ``N`` is the *nearest* integer that keeps ``n_cycles`` faithful at
+    # the given ``sample_rate``. We then build ``time`` with
+    # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly
+    # (the previous ``np.linspace(0, T, N)`` was endpoint-inclusive and
+    # produced ``dt == T / (N - 1) != 1 / sample_rate``).
     T = n_cycles / frequency
-    N = int(T * sample_rate)
-    time = np.linspace(0, T, N)
+    N = int(round(T * sample_rate))
+    time = np.arange(N) / float(sample_rate)
 
     s = np.sin(2 * np.pi * frequency * time)
 

@@ -166,12 +166,11 @@ def test_rd_layered_layers_preserve_requires_layered_support():
     ('rd_layered_range',  'bogus'),
 ])
 def test_rd_layered_invalid_value_raises(bad_key, bad_val):
+    """Invalid collapse values raise :class:`ConfigurationError` at
+    construction, like unknown keys."""
     Bare = _bare_model_factory(supports_layered=True)
-    bare = Bare(collapse={bad_key: bad_val})
     with pytest.raises(ConfigurationError, match=bad_key):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            bare.run(_rdlb_env(), None, None)
+        Bare(collapse={bad_key: bad_val})
 
 
 # ---------------------------------------------------------------------
@@ -256,6 +255,48 @@ def test_layered_volume_average_forwards_shear_attenuation():
     assert flat.shear_attenuation > 0.0, (
         "volume_average collapse must forward shear_attenuation, not drop it"
     )
+
+
+# ---------------------------------------------------------------------
+# _collapse_elastic_boundary handles RangeDependentBottom shear ndarrays
+# ---------------------------------------------------------------------
+
+def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
+    """``_collapse_elastic_boundary(rd_bottom, 'fluid')`` zeroes the
+    per-range ``shear_speed`` / ``shear_attenuation`` ndarrays while
+    preserving shape and dtype."""
+    from uacpy.models.base import PropagationModel
+    rd = RangeDependentBottom(
+        ranges=np.array([0.0, 5000.0, 10000.0]),
+        sound_speed=np.array([1600.0, 1650.0, 1700.0]),
+        density=np.array([1.5, 1.6, 1.7]),
+        attenuation=np.array([0.2, 0.3, 0.4]),
+        shear_speed=np.array([0.0, 400.0, 800.0]),
+        shear_attenuation=np.array([0.0, 0.5, 1.0]),
+    )
+    collapsed = PropagationModel._collapse_elastic_boundary(rd, 'fluid')
+    # Must remain a RangeDependentBottom with per-range arrays
+    assert isinstance(collapsed, RangeDependentBottom)
+    assert isinstance(collapsed.shear_speed, np.ndarray)
+    assert collapsed.shear_speed.shape == (3,)
+    assert np.all(collapsed.shear_speed == 0.0), (
+        f"shear_speed must be zeroed, got {collapsed.shear_speed!r}"
+    )
+    assert isinstance(collapsed.shear_attenuation, np.ndarray)
+    assert collapsed.shear_attenuation.shape == (3,)
+    assert np.all(collapsed.shear_attenuation == 0.0), (
+        f"shear_attenuation must be zeroed, "
+        f"got {collapsed.shear_attenuation!r}"
+    )
+    # Compressional properties preserved
+    np.testing.assert_array_equal(
+        collapsed.sound_speed, np.array([1600.0, 1650.0, 1700.0])
+    )
+    np.testing.assert_array_equal(
+        collapsed.density, np.array([1.5, 1.6, 1.7])
+    )
+    # Original input untouched (deepcopy contract)
+    assert rd.shear_speed[1] == 400.0
 
 
 # ---------------------------------------------------------------------

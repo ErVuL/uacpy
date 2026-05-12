@@ -80,7 +80,7 @@ class RAM(PropagationModel):
     fluid bottom + flat surface   ``mpiramS`` — Dushaw's broadband PE (Q/T loop)
     elastic bottom (any shear>0)  ``rams0.5`` — Collins' elastic PE (single-frequency)
     fluid bottom + altimetry      ``ramsurf1.5`` — Collins' rough-surface PE (single-freq)
-    elastic + altimetry           ``NotImplementedError`` (no published Collins PE)
+    elastic + altimetry           ``UnsupportedFeatureError`` (no published Collins PE)
     ============================  =====================================================
 
     Use ``RAM(...).select_backend(env)`` to inspect the choice without
@@ -929,7 +929,8 @@ class RAM(PropagationModel):
             )
         raise UnsupportedFeatureError(
             f"RAM:{backend}", str(run_mode),
-            alternatives=[str(m) for m in self._supported_modes]
+            alternatives=[str(m) for m in self._supported_modes],
+            alternatives_label='run modes',
         )
 
     @staticmethod

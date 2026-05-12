@@ -225,9 +225,10 @@ def test_broadband_peak_times_agree_across_models():
 
 
 def test_synthesize_time_series_honors_user_sample_rate():
-    """The TimeSeriesField returned by synthesize_time_series sits on
-    the same sampling grid as the source pulse (the bug fixed by the
-    audit: previously dt = 1/(nfft*df), unrelated to sample_rate)."""
+    """The :class:`TimeSeriesField` returned by
+    :meth:`TransferFunction.synthesize_time_series` sits on the same
+    sampling grid as the source pulse — i.e. ``ts.fs == sample_rate``
+    exactly."""
     env = _pekeris_env()
     src, rcv = _src_rcv()
     tf = _scooter_bb(env, src, rcv)

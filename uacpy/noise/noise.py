@@ -42,7 +42,10 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     f : ndarray or float
         Frequencies in Hz (1-Hz band assumed for a scalar).
     u : float
-        Wind speed in knots.
+        Wind speed in knots. Must be non-negative; ``u == 0`` silences
+        the wind component and the returned spectral level is
+        ``-inf`` dB at every frequency (the surface-noise source has
+        no power).
     water_depth : {'deep', 'shallow'}
         Coefficient family. Default 'deep'.
     band_integrate : bool
@@ -55,20 +58,31 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     -------
     NL : ndarray
         Wind noise spectral level (dB re 1 µPa²/Hz), or band-integrated
-        SPL (dB re 1 µPa²) if ``band_integrate=True``.
+        SPL (dB re 1 µPa²) if ``band_integrate=True``. Always shaped
+        ``(len(f),)`` (1-D, even for scalar ``f``).
 
     Notes
     -----
     Translated from the IDL implementation by Dan Hutt, rewritten by Vic
     Young, and packaged in Tollefsen & Pecknold (2018).
     """
+    # Normalise ``f`` up-front so scalars (the docstring promises they
+    # work) don't crash at ``.size`` / ``.flatten()`` below.
+    f = np.atleast_1d(np.asarray(f, dtype=float)).flatten()
 
-    # This all breaks down if u == 0 so account for that
+    u = float(u)
+    if u < 0:
+        raise ValueError(
+            f"compute_windnoise: wind speed u must be non-negative (knots), got {u}"
+        )
+
+    # u == 0 silences the surface-noise source: return -inf dB at every
+    # frequency so an incoherent dB sum with the other Wenz components
+    # behaves correctly (10**(-inf/10) == 0, no contribution).
     if u == 0:
-        NL = np.zeros_like(f)
+        NL = np.full_like(f, -np.inf)
     else:
         n2 = f.size
-        f = np.array(f).flatten()  # Make sure f is a 1D array
         if band_integrate:
             f2 = np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
             df = (f2[2:] - f2[:-2]) / 2
@@ -217,9 +231,13 @@ class WenzNoise:
 
         f = self.frequencies
 
+        # Inactive-component sentinel: ``-inf`` dB means "no power" so an
+        # incoherent dB sum via ``logaddexp`` collapses cleanly
+        # (``10**(-inf/10) == 0``, no contribution to the total).
+
         # Thermal (Mellen 1952) — deep-sea molecular contribution.
         thermal = -75.0 + 20.0 * np.log10(f)
-        thermal[thermal <= 0] = 1
+        thermal[thermal <= 0] = -np.inf
 
         # Wind (Merklinger 1979 + Piggott 1964 shallow correction).
         wind = compute_windnoise(f, self.wind_speed, water_depth)
@@ -231,16 +249,16 @@ class WenzNoise:
         c2 = _SHIPPING_C2[shipping_level]
         if shipping_level != 'no':
             shipping = 76 - 20 * (np.log10(f) - np.log10(c1)) ** 2 + 5 * (c2 - 4)
-            shipping[shipping <= 0] = 1
+            shipping[shipping <= 0] = -np.inf
         else:
-            shipping = np.zeros_like(f)
+            shipping = np.full_like(f, -np.inf)
 
         # Turbulence (Nichols & Bradley 2016 — same coefficients as the
         # MATLAB ``calc_noise_level.m`` appendix in WenzCurves.pdf p.12).
         # NB: the prose in WenzCurves.pdf §2.1 quotes 107 − 33.2·log10(f)
         # instead; the appendix code uses the values below.
         turbulence = 108.5 - 32.5 * np.log10(f)
-        turbulence[turbulence <= 0] = 1
+        turbulence[turbulence <= 0] = -np.inf
 
         # Rain (Torres & Costa 2019, valid up to ~7 kHz; melded above).
         ir = _RAIN_INDEX[rain_rate]

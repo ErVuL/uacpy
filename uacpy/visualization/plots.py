@@ -27,6 +27,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE,
     BOTTOM_HALFSPACE_COLOR,
     BOTTOM_LINE_STYLE,
+    BOTTOM_LINE_STYLE_FLAT,
     SOURCE_MARKER_STYLE,
     RECEIVER_MARKER_STYLE,
 )
@@ -143,7 +144,7 @@ def _overlay_bathymetry(
             ranges_km, env.depth, fill_bottom,
             **BOTTOM_FILL_STYLE, zorder=ZORDER_SEDIMENT + 5,
         )
-        ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
+        ax.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT,
                    zorder=ZORDER_SEDIMENT + 6)
     return max_depth
 
@@ -151,20 +152,36 @@ def _overlay_bathymetry(
 def _select_2d_slice(field, frequency: Optional[float] = None) -> np.ndarray:
     """Return a 2-D ``(n_depths, n_ranges)`` TL view (dB) of a gridded Result.
 
-    Narrowband :class:`PressureField` returns ``.tl`` directly. Broadband
-    fields collapse the frequency axis via :meth:`sel` — picking
-    ``frequency`` if given, else the middle bin.
+    :class:`PressureField` returns ``.tl`` directly (2-D).
+    :class:`TransferFunction` collapses the frequency axis: ``frequency=``
+    if given, else the middle bin.
+
+    ``SlicedPressureField.tl`` auto-squeezes size-1 axes; this helper
+    always reshapes back to ``(len(depths), len(ranges))`` so callers
+    can safely ``pcolormesh`` the result.
+
+    Multi-source results are returned as :class:`ResultStack`; pick the
+    slab to plot via ``stack[i]`` or ``stack.at(source_depth=z)`` before
+    calling.
     """
+    from uacpy.core.results import ResultStack
+    if isinstance(field, ResultStack):
+        raise TypeError(
+            "_select_2d_slice: ResultStack carries multiple source-depth "
+            "slabs — pick one with ``stack[i]`` or "
+            "``stack.at(source_depth=z)`` before plotting."
+        )
+
+    n_d = len(field.depths) if field.depths is not None else 1
+    n_r = len(field.ranges) if field.ranges is not None else 1
+
     if isinstance(field, TransferFunction):
         f = frequency if frequency is not None \
             else float(field.frequencies[len(field.frequencies) // 2])
-        return field.at(frequency=f).to_tl().tl
-    if isinstance(field, PressureField) and field.is_broadband:
-        f = frequency if frequency is not None \
-            else float(field.frequencies[len(field.frequencies) // 2])
-        return field.at(frequency=f).tl
+        tl = field.at(frequency=f).to_tl().tl
+        return np.asarray(tl).reshape(n_d, n_r)
     if isinstance(field, PressureField):
-        return field.tl
+        return np.asarray(field.tl).reshape(n_d, n_r)
     data = field.data
     if data.ndim == 2:
         return data
@@ -179,6 +196,13 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
     Selects the correct specialised plot function based on the concrete
     ``Result`` subclass. Used by ``Result.plot()``.
     """
+    from uacpy.core.results import ResultStack
+    if isinstance(result, ResultStack):
+        raise TypeError(
+            "plot_result: ResultStack carries multiple source-depth "
+            "slabs — pick one with ``stack[i]`` or "
+            "``stack.at(source_depth=z)`` before plotting."
+        )
     if isinstance(result, TransferFunction):
         return plot_transfer_function(result, **kwargs)
     if isinstance(result, PressureField):
@@ -337,7 +361,16 @@ def plot_transmission_loss(
     # Invert y-axis (depth increases downward)
     ax.invert_yaxis()
 
-    ax.set_xlim([ranges_km[0], ranges_km[-1]])
+    # A length-1 range collapses xlim to a zero-width interval, which
+    # matplotlib expands with a warning. Pad by a small margin (1 % of
+    # the value, or 1 m as floor) so the result fits without warning.
+    x_lo = float(ranges_km[0])
+    x_hi = float(ranges_km[-1])
+    if x_lo == x_hi:
+        margin = max(abs(x_lo) * 0.01, 1e-3)
+        x_lo -= margin
+        x_hi += margin
+    ax.set_xlim([x_lo, x_hi])
 
     max_depth = depths.max()
     if env is not None:
@@ -830,7 +863,7 @@ def plot_environment(
             **BOTTOM_FILL_STYLE, zorder=1
         )
     else:
-        ax_env.axhline(env.depth, **BOTTOM_LINE_STYLE, zorder=3, label='Bottom')
+        ax_env.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=3, label='Bottom')
         # Fill is applied below, after xlim is established by source/receiver.
 
     if source is not None:
@@ -3420,7 +3453,7 @@ def plot_tl_difference(
                             env.depth, max_depth * 1.05,
                             **BOTTOM_FILL_STYLE,
                             zorder=ZORDER_SEDIMENT + 5, )
-            ax.axhline(env.depth, **BOTTOM_LINE_STYLE,
+            ax.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT,
                        zorder=ZORDER_SEDIMENT + 6)
 
     cbar = None

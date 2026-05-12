@@ -282,8 +282,8 @@ class Bellhop(PropagationModel):
     :meth:`run_with_bounce` for explicit control over BOUNCE parameters.
 
     Bellhop uses the global :data:`DEFAULT_COLLAPSE` policy without
-    overrides — RD bathymetry / RD bottom / RD-SSP (when ``ssp.interp='quad'``)
-    are honoured natively.
+    overrides — RD bathymetry / RD bottom / RD-SSP (when the model's
+    ``interp_ssp='quad'``) are honoured natively.
 
     Examples
     --------
@@ -424,7 +424,8 @@ class Bellhop(PropagationModel):
         ]
         self._supports_altimetry = True
         self._supports_range_dependent_bathymetry = True
-        # RD-SSP gated on ssp.interp='quad' — non-quad warned in run().
+        # RD-SSP honoured when Bellhop(interp_ssp='quad'); other interp
+        # values trigger a warning and SSP-collapse in run().
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = True
         self._supports_layered_bottom = False
@@ -560,6 +561,37 @@ class Bellhop(PropagationModel):
                 sample_rate=sample_rate,
                 **kwargs,
             )
+
+        # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires only on
+        # receiver hits AND Bellhop's eigenray search reorders ``alpha``
+        # for its bracketing heuristic, so the ``.ray`` file has no
+        # parseable per-source boundary. Loop in Python for this one
+        # mode — TL / RAYS / ARRIVALS all split at the reader level
+        # from the single binary call.
+        if (
+            run_mode == RunMode.EIGENRAYS
+            and len(np.atleast_1d(source.depths)) > 1
+        ):
+            from uacpy.core.results import ResultStack
+            slabs = []
+            for sd in source.depths:
+                single = Source(
+                    depths=float(sd),
+                    frequencies=source.frequencies,
+                    source_type=source.source_type,
+                )
+                slabs.append(self.run(
+                    env, single, receiver, run_mode=run_mode,
+                    frequencies=frequencies,
+                    source_waveform=source_waveform,
+                    sample_rate=sample_rate,
+                    **kwargs,
+                ))
+            return ResultStack(
+                slabs=slabs, coordinate=source.depths,
+                coordinate_name='source_depth',
+            )
+
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
         _validate_arrivals_format(self.arrivals_format)
@@ -651,6 +683,28 @@ class Bellhop(PropagationModel):
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+
+        # Bellhop fills the r=0 column with the 600 dB "no data" sentinel
+        # because no rays have travelled distance zero. Newcomers using
+        # ``np.linspace(0, R, N)`` for ``receiver.ranges`` hit a wall of
+        # 600 dB values at r=0 and rightly wonder what is wrong. Warn once
+        # per ``Bellhop`` instance to nudge them toward a non-zero start.
+        if (
+            run_mode in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+                         RunMode.SEMICOHERENT_TL)
+            and len(receiver.ranges) > 0
+            and float(receiver.ranges[0]) == 0.0
+            and not getattr(self, '_warned_r0_sentinel', False)
+        ):
+            warnings.warn(
+                f"{self.model_name}: receiver.ranges starts at r=0 m. "
+                f"Bellhop fills that column with the 600 dB no-data "
+                f"sentinel (no rays have travelled zero distance). "
+                f"Start ranges at a small positive value "
+                f"(e.g. ``np.linspace(eps, R, N)``) to avoid surprise.",
+                UserWarning, stacklevel=2,
+            )
+            self._warned_r0_sentinel = True
 
         # Irregular receiver grid ('I' in RunType position 5) requires the
         # receiver.depths and receiver.ranges arrays to have the same
@@ -778,17 +832,52 @@ class Bellhop(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
             result = reader(output_file)
+
+            # Bellhop fills the r=0 column with zero pressure ⇒ TL=600 dB
+            # (the AT "no data" sentinel: no rays have travelled distance
+            # zero). Replace that column with NaN so downstream numerics
+            # (.tl.min(), np.nanmean, plots) ignore it rather than read
+            # 600 dB as a real value. Honest shadow zones elsewhere
+            # keep the 600 dB marker.
+            if rt in ('C', 'I', 'S'):
+                from uacpy.core.results import ResultStack
+                if isinstance(result, ResultStack):
+                    pf_slabs = result.slabs
+                else:
+                    pf_slabs = [result]
+                for slab in pf_slabs:
+                    if (
+                        getattr(slab, 'ranges', None) is not None
+                        and slab.ranges.size > 0
+                        and float(slab.ranges[0]) == 0.0
+                    ):
+                        slab.data[:, 0] = np.nan
+
+            from uacpy.core.results import ResultStack
+
+            # The .ray header records only NSz (count), not Pos%Sz; the
+            # reader returns the stack with a placeholder coordinate.
+            # Replace it with the real source.depths order (Bellhop's
+            # SourceDepth loop iterates Pos%Sz in writer order).
+            if isinstance(result, ResultStack):
+                real_sds = np.atleast_1d(np.asarray(source.depths, dtype=float))
+                if real_sds.size == result.n_slabs:
+                    result.coordinate = real_sds
+
             if rt in ('R', 'E'):
                 # The .ray file format is identical for fan and
                 # eigenray runs; only the wrapper knows which one
                 # produced it. Same goes for the receiver geometry.
-                result.is_eigen = (rt == 'E')
-                result.receiver_depths = np.atleast_1d(
-                    np.asarray(receiver.depths, dtype=float)
+                rcv_d = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+                rcv_r = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+                ray_slabs = (
+                    result.slabs if isinstance(result, ResultStack) else [result]
                 )
-                result.receiver_ranges = np.atleast_1d(
-                    np.asarray(receiver.ranges, dtype=float)
-                )
+                for slab in ray_slabs:
+                    slab.is_eigen = (rt == 'E')
+                    slab.receiver_depths = rcv_d
+                    slab.receiver_ranges = rcv_r
+
             kw = self._result_kwargs(
                 source,
                 backend=self.model_name.lower(),
@@ -796,16 +885,24 @@ class Bellhop(PropagationModel):
                 phase_reference='travelling_wave',
             )
             extras = kw.pop('metadata', {})
-            result.tag(**kw, **extras)
 
-            self._attach_output_paths(
-                result, fm.work_dir, base_name,
-                primary_files=(
-                    ('shd_file', '.shd'),
-                    ('arr_file', '.arr'),
-                    ('ray_file', '.ray'),
-                ),
-            )
+            to_tag = result.slabs if isinstance(result, ResultStack) else [result]
+            for i, slab in enumerate(to_tag):
+                if isinstance(result, ResultStack):
+                    slab_kw = {**kw,
+                               'source_depths': np.array(
+                                   [float(result.coordinate[i])])}
+                else:
+                    slab_kw = kw
+                slab.tag(**slab_kw, **extras)
+                self._attach_output_paths(
+                    slab, fm.work_dir, base_name,
+                    primary_files=(
+                        ('shd_file', '.shd'),
+                        ('arr_file', '.arr'),
+                        ('ray_file', '.ray'),
+                    ),
+                )
 
             self._log("Simulation complete")
             return result
@@ -924,6 +1021,14 @@ class Bellhop(PropagationModel):
         bandwidth_factor: float = _DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
         **kwargs
     ) -> Result:
+        if len(np.atleast_1d(source.depths)) > 1:
+            raise ConfigurationError(
+                f"Bellhop broadband synthesis (BROADBAND / TIME_SERIES) "
+                f"runs at a single source depth; got "
+                f"{len(source.depths)}: {list(source.depths)}. Loop in "
+                f"Python over Source(depths=z, ...) and stack the "
+                f"results, or pick one depth for this run."
+            )
         """
         Run Bellhop in broadband mode to produce a time-series or
         transfer function result.

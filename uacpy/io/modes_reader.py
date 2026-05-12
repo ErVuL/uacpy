@@ -202,25 +202,44 @@ def read_modes_asc(
     """
     try:
         with open(filename, "r") as fid:
-            int(fid.readline().strip())
+            # Each Fortran list-directed record below is read as a token
+            # stream that may span one or more text lines, mirroring the
+            # MATLAB ``fscanf( fid, '%f', N )`` pattern in
+            # read_modes_asc.m. This makes the parser robust to line wrap
+            # widths chosen by different Fortran runtimes (gfortran does
+            # not wrap, Intel-Fortran may wrap mid-record).
+            def _read_floats(n):
+                vals = []
+                while len(vals) < n:
+                    line = fid.readline()
+                    if not line:
+                        raise ValueError(
+                            f"Modes file {filename}: EOF while reading "
+                            f"{n} floats (got {len(vals)})"
+                        )
+                    vals.extend(float(x) for x in line.split())
+                # Fortran list-directed WRITE ends each record with a
+                # newline, so the trailing tokens of the last line we
+                # consumed always belong to the *current* record. If the
+                # writer added extra padding tokens, drop them.
+                return np.array(vals[:n])
+
+            int(fid.readline().strip())  # lrecl (unused for ASCII)
             pltitl = fid.readline().strip()
-            params_line = fid.readline().strip().split()
-            freq = float(params_line[0])
-            Nmedia = int(params_line[1])
-            ntot = int(params_line[2])
-            nmat = int(params_line[3])
-            M = int(params_line[4])  # total number of modes
+            params = _read_floats(5)
+            freq = float(params[0])
+            Nmedia = int(params[1])
+            ntot = int(params[2])
+            nmat = int(params[3])
+            M = int(params[4])  # total number of modes
             for _ in range(Nmedia):
                 fid.readline()
             fid.readline()  # top halfspace
             fid.readline()  # bottom halfspace
             fid.readline()  # blank line
-            z_line = fid.readline().strip().split()
-            z = np.array([float(x) for x in z_line])
-            k_real_line = fid.readline().strip().split()
-            k_imag_line = fid.readline().strip().split()
-            k_real = np.array([float(x) for x in k_real_line])
-            k_imag = np.array([float(x) for x in k_imag_line])
+            z = _read_floats(ntot)
+            k_real = _read_floats(M)
+            k_imag = _read_floats(M)
             k_all = k_real + 1j * k_imag
             if modes is None:
                 modes_to_read = list(range(1, M + 1))  # 1-indexed
@@ -233,11 +252,9 @@ def read_modes_asc(
             phi = np.zeros((ntot, len(modes_to_read)), dtype=complex)
 
             for mode_num in range(1, M + 1):
-                fid.readline()
-                phi_real_line = fid.readline().strip().split()
-                phi_real = np.array([float(x) for x in phi_real_line])
-                phi_imag_line = fid.readline().strip().split()
-                phi_imag = np.array([float(x) for x in phi_imag_line])
+                fid.readline()  # per-mode separator/title line
+                phi_real = _read_floats(ntot)
+                phi_imag = _read_floats(ntot)
 
                 phi_mode = phi_real + 1j * phi_imag
                 if mode_num in modes_to_read:

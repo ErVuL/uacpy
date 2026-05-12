@@ -52,6 +52,21 @@ class Source:
         self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
         self.frequencies = np.atleast_1d(np.array(frequencies, dtype=np.float64))
 
+        if self.depths.size == 0:
+            raise ValueError("Source requires at least one depth; got an empty array")
+        if self.frequencies.size == 0:
+            raise ValueError("Source requires at least one frequency; got an empty array")
+
+        if np.any(~np.isfinite(self.depths)):
+            raise ValueError(
+                f"source depths must be finite (no NaN/inf), got {self.depths.tolist()}"
+            )
+
+        if np.any(~np.isfinite(self.frequencies)):
+            raise ValueError(
+                f"source frequencies must be finite (no NaN/inf), got {self.frequencies.tolist()}"
+            )
+
         if np.any(self.depths < 0):
             raise ValueError(
                 f"source depths must be non-negative (down from surface), got {self.depths.tolist()}"
