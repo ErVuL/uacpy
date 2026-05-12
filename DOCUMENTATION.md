@@ -612,7 +612,21 @@ trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
 - `Bellhop3D` is a stub — the env writer is 2-D only, 3-D arrivals
   parsing is not implemented.
 - Bellhop is the only model that natively writes a multi-source-depth
-  grid; everyone else loops in Python.
+  grid; passing ``Source(depths=[z1, z2, …])`` returns a
+  :class:`uacpy.ResultStack` of slabs (one :class:`PressureField` per
+  source for TL modes, one :class:`Rays` for ``RAYS``/``EIGENRAYS``,
+  one :class:`Arrivals` for ``ARRIVALS``). The stack carries the
+  source-depth labels in ``stack.coordinate`` (with
+  ``stack.coordinate_name == 'source_depth'``). Pick a slab via
+  ``stack[i]`` or ``stack.at(source_depth=z)`` before calling slab-
+  typed accessors (``.tl``, ``.rays``, ``.plot()``).
+- :class:`ResultStack` generalises to any stacking axis — pass
+  ``coordinate_name='frequency'`` or any external coordinate name
+  (``'wind_speed'``, ``'azimuth'``, …) to bundle slabs from a custom
+  parameter sweep. The constructor validates that every slab agrees
+  on every metadata axis *except* the stacking one.
+- ``BROADBAND`` / ``TIME_SERIES`` reject multi-source ``Source`` —
+  loop in Python over single depths if you need that combination.
 
 Examples: 01, 04, 11, 16, 24.
 
@@ -620,8 +634,12 @@ Examples: 01, 04, 11, 16, 24.
 
 Real (Kraken) and complex (KrakenC) normal-modes solvers. Both share
 `_KrakenBase`; KrakenC handles elastic / leaky cases via complex
-arithmetic. **Kraken auto-routes to `krakenc.exe`** when it sees
-`shear_speed > 0` anywhere or `leaky_modes=True`, with a `UserWarning`.
+arithmetic. **No auto-route at the class level** — instantiate
+``KrakenC`` directly for envs that carry ``shear_speed > 0`` or that
+need leaky modes. ``Kraken`` on those envs will fail at runtime and
+the wrapper's PRT-aware :class:`ModelExecutionError` points the user
+to ``KrakenC``. (``KrakenField`` *does* auto-route its internal
+modes solve to ``krakenc.exe`` — that's a separate code path.)
 
 ```python
 from uacpy.models import Kraken, KrakenC

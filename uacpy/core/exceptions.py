@@ -91,19 +91,35 @@ class InvalidDepthError(UACPYError):
 
 
 class UnsupportedFeatureError(UACPYError):
-    """Raised when a model cannot satisfy the requested feature."""
+    """Raised when a model cannot satisfy the requested feature.
 
-    def __init__(self, model_name: str, feature: str, alternatives: list = None):
+    ``alternatives_label`` controls the wording of the remediation line;
+    use ``'models'`` (default) when the suggestions are other model
+    classes, or ``'run modes'`` when they are :class:`RunMode` values.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        feature: str,
+        alternatives: list = None,
+        *,
+        alternatives_label: str = 'models',
+    ):
         message = f"{model_name} does not support: {feature}"
 
         remediation = None
         if alternatives:
-            remediation = "Try these models instead:\n" + "\n".join(f"  • {alt}" for alt in alternatives)
+            remediation = (
+                f"Try one of these {alternatives_label} instead:\n"
+                + "\n".join(f"  • {alt}" for alt in alternatives)
+            )
 
         super().__init__(message, remediation)
         self.model_name = model_name
         self.feature = feature
         self.alternatives = alternatives
+        self.alternatives_label = alternatives_label
 
 
 class ConfigurationError(UACPYError):

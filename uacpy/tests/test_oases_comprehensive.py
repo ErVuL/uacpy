@@ -369,11 +369,44 @@ class TestOASESFactory:
     def test_coherent_tl_broadband_routes_to_oasp(self):
         assert isinstance(OASES(broadband=True), OASP)
 
-    def test_unknown_kwarg_raises(self):
-        """OASES() forwards kwargs to the chosen sub-class; mistypes
-        surface as ``TypeError`` instead of being silently dropped."""
-        with pytest.raises(TypeError):
-            OASES(verbose=False, angles=np.linspace(0, 90, 10))
+    def test_subclass_specific_kwarg_silently_dropped(self):
+        """OASES() filters kwargs against the chosen sub-class signature
+        and silently drops irrelevant keys per uacpy convention. E.g.
+        ``angles=`` belongs to OASR; routing to OAST must drop it
+        instead of raising ``TypeError``."""
+        m = OASES(
+            run_mode=RunMode.COHERENT_TL, verbose=False,
+            angles=np.linspace(0, 90, 10),  # OASR-only
+        )
+        assert isinstance(m, OAST)
+        # The dropped kwarg must NOT have been stored on the instance.
+        assert not hasattr(m, 'angles')
+
+    def test_subclass_specific_kwarg_forwarded_when_relevant(self):
+        """When the kwarg DOES belong to the chosen sub-class, the
+        factory must forward it (not over-filter)."""
+        angles = np.linspace(0, 90, 19)
+        m = OASES(
+            run_mode=RunMode.REFLECTION, verbose=False, angles=angles,
+        )
+        assert isinstance(m, OASR)
+        np.testing.assert_array_equal(m.angles, angles)
+
+    def test_unrelated_garbage_kwarg_silently_dropped(self):
+        """A kwarg that no class consumes is dropped without error."""
+        m = OASES(verbose=False, totally_made_up_kwarg=42)
+        assert isinstance(m, OAST)
+
+    def test_factory_forwards_base_kwargs(self):
+        """Base-class kwargs (verbose, timeout, collapse) must pass
+        through the filter."""
+        m = OASES(
+            run_mode=RunMode.REFLECTION, verbose=False,
+            timeout=42.0, collapse={'bottom': 'median'},
+        )
+        assert isinstance(m, OASR)
+        assert m.timeout == 42.0
+        assert m._collapse['bottom'] == 'median'
 
     def test_env_absorption_propagates_to_options_string(self, tmp_path):
         """Francois–Garrison from env.absorption appends 'F' to the OAST
@@ -407,3 +440,113 @@ def test_all_oases_models_importable():
         model = ModelClass(verbose=False)
         assert model.model_name == name
         assert hasattr(model, 'run')
+
+
+# ---------------------------------------------------------------------
+# OASR/OASP equispaced frequency-vector check + auto-resample warning
+# ---------------------------------------------------------------------
+
+class TestOASESFrequencyResample:
+    """The (fmin, fmax, N) triple OASES writes implies equispaced
+    frequency sampling; arbitrary user vectors must trigger a warning
+    + auto-resample (Finding #14)."""
+
+    def test_helper_equispaced_no_warning(self, recwarn):
+        from uacpy.models.oases import _oases_resample_frequencies
+        freqs = np.linspace(10.0, 100.0, 10)
+        fmin, fmax, n, resampled = _oases_resample_frequencies(freqs, 'OASR')
+        assert (fmin, fmax, n) == (10.0, 100.0, 10)
+        assert resampled is False
+        assert not any(
+            "non-equispaced" in str(w.message) for w in recwarn.list
+        )
+
+    def test_helper_non_equispaced_warns_and_reports_resampled(self):
+        import warnings as _warnings
+        from uacpy.models.oases import _oases_resample_frequencies
+        freqs = np.array([10.0, 15.0, 30.0, 100.0])
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            fmin, fmax, n, resampled = _oases_resample_frequencies(
+                freqs, 'OASR'
+            )
+        assert (fmin, fmax, n) == (10.0, 100.0, 4)
+        assert resampled is True
+        msgs = [str(w.message) for w in caught
+                if issubclass(w.category, UserWarning)]
+        assert any("non-equispaced" in m for m in msgs), (
+            f"Expected non-equispaced warning; got {msgs!r}"
+        )
+
+    def test_helper_single_freq_no_warning(self, recwarn):
+        from uacpy.models.oases import _oases_resample_frequencies
+        fmin, fmax, n, resampled = _oases_resample_frequencies(
+            np.array([50.0]), 'OASR',
+        )
+        assert (fmin, fmax, n) == (50.0, 50.0, 1)
+        assert resampled is False
+
+    @pytest.mark.requires_binary
+    def test_oasr_equispaced_vector_no_warning_correct_freqs(self):
+        """A truly equispaced user vector goes through OASR untouched and
+        the result's ``frequencies`` matches the user's grid."""
+        import warnings as _warnings
+        bottom = BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600.0, shear_speed=400.0,
+            density=1.8, attenuation=0.5, shear_attenuation=1.0,
+        )
+        env = Environment(
+            name="oasr_eq", bathymetry=100.0, ssp=1500.0, bottom=bottom,
+        )
+        src = Source(depths=50.0, frequencies=50.0)
+        rcv = Receiver(depths=[50.0], ranges=[1000.0])
+        oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 19))
+        user_freqs = np.linspace(20.0, 80.0, 4)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            result = oasr.run(env=env, source=src, receiver=rcv,
+                              frequencies=user_freqs)
+        non_eq = [w for w in caught if "non-equispaced" in str(w.message)]
+        assert non_eq == [], (
+            f"Equispaced vector triggered a spurious warning: {non_eq!r}"
+        )
+        # Result frequencies match the equispaced grid
+        np.testing.assert_allclose(
+            np.sort(result.frequencies), user_freqs, rtol=1e-3,
+        )
+
+    @pytest.mark.requires_binary
+    def test_oasr_non_equispaced_vector_warns_and_resamples(self):
+        """A non-equispaced user vector triggers the warning and the
+        result's ``frequencies`` is the resampled equispaced grid, not
+        the user input."""
+        import warnings as _warnings
+        bottom = BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600.0, shear_speed=400.0,
+            density=1.8, attenuation=0.5, shear_attenuation=1.0,
+        )
+        env = Environment(
+            name="oasr_neq", bathymetry=100.0, ssp=1500.0, bottom=bottom,
+        )
+        src = Source(depths=50.0, frequencies=50.0)
+        rcv = Receiver(depths=[50.0], ranges=[1000.0])
+        oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 19))
+        user_freqs = np.array([20.0, 30.0, 50.0, 80.0])  # non-equispaced
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            result = oasr.run(env=env, source=src, receiver=rcv,
+                              frequencies=user_freqs)
+        non_eq = [w for w in caught if "non-equispaced" in str(w.message)]
+        assert len(non_eq) >= 1, (
+            "Non-equispaced vector must trigger a UserWarning"
+        )
+        # Result frequencies are the resampled equispaced grid spanning
+        # the user's [min, max] with the same N — NOT the user input.
+        expected = np.linspace(
+            user_freqs.min(), user_freqs.max(), user_freqs.size,
+        )
+        np.testing.assert_allclose(
+            np.sort(result.frequencies), expected, rtol=1e-3,
+        )

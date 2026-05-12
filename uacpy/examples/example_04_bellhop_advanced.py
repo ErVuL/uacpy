@@ -163,10 +163,41 @@ def main():
         result_line = None
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 4: Ray Trace with Beam Shift
+    # RUN 4: Multi-source-depth (Bellhop binary loops source axis natively)
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[4/4] Running ray trace with beam shift...")
+    print("[4/5] Running Bellhop with three source depths in one binary call...")
+    # The shelf depth at r=0 is 100 m, so every source must sit in
+    # the water column at the launch point (z < 100 m).
+    source_multi = uacpy.Source(depths=[20.0, 50.0, 80.0],
+                                frequencies=300.0)
+    bellhop_multi = Bellhop(verbose=False, n_beams=500, alpha=(-85, 85))
+    try:
+        stack = bellhop_multi.run(
+            env, source_multi, receiver, run_mode=RunMode.COHERENT_TL,
+        )
+        # ``stack`` is a ResultStack of PressureField slabs. Iterate to
+        # walk (source_depth, slab) pairs, or stack.at(source_depth=z)
+        # to pick a single 2-D PressureField by label. Slab accessors
+        # (.tl, .p, .at(depth=, range=)) live on the PressureField,
+        # not on the stack itself.
+        print(f"  ✓ Success — ResultStack of {stack.slab_type.__name__} "
+              f"with {stack.n_slabs} source-depth slabs")
+        for sd_value, slab in stack:
+            tl = np.asarray(slab.tl)
+            real = tl[(tl > 0) & (tl < 500)]
+            if real.size:
+                print(f"      sd={sd_value:6.1f} m  →  median TL "
+                      f"{np.nanmedian(real):.1f} dB")
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+        stack = None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUN 5: Ray Trace with Beam Shift
+    # ═══════════════════════════════════════════════════════════════════════
+
+    print("[5/5] Running ray trace with beam shift...")
 
     bellhop_rays = Bellhop(
         verbose=False,
@@ -260,11 +291,43 @@ def main():
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_rays.png")
 
+    # Plot 5: Multi-source-depth — one TL panel per source slab.
+    if stack is not None:
+        n_sd = stack.n_slabs
+        fig5, axes5 = plt.subplots(1, n_sd, figsize=(6 * n_sd, 5))
+        if n_sd == 1:
+            axes5 = [axes5]
+        for ax, (sd_value, slab) in zip(axes5, stack):
+            plot_transmission_loss(slab.to_tl(), env, ax=ax,
+                                   show_colorbar=False)
+            # Mark the source location (r = 0 km, z = source depth)
+            # — TL plots use km on x and m on y.
+            ax.plot(0.0, sd_value, marker='*', markersize=18,
+                    color='white', markeredgecolor='black',
+                    markeredgewidth=1.2, zorder=10, clip_on=False)
+            ax.set_title(f'Source depth = {sd_value:.0f} m')
+        import matplotlib as mpl
+        cbar_ax = fig5.add_axes([0.92, 0.15, 0.015, 0.7])
+        norm = mpl.colors.Normalize(vmin=50, vmax=110)
+        cmap = mpl.cm.get_cmap('jet_r')
+        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap,
+                                       norm=norm, orientation='vertical')
+        cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
+        plt.suptitle(
+            'Bellhop multi-source-depth: one binary call, '
+            'ResultStack[PressureField] slabs',
+            fontsize=15, fontweight='bold',
+        )
+        plt.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
+                    dpi=150, bbox_inches='tight')
+        print("  ✓ Saved: example_04_multi_source.png")
+
     print("\nFeatures demonstrated:")
     print("  ✓ Advanced RunType (7 positions)")
     print("  ✓ Cerveny beam parameters")
     print("  ✓ Thorp volume attenuation")
     print("  ✓ Point vs Line sources")
+    print("  ✓ Multi-source-depth → ResultStack[PressureField] (.at(source_depth=z))")
     print("  ✓ Beam shift on reflection")
     print("  ✓ Range-dependent bottom properties")
     print("  ✓ Continental shelf scenario")

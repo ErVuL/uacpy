@@ -329,10 +329,11 @@ env = uacpy.Environment(
 # 2. Source — 1000 Hz, mid water column
 source = uacpy.Source(depths=50.0, frequencies=1000.0)
 
-# 3. Receiver grid — 200 depths × 5000 ranges out to 5 km
+# 3. Receiver grid — 200 depths × 500 ranges out to 5 km
+#    Start ranges at the step size; r=0 has no ray data (Bellhop sentinel).
 receiver = uacpy.Receiver(
     depths=np.linspace(0, 100, 200),
-    ranges=np.linspace(0, 5000, 5000),
+    ranges=np.linspace(10, 5000, 500),
 )
 
 # 4. Run Bellhop in coherent-TL mode

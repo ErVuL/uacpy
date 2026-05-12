@@ -443,8 +443,18 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     write_bellhop_env_file(env_path, env, src, rcv, interp_ssp='quad')
     ssp_path = env_path.with_suffix('.ssp')
     assert ssp_path.exists()
-    contents = ssp_path.read_text().split()
-    n_profiles = int(contents[0])
-    assert n_profiles == 3
-    ranges_km = list(map(float, contents[1:1 + n_profiles]))
+
+    lines = ssp_path.read_text().splitlines()
+    # AT/bellhopcuda LDIFile expects Npts and the range vector on
+    # separate records (one line each), then one line per depth row.
+    assert lines[0].strip() == '3', (
+        f"line 1 must contain only Npts; got {lines[0]!r}"
+    )
+    ranges_km = list(map(float, lines[1].split()))
     assert ranges_km == [0.0, 1.0, 5.0]
+    # Two depths -> two SSP rows
+    assert len(lines) >= 4
+    row0 = list(map(float, lines[2].split()))
+    row1 = list(map(float, lines[3].split()))
+    assert row0 == [1500.0, 1495.0, 1485.0]
+    assert row1 == [1480.0, 1475.0, 1465.0]

@@ -155,8 +155,25 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     filepath = Path(filepath)
     Npts = len(r_km)
 
+    # Validate range vector vs SSP matrix shape — each column of ``c``
+    # is the profile at the corresponding range. Mismatched shapes will
+    # otherwise produce a silently-malformed .ssp file that Bellhop
+    # rejects deep in its run.
+    if c.ndim != 2:
+        raise ValueError(
+            f"write_ssp: c must be 2-D (n_depth, n_ranges); got shape {c.shape}"
+        )
+    if c.shape[1] != Npts:
+        raise ValueError(
+            f"write_ssp: len(r_km) = {Npts} does not match c.shape[1] = "
+            f"{c.shape[1]} (each column of c must be one profile)"
+        )
+
+    # AT/bellhopcuda's LDIFile reader treats each line as a separate
+    # list-directed record (`LIST(SSPFile)` resets to the next line before
+    # each read), so Npts and the range vector must live on different lines.
     with open(filepath, "w") as fid:
-        fid.write(f"{Npts}")
+        fid.write(f"{Npts}\n")
         for r in r_km:
             fid.write(f"{r:6.3f}  ")
         fid.write("\n")
@@ -964,10 +981,16 @@ def write_fieldflp(
                 f.write(f"    {z:6f}  ")
         f.write("/ \t ! Rz(1)  ... (m) \n")
 
-        # Receiver range offsets (array tilt) - default to zeros
+        # Receiver range offsets (array tilt) - default to zeros for every
+        # receiver. AT's field.f90 enforces ``NRro == NRz`` (see
+        # KrakenField/field.f90:147), so we keep the count = NRz. The
+        # sentinel ``/`` terminator paired with a single explicit value
+        # lets AT's SubTab routine replicate it across the full vector
+        # (see misc/subtabulate.f90 — when x(3) is left at its -999.9
+        # default, the vector is filled by repeating x(1)). This matches
+        # the canonical AT examples MunkK.flp / DickinsK_rd.flp.
         f.write(f"{len(r_depths):5d} \t \t \t \t ! NRro \n")
-        f.write("    0.00  0.00 ")
-        f.write("/ \t \t \t \t ! Rro(1)  ... (m) \n")
+        f.write("    0.0 /    \t \t \t \t ! Rro(1)  ... (m) \n")
 
 
 def write_field3dflp(

@@ -61,6 +61,12 @@ class Receiver:
         ranges: Optional[Union[float, List[float], np.ndarray]] = None,
         receiver_type: str = 'grid',
     ):
+        valid_types = ('grid', 'line')
+        if receiver_type not in valid_types:
+            raise ValueError(
+                f"receiver_type must be one of {list(valid_types)}, "
+                f"got {receiver_type!r}"
+            )
         self.receiver_type = receiver_type
         if ranges is None:
             ranges = 0.0
@@ -72,6 +78,16 @@ class Receiver:
             raise ValueError("receiver depths must contain at least one value, got empty array")
         if self.ranges.size < 1:
             raise ValueError("receiver ranges must contain at least one value, got empty array")
+
+        if np.any(~np.isfinite(self.depths)):
+            raise ValueError(
+                f"receiver depths must be finite (no NaN/inf), got {self.depths.tolist()}"
+            )
+
+        if np.any(~np.isfinite(self.ranges)):
+            raise ValueError(
+                f"receiver ranges must be finite (no NaN/inf), got {self.ranges.tolist()}"
+            )
 
         if np.any(self.depths < 0):
             raise ValueError(

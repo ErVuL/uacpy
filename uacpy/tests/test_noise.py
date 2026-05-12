@@ -21,9 +21,25 @@ def freqs():
 
 
 def test_compute_windnoise_zero_wind(freqs):
+    """``u == 0`` silences the surface-noise source: spectral level is
+    ``-inf`` dB at every frequency so the incoherent dB sum with the
+    other Wenz components drops wind cleanly."""
     NL = compute_windnoise(freqs, u=0)
     assert NL.shape == freqs.shape
-    assert np.all(NL == 0.0)
+    assert np.all(np.isneginf(NL))
+
+
+def test_compute_windnoise_scalar_frequency():
+    """``compute_windnoise(scalar_f, u)`` returns a 1-element 1-D array."""
+    NL = compute_windnoise(100.0, u=10, water_depth='deep')
+    assert NL.shape == (1,)
+    assert np.isfinite(NL[0])
+
+
+def test_compute_windnoise_negative_wind_raises():
+    """Negative wind speed raises :class:`ValueError`."""
+    with pytest.raises(ValueError, match="non-negative"):
+        compute_windnoise(np.array([100.0]), u=-5, water_depth='deep')
 
 
 def test_compute_windnoise_increases_with_wind(freqs):
@@ -62,11 +78,20 @@ def test_wenznoise_high_freq_only_no_rain_meld_crash():
 
 
 def test_wenznoise_default_attributes(freqs):
+    """Inactive bands are carried as ``-inf`` in each component array;
+    ``.total`` stays finite as long as at least one source is active
+    at every frequency."""
     wenz = WenzNoise(freqs, wind_speed=10)
     for attr in ('total', 'shipping', 'wind', 'rain', 'thermal', 'turbulence'):
         v = getattr(wenz, attr)
         assert v.shape == freqs.shape
-        assert np.all(np.isfinite(v)), f"{attr} contains non-finite values"
+    # The total is the incoherent sum — must be finite when any of the
+    # five components is active at each frequency (it is, for these inputs).
+    assert np.all(np.isfinite(wenz.total))
+    # Components are allowed to be -inf when inactive but never NaN.
+    for attr in ('shipping', 'wind', 'rain', 'thermal', 'turbulence'):
+        v = getattr(wenz, attr)
+        assert not np.any(np.isnan(v)), f"{attr} contains NaN"
 
 
 def test_wenznoise_components_matrix_layout(freqs):
@@ -141,3 +166,38 @@ def test_wenznoise_plot_total_only(freqs):
     assert fig is not None and ax is not None
     import matplotlib.pyplot as plt
     plt.close(fig)
+
+
+def test_wenznoise_total_matches_linear_sum_of_components(freqs):
+    """``total`` equals the incoherent linear sum of the five
+    components within numerical precision; ``-inf`` components
+    contribute zero linear power."""
+    wenz = WenzNoise(freqs, wind_speed=10, shipping_level='medium',
+                     rain_rate='moderate', water_depth='deep')
+    # Treat -inf rigorously: 10**(-inf/10) = 0.
+    lin_sum = (
+        10.0 ** (wenz.shipping / 10.0)
+        + 10.0 ** (wenz.wind / 10.0)
+        + 10.0 ** (wenz.rain / 10.0)
+        + 10.0 ** (wenz.thermal / 10.0)
+        + 10.0 ** (wenz.turbulence / 10.0)
+    )
+    expected = 10.0 * np.log10(lin_sum)
+    np.testing.assert_allclose(wenz.total, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_wenznoise_zero_wind_drops_wind_from_total(freqs):
+    """``wind_speed=0`` makes the wind component ``-inf`` so it drops out
+    of ``.total``; the total equals the sum of the four remaining
+    components."""
+    wenz = WenzNoise(freqs, wind_speed=0, shipping_level='medium',
+                     rain_rate='moderate', water_depth='deep')
+    assert np.all(np.isneginf(wenz.wind))
+    lin_no_wind = (
+        10.0 ** (wenz.shipping / 10.0)
+        + 10.0 ** (wenz.rain / 10.0)
+        + 10.0 ** (wenz.thermal / 10.0)
+        + 10.0 ** (wenz.turbulence / 10.0)
+    )
+    expected = 10.0 * np.log10(lin_no_wind)
+    np.testing.assert_allclose(wenz.total, expected, rtol=1e-10, atol=1e-10)

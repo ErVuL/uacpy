@@ -381,3 +381,52 @@ class TestAutoTLLimits:
         from uacpy.visualization.plots import _auto_tl_limits
         vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
         assert (vmin, vmax) == (30.0, 80.0)
+
+
+class TestPlotTransmissionLossSingletonAxis:
+    """``plot_transmission_loss`` and ``_select_2d_slice`` handle a
+    broadband :class:`TransferFunction` whose depth or range axis is
+    length 1 without crashing — the returned 2-D slice always has shape
+    ``(n_depths, n_ranges)`` even when one of those is a singleton.
+    """
+
+    def test_broadband_singleton_depth_does_not_crash(self):
+        from uacpy.visualization.plots import plot_transmission_loss
+        data = np.ones((1, 10, 4), dtype=complex)
+        tf = uacpy.TransferFunction(
+            data=data,
+            depths=[50.0],
+            ranges=np.arange(10) * 100,
+            frequencies=[100., 200., 300., 400.],
+            phase_reference='travelling_wave',
+        )
+        fig, ax = plot_transmission_loss(tf)
+        assert fig is not None and ax is not None
+        plt.close(fig)
+
+    def test_broadband_singleton_range_does_not_crash(self):
+        from uacpy.visualization.plots import plot_transmission_loss
+        data = np.ones((8, 1, 3), dtype=complex)
+        tf = uacpy.TransferFunction(
+            data=data,
+            depths=np.linspace(10, 90, 8),
+            ranges=[1000.0],
+            frequencies=[100., 200., 300.],
+            phase_reference='travelling_wave',
+        )
+        fig, ax = plot_transmission_loss(tf)
+        assert fig is not None and ax is not None
+        plt.close(fig)
+
+    def test_select_2d_slice_reshapes_to_grid(self):
+        from uacpy.visualization.plots import _select_2d_slice
+        data = np.ones((1, 10, 4), dtype=complex)
+        tf = uacpy.TransferFunction(
+            data=data,
+            depths=[50.0],
+            ranges=np.arange(10) * 100,
+            frequencies=[100., 200., 300., 400.],
+            phase_reference='travelling_wave',
+        )
+        arr = _select_2d_slice(tf, frequency=200.0)
+        assert arr.shape == (1, 10)
