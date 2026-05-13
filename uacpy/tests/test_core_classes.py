@@ -247,26 +247,36 @@ class TestField:
 
 
 class TestPublicReexports:
-    """Top-level re-exports added for the API audit."""
+    """Public namespace contract."""
 
-    def test_environment_helpers_at_top_level(self):
-        from uacpy import SoundSpeedProfile, generate_sea_surface
+    def test_soundspeedprofile_at_top_level(self):
+        from uacpy import SoundSpeedProfile
         assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
-        assert generate_sea_surface is uacpy.core.environment.generate_sea_surface
 
     def test_environment_helpers_at_core(self):
         from uacpy.core import SoundSpeedProfile, generate_sea_surface
         assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
         assert generate_sea_surface is uacpy.core.environment.generate_sea_surface
 
-    def test_signal_analysis_classes_at_top_level(self):
-        sig = uacpy.signal
+    def test_acoustic_signal_is_importable_submodule(self):
+        import uacpy.acoustic_signal as sig
+        assert sig is uacpy.acoustic_signal
+
+    def test_signal_analysis_classes_reachable(self):
+        sig = uacpy.acoustic_signal
         for name in ('PPSD', 'PSD', 'FRF', 'SEL', 'FKTransform', 'Spectrogram'):
-            assert hasattr(sig, name), f"uacpy.signal.{name} not reachable"
+            assert hasattr(sig, name), f"uacpy.acoustic_signal.{name} not reachable"
         assert 'PSD' in sig.__all__
         assert 'FRF' in sig.__all__
         assert 'SEL' in sig.__all__
         assert 'FKTransform' in sig.__all__
+
+    def test_metrics_is_importable_submodule(self):
+        import uacpy.metrics as m
+        assert m is uacpy.metrics
+        assert hasattr(m, 'tl_rmse')
+        assert hasattr(m, 'tl_max_error')
+        assert hasattr(m, 'tl_bias')
 
 
 class TestModesFieldType:

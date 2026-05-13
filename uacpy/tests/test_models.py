@@ -12,7 +12,7 @@ from uacpy.models import (
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, Modes, Arrivals, Rays, ReflectionCoefficient
+from uacpy.core.results import Field, Modes, ReflectionCoefficient
 
 
 @pytest.mark.requires_binary

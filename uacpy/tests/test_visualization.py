@@ -7,17 +7,17 @@ regression tests' job.
 """
 
 import numpy as np
-import pytest
-import matplotlib
+import matplotlib  # noqa: E402 ordering — must precede pyplot
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
-import uacpy
-from uacpy.core.results import (
-    Field, Modes, Arrivals, Rays, Covariance, Replicas,
-    ReflectionCoefficient,
+import pytest  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+
+import uacpy  # noqa: E402
+from uacpy.core.results import (  # noqa: E402
+    Field, Modes, Arrivals, Rays, ReflectionCoefficient,
 )
-from uacpy.visualization import plots
+from uacpy.visualization import plots  # noqa: E402
 
 
 @pytest.fixture

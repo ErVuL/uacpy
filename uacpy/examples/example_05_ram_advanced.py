@@ -49,7 +49,6 @@ from uacpy.visualization.plots import (  # noqa: E402
 )
 
 
-
 def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
                          vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
     """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.

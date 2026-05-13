@@ -199,10 +199,11 @@ def main():
     print("GENERATING VISUALIZATIONS")
     print("=" * 70)
 
-    # Plot 1: Environment overview — SSP panel + bathymetry-with-bottom panel.
+    # Plot 1: Environment overview — single panel showing the water
+    # column (Blues) + bottom (YlOrBr) on one figure.
     print("\n[1/3] Environment overview...")
-    fig1, (ax_ssp, _ax_bot) = plot_environment(env)
-    ax_ssp.set_title('Thermal Front: 2D Range-Dependent SSP')
+    fig1, ax_env = plot_environment(env)
+    ax_env.set_title('Thermal Front: 2D Range-Dependent SSP + bottom')
     fig1.savefig(OUTPUT_DIR / 'example_07_environment.png', dpi=150,
                  bbox_inches='tight')
     plt.close(fig1)

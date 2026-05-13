@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 
-from uacpy.core.results import Field, Field
+from uacpy.core.results import Field
 from uacpy.models import Scooter
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver

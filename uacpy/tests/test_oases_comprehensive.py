@@ -16,9 +16,7 @@ import numpy as np
 
 from uacpy.models import OAST, OASN, OASR, OASP, OASES, RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.results import (
-    Field, ReflectionCoefficient, Covariance, Replicas,
-)
+from uacpy.core.results import Field, ReflectionCoefficient
 
 pytestmark = pytest.mark.requires_oases
 

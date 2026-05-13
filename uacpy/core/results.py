@@ -179,7 +179,15 @@ class Result:
                 bits.append(f"f={float(self.frequencies[0]):.3g} Hz")
             else:
                 bits.append(f"n_f={len(self.frequencies)}")
+        extra = self._repr_extra()
+        if extra:
+            bits.append(extra)
         return f"{cls}({', '.join(bits)})"
+
+    def _repr_extra(self) -> str:
+        """Override on subclasses to add a per-class size summary
+        (``n_modes=N``, ``n_rays=N``, …) to :meth:`__repr__`."""
+        return ''
 
     # Stub plot() — concrete subclasses override.
     def plot(self, **kwargs):
@@ -282,6 +290,34 @@ class Field(Result):
     @property
     def is_complex(self) -> bool:
         return bool(np.iscomplexobj(self.data))
+
+    @property
+    def kind(self) -> str:
+        """Physical-quantity classification from ``(dtype, coords)``.
+
+        One of ``'tl'`` (real, no time/frequency axis), ``'pressure'``
+        (complex, no frequency axis), ``'transfer_function'``
+        (complex, ``'frequency'`` axis present), or ``'time_series'``
+        (real, ``'time'`` axis present). Independent of dimensionality —
+        ``tl.at(depth=20)`` is still ``'tl'``."""
+        axes = set(self.coords)
+        if 'frequency' in axes and self.is_complex:
+            return 'transfer_function'
+        if 'time' in axes and not self.is_complex:
+            return 'time_series'
+        if self.is_complex:
+            return 'pressure'
+        return 'tl'
+
+    def __repr__(self) -> str:
+        bits = [f"kind={self.kind!r}"]
+        if self.model:
+            bits.append(f"model={self.model!r}")
+        f0 = self.f0
+        if f0 is not None and 'frequency' not in self.coords:
+            bits.append(f"f={f0:.3g} Hz")
+        bits.append(f"axes=({', '.join(self.coords) or 'scalar'})")
+        return f"Field({', '.join(bits)})"
 
     # ── value accessors ───────────────────────────────────────────────
 
@@ -950,6 +986,9 @@ class Arrivals(Result):
     def __iter__(self):
         return iter(self.arrivals)
 
+    def _repr_extra(self) -> str:
+        return f"n_arrivals={len(self.arrivals)}"
+
     # Per-field bulk views ---------------------------------------------------
 
     @property
@@ -1082,6 +1121,10 @@ class Rays(Result):
             np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
             if receiver_ranges is not None else None
         )
+
+    def _repr_extra(self) -> str:
+        kind = 'eigenrays' if self.is_eigen else 'rays'
+        return f"n_{kind}={len(self.rays)}"
 
     # ------------------------------------------------------------------
     # Filtering helpers — pure data subsets. ``is_eigen`` is preserved
@@ -1321,6 +1364,9 @@ class Modes(Result):
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
         self.n_modes = int(n_modes if n_modes is not None else len(self.k))
+
+    def _repr_extra(self) -> str:
+        return f"n_modes={self.n_modes}, n_z={self.depths.size}"
 
     @property
     def data(self) -> np.ndarray:      # alias for plot helpers
@@ -1650,6 +1696,9 @@ class Covariance(Result):
     def n_receivers(self) -> int:
         return int(self.covariance.shape[1])
 
+    def _repr_extra(self) -> str:
+        return f"n_rcv={self.n_receivers}"
+
     def _replica_grid(self, replicas: "Replicas") -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """Validate and reshape the replica field to ``(n_f, n_pts, n_rcv)``."""
         if replicas.replicas.shape[0] != self.n_frequencies:
@@ -1801,6 +1850,9 @@ class Replicas(Result):
     def n_replica_points(self) -> int:
         return int(self.replicas.shape[1] * self.replicas.shape[2] * self.replicas.shape[3])
 
+    def _repr_extra(self) -> str:
+        return f"n_pts={self.n_replica_points}, n_rcv={self.n_receivers}"
+
 
 class ReflectionCoefficient(Result):
     """Angle-dependent reflection coefficient ``R(theta[, f])``.
@@ -1874,6 +1926,10 @@ class ReflectionCoefficient(Result):
     @property
     def is_broadband(self) -> bool:
         return self.R.ndim == 2
+
+    def _repr_extra(self) -> str:
+        kind = 'broadband' if self.is_broadband else 'narrowband'
+        return f"n_θ={self.n_angles}, {kind}"
 
     def at(
         self,

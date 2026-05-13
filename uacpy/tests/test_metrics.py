@@ -31,7 +31,7 @@ class TestTLRmseBasic:
         data = np.broadcast_to(data, (10, 20)).copy()
         a = _tl_field(data, d, r, model='A')
         b = _tl_field(data.copy(), d, r, model='B')
-        assert uacpy.tl_rmse(a, b) == pytest.approx(0.0)
+        assert uacpy.metrics.tl_rmse(a, b) == pytest.approx(0.0)
 
     def test_constant_offset(self):
         d = np.linspace(5, 95, 10)
@@ -39,7 +39,7 @@ class TestTLRmseBasic:
         base = np.zeros((10, 20))
         a = _tl_field(base, d, r)
         b = _tl_field(base + 3.0, d, r)
-        assert uacpy.tl_rmse(a, b) == pytest.approx(3.0)
+        assert uacpy.metrics.tl_rmse(a, b) == pytest.approx(3.0)
 
     def test_window_selects_subregion(self):
         d = np.linspace(5, 95, 10)
@@ -54,7 +54,7 @@ class TestTLRmseBasic:
     def test_type_error_on_non_field(self):
         a = _tl_field(np.zeros((4, 4)), np.arange(4), np.arange(4))
         with pytest.raises(TypeError):
-            uacpy.tl_rmse(a, object())
+            uacpy.metrics.tl_rmse(a, object())
 
 
 class TestTLMetricsUnits:

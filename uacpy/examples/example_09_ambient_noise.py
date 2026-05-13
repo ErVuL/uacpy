@@ -6,12 +6,12 @@ EXAMPLE 09: Ambient noise (Wenz) + ssrp synthesis + PPSD verification
 Pipeline:
   1. Build a Wenz total ambient-noise PSD via :class:`uacpy.noise.WenzNoise`
      (deep water, Beaufort-6 wind, heavy shipping + rain).
-  2. Synthesise a time-domain realisation with :func:`uacpy.signal.ssrp`
+  2. Synthesise a time-domain realisation with :func:`uacpy.acoustic_signal.ssrp`
      (spectral synthesis of random processes).
   3. Visualise the time–frequency content with
-     :class:`uacpy.signal.Spectrogram` — a stationary process should show
+     :class:`uacpy.acoustic_signal.Spectrogram` — a stationary process should show
      a uniform spectral pattern across time.
-  4. Round-trip the realisation through :class:`uacpy.signal.PPSD` to
+  4. Round-trip the realisation through :class:`uacpy.acoustic_signal.PPSD` to
      verify the synthesis recovers the input spectrum and to visualise
      the level distribution across time segments.
 
@@ -78,7 +78,7 @@ def main():
     Pxx = wenz_ssrp.as_psd()                           # Pa² / Hz (linear)
 
     duration = 30.0                                    # seconds
-    t, x, fs = uacpy.signal.ssrp(Pxx, f_ssrp, fs=96000,
+    t, x, fs = uacpy.acoustic_signal.ssrp(Pxx, f_ssrp, fs=96000,
                                  duration=duration, scale=1.0, n_fft=n_fft)
     print(f"  ssrp: synthesised {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
@@ -99,7 +99,7 @@ def main():
     print("  ✓ Saved: output/example_09_ssrp_timeseries.png")
 
     # ── 3. Spectrogram of the synthesised noise ─────────────────────────
-    spec = uacpy.signal.Spectrogram(ref=UPA, nperseg=4096, noverlap=2048)
+    spec = uacpy.acoustic_signal.Spectrogram(ref=UPA, nperseg=4096, noverlap=2048)
     spec.compute(x, fs)
     fig, ax = spec.plot(
         title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
@@ -114,7 +114,7 @@ def main():
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
-    ppsd = uacpy.signal.PPSD(
+    ppsd = uacpy.acoustic_signal.PPSD(
         ref=UPA,
         seg_duration=1.0,
         overlap_pct=50,

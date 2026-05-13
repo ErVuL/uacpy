@@ -8,7 +8,9 @@ Canonical surface
 * :func:`compare` — overlay 1-D sliced fields.
 * :func:`compare_models` — side-by-side heatmap grid.
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans, arrival stems.
-* :func:`plot_environment` — SSP + bathymetry.
+* :func:`plot_environment` — single-panel view of the env: water column
+  (SSP, Blues cmap) + bottom (every flavour, YlOrBr cmap) + optional
+  ``source=``/``receiver=`` markers, with two independent colorbars.
 * :func:`plot_mode_functions`, :func:`plot_mode_wavenumbers`,
   :func:`plot_modes_heatmap` — three distinct mode views.
 * :func:`plot_reflection_coefficient`, :func:`plot_covariance`,

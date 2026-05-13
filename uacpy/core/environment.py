@@ -106,6 +106,17 @@ class SedimentLayer:
         if self.density <= 0:
             raise ValueError(f"SedimentLayer: density must be positive (g/cm^3); got {self.density}")
 
+    def __repr__(self) -> str:
+        bits = [
+            f"thickness={self.thickness:g} m",
+            f"cp={self.sound_speed:g} m/s",
+            f"ρ={self.density:g}",
+            f"α={self.attenuation:g}",
+        ]
+        if self.shear_speed > 0:
+            bits.append(f"cs={self.shear_speed:g} m/s")
+        return f"SedimentLayer({', '.join(bits)})"
+
     @classmethod
     def from_preset(cls, name: str, *, thickness: float, **overrides) -> "SedimentLayer":
         """Build a :class:`SedimentLayer` from a :mod:`uacpy.core.materials`
@@ -208,6 +219,23 @@ class BoundaryProperties:
                 f"got {self.shear_attenuation}"
             )
         _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
+
+    def __repr__(self) -> str:
+        if self.acoustic_type in ('vacuum', 'rigid'):
+            return f"BoundaryProperties({self.acoustic_type})"
+        if self.acoustic_type == 'file':
+            return (
+                f"BoundaryProperties(file={self.reflection_file!r})"
+            )
+        bits = [self.acoustic_type,
+                f"cp={self.sound_speed:g} m/s",
+                f"ρ={self.density:g}",
+                f"α={self.attenuation:g}"]
+        if self.shear_speed > 0:
+            bits.append(f"cs={self.shear_speed:g} m/s")
+        if self.roughness > 0:
+            bits.append(f"σ={self.roughness:g} m")
+        return f"BoundaryProperties({', '.join(bits)})"
 
     @classmethod
     def from_preset(cls, name: str, **overrides) -> "BoundaryProperties":
@@ -312,6 +340,17 @@ class RangeDependentBottom:
             self.shear_speed = np.zeros(n)
         if self.shear_attenuation is None:
             self.shear_attenuation = np.zeros(n)
+
+    def __repr__(self) -> str:
+        n = len(self.ranges)
+        r_lo, r_hi = float(self.ranges[0]) / 1000, float(self.ranges[-1]) / 1000
+        c_lo, c_hi = float(np.min(self.sound_speed)), float(np.max(self.sound_speed))
+        elastic = " elastic" if np.any(np.asarray(self.shear_speed) > 0) else ""
+        return (
+            f"RangeDependentBottom({self.acoustic_type}{elastic}, "
+            f"n={n}, range=[{r_lo:g}, {r_hi:g}] km, "
+            f"cp=[{c_lo:g}, {c_hi:g}] m/s)"
+        )
 
     def eval(self, *, range: float, interp: str = 'linear') -> BoundaryProperties:
         """``BoundaryProperties`` at the requested range (m).
@@ -419,6 +458,17 @@ class LayeredBottom:
     def __post_init__(self):
         if not self.layers:
             raise ValueError("LayeredBottom: requires at least one SedimentLayer; got 0")
+
+    def __repr__(self) -> str:
+        n = len(self.layers)
+        thick = self.total_thickness()
+        bits = [f"n_layers={n}", f"thickness={thick:g} m"]
+        if any(layer.shear_speed > 0 for layer in self.layers):
+            bits.append("elastic")
+        bits.append(f"halfspace={self.halfspace.acoustic_type}")
+        if self.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
+            bits.append(f"cp={self.halfspace.sound_speed:g} m/s")
+        return f"LayeredBottom({', '.join(bits)})"
 
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m)."""
@@ -723,6 +773,17 @@ class RangeDependentLayeredBottom:
                 f"must match ranges length ({n})"
             )
 
+    def __repr__(self) -> str:
+        n = len(self.ranges)
+        r_lo = float(self.ranges[0]) / 1000
+        r_hi = float(self.ranges[-1]) / 1000
+        max_layers = max(len(p.layers) for p in self.profiles)
+        return (
+            f"RangeDependentLayeredBottom(n_profiles={n}, "
+            f"range=[{r_lo:g}, {r_hi:g}] km, "
+            f"max_layers={max_layers})"
+        )
+
     def max_total_thickness(self) -> float:
         """Maximum total sediment thickness across all range points."""
         return max(p.total_thickness() for p in self.profiles)
@@ -894,6 +955,22 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: shape={self.shape!r} not in "
                 f"{_VALID_SSP_SHAPES}"
             )
+
+    def __repr__(self) -> str:
+        c_lo = float(np.min(self.data))
+        c_hi = float(np.max(self.data))
+        bits = [
+            f"shape={self.shape!r}",
+            f"n_z={self.depths.size}",
+            f"z=[{float(self.depths[0]):g}, {float(self.depths[-1]):g}] m",
+        ]
+        if self.is_range_dependent:
+            r_lo = float(self.ranges[0]) / 1000
+            r_hi = float(self.ranges[-1]) / 1000
+            bits.append(f"n_r={self.data.shape[1]}")
+            bits.append(f"range=[{r_lo:g}, {r_hi:g}] km")
+        bits.append(f"c=[{c_lo:g}, {c_hi:g}] m/s")
+        return f"SoundSpeedProfile({', '.join(bits)})"
 
     @property
     def is_range_dependent(self) -> bool:

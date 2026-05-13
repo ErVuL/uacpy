@@ -43,5 +43,3 @@ class TestBottomLossCurve:
         custom = np.linspace(5.0, 85.0, 41)
         ang, loss = bottom_loss_curve('limestone', grazing_angles_deg=custom)
         assert np.array_equal(ang, custom)
-
-

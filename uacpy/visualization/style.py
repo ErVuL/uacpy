@@ -128,19 +128,32 @@ def apply_professional_style(dpi: int = 150):
     mpl.rcParams.update(style_dict)
 
 
-BOTTOM_CMAP = 'YlOrBr'
+# ── Sediment colour — single source of truth ─────────────────────────────
+# Change ``BOTTOM_HALFSPACE_COLOR`` and the fill + hatch colours below
+# follow automatically (they're alpha-blended derivations of it). The
+# rendered fill is opaque so it cleanly covers the water heatmap
+# underneath without translucent bleed-through.
 BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
 BOTTOM_FILL_HATCH = '///'
-# Sediment fill — opaque sandy-tan with brownish-gray diagonal hatching.
-# Both colours are pre-blended to reproduce the *rendered appearance* of
-# ``saddlebrown × black × alpha=0.35`` from ``plot_rd_bottom`` /
-# ``plot_rd_layered_bottom`` without using a translucent alpha (which
-# would let the TL heatmap below the seafloor bleed through and break
-# the masking). Apply via ``ax.fill_between(..., **BOTTOM_FILL_STYLE)``.
-#   ``#d6beac`` ≈ saddlebrown × 0.35 + white × 0.65  (sandy-tan fill)
-#   ``#8d7a70`` ≈ black × 0.35 + #d6beac × 0.65      (brownish-gray hatch)
-BOTTOM_FILL_COLOR = '#d6beac'
-BOTTOM_HATCH_COLOR = '#8d7a70'
+
+
+def _blend(a, b, t):
+    """Alpha-blend ``a`` over ``b`` (RGB tuples or named colours), where
+    ``t`` is the weight of ``a``."""
+    import matplotlib.colors as mc
+    ra, ga, ba = mc.to_rgb(a)
+    rb, gb, bb = mc.to_rgb(b)
+    return (
+        ra * t + rb * (1 - t),
+        ga * t + gb * (1 - t),
+        ba * t + bb * (1 - t),
+    )
+
+
+# Sandy-tan fill ≈ saddlebrown × 0.35 + white × 0.65
+BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
+# Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
+BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
 BOTTOM_FILL_STYLE = {
     'color': BOTTOM_FILL_COLOR,
     'hatch': BOTTOM_FILL_HATCH,

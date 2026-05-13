@@ -1,5 +1,5 @@
 """
-Smoke tests for uacpy.signal (uacpy.acoustic_signal).
+Smoke tests for uacpy.acoustic_signal (uacpy.acoustic_signal).
 
 Bare minimum that the public API is reachable and behaves on simple inputs.
 """
@@ -92,15 +92,16 @@ class TestProcessing:
         assert np.all(np.isfinite(n))
 
 
-def test_signal_alias_resolves_to_acoustic_signal_package():
+def test_acoustic_signal_is_importable():
+    import uacpy.acoustic_signal as sig
     import uacpy
-    import uacpy.acoustic_signal
-    assert uacpy.signal is uacpy.acoustic_signal
+    assert sig is uacpy.acoustic_signal
 
 
-def test_signal_all_symbols_resolve():
+def test_signal_symbols_resolve():
     import uacpy
     for name in ('lfm_chirp', 'hfm_chirp', 'tone_burst', 'gaussian_pulse',
                  'ricker_wavelet', 'add_noise', 'make_bandlimited_noise',
                  'PPSD', 'Spectrogram'):
-        assert hasattr(uacpy.signal, name), f"uacpy.signal.{name} missing"
+        assert hasattr(uacpy.acoustic_signal, name), \
+            f"uacpy.acoustic_signal.{name} missing"

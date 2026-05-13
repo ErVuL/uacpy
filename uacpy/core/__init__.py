@@ -30,6 +30,7 @@ from uacpy.core.exceptions import (
 
 from uacpy.core import acoustics
 from uacpy.core import materials
+from uacpy.core import metrics
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 from uacpy.core.constants import (
     AttenuationUnits, BoundaryType,
@@ -60,5 +61,6 @@ __all__ = [
     'ConfigurationError',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
+    'metrics',
     'AttenuationUnits', 'BoundaryType',
 ]

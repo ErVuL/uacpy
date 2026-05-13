@@ -23,7 +23,6 @@ import numpy as np
 import pytest
 
 from uacpy.core.environment import BoundaryProperties, Environment
-from uacpy import Field
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import Bellhop, KrakenField, RAM, RunMode, Scooter

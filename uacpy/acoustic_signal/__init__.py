@@ -1,7 +1,7 @@
 """Signal processing and generation tools for acoustic signals.
 
-The package is named ``acoustic_signal`` so it does not collide with Python's
-own ``signal`` module; ``uacpy`` re-exposes it as ``uacpy.signal``.
+Named ``acoustic_signal`` so it does not collide with Python's stdlib
+``signal`` module.
 """
 
 from .generation import (
