@@ -33,9 +33,7 @@ from uacpy.core.absorption import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, PhaseReference,
-    PressureField, TransferFunction, ResultStack,
-    TimeSeriesField, TimeTrace,
+    Result, PhaseReference, Field, ResultStack,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
@@ -80,9 +78,7 @@ __all__ = [
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
-    'Result', 'PhaseReference',
-    'PressureField', 'TransferFunction', 'ResultStack',
-    'TimeSeriesField', 'TimeTrace',
+    'Result', 'PhaseReference', 'Field', 'ResultStack',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',

@@ -4,6 +4,8 @@ import pytest
 import numpy as np
 
 from uacpy.models import Bellhop, Kraken, Scooter
+from uacpy import Field
+from uacpy.core.results import Modes
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
 from uacpy.core.absorption import Thorp
@@ -82,7 +84,7 @@ class TestVolumeAttenuation:
         range_km_max = float(receiver.ranges[-1]) / 1000.0
         expected_extra_db = alpha_db_per_km * range_km_max
 
-        assert result_thorp.field_type == 'tl'
+        assert isinstance(result_thorp, Field)
         observed_extra = (
             np.mean(result_thorp.tl[:, -1]) - np.mean(result_no_atten.tl[:, -1])
         )
@@ -109,7 +111,7 @@ class TestVolumeAttenuation:
             source=high_freq_source,
             receiver=receiver,
         )
-        assert result.field_type == 'modes'
+        assert isinstance(result, Modes)
         assert result.k is not None
 
     @pytest.mark.requires_binary
@@ -133,8 +135,8 @@ class TestVolumeAttenuation:
             run_mode=RunMode.COHERENT_TL,
         )
 
-        assert result_low.field_type == 'tl'
-        assert result_high.field_type == 'tl'
+        assert isinstance(result_low, Field)
+        assert isinstance(result_high, Field)
         assert np.all(np.isfinite(result_low.data))
         assert np.all(np.isfinite(result_high.data))
 
@@ -149,5 +151,5 @@ class TestVolumeAttenuation:
             source=high_freq_source,
             receiver=receiver,
         )
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))

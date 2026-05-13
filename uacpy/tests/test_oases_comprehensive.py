@@ -16,6 +16,9 @@ import numpy as np
 
 from uacpy.models import OAST, OASN, OASR, OASP, OASES, RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
+from uacpy.core.results import (
+    Field, ReflectionCoefficient, Covariance, Replicas,
+)
 
 pytestmark = pytest.mark.requires_oases
 
@@ -62,7 +65,7 @@ class TestOAST:
             receiver=receiver
         )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(receiver.depths), len(receiver.ranges))
         assert np.all(np.isfinite(result.data))
         # TL values should be positive (loss)
@@ -90,7 +93,7 @@ class TestOAST:
 
         oast = OAST(verbose=False)
         result = oast.compute_tl(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
 
@@ -130,7 +133,7 @@ class TestOASN:
         oasn = OASN(verbose=False)
         cov = oasn.compute_covariance(env=oasn_env, source=source, receiver=receiver)
         assert isinstance(cov, Covariance)
-        assert cov.field_type == 'covariance'
+        assert isinstance(cov, Covariance)
         assert cov.covariance.ndim == 3
         assert cov.covariance.shape[1] == cov.covariance.shape[2] == cov.n_receivers
         assert cov.n_frequencies >= 1
@@ -150,7 +153,7 @@ class TestOASN:
             replica_xmin=500.0, replica_xmax=2000.0, replica_nx=4,  # metres
         )
         assert isinstance(rep, Replicas)
-        assert rep.field_type == 'replicas'
+        assert isinstance(rep, Replicas)
         # replica_x axis must be in metres (uacpy public-API convention).
         assert rep.replica_x.min() >= 500.0 - 1.0
         assert rep.replica_x.max() <= 2000.0 + 1.0
@@ -218,7 +221,7 @@ class TestOASR:
         result = oasr.run(env=oasr_env, source=source, receiver=receiver)
 
         assert isinstance(result, ReflectionCoefficient)
-        assert result.field_type == 'reflection_coefficients'
+        assert isinstance(result, ReflectionCoefficient)
         assert result.theta.shape == (91,)
         assert result.R.shape == result.phi.shape
         assert result.R.size > 0 and np.all(np.isfinite(result.R))
@@ -230,7 +233,7 @@ class TestOASR:
         oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 19))
         result = oasr.run(env=oasr_env, source=source, receiver=receiver)
 
-        assert result.field_type == 'reflection_coefficients'
+        assert isinstance(result, ReflectionCoefficient)
 
     @pytest.mark.requires_binary
     def test_oasr_compute_reflection_helper(self, oasr_env, source, receiver):
@@ -239,7 +242,7 @@ class TestOASR:
         result = oasr.compute_reflection(
             env=oasr_env, source=source, receiver=receiver,
         )
-        assert result.field_type == 'reflection_coefficients'
+        assert isinstance(result, ReflectionCoefficient)
 
 
 class TestOASP:
@@ -297,7 +300,7 @@ class TestOASP:
                 receiver=receiver
             )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape[0] > 0  # Has depth dimension
         assert result.shape[1] > 0  # Has range dimension
         assert np.all(np.isfinite(result.data))
@@ -305,8 +308,8 @@ class TestOASP:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_oasp_broadband(self, oasp_env, receiver):
-        """OASP run_mode=BROADBAND returns a populated TransferFunction."""
-        from uacpy.core.results import TransferFunction
+        """OASP run_mode=BROADBAND returns a populated Field."""
+        from uacpy.core.results import Field
         source = Source(
             depths=50.0,
             frequencies=np.array([30.0, 50.0, 70.0]),
@@ -321,8 +324,8 @@ class TestOASP:
                 run_mode=RunMode.BROADBAND,
             )
 
-        assert isinstance(result, TransferFunction)
-        assert result.field_type == 'transfer_function'
+        assert isinstance(result, Field)
+        assert isinstance(result, Field)
         assert result.frequencies is not None and len(result.frequencies) > 0
         assert result.data.shape[:2] == (len(receiver.depths), len(receiver.ranges))
 
@@ -349,7 +352,7 @@ class TestOASESFactory:
         )
         m = OASES(verbose=False)
         result = m.compute_tl(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
     def test_routes_covariance_to_oasn(self):
         assert isinstance(OASES(run_mode=RunMode.COVARIANCE), OASN)

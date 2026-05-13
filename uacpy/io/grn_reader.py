@@ -25,7 +25,7 @@ import struct
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
-from uacpy.core.results import PressureField, TransferFunction
+from uacpy.core.results import Field
 
 
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -316,8 +316,8 @@ def grn_to_field(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
-) -> PressureField:
-    """Transform a single-frequency Green's function to a TL field.
+) -> Field:
+    """Transform a single-frequency Green's function to a complex narrowband Field.
 
     The reader returns a 4-D ``G`` regardless of ``nfreq``; this picks the
     first frequency slice (use :func:`grn_to_transfer_function` for the
@@ -345,16 +345,14 @@ def grn_to_field(
         source_type=source_type, spectrum=spectrum, cmin=cmin, cmax=cmax,
     )
 
-    return PressureField(
-        units="complex",
+    return Field(
         data=p_out,
-        ranges=ranges,
-        depths=grn_data["rd"],
+        coords={'depth': grn_data["rd"], 'range': ranges},
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
         frequencies=float(grn_data["freq"]),
+        phase_reference='travelling_wave',
         metadata={
-            "phase_reference": "travelling_wave",
             "transform_method": method,
             "source_type": source_type,
             "spectrum": spectrum,
@@ -372,7 +370,7 @@ def sparc_snapshot_to_field(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
-) -> PressureField:
+) -> Field:
     """Extract steady-state complex pressure at ``frequency`` from a SPARC snapshot.
 
     SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
@@ -384,8 +382,8 @@ def sparc_snapshot_to_field(
     2. Pick the bin closest to the source ``frequency``.
     3. Hankel-transform :math:`G(k, z)` to range.
 
-    Returns a complex :class:`PressureField` (``units='complex'``); use
-    ``.tl`` or ``.to_tl()`` to materialise transmission loss in dB.
+    Returns a complex narrowband :class:`Field` (``coords={'depth',
+    'range'}``); use ``.tl`` or ``.to_tl()`` for transmission loss in dB.
     """
     if not grn_data["is_sparc"]:
         raise ValueError(
@@ -434,16 +432,14 @@ def sparc_snapshot_to_field(
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
 
-    return PressureField(
-        units="complex",
+    return Field(
         data=p_out,
-        ranges=ranges,
-        depths=grn_data["rd"],
+        coords={'depth': grn_data["rd"], 'range': ranges},
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
         frequencies=float(frequency),
+        phase_reference='travelling_wave',
         metadata={
-            "phase_reference": "travelling_wave",
             "transform_method": "time_fft+hankel",
             "snapshot_freq_bin": float(fft_freqs[f_idx]),
             "snapshot_dt": dt,
@@ -463,10 +459,11 @@ def grn_to_transfer_function(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
-) -> TransferFunction:
-    """Transform a multi-frequency Green's function to a complex H(d, r, f).
+) -> Field:
+    """Transform a multi-frequency Green's function to a broadband Field.
 
-    Output shape ``(n_d, n_r, n_f)``.
+    Output: complex ``Field`` with ``coords={'depth', 'range',
+    'frequency'}``, shape ``(n_d, n_r, n_f)``.
     """
     nfreq = grn_data["nfreq"]
     nrd = grn_data["nrd"]
@@ -476,7 +473,6 @@ def grn_to_transfer_function(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    # New (n_d, n_r, n_f) layout — matches Result hierarchy contract.
     pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex64)
     for ifreq in range(nfreq):
         pressure[:, :, ifreq] = _grn_pressure_slice(
@@ -485,14 +481,17 @@ def grn_to_transfer_function(
         )
 
     freqVec = np.asarray(grn_data["freqVec"], dtype=float)
-    return TransferFunction(
+    return Field(
         data=pressure,
-        ranges=ranges,
-        depths=grn_data["rd"],
-        frequencies=freqVec,
+        coords={
+            'depth': grn_data["rd"],
+            'range': ranges,
+            'frequency': freqVec,
+        },
         phase_reference='travelling_wave',
         model='', backend='',
         source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
+        frequencies=freqVec,
         metadata={
             'center_frequency': float(freqVec[len(freqVec) // 2]),
             'nfreq': nfreq,

@@ -14,7 +14,7 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, PressureField, TimeSeriesField
+from uacpy.core.results import Result, Field
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
@@ -155,7 +155,7 @@ class SPARC(PropagationModel):
     Range-independent time-marched FFP. Only ``Vacuum`` / ``Rigid``
     bottom interfaces are supported (the writer auto-converts
     halfspaces to rigid). ``RunMode.TIME_SERIES`` returns a
-    :class:`TimeSeriesField` directly; ``source_waveform`` /
+    :class:`Field` directly; ``source_waveform`` /
     ``sample_rate`` on ``run()`` are silently ignored — SPARC drives
     the source pulse via ``pulse_type``.
 
@@ -414,11 +414,13 @@ class SPARC(PropagationModel):
                         p_3d = np.asarray(rts_data['p']).T[None, :, :]
                         dt = rts_data['dt']
                         time = rts_data['time']
-                        result = TimeSeriesField(
+                        result = Field(
                             data=p_3d,
-                            ranges=rts_data['ranges'],
-                            depths=receiver.depths,
-                            time=time,
+                            coords={
+                                'depth': receiver.depths,
+                                'range': rts_data['ranges'],
+                                'time': time,
+                            },
                             **self._result_kwargs(
                                 source,
                                 backend='sparc.exe',
@@ -494,11 +496,13 @@ class SPARC(PropagationModel):
                         )
                         time = time_grid['time']
                         dt = time_grid['dt']
-                        result = TimeSeriesField(
+                        result = Field(
                             data=pressure_stack,
-                            ranges=receiver.ranges,
-                            depths=receiver.depths,
-                            time=time,
+                            coords={
+                                'depth': receiver.depths,
+                                'range': receiver.ranges,
+                                'time': time,
+                            },
                             **self._result_kwargs(
                                 source,
                                 backend='sparc.exe',
@@ -515,11 +519,9 @@ class SPARC(PropagationModel):
 
                     p_field = np.vstack(p_list)  # shape: (n_depths, n_ranges)
 
-                result = PressureField(
-                    units="complex",
+                result = Field(
                     data=p_field,
-                    ranges=ranges_out,
-                    depths=receiver.depths,
+                    coords={'depth': receiver.depths, 'range': ranges_out},
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
@@ -590,11 +592,9 @@ class SPARC(PropagationModel):
 
                     p_field = np.column_stack(p_list)  # shape: (n_depths, n_ranges)
 
-                result = PressureField(
-                    units="complex",
+                result = Field(
                     data=p_field,
-                    ranges=receiver.ranges,
-                    depths=depths_out,
+                    coords={'depth': depths_out, 'range': receiver.ranges},
                     **self._result_kwargs(
                         source,
                         backend='sparc.exe',
@@ -650,16 +650,13 @@ class SPARC(PropagationModel):
                 result = sparc_snapshot_to_field(
                     grn_data, receiver.ranges, frequency=freq,
                 )
-                kw = self._result_kwargs(
-                    source,
-                    backend='sparc.exe',
-                    frequencies=freq,
-                    phase_reference='travelling_wave',
-                    output_mode='S',
-                    note='Snapshot mode: time-FFT then Hankel transform',
-                )
-                extras = kw.pop('metadata', {})
-                result.tag(**kw, **extras)
+                result.model = self.model_name
+                result.backend = 'sparc.exe'
+                result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+                result.frequencies = np.atleast_1d(np.asarray(freq, dtype=float))
+                result.phase_reference = 'travelling_wave'
+                result.metadata['output_mode'] = 'S'
+                result.metadata['note'] = 'Snapshot mode: time-FFT then Hankel transform'
 
             else:
                 raise ConfigurationError(

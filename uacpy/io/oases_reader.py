@@ -42,7 +42,7 @@ def read_oast_tl(
     OAST writes TL (in dB) directly to disk; this reader returns the
     native ``(n_depths, n_ranges)`` TL grid plus the depth and range
     axes. Resampling onto a user receiver grid is the caller's job —
-    use :meth:`PressureField.resample_to` after wrapping.
+    use :meth:`Field.resample_to` after wrapping.
 
     Parameters
     ----------

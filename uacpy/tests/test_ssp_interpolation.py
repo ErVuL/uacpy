@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy import Field
 from uacpy.models import Bellhop
 from uacpy.core import Environment, Receiver
 
@@ -31,7 +32,7 @@ class TestSSPInterpolationMethods:
 
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
     @pytest.mark.requires_binary
     def test_ssp_linear(self, source, receiver):
@@ -47,7 +48,7 @@ class TestSSPInterpolationMethods:
 
         bellhop = Bellhop(verbose=False, interp_ssp='linear')
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
     @pytest.mark.requires_binary
     def test_ssp_cubic(self, source, receiver):
@@ -63,4 +64,4 @@ class TestSSPInterpolationMethods:
 
         bellhop = Bellhop(verbose=False, interp_ssp='cubic')
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)

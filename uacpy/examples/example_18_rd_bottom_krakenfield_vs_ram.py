@@ -32,6 +32,25 @@ from uacpy.models.ram import RAM  # noqa: E402
 from uacpy.models.kraken import KrakenField  # noqa: E402
 
 
+
+def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
+                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
+    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
+
+    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
+    ``vmax = +diff_vmax``.
+    """
+    from uacpy import Field
+    from uacpy.visualization import plot_field
+    if diff_vmax is not None:
+        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
+    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
+    return plot_field(
+        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
+        cmap='RdBu_r', title=title, **kw,
+    )
+
+
 def make_base_env(bottom):
     """Build the shared environment with given bottom type."""
     bathy_ranges_m = np.array([0, 5000, 10000, 15000, 20000.0])
@@ -119,8 +138,9 @@ def main():
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from uacpy.visualization.plots import (
-        plot_transmission_loss, plot_rd_layered_bottom, plot_tl_difference,
-    )
+    plot_field,
+    plot_environment,
+)
 
     print("\n" + "═" * 80)
     print("EXAMPLE 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
@@ -213,7 +233,7 @@ def main():
             ax = axes[row_idx, col_idx]
             f = results[case_label].get(key)
             if f is not None:
-                plot_transmission_loss(f, env_plot, ax=ax, show_colorbar=False,
+                plot_field(f, env=env_plot, ax=ax, show_colorbar=False,
                                        vmin=vmin_shared, vmax=vmax_shared)
                 tl_im = ax.collections[0] if ax.collections else tl_im
             ax.set_title(f'{case_label} — {title_suffix}', fontsize=10,
@@ -265,7 +285,7 @@ def main():
             ax = axes[2, col]
             f_kf = results[case_label].get(kf_key)
             if f_ram is not None and f_kf is not None:
-                plot_tl_difference(f_ram, f_kf, env_plot, ax=ax,
+                _plot_tl_difference(f_ram, f_kf, env_plot, ax=ax,
                                    label=diff_title, show_colorbar=False,
                                    diff_vmax=diff_vmax_shared)
                 diff_im = ax.collections[0] if ax.collections else diff_im
@@ -295,7 +315,7 @@ def main():
     print(f"\n  ✓ Saved: {out_path}")
 
     for case_label in ('Hard layered', 'Soft layered'):
-        fig_b, _ = plot_rd_layered_bottom(envs[case_label])
+        fig_b, _ = plot_environment(envs[case_label])
         slug = case_label.lower().replace(' ', '_')
         path = out_dir / f'example_18_rd_layered_{slug}.png'
         fig_b.savefig(path, dpi=150, bbox_inches='tight')

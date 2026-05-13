@@ -19,12 +19,165 @@ Concrete subclasses
 :class:`ConstantAbsorption`
     Frequency-independent baseline written into every SSP-block ``alphaI``
     row (dB/wavelength). Useful for calibrated ad-hoc absorption.
+
+Module-level numerics
+---------------------
+:func:`thorp_db_per_km`, :func:`francois_garrison_db_per_km`
+    Bare formulas returning ``α(f)`` in dB/km. Useful for plotting
+    attenuation curves without constructing an :class:`Absorption`.
+:func:`convert_attenuation_units`
+    Unit conversion helper (dB/km ↔ dB/m ↔ dB/wavelength ↔ Nepers/m
+    ↔ Q ↔ L).
 """
 
 from __future__ import annotations
 
+import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Union
+
+
+_ArrayLike = Union[float, np.ndarray]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bare numeric formulas
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
+    """Thorp 1967 seawater volume attenuation in dB/km.
+
+    Parameters
+    ----------
+    frequency : float or array
+        Frequency in Hz.
+
+    References
+    ----------
+    Thorp, W. H. (1967). JASA 42(1), 270.
+    """
+    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    f2 = f * f
+    a = 0.11 * f2 / (1.0 + f2) + 44.0 * f2 / (4100.0 + f2) + 2.75e-4 * f2 + 0.003
+    return np.squeeze(a)
+
+
+def francois_garrison_db_per_km(
+    frequency: _ArrayLike,
+    temperature: _ArrayLike = 10.0,
+    salinity: _ArrayLike = 35.0,
+    pH: _ArrayLike = 8.0,
+    depth: _ArrayLike = 1000.0,
+) -> np.ndarray:
+    """Francois–Garrison 1982 seawater volume attenuation in dB/km.
+
+    Parameters
+    ----------
+    frequency : float or array
+        Frequency in Hz.
+    temperature : float or array
+        Water temperature (°C). Default 10.
+    salinity : float or array
+        Salinity (PSU). Default 35.
+    pH : float or array
+        Acidity. Default 8.
+    depth : float or array
+        Depth (m). Default 1000.
+
+    Notes
+    -----
+    Implementation follows the Acoustics Toolbox ``AttenMod.f90``.
+
+    References
+    ----------
+    Francois & Garrison (1982). JASA 72(6), 1879–1890.
+    """
+    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    T = np.asarray(temperature, dtype=float)
+    S = np.asarray(salinity, dtype=float)
+    z = np.asarray(depth, dtype=float)
+
+    c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z
+
+    A1 = 8.86 / c * 10.0 ** (0.78 * pH - 5.0)
+    P1 = 1.0
+    f1 = 2.8 * np.sqrt(S / 35.0) * 10.0 ** (4.0 - 1245.0 / (T + 273.0))
+
+    A2 = 21.44 * S / c * (1.0 + 0.025 * T)
+    P2 = 1.0 - 1.37e-4 * z + 6.2e-9 * z * z
+    f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (T + 273.0)) / (1.0 + 0.0018 * (S - 35.0))
+
+    P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z * z
+    A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T * T - 1.5e-8 * T * T * T
+    A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T * T - 6.5e-10 * T * T * T
+    A3 = np.where(T < 20.0, A3_cold, A3_warm)
+
+    a = (
+        A1 * P1 * (f1 * f * f) / (f1 * f1 + f * f)
+        + A2 * P2 * (f2 * f * f) / (f2 * f2 + f * f)
+        + A3 * P3 * f * f
+    )
+    return np.squeeze(a)
+
+
+def convert_attenuation_units(
+    alpha: _ArrayLike,
+    frequency: float,
+    from_unit: str,
+    to_unit: str,
+    sound_speed: float = 1500.0,
+) -> np.ndarray:
+    """Convert volume attenuation between unit conventions.
+
+    Supported units: ``dB/km``, ``dB/m``, ``dB/wavelength``, ``Nepers/m``,
+    ``Q`` (quality factor), ``L`` (loss tangent). ``sound_speed`` is
+    required for the wavelength / Q / L paths.
+    """
+    alpha = np.atleast_1d(np.asarray(alpha, dtype=float))
+
+    if from_unit == 'dB/km':
+        alpha_db_m = alpha / 1000.0
+    elif from_unit == 'dB/m':
+        alpha_db_m = alpha
+    elif from_unit == 'dB/wavelength':
+        wavelength = sound_speed / frequency
+        alpha_db_m = alpha / wavelength
+    elif from_unit == 'Nepers/m':
+        alpha_db_m = alpha * 8.686
+    elif from_unit == 'Q':
+        alpha_nepers_m = 2 * np.pi * frequency / (alpha * sound_speed)
+        alpha_db_m = alpha_nepers_m * 8.686
+    elif from_unit == 'L':
+        alpha_nepers_m = alpha * np.pi * frequency / sound_speed
+        alpha_db_m = alpha_nepers_m * 8.686
+    else:
+        raise ValueError(f"Unknown unit: {from_unit}")
+
+    if to_unit == 'dB/km':
+        result = alpha_db_m * 1000.0
+    elif to_unit == 'dB/m':
+        result = alpha_db_m
+    elif to_unit == 'dB/wavelength':
+        wavelength = sound_speed / frequency
+        result = alpha_db_m * wavelength
+    elif to_unit == 'Nepers/m':
+        result = alpha_db_m / 8.686
+    elif to_unit == 'Q':
+        alpha_nepers_m = alpha_db_m / 8.686
+        result = 2 * np.pi * frequency / (alpha_nepers_m * sound_speed)
+    elif to_unit == 'L':
+        alpha_nepers_m = alpha_db_m / 8.686
+        result = alpha_nepers_m * sound_speed / (np.pi * frequency)
+    else:
+        raise ValueError(f"Unknown unit: {to_unit}")
+
+    return np.squeeze(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Env-attachable Absorption hierarchy
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -32,7 +185,13 @@ class Absorption:
     """Abstract base for water-column absorption models. Do not
     instantiate directly — pick one of :class:`Thorp`,
     :class:`FrancoisGarrison`, :class:`Biological`,
-    :class:`ConstantAbsorption`."""
+    :class:`ConstantAbsorption`.
+
+    Subclasses implement :meth:`alpha_db_per_m`, which evaluates
+    ``α(f, z)`` at the depths a model needs (used by the Kraken-class
+    modal perturbation kernel; the Acoustics-Toolbox writers read
+    :meth:`topopt_code` and the per-class fields instead).
+    """
 
     def __post_init__(self):
         if type(self) is Absorption:
@@ -45,29 +204,56 @@ class Absorption:
         """Single Acoustics-Toolbox character for ``TopOpt`` position 4."""
         raise NotImplementedError
 
+    def alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        """Evaluate ``α(f, z)`` in dB/m at one frequency, on a depth grid.
+
+        Parameters
+        ----------
+        frequency : float
+            Frequency in Hz.
+        depths : float or 1-D array
+            Depths (m).
+
+        Returns
+        -------
+        ndarray, same shape as ``depths``
+        """
+        raise NotImplementedError
+
 
 @dataclass
 class Thorp(Absorption):
-    """Thorp (1967) seawater volume attenuation. No parameters."""
+    """Thorp (1967) seawater volume attenuation. No parameters.
+
+    Frequency-only — α(f, z) is constant in depth.
+    """
 
     def topopt_code(self) -> str:
         return 'T'
+
+    def alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        a = float(thorp_db_per_km(float(frequency))) / 1000.0
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        return np.full(z.shape, a)
 
 
 @dataclass
 class FrancoisGarrison(Absorption):
     """Francois–Garrison (1982) seawater absorption.
 
-    Parameters
-    ----------
-    temperature_c : float
-        Water temperature (°C).
-    salinity_psu : float
-        Salinity (PSU).
-    pH : float
-        Acidity (pH).
-    z_bar_m : float
-        Mean propagation depth (m).
+    The per-instance ``temperature_c``, ``salinity_psu``, ``pH``, and
+    ``z_bar_m`` are the Acoustics-Toolbox single-row parameters. When
+    :meth:`alpha_db_per_m` is called for a modal perturbation, the
+    depth axis the caller provides overrides ``z_bar_m`` so the formula
+    is evaluated per depth (pressure-corrected).
     """
     temperature_c: float
     salinity_psu: float
@@ -83,6 +269,21 @@ class FrancoisGarrison(Absorption):
             float(self.temperature_c), float(self.salinity_psu),
             float(self.pH), float(self.z_bar_m),
         )
+
+    def alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        a_km = francois_garrison_db_per_km(
+            frequency=float(frequency),
+            temperature=self.temperature_c,
+            salinity=self.salinity_psu,
+            pH=self.pH,
+            depth=z,
+        )
+        return np.atleast_1d(a_km) / 1000.0
 
 
 @dataclass
@@ -107,20 +308,11 @@ class BiologicalLayer:
     a0: float
 
     def __post_init__(self):
-        # Mirror SedimentLayer.__post_init__ shape: surface area first,
-        # then layer geometry.
         if self.z_bottom_m <= self.z_top_m:
             raise ValueError(
                 "BiologicalLayer: z_bottom_m must be strictly greater than "
                 f"z_top_m (got z_top_m={self.z_top_m}, "
                 f"z_bottom_m={self.z_bottom_m})"
-            )
-        # Layer thickness positive (a free consequence of the bound check
-        # above, but stated for symmetry with SedimentLayer's docstring).
-        if (self.z_bottom_m - self.z_top_m) <= 0:
-            raise ValueError(
-                "BiologicalLayer: layer thickness must be positive (m); "
-                f"got {self.z_bottom_m - self.z_top_m}"
             )
         if self.f0_hz <= 0:
             raise ValueError(
@@ -181,10 +373,6 @@ class Biological(Absorption):
 class ConstantAbsorption(Absorption):
     """Frequency-independent baseline absorption written into the SSP
     block's ``alphaI`` column at every depth (dB/wavelength).
-
-    Use when you want a calibrated ad-hoc absorption that doesn't match
-    any of the standard formulas. AT models still accept a formula on
-    top (``Thorp`` etc.) via the env-level choice — pick one.
 
     Parameters
     ----------

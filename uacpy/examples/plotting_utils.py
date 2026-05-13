@@ -345,8 +345,10 @@ def plot_model_statistics(results: Dict, source_depth: float):
     model_names = list(results.keys())
     stats = []
     for name, result in results.items():
-        tl_vs_range = result.at(depth=source_depth).tl
-        stats.append([np.mean(tl_vs_range), np.std(tl_vs_range)])
+        tl_vs_range = np.asarray(result.at(depth=source_depth).tl)
+        # Use nan-aware reductions — RAM masks below-seafloor cells with
+        # NaN, which would otherwise zero out the bars.
+        stats.append([np.nanmean(tl_vs_range), np.nanstd(tl_vs_range)])
 
     stats = np.array(stats)
     x = np.arange(len(model_names))
@@ -375,8 +377,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
                     result_i = results[model_names[i]]
                     result_j = results[model_names[j]]
 
-                    tl_i = result_i.at(depth=source_depth).tl
-                    tl_j = result_j.at(depth=source_depth).tl
+                    tl_i = np.asarray(result_i.at(depth=source_depth).tl)
+                    tl_j = np.asarray(result_j.at(depth=source_depth).tl)
 
                     # Interpolate to common grid
                     if len(tl_i) != len(tl_j):
@@ -387,12 +389,23 @@ def plot_model_statistics(results: Dict, source_depth: float):
                         else:
                             tl_i = np.interp(ranges_j, ranges_i, tl_i)
 
-                    rms_matrix[i, j] = np.sqrt(np.mean((tl_i - tl_j)**2))
+                    diff = tl_i - tl_j
+                    finite = np.isfinite(diff)
+                    rms_matrix[i, j] = (
+                        np.sqrt(np.mean(diff[finite] ** 2))
+                        if finite.any() else np.nan
+                    )
 
         # Compute colormap normalization from data
         rms_max = np.max(rms_matrix)
         vmax_rms = max(10, np.percentile(rms_matrix[rms_matrix > 0], 95)) if rms_max > 0 else 15
-        im = ax.imshow(rms_matrix, cmap='RdYlGn_r', vmin=0, vmax=vmax_rms, interpolation='none')
+        # Mask the diagonal so it gets the "bad" colour — a deep green
+        # set_bad — rather than rendering as white / off-scale.
+        display = np.ma.array(rms_matrix, mask=np.eye(n_models, dtype=bool))
+        cmap = plt.get_cmap('RdYlGn_r').copy()
+        cmap.set_bad(color=cmap(0.0))  # match the colormap's own vmin=0 green
+        im = ax.imshow(display, cmap=cmap, vmin=0, vmax=vmax_rms,
+                       interpolation='none')
         plt.colorbar(im, ax=ax, label='RMS Error (dB)')
 
         ax.set_xticks(range(n_models))

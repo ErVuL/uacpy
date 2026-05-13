@@ -17,6 +17,7 @@ import numpy as np
 from pathlib import Path
 
 from uacpy.core import Environment, Receiver, BoundaryProperties
+from uacpy import Field
 from uacpy.models import KrakenField, Bounce, Scooter
 
 # Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
@@ -78,7 +79,7 @@ class TestElasticBoundaryAutoDetection:
         assert result is not None
         assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
         assert np.all(np.isfinite(result.data))
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
         # TL should be reasonable (not all zeros, not all inf)
         assert np.any(result.tl > 0)

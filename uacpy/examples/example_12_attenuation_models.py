@@ -76,10 +76,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from uacpy.core.attenuation import (  # noqa: E402
-    thorp_attenuation,
-    francois_garrison,
-    convert_attenuation_units
+from uacpy.core.absorption import (  # noqa: E402
+    thorp_db_per_km,
+    francois_garrison_db_per_km,
+    convert_attenuation_units,
 )
 from uacpy.core.acoustics import soundspeed  # noqa: E402
 
@@ -112,12 +112,12 @@ def scenario_a_model_comparison():
 
     # Thorp
     print("    • Thorp (1967)...", end=" ", flush=True)
-    atten_thorp = thorp_attenuation(frequencies)
+    atten_thorp = thorp_db_per_km(frequencies)
     print("✓")
 
     # Francois-Garrison
     print("    • Francois-Garrison (1982)...", end=" ", flush=True)
-    atten_fg = francois_garrison(frequencies, temperature, salinity,
+    atten_fg = francois_garrison_db_per_km(frequencies, temperature, salinity,
                                  pH, depth)
     print("✓")
 
@@ -233,7 +233,7 @@ def scenario_b_environmental_sensitivity():
     # Temperature variation
     # ─────────────────────────────────────────────────────────────────────────
     temperatures = np.linspace(0, 30, 31)
-    atten_vs_temp = [float(francois_garrison(freq, T, S_base,
+    atten_vs_temp = [float(francois_garrison_db_per_km(freq, T, S_base,
                                              pH_base, depth_base))
                      for T in temperatures]
 
@@ -241,7 +241,7 @@ def scenario_b_environmental_sensitivity():
     # Salinity variation
     # ─────────────────────────────────────────────────────────────────────────
     salinities = np.linspace(0, 40, 41)
-    atten_vs_sal = [float(francois_garrison(freq, T_base, S,
+    atten_vs_sal = [float(francois_garrison_db_per_km(freq, T_base, S,
                                             pH_base, depth_base))
                     for S in salinities]
 
@@ -249,7 +249,7 @@ def scenario_b_environmental_sensitivity():
     # pH variation
     # ─────────────────────────────────────────────────────────────────────────
     pHs = np.linspace(7.5, 8.5, 21)
-    atten_vs_pH = [float(francois_garrison(freq, T_base, S_base,
+    atten_vs_pH = [float(francois_garrison_db_per_km(freq, T_base, S_base,
                                            pH, depth_base))
                    for pH in pHs]
 
@@ -257,7 +257,7 @@ def scenario_b_environmental_sensitivity():
     # Depth variation
     # ─────────────────────────────────────────────────────────────────────────
     depths = np.linspace(0, 6000, 61)
-    atten_vs_depth = [float(francois_garrison(freq, T_base, S_base,
+    atten_vs_depth = [float(francois_garrison_db_per_km(freq, T_base, S_base,
                                               pH_base, d))
                       for d in depths]
 
@@ -335,7 +335,7 @@ def scenario_c_unit_conversions():
     c = soundspeed()   # Sound speed at standard conditions
 
     # Calculate attenuation in dB/km
-    alpha_dbpkm = float(thorp_attenuation(frequency))
+    alpha_dbpkm = float(thorp_db_per_km(frequency))
 
     print(f"\n  Original attenuation at {frequency/1000:.0f} kHz:")
     print(f"    • {alpha_dbpkm:.4f} dB/km")

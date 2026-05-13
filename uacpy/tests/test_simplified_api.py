@@ -7,7 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from uacpy.models import Bellhop, Kraken, KrakenField
-from uacpy.core.results import PressureField, Modes
+from uacpy import Field
+from uacpy.core.results import Modes
 from uacpy.visualization import plots
 from uacpy.models import RunMode
 
@@ -22,7 +23,7 @@ class TestComputeAPI:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.n_depths == len(receiver_small.depths)
         assert result.n_ranges == len(receiver_small.ranges)
 
@@ -32,7 +33,7 @@ class TestComputeAPI:
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
         assert isinstance(modes, Modes)
-        assert modes.field_type == 'modes'
+        assert isinstance(modes, Modes)
         assert modes.k is not None
         assert modes.phi is not None
 
@@ -44,10 +45,10 @@ class TestComputeAPI:
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert isinstance(result_bellhop, PressureField)
-        assert isinstance(result_kraken, PressureField)
-        assert result_bellhop.field_type == 'tl'
-        assert result_kraken.field_type == 'tl'
+        assert isinstance(result_bellhop, Field)
+        assert isinstance(result_kraken, Field)
+        assert isinstance(result_bellhop, Field)
+        assert isinstance(result_kraken, Field)
 
 
 class TestPlottingAPI:
@@ -73,15 +74,17 @@ class TestPlottingAPI:
         plt.close(fig)
 
     def test_plot_modes(self, simple_env, source):
-        """Test plotting modes."""
+        """Test plotting modes — Result.plot() routes Modes to plot_mode_functions."""
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
-        fig, axes = modes.plot(n_modes=6)
+        fig, ax = modes.plot(n_modes=6)
 
         assert fig is not None
-        assert axes is not None
-        assert len(axes) == 2  # mode shapes and wavenumber spectrum
+        assert ax is not None
+        # ``plot_mode_functions`` returns a single axes carrying overlaid
+        # mode shapes; wavenumbers and the heatmap live on the other two
+        # canonical mode plotters.
         plt.close(fig)
 
     def test_plot_with_custom_parameters(self, simple_env, source, receiver_small):
@@ -120,7 +123,7 @@ class TestFieldMethods:
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         point = result.at(range=3000, depth=50)
-        assert isinstance(point, PressureField)
+        assert isinstance(point, Field)
         assert point.tl.ndim == 0
         assert isinstance(float(point.tl), float)
 
@@ -148,7 +151,7 @@ class TestRunModeAndComputeTl:
         bellhop = Bellhop(verbose=False)
         result = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
                              run_mode=RunMode.COHERENT_TL)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
     def test_run_and_compute_tl_agree(self, simple_env, source, receiver_small):

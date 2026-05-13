@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 
-from uacpy.core.results import TransferFunction, TimeSeriesField
+from uacpy.core.results import Field, Modes
 from uacpy.models import Kraken, KrakenC, KrakenField
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
@@ -32,7 +32,7 @@ class TestKrakenFieldBroadband:
             frequencies=frequencies,
         )
 
-        assert isinstance(result, TransferFunction)
+        assert isinstance(result, Field)
         assert np.iscomplexobj(result.data)
         assert result.data.shape[0] == len(receiver.depths)
         assert result.data.shape[1] == len(receiver.ranges)
@@ -40,7 +40,7 @@ class TestKrakenFieldBroadband:
 
     @pytest.mark.slow
     def test_krakenfield_time_series_returns_time_series_field(self):
-        """KrakenField TIME_SERIES with a tonal waveform returns TimeSeriesField."""
+        """KrakenField TIME_SERIES with a tonal waveform returns Field."""
         env = Environment(name="kf_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -62,7 +62,7 @@ class TestKrakenFieldBroadband:
             sample_rate=fs,
         )
 
-        assert isinstance(result, TimeSeriesField)
+        assert isinstance(result, Field)
         assert result.data.shape[0] == len(receiver.depths)
         assert result.data.shape[1] == len(receiver.ranges)
         assert result.data.shape[2] > 0
@@ -103,7 +103,7 @@ class TestKrakenFieldBroadband:
             receiver=receiver
         )
 
-        assert modes.field_type == 'modes'
+        assert isinstance(modes, Modes)
         assert modes.k is not None
         assert len(modes.k) > 0
 

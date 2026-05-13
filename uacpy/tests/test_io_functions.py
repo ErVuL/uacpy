@@ -9,6 +9,7 @@ import tempfile
 
 import uacpy
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
 
 
@@ -116,19 +117,20 @@ class TestEnvironmentIO:
 class TestFieldIO:
     """Tests for Field I/O operations."""
 
+    @staticmethod
+    def _make_field(**meta):
+        return Field(
+            data=np.random.rand(10, 20),
+            coords={
+                'depth': np.linspace(10, 90, 10),
+                'range': np.linspace(100, 5000, 20),
+            },
+            model='Bellhop', frequencies=100.0,
+            metadata=meta,
+        )
+
     def test_field_metadata_preservation(self):
-        """Result subclasses preserve metadata + identification kwargs."""
-        from uacpy.core.results import PressureField
-        field = PressureField(units="dB",
-                              data=np.random.rand(10, 20),
-                              ranges=np.linspace(100, 5000, 20),
-                              depths=np.linspace(10, 90, 10),
-                              model='Bellhop',
-                              frequencies=100.0,
-                              metadata={'source_depth': 50.0, 'custom_param': 'test_value'},
-                              )
-        # ``model``, ``frequencies``, ``source_depths`` are typed attributes;
-        # ad-hoc keys live in ``metadata``.
+        field = self._make_field(source_depth=50.0, custom_param='test_value')
         assert field.model == 'Bellhop'
         assert field.f0 == 100.0
         assert list(field.frequencies) == [100.0]
@@ -136,17 +138,8 @@ class TestFieldIO:
         assert field.metadata['custom_param'] == 'test_value'
 
     def test_field_deepcopy_preserves_metadata(self):
-        """copy.deepcopy(field) returns a deep copy with metadata preserved."""
         import copy as _copy
-        from uacpy.core.results import PressureField
-        field = PressureField(units="dB",
-                              data=np.random.rand(10, 20),
-                              ranges=np.linspace(100, 5000, 20),
-                              depths=np.linspace(10, 90, 10),
-                              model='Bellhop',
-                              frequencies=100.0,
-                              metadata={'test_key': 'test_value'},
-                              )
+        field = self._make_field(test_key='test_value')
         field_copy = _copy.deepcopy(field)
         assert field_copy.metadata['test_key'] == 'test_value'
         assert field_copy.metadata is not field.metadata

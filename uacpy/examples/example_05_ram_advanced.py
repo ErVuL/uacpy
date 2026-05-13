@@ -44,10 +44,28 @@ from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import RangeDependentBottom  # noqa: E402
 from uacpy.models import RAM  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_transmission_loss,
-    plot_rd_bottom,
-    plot_environment_advanced,
+    plot_field,
+    plot_environment,
 )
+
+
+
+def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
+                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
+    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
+
+    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
+    ``vmax = +diff_vmax``.
+    """
+    from uacpy import Field
+    from uacpy.visualization import plot_field
+    if diff_vmax is not None:
+        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
+    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
+    return plot_field(
+        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
+        cmap='RdBu_r', title=title, **kw,
+    )
 
 
 def main():
@@ -190,26 +208,17 @@ def main():
     print("\nGenerating plots...")
 
     # Plot 1: Advanced environment overview
-    fig1, axes1 = plot_environment_advanced(env, source, receiver)
+    fig1, axes1 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_05_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_05_environment.png")
 
-    # Plot 2: SSP profile
-    from uacpy.visualization.plots import plot_ssp
-    fig2, ax2 = plot_ssp(env)
-    plt.savefig(OUTPUT_DIR / 'example_05_ssp.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: example_05_ssp.png")
-
-    # Plot 3: Bottom properties detail
-    fig3, _ = plot_rd_bottom(env)
-    plt.savefig(OUTPUT_DIR / 'example_05_bottom.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: example_05_bottom.png")
+    # ``plot_environment`` already renders SSP and bottom in two panels;
+    # the previous SSP-only and bottom-only plots are subsumed.
 
     # Plot 4: TL field result
     if result is not None:
-        fig4, ax4 = plot_transmission_loss(
-            result, env,
-            contours=[70, 85, 100],
+        fig4, ax4 = plot_field(
+            result, env=env, contours=[70, 85, 100],
             show_colorbar=True,
             vmin=40, vmax=100,
         )
@@ -220,7 +229,7 @@ def main():
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, KrakenField)
     if result is not None and result_bellhop is not None and result_krakenfield is not None:
-        from uacpy.visualization.plots import compare_models, plot_tl_difference
+        from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
             {'RAM': result, 'Bellhop': result_bellhop, 'KrakenField': result_krakenfield},
             env, vmin=40, vmax=100,
@@ -231,11 +240,11 @@ def main():
         print("  ✓ Saved: example_05_comparison.png")
 
         fig6, axes6 = plt.subplots(1, 3, figsize=(20, 5))
-        plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
+        _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
                            label='RAM − Bellhop', show_colorbar=True)
-        plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
+        _plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
                            label='RAM − KrakenField', show_colorbar=True)
-        plot_tl_difference(result_bellhop, result_krakenfield, env,
+        _plot_tl_difference(result_bellhop, result_krakenfield, env,
                            ax=axes6[2], label='Bellhop − KrakenField',
                            show_colorbar=True)
         fig6.suptitle('Pairwise Differences (signed, dB)',

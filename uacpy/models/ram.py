@@ -42,7 +42,7 @@ from uacpy.core.environment import (
 )
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, PressureField, TransferFunction
+from uacpy.core.results import Result, Field
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_MAX_DB
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -107,17 +107,17 @@ class RAM(PropagationModel):
     ---------
     COHERENT_TL:
         Narrowband TL over a range-depth grid. Available on every backend.
-        Returns ``PressureField``.
+        Returns ``Field``.
 
     BROADBAND — *mpiramS only*:
         Broadband complex pressure field. Returns
-        ``TransferFunction`` with ψ(depth, frequency,
+        ``Field`` with ψ(depth, frequency,
         range) for downstream IFFT to time domain.
 
     TIME_SERIES — *mpiramS only*:
         Real pressure p(t) at each receiver. Internally runs BROADBAND
         and convolves with ``source_waveform`` (sampled at ``sample_rate``).
-        Returns ``TimeSeriesField`` / ``TimeTrace`` with shape (n_d, n_t, n_r).
+        Returns ``Field`` / ``Field`` with shape (n_d, n_t, n_r).
 
     Some constructor kwargs are backend-specific. The list below tags each
     one with the backends that consume it; settings tagged ``[mpiramS]``
@@ -858,8 +858,8 @@ class RAM(PropagationModel):
         Returns
         -------
         result : Result
-            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
-            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
+            :class:`Field` for COHERENT_TL, :class:`Field`
+            for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
 
@@ -906,7 +906,7 @@ class RAM(PropagationModel):
         # PE solvers but uacpy's local patch dumps the complex
         # envelope (see third_party/MODIFICATIONS.md), so BROADBAND is
         # implemented as a Python-side frequency loop and TIME_SERIES
-        # builds on top of that via TransferFunction.synthesize_time_series.
+        # builds on top of that via Field.synthesize_time_series.
         if run_mode == RunMode.COHERENT_TL:
             return self._run_collins(env, source, receiver, kind=backend)
         if run_mode == RunMode.BROADBAND:
@@ -1045,7 +1045,7 @@ class RAM(PropagationModel):
         source's centre frequency and return a TL Field.
 
         Wraps :meth:`_run_collins_one_freq` and converts the binary's
-        ``tl.grid`` to a :class:`PressureField` interpolated onto the
+        ``tl.grid`` to a :class:`Field` interpolated onto the
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
@@ -1078,11 +1078,9 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
-        field = PressureField(
-            units="dB",
+        field = Field(
             data=tl_out,
-            depths=rcv_d,
-            ranges=rcv_r,
+            coords={'depth': rcv_d, 'range': rcv_r},
             **self._result_kwargs(
                 source,
                 backend=kind,
@@ -1513,10 +1511,9 @@ class RAM(PropagationModel):
             )
             H = np.conj(H) * carrier
 
-        field = TransferFunction(
+        field = Field(
             data=H,
-            depths=rcv_d,
-            ranges=rcv_r,
+            coords={'depth': rcv_d, 'range': rcv_r, 'frequency': frequencies},
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
@@ -2056,7 +2053,7 @@ class RAM(PropagationModel):
 
             # Build complex pressure |p| such that
             #   TL_dB = -20*log10(|p|) = -20*log10(|psi|*4π) - 10*log10(r)
-            # is recovered by PressureField.tl. We bake the cylindrical
+            # is recovered by Field.tl. We bake the cylindrical
             # 1/sqrt(r) spreading into the magnitude by dividing
             # |psi|*4π by sqrt(r); since we don't have psi's true phase
             # at the receiver we keep a phase of 0 (consumers that only
@@ -2070,11 +2067,9 @@ class RAM(PropagationModel):
             elapsed = time.time() - start_time
             self._log(f"TL completed in {elapsed:.2f}s")
 
-            field = PressureField(
-                units="complex",
+            field = Field(
                 data=pressure_field,
-                ranges=receiver.ranges,
-                depths=receiver.depths,
+                coords={'depth': receiver.depths, 'range': receiver.ranges},
                 **self._result_kwargs(
                     source,
                     backend='mpiramS',
@@ -2222,10 +2217,13 @@ class RAM(PropagationModel):
             # (n_d, n_r, n_f).
             pressure = np.moveaxis(pressure, 1, 2)
 
-            tf = TransferFunction(
+            tf = Field(
                 data=pressure,
-                ranges=rout,
-                depths=out_depths,
+                coords={
+                    'depth': out_depths,
+                    'range': rout,
+                    'frequency': result['frq'],
+                },
                 phase_reference='travelling_wave',
                 **self._result_kwargs(
                     source,

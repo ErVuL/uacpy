@@ -125,8 +125,8 @@ def main():
 
     print("\nGenerating visualizations...")
 
-    # Plot 1: OAST transmission loss (PressureField (units="dB") → plot_transmission_loss).
-    fig1, _ = uacpy.plot.plot_transmission_loss(result_oast, env=env)
+    # Plot 1: OAST transmission loss (real-dB Field → plot_field).
+    fig1, _ = uacpy.plot.plot_field(result_oast, env=env)
     fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
                  dpi=150, bbox_inches='tight')
     plt.close(fig1)
@@ -178,30 +178,15 @@ def main():
         plt.close(fig3)
         print("  ✓ Saved: output/example_13_oasn_covariance.png")
 
-    # Plot 4: OASP — broadband transfer function. Slice |H| → dB
-    # PressureField at the center frequency, then use the helper. Also
-    # synthesize a time trace with a Gaussian pulse and let
-    # TimeTrace.plot() render it.
+    # Plot 4: OASP — broadband transfer function. Slice the broadband
+    # Field at the centre frequency to get a 2-D narrowband Field, then
+    # plot it. The OASP synthesize_time_series helper produces a
+    # time-domain Field; we slice that to a single trace.
     if oasp_success and result_oasp is not None:
-        from uacpy.core.constants import PRESSURE_FLOOR
-        from uacpy import PressureField
-
-        H = result_oasp.data
-        freqs_h = result_oasp.frequencies
-        depths_h = result_oasp.depths
-        ranges_h = result_oasp.ranges
+        freqs_h = result_oasp.coords['frequency']
         f_center = float(freqs_h[len(freqs_h) // 2])
-        k_c = int(np.argmin(np.abs(freqs_h - f_center)))
-
-        TL_centre = -20.0 * np.log10(np.maximum(np.abs(H[..., k_c]), PRESSURE_FLOOR))
-        tl_field = PressureField(
-            data=TL_centre, depths=depths_h, ranges=ranges_h,
-            units='dB',
-            model='OASP', backend='oasp',
-            source_depths=result_oasp.source_depths,
-            frequencies=f_center,
-        )
-        fig4, _ = uacpy.plot.plot_transmission_loss(tl_field, env=env)
+        tl_field = result_oasp.at(frequency=f_center)
+        fig4, _ = uacpy.plot.plot_field(tl_field, env=env)
         fig4.savefig(OUTPUT_DIR / 'example_13_oasp_tl.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig4)
@@ -221,7 +206,7 @@ def main():
         try:
             ts = result_oasp.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
             trace = ts.at(depth=d_pick, range=r_pick)
-            fig5, _ = uacpy.plot.plot_time_trace(trace)
+            fig5, _ = uacpy.plot.plot_field(trace)
             fig5.savefig(OUTPUT_DIR / 'example_13_oasp_trace.png',
                          dpi=150, bbox_inches='tight')
             plt.close(fig5)

@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 
-from uacpy.core.results import TransferFunction, TimeSeriesField
+from uacpy.core.results import Field, Field
 from uacpy.models import Scooter
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
@@ -32,7 +32,7 @@ class TestScooterBasic:
         scooter = Scooter(verbose=False)
         result = scooter.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(receiver.depths), len(receiver.ranges))
         assert np.all(np.isfinite(result.data))
 
@@ -42,7 +42,7 @@ class TestScooterBroadband:
 
     @pytest.mark.slow
     def test_scooter_broadband_returns_transfer_function(self):
-        """Scooter BROADBAND returns a populated H(f) TransferFunction."""
+        """Scooter BROADBAND returns a populated H(f) Field."""
         env = Environment(name="sc_bb", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -58,14 +58,14 @@ class TestScooterBroadband:
             frequencies=frequencies,
         )
 
-        assert isinstance(result, TransferFunction)
+        assert isinstance(result, Field)
         assert np.iscomplexobj(result.data)
         assert result.data.shape[:2] == (len(receiver.depths), len(receiver.ranges))
         assert result.data.shape[2] > 0
 
     @pytest.mark.slow
     def test_scooter_time_series_returns_time_series_field(self):
-        """Scooter TIME_SERIES with a tonal waveform returns TimeSeriesField."""
+        """Scooter TIME_SERIES with a tonal waveform returns Field."""
         env = Environment(name="sc_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -87,7 +87,7 @@ class TestScooterBroadband:
             sample_rate=fs,
         )
 
-        assert isinstance(result, TimeSeriesField)
+        assert isinstance(result, Field)
         assert result.data.shape[0] == len(receiver.depths)
         assert result.data.shape[1] == len(receiver.ranges)
         assert result.data.shape[2] > 0

@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 
 from uacpy.models import RAM
+from uacpy import Field
 from uacpy.core import Environment, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
@@ -41,7 +42,7 @@ class TestRAMAdvancedParameters:
             receiver=ram_receiver,
             np_pade=np_pade,
         )
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
@@ -53,7 +54,7 @@ class TestRAMAdvancedParameters:
             receiver=ram_receiver,
             ns_stability=1
         )
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
@@ -66,7 +67,7 @@ class TestRAMAdvancedParameters:
             dr=10.0,  # 10m range step
             dz=0.5    # 0.5m depth step
         )
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     def test_ram_tl_honors_constructor_Q_T(

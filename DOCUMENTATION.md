@@ -495,7 +495,7 @@ uacpy.Receiver(
 - A single hydrophone is just `Receiver(depths=[d], ranges=[r])` — there
   is no `'point'` receiver type.
 - Time-series / broadband models always populate the full grid; extract
-  a trace via `TransferFunction.to_time_trace(depth=, range=)` or
+  a trace via `Field.to_time_trace(depth=, range=)` or
   `synthesize_time_series(depth=, range=)` on the returned typed result.
 
 `Source(frequencies=[…])` with more than one frequency on a
@@ -601,7 +601,7 @@ field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 ts = bh.run(env, source, receiver,
             run_mode=RunMode.TIME_SERIES,
             source_waveform=s, sample_rate=fs)
-trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
+trace = ts.get_trace(depth=50.0, range=2000.0)        # → Field
 ```
 
 **Caveats:**
@@ -613,7 +613,7 @@ trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
   parsing is not implemented.
 - Bellhop is the only model that natively writes a multi-source-depth
   grid; passing ``Source(depths=[z1, z2, …])`` returns a
-  :class:`uacpy.ResultStack` of slabs (one :class:`PressureField` per
+  :class:`uacpy.ResultStack` of slabs (one :class:`Field` per
   source for TL modes, one :class:`Rays` for ``RAYS``/``EIGENRAYS``,
   one :class:`Arrivals` for ``ARRIVALS``). The stack carries the
   source-depth labels in ``stack.coordinate`` (with
@@ -760,7 +760,7 @@ Examples: 05, 18, 19, 20, 22.
 ### 5.8 SPARC — time-domain PE
 
 Range-independent time-marched FFP. Native time-domain — `RunMode.TIME_SERIES`
-returns a `TimeSeriesField` directly, shape `(n_d, n_r, n_t)`.
+returns a `Field` directly, shape `(n_d, n_r, n_t)`.
 
 ```python
 from uacpy.models import SPARC
@@ -884,12 +884,8 @@ subclass:
 
 ```
 Result                              identification + metadata
-├── PressureField                   (n_d, n_r) or (n_d, n_r, n_f); units='complex' (default) or 'dB'
-│                                   .tl always works; .p only when complex
-├── TransferFunction                (n_d, n_r, n_f) complex; sibling of PressureField
-│                                   carries phase_reference + .synthesize_time_series / .to_time_trace / .to_tl
-├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
-├── TimeTrace                       (n_t,) real, p(t) at one (depth, range)
+├── Field                           one container for every gridded output
+│                                   data + coords (varying axes) + pinned (collapsed-to-scalar coords)
 ├── Arrivals                        flat list of arrival events
 ├── Rays                            list of ray polylines
 ├── Modes                           Kraken normal modes (.k complex wavenumbers, .phi eigenfunctions)
@@ -898,43 +894,52 @@ Result                              identification + metadata
 └── ReflectionCoefficient           .theta + .R / .phi (n_θ,) or (n_θ, n_f)
 ```
 
-### Trailing-axis convention
+### Field — one container, dtype × coords disambiguates
 
-The variable axis is always trailing — `np.fft.ifft(H)` works without an
-axis argument:
+`Field` collapses what used to be five separate gridded types. The
+dtype of `.data` plus which keys appear in `.coords` tell you what
+the field represents:
 
-| Result | Shape |
-|---|---|
-| `PressureField` (narrowband) | `(n_d, n_r)` |
-| `PressureField` (broadband) / `TransferFunction` | `(n_d, n_r, n_f)` |
-| `TimeSeriesField` | `(n_d, n_r, n_t)` |
-| `TimeTrace` | `(n_t,)` |
-| `Covariance` | `(n_f, n_rcv, n_rcv)` |
-| `Replicas` | `(n_f, n_z, n_x, n_y, n_rcv)` |
+| dtype     | `coords` keys                          | Physical meaning                  |
+|-----------|----------------------------------------|-----------------------------------|
+| complex   | `{depth, range}`                       | narrowband pressure `p(d, r)`     |
+| real      | `{depth, range}`                       | TL in dB                          |
+| complex   | `{depth, range, frequency}`            | broadband `H(d, r, f)`            |
+| real      | `{depth, range, time}`                 | `p(d, r, t)`                      |
+| real      | `{time}`                               | single-point trace                |
+| complex   | `{source_depth, depth, range}`         | multi-source TL field             |
 
-### Slicing — `.at()` / `.max()` / `.data`
+`data.shape` matches the insertion order of `coords`, so the variable
+axis is always trailing — `np.fft.ifft(H)` works without an axis kwarg.
+
+### Slicing — `.at()` / `.isel()` / `.max()`
+
+Slicing **drops the named axis** from `coords` and records the chosen
+sample in `pinned`:
 
 | Method | Selector | Behaviour |
 |---|---|---|
-| `.at(depth=, range=, frequency=, time=)` | label (m / Hz / s) | nearest grid point via `argmin(|axis - value|)`; returns a typed slice |
-| `.max()` | none | global `argmax(|data|)` across all axes |
-| `.data[…]` | numpy slicing | raw ndarray (no axis labels, no metadata) |
-
-**Auto-squeeze on slices.** A full grid preserves shape
-(`field.tl.shape == field.data.shape`); a *sliced* field is
-`SlicedPressureField` and squeezes singleton axes on `.tl` / `.p`:
+| `.at(depth=, range=, frequency=, time=)` | label (m / Hz / s) | nearest grid point via `argmin(|axis - value|)`; drops named axes |
+| `.isel(depth=, range=, frequency=, time=)` | integer index | identical to `.at` but positional |
+| `.max()` | none | global `argmax(|data|)` across all axes — every coord ends up in `pinned` |
 
 ```python
-field.at(depth=50).tl                 # (n_r,) — plt-ready
-field.at(range=2000, depth=50).tl     # 0-D scalar
-field.at(frequency=200).tl            # (n_d, n_r) for a broadband field
-field.max().tl                        # 0-D scalar at global argmax(|data|)
+narrow = tf.at(frequency=200)
+narrow.coords         # {'depth': ..., 'range': ...}    — frequency dropped
+narrow.pinned         # {'frequency': 198.4}            — nearest sample
+narrow.data.shape     # (n_d, n_r) — no zombie axes
+
+peak = field.max()
+peak.coords           # {}             — all collapsed
+peak.pinned           # {'depth': ..., 'range': ...}
+float(peak.tl)        # the peak TL in dB
 ```
 
-**`.tl` vs `.data`.** Use `.tl` for plotting (always dB, always
-plot-friendly shape). Use `.data` inside numerical code that pairs the
-field with a 2-D mask — auto-squeeze on a sliced `.tl` can drop axis
-identity. `_complex_to_db` from `core.results` converts when needed.
+**Value accessors.** `field.tl` always returns dB (computed from
+`|data|` for complex data, `data` as-is for real). `field.p` returns
+complex pressure; raises `AttributeError` if data is real (no phase
+to expose). `field.magnitude` / `field.phase` likewise require complex
+data.
 
 `SoundSpeedProfile` and `RangeDependentBottom` split nearest vs.
 interpolation: `.at(...)` is nearest, `.eval(...)` interpolates.
@@ -990,7 +995,7 @@ result.metadata['shd_file']                   # → './out/bellhop_run.shd'
 
 ### Phase reference
 
-`TransferFunction.phase_reference` is a `PhaseReference` enum (subclass
+`Field.phase_reference` is a `PhaseReference` enum (subclass
 of `str`). Two values today:
 
 - **`'travelling_wave'`** — Bellhop / Scooter / OASP / KrakenField /
@@ -1004,7 +1009,7 @@ of `str`). Two values today:
 - **`'time_domain_native'`** — SPARC `RunMode.TIME_SERIES`. Result data
   is real `p(t)` direct from the solver; no phase reconstruction needed.
 
-`TransferFunction.synthesize_time_series(...)` and `.to_time_trace(...)`
+`Field.synthesize_time_series(...)` and `.to_time_trace(...)`
 honour both transparently. Cross-model agreement is verified in
 `tests/test_cross_model_broadband.py` (~6 dB of Scooter on a Pekeris
 reference; IFFT envelope peaks within 100 ms).
@@ -1302,7 +1307,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 21 | `example_21_bellhop_vs_ramsurf.py` | Bellhop vs ramsurf with rough surface | |
 | 22 | `example_22_ram_lytaev_grid.py` | RAM Lytaev (2023) Padé grid optimizer | ✓ |
 | 23 | `example_23_collapse_methods.py` | Same RD env collapsed multiple ways via `collapse={…}` | |
-| 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `TransferFunction.synthesize_time_series` | |
+| 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
 
 Smoke test:

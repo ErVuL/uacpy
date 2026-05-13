@@ -6,6 +6,7 @@ import pytest
 import warnings
 import numpy as np
 import uacpy
+from uacpy import Field
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
@@ -198,7 +199,7 @@ class TestModelWithRangeDependence:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (3, 3)
 
     @pytest.mark.requires_binary
@@ -229,7 +230,7 @@ class TestModelWithRangeDependence:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         # RAM computes on its own internal grid
         assert result.shape[0] > 0  # Has depth dimension
         assert result.shape[1] > 0  # Has range dimension
@@ -266,7 +267,7 @@ class TestModelWithRangeDependence:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
 
 class TestRangeDependentConsistency:

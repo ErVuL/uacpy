@@ -4,6 +4,9 @@ Stand-alone helpers used by tests, examples, and end-user comparison
 scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 
 Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`.
+All accept a pair of 2-D :class:`~uacpy.Field` instances. Read TL via
+``field.tl`` regardless of whether the field stores complex pressure or
+real dB — :class:`Field` handles the conversion.
 """
 
 from __future__ import annotations
@@ -12,26 +15,14 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from uacpy.core.results import PressureField, _complex_to_db
-
-
-def _to_db(field: PressureField) -> np.ndarray:
-    """Return TL in dB at ``field.data.shape`` — does not squeeze, so
-    metrics can pair this with the 2-D ``(depth, range)`` window mask
-    even when the field has a singleton axis. Bypasses the
-    :class:`SlicedPressureField` auto-squeeze on ``.tl``."""
-    if field.units == 'dB':
-        return np.asarray(field.data)
-    return _complex_to_db(field.data)
+from uacpy.core.results import Field
 
 
 def _resolve_window(
     coords: np.ndarray, window: Optional[Tuple[float, float]]
 ) -> np.ndarray:
     """Boolean mask selecting ``coords`` inside ``window`` (inclusive).
-
-    ``window=None`` returns an all-True mask of the right length.
-    """
+    ``window=None`` returns an all-True mask."""
     if window is None:
         return np.ones_like(coords, dtype=bool)
     lo, hi = window
@@ -39,41 +30,40 @@ def _resolve_window(
 
 
 def _validate_tl_pair_and_window(
-    field_a: PressureField,
-    field_b: PressureField,
+    field_a: Field,
+    field_b: Field,
     range_window: Optional[Tuple[float, float]],
     depth_window: Optional[Tuple[float, float]],
     fname: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Shared validation for TL-pair metrics.
 
-    Checks both fields are narrowband :class:`PressureField` instances on
-    a common grid, builds the window mask, and returns
-    ``(da, db, region_mask, finite)``. ``da`` / ``db`` are TL in dB —
-    pulled from ``.tl`` so either ``units='complex'`` or ``units='dB'``
-    storage works. Raises if the window contains no finite cells.
+    Both inputs must be 2-D ``(depth, range)`` fields. TL is pulled from
+    ``.tl`` (handles complex → dB conversion). Returns
+    ``(da, db, region_mask, finite)``.
     """
     for label, f in (('field_a', field_a), ('field_b', field_b)):
-        if not isinstance(f, PressureField):
+        if not isinstance(f, Field):
             raise TypeError(
-                f"{fname}: {label} must be a PressureField; got {type(f).__name__}"
+                f"{fname}: {label} must be a Field; got {type(f).__name__}"
             )
-    if field_a.data.ndim != 2 or field_b.data.ndim != 2:
-        raise ValueError(
-            f"{fname}: broadband TL field (3-D data) is not supported; "
-            "extract a single frequency via .at(frequency=f) first."
-        )
+        if list(f.coords) != ['depth', 'range']:
+            raise ValueError(
+                f"{fname}: {label} must be a 2-D (depth, range) Field; "
+                f"got coords {list(f.coords)}"
+            )
 
-    da = _to_db(field_a)
-    db = _to_db(field_b)
+    da = np.asarray(field_a.tl)
+    db = np.asarray(field_b.tl)
     if da.shape != db.shape:
         raise ValueError(
             f"{fname}: shape mismatch — field_a {da.shape} vs field_b {db.shape}"
         )
 
-    depths = np.asarray(field_a.depths)
-    ranges = np.asarray(field_a.ranges)
-    if depths.shape != np.asarray(field_b.depths).shape or ranges.shape != np.asarray(field_b.ranges).shape:
+    depths = field_a.coords['depth']
+    ranges = field_a.coords['range']
+    if (depths.shape != field_b.coords['depth'].shape
+            or ranges.shape != field_b.coords['range'].shape):
         raise ValueError(f"{fname}: depth/range axes must have matching shapes")
 
     rmask = _resolve_window(ranges, range_window)
@@ -91,8 +81,8 @@ def _validate_tl_pair_and_window(
 
 
 def tl_rmse(
-    field_a: PressureField,
-    field_b: PressureField,
+    field_a: Field,
+    field_b: Field,
     range_window: Optional[Tuple[float, float]] = None,
     depth_window: Optional[Tuple[float, float]] = None,
 ) -> float:
@@ -104,8 +94,9 @@ def tl_rmse(
 
     Parameters
     ----------
-    field_a, field_b : PressureField (units='dB')
-        Narrowband TL fields. Broadband ``(n_d, n_r, n_f)`` fields raise.
+    field_a, field_b : Field
+        2-D ``(depth, range)`` fields. Broadband / time-domain fields
+        raise.
     range_window : (float, float), optional
         ``(rmin_m, rmax_m)`` inclusive. Defaults to all ranges.
     depth_window : (float, float), optional
@@ -115,14 +106,6 @@ def tl_rmse(
     -------
     float
         RMSE in dB over the windowed grid, ignoring non-finite cells.
-
-    Raises
-    ------
-    TypeError
-        If either input is not a dB-units :class:`PressureField`.
-    ValueError
-        If shapes/axes don't match, the fields are broadband, or the
-        window selects no finite cells.
     """
     da, db, _, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_rmse'
@@ -132,21 +115,12 @@ def tl_rmse(
 
 
 def tl_max_error(
-    field_a: PressureField,
-    field_b: PressureField,
+    field_a: Field,
+    field_b: Field,
     range_window: Optional[Tuple[float, float]] = None,
     depth_window: Optional[Tuple[float, float]] = None,
 ) -> float:
-    """Maximum absolute TL difference between two TL fields.
-
-    Same input contract as :func:`tl_rmse`.
-
-    Returns
-    -------
-    float
-        ``max(|field_a - field_b|)`` in dB over the windowed grid,
-        ignoring non-finite cells.
-    """
+    """Maximum absolute TL difference between two TL fields."""
     da, db, _, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_max_error'
     )
@@ -155,23 +129,15 @@ def tl_max_error(
 
 
 def tl_bias(
-    field_a: PressureField,
-    field_b: PressureField,
+    field_a: Field,
+    field_b: Field,
     range_window: Optional[Tuple[float, float]] = None,
     depth_window: Optional[Tuple[float, float]] = None,
 ) -> float:
     """Mean signed TL difference (bias) between two TL fields.
 
-    Same input contract as :func:`tl_rmse`. Positive values mean
-    ``field_a`` reports higher TL (more attenuation) than ``field_b``
-    on average.
-
-    Returns
-    -------
-    float
-        ``mean(field_a - field_b)`` in dB over the windowed grid,
-        ignoring non-finite cells.
-    """
+    Positive values mean ``field_a`` reports higher TL (more attenuation)
+    than ``field_b`` on average."""
     da, db, _, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_bias'
     )
