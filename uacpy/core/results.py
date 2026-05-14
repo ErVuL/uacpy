@@ -326,7 +326,18 @@ class Field(Result):
         """Transmission loss in dB at ``data.shape``.
 
         ``-20·log10(|data|)`` if data is complex, otherwise ``data``
-        returned as-is (real data is taken to be already in dB)."""
+        returned as-is (real data is taken to be already in dB).
+
+        Raises :class:`AttributeError` for ``kind='time_series'`` —
+        a time-domain trace is not transmission loss; use ``.data`` to
+        read raw samples or ``.extract_tone(f)`` to recover a complex
+        narrowband field first."""
+        if self.kind == 'time_series':
+            raise AttributeError(
+                "Field.tl: time-domain trace is not transmission loss; "
+                "use .data for raw samples or .extract_tone(f) to "
+                "recover a complex narrowband field first"
+            )
         if self.is_complex:
             return _complex_to_db(self.data)
         return np.asarray(self.data, dtype=float)
@@ -445,9 +456,11 @@ class Field(Result):
             if name in idx_map:
                 i = idx_map[name]
                 size = self.coords[name].size
+                if -size <= i < 0:
+                    i += size
                 if not (0 <= i < size):
                     raise IndexError(
-                        f"Field: index {i} out of range for axis "
+                        f"Field: index {idx_map[name]} out of range for axis "
                         f"{name!r} (size {size})"
                     )
                 slicers.append(i)
@@ -2124,6 +2137,7 @@ def _ifft_to_trace(
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
+        phase_reference=tf.phase_reference,
         metadata={'window': window, 'source_model': tf.model},
     )
 
@@ -2201,6 +2215,7 @@ def _synthesize_time_series(
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
+        phase_reference=tf.phase_reference,
         metadata={'source_waveform_fs': sample_rate, 'window': window},
     )
 

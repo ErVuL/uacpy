@@ -303,7 +303,11 @@ Useful methods:
 
 ```python
 BoundaryProperties(
-    acoustic_type='vacuum',      # vacuum | rigid | half-space | grain-size | file
+    acoustic_type=None,          # auto-inferred when omitted: 'file' if
+                                 # reflection_file is set, 'half-space' if
+                                 # any cp/ρ/α/cs/roughness is non-default,
+                                 # 'vacuum' otherwise. Pass explicitly for
+                                 # 'rigid' or 'grain-size'.
     sound_speed=1600.0,          # m/s (compressional)
     density=1.5,                 # g/cm³
     attenuation=0.5,             # dB/λ (compressional)

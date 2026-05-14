@@ -198,7 +198,7 @@ def plot_field(
     ax=None,
     *,
     env: Optional[Environment] = None,
-    value: str = 'tl',
+    value: Optional[str] = None,
     projection: str = 'cartesian',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -256,6 +256,8 @@ def plot_field(
             f"plot_field: expected Field, got {type(field).__name__}"
         )
 
+    if value is None:
+        value = 'real' if field.kind == 'time_series' else 'tl'
     arr, value_label = _value_array(field, value)
     axes_present = list(field.coords)
     n_axes = len(axes_present)
@@ -1261,10 +1263,13 @@ def plot_environment(
         rr_full = np.atleast_1d(receiver.ranges) / 1000.0
         rd_full = np.atleast_1d(receiver.depths)
         # Dense grids form solid bars — decimate each axis independently
-        # to ~20 samples max so the spatial structure stays readable.
-        max_per_axis = 20
-        step_r = max(1, rr_full.size // max_per_axis)
-        step_d = max(1, rd_full.size // max_per_axis)
+        # so the spatial structure stays readable. Range typically spans
+        # 10× more samples than depth in surveys, so we cap the two axes
+        # differently (20 across, 10 down).
+        max_range_dots = 20
+        max_depth_dots = 10
+        step_r = max(1, rr_full.size // max_range_dots)
+        step_d = max(1, rd_full.size // max_depth_dots)
         rr = rr_full[::step_r]
         rd = rd_full[::step_d]
         RR, RD = np.meshgrid(rr, rd)

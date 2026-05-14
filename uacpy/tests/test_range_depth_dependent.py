@@ -46,7 +46,7 @@ class TestRangeDependentEnvironment:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=densities,
-            attenuation=attenuations
+            attenuation=attenuations,
         )
 
         env = uacpy.Environment(
@@ -248,7 +248,7 @@ class TestModelWithRangeDependence:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=densities,
-            attenuation=attenuations
+            attenuation=attenuations,
         )
 
         env = uacpy.Environment(
@@ -303,7 +303,7 @@ class TestRangeDependentConsistency:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=np.array([1.5, 1.5, 1.5]),
-            attenuation=np.array([0.5, 0.5, 0.5])
+            attenuation=np.array([0.5, 0.5, 0.5]),
         )
 
         env = uacpy.Environment(
@@ -537,7 +537,7 @@ class TestWarnings:
             ranges=np.array([0, 10000]),
             sound_speed=np.array([1600, 1700]),
             density=np.array([1.5, 1.7]),
-            attenuation=np.array([0.5, 0.3])
+            attenuation=np.array([0.5, 0.3]),
         )
         env = uacpy.Environment(name='test', bathymetry=100, bottom=rd_bottom)
         source = uacpy.Source(frequencies=100, depths=25)
