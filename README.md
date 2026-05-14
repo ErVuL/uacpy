@@ -60,7 +60,7 @@ processing, ambient noise, and visualization.
 | **Kraken**        | Normal modes                                                       |
 | **Scooter**       | Finite elements for range independant env                          |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
-| **RAM**           | Parabolic equation — auto-dispatches to mpiramS (broadband fluid), rams0.5 (elastic bottoms, broadband via Python freq loop), or ramsurf1.5 (rough surface, broadband via Python freq loop) based on the environment. All three backends support `COHERENT_TL`, `BROADBAND`, and `TIME_SERIES`. |
+| **RAM**           | Parabolic equation                                                 |
 | **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |
 
@@ -91,15 +91,6 @@ What `install.sh` builds:
 message if anything is missing — it does *not* install system packages
 itself. Provision the toolchain once for your platform, then run the
 build.
-
-**Continuous integration** runs on **Linux (`ubuntu-latest`), Python 3.12,
-`--bellhop cxx`, `--oases yes`** — see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). macOS, Windows/WSL,
-Python 3.10/3.11/3.13, the CUDA Bellhop build, the Fortran-only Bellhop
-fallback, and the no-OASES partial install are all **supported
-configurations exercised by users in practice but not validated by CI**.
-Patches that touch any of those paths should be tested locally before
-submission.
 
 > **OASES supply-chain note.** `install.sh` downloads OASES over HTTPS from
 > MIT and supports an optional sha256 pin via the `OASES_EXPECTED_SHA256`
@@ -192,28 +183,11 @@ on macOS.)
 ### 🪟 Windows (via WSL2)
 
 **uacpy on Windows runs inside WSL2 (Windows Subsystem for Linux),
-following the Linux instructions above.** Smart App Control can 
-block unsigned MSYS2 binaries (gfortran's `f951.exe`,`git.exe`, etc.), 
-and bellhopcuda's headers conflict with MinGW's `math.h`..
-
-You'll work like a Linux developer, but with a Windows desktop, Windows
-file explorer, and Windows IDE. Plots open in normal Windows windows
-(WSLg). It feels native.
-
-#### Step 1 — Enable hardware virtualization in BIOS/UEFI
+following the Linux instructions above.**
 
 WSL2 needs CPU virtualization extensions. Some computer ship with this
-**disabled by default**.
-
-1. Reboot, press `F2` (Dell / Lenovo) or `F10` / `Esc` (HP) at the
-   vendor logo to enter BIOS/UEFI.
-2. Find and enable, depending on your CPU:
-   - Intel: **Intel Virtualization Technology** (or **VT-x**), and
-     **VT-d** if listed
-   - AMD: **SVM Mode** (or **AMD-V**)
-3. Save & exit (usually `F10`).
-
-#### Step 2 — Install WSL2 + Ubuntu
+**disabled by default**, so first of all enable hardware virtualization 
+in your BIOS/UEFI.
 
 In an **elevated PowerShell** (Run as Administrator):
 
@@ -221,15 +195,8 @@ In an **elevated PowerShell** (Run as Administrator):
 wsl --install -d Ubuntu
 ```
 
-Reboot when prompted. After reboot an Ubuntu window should open 
-automatically and asks you to set a username + password. (You can 
-skip the user creation by closing it — the default user becomes 
-`root`)
-
-#### Step 3 — Install uacpy inside Ubuntu
-
-Open Ubuntu (Start menu → "Ubuntu") and follow the **Linux / Debian**
-recipe from above:
+Reboot when prompted. Open Ubuntu (Start menu → "Ubuntu") and follow the 
+**Linux / Debian** recipe from above:
 
 ```bash
 sudo apt-get update
@@ -248,49 +215,6 @@ pip install -e .
 > **Tip:** clone into the WSL filesystem (`~/uacpy`), **not** into
 > `/mnt/c/...`. Cross-filesystem I/O is 10–20× slower and the
 > Acoustics-Toolbox build does a lot of small file writes.
-
-#### Step 4 — Pick a development workflow (NOT TESTED !)
-
-You have three options for using uacpy from Windows:
-
-**Option A — VS Code with the WSL extension (recommended).**
-Edit and run from a Windows-native IDE; Python and uacpy execute
-inside WSL transparently.
-
-1. Install [VS Code](https://code.visualstudio.com/) for Windows.
-2. Install the **WSL** extension (`ms-vscode-remote.remote-wsl`).
-3. From Ubuntu: `cd ~/uacpy && code .`
-   VS Code opens on Windows, auto-installs a small server in WSL.
-4. In VS Code: `Ctrl+Shift+P` → *Python: Select Interpreter* →
-   pick `~/uacpy/uacpy_venv/bin/python`.
-
-Run scripts, debug, open Jupyter notebooks — everything works as if
-you were on Linux. Plots open in real Windows windows via WSLg.
-
-**Option B — Jupyter Lab in WSL, browser on Windows.**
-From Ubuntu:
-
-```bash
-source ~/uacpy/uacpy_venv/bin/activate
-pip install jupyterlab
-jupyter lab --no-browser --ip=127.0.0.1
-```
-
-Open the `http://127.0.0.1:8888/...` URL it prints in any Windows
-browser.
-
-**Option C — Plain Ubuntu terminal.**
-Run scripts directly:
-
-```bash
-cd ~/uacpy
-source uacpy_venv/bin/activate
-python uacpy/uacpy/examples/example_01_basic_shallow_water.py
-```
-
-Plot windows still appear on the Windows desktop (WSLg).
-
----
 
 ### Uninstall
 
@@ -389,21 +313,6 @@ pytest uacpy/tests/
 
 ```
 
-### Run a specific test file
-
-``` bash
-
-pytest uacpy/tests/test_models.py
-
-```
-
-### Run a single test
-
-``` bash
-pytest uacpy/tests/test_models.py::TestClassName::test_method -v
-
-```
-
 ### Test markers
 
 Tests use custom markers to allow selective execution:
@@ -434,14 +343,13 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 
 ### 🛠️ Hardening & validation (priority)
 
-- **🧱 API audit** — consistency of `PropagationModel` and per‑model overrides; spot‑check the `DOCUMENTATION.md` capability matrix; hunt drifted conventions and inconsistent units.
-- **🔬 Native model re‑validation** — every in‑tree modification is potential silent numerical drift. Diff mpiramS against unmodified upstream; confirm the KrakenField OOB fix; validate the UACPY RAM TL formula; run cross‑model regressions (Bellhop / Kraken / Scooter / RAM / OASES agree within tolerance).
-- **🐍 Python‑side review** — dead / hallucinated code paths, doc ↔ code drift, clean error handling, `subprocess` + file‑I/O security, magic numbers traced to references.
-- **📊 Visualization review** — axes / units / orientation, colormap and dynamic‑range defaults, overlay coordinate frames, ray & mode ordering conventions, honest interpolation in comparison helpers, rcParams leakage.
-- **🧪 Test suite audit** — separate smoke from validation; add reference‑case regressions (Pekeris, Munk, canonical waveguides); audit marker application; verify every `uacpy/examples/` script runs.
-- **📦 Build, install, packaging** — reproduce installs on clean Linux VM / macOS / WSL; keep `install.sh` ↔ `install.bat` in sync; confirm the OASES URL + archive hash; pin a known‑good numpy / scipy / matplotlib set.
-- **🔁 CI / CD** — a minimal GitHub Actions workflow runs on every push to `main` and every PR: builds the native binaries (`oalib`, `bellhop-cxx`, `mpiramS`, `ramsurf`, downloads + builds OASES), runs `flake8` (real bugs only) and the full `pytest` suite on Python 3.12 / Ubuntu (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Still wanted before a tagged release: nightly full suite with binaries, macOS / WSL matrix, release automation, benchmark regression job with TL / arrival tolerances.
-- **🌍 Community & process** — issue template for benchmark deviations; targeted per‑model reviews by domain experts.
+- **🧱 API audit** 
+- **🔬 Native model re‑validation** 
+- **🐍 Python‑side review** 
+- **📊 Visualization review** 
+- **🧪 Test suite audit** 
+- **📦 Build, install, packaging** 
+- **🔁 CI / CD** 
 
 > **If you are evaluating UACPY for a project: do not trust any specific
 > number it produces until the re‑validation items above have been
