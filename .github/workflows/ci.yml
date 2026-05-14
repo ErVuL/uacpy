@@ -90,4 +90,4 @@ jobs:
         env:
           # Avoid /dev/shm size limits on GH-hosted runners.
           TMPDIR: ${{ runner.temp }}
-        run: pytest uacpy/tests/
+        run: pytest -n logical --dist=worksteal uacpy/tests/

@@ -528,6 +528,10 @@ def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
     ----------
     Pekeris, C.L., "Theory of propagation of explosive sound in shallow
     water," Geol. Soc. Am. Mem. 27 (1948).
+
+    Adapted from Acoustics-Toolbox ``Matlab/Kraken/PekerisRoot.m``
+    (M.B. Porter, 04/2009). Not an arlpy-derived helper — see
+    ``third_party/arlpy/NOTICE`` for the arlpy-attributed list.
     """
     gamma2 = np.asarray(gamma2, dtype=complex)
     gamma = np.sqrt(gamma2)

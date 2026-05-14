@@ -94,6 +94,298 @@ class PhaseReference(str, Enum):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Documented metadata-key registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per ``(model_name, key)``: ``(expected_type, one-line description)``.
+# ``Result.list_metadata()`` consults this so users get the type + meaning
+# for every documented entry on ``result.metadata`` without grepping the
+# source. Keep this synchronised with what each wrapper actually attaches
+# (grep ``_attach_output_paths`` and ``_result_kwargs(`` calls per model).
+_UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
+    'prt_file': (
+        str, 'Acoustics-Toolbox / RAM diagnostic .prt log (only when '
+        'work_dir is pinned).'
+    ),
+}
+
+_DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
+    # ───────── Bellhop / BellhopCUDA ─────────
+    ('Bellhop', 'shd_file'): (str, 'Bellhop pressure-field output (.shd).'),
+    ('Bellhop', 'arr_file'): (str, 'Bellhop arrivals output (.arr).'),
+    ('Bellhop', 'ray_file'): (str, 'Bellhop ray paths (.ray).'),
+    ('Bellhop', 'c0'): (
+        float, 'Reference sound speed (m/s) used by the arrivals → H(f) '
+        'synthesis path to convert delays to phases.'
+    ),
+    ('Bellhop', 'center_frequency'): (
+        float, 'Carrier (centre) frequency fc (Hz) used to build H(f) '
+        'from a single arrivals run.'
+    ),
+    ('Bellhop', 'arrivals_field'): (
+        'Arrivals',
+        'The intermediate Arrivals Result the broadband path was built '
+        'from — kept so the caller can inspect ray fans or re-synthesise '
+        'with a different waveform.'
+    ),
+    ('Bellhop', 'bounce_result'): (
+        'ReflectionCoefficient',
+        'Auto-routed Bounce result when the env carried a layered or '
+        'elastic bottom and Bellhop ran against a generated .brc.'
+    ),
+    ('Bellhop', 'dt'): (
+        float, 'Time-sample step (s) for TIME_SERIES results '
+        '(= 1 / sample_rate).'
+    ),
+    ('Bellhop', 'fs'): (
+        float, 'Sample rate (Hz) for TIME_SERIES results.'
+    ),
+    ('Bellhop', 'nt'): (
+        int, 'Number of samples in the TIME_SERIES time axis.'
+    ),
+    ('Bellhop', 't_start'): (
+        float, 'Start time (s) of the delay-and-sum window.'
+    ),
+    # ───────── Kraken / KrakenC (mode solvers) ─────────
+    ('Kraken', 'mod_file'): (str, 'Kraken modes file (.mod).'),
+    ('Kraken', 'n_modes_requested'): (
+        int, 'User-supplied mode-count cap. Kraken itself does not cap '
+        'mode count; this records what the wrapper sliced via .first_n().'
+    ),
+    ('Kraken', 'leaky_modes'): (
+        bool, 'True when the run was configured to include leaky modes '
+        '(c_high pushed to ~1e9, normally auto-routed to KrakenC).'
+    ),
+    ('KrakenC', 'mod_file'): (str, 'KrakenC modes file (.mod, complex k).'),
+    ('KrakenC', 'n_modes_requested'): (
+        int, 'User-supplied mode-count cap (see Kraken).'
+    ),
+    ('KrakenC', 'leaky_modes'): (
+        bool, 'True when leaky / complex-k modes were retained.'
+    ),
+    # ───────── KrakenField (modes + field pipeline) ─────────
+    ('KrakenField', 'shd_file'): (
+        str, 'KrakenField pressure-field output (.shd).'
+    ),
+    ('KrakenField', 'mod_file'): (
+        str, 'Modes used by KrakenField (.mod).'
+    ),
+    ('KrakenField', 'mode_coupling'): (
+        str, "'adiabatic', 'coupled', or 'none' (range-independent run)."
+    ),
+    ('KrakenField', 'n_profiles'): (
+        int, 'Number of modal segments KrakenField used for the '
+        'range-dependent path.'
+    ),
+    ('KrakenField', 'native_broadband'): (
+        bool, 'True when KrakenField produced H(f) natively from a '
+        'multi-frequency .mod file (versus a Python frequency loop).'
+    ),
+    # ───────── Scooter (FFP / wavenumber integration) ─────────
+    ('Scooter', 'grn_file'): (
+        str, "Scooter Green's-function output (.grn)."
+    ),
+    ('Scooter', 'transform_method'): (
+        str, "Hankel-transform method used by grn_reader to map "
+        "k-domain G(k) → r-domain p(r) (e.g. 'fft_hankel')."
+    ),
+    ('Scooter', 'source_type'): (
+        str, "Scooter source type passed to grn_to_field "
+        "('R' = point/cylindrical, 'X' = line/Cartesian)."
+    ),
+    ('Scooter', 'spectrum'): (
+        'ndarray',
+        'Wavenumber-domain spectrum the transform consumed (one slice '
+        'per frequency for broadband; one array for narrowband).'
+    ),
+    ('Scooter', 'center_frequency'): (
+        float, 'Centre frequency (Hz) of the broadband sweep — picked '
+        'as the middle element of freqVec.'
+    ),
+    ('Scooter', 'nfreq'): (
+        int, 'Number of frequencies in the broadband sweep.'
+    ),
+    # ───────── SPARC (time-domain FFP) ─────────
+    ('SPARC', 'grn_file'): (
+        str, "SPARC Green's-function snapshot (.grn, output_mode='S')."
+    ),
+    ('SPARC', 'rts_file'): (
+        str, "SPARC received-time-series output (.rts, output_mode='R'/'D')."
+    ),
+    ('SPARC', 'output_mode'): (
+        str, "Which SPARC output path produced this Field: 'R' "
+        "(horizontal time-marched array), 'D' (vertical), 'S' (snapshot)."
+    ),
+    ('SPARC', 'conversion_method'): (
+        str, "How the .rts time-series was converted to a steady-state "
+        "Field (e.g. 'fft' for time-FFT at the source frequency)."
+    ),
+    ('SPARC', 'n_depth_runs'): (
+        int, "Number of per-depth SPARC subprocess calls dispatched "
+        "(R-mode loops over receiver depths)."
+    ),
+    ('SPARC', 'n_range_runs'): (
+        int, "Number of per-range SPARC subprocess calls dispatched "
+        "(D-mode loops over receiver ranges)."
+    ),
+    ('SPARC', 'dt'): (float, 'Time-sample step (s) for TIME_SERIES output.'),
+    ('SPARC', 'fs'): (float, 'Sample rate (Hz) for TIME_SERIES output.'),
+    ('SPARC', 'nt'): (int, 'Number of samples in the TIME_SERIES time axis.'),
+    ('SPARC', 't_start'): (
+        float, 'Start time (s) of the SPARC TIME_SERIES window.'
+    ),
+    # Snapshot-mode SPARC attaches grn_reader keys when the snapshot
+    # path computes p(z, r) via time-FFT + Hankel transform.
+    ('SPARC', 'transform_method'): (
+        str, "Hankel-transform method used to convert the k-domain "
+        "snapshot to r-domain pressure ('time_fft+hankel')."
+    ),
+    ('SPARC', 'source_type'): (
+        str, "Source type ('R' / 'X') consumed by the Hankel transform."
+    ),
+    ('SPARC', 'spectrum'): (
+        'ndarray', 'k-domain G(k) consumed by the Hankel transform.'
+    ),
+    ('SPARC', 'snapshot_freq_bin'): (
+        float, "FFT-bin frequency (Hz) the snapshot was extracted at "
+        "(closest bin to the source frequency)."
+    ),
+    ('SPARC', 'snapshot_dt'): (
+        float, "Time-step (s) used in the snapshot FFT."
+    ),
+    ('SPARC', 'snapshot_nt'): (
+        int, "Number of time samples in the snapshot FFT."
+    ),
+    # ───────── Bounce → ReflectionCoefficient ─────────
+    ('Bounce', 'brc_file'): (
+        str, '.brc bottom-reflection-coefficient file written by Bounce.'
+    ),
+    ('Bounce', 'irc_file'): (
+        str, '.irc internal-reflection-coefficient file written by Bounce.'
+    ),
+    ('Bounce', 'c_low'): (
+        float, 'Lower phase-speed bound (m/s) passed to Bounce.'
+    ),
+    ('Bounce', 'c_high'): (
+        float, 'Upper phase-speed bound (m/s) passed to Bounce.'
+    ),
+    ('Bounce', 'rmax'): (
+        float, 'Maximum range (m) passed to Bounce.'
+    ),
+    ('Bounce', 'n_points'): (
+        int, 'Number of angle samples in the reflection-coefficient table.'
+    ),
+    ('Bounce', 'full_result'): (
+        dict, 'Raw .brc dict (theta, R, phi, n_pts) for downstream '
+        'consumers that prefer the unwrapped form.'
+    ),
+    # ───────── RAM dispatcher (mpiramS / rams0.5 / ramsurf1.5) ─────────
+    ('RAM', 'c0'): (
+        float, 'Reference sound speed (m/s) the PE solver was initialised at.'
+    ),
+    ('RAM', 'c_min'): (
+        float, 'Minimum sound speed (m/s) the solver brackets — used by '
+        'the per-wavelength stability cap on dr.'
+    ),
+    ('RAM', 'dr'): (float, 'Range step (m) used by the PE.'),
+    ('RAM', 'dz'): (float, 'Depth step (m) used by the PE.'),
+    ('RAM', 'zmax'): (float, 'PE domain depth (m) including absorbing layer.'),
+    ('RAM', 'Q'): (float, 'Broadband Q = fc/bandwidth (mpiramS).'),
+    ('RAM', 'T'): (float, 'Time-window width (s) for broadband synthesis.'),
+    ('RAM', 'bandwidth_hz'): (
+        float, 'Broadband bandwidth (Hz) the run actually used.'
+    ),
+    ('RAM', 'df_hz'): (
+        float, 'Frequency-bin spacing (Hz) of the broadband sweep.'
+    ),
+    ('RAM', 'n_samples'): (
+        int, 'Number of time-domain samples per receiver in TIME_SERIES.'
+    ),
+    ('RAM', 'fs'): (
+        float, 'Time-series sample rate (Hz) for TIME_SERIES results.'
+    ),
+    ('RAM', 'tl_grid_file'): (str, 'tl.grid TL output from Collins backends.'),
+    ('RAM', 'pcomplex_file'): (str, 'pcomplex.bin complex-pressure output.'),
+    ('RAM', 'in_file'): (str, 'ram.in input file consumed by the backend.'),
+    ('RAM', 'psif_file'): (str, 'psif.dat broadband output from mpiramS.'),
+    # ───────── OAST (TL via wavenumber integration) ─────────
+    ('OAST', 'plt_file'): (str, 'OAST .plt output.'),
+    ('OAST', 'oast_grid_shape'): (
+        tuple,
+        '(n_depths, n_ranges) of the native OAST output grid before any '
+        'interpolation onto the user-supplied receiver grid.'
+    ),
+    ('OAST', 'oast_native_ranges'): (
+        'ndarray',
+        'Native OAST range axis (m) — present when the wrapper resampled '
+        'OAST onto the user receiver grid.'
+    ),
+    ('OAST', 'interpolated'): (
+        bool,
+        'True when the returned field was resampled onto the user '
+        'receiver grid; False / absent when the native grid was kept.'
+    ),
+    # ───────── OASN (covariance / replicas) ─────────
+    ('OASN', 'xsm_file'): (
+        str, 'Covariance output (.xsm) — RunMode.COVARIANCE.'
+    ),
+    ('OASN', 'rpo_file'): (
+        str, 'Replica output (.rpo) — RunMode.REPLICA.'
+    ),
+    ('OASN', 'n_receivers'): (
+        int, 'Number of receivers (NRCV) in the OASN array.'
+    ),
+    ('OASN', 'title'): (
+        str, 'Title string from the OASN output file header.'
+    ),
+    # ───────── OASR (reflection coefficients) ─────────
+    ('OASR', 'trc_file'): (
+        str, 'Reflection-coefficient table (.trc).'
+    ),
+    ('OASR', 'rco_file'): (
+        str, 'Complex reflection-coefficient output (.rco).'
+    ),
+    ('OASR', 'sampling_type'): (
+        str, "How the angle/slowness axis was sampled by OASR "
+        "('angle' or 'slowness')."
+    ),
+    ('OASR', 'reflection_type'): (
+        str, "Which reflection coefficient OASR returned: 'P-P' (default), "
+        "'P-SV', 'P-Slow' (Biot only), or 'transmission'."
+    ),
+    # ───────── OASP (pulse / broadband transfer function) ─────────
+    ('OASP', 'trf_file'): (
+        str, 'Transfer-function output (.trf).'
+    ),
+    ('OASP', 'center_frequency'): (
+        float, 'OASP carrier (centre) frequency (Hz).'
+    ),
+    ('OASP', 'n_time_samples'): (
+        int, 'Power-of-two FFT length used by OASP for the time axis.'
+    ),
+    ('OASP', 'freq_max'): (
+        float, 'Maximum frequency (Hz) of the OASP broadband sweep.'
+    ),
+    ('OASP', 'source_waveform'): (
+        'ndarray',
+        'User-supplied time-domain source waveform (TIME_SERIES path).'
+    ),
+    ('OASP', 'sample_rate'): (
+        float, 'Sample rate (Hz) for source_waveform (TIME_SERIES path).'
+    ),
+    ('OASP', 'frequencies_available'): (
+        'ndarray',
+        'Full frequency axis available in the .trf, kept on a '
+        'single-frequency slice result so the caller can recover the '
+        'broadband context.'
+    ),
+    ('OASP', 'source_depth'): (
+        float, 'Source depth (m) read from the .trf header.'
+    ),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Base
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -193,6 +485,48 @@ class Result:
     def plot(self, **kwargs):
         from uacpy.visualization import plots
         return plots.plot_result(self, **kwargs)
+
+    def list_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Describe every key currently in ``self.metadata``.
+
+        For each key, return the runtime value type, the documented
+        expected type (if uacpy knows about it), and a one-line
+        description. ``Bounce``'s ``'c_low'`` lookup, for example::
+
+            >>> ref = bounce.run(env, src, rcv, output_dir=tmp)
+            >>> ref.list_metadata()['c_low']
+            {'value_type': 'float',
+             'documented_type': 'float',
+             'description': 'Lower phase-speed bound (m/s) passed to Bounce.'}
+
+        Undocumented keys still appear (with ``documented_type=None``
+        and ``description=None``) so callers can see everything the
+        wrapper attached.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for key, value in self.metadata.items():
+            doc = _DOCUMENTED_METADATA.get((self.model, key))
+            if doc is None:
+                doc = _DOCUMENTED_METADATA.get((self.backend, key))
+            if doc is None:
+                doc = _UNIVERSAL_METADATA.get(key)
+            if doc is not None:
+                # ``documented_type`` may already be a string for
+                # late-bound forward references (e.g. ``'ndarray'``,
+                # ``'Arrivals'``); accept either a type or a name.
+                documented_type = (
+                    doc[0] if isinstance(doc[0], str) else doc[0].__name__
+                )
+                description = doc[1]
+            else:
+                documented_type = None
+                description = None
+            out[key] = {
+                'value_type': type(value).__name__,
+                'documented_type': documented_type,
+                'description': description,
+            }
+        return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1500,6 +1834,17 @@ class Modes(Result):
         -------
         Modes
             New :class:`Modes` instance with updated complex ``k``.
+
+        Notes
+        -----
+        The perturbed ``k`` is consumed by uacpy's Python-side modal
+        synthesis (:meth:`pressure_at`, :meth:`tl_at`). It is **not**
+        consumed by Acoustics-Toolbox ``field.exe`` / ``fieldS.exe``:
+        uacpy has no ``.mod`` writer, and ``field.exe`` reads
+        attenuation natively from the environment passed to its field
+        run rather than from ``Im(k)`` of the ``.mod`` file. To get the
+        perturbed TL from ``field.exe``, attach an :class:`Absorption`
+        to the :class:`Environment` and run :class:`KrakenField`.
         """
         omega = 2.0 * np.pi * float(self.f0 or 0.0)
         if omega == 0.0:
@@ -1632,7 +1977,10 @@ class Modes(Result):
                 for m in range(self.n_modes)
             ])
         k = np.asarray(self.k)
-        inv_sqrt_k = 1.0 / np.sqrt(np.abs(k))
+        # Complex sqrt — preserves the -arg(k)/2 phase contribution that
+        # matters for phase-sensitive consumers (MFP, coherent integration).
+        # Numpy's sqrt picks the principal branch (positive real part).
+        inv_sqrt_k = 1.0 / np.sqrt(k.astype(np.complex128))
         weights = phi_zs * inv_sqrt_k
         expikr = np.exp(1j * k[:, None] * r[None, :])
         contribution = (phi_zr * weights)[:, :, None] * expikr[None, :, :]
@@ -2061,7 +2409,7 @@ def _ifft_to_trace(
     max_bin = int(bin_indices[-1])
 
     if nfft is None:
-        nfft_min = max(int(tf.metadata.get('Nsam', 0)) or 0, 4 * n_freq)
+        nfft_min = max(int(tf.metadata.get('n_samples', 0)) or 0, 4 * n_freq)
         nfft_target = max(nfft_min, 2 * max_bin + 2)
         if sample_rate is not None:
             nfft_target = max(nfft_target, int(np.ceil(sample_rate / df)))

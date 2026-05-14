@@ -18,6 +18,7 @@ from typing import Tuple, Union
 
 from uacpy._log import log_message
 from uacpy.core.exceptions import ModelExecutionError
+from uacpy.io.units import km_to_m, m_to_km
 from uacpy.io._fortran_helpers import read_vector
 
 
@@ -51,26 +52,30 @@ def read_boundary_3d(
     Returns
     -------
     x_bot : ndarray
-        X-coordinates (typically in km), shape (n_x,)
+        X-coordinates in metres, shape (n_x,). The file stores km;
+        ``read_boundary_3d`` converts to metres to match the rest of
+        the uacpy I/O surface.
     y_bot : ndarray
-        Y-coordinates (typically in km), shape (n_y,)
+        Y-coordinates in metres, shape (n_y,). Same km→m conversion
+        as ``x_bot``.
     z_bot : ndarray
-        Z-coordinates (depth/height), shape (n_y, n_x)
-        Note: Transposed to match (y, x) grid convention
+        Z-coordinates (depth/height) in metres, shape (n_y, n_x).
+        Note: transposed to match (y, x) grid convention.
     n_x : int
-        Number of boundary points in x-direction
+        Number of boundary points in x-direction.
     n_y : int
-        Number of boundary points in y-direction
+        Number of boundary points in y-direction.
 
     Notes
     -----
-    File format (.bty or .ati):
+    File format (.bty or .ati), per Bellhop3D ``bdry3DMod.f90``:
     - Line 1: Boundary type ('R' or 'C')
       - 'R': Piecewise-linear (ruled) approximation
       - 'C': Curvilinear approximation
-    - Lines 2-3: X-vector specification (uses read_vector format)
-    - Lines 4-5: Y-vector specification (uses read_vector format)
-    - Remaining lines: Z-values in row-major order (n_x × n_y values)
+    - Lines 2-3: X-vector specification in km (uses read_vector format)
+    - Lines 4-5: Y-vector specification in km (uses read_vector format)
+    - Remaining lines: Z-values in row-major order (n_x × n_y values),
+      depths in metres positive downward.
 
     The Z-matrix is read as (n_x, n_y) and transposed to (n_y, n_x)
     to match standard grid indexing conventions.
@@ -119,7 +124,9 @@ def read_boundary_3d(
                 values = [float(v) for v in line.split() if v]
                 z_values.extend(values)
 
-            z_bot = np.array(z_values).reshape(n_x, n_y).T
+            # Bellhop3D writes the depth grid as ny rows of nx values
+            # each (bdry3DMod.f90: DO iy = 1, NbtyPts(2); READ Bot(:, iy)).
+            z_bot = np.array(z_values).reshape(n_y, n_x)
 
     except FileNotFoundError:
         raise FileNotFoundError(f"Boundary file not found: {filename}")
@@ -128,6 +135,9 @@ def read_boundary_3d(
             'Bellhop3D', return_code=0, stdout=None,
             stderr=f"Error reading boundary file {filename}: {e}",
         ) from e
+
+    x_bot = km_to_m(x_bot)
+    y_bot = km_to_m(y_bot)
 
     return x_bot, y_bot, z_bot, n_x, n_y
 
@@ -220,7 +230,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
                     f"depth (m): {_summarize_axis(bty_data[1])}",
                     verbose=verbose, level='debug')
 
-    bty_data[0, :] *= 1000.0
+    bty_data[0, :] = km_to_m(bty_data[0, :])
 
     n_pts_extended = n_pts + 2
     bty = np.zeros((2, n_pts_extended))
@@ -319,7 +329,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
                     f"depth (m): {_summarize_axis(ati_data[1])}",
                     verbose=verbose, level='debug')
 
-    ati_data[0, :] *= 1000.0
+    ati_data[0, :] = km_to_m(ati_data[0, :])
 
     n_pts_extended = n_pts + 2
     ati = np.zeros((2, n_pts_extended))
@@ -387,7 +397,7 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     type_str = f"{interp_char}S"
 
     bathy_km = bathymetry.copy()
-    bathy_km[:, 0] = bathy_km[:, 0] / 1000.0
+    bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
 
     n_pts = bathy_km.shape[0]
 
@@ -448,10 +458,10 @@ def write_bty_long_format(
     type_str = f"{interp_char}L"
 
     bathy_km = bathymetry.copy()
-    bathy_km[:, 0] = bathy_km[:, 0] / 1000.0
+    bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
     n_pts = bathy_km.shape[0]
 
-    rd_r_km = np.asarray(bottom_rd.ranges, dtype=float) / 1000.0
+    rd_r_km = m_to_km(bottom_rd.ranges)
     cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.sound_speed)
     rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.density)
     alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.attenuation)
@@ -511,7 +521,7 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     type_str = f"{interp_char}S"
 
     alti_km = altimetry.copy()
-    alti_km[:, 0] = alti_km[:, 0] / 1000.0
+    alti_km[:, 0] = m_to_km(alti_km[:, 0])
 
     n_pts = alti_km.shape[0]
 
@@ -531,14 +541,16 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     Parameters
     ----------
     filepath : str or Path
-        Bathymetry file path (typically .bty extension)
+        Bathymetry file path (typically .bty extension).
     X : ndarray
-        X coordinates in kilometers, shape (nx,)
+        X coordinates in metres, shape (nx,). Converted to km on disk
+        to match the Bellhop3D file format.
     Y : ndarray
-        Y coordinates in kilometers, shape (ny,)
+        Y coordinates in metres, shape (ny,). Same m→km conversion as
+        ``X``.
     depth : ndarray
-        Depth values in meters, shape (ny, nx)
-        depth[iy, ix] is depth at Y[iy], X[ix]
+        Depth values in metres, shape (ny, nx).
+        ``depth[iy, ix]`` is depth at ``Y[iy], X[ix]``.
     interp_type : str, optional
         Interpolation type:
         - 'R': Piecewise-linear (default)
@@ -557,8 +569,8 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     NaN values in depth array are replaced with 0.0.
 
     The coordinate system uses:
-    - X: Eastings (km) - horizontal coordinate
-    - Y: Northings (km) - vertical coordinate
+    - X: Eastings (m) - horizontal coordinate
+    - Y: Northings (m) - vertical coordinate
     - depth: Positive downward (m)
 
     See Also
@@ -580,16 +592,19 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     if depth.shape != (ny, nx):
         raise ValueError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
 
+    X_km = m_to_km(X)
+    Y_km = m_to_km(Y)
+
     with open(filepath, 'w') as f:
         f.write(f"'{interp_type}'\n")
 
         f.write(f"{nx}\n")
-        for x in X:
+        for x in X_km:
             f.write(f"{x:.6f} ")
         f.write("\n")
 
         f.write(f"{ny}\n")
-        for y in Y:
+        for y in Y_km:
             f.write(f"{y:.6f} ")
         f.write("\n")
 

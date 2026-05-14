@@ -5,7 +5,7 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import (
     UACPYError, InvalidDepthError,
-    UnsupportedFeatureError,
+    UnsupportedFeatureError, ConfigurationError,
 )
 from uacpy.models import Kraken
 
@@ -62,23 +62,23 @@ class TestInputValidation:
     """Constructor-time validation on Source / Receiver / Environment."""
 
     def test_negative_source_depth(self):
-        with pytest.raises(ValueError, match="source depths must be"):
+        with pytest.raises(ConfigurationError, match="source depths must be"):
             uacpy.Source(depths=-10, frequencies=100)
 
     def test_negative_receiver_depth(self):
-        with pytest.raises(ValueError, match="receiver depths must be"):
+        with pytest.raises(ConfigurationError, match="receiver depths must be"):
             uacpy.Receiver(depths=[-10], ranges=[1000])
 
     def test_zero_frequency_rejected(self):
-        with pytest.raises(ValueError, match="frequencies"):
+        with pytest.raises(ConfigurationError, match="frequencies"):
             uacpy.Source(depths=50, frequencies=0)
 
     def test_negative_frequency_rejected(self):
-        with pytest.raises(ValueError, match="frequencies"):
+        with pytest.raises(ConfigurationError, match="frequencies"):
             uacpy.Source(depths=50, frequencies=-100)
 
     def test_zero_environment_depth_rejected(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             uacpy.Environment(name='bad', bathymetry=0, ssp=1500)
 
 

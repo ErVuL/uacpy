@@ -47,8 +47,15 @@ def simple_env():
 
 
 @pytest.fixture
-def munk_env():
-    """Munk profile environment."""
+def parabolic_ssp_env():
+    """100-m shallow-water env with a parabolic SSP centred at 50 m.
+
+    Despite its previous name, this is *not* the canonical Munk profile
+    (which carries an exponential ``η - 1 + exp(-η)`` term and channels
+    at ~1300 m in deep water). Used for SSP-shape smoke checks where
+    the only requirement is "a non-flat profile with a minimum
+    somewhere".
+    """
     from uacpy.core.environment import SoundSpeedProfile
     depths = np.linspace(0, 100, 21)
     axis_depth = 50
@@ -56,10 +63,33 @@ def munk_env():
     sound_speeds = c_axis * (1 + 0.00737 * ((depths - axis_depth) / axis_depth) ** 2)
 
     return uacpy.Environment(
-        name="Munk Profile",
+        name="Parabolic SSP",
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs(
             np.column_stack([depths, sound_speeds])
+        ),
+    )
+
+
+@pytest.fixture
+def munk_env():
+    """Deep-water Munk profile (canonical, axis at 1300 m).
+
+    Built via :meth:`SoundSpeedProfile.from_munk`, which implements
+    ``c(z) = c_min * (1 + ε * (η - 1 + exp(-η)))`` with
+    ``η = 2(z - z_axis)/z_axis``, ``c_min = 1500 m/s``, ``ε = 7.37e-3``.
+    Bathymetry is 5 km with a fluid half-space bottom.
+    """
+    from uacpy.core.environment import SoundSpeedProfile
+    return uacpy.Environment(
+        name="Munk Profile",
+        bathymetry=5000.0,
+        ssp=SoundSpeedProfile.from_munk(5000.0),
+        bottom=uacpy.BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600.0,
+            density=1.8,
+            attenuation=0.3,
         ),
     )
 

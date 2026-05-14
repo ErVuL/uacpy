@@ -22,17 +22,17 @@ class TestOptimalC0:
 
     def test_water_only_30deg(self):
         """Homogeneous water + 30° angle → ≈ 1591 m/s per Table 1."""
-        c0 = optimal_c0(1500.0, 1500.0, np.deg2rad(30.0))
+        c0 = optimal_c0(1500.0, 1500.0, 30.0)
         assert 1590 < c0 < 1592
 
     def test_pekeris_water_sediment_30deg(self):
         """Water + faster sediment → c₀ between c_water and c_sediment."""
-        c0 = optimal_c0(1500.0, 1700.0, np.deg2rad(30.0))
+        c0 = optimal_c0(1500.0, 1700.0, 30.0)
         assert 1500 < c0 < 1700
 
     def test_inhomogeneous_30deg(self):
         """Range [1500, 1550] @ 30° → ≈ 1616 m/s per Table 4."""
-        c0 = optimal_c0(1500.0, 1550.0, np.deg2rad(30.0))
+        c0 = optimal_c0(1500.0, 1550.0, 30.0)
         assert 1614 < c0 < 1618
 
 
@@ -87,7 +87,7 @@ class TestOptimizeGrid:
         """Paper Table 1, x_max=5 km, c0=1500: dx≈10, dz≈0.08 (within ladder)."""
         res = optimize_grid(
             freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-            c0=1500.0, theta_max=np.deg2rad(30.0), eps=1e-3, p=8, alpha=1 / 12,
+            c0=1500.0, theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12,
         )
         # Allow some slack — geometric ladder won't land exactly on paper values.
         assert 8 <= res['dr'] <= 30
@@ -97,10 +97,9 @@ class TestOptimizeGrid:
     def test_optimal_c0_gives_better_grid(self):
         """Eq. (15) c₀ permits a coarser dx than the suboptimal c0=1500."""
         kw = dict(freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-                  theta_max=np.deg2rad(30.0), eps=1e-3, p=8, alpha=1 / 12)
+                  theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12)
         res_default = optimize_grid(c0=1500.0, **kw)
-        res_optimal = optimize_grid(c0=optimal_c0(1500.0, 1500.0, np.deg2rad(30.0)),
-                                    **kw)
+        res_optimal = optimize_grid(c0=optimal_c0(1500.0, 1500.0, 30.0), **kw)
         assert res_optimal['dr'] >= res_default['dr']
 
     def test_user_c0_is_honoured(self):
@@ -108,7 +107,7 @@ class TestOptimizeGrid:
         for c0 in [1480.0, 1500.0, 1545.0, 1600.0]:
             res = optimize_grid(
                 freq=500.0, c_min=1500.0, c_max=1500.0, x_max=2000.0,
-                c0=c0, theta_max=np.deg2rad(30.0), eps=1e-2, p=6, alpha=1 / 12,
+                c0=c0, theta_max=30.0, eps=1e-2, p=6, alpha=1 / 12,
             )
             assert res['c0'] == c0
 
@@ -118,7 +117,7 @@ class TestOptimizeGrid:
         # sits well above the floor — but we still want the floor enforced.
         res = optimize_grid(
             freq=100.0, c_min=1500.0, c_max=1500.0, x_max=2000.0,
-            c0=1500.0, theta_max=np.deg2rad(20.0), eps=1e-2, p=6, alpha=1 / 12,
+            c0=1500.0, theta_max=20.0, eps=1e-2, p=6, alpha=1 / 12,
             dz_floor=2.0,
         )
         assert res['dz'] >= 2.0
@@ -128,7 +127,7 @@ class TestOptimizeGrid:
         with pytest.raises(RuntimeError, match="No"):
             optimize_grid(
                 freq=10000.0, c_min=1500.0, c_max=1500.0, x_max=1000000.0,
-                c0=1500.0, theta_max=np.deg2rad(60.0), eps=1e-12, p=2,
+                c0=1500.0, theta_max=60.0, eps=1e-12, p=2,
                 alpha=0.0,
             )
 

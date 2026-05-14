@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import uacpy
 from uacpy import Field
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
@@ -351,12 +352,12 @@ class TestSedimentLayer:
 
     def test_validation_negative_thickness(self):
         """Negative thickness should raise ValueError."""
-        with pytest.raises(ValueError, match="thickness"):
+        with pytest.raises(ConfigurationError, match="thickness"):
             SedimentLayer(thickness=-5, sound_speed=1650, density=1.9)
 
     def test_validation_negative_sound_speed(self):
         """Negative sound speed should raise ValueError."""
-        with pytest.raises(ValueError, match="sound_speed"):
+        with pytest.raises(ConfigurationError, match="sound_speed"):
             SedimentLayer(thickness=10, sound_speed=-100, density=1.9)
 
     def test_elastic_layer(self):
@@ -402,7 +403,7 @@ class TestLayeredBottom:
 
     def test_empty_layers_raises(self):
         """Empty layers list should raise ValueError."""
-        with pytest.raises(ValueError, match="at least one"):
+        with pytest.raises(ConfigurationError, match="at least one"):
             LayeredBottom(
                 layers=[],
                 halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -478,7 +479,7 @@ class TestRangeDependentLayeredBottom:
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=1700, density=1.8),
         )
-        with pytest.raises(ValueError, match="profiles length"):
+        with pytest.raises(ConfigurationError, match="profiles length"):
             RangeDependentLayeredBottom(
                 ranges=np.array([0, 10000, 20000]),
                 profiles=[lb, lb],  # 2 profiles for 3 ranges

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Union
 
 from uacpy._log import log_message
+from uacpy.io.units import deg_to_rad, rad_to_deg
 
 
 def read_reflection_coefficient(
@@ -81,22 +82,20 @@ def read_reflection_coefficient(
             R = np.zeros(n_pts)
             phi = np.zeros(n_pts)
 
-            # Read data (angle magnitude phase per line)
             for i in range(n_pts):
                 line = fid.readline().strip()
                 values = line.split()
-                if len(values) >= 3:
-                    theta[i] = float(values[0])
-                    R[i] = float(values[1])
-                    phi[i] = float(values[2])
-                else:
-                    # Fallback: try old format (one value per line)
-                    theta[i] = float(values[0]) if values else 0.0
-                    R[i] = float(fid.readline().strip()) if i == 0 else R[i-1]
-                    phi[i] = float(fid.readline().strip()) if i == 0 else phi[i-1]
+                if len(values) < 3:
+                    raise ValueError(
+                        f"Reflection coefficient file {filename}: "
+                        f"line {i + 2} has fewer than 3 tokens "
+                        f"({line!r}); expected 'theta magnitude phase'."
+                    )
+                theta[i] = float(values[0])
+                R[i] = float(values[1])
+                phi[i] = float(values[2])
 
-            # Convert phase from degrees to radians
-            phi = phi * np.pi / 180.0
+            phi = deg_to_rad(phi)
 
             # Validate angles are non-decreasing
             if not np.all(np.diff(theta) >= 0):
@@ -200,46 +199,51 @@ def write_reflection_coefficient(
     Parameters
     ----------
     filepath : str or Path
-        Output file path (typically .brc for bottom, .trc for top)
+        Output file path (typically .brc for bottom, .trc for top).
     angles : ndarray
-        Grazing angles in degrees, shape (N,)
+        Grazing angles in degrees, shape (N,).
     coefficients : ndarray
-        Complex reflection coefficients, shape (N,) or (N, 2) for [amplitude, phase]
-        If complex, uses magnitude and phase. If real (N, 2), uses directly.
+        - Complex (N,): ``np.angle`` is taken (radians) and converted
+          to degrees on output.
+        - Real (N, 2): ``[amplitude, phase_radians]``. Phase column is
+          converted to degrees on output.
+        - Real (N,): amplitudes only; phase is zero.
     file_type : str, optional
         File type: 'brc' (bottom) or 'trc' (top). Default is 'brc'.
 
     Notes
     -----
-    File format (.brc/.trc):
-    - Line 1: Number of angles
-    - Following lines: angle (degrees), |R| (amplitude), phase (degrees)
+    File format (.brc/.trc), per AT ReflectionCoefficientFile.htm:
+        Line 1: NTHETA
+        Lines 2+: THETA(deg)  RMAG  RPHASE(deg)
 
-    The reflection coefficient R = |R| * exp(i*phase)
+    Phase is stored in **degrees** on disk; this writer takes radians
+    in to match :func:`read_reflection_coefficient` (which returns
+    ``phi`` in radians) and the :class:`uacpy.ReflectionCoefficient`
+    result convention.
     """
     filepath = Path(filepath)
 
-    # Convert complex to amplitude/phase if needed
     if np.iscomplexobj(coefficients):
         amplitude = np.abs(coefficients)
-        phase = np.angle(coefficients, deg=True)
+        phase_rad = np.angle(coefficients)
     elif coefficients.ndim == 2 and coefficients.shape[1] == 2:
         amplitude = coefficients[:, 0]
-        phase = coefficients[:, 1]
+        phase_rad = coefficients[:, 1]
     else:
-        # Assume real values are amplitudes with zero phase
         amplitude = coefficients
-        phase = np.zeros_like(coefficients)
+        phase_rad = np.zeros_like(coefficients)
+
+    phase_deg = rad_to_deg(phase_rad)
 
     n_angles = len(angles)
 
     with open(filepath, "w") as f:
-        # Write number of angles
         f.write(f"{n_angles}\n")
-
-        # Write angle, amplitude, phase triplets
         for i in range(n_angles):
-            f.write(f"{angles[i]:8.2f} {amplitude[i]:12.6f} {phase[i]:12.6f}\n")
+            f.write(
+                f"{angles[i]:8.2f} {amplitude[i]:12.6f} {phase_deg[i]:12.6f}\n"
+            )
 
 
 def write_source_beam_pattern(

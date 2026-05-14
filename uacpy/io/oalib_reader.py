@@ -26,6 +26,7 @@ from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import read_vector as _read_vector
+from uacpy.io.units import km_to_m
 
 
 def read_shd_file(filepath: Union[str, Path]):
@@ -171,44 +172,52 @@ def read_shd_bin(
     >>> shd = read_shd_bin('broadband.shd', freq=100.0)
     """
     with open(filename, "rb") as fid:
-        recl = np.fromfile(fid, dtype=np.int32, count=1)[0]
+        from uacpy.io._fortran_helpers import detect_endian
+        head = fid.read(4)
+        fid.seek(0)
+        endian = detect_endian(head, source=f'read_shd_bin:{filename}')
+        i4 = np.dtype(endian + 'i4')
+        f4 = np.dtype(endian + 'f4')
+        f8 = np.dtype(endian + 'f8')
+
+        recl = int(np.fromfile(fid, dtype=i4, count=1)[0])
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
         fid.seek(4 * recl, 0)
         plot_type_bytes = fid.read(10)
         PlotType = plot_type_bytes.decode("ascii", errors="ignore")
         fid.seek(2 * 4 * recl, 0)
-        Nfreq = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Ntheta = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nsx = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nsy = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nsz = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nrz = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nrr = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        freq0 = np.fromfile(fid, dtype=np.float64, count=1)[0]
-        atten = np.fromfile(fid, dtype=np.float64, count=1)[0]
+        Nfreq = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Ntheta = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Nsx = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Nsy = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Nsz = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Nrz = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        Nrr = int(np.fromfile(fid, dtype=i4, count=1)[0])
+        freq0 = float(np.fromfile(fid, dtype=f8, count=1)[0])
+        atten = float(np.fromfile(fid, dtype=f8, count=1)[0])
         fid.seek(3 * 4 * recl, 0)
-        freqVec = np.fromfile(fid, dtype=np.float64, count=Nfreq)
+        freqVec = np.fromfile(fid, dtype=f8, count=Nfreq)
         fid.seek(4 * 4 * recl, 0)
-        theta = np.fromfile(fid, dtype=np.float64, count=Ntheta)
+        theta = np.fromfile(fid, dtype=f8, count=Ntheta)
         if PlotType[:2] != "TL":
             fid.seek(5 * 4 * recl, 0)
-            s_x = np.fromfile(fid, dtype=np.float64, count=Nsx)
+            s_x = np.fromfile(fid, dtype=f8, count=Nsx)
             fid.seek(6 * 4 * recl, 0)
-            s_y = np.fromfile(fid, dtype=np.float64, count=Nsy)
+            s_y = np.fromfile(fid, dtype=f8, count=Nsy)
         else:
             fid.seek(5 * 4 * recl, 0)
-            s_x_lim = np.fromfile(fid, dtype=np.float64, count=2)
+            s_x_lim = np.fromfile(fid, dtype=f8, count=2)
             s_x = np.linspace(s_x_lim[0], s_x_lim[1], Nsx)
             fid.seek(6 * 4 * recl, 0)
-            s_y_lim = np.fromfile(fid, dtype=np.float64, count=2)
+            s_y_lim = np.fromfile(fid, dtype=f8, count=2)
             s_y = np.linspace(s_y_lim[0], s_y_lim[1], Nsy)
         fid.seek(7 * 4 * recl, 0)
-        s_z = np.fromfile(fid, dtype=np.float32, count=Nsz)
+        s_z = np.fromfile(fid, dtype=f4, count=Nsz)
         fid.seek(8 * 4 * recl, 0)
-        r_z = np.fromfile(fid, dtype=np.float32, count=Nrz)
+        r_z = np.fromfile(fid, dtype=f4, count=Nrz)
         fid.seek(9 * 4 * recl, 0)
-        r_r = np.fromfile(fid, dtype=np.float64, count=Nrr)
+        r_r = np.fromfile(fid, dtype=f8, count=Nrr)
         if PlotType.strip() == "irregular":
             pressure = np.zeros((Ntheta, Nsz, 1, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = 1
@@ -216,6 +225,13 @@ def read_shd_bin(
             pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = Nrz
         if xs is None:
+            if Nsx > 1 or Nsy > 1:
+                warnings.warn(
+                    f"read_shd_bin: file has Nsx={Nsx}, Nsy={Nsy} source "
+                    "positions but no xs=/ys= selector was given; returning "
+                    "the (0, 0) slot only. Pass xs=, ys= to choose another.",
+                    UserWarning, stacklevel=2,
+                )
             idxX = 0
             idxY = 0
             ifreq = 0
@@ -234,15 +250,15 @@ def read_shd_bin(
                         )
 
                         fid.seek(recnum * 4 * recl, 0)
-                        temp = np.fromfile(fid, dtype=np.float32, count=2 * Nrr)
+                        temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
 
         else:
             if ys is None:
                 raise ValueError("ys must be provided if xs is specified")
-            x_diff = np.abs(s_x - xs * 1000.0)
+            x_diff = np.abs(s_x - km_to_m(xs))
             idxX = np.argmin(x_diff)
-            y_diff = np.abs(s_y - ys * 1000.0)
+            y_diff = np.abs(s_y - km_to_m(ys))
             idxY = np.argmin(y_diff)
 
             for itheta in range(Ntheta):
@@ -257,7 +273,7 @@ def read_shd_bin(
                         )
 
                         fid.seek(recnum * 4 * recl, 0)
-                        temp = np.fromfile(fid, dtype=np.float32, count=2 * Nrr)
+                        temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
 
     return {
@@ -397,12 +413,27 @@ def read_arr_file(filepath: Union[str, Path]):
     Arrivals
         Typed result with:
         - ``by_receiver``: nested list ``[isd][ird][irr]`` of per-receiver
-          arrival dicts (amplitudes, phases, delays, delay_imag,
-          src_angles, rcv_angles, n_top_bounces, n_bot_bounces).
+          arrival dicts.
         - ``arrivals``: flat list of per-arrival records (same data,
           un-nested) for filter/top_n/in_window chain methods.
         - ``frequencies``, ``source_depths``, ``receiver_depths``,
           ``receiver_ranges`` as typed attributes.
+
+        Per-arrival fields, with units (ArrMod.f90:WriteArrivalsASCII):
+
+        - ``amplitudes`` : complex (linear pressure, dimensionless).
+        - ``phases`` : radians.
+        - ``delays`` : real part of travel time in **seconds**.
+        - ``delay_imag`` : imaginary part of travel time in **seconds**;
+          carries volume-attenuation loss so that
+          ``exp(ω · delay_imag) = exp(-α·r)`` reproduces the standard
+          Nepers attenuation when summed by ``delayandsum``.
+        - ``src_angles``, ``rcv_angles`` : ray angles in **degrees**,
+          measured from the horizontal (positive downward).
+        - ``n_top_bounces``, ``n_bot_bounces`` : integer bounce counts.
+
+        Depths are in **m**, ranges in **m** (the reader converts from
+        km on disk), frequencies in **Hz**.
     """
     filepath = Path(filepath)
 
@@ -1051,9 +1082,10 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
                     verbose=verbose, level='debug')
 
         r_rcv, _ = _read_vector(f)
-        r_rcv = r_rcv * 1000.0  # km → m
+        r_rcv = km_to_m(r_rcv)
         pos_temp = _read_sz_rz(f)
         r_offsets, N_offsets = _read_vector(f)
+        r_offsets = km_to_m(r_offsets)
 
         log_message('oalib_reader',
                     f"Number of receiver range offsets = {N_offsets}",
@@ -1079,7 +1111,7 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         "comp": comp,
         "M_limit": M_limit,
         "N_prof": N_prof,
-        "r_prof": r_prof * 1000.0,  # Convert to meters
+        "r_prof": km_to_m(r_prof),
         "pos": {
             "s": {"z": pos_temp["sz"]},
             "r": {"z": pos_temp["rz"], "r": r_rcv, "ro": r_offsets},
@@ -1154,15 +1186,15 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
         "M_limit": M_limit,
         "N_r_prof": N_r_prof,
         "N_theta_prof": N_theta_prof,
-        "r_prof": r_prof * 1000.0,  # Convert to meters
+        "r_prof": km_to_m(r_prof),
         "theta_prof": theta_prof,
         "pos": {
             "s": {"z": pos_temp["sz"]},
             "r": {
                 "z": pos_temp["rz"],
-                "r": r_rcv * 1000.0,  # Convert to meters
+                "r": km_to_m(r_rcv),
                 "theta": theta_rcv,
-                "ro": r_offsets,
+                "ro": km_to_m(r_offsets),
             },
             "Nro": N_offsets,
         },

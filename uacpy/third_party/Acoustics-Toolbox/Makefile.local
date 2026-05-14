@@ -1,8 +1,0 @@
-# Auto-generated Makefile.local for OALIB (Acoustics-Toolbox)
-export FC=gfortran
-# OpenMP enabled and single-export FFLAGS
-export FFLAGS="-march=native -O2 -ffast-math -funroll-loops -fomit-frame-pointer -mtune=native -I../misc -I../tslib -fopenmp"
-export RM=rm
-export CC=gcc
-export CFLAGS=-g -fopenmp
-export LAPACK_LIBS=-llapack

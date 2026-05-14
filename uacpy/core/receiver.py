@@ -5,6 +5,8 @@ Receiver class for defining hydrophones and receiver arrays
 import numpy as np
 from typing import Union, List, Optional
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 class Receiver:
     """
@@ -63,7 +65,7 @@ class Receiver:
     ):
         valid_types = ('grid', 'line')
         if receiver_type not in valid_types:
-            raise ValueError(
+            raise ConfigurationError(
                 f"receiver_type must be one of {list(valid_types)}, "
                 f"got {receiver_type!r}"
             )
@@ -75,28 +77,36 @@ class Receiver:
         self.ranges = np.atleast_1d(np.array(ranges, dtype=np.float64))
 
         if self.depths.size < 1:
-            raise ValueError("receiver depths must contain at least one value, got empty array")
+            raise ConfigurationError(
+                "receiver depths must contain at least one value, got empty array"
+            )
         if self.ranges.size < 1:
-            raise ValueError("receiver ranges must contain at least one value, got empty array")
+            raise ConfigurationError(
+                "receiver ranges must contain at least one value, got empty array"
+            )
 
         if np.any(~np.isfinite(self.depths)):
-            raise ValueError(
-                f"receiver depths must be finite (no NaN/inf), got {self.depths.tolist()}"
+            raise ConfigurationError(
+                f"receiver depths must be finite (no NaN/inf), got "
+                f"{self.depths.tolist()}"
             )
 
         if np.any(~np.isfinite(self.ranges)):
-            raise ValueError(
-                f"receiver ranges must be finite (no NaN/inf), got {self.ranges.tolist()}"
+            raise ConfigurationError(
+                f"receiver ranges must be finite (no NaN/inf), got "
+                f"{self.ranges.tolist()}"
             )
 
         if np.any(self.depths < 0):
-            raise ValueError(
-                f"receiver depths must be non-negative (down from surface), got {self.depths.tolist()}"
+            raise ConfigurationError(
+                f"receiver depths must be non-negative (down from surface), "
+                f"got {self.depths.tolist()}"
             )
 
         if np.any(self.ranges < 0):
-            raise ValueError(
-                f"receiver ranges must be non-negative (outward from source), got {self.ranges.tolist()}"
+            raise ConfigurationError(
+                f"receiver ranges must be non-negative (outward from source), "
+                f"got {self.ranges.tolist()}"
             )
 
         if receiver_type == 'line':
@@ -106,9 +116,9 @@ class Receiver:
                 elif len(self.depths) == 1:
                     self.depths = np.full_like(self.ranges, self.depths[0])
                 else:
-                    raise ValueError(
-                        "For receiver_type='line', depths and ranges must have "
-                        "same length or one must be scalar"
+                    raise ConfigurationError(
+                        "For receiver_type='line', depths and ranges must "
+                        "have the same length or one must be scalar"
                     )
         else:
             from uacpy.core.environment import _require_strictly_increasing

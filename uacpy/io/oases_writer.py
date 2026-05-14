@@ -25,6 +25,7 @@ from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.io.units import m_to_km
 
 
 def _write_oases_header(
@@ -37,31 +38,15 @@ def _write_oases_header(
 
 
 def _inject_volume_attenuation(options: str, env: 'Environment') -> str:
-    """Append the ``env.absorption`` marker character to the OASES option string.
-
-    OASES itself does not implement dedicated T (Thorp) / F (Francois-Garrison) /
-    B (biological) option letters — empirical Skretting & Leroy attenuation is
-    applied automatically to any water layer with AC=0. This helper records the
-    user's chosen formula in the option string so downstream tools and the user
-    can still see what was requested. OASES prints ``UNKNOWN OPTION`` for
-    letters it does not recognise but still runs to completion.
-
-    Parameters
-    ----------
-    options : str
-        Existing option string. May contain whitespace separators.
-    env : Environment
-        Environment whose ``absorption`` field drives the marker.
+    """No-op kept as the public symbol — the OASES Block II letters
+    ``T``, ``F``, ``B`` already have sub-model-specific meanings (OAST
+    'T' = TL output, OASR 'B' = Biot P-Slow, etc.), so injecting the
+    Acoustics-Toolbox ``TopOpt`` codes here can flip OASES into the
+    wrong path. OASES applies empirical Skretting-Leroy attenuation
+    automatically to any water layer with AC=0; the user can read
+    ``env.absorption`` to see which formula uacpy intended.
     """
-    absorption = getattr(env, 'absorption', None)
-    if absorption is None:
-        return options
-    marker = absorption.topopt_code()
-    if marker not in ('T', 'F', 'B'):
-        return options
-    if marker in options.split():
-        return options
-    return options + ' ' + marker
+    return options
 
 
 def _extract_bottom_props(bottom: BoundaryProperties) -> dict:
@@ -215,6 +200,31 @@ def _count_bottom_layers(env: Environment) -> int:
     if env.has_layered_bottom():
         return len(env.bottom.layers)
     return 0
+
+
+_OASES_MAX_SSP_LAYERS = 15
+
+
+def _cap_ssp_layers(
+    ssp_data: np.ndarray,
+    max_layers: int = _OASES_MAX_SSP_LAYERS,
+) -> np.ndarray:
+    """Subsample an SSP to at most ``max_layers`` rows.
+
+    OASES integrates the per-layer wavenumber kernels analytically, and
+    long n^2-linear chains (CS<0 gradient encoding) accumulate
+    cancellation error that shows up as TL bias above ~15 water layers
+    in practice. ``oases_gen.tex`` recommends keeping the SSP coarse.
+    The first and last rows are always preserved so the layer interfaces
+    still pin to env.depth, with evenly-spaced intermediate points.
+    """
+    if len(ssp_data) <= max_layers:
+        return ssp_data
+    step = max(1, len(ssp_data) // (max_layers - 1))
+    indices = list(range(0, len(ssp_data), step))
+    if indices[-1] != len(ssp_data) - 1:
+        indices.append(len(ssp_data) - 1)
+    return ssp_data[sorted(set(indices)), :]
 
 
 def _format_upper_halfspace(env: Environment) -> str:
@@ -422,23 +432,10 @@ def write_oast_input(
             offdb=kwargs.get('offdb'),
         )
 
-        # Block IV: Environment
-        # OASES uses CS = -999.999 to indicate continuous SVP gradient to next layer
-        # Reference: oases_gen.tex documentation
-
-        # Subsample SSP - OASES works best with ~10-15 layers for complex SSPs
-        # Too many layers with -999.999 gradient flag causes numerical issues
-        max_ssp_layers = 15
-        if len(ssp_data) > max_ssp_layers:
-            # Keep first, last, and evenly spaced points
-            indices = list(range(0, len(ssp_data), max(1, len(ssp_data) // (max_ssp_layers - 1))))
-            if indices[-1] != len(ssp_data) - 1:
-                indices.append(len(ssp_data) - 1)
-            # Remove duplicates and sort
-            indices = sorted(set(indices))
-            ssp_subset = ssp_data[indices, :]
-        else:
-            ssp_subset = ssp_data
+        # Block IV: Environment. OASES uses CS = -|c_next| in the
+        # Airy-layer convention to encode a continuous SSP gradient
+        # (oaseun31.f:160-192).
+        ssp_subset = _cap_ssp_layers(ssp_data)
 
         # Special case: if isovelocity (all sound speeds are the same), write only 1 layer
         # Check if all sound speeds are equal within tolerance
@@ -520,43 +517,45 @@ def write_oast_input(
 
         # Block VIII: Range axes (for plots) — OASES expects km on disk.
         # RMIN RMAX RLEN RINC
-        f.write(f"{plot_rmin / 1000.0:.1f} {plot_rmax / 1000.0:.1f} 20 1\n")
-
-        # Block IX: Transmission loss axes (only for options A, D, T, I, or
-        # the ANSPEC / TLDEP plot flags — see oast.tex Table "BLOCK IX").
-        # Emitting this block unconditionally would be consumed as noise by
-        # the next block when no TL plot is requested.
-        opt_tokens = options.split()
-        needs_tl_axes = (
-            any(tok in opt_tokens for tok in ('A', 'D', 'T', 'I'))
-            or 'ANSPEC' in options
-            or 'TLDEP' in options
+        f.write(
+            f"{float(m_to_km(plot_rmin)):.1f} "
+            f"{float(m_to_km(plot_rmax)):.1f} 20 1\n"
         )
-        if needs_tl_axes:
-            # TMIN TMAX TLEN TINC
+
+        # Block gating per oast.tex §IX-XII:
+        #   IX (TL axes):       options A, D, T
+        #   X  (depth axes):    options C, D
+        #   XI (contour levels):options C, f
+        #   XII (SVP axes):     option Z
+        opt_tokens = options.split()
+
+        def has(*codes):
+            return any(tok in opt_tokens for tok in codes)
+
+        if has('A', 'D', 'T'):
+            # Block IX — TMIN TMAX TLEN TINC
             f.write("20 100 12 10\n")
 
-        # Block X: Depth axes (for contour plots)
-        # DUP DLO DLN DIN
-        f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
+        if has('C', 'D'):
+            # Block X — DUP DLO DLN DIN (depth axes)
+            f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
 
-        # Block XI: Contour levels
-        # ZMIN ZMAX ZINC
-        f.write("40 100 10\n")
+        if has('C', 'f'):
+            # Block XI — ZMIN ZMAX ZINC (contour levels)
+            f.write("40 100 10\n")
 
-        # Block XII: SVP axes (if option Z used)
-        # VLEF VRIG VLEN VINC
-        c_min = float(ssp_data[:, 1].min())
-        c_max = float(ssp_data[:, 1].max())
-        c_range = c_max - c_min
-        if c_range < 1.0:  # For isovelocity, add some margin
-            c_range = c_ref * 0.1
-        c_plot_min = c_min - c_range * 0.05
-        c_plot_max = c_max + c_range * 0.05
-        c_inc = max(10, c_range / 10)
-        f.write(f"{c_plot_min:.1f} {c_plot_max:.1f} 12 {c_inc:.1f}\n")
-        # DVUP DVLO DVLN DVIN
-        f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
+        if has('Z'):
+            # Block XII — VLEF VRIG VLEN VINC + DVUP DVLO DVLN DVIN
+            c_min = float(ssp_data[:, 1].min())
+            c_max = float(ssp_data[:, 1].max())
+            c_range = c_max - c_min
+            if c_range < 1.0:
+                c_range = c_ref * 0.1
+            c_plot_min = c_min - c_range * 0.05
+            c_plot_max = c_max + c_range * 0.05
+            c_inc = max(10, c_range / 10)
+            f.write(f"{c_plot_min:.1f} {c_plot_max:.1f} 12 {c_inc:.1f}\n")
+            f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
 
 
 def write_oasn_input(
@@ -671,9 +670,10 @@ def write_oasn_input(
             integration_offset=integration_offset,
         )
 
-        # Block IV: Environment
-        # NL = number of layers (including halfspaces and all water layers)
-        n_water_layers = len(ssp_data)
+        # Block IV: Environment. NL = total layers (upper halfspace +
+        # water + sediments + bottom halfspace).
+        ssp_subset = _cap_ssp_layers(ssp_data)
+        n_water_layers = len(ssp_subset)
         n_sed_layers = _count_bottom_layers(env)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
@@ -681,19 +681,14 @@ def write_oasn_input(
         # Upper halfspace (from env.surface)
         f.write(f"{_format_upper_halfspace(env)}\n")
 
-        # Water layers from SSP using OASES Airy-layer convention.
-        # Per oaseun31.f:160-192, the SSP-gradient signal is:
-        #   CC > 0 and CS < 0  →  n^2-linear layer with speed varying from
-        #   CC at the top of THIS layer to -CS at the top of the NEXT layer.
-        # Negative CC (the previous implementation) instead matches the
-        # Cp<0, Cs>=0 branch at oaseun31.f:302, which unconditionally flags
-        # the layer TRANSVERSELY ISOTROPIC. OASN then tries to read 5 complex
-        # tensor constants + density and dies with "End of file" in inenvi_.
-        # This mirrors OAST writer's gradient encoding at lines 340-349.
-        for i in range(len(ssp_data)):
-            d, c = ssp_data[i]
-            if i < len(ssp_data) - 1:
-                c_next = float(ssp_data[i + 1, 1])
+        # Water layers from SSP using OASES Airy-layer convention
+        # (oaseun31.f:160-192): CC > 0 and CS < 0 declare an n^2-linear
+        # layer whose speed varies from CC at the top of THIS layer to
+        # -CS at the top of the NEXT layer.
+        for i in range(len(ssp_subset)):
+            d, c = ssp_subset[i]
+            if i < len(ssp_subset) - 1:
+                c_next = float(ssp_subset[i + 1, 1])
                 cs = -abs(c_next)
             else:
                 cs = 0
@@ -749,11 +744,14 @@ def write_oasn_input(
                 level_ds = ds.get('level', 180.0)
                 f.write(f"{z_ds:.2f} {x_ds:.3f} {y_ds:.3f} {level_ds:.1f}\n")
 
-            # Wavenumber sampling for discrete sources
-            # CMIN CMAX
+            # Wavenumber sampling for discrete sources.
+            # CMIN CMAX. ``cmaxs`` defaults to OASN-manual 1E8 for
+            # surface-style noise integrations; let the caller pin it
+            # via kwargs for fast-bottom critical-angle work.
             c_water_min = float(ssp_data[:, 1].min())
-            f.write(f"{c_water_min*0.95:.1f} {c_p*1.05:.1f}\n")
-            # NW IC1 IC2 (-1 for automatic)
+            cmins = kwargs.get('cmins_discrete', c_water_min * 0.95)
+            cmaxs = kwargs.get('cmaxs_discrete', 1.0e8)
+            f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
             f.write("-1 1 2000\n")
 
         # Block X: Replica parameters (if option 'R' is present)
@@ -765,14 +763,21 @@ def write_oasn_input(
             replica_xmin = kwargs.get('replica_xmin', 0.1)  # km
             replica_xmax = kwargs.get('replica_xmax', 10.0)  # km
             replica_nx = kwargs.get('replica_nx', 50)
+            replica_ymin = kwargs.get('replica_ymin', 0.0)  # km
+            replica_ymax = kwargs.get('replica_ymax', 0.0)  # km
+            replica_ny = kwargs.get('replica_ny', 1)
 
             f.write(f"{replica_zmin:.2f} {replica_zmax:.2f} {replica_nz}\n")
             f.write(f"{replica_xmin:.3f} {replica_xmax:.3f} {replica_nx}\n")
-            f.write("0 0 1\n")  # y-range (omnidirectional)
+            f.write(f"{replica_ymin:.3f} {replica_ymax:.3f} {replica_ny}\n")
 
-            # Wavenumber sampling for replicas
+            # Wavenumber sampling for replicas (CMIN CMAX). Same
+            # OASN-manual 1E8 default for the upper bound as the
+            # discrete-source block — overridable via kwargs.
             c_water_min = float(ssp_data[:, 1].min())
-            f.write(f"{c_water_min*0.95:.1f} {c_p*1.05:.1f}\n")
+            cmins = kwargs.get('cmins_replica', c_water_min * 0.95)
+            cmaxs = kwargs.get('cmaxs_replica', 1.0e8)
+            f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
             f.write("-1 1 2000\n")
 
 
@@ -888,17 +893,16 @@ def write_oasp_input(
     # Range parameters — public API in metres, OASES expects km on disk.
     r_min_m = float(receiver.ranges.min())
     r_max_m = float(receiver.ranges.max())
-    r1_km = float(kwargs.get('range_start', r_min_m)) / 1000.0
+    r1_km = float(m_to_km(kwargs.get('range_start', r_min_m)))
 
     if 'range_step' in kwargs:
-        dr_km = float(kwargs['range_step']) / 1000.0
+        dr_km = float(m_to_km(kwargs['range_step']))
     else:
-        # Auto-calculate based on receiver spacing
         n_ranges = len(receiver.ranges)
         if n_ranges > 1:
-            dr_km = (r_max_m - r_min_m) / (n_ranges - 1) / 1000.0
+            dr_km = float(m_to_km((r_max_m - r_min_m) / (n_ranges - 1)))
         else:
-            dr_km = 1.0  # Default 1 km
+            dr_km = 1.0
 
     nr = len(receiver.ranges)
 
@@ -907,9 +911,12 @@ def write_oasp_input(
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
     cmin, cmax = _oases_wavenumber_bounds(ssp_data, c_p, c_p_ceiling=1e9)
 
-    # Options string
+    # Options string. Default is single-component (normal stress / pressure)
+    # plus the complex-contour integration flag. ``V`` was historically
+    # included for vertical velocity but the .trf reader keeps only the
+    # first NOUT component, so emitting V silently discarded it.
     if options is None:
-        options = 'N V J'  # Normal stress, vertical velocity, complex contour
+        options = 'N J'
 
     options = _inject_volume_attenuation(options, env)
 
@@ -920,9 +927,10 @@ def write_oasp_input(
         # FRC COFF [IT VS VR for Doppler]
         f.write(f"{center_freq:.1f} {integration_offset}\n")
 
-        # Block IV: Environment
-        # NL = number of layers (including halfspaces and all water layers)
-        n_water_layers = len(ssp_data)
+        # Block IV: Environment. NL = total layers (upper halfspace +
+        # water + sediments + bottom halfspace).
+        ssp_array = np.asarray(_cap_ssp_layers(ssp_data), dtype=float).reshape(-1, 2)
+        n_water_layers = len(ssp_array)
         n_sed_layers = _count_bottom_layers(env)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
@@ -930,10 +938,17 @@ def write_oasp_input(
         # Upper halfspace (from env.surface)
         f.write(f"{_format_upper_halfspace(env)}\n")
 
-        # Water layers from SSP
-        for i in range(len(ssp_data)):
-            d, c = ssp_data[i]
-            f.write(f"{d:.2f} {c:.2f} 0 0.0 0 1.0 0 0 0\n")
+        # Water layers from SSP. Per oast.tex §IV (Airy-layer convention):
+        # CS < 0 carries the bottom-of-layer compressional speed so OASES
+        # treats the layer as fluid with 1/c^2 linear. Last layer leaves
+        # CS = 0 since the next interface is the sediment block.
+        for i in range(len(ssp_array)):
+            d, c = ssp_array[i]
+            if i < len(ssp_array) - 1:
+                cs = -abs(float(ssp_array[i + 1, 1]))
+            else:
+                cs = 0.0
+            f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0 0 0 0\n")
 
         # Sediment layers + bottom halfspace (shared helper, B15)
         _emit_bottom_layers(

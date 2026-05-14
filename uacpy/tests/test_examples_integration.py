@@ -2,21 +2,24 @@
 Auto-discovered smoke tests for uacpy/examples/.
 
 Every example runs end-to-end as a subprocess with a generous timeout.
-All examples are tagged ``slow`` so the default ``pytest -m "not slow"``
-run skips them; the on-demand / nightly path runs them via plain
-``pytest`` or ``pytest -m slow``.
+Examples that drive a native binary (Bellhop, Kraken, RAM, …) are
+additionally tagged ``slow`` so they're skipped by the default
+``pytest -m "not slow"`` run; pure-Python examples (signal processing,
+canonical presets, ambient noise) run on the fast path.
 
-Documentation-style checks of the examples (e.g. "examples 11+ must not
-import example_helpers") are NOT here — those are static lints, see
-``scripts/check_example_helpers.py``.
+The marker assignment is derived statically from each example's
+``from uacpy.models import ...`` line so it can't drift away from the
+example's actual dependencies.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Set
 
 import pytest
 
@@ -24,16 +27,20 @@ import uacpy
 
 EXAMPLES_DIR = Path(uacpy.__file__).parent / "examples"
 
-# Examples that import (and run) at least one OASES wrapper — must be
-# de-selectable with `-m "not requires_oases"` when the OASES binaries are
-# absent. Docstring-only mentions of OASES don't count.
-_OASES_STEMS = {
-    "example_02_sound_speed_profiles",
-    "example_03_multi_frequency",
-    "example_07_all_models_comparison",
-    "example_08_long_range",
-    "example_13_oases_suite",
-}
+# Model classes whose ``.run(...)`` spawns one of the OALIB / RAM
+# Fortran/C++ binaries shipped by ``install.sh``.
+_BINARY_MODEL_CLASSES = frozenset({
+    "Bellhop", "BellhopCUDA",
+    "Kraken", "KrakenC", "KrakenField",
+    "Scooter", "SPARC", "Bounce",
+    "RAM",
+})
+
+# Sub-classes of OASES — academic-licensed, downloaded by
+# ``install.sh --oases yes``. ``OASES`` is the factory.
+_OASES_MODEL_CLASSES = frozenset({
+    "OAST", "OASN", "OASR", "OASP", "OASES",
+})
 
 # Examples that need a noticeably longer subprocess timeout (deep-ocean /
 # multi-model / Lytaev-grid runs may take several minutes each).
@@ -50,9 +57,30 @@ ALL_EXAMPLES = sorted(
 )
 
 
+def _imported_names(path: Path) -> Set[str]:
+    """Names brought into an example's namespace via ``from X import Y``.
+
+    Module-level only (no ``import inside-a-function`` parsing); covers
+    every model-class import pattern actually used by examples/.
+    """
+    tree = ast.parse(path.read_text())
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
 def _example_marks(example: Path):
-    marks = [pytest.mark.requires_binary, pytest.mark.slow]
-    if example.stem in _OASES_STEMS:
+    """Derive (requires_binary, slow, requires_oases?) from imports."""
+    imported = _imported_names(example)
+    needs_oases = bool(imported & _OASES_MODEL_CLASSES)
+    needs_binary = needs_oases or bool(imported & _BINARY_MODEL_CLASSES)
+    marks = []
+    if needs_binary:
+        marks.extend([pytest.mark.requires_binary, pytest.mark.slow])
+    if needs_oases:
         marks.append(pytest.mark.requires_oases)
     return marks
 
@@ -64,18 +92,19 @@ def _params(examples):
     ]
 
 
-def _run(example: Path, timeout: int) -> subprocess.CompletedProcess:
+def _run(
+    example: Path, timeout: int, cwd: Path | None = None,
+) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     # Make sure the in-tree `uacpy` package is importable when `pip install -e`
-    # was not used. This mirrors what the example would do when run by hand.
+    # was not used.
     env["PYTHONPATH"] = os.pathsep.join(
         [str(EXAMPLES_DIR.parent.parent), env.get("PYTHONPATH", "")]
     )
-    # Force matplotlib non-interactive in case the example imports pyplot.
     env.setdefault("MPLBACKEND", "Agg")
     return subprocess.run(
         [sys.executable, str(example)],
-        cwd=str(EXAMPLES_DIR),
+        cwd=str(cwd) if cwd is not None else str(EXAMPLES_DIR),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -83,13 +112,41 @@ def _run(example: Path, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _check_pngs_well_formed(example_dir: Path) -> None:
+    """Every PNG the example wrote in its working directory must carry a
+    valid PNG signature and be at least 1 KiB. A 0-byte PNG, or a binary
+    that doesn't start with the magic, almost always means a silent
+    matplotlib regression that ``returncode == 0`` would miss.
+    """
+    for png in example_dir.glob("*.png"):
+        # Ignore tiny PNGs (icons, etc.) — generated figures from
+        # examples are typically 50-500 KiB.
+        size = png.stat().st_size
+        assert size >= 1024, (
+            f"{png.name}: {size} bytes is too small to be a real plot"
+        )
+        with png.open("rb") as fh:
+            header = fh.read(8)
+        assert header == _PNG_SIG, (
+            f"{png.name}: missing PNG signature (got {header!r})"
+        )
+
+
 @pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
-def test_example_runs(example):
-    """Run an example end-to-end and assert it exits cleanly."""
+def test_example_runs(example, tmp_path):
+    """Run an example end-to-end, verify clean exit + any PNG output."""
     timeout = 240 if example.stem in _LONG_TIMEOUT_STEMS else 120
-    result = _run(example, timeout=timeout)
+    # Run inside a per-test scratch dir so PNG droppings stay isolated
+    # and we can assert on them without polluting examples/.
+    workdir = tmp_path / example.stem
+    workdir.mkdir()
+    result = _run(example, timeout=timeout, cwd=workdir)
     assert result.returncode == 0, (
         f"{example.name} failed (rc={result.returncode}):\n"
         f"--- stdout ---\n{result.stdout[-2000:]}\n"
         f"--- stderr ---\n{result.stderr[-2000:]}"
     )
+    _check_pngs_well_formed(workdir)

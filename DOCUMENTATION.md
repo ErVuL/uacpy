@@ -1015,6 +1015,48 @@ honour both transparently. Cross-model agreement is verified in
 `tests/test_cross_model_broadband.py` (~6 dB of Scooter on a Pekeris
 reference; IFFT envelope peaks within 100 ms).
 
+**Worked example: Bellhop BROADBAND → p(t).**
+
+```python
+import numpy as np
+import uacpy
+from uacpy.models import Bellhop, RunMode
+
+env = uacpy.Environment(
+    name='Pekeris', bathymetry=100.0, ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1700.0,
+        density=1.8, attenuation=0.5,
+    ),
+)
+source = uacpy.Source(depths=50.0, frequencies=200.0)         # fc = 200 Hz
+receiver = uacpy.Receiver(depths=50.0, ranges=2000.0)
+
+# 1) Run BROADBAND. Bellhop builds H(f) from arrivals at fc and a default
+#    grid of DEFAULT_BROADBAND_N_FREQS bins around fc.
+tf = Bellhop().run(env, source, receiver, run_mode=RunMode.BROADBAND)
+assert tf.phase_reference == 'travelling_wave'                # set by Bellhop
+assert tf.coords['frequency'].size == 128                     # default grid
+
+# 2a) Easiest path: ask the Field to synthesise p(t) at one (depth, range).
+#     Honours phase_reference internally; no manual IFFT.
+ts = tf.synthesize_time_series(depth=50.0, range=2000.0)
+plt.plot(ts.coords['time'], ts.data)                          # ts is a Field
+                                                              # of shape (n_t,)
+
+# 2b) Manual IFFT for advanced consumers. With phase_reference =
+#     'travelling_wave', H(f) is the engineering propagator (exp(-i k0 r)),
+#     so 2·Re[ifft(H)] lands the causal arrival at t = r/c0:
+H = tf.data[0, 0, :]                                          # shape (n_f,)
+p_t = 2.0 * np.real(np.fft.ifft(H))
+# Causal arrival lands at t = r / c0 ≈ 2000 / 1500 = 1.33 s
+```
+
+For SPARC `RunMode.TIME_SERIES` (`phase_reference == 'time_domain_native'`)
+the wrapper returns `p(t)` directly — no IFFT step, just plot the real
+data. The two synthesise paths above degenerate to a pass-through when
+called on a time-domain result.
+
 ### Filtering helpers
 
 `Rays` and `Arrivals` are pure data containers — filtering helpers
@@ -1065,19 +1107,24 @@ arrivals.plot()                                   # → plot_arrivals
 rays.plot(env=env)                                # → plot_rays
 ```
 
-The uacpy rcParams (grid, fonts, colours) are applied automatically on
-import. To re-apply after fiddling with matplotlib defaults:
+`uacpy.visualization` does **not** mutate `matplotlib.rcParams` on
+import; the default rendering inherits whatever the user has set.
+Apply the bundled professional style globally with:
 
 ```python
 from uacpy.visualization.style import apply_professional_style
 apply_professional_style()
 ```
 
+Note that this call mutates process-global `mpl.rcParams` and persists
+across subsequent plots — wrap in `matplotlib.rc_context()` if you
+want it scoped.
+
 ### The 13 helpers
 
 | Helper | Takes | Notes |
 |---|---|---|
-| `plot_field(field, env=None, *, value='tl', projection='cartesian', stacked=False, contours=None, ...)` | `Field` | Auto-shape: 1 surviving coord → line, 2 → heatmap. `projection='polar'` for 2-D (depth, range). `stacked=True` for 2-D `(X, time)` → waterfall. `value` ∈ `'tl' \| 'mag' \| 'phase' \| 'real' \| 'imag'`. |
+| `plot_field(field, env=None, *, value='tl', stacked=False, contours=None, ...)` | `Field` | Auto-shape: 1 surviving coord → line, 2 → heatmap. `stacked=True` for 2-D `(X, time)` → waterfall. `value` ∈ `'tl' \| 'mag' \| 'phase' \| 'real' \| 'imag'`. |
 | `compare(fields, labels=None, *, value='tl')` | list of 1-D `Field`s | Overlay multiple sliced fields on one axes. |
 | `compare_models(fields, labels=None, *, env=None, ncols=None, contours=None, ...)` | list/dict of 2-D `Field`s | Side-by-side heatmap grid with one shared colourbar. |
 | `plot_rays(rays, *, env=None, color_by='bounces', ...)` | `Rays` | Direct/surface/bottom/both colour-coded; auto-overlays seafloor and source/receivers. |
@@ -1104,7 +1151,6 @@ caller can pass a pre-built axes for multi-panel layouts) and returns
 | `plot_transfer_function(tf)` | `plot_field(tf)` |
 | `plot_transfer_function_slice(tf, f=200)` | `plot_field(tf.at(frequency=200))` |
 | `plot_time_trace(trace)` | `plot_field(trace)` |
-| `plot_transmission_loss_polar(field)` | `plot_field(field, projection='polar')` |
 | `plot_ssp(env)` / `plot_bathymetry(env)` | `plot_environment(env)` |
 
 ### Two canonical patterns
@@ -1129,7 +1175,7 @@ Reachable as `uacpy.acoustic_signal`. Three sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `uacpy.acoustic_signal.generation` | Waveforms (CW, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `cw`, `sweep`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
+| `uacpy.acoustic_signal.generation` | Waveforms (tone bursts, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
 | `uacpy.acoustic_signal.processing` | Beamforming, source/noise scaling, Fourier synthesis | `planewave_rep`, `beamform`, `add_noise`, `fourier_synthesis` |
 | `uacpy.acoustic_signal.analysis` | Class-based estimators | `PSD`, `PPSD`, `Spectrogram`, `SEL`, `FRF`, `FKTransform` |
 
@@ -1139,7 +1185,7 @@ Three canonical patterns:
 import uacpy
 sig = uacpy.acoustic_signal
 
-# 1. Build a waveform — chirps return (signal, time); cw/sweep return signal only
+# 1. Build a waveform — chirps and tone bursts return (signal, time).
 s, t = sig.lfm_chirp(fmin=100.0, fmax=1000.0, T=1.0, sample_rate=10000)
 
 # 2. Add Gaussian noise sized for SL/NL around carrier (fc, BW)

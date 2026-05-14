@@ -126,5 +126,6 @@ class ConfigurationError(UACPYError):
     """Raised when user-supplied inputs to a model wrapper or core class
     fail validation (bad parameter values, illegal combinations of
     flags, missing required kwargs, malformed envs, etc.). The generic
-    "bad inputs" exception across the package."""
+    "bad inputs" exception across the package. Catch via
+    ``except ConfigurationError`` or, more broadly, ``except UACPYError``."""
     pass

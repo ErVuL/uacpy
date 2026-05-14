@@ -370,18 +370,15 @@ class TestOASESFactory:
     def test_coherent_tl_broadband_routes_to_oasp(self):
         assert isinstance(OASES(broadband=True), OASP)
 
-    def test_subclass_specific_kwarg_silently_dropped(self):
-        """OASES() filters kwargs against the chosen sub-class signature
-        and silently drops irrelevant keys per uacpy convention. E.g.
-        ``angles=`` belongs to OASR; routing to OAST must drop it
-        instead of raising ``TypeError``."""
-        m = OASES(
-            run_mode=RunMode.COHERENT_TL, verbose=False,
-            angles=np.linspace(0, 90, 10),  # OASR-only
-        )
-        assert isinstance(m, OAST)
-        # The dropped kwarg must NOT have been stored on the instance.
-        assert not hasattr(m, 'angles')
+    def test_subclass_specific_kwarg_raises_when_irrelevant(self):
+        """OASES() forwards kwargs verbatim to the chosen sub-class.
+        ``angles=`` belongs to OASR; routing to OAST must raise
+        ``TypeError`` so a typo or wrong-class kwarg surfaces."""
+        with pytest.raises(TypeError):
+            OASES(
+                run_mode=RunMode.COHERENT_TL, verbose=False,
+                angles=np.linspace(0, 90, 10),  # OASR-only
+            )
 
     def test_subclass_specific_kwarg_forwarded_when_relevant(self):
         """When the kwarg DOES belong to the chosen sub-class, the
@@ -393,10 +390,11 @@ class TestOASESFactory:
         assert isinstance(m, OASR)
         np.testing.assert_array_equal(m.angles, angles)
 
-    def test_unrelated_garbage_kwarg_silently_dropped(self):
-        """A kwarg that no class consumes is dropped without error."""
-        m = OASES(verbose=False, totally_made_up_kwarg=42)
-        assert isinstance(m, OAST)
+    def test_unrelated_garbage_kwarg_raises_typeerror(self):
+        """A kwarg that no class consumes must raise ``TypeError`` so
+        typos do not silently change the run."""
+        with pytest.raises(TypeError):
+            OASES(verbose=False, totally_made_up_kwarg=42)
 
     def test_factory_forwards_base_kwargs(self):
         """Base-class kwargs (verbose, timeout, collapse) must pass
@@ -409,11 +407,12 @@ class TestOASESFactory:
         assert m.timeout == 42.0
         assert m._collapse['bottom'] == 'median'
 
-    def test_env_absorption_propagates_to_options_string(self, tmp_path):
-        """Francois–Garrison from env.absorption appends 'F' to the OAST
-        options string written to disk (oases.tex docs treat the letter
-        as a UNKNOWN OPTION that does not affect the run but flags the
-        chosen formula in the .dat file)."""
+    def test_env_absorption_does_not_pollute_options_string(self, tmp_path):
+        """env.absorption choice (Thorp/F-G/Biological) must NOT be
+        injected as a single-letter marker into the OASES options
+        string — those letters collide with OASES Block II semantics
+        (OAST 'T' = TL plot, OASR 'B' = Biot P-Slow). Users read the
+        chosen formula from ``env.absorption`` directly."""
         from uacpy.core import Environment, Source, Receiver
         from uacpy.core.absorption import FrancoisGarrison
         from uacpy.io.oases_writer import write_oast_input
@@ -428,9 +427,10 @@ class TestOASESFactory:
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
         dat = tmp_path / 'oast.dat'
         write_oast_input(dat, env, source, receiver)
-        contents = dat.read_text()
-        # The single-letter formula marker appears on the options line.
-        assert ' F' in contents.splitlines()[1]
+        opt_tokens = set(dat.read_text().splitlines()[1].split())
+        assert 'F' not in opt_tokens, (
+            f"absorption letter 'F' leaked into OAST options: {opt_tokens}"
+        )
 
 
 # Integration test to verify all OASES models can be imported and instantiated

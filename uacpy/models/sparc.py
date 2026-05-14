@@ -34,9 +34,12 @@ from uacpy.io.oalib_writer import (
 )
 
 
-# SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 and tslib/sourceMod.f90)
-# Pos 1: pulse shape (strictly validated in sparc.f90 SELECT CASE).
-_PULSE_TYPE_POS1 = set('PRASHNGFBMTC')
+# SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
+# Pos 1: pulse shape — the 10 letters accepted by sparc.f90's parser.
+# ``T`` and ``C`` exist in tslib/cans.f90 (the pulse evaluator) but
+# sparc.f90's GetPar rejects them with "Unknown source type" before
+# cans.f90 is reached.
+_PULSE_TYPE_POS1 = set('PRASHNGFBM')
 # Pos 2: post-processing applied to the pulse samples.
 #   'H' = pre-envelope (|analytic signal|), 'Q' = Hilbert transform.
 #   Any other character (including ' ' or 'N') means "no transform".
@@ -131,8 +134,16 @@ class SPARC(PropagationModel):
         ``'R'`` horizontal array (default) | ``'D'`` vertical array | ``'S'`` snapshot.
     pulse_type : str, optional
         4-character source-pulse code per ``sourceMod.f90``. Default ``'PN+B'``.
-        Position 1 = pulse shape (``PRASHNGFBMTC``), 2 = post-process,
-        3 = sign, 4 = filter. See `sourceMod.f90` for the full alphabet.
+        Position 1 = pulse shape (``PRASHNGFBM`` — ``T``/``C`` are listed
+        in ``cans.f90`` but rejected by ``sparc.f90``'s ``GetPar``),
+        2 = post-process, 3 = sign, 4 = filter.
+
+        ``cans.f90``'s ``'R'`` (Ricker) is defined on ``U = ω·T - 5``
+        and therefore peaks at ``T ≈ 5/(2π·F) ≈ 0.796/F``, not at
+        ``T = 0`` (the comment in ``cans.f90:32`` says "peak at F"
+        meaning at *time* ``1/F``). When aligning expected vs measured
+        arrivals downstream, treat the Ricker peak as offset by
+        ``+5/(2π·F)`` from the source pulse origin.
     n_t_out : int, optional
         Number of output time samples. Default ``501``.
     t_max : float, optional
@@ -192,7 +203,9 @@ class SPARC(PropagationModel):
         interp_ssp: Optional[str] = None,
         output_mode: str = 'R',
         pulse_type: str = 'PN+B',
-        n_t_out: int = 501,
+        # Power-of-two so the downstream np.fft.fft on this length runs
+        # in O(N log N) instead of the prime-factor 501=3*167 fallback.
+        n_t_out: int = 512,
         t_max: Optional[float] = None,
         t_start: float = -0.1,
         t_mult: float = 0.999,

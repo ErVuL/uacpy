@@ -59,6 +59,9 @@ from uacpy.core.results import Result, Modes, Field
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
+    DEFAULT_BROADBAND_N_FREQS,
+    DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+    C_LOW_FACTOR_KRAKEN,
 )
 import inspect
 import shutil
@@ -133,7 +136,13 @@ class _KrakenBase(PropagationModel):
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
         self.interp_ssp = interp_ssp
-        self.c_low = c_low
+        # Modal solver default for c_low — KRAKEN manual recommends 0
+        # to capture slow Scholte / interfacial modes; Scooter's
+        # wavenumber-integration default (positive floor) lives at
+        # core/constants.C_LOW_FACTOR.
+        self.c_low = (
+            C_LOW_FACTOR_KRAKEN * 1500.0 if c_low is None else float(c_low)
+        )
         self.c_high = c_high
         self.n_mesh = n_mesh
         self.roughness = roughness
@@ -395,18 +404,10 @@ class _KrakenBase(PropagationModel):
         else:
             basename = filepath_str
 
-        # read_modes_bin will add .moA, but Kraken produces .mod
-        # So we need to rename the file first
         mod_file = basename + '.mod'
-        moa_file = basename + '.moA'
 
-        if os.path.exists(mod_file) and not os.path.exists(moa_file):
-            shutil.copy(mod_file, moa_file)
-
-        # Check if modes file exists and is not empty
-        # Kraken produces empty files when it encounters unsupported conditions
-        # Check both .mod and .moA files (read_modes_bin expects .moA)
-        files_to_check = [mod_file, moa_file, basename + '.modfil']
+        # Kraken produces empty files when it encounters unsupported conditions.
+        files_to_check = [mod_file, basename + '.modfil']
         is_empty = False
         for check_file in files_to_check:
             if os.path.exists(check_file) and os.path.getsize(check_file) == 0:
@@ -419,7 +420,11 @@ class _KrakenBase(PropagationModel):
                 stderr=self._modes_error_message(basename),
             )
 
-        # Try to read modes, catch IndexError from reading empty binary files
+        # Kraken/KrakenC emit a single-frequency ``.mod`` file (broadband
+        # is dispatched through KrakenField, which uses
+        # ``read_field_grid``). ``freq=0.0`` selects the only bin
+        # present; ``read_modes_bin`` would otherwise fall back to
+        # closest-frequency matching.
         try:
             modes_data = read_modes_bin(basename, freq=0.0)
         except IndexError as e:
@@ -570,6 +575,10 @@ class Kraken(_KrakenBase):
         self._supports_range_dependent_bottom = False
         self._supports_layered_bottom = True
         self._supports_range_dependent_layered_bottom = False
+        # Kraken (real-arith) cannot handle elastic media; the wrapper
+        # auto-routes to KrakenC at run() time. The capability flag
+        # stays True so the projection layer does not collapse shear
+        # away before the route fires.
         self._supports_elastic_media = True
         self._supports_multi_source_depth = False
         # Modes solve an eigenproblem over the whole water column —
@@ -590,6 +599,14 @@ class Kraken(_KrakenBase):
 
         if not self.executable.exists():
             raise ExecutableNotFoundError(self.model_name, str(self.executable))
+
+    def _route_to_krakenc(self, env: Environment) -> bool:
+        """Real-arith ``kraken.exe`` does not converge on elastic media
+        or when ``leaky_modes=True``. Either case triggers an auto-route
+        to ``KrakenC``."""
+        return bool(self.leaky_modes) or env.has_elastic_bottom() or (
+            env.surface is not None and env.has_elastic_surface()
+        )
 
     def run(
         self,
@@ -626,6 +643,29 @@ class Kraken(_KrakenBase):
         Modes
         """
         run_mode = self._resolve_run_mode(run_mode)
+
+        if self._route_to_krakenc(env):
+            warnings.warn(
+                f"{self.model_name}: env carries elastic media or "
+                "leaky_modes=True; auto-routing to KrakenC "
+                "(real-arithmetic kraken.exe cannot converge).",
+                UserWarning, stacklevel=2,
+            )
+            krakenc = KrakenC(
+                c_low=self.c_low, c_high=self.c_high,
+                n_mesh=self.n_mesh, roughness=self.roughness,
+                interp_ssp=self.interp_ssp,
+                leaky_modes=self.leaky_modes,
+                top_reflection_file=self.top_reflection_file,
+                use_tmpfs=self.use_tmpfs, verbose=self.verbose,
+                work_dir=self.work_dir, cleanup=self.cleanup,
+                timeout=self.timeout,
+                mode_points_per_meter=self.mode_points_per_meter,
+            )
+            return krakenc.run(
+                env, source, receiver, run_mode=run_mode,
+                n_modes=n_modes, **kwargs,
+            )
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -818,7 +858,12 @@ class KrakenField(_KrakenBase):
         ``coherent=False`` is rejected — ``field.exe`` has no
         coupled-incoherent path.
     n_segments : int, optional
-        Range segments for RD scenarios. Default ``10``.
+        Range segments for RD scenarios. Default ``None`` lets
+        :func:`coupled_modes.segment_environment_by_range` pick segment
+        edges from the union of bathymetry / RD-SSP / RD-bottom
+        change-points, inserting intermediates wherever the gap
+        exceeds ``max_segment_length`` (2 km). Pass an explicit int
+        to override with a uniform linspace decomposition.
     mode_points_per_meter : float, optional
         Mode-depth grid density. Default ``1.5`` pts/m.
     source_beam_pattern_file : Path, optional
@@ -872,7 +917,7 @@ class KrakenField(_KrakenBase):
         mode_points_per_meter: float = 1.5,
         mode_coupling: str = 'adiabatic',
         coherent: bool = True,
-        n_segments: int = 10,
+        n_segments: Optional[int] = None,
         executable: Optional[Path] = None,
         field_executable: Optional[Path] = None,
         source_beam_pattern_file: Optional[Path] = None,
@@ -1425,12 +1470,19 @@ class KrakenField(_KrakenBase):
         Returns
         -------
         Field
-            Transfer function field with shape ``(n_depths, n_freqs, n_ranges)``
-            containing complex pressure. Axis order matches Bellhop/RAM/Scooter.
+            Transfer function field with shape
+            ``(n_depths, n_ranges, n_frequency)`` containing complex
+            pressure. Trailing-frequency convention matches
+            Bellhop/RAM/Scooter broadband outputs.
         """
         fc = float(source.frequencies[0])
         if frequencies is None:
-            frequencies = np.linspace(fc * 0.5, fc * 2.0, 64)
+            half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
+            frequencies = np.linspace(
+                max(1.0, fc * (1.0 - half_bw)),
+                fc * (1.0 + half_bw),
+                DEFAULT_BROADBAND_N_FREQS,
+            )
         frequencies = np.asarray(frequencies, dtype=float)
 
         self._log(f"Broadband: {len(frequencies)} frequencies, "

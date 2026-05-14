@@ -415,7 +415,7 @@ class Bounce(PropagationModel):
                 **self._result_kwargs(
                     source,
                     frequencies=frequency,
-                    n_pts=result.get('n_pts', 0),
+                    n_points=result.get('n_pts', 0),
                     c_low=self.c_low,
                     c_high=self.c_high,
                     rmax=rmax,

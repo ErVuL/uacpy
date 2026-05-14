@@ -17,8 +17,9 @@ Layout:
 * ``mpirams_writer`` / ``mpirams_reader`` — RAM mpiramS backend.
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
-* ``shd_utils`` — broadband ``.shd`` merging.
 * ``utils`` — shared helpers (``equally_spaced``).
+* ``units`` — unit-conversion helpers (km↔m, deg↔rad) shared by readers
+  and writers.
 * ``file_manager`` — temp-dir / tmpfs management.
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
 """
@@ -59,7 +60,6 @@ from uacpy.io.grn_reader import (
     sparc_snapshot_to_field,
 )
 from uacpy.io.utils import equally_spaced
-from uacpy.io.shd_utils import merge_shd_files
 from uacpy.io.oases_writer import (
     write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input,
 )
@@ -123,5 +123,4 @@ __all__ = [
     "read_tl_line", "read_tl_grid", "read_pcomplex_grid",
     # Utilities
     "equally_spaced",
-    "merge_shd_files",
 ]

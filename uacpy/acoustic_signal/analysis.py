@@ -433,6 +433,18 @@ class SEL:
             SEL values in Pa^2*s.
         bands : list of tuple
             Frequency bands as (low, center, high) tuples.
+
+        Notes
+        -----
+        Each chunk is split into Hann-windowed segments of length
+        ``nfft`` with ``noverlap=0``; ``scipy.signal.spectrogram`` with
+        ``scaling="spectrum"`` normalises by ``Σ w^2`` so each segment's
+        power spectrum is in Pa². No further window-correction factor is
+        applied: with no overlap the Hann taper attenuates samples near
+        segment boundaries, biasing the integral low by ≲0.5 dB on
+        stationary signals long compared to ``nfft``. For impulsive
+        signals shorter than one segment, pass ``nfft`` equal to the
+        signal length to avoid the bias entirely.
         """
         # Determine how much data to process based on integration_time
         if self.integration_time is not None:
@@ -695,14 +707,16 @@ class FRF:
         -----
         The Transfer Function (FRF) is a complex function that relates the
         input and output of a linear time-invariant (LTI) system in the
-        frequency domain. It is defined as::
+        frequency domain. Under the scipy convention ``Sxy = csd(x, y)
+        = E[X*·Y]`` it is defined as::
 
-            H1(f) = Pyx(f) / Pxx(f)
-            H2(f) = Pyy(f) / Pxy(f)
+            H1(f) = Sxy(f) / Sxx(f)
+            H2(f) = Syy(f) / Syx(f)
 
-        where ``Pxx(f)`` is the Power Spectral Density (PSD) of the input
-        signal (x) and ``Pxy(f)`` is the Cross-Power Spectral Density (CPSD)
-        between input (x) and output (y).
+        where ``Sxx`` is the input PSD and ``Sxy`` the input/output CPSD.
+        Internally the code stores ``csd(y, x) = Syx = conj(Sxy)`` in
+        the variable named ``Pxy``; the H1 expression
+        ``conj(Pxy)/Pxx`` recovers the textbook ``Sxy/Sxx``.
         """
         import numpy as np
 
@@ -1467,7 +1481,19 @@ class FKTransform:
         wavenumbers : ndarray
             Wavenumber axis (1/m).
         fk : ndarray
-            2D f-k spectrum (linear scale).
+            2D f-k power spectrum (linear scale, ``|FK|^2``).
+
+        Notes
+        -----
+        ``FK`` is the *unnormalised* output of ``np.fft.fft2``; ``fk``
+        is the squared magnitude. Neither carries a PSD normalisation:
+        no division by ``nt·nx``, ``fs·(1/dx)``, or by a window-energy
+        factor. The dB conversion in :meth:`plot` therefore reports
+        relative levels — useful for picking mode/ray slopes from the
+        f-k structure, but absolute pressure-squared values require
+        the caller to apply ``fk /= (nt * nx) ** 2`` (single-sided
+        energy spectrum) or ``fk /= (nt * nx * fs * (1/dx))`` (PSD in
+        Pa²/(Hz·(1/m))).
         """
         data = np.asarray(data)
         nt, nx = data.shape

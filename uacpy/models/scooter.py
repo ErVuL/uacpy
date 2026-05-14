@@ -21,7 +21,11 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
-from uacpy.core.constants import parse_boundary_type
+from uacpy.core.constants import (
+    parse_boundary_type,
+    DEFAULT_BROADBAND_N_FREQS,
+    DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+)
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import (
     write_absorption_block, write_bottom_section, write_broadband_freqs,
@@ -299,7 +303,12 @@ class Scooter(PropagationModel):
                 broadband_freqs = np.asarray(frequencies, dtype=float)
             else:
                 fc = float(source.frequencies[0])
-                broadband_freqs = np.linspace(fc * 0.5, fc * 2.0, 64)
+                half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
+                broadband_freqs = np.linspace(
+                    max(1.0, fc * (1.0 - half_bw)),
+                    fc * (1.0 + half_bw),
+                    DEFAULT_BROADBAND_N_FREQS,
+                )
             self._log(f"Broadband: {len(broadband_freqs)} frequencies, "
                       f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
 

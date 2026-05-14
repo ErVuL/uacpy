@@ -23,6 +23,8 @@ from typing import Tuple, Union
 
 import numpy as np
 
+from uacpy.io._fortran_helpers import detect_endian
+
 
 def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -51,23 +53,33 @@ def _read_lz_records(
     Read a Fortran-unformatted file whose record 1 is ``int32 lz`` and
     records 2..N each hold ``lz`` samples of ``dtype``. Returns ``(lz,
     matrix[lz, n_records])``.
+
+    Byte order is auto-detected from the first record marker; a
+    one-shot warning fires the first time a big-endian file is decoded.
     """
     path = Path(filepath)
     raw = path.read_bytes()
     pos = 0
-    item_size = np.dtype(dtype).itemsize
 
     if len(raw) < 12:
         raise ValueError(f"{path}: too short to contain the header record")
-    rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
+
+    endian = detect_endian(raw[:4], source=f'ramsurf_reader:{path.name}')
+    # Re-anchor the caller-supplied dtype on the detected byte order so
+    # the file decodes correctly regardless of host endianness.
+    base_dtype = dtype.lstrip('<>=|')
+    item_dtype = np.dtype(endian + base_dtype)
+    item_size = item_dtype.itemsize
+
+    rec_len = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
     pos += 4
     if rec_len != 4:
         raise ValueError(
             f"{path}: expected 4-byte header record, got {rec_len}"
         )
-    lz = struct.unpack('<i', raw[pos:pos + 4])[0]
+    lz = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
     pos += 4
-    rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
+    rec_len_close = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
     pos += 4
     if rec_len_close != 4:
         raise ValueError(
@@ -79,15 +91,17 @@ def _read_lz_records(
     while pos < len(raw):
         if len(raw) - pos < 8 + expected:
             break
-        rec_len = struct.unpack('<i', raw[pos:pos + 4])[0]
+        rec_len = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
         pos += 4
         if rec_len != expected:
             raise ValueError(
                 f"{path}: expected {expected}-byte data record, got {rec_len}"
             )
-        col = np.frombuffer(raw[pos:pos + expected], dtype=dtype).copy()
+        col = np.frombuffer(
+            raw[pos:pos + expected], dtype=item_dtype,
+        ).astype(base_dtype, copy=True)
         pos += expected
-        rec_len_close = struct.unpack('<i', raw[pos:pos + 4])[0]
+        rec_len_close = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
         pos += 4
         if rec_len_close != expected:
             raise ValueError(

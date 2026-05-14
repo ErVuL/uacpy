@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.2.3"
+version = "0.2.4"
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -77,6 +77,10 @@ uacpy = [
 
 [tool.pytest.ini_options]
 testpaths = ["uacpy/tests"]
+# pytest-xdist is in the `test` extra and runs the suite in parallel
+# by default (one worker per logical CPU, work-stealing scheduler).
+# Install with `pip install -e ".[test]"`; override with `-n 0` for a
+# single-process run when debugging.
 addopts = "-n logical --dist=worksteal"
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",

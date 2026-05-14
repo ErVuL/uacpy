@@ -28,6 +28,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -137,14 +138,14 @@ def delayandsum(
     nrts = int(np.ceil(time_window * sample_rate))
     rts = np.zeros(nrts)
 
+    omega_c = 2.0 * np.pi * fc
     for ia in range(n_arr):
         phase_rad = np.deg2rad(phases_deg[ia])
         phase_factor = np.exp(1j * phase_rad)
 
-        # Volume attenuation evaluated at fc (narrowband approximation).
-        # delay_imag is τ_i with α(fc)·r ≡ τ_i; H(f)→IFFT path applies the
-        # full ω-linear scaling.
-        atten = np.exp(-delay_imag[ia]) if delay_imag[ia] != 0.0 else 1.0
+        # ``delay_imag`` is Im(tau) in seconds; volume-attenuation factor
+        # is exp(omega * Im(tau)) per delayandsum.m:134.
+        atten = np.exp(omega_c * delay_imag[ia])
 
         scaled_amp = amps[ia] * atten
 
@@ -188,13 +189,6 @@ _RUN_MODE_TO_BELLHOP_TYPE = {
     RunMode.EIGENRAYS: 'E',
     RunMode.ARRIVALS: 'A',
 }
-
-# Default broadband-synthesis grid when the user passes neither
-# `frequencies=` nor a custom waveform. 128 bins gives ~16 ms IFFT
-# resolution at 100 Hz centre / 2.0 bandwidth_factor; coarser users
-# should pass `frequencies=` explicitly.
-_DEFAULT_BROADBAND_N_FREQS = 128
-_DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 1.0
 
 
 class Bellhop(PropagationModel):
@@ -270,8 +264,6 @@ class Bellhop(PropagationModel):
       ``auto_bounce=True``, BOUNCE is invoked transparently to derive
       the ``.brc`` reflection coefficient table.
 
-    Notes
-    -----
     **Auto-route through BOUNCE.** ``Bellhop.run(...)`` detects
     ``LayeredBottom`` / ``RangeDependentLayeredBottom`` / elastic
     halfspace / ``RangeDependentBottom`` with non-zero ``shear_speed``
@@ -524,11 +516,10 @@ class Bellhop(PropagationModel):
             Explicit frequency vector (Hz) for ``RunMode.BROADBAND`` /
             ``RunMode.TIME_SERIES``. When ``None`` and no
             ``source_waveform`` is given, the wrapper auto-synthesises
-            ``_DEFAULT_BROADBAND_N_FREQS`` (128) bins linearly spaced over
-            ``[fc*(1 - bw), fc*(1 + bw)]`` with ``bw =
-            _DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (1.0). These module-level
-            constants govern the IFFT resolution of the resulting
-            ``Field``; pass ``frequencies=`` explicitly to
+            ``DEFAULT_BROADBAND_N_FREQS`` (128) bins linearly spaced
+            over ``[fc*(1 - bw/2), fc*(1 + bw/2)]`` (clipped to [1, ∞))
+            with ``bw = DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5 →
+            half-octave band). Pass ``frequencies=`` explicitly to
             override.
         source_waveform : ndarray, optional
             Time-domain source waveform for delay-and-sum synthesis
@@ -1019,18 +1010,10 @@ class Bellhop(PropagationModel):
         sample_rate: Optional[float] = None,
         time_window: Optional[float] = None,
         t_start: Optional[float] = None,
-        n_freqs: int = _DEFAULT_BROADBAND_N_FREQS,
-        bandwidth_factor: float = _DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+        n_freqs: int = DEFAULT_BROADBAND_N_FREQS,
+        bandwidth_factor: float = DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
         **kwargs
     ) -> Result:
-        if len(np.atleast_1d(source.depths)) > 1:
-            raise ConfigurationError(
-                f"Bellhop broadband synthesis (BROADBAND / TIME_SERIES) "
-                f"runs at a single source depth; got "
-                f"{len(source.depths)}: {list(source.depths)}. Loop in "
-                f"Python over Source(depths=z, ...) and stack the "
-                f"results, or pick one depth for this run."
-            )
         """
         Run Bellhop in broadband mode to produce a time-series or
         transfer function result.
@@ -1081,12 +1064,14 @@ class Bellhop(PropagationModel):
             arrival. Only used when ``source_waveform`` is provided.
         n_freqs : int, optional
             Number of frequency points for transfer function mode.
-            Default: ``_DEFAULT_BROADBAND_N_FREQS`` (128). Ignored when
+            Default: ``DEFAULT_BROADBAND_N_FREQS`` (128). Ignored when
             source_waveform is provided.
         bandwidth_factor : float, optional
-            Fractional bandwidth around fc. bandwidth_factor=1.0 means
-            [0, 2*fc]. Default: ``_DEFAULT_BROADBAND_BANDWIDTH_FACTOR``
-            (1.0). Ignored when source_waveform is provided.
+            Fractional bandwidth around fc — band is
+            ``[fc·(1-bw/2), fc·(1+bw/2)]``. ``bw=1.0`` gives
+            ``[0.5·fc, 1.5·fc]`` (a single octave). Default:
+            ``DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5). Ignored when
+            source_waveform is provided.
         **kwargs
             Additional Bellhop parameters (beam_type, etc.)
 
@@ -1100,6 +1085,14 @@ class Bellhop(PropagationModel):
                 with data shape (n_depths, n_ranges, n_samples) and
                 metadata containing 'time', 'dt', 'fs'.
         """
+        if len(np.atleast_1d(source.depths)) > 1:
+            raise ConfigurationError(
+                f"Bellhop broadband synthesis (BROADBAND / TIME_SERIES) "
+                f"runs at a single source depth; got "
+                f"{len(source.depths)}: {list(source.depths)}. Loop in "
+                f"Python over Source(depths=z, ...) and stack the "
+                f"results, or pick one depth for this run."
+            )
         fc = float(np.atleast_1d(source.frequencies)[0])
 
         # Step 1: Run Bellhop in arrivals mode
@@ -1172,8 +1165,9 @@ class Bellhop(PropagationModel):
 
         # ── Path B: frequency-domain transfer function ──
         if frequencies is None:
-            f_min = max(1.0, fc * (1.0 - bandwidth_factor))
-            f_max = fc * (1.0 + bandwidth_factor)
+            half_bw = 0.5 * bandwidth_factor
+            f_min = max(1.0, fc * (1.0 - half_bw))
+            f_max = fc * (1.0 + half_bw)
             frequencies = np.linspace(f_min, f_max, n_freqs)
 
         frequencies = np.asarray(frequencies, dtype=float)
@@ -1262,19 +1256,12 @@ class Bellhop(PropagationModel):
         H = np.zeros(len(frequencies), dtype=complex)
 
         for ia in range(n_arr):
-            # Complex amplitude with geometric phase
             A_complex = amps[ia] * np.exp(1j * phases_rad[ia])
-
-            # Volume attenuation: imaginary delay scales with frequency
-            # relative to center frequency (Bellhop convention)
-            if delay_imag[ia] != 0.0:
-                atten = np.exp(-delay_imag[ia] * omega / (2.0 * np.pi * fc))
-            else:
-                atten = 1.0
-
-            # Phase delay: exp(-i * 2*pi*f * tau)
+            # exp(-i*omega*tau) with tau = Re(tau) + i*Im(tau) gives a
+            # phase-shift and an exp(omega*Im(tau)) attenuation. Im(tau)
+            # is in seconds; omega is the per-frequency carrier.
             phase_shift = np.exp(-1j * omega * delays[ia])
-
+            atten = np.exp(omega * delay_imag[ia])
             H += A_complex * atten * phase_shift
 
         return H

@@ -36,6 +36,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 _ArrayLike = Union[float, np.ndarray]
 
@@ -46,7 +48,11 @@ _ArrayLike = Union[float, np.ndarray]
 
 
 def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
-    """Thorp 1967 seawater volume attenuation in dB/km.
+    """Thorp seawater volume attenuation in dB/km.
+
+    Uses the JKPS Eq. 1.34 coefficients, which match the AT
+    ``AttenMod.f90:94`` formula used internally by the Acoustics-Toolbox
+    binaries.
 
     Parameters
     ----------
@@ -55,11 +61,18 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
 
     References
     ----------
-    Thorp, W. H. (1967). JASA 42(1), 270.
+    Thorp, W. H. (1967). JASA 42(1), 270 (original).
+    Jensen, Kuperman, Porter, Schmidt — *Computational Ocean
+    Acoustics*, 2nd ed., Eq. 1.34.
     """
     f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
     f2 = f * f
-    a = 0.11 * f2 / (1.0 + f2) + 44.0 * f2 / (4100.0 + f2) + 2.75e-4 * f2 + 0.003
+    a = (
+        3.3e-3
+        + 0.11 * f2 / (1.0 + f2)
+        + 44.0 * f2 / (4100.0 + f2)
+        + 3.0e-4 * f2
+    )
     return np.squeeze(a)
 
 
@@ -133,6 +146,22 @@ def convert_attenuation_units(
     Supported units: ``dB/km``, ``dB/m``, ``dB/wavelength``, ``Nepers/m``,
     ``Q`` (quality factor), ``L`` (loss tangent). ``sound_speed`` is
     required for the wavelength / Q / L paths.
+
+    Notes
+    -----
+    Acoustics-Toolbox ``AttenMod.f90`` also recognises two units that
+    this helper does **not** convert:
+
+    - ``'m'`` (lowercase) — dB/m with a frequency power-law
+      ``α(f) = α₀ · (f/f₀)^β`` below a transition frequency ``fT``.
+      Round-tripping needs the (``β``, ``f₀``, ``fT``) triple, which is
+      outside the scalar-frequency contract here.
+    - ``'F'`` — dB/(m·kHz), i.e. ``α(f) = α₀ · f[kHz]``. The single
+      ``frequency`` argument would suffice, but the unit is rare enough
+      that adding it would broaden the contract for one AT-only use.
+
+    Pass through Acoustics-Toolbox directly (set ``TopOpt`` position 4
+    to ``'m'`` or ``'F'``) if you need those formulas.
     """
     alpha = np.atleast_1d(np.asarray(alpha, dtype=float))
 
@@ -146,13 +175,15 @@ def convert_attenuation_units(
     elif from_unit == 'Nepers/m':
         alpha_db_m = alpha * 8.686
     elif from_unit == 'Q':
-        alpha_nepers_m = 2 * np.pi * frequency / (alpha * sound_speed)
+        # alphaT = omega / (2 * c * Q)
+        alpha_nepers_m = np.pi * frequency / (alpha * sound_speed)
         alpha_db_m = alpha_nepers_m * 8.686
     elif from_unit == 'L':
-        alpha_nepers_m = alpha * np.pi * frequency / sound_speed
+        # alphaT = L * omega / c
+        alpha_nepers_m = alpha * 2.0 * np.pi * frequency / sound_speed
         alpha_db_m = alpha_nepers_m * 8.686
     else:
-        raise ValueError(f"Unknown unit: {from_unit}")
+        raise ConfigurationError(f"Unknown unit: {from_unit}")
 
     if to_unit == 'dB/km':
         result = alpha_db_m * 1000.0
@@ -165,12 +196,12 @@ def convert_attenuation_units(
         result = alpha_db_m / 8.686
     elif to_unit == 'Q':
         alpha_nepers_m = alpha_db_m / 8.686
-        result = 2 * np.pi * frequency / (alpha_nepers_m * sound_speed)
+        result = np.pi * frequency / (alpha_nepers_m * sound_speed)
     elif to_unit == 'L':
         alpha_nepers_m = alpha_db_m / 8.686
-        result = alpha_nepers_m * sound_speed / (np.pi * frequency)
+        result = alpha_nepers_m * sound_speed / (2.0 * np.pi * frequency)
     else:
-        raise ValueError(f"Unknown unit: {to_unit}")
+        raise ConfigurationError(f"Unknown unit: {to_unit}")
 
     return np.squeeze(result)
 
@@ -195,7 +226,7 @@ class Absorption:
 
     def __post_init__(self):
         if type(self) is Absorption:
-            raise TypeError(
+            raise ConfigurationError(
                 "Absorption is abstract; instantiate Thorp / "
                 "FrancoisGarrison / Biological / ConstantAbsorption."
             )
@@ -309,21 +340,21 @@ class BiologicalLayer:
 
     def __post_init__(self):
         if self.z_bottom_m <= self.z_top_m:
-            raise ValueError(
+            raise ConfigurationError(
                 "BiologicalLayer: z_bottom_m must be strictly greater than "
                 f"z_top_m (got z_top_m={self.z_top_m}, "
                 f"z_bottom_m={self.z_bottom_m})"
             )
         if self.f0_hz <= 0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"BiologicalLayer: f0_hz must be positive (Hz); got {self.f0_hz}"
             )
         if self.Q <= 0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"BiologicalLayer: Q must be positive (dimensionless); got {self.Q}"
             )
         if self.a0 <= 0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"BiologicalLayer: a0 must be positive (dB/m); got {self.a0}"
             )
 
@@ -353,7 +384,7 @@ class Biological(Absorption):
                     f0_hz=float(f0), Q=float(Q), a0=float(a0),
                 ))
         if not normalized:
-            raise ValueError(
+            raise ConfigurationError(
                 "Biological absorption requires at least one layer; got 0."
             )
         self.layers = normalized
@@ -384,7 +415,7 @@ class ConstantAbsorption(Absorption):
     def __post_init__(self):
         Absorption.__post_init__(self)
         if not (self.value_db_per_wavelength >= 0):
-            raise ValueError(
+            raise ConfigurationError(
                 f"ConstantAbsorption.value_db_per_wavelength must be "
                 f"non-negative; got {self.value_db_per_wavelength}."
             )

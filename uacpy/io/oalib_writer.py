@@ -37,6 +37,7 @@ from uacpy.core.constants import (
 )
 from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
+from uacpy.io.units import m_to_km
 
 
 _BOUNDARY_TYPE_MAP = {
@@ -177,9 +178,12 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
         for r in r_km:
             fid.write(f"{r:6.3f}  ")
         fid.write("\n")
+        # Sub-decimetre precision so Munk-style SSPs (e.g. 1502.345 m/s)
+        # are not silently rounded; Acoustics-Toolbox parses free-format
+        # so the extra digits are tolerated.
         for i in range(c.shape[0]):
             for j in range(c.shape[1]):
-                fid.write(f"{c[i, j]:6.1f} ")
+                fid.write(f"{c[i, j]:8.4f} ")
             fid.write("\n")
 
 
@@ -391,7 +395,7 @@ def write_phase_speed_and_rmax(
     """
     _c_low, _c_high = resolve_phase_speed_bounds(env, c_low, c_high)
     f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
-    f.write(rmax_format.format(rmax_m / 1000.0) + "\n")
+    f.write(rmax_format.format(float(m_to_km(rmax_m))) + "\n")
 
 
 def write_ssp_section(
@@ -580,7 +584,7 @@ def write_bottom_section(
                     "c_low, c_high, rmax to be passed by the caller."
                 )
             f.write(f"{float(c_low):.2f}  {float(c_high):.2f}\n")
-            f.write(f"{float(rmax) / 1000.0:.2f}\n")
+            f.write(f"{float(m_to_km(rmax)):.2f}\n")
 
     elif bottom_code == 'A':  # Half-space
         if halfspace_depth is not None:
@@ -918,8 +922,7 @@ def write_fieldflp(
     if filepath.suffix != ".flp":
         filepath = filepath.with_suffix(".flp")
 
-    # Extract position data
-    r_ranges = pos["r"]["r"] / 1000.0  # Convert m to km
+    r_ranges = m_to_km(pos["r"]["r"])
     s_depths = pos["s"]["z"]
     r_depths = pos["r"]["z"]
 
@@ -1016,14 +1019,20 @@ def write_field3dflp(
         Option string (e.g., 'STDFM' for standard field mode)
     pos : dict
         Position dictionary with:
-        - 's': dict with 'x', 'y', 'z' (source coords in km, km, m)
-        - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in km),
+        - 's': dict with 'x', 'y', 'z' (source coords in m, m, m)
+        - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m),
                          'theta' (bearings in degrees)
         - 'Nsx', 'Nsy': Number of source x,y points
+
+        x/y/r values are converted to km on write to match the
+        Bellhop3D ``.flp`` format. The public API stays in metres for
+        symmetry with ``write_fieldflp`` and the 2-D sibling.
     bathy : dict
         Bathymetry dictionary with:
-        - 'X': ndarray - X coordinates in km, shape (nx,)
-        - 'Y': ndarray - Y coordinates in km, shape (ny,)
+        - 'X': ndarray - X coordinates in m, shape (nx,) — converted
+          to km on write.
+        - 'Y': ndarray - Y coordinates in m, shape (ny,) — converted
+          to km on write.
         - 'depth': ndarray - Depths in m, shape (ny, nx)
     mod_file_pattern : str, optional
         Pattern for mode file names. Can include format specifiers.
@@ -1084,18 +1093,17 @@ def write_field3dflp(
     if filepath.suffix != ".flp":
         filepath = filepath.with_suffix(".flp")
 
-    # Extract data
-    s_x = pos["s"]["x"]
-    s_y = pos["s"]["y"]
+    s_x = m_to_km(pos["s"]["x"])
+    s_y = m_to_km(pos["s"]["y"])
     s_z = pos["s"]["z"]
     r_z = pos["r"]["z"]
-    r_r = pos["r"]["r"]
+    r_r = m_to_km(pos["r"]["r"])
     r_theta = pos["r"]["theta"]
     Nsx = pos.get("Nsx", len(s_x))
     Nsy = pos.get("Nsy", len(s_y))
 
-    X = bathy["X"]
-    Y = bathy["Y"]
+    X = m_to_km(bathy["X"])
+    Y = m_to_km(bathy["Y"])
     depth = bathy["depth"]
     nx = len(X)
     ny = len(Y)

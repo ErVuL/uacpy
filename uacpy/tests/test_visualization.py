@@ -98,10 +98,6 @@ class TestPlotField:
         fig, ax = plots.plot_field(spec)
         plt.close(fig)
 
-    def test_polar_projection(self, tl_field):
-        fig, ax = plots.plot_field(tl_field, projection='polar')
-        plt.close(fig)
-
     def test_phase_value(self, complex_field):
         fig, ax = plots.plot_field(complex_field, value='phase')
         plt.close(fig)

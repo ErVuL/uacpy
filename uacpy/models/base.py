@@ -265,6 +265,65 @@ class PropagationModel(ABC):
         """Return True if the model supports ``mode``."""
         return mode in self._supported_modes
 
+    def copy(self, **overrides) -> 'PropagationModel':
+        """Return a new instance with the same configuration plus ``overrides``.
+
+        Model configuration is constructor-only by design, which means
+        every parameter sweep boils down to "instantiate the model again
+        with one knob changed." This helper does that without forcing
+        the caller to re-type every other argument::
+
+            base = RAM(dr=2.0, dz=0.5, np_pade=8)
+            for dr in (1.0, 2.0, 4.0):
+                run_one(base.copy(dr=dr), env, source, receiver)
+
+        Implementation: walks ``inspect.signature(type(self).__init__)``,
+        pulls each parameter's current value off the instance (uacpy
+        models store every constructor arg as ``self.<name>``), merges
+        ``overrides``, and instantiates. ``**kwargs``-only sinks on the
+        constructor are ignored.
+
+        Parameters
+        ----------
+        **overrides
+            Keyword arguments to override on the new instance.
+
+        Returns
+        -------
+        PropagationModel
+            A fresh instance of the same concrete class.
+
+        Raises
+        ------
+        ConfigurationError
+            If ``overrides`` includes a key that isn't a parameter of
+            the constructor.
+        """
+        import inspect
+
+        sig = inspect.signature(type(self).__init__)
+        kwargs: Dict[str, object] = {}
+        valid_names = set()
+        for name, param in sig.parameters.items():
+            if name == 'self':
+                continue
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+            valid_names.add(name)
+            if hasattr(self, name):
+                kwargs[name] = getattr(self, name)
+
+        unknown = set(overrides) - valid_names
+        if unknown:
+            raise ConfigurationError(
+                f"{type(self).__name__}.copy: unknown override(s) "
+                f"{sorted(unknown)}; valid parameters are "
+                f"{sorted(valid_names)}."
+            )
+
+        kwargs.update(overrides)
+        return type(self)(**kwargs)
+
     @abstractmethod
     def run(
         self,
@@ -1257,16 +1316,18 @@ class PropagationModel(ABC):
     ) -> None:
         """Attach work-dir output paths to ``result.metadata``.
 
-        For each ``(key, suffix)`` in ``primary_files``, sets
-        ``result.metadata[key] = str(work_dir / f'{base_name}{suffix}')``
-        if the file exists at write time. Also sets ``'prt_file'`` from
-        the binary's diagnostic log when present.
+        When ``self.cleanup`` is True the work dir will be wiped immediately
+        after ``run()`` returns, so no keys are written: the absence of a
+        ``*_file`` / ``prt_file`` key is the documented signal that the
+        directory has been cleaned up (DOCUMENTATION.md §6).
 
-        Paths are always recorded; if ``self.cleanup`` wipes the work
-        dir afterwards, the user gets a plain ``FileNotFoundError`` when
-        they try to open the path — clearer than a silently missing
-        metadata key.
+        Otherwise, for each ``(key, suffix)`` in ``primary_files`` set
+        ``result.metadata[key] = str(work_dir / f'{base_name}{suffix}')``
+        when the file exists. Also set ``'prt_file'`` from the binary's
+        diagnostic log when present.
         """
+        if self.cleanup:
+            return
         for key, suffix in primary_files:
             path = work_dir / f'{base_name}{suffix}'
             if path.exists():

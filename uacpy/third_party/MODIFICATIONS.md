@@ -38,6 +38,38 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
+### Root `Makefile` -- strip baked `-march=native` and add vendoring header
+
+The upstream root `Makefile` hard-codes `-march=native -mtune=native` in the
+default `FFLAGS` line. Baked architecture flags break wheel/sdist consumers
+(produced CPU-specific binaries) and macOS/ARM cross-compiles. uacpy's
+`install.sh` injects architecture flags via `FORTRAN_ARCH_FLAGS` on the
+make command line. The original Makefile is preserved as `Makefile.orig`
+alongside the modified one.
+
+```diff
+@@ -1,3 +1,7 @@
++# This Makefile is vendored by uacpy. Compiler flags here are intentionally
++# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
++# FORTRAN_ARCH_FLAGS on the make command line. To build outside uacpy, pass
++# your own flags (e.g. `make FFLAGS="-O3 -march=native ..."`).
+ #
+ # To install the Acoustics Toolbox:
+ #
+@@ -114,7 +118,13 @@
+ # export FFLAGS= -march=corei7 -Bstatic -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation        -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer
+ # export FFLAGS= -march=native          -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wa,-q -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
+ # Had a problem with -O2 in the KRAKENC root finder for at/tests/Noise/Sduct. Switching to O1 (4//25/2023)
+-export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
++# -march=native / -mtune=native baked-in flags commented out by uacpy: they
++# produce CPU-specific binaries that break wheel/sdist consumers and macOS/ARM
++# cross-compiles. install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS= on the
++# command line; users invoking `make` directly should pass FFLAGS= explicitly
++# if they want CPU tuning.
++# export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
++export FFLAGS= -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
+```
+
 ---
 
 ## ramsurf (Collins-style RAM family)
@@ -183,9 +215,20 @@ build works on any machine with gfortran installed.
  
 -FFLAGS = -Ofast -march=icelake-client -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
 -LDFLAGS = -Ofast -fopenmp -march=icelake-client -flto
-+FFLAGS = -Ofast -march=native -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
-+LDFLAGS = -Ofast -fopenmp -march=native -flto
++# -march=native baked-in flag commented out by uacpy: produces CPU-specific
++# binaries that break wheel/sdist consumers and macOS/ARM cross-compiles.
++# install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS=/LDFLAGS= on the command
++# line; users invoking `make` directly should pass FFLAGS=/LDFLAGS=
++# explicitly if they want CPU tuning.
++# FFLAGS  = -Ofast -march=native -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
++# LDFLAGS = -Ofast -fopenmp -march=native -flto
++FFLAGS  ?= -Ofast -fopenmp -I $(MODDIR) -Wall -fuse-linker-plugin
++LDFLAGS ?= -Ofast -fopenmp -flto
 ```
+
+`?=` is used (rather than `=`) so install.sh's command-line `FFLAGS=` /
+`LDFLAGS=` injection always wins; users invoking `make` directly can set
+their own via environment.
 
 ### `src/kinds.f90` -- single to double precision
 

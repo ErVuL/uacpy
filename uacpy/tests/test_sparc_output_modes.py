@@ -137,40 +137,54 @@ class TestSPARCModeComparison:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_horizontal_vs_vertical_consistency(self, sparc_simple_env, source_50hz):
-        """
-        Test that horizontal and vertical modes give consistent results
+        """SPARC R-mode and D-mode must agree in shape, up to a constant
+        normalisation offset.
 
-        When computing a 2D field, both modes should produce similar TL values
-        at the same (depth, range) points.
+        R-mode (horizontal array, ``sparc.f90:622-623``) accumulates
+        ``RTSrr += √2·dk·√k·U·exp(...)·√(1/r)``. D-mode
+        (``sparc.f90:595-606``) accumulates ``RTSrz`` without the
+        ``1/√r`` term, then applies ``Scale = 1/√(π·Pos%Rr(1))`` at
+        write-out (``sparc.f90:292``). The two paths therefore differ
+        by exactly ``√π`` (~5 dB) when the wrapper's per-range D-mode
+        loop pins ``Pos%Rr(1) = receiver.ranges[i]``. The residual after
+        bias removal isolates wrapper-level divergence from this
+        documented Fortran asymmetry.
         """
-        SPARC()
-
-        # Simple grid for comparison
         depths = np.array([30.0, 50.0, 70.0])
         ranges = np.array([500.0, 1000.0])
 
         receiver_h = Receiver(depths=depths, ranges=ranges)
         receiver_v = Receiver(depths=depths, ranges=ranges)
 
-        # Run both modes
         sparc_h = SPARC(verbose=False, output_mode='R')
         result_h = sparc_h.run(sparc_simple_env, source_50hz, receiver_h)
         sparc_v = SPARC(verbose=False, output_mode='D')
         result_v = sparc_v.run(sparc_simple_env, source_50hz, receiver_v)
 
-        # Check shapes match
         assert result_h.data.shape == result_v.data.shape
-
-        # Both modes must produce finite, physical TL values.
-        # We deliberately do *not* compare R-mode and D-mode numerically:
-        # they use different Hankel-transform paths internally and a tolerant
-        # `assert_allclose(atol=15, rtol=0.2)` passes for almost any pair of
-        # TL fields, so it provides no signal. Quantitative R-vs-D agreement
-        # belongs in a dedicated benchmark with stored reference data.
         for r in (result_h, result_v):
             assert np.all(np.isfinite(r.data)), "non-finite TL"
             assert np.all(r.tl > 0), "non-positive TL"
             assert np.all(r.tl < 200), "TL exceeds 200 dB"
+
+        tl_h = np.asarray(result_h.tl)
+        tl_v = np.asarray(result_v.tl)
+        diff = tl_h - tl_v
+        bias = float(np.median(diff))
+        residual = float(np.max(np.abs(diff - bias)))
+
+        assert abs(bias) < 10.0, (
+            f"R-vs-D bias {bias:.2f} dB exceeds 10 dB on a 50 Hz isovelocity "
+            f"vacuum-bottom Pekeris; the two SPARC output paths have "
+            f"diverged in their absolute normalisation."
+        )
+        assert residual < 3.0, (
+            f"R-vs-D residual {residual:.2f} dB after bias removal exceeds "
+            f"3 dB. The two output paths share the same Green's function "
+            f"so the shape must match up to a constant offset.\n"
+            f"  TL_R = {tl_h.tolist()}\n  TL_D = {tl_v.tolist()}\n"
+            f"  bias = {bias:.2f} dB"
+        )
 
     @pytest.mark.requires_binary
     @pytest.mark.slow

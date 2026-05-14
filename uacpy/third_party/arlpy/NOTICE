@@ -12,18 +12,16 @@ Files in UACPY containing arlpy-adapted code:
     uacpy/core/acoustics.py
         Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
           - soundspeed          (Mackenzie 1981)
-          - absorption          (Francois-Garrison)
-          - absorption_filter
           - density             (Fofonoff IES-80)
           - reflection_coeff
           - doppler
           - bubble_resonance
+          - bubble_surface_loss
+          - bubble_soundspeed
 
-    uacpy/acoustic_signal/advanced.py
-        Functions adapted from arlpy.signal (BSD-3-Clause, (c) 2016 Mandar Chitre):
-          - time, nextpow2, pow2, padded_shape (utilities)
-          - lfilter0                           (zero-phase filtering)
-          - and other signal-processing helpers
+    Volume-attenuation models (Thorp, Francois-Garrison) live in
+    uacpy/core/absorption.py and were re-derived from the upstream
+    physics references; they do not carry arlpy adaptation.
 
 All adapted functions preserve their original scientific formulas;
 UACPY-side changes are limited to Python-level formatting (type hints,

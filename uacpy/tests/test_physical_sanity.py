@@ -18,7 +18,7 @@ import numpy as np
 import uacpy
 from uacpy import Field
 from uacpy.core.results import Modes
-from uacpy.models import Bellhop, Kraken, KrakenField, RAM
+from uacpy.models import Bellhop, Kraken, KrakenField, RAM, RunMode
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
 
 
@@ -277,59 +277,51 @@ class TestMunkProfile:
     """
 
     @pytest.fixture
-    def munk_env(self):
-        """Deep water environment with Munk profile."""
-        env = uacpy.Environment(
-            name='Munk Profile',
-            bathymetry=5000.0,
-            ssp=SoundSpeedProfile.from_munk(5000.0),
-            bottom=BoundaryProperties(
-                acoustic_type='half-space',
-                sound_speed=1600.0,
-                density=1.8,
-                attenuation=0.3
-            )
-        )
-        return env
-
-    @pytest.fixture
     def munk_source(self):
-        """Source at depth (in sound channel)."""
-        return uacpy.Source(depths=1000.0, frequencies=100.0)
+        """Source at the Munk sound-channel axis (1300 m), 100 Hz."""
+        return uacpy.Source(depths=1300.0, frequencies=100.0)
 
     @pytest.fixture
     def munk_receiver(self):
-        """Receiver grid covering sound channel."""
+        """20-point depth grid at one long range — enough to compare
+        median TL near the surface vs the channel vs the bottom."""
         return uacpy.Receiver(
-            depths=np.linspace(0, 5000, 51),
-            ranges=np.linspace(1000, 50000, 11)
+            depths=np.linspace(50.0, 4950.0, 20),
+            ranges=np.array([50000.0]),
         )
 
     @pytest.mark.requires_binary
-    @pytest.mark.slow
-    def test_bellhop_munk_propagation(self, munk_env, munk_source, munk_receiver):
+    def test_bellhop_munk_channel_traps_energy(
+        self, munk_env, munk_source, munk_receiver,
+    ):
+        """Bellhop on a canonical Munk profile must trap refracted energy
+        in the sound channel. Measured ~9 dB surface-vs-channel and
+        ~5 dB bottom-vs-channel; thresholds half those values catch
+        gross errors (lost channel, inverted gradient) while leaving
+        margin for beam-sampling jitter.
         """
-        Bellhop should show sound channel effects in Munk profile
+        bellhop = Bellhop(verbose=False, n_beams=500, alpha=(-25, 25))
+        result = bellhop.run(
+            munk_env, munk_source, munk_receiver,
+            run_mode=RunMode.COHERENT_TL,
+        )
+        tl = np.asarray(result.tl).reshape(-1)
+        z = np.asarray(munk_receiver.depths)
 
-        Expected behavior:
-        - Sound focused near sound channel axis
-        - Long-range propagation possible
-        - Lower TL at axis depth than at surface/bottom
-        """
-        bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(munk_env, munk_source, munk_receiver)
+        tl_surface = float(np.median(tl[z < 200.0]))
+        tl_mid = float(np.median(tl[(z > 800.0) & (z < 3000.0)]))
+        tl_bottom = float(np.median(tl[z > 4500.0]))
 
-        assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.data))
-
-        # Check for sound channel effect
-        # TL at mid-depths should be lower than at surface (averaged over ranges)
-        tl_surface = result.tl[0, :].mean()  # Surface receivers
-        tl_mid = result.tl[len(result.depths)//2, :].mean()  # Mid-depth receivers
-
-        # Sound channel should focus energy (lower TL at mid-depth)
-        # This is a weak test - just checking qualitative behavior
-        assert tl_mid < tl_surface + 20, "Sound channel should show some focusing effect"
+        assert tl_surface - tl_mid >= 4.0, (
+            f"Munk channel should trap energy away from the surface: "
+            f"TL_surface={tl_surface:.1f}, TL_mid={tl_mid:.1f} "
+            f"(diff {tl_surface - tl_mid:.1f}, expected ≥ 4 dB)"
+        )
+        assert tl_bottom - tl_mid >= 2.0, (
+            f"Munk channel should trap energy away from the bottom: "
+            f"TL_bottom={tl_bottom:.1f}, TL_mid={tl_mid:.1f} "
+            f"(diff {tl_bottom - tl_mid:.1f}, expected ≥ 2 dB)"
+        )
 
 
 class TestInterpolationAccuracy:

@@ -115,52 +115,55 @@ def beamform(
     c: float = DEFAULT_SOUND_SPEED
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Simple beamformer for underwater acoustic data.
+    Plane-wave beamformer — returns signal-to-noise ratio per look angle.
 
-    Performs conventional plane-wave beamforming on pressure field data
-    using steering vectors.
+    Performs conventional plane-wave beamforming on ``pressure`` interpreted
+    as a transfer function from a 0-dB source. The returned value is the
+    receive level minus the ambient noise level, i.e. SNR in dB.
 
     Parameters
     ----------
     pressure : ndarray
-        Pressure field data with shape (n_depths, n_ranges) or (n_phones, n_ranges)
-        Can be complex-valued
+        Pressure transfer-function data with shape (n_phones, n_ranges).
+        Can be complex-valued.
     phone_coords : ndarray
-        Hydrophone/receiver depth coordinates
+        Hydrophone depth coordinates (m).
     freq : float
-        Frequency in Hz
+        Frequency in Hz.
     angles : ndarray, optional
-        Beam angles in degrees relative to broadside (default: -90 to 90 in 1° steps)
+        Beam angles in degrees relative to broadside (default: -90 to 90 in
+        1° steps).
     SL : float, optional
-        Source level in dB (default: 150.0)
+        Source level in dB re 1 µPa @ 1 m. Default 150.0.
     NL : float, optional
-        Noise level in dB (default: 0.0)
+        **Per-element, wideband** noise level in dB at the receiver
+        (i.e. dB re 1 µPa², already integrated over the signal
+        bandwidth). The unit-normalised steering vector already folds
+        the array gain ``10·log10(N)`` into ``|e @ pressure|``, so do
+        not pre-correct ``NL`` for the number of elements. For a PSD
+        in dB re 1 µPa²/Hz, multiply by the integration bandwidth in
+        Hz before passing. Default 0.0.
     c : float, optional
-        Reference sound speed for steering vectors in m/s (default: 1480.0)
+        Reference sound speed for steering vectors in m/s.
 
     Returns
     -------
-    power : ndarray
-        Beamformed power in dB with shape (n_angles, n_ranges)
+    snr : ndarray
+        Signal-to-noise ratio in dB with shape (n_angles, n_ranges).
     angles_out : ndarray
-        Angles used for beamforming
-    peak : float
-        Peak power value in dB
+        Angles used for beamforming (degrees from broadside).
+    peak_snr : float
+        Maximum value of ``snr``.
 
     Notes
     -----
-    The beamformer computes:
-        power = 20 * log10(|e * pressure|) + SL - NL
-    where e is the steering vector matrix
+    The beamformer computes::
 
-    Examples
-    --------
-    >>> # pressure field shape: (101 depths, 50 ranges)
-    >>> pressure = np.random.randn(101, 50) + 1j*np.random.randn(101, 50)
-    >>> depths = np.linspace(0, 100, 101)
-    >>> freq = 100.0  # 100 Hz
-    >>> power, angles, peak = beamform(pressure, depths, freq)
-    >>> print(f"Power shape: {power.shape}, Peak: {peak:.1f} dB")
+        snr = 20·log10(|e @ pressure|) + SL - NL
+
+    where ``e`` is the unit-normalised steering-vector matrix from
+    :func:`planewave_rep`. Pass ``NL=0`` to recover the receive
+    level alone.
 
     References
     ----------
@@ -169,13 +172,11 @@ def beamform(
     if angles is None:
         angles = np.arange(-90, 91, 1)
     e = planewave_rep(phone_coords, angles, freq, c=c)
-    # e has shape (n_angles, n_phones)
-    # pressure has shape (n_phones, n_ranges)
     beamformed = e @ pressure
-    power = 20 * np.log10(np.abs(beamformed)) + SL - NL
-    peak = np.max(power)
+    snr = 20 * np.log10(np.abs(beamformed)) + SL - NL
+    peak_snr = np.max(snr)
 
-    return power, angles, peak
+    return snr, angles, peak_snr
 
 
 def add_noise(
@@ -449,6 +450,10 @@ def fourier_synthesis(
     deltaf = freq_vec[1] - freq_vec[0] if len(freq_vec) > 1 else 1.0
     Tmax = 1 / deltaf
     deltat = Tmax / Nfreq
-    time = np.linspace(0.0, Tmax - deltat, Nfreq)
+    # Anchor the output time axis at ``Tstart`` so the IFFT trace lines
+    # up with absolute travel time when the caller passes r/c0 (or any
+    # other origin). Tstart=0.0 (default) reproduces the original
+    # source-local axis.
+    time = Tstart + np.linspace(0.0, Tmax - deltat, Nfreq)
 
     return rmod, time

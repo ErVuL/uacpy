@@ -7,8 +7,10 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 * ``get_component`` — extract a column from a Kraken modes dict.
 """
 
-import numpy as np
+import os
 from typing import Any, Dict, Optional, Union
+
+import numpy as np
 
 from uacpy.core.exceptions import ModelExecutionError
 
@@ -234,8 +236,37 @@ def read_modes_asc(
             M = int(params[4])  # total number of modes
             for _ in range(Nmedia):
                 fid.readline()
-            fid.readline()  # top halfspace
-            fid.readline()  # bottom halfspace
+
+            def _parse_halfspace(line: str) -> Dict[str, Any]:
+                """Parse a Kraken halfspace summary line.
+
+                The Fortran writer emits the boundary-condition character
+                first, followed by ``cP_real cP_imag cS_real cS_imag rho
+                depth`` (six floats). Missing trailing fields default to
+                zero so vacuum / rigid halfspaces parse cleanly.
+                """
+                toks = line.split()
+                if not toks:
+                    return {"BC": " ", "cp": 0.0 + 0j, "cs": 0.0 + 0j,
+                            "rho": 0.0, "depth": 0.0}
+                bc = toks[0]
+                vals = []
+                for t in toks[1:]:
+                    try:
+                        vals.append(float(t))
+                    except ValueError:
+                        break
+                vals = (vals + [0.0] * 6)[:6]
+                return {
+                    "BC": bc,
+                    "cp": complex(vals[0], vals[1]),
+                    "cs": complex(vals[2], vals[3]),
+                    "rho": vals[4],
+                    "depth": vals[5],
+                }
+
+            Top = _parse_halfspace(fid.readline())
+            Bot = _parse_halfspace(fid.readline())
             fid.readline()  # blank line
             z = _read_floats(ntot)
             k_real = _read_floats(M)
@@ -270,7 +301,10 @@ def read_modes_asc(
         ) from e
     return {
         "pltitl": pltitl,
+        "title": pltitl,
         "freq": freq,
+        "freqVec": np.asarray([freq], dtype=float),
+        "Nfreq": 1,
         "Nmedia": Nmedia,
         "ntot": ntot,
         "nmat": nmat,
@@ -278,6 +312,8 @@ def read_modes_asc(
         "z": z,
         "k": k_selected,
         "phi": phi,
+        "Top": Top,
+        "Bot": Bot,
     }
 
 
@@ -296,7 +332,9 @@ def read_modes_bin(
     Parameters
     ----------
     filename : str
-        Path to mode file (without extension, assumes '.moA').
+        Mode file path. If no extension is given, ``.mod`` is appended
+        (this is the extension that Kraken/KrakenC actually emit per
+        ``Kraken/kraken.f90`` — ``OPEN(FILE=TRIM(FileRoot)//'.mod', ...)``).
     freq : float, optional
         Frequency in Hz for which to read modes. For broadband runs,
         selects the closest frequency. Use freq=0 if only one frequency.
@@ -333,12 +371,12 @@ def read_modes_bin(
 
     Notes
     -----
-    - The file extension '.moA' is assumed and should not be included
-    - This function uses persistent state to read sequentially from the same
-      file across multiple calls in MATLAB. In Python, each call reopens the file.
-    - Modes are stored in Fortran unformatted binary format
-    - Record length (lrecl) is determined from first 4 bytes
-    - Mode indices are 1-indexed (MATLAB/Fortran convention)
+    - The canonical extension is ``.mod`` (binary direct-access produced by
+      Kraken/KrakenC). Any explicit extension on ``filename`` is honoured;
+      otherwise ``.mod`` is appended.
+    - Modes are stored in Fortran unformatted direct-access binary.
+    - Record length (lrecl) is determined from first 4 bytes.
+    - Mode indices are 1-indexed (MATLAB/Fortran convention).
 
     References
     ----------
@@ -355,8 +393,8 @@ def read_modes_bin(
     >>> modes = read_modes_bin('pekeris', freq=100.0, modes=[1, 2, 3])
     >>> print(f"Mode shapes: {modes['phi'].shape}")
     """
-    if not filename.endswith(".moA"):
-        filename = filename + ".moA"
+    if not os.path.splitext(filename)[1]:
+        filename = filename + ".mod"
 
     with open(filename, "rb") as fid:
         lrecl = 4 * np.fromfile(fid, dtype=np.int32, count=1)[0]
@@ -411,7 +449,9 @@ def read_modes_bin(
         else:
             modes = np.array(modes)
             modes = modes[modes <= M]
-        fid.seek((iRecProfile + 2) * lrecl, 0)
+        # Top/Bot halfspace block sits at REC iRecProfile+1 per
+        # kraken.f90:603 and read_modes_bin.m:130.
+        fid.seek((iRecProfile + 1) * lrecl, 0)
         Top = {}
         Top["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
         cp_data = np.fromfile(fid, dtype=np.float32, count=2)
@@ -565,10 +605,11 @@ def read_modes(
     else:
         raise ValueError(f"read_modes: Unrecognized file extension {ext}")
     freq_diff = np.abs(Modes["freqVec"] - freq)
-    freq_index = np.argmin(freq_diff)
+    freq_index = int(np.argmin(freq_diff))
+    f_selected = float(Modes["freqVec"][freq_index])
     if Modes["M"] != 0:
         if Modes["Top"]["BC"] == "A":
-            k_top = 2.0 * np.pi * Modes["freqVec"][0] / Modes["Top"]["cp"]
+            k_top = 2.0 * np.pi * f_selected / Modes["Top"]["cp"]
             Modes["Top"]["k2"] = k_top**2
             gamma2 = Modes["k"] ** 2 - Modes["Top"]["k2"]
             Modes["Top"]["gamma"] = pekeris_root(gamma2)
@@ -578,7 +619,7 @@ def read_modes(
             Modes["Top"]["gamma"] = np.zeros_like(Modes["k"])
             Modes["Top"]["phi"] = np.zeros_like(Modes["phi"][0, :])
         if Modes["Bot"]["BC"] == "A":
-            k_bot = 2.0 * np.pi * Modes["freqVec"][freq_index] / Modes["Bot"]["cp"]
+            k_bot = 2.0 * np.pi * f_selected / Modes["Bot"]["cp"]
             Modes["Bot"]["k2"] = k_bot**2
             gamma2 = Modes["k"] ** 2 - Modes["Bot"]["k2"]
             Modes["Bot"]["gamma"] = pekeris_root(gamma2)

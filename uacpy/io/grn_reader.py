@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import Field
+from uacpy.io._fortran_helpers import detect_endian
 
 
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -60,8 +61,16 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     filepath = Path(filepath)
 
     with open(filepath, "rb") as f:
+        head = f.read(4)
+        f.seek(0)
+        endian = detect_endian(head, source=f'read_grn_file:{filepath.name}')
+        i4 = endian + 'i'
+        d8 = endian + 'd'
+        f4 = endian + 'f4'
+        f8 = endian + 'f8'
+
         # Record 1: recl (int32, in 4-byte words) + title (80 chars)
-        recl = struct.unpack("<i", f.read(4))[0]
+        recl = struct.unpack(i4, f.read(4))[0]
         title = f.read(80).decode("utf-8", errors="ignore").strip()
 
         f.seek(4 * recl, 0)
@@ -72,36 +81,36 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         f.seek(2 * 4 * recl, 0)
 
         # Record 3: 7 int32 + freq0 (float64) + atten (float64)
-        nfreq = struct.unpack("<i", f.read(4))[0]
-        struct.unpack("<i", f.read(4))[0]
-        struct.unpack("<i", f.read(4))[0]
-        struct.unpack("<i", f.read(4))[0]
-        nsd = struct.unpack("<i", f.read(4))[0]   # NSz
-        nrd = struct.unpack("<i", f.read(4))[0]   # NRz
-        nk = struct.unpack("<i", f.read(4))[0]    # NRr — number of k samples
-        freq0 = struct.unpack("<d", f.read(8))[0]
-        atten = struct.unpack("<d", f.read(8))[0]
+        nfreq = struct.unpack(i4, f.read(4))[0]
+        struct.unpack(i4, f.read(4))[0]
+        struct.unpack(i4, f.read(4))[0]
+        struct.unpack(i4, f.read(4))[0]
+        nsd = struct.unpack(i4, f.read(4))[0]   # NSz
+        nrd = struct.unpack(i4, f.read(4))[0]   # NRz
+        nk = struct.unpack(i4, f.read(4))[0]    # NRr — number of k samples
+        freq0 = struct.unpack(d8, f.read(8))[0]
+        atten = struct.unpack(d8, f.read(8))[0]
 
         f.seek(3 * 4 * recl, 0)
 
         # Record 4: frequency vector (or time vector for SPARC snapshot)
-        freqVec = np.frombuffer(f.read(nfreq * 8), dtype="<f8").copy()
+        freqVec = np.frombuffer(f.read(nfreq * 8), dtype=f8).copy()
 
         # Records 5-7: theta / sx / sy — skipped
         f.seek(7 * 4 * recl, 0)
 
         # Record 8: Source depths (float32)
-        sd = np.frombuffer(f.read(nsd * 4), dtype="<f4").copy()
+        sd = np.frombuffer(f.read(nsd * 4), dtype=f4).copy()
 
         f.seek(8 * 4 * recl, 0)
 
         # Record 9: Receiver depths (float32)
-        rd = np.frombuffer(f.read(nrd * 4), dtype="<f4").copy()
+        rd = np.frombuffer(f.read(nrd * 4), dtype=f4).copy()
 
         f.seek(9 * 4 * recl, 0)
 
         # Record 10: phase-speed vector (float64), Nk entries.
-        cVec = np.frombuffer(f.read(nk * 8), dtype="<f8").copy()
+        cVec = np.frombuffer(f.read(nk * 8), dtype=f8).copy()
 
         # Records 11+: complex Green's function, one record per
         # (freq, source_depth, receiver_depth) tuple.
@@ -115,7 +124,7 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
                     raw = f.read(nk * 8)
                     if len(raw) < nk * 8:
                         break
-                    data = np.frombuffer(raw, dtype="<f4")
+                    data = np.frombuffer(raw, dtype=f4)
                     G[ifreq, isd, ird, :] = data[0::2] + 1j * data[1::2]
 
     is_sparc = title.upper().startswith('SPARC')
@@ -417,7 +426,11 @@ def sparc_snapshot_to_field(
             "shortening t_max."
         )
     f_idx = int(np.argmin(np.abs(fft_freqs - frequency)))
-    G_at_f0 = G_freq[f_idx, :, :]                    # (nrd, nk)
+    # One-sided spectrum from a real time series — multiply by 2 to
+    # recover full amplitude (matches rts_to_pressure at
+    # oalib_reader.py:1331). The DC bin is the only one that should
+    # not be doubled, but f_idx > 0 for any physical source frequency.
+    G_at_f0 = 2.0 * G_freq[f_idx, :, :]              # (nrd, nk)
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)

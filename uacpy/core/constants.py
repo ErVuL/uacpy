@@ -11,8 +11,19 @@ from enum import Enum
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 
-# Phase-speed search bounds (fractions of c_min / c_max for mode finding).
+# Phase-speed search bounds used by AT-family writers when the user
+# doesn't pass an explicit (c_low, c_high).
+#
+# ``C_LOW_FACTOR`` is the wavenumber-integration default: Scooter / SPARC
+# pin ``k_max = omega/c_low`` so a positive floor is required (c_low=0
+# blows up the integral). 0.95·c_min is the canonical conservative
+# choice.
+#
+# ``C_LOW_FACTOR_KRAKEN`` is the modal-solver default. KRAKEN's c_low is
+# the slowest phase speed in the mode search; setting it to 0 captures
+# Scholte / interfacial modes per the KRAKEN manual.
 C_LOW_FACTOR = 0.95
+C_LOW_FACTOR_KRAKEN = 0.0
 C_HIGH_FACTOR = 1.05
 
 DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
@@ -20,6 +31,16 @@ DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
 # Floor applied whenever we take 20*log10(|p|).
 PRESSURE_FLOOR = 1e-30
+
+# Broadband-mode auto-generated frequency grid: when the user runs a
+# broadband-capable wrapper (Bellhop, Scooter, KrakenField, RAM, OASP)
+# without an explicit ``frequencies=`` override, the wrapper picks
+# ``N`` bins linearly spaced over ``[fc·(1 - BW/2), fc·(1 + BW/2)]``
+# (clipped to [1, ∞)) where ``fc = source.frequencies[0]``.
+# Default BW=0.5 — Bellhop User Guide §9 recommends sub-banding for
+# wide bandwidths because arrivals are computed at a single fc.
+DEFAULT_BROADBAND_N_FREQS = 128
+DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 0.5
 
 
 class BoundaryType(Enum):

@@ -24,26 +24,30 @@ from uacpy.models import KrakenField, Bounce, Scooter
 pytestmark = pytest.mark.requires_binary
 
 
+@pytest.fixture
+def elastic_env():
+    """Module-shared Pekeris-style env with an elastic half-space bottom
+    (cp=1600, cs=400, ρ=1.8, αp=0.2, αs=0.5). Distinct from conftest's
+    ``elastic_env`` (cp=1700, αp=0.5, αs=0.8); the four test classes here
+    were all written against this specific tune of the parameters."""
+    bottom = BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1600.0,
+        shear_speed=400.0,
+        density=1.8,
+        attenuation=0.2,
+        shear_attenuation=0.5,
+    )
+    return Environment(
+        name="Elastic Test",
+        bathymetry=100.0,
+        ssp=1500.0,
+        bottom=bottom,
+    )
+
+
 class TestElasticBoundaryAutoDetection:
     """Test automatic elastic boundary detection in KrakenField."""
-
-    @pytest.fixture
-    def elastic_env(self):
-        """Create environment with elastic bottom (shear speed > 0)."""
-        bottom = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0,
-            shear_speed=400.0,  # THIS makes it elastic!
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        return Environment(
-            name="Elastic Test",
-            bathymetry=100.0,
-            ssp=1500.0,
-            bottom=bottom
-        )
 
     @pytest.fixture
     def fluid_env(self):
@@ -113,24 +117,6 @@ class TestElasticBoundaryAutoDetection:
 
 class TestBounceReflectionCoefficients:
     """Test BOUNCE reflection coefficient computation."""
-
-    @pytest.fixture
-    def elastic_env(self):
-        """Create environment with elastic bottom for BOUNCE."""
-        bottom = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0,
-            shear_speed=400.0,
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        return Environment(
-            name="BOUNCE Test",
-            bathymetry=100.0,
-            ssp=1500.0,
-            bottom=bottom
-        )
 
     @pytest.fixture
     def receiver_bounce(self):
@@ -206,23 +192,6 @@ class TestBounceToScooterWorkflow:
     """Test BOUNCE → SCOOTER workflow using .brc files."""
 
     @pytest.fixture
-    def elastic_env(self):
-        bottom = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0,
-            shear_speed=400.0,
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        return Environment(
-            name="Workflow Test",
-            bathymetry=100.0,
-            ssp=1500.0,
-            bottom=bottom
-        )
-
-    @pytest.fixture
     def receiver_small(self):
         return Receiver(
             depths=np.linspace(10, 90, 10),
@@ -276,23 +245,6 @@ class TestBounceToScooterWorkflow:
 
 class TestWorkflowComparison:
     """Compare KrakenField auto-detection vs BOUNCE→SCOOTER workflows."""
-
-    @pytest.fixture
-    def elastic_env(self):
-        bottom = BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0,
-            shear_speed=400.0,
-            density=1.8,
-            attenuation=0.2,
-            shear_attenuation=0.5
-        )
-        return Environment(
-            name="Comparison Test",
-            bathymetry=100.0,
-            ssp=1500.0,
-            bottom=bottom
-        )
 
     @pytest.fixture
     def receiver_small(self):

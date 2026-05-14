@@ -70,8 +70,10 @@ def _gaussian_pulse(fc: float, fs: float, duration: float = 0.2) -> np.ndarray:
 
 
 def _bellhop_bb(env, src, rcv):
-    return Bellhop(verbose=False)._run_broadband(
-        env, src, rcv, frequencies=np.linspace(F_LO, F_HI, N_FREQ),
+    return Bellhop(verbose=False).run(
+        env, src, rcv,
+        run_mode=RunMode.BROADBAND,
+        frequencies=np.linspace(F_LO, F_HI, N_FREQ),
     )
 
 

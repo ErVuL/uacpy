@@ -23,6 +23,8 @@ Nichols, S. M. & Bradley, D. L. (2016). Global examination of the
    wind-dependence of low-frequency ambient noise. (cited via the
    report.)
 """
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -104,7 +106,13 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
         elif water_depth == 'deep':
             cst = 42
         else:
-            cst = 42  # default
+            warnings.warn(
+                f"compute_windnoise: water_depth={water_depth!r} not "
+                "recognised ('shallow' / 'deep'); falling back to deep "
+                "(cst=42).",
+                UserWarning, stacklevel=2,
+            )
+            cst = 42
 
         i_wind = f <= f_wind
         # so it doesn't crash if only f > 2000 are entered (arbitrary fallback):

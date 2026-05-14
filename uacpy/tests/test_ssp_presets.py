@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.exceptions import ConfigurationError
 
 
 class TestIsovelocity:
@@ -32,7 +33,7 @@ class TestMackenzie:
         assert np.all(np.diff(ssp.data[:, 0]) > 0)
 
     def test_shape_mismatch_raises(self):
-        with pytest.raises(ValueError, match="must share shape"):
+        with pytest.raises(ConfigurationError, match="must share shape"):
             SoundSpeedProfile.from_mackenzie(
                 depths=np.array([0.0, 100.0]),
                 temperature_c=np.array([15.0]),

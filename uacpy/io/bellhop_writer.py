@@ -26,6 +26,7 @@ from uacpy.io.oalib_writer import (
     write_receiver_depths, write_receiver_ranges, write_source_depths,
     write_surface_halfspace,
 )
+from uacpy.io.units import m_to_km
 
 
 def write_bellhop_env_file(
@@ -239,7 +240,7 @@ def write_bellhop_env_file(
             from uacpy.io.oalib_writer import write_ssp
             ssp_file = filepath.with_suffix('.ssp')
             # write_ssp (.ssp file format) expects ranges in km.
-            write_ssp(ssp_file, env.ssp.ranges / 1000.0, env.ssp.data)
+            write_ssp(ssp_file, m_to_km(env.ssp.ranges), env.ssp.data)
             log_message('bellhop_writer',
                         f"wrote range-dependent SSP file: {ssp_file}",
                         verbose=verbose)
@@ -428,7 +429,7 @@ def write_bellhop_env_file(
             eps_multiplier = kwargs.get('eps_multiplier', 1.0)
             # Bellhop's RLoop column expects km; uacpy keeps everything in
             # metres at the API surface, so convert here.
-            r_loop_km = kwargs.get('r_loop', 1000.0) / 1000.0
+            r_loop_km = float(m_to_km(kwargs.get('r_loop', 1000.0)))
             n_image = kwargs.get('n_image', 1)
             ib_win = kwargs.get('ib_win', 4)
             component = kwargs.get('component', 'P')

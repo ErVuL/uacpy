@@ -5,6 +5,7 @@ Tests for core UACPY classes: Environment, Source, Receiver, Result
 import pytest
 import numpy as np
 import uacpy
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 
 
@@ -19,12 +20,18 @@ class TestEnvironment:
         assert simple_env.ssp.shape == 'isovelocity'
         assert not simple_env.is_range_dependent
 
+    def test_create_parabolic_ssp_environment(self, parabolic_ssp_env):
+        """Construction of a 100-m parabolic-SSP env."""
+        assert parabolic_ssp_env.name == "Parabolic SSP"
+        assert parabolic_ssp_env.depth == 100.0
+        assert parabolic_ssp_env.ssp.n_depths == 21
+        assert parabolic_ssp_env.ssp.shape == 'measured'
+
     def test_create_munk_environment(self, munk_env):
-        """Test creating environment with Munk profile."""
+        """Construction of a deep-water Munk env using from_munk()."""
         assert munk_env.name == "Munk Profile"
-        assert munk_env.depth == 100.0
-        assert munk_env.ssp.n_depths == 21
-        assert munk_env.ssp.shape == 'measured'
+        assert munk_env.depth == 5000.0
+        assert munk_env.ssp.shape == 'munk'
 
     def test_range_dependent_environment(self, range_dependent_env):
         """Test range-dependent environment."""
@@ -33,10 +40,10 @@ class TestEnvironment:
         assert range_dependent_env.bathymetry[0, 1] == 80.0
         assert range_dependent_env.bathymetry[-1, 1] == 120.0
 
-    def test_ssp_pairs_shape(self, simple_env, munk_env):
+    def test_ssp_pairs_shape(self, simple_env, parabolic_ssp_env):
         """SSP pairs view always has shape (N, 2)."""
         assert simple_env.ssp.to_pairs().shape[1] == 2
-        assert munk_env.ssp.to_pairs().shape[1] == 2
+        assert parabolic_ssp_env.ssp.to_pairs().shape[1] == 2
 
     def test_get_representative_depth(self, range_dependent_env):
         """Test getting representative depth for range-dependent environment."""
@@ -45,13 +52,13 @@ class TestEnvironment:
 
     def test_invalid_depth(self):
         """Test that negative depth raises error."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             uacpy.Environment(name="Test", bathymetry=-10, ssp=1500)
 
     def test_bathymetry_rejects_negative_range(self):
         """Bathymetry ranges are measured from the source; they cannot
         be negative."""
-        with pytest.raises(ValueError, match="ranges must be non-negative"):
+        with pytest.raises(ConfigurationError, match="ranges must be non-negative"):
             uacpy.Environment(
                 name="Test",
                 bathymetry=[[-100.0, 80.0], [5000.0, 90.0]],
@@ -84,7 +91,7 @@ class TestBiologicalLayerValidation:
     ])
     def test_biological_layer_rejects_invalid(self, kwargs, match):
         from uacpy.core.absorption import BiologicalLayer
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ConfigurationError, match=match):
             BiologicalLayer(**kwargs)
 
 
@@ -129,7 +136,7 @@ class TestSource:
 def test_source_receiver_reject_non_finite(ctor, kwargs):
     """Source and Receiver reject NaN / inf at construction so
     non-finite values cannot leak into env-file writers."""
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(ConfigurationError, match="finite"):
         ctor(**kwargs)
 
 
@@ -161,9 +168,10 @@ class TestReceiver:
         assert len(receiver.ranges) == 100
 
     def test_receiver_type_rejects_unknown(self):
-        """Unknown ``receiver_type`` strings raise :class:`ValueError`,
-        mirroring the validation on ``Source.source_type``."""
-        with pytest.raises(ValueError, match="receiver_type"):
+        """Unknown ``receiver_type`` strings raise
+        :class:`ConfigurationError`, mirroring the validation on
+        ``Source.source_type``."""
+        with pytest.raises(ConfigurationError, match="receiver_type"):
             uacpy.Receiver(depths=50, ranges=1000, receiver_type='gird')
 
     def test_receiver_type_accepts_grid_and_line(self):

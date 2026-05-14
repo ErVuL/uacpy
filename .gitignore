@@ -17,6 +17,13 @@ uacpy/third_party/mpiramS/mod/
 uacpy/third_party/bellhopcuda/build/
 uacpy/third_party/bellhopcuda/bin/
 
+# Extension-less binary outputs from in-tree Fortran builds.
+uacpy/third_party/ramsurf/rams0.5
+uacpy/third_party/ramsurf/ramsurf1.5
+uacpy/third_party/mpiramS/s_mpiram
+
+uacpy/third_party/**/--*.prt
+
 
 # ---------------------------------------------------------------------------
 # Fortran / C / C++ build artifacts

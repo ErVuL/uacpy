@@ -54,6 +54,7 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.oases_writer import write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input
+from uacpy.io.units import m_to_km
 from uacpy.io.oases_reader import (
     read_oast_tl,
     read_oasn_covariance,
@@ -536,16 +537,36 @@ class OASN(PropagationModel):
         """
         run_mode = self._resolve_run_mode(run_mode)
 
-        # Public API uses metres for ranges; OASES expects km. Build a
-        # shallow copy with the four range-axis kwargs converted so we
+        # OASN expresses the frequency axis as (fmin, fmax, N) like OASR
+        # and OASP, so a non-equispaced source.frequencies vector would
+        # be silently regridded by _resolve_freq_sweep inside the writer.
+        # Warn (and resample) here so the user sees what is happening.
+        source_freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if source_freqs.size > 1:
+            _oases_resample_frequencies(source_freqs, self.model_name)
+
+        # Public API uses metres for x/y; OASES expects km. Build a
+        # shallow copy with the relevant axis kwargs converted so we
         # don't mutate the caller's dict (z-axis stays metres — OASES
-        # accepts those). Only meaningful for RunMode.REPLICA.
+        # accepts those).
+        kwargs = dict(kwargs)
         if run_mode == RunMode.REPLICA:
-            kwargs = dict(kwargs)
             for k in ('replica_xmin', 'replica_xmax',
                       'replica_ymin', 'replica_ymax'):
                 if k in kwargs:
-                    kwargs[k] = float(kwargs[k]) / 1000.0
+                    kwargs[k] = float(m_to_km(kwargs[k]))
+        # ``discrete_sources`` carries per-source x/y in metres in the
+        # uacpy API; OASES writes them in km (oasn.tex:343). Convert.
+        if 'discrete_sources' in kwargs:
+            converted = []
+            for ds in kwargs['discrete_sources']:
+                ds_km = dict(ds)
+                if 'x' in ds_km:
+                    ds_km['x'] = float(m_to_km(ds_km['x']))
+                if 'y' in ds_km:
+                    ds_km['y'] = float(m_to_km(ds_km['y']))
+                converted.append(ds_km)
+            kwargs['discrete_sources'] = converted
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -1109,6 +1130,21 @@ class OASP(PropagationModel):
 
         run_mode = self._resolve_run_mode(run_mode)
 
+        # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
+        # first slot. Refuse option letters that would produce
+        # multi-axis output rather than silently discard data.
+        user_opts = kwargs.get('options')
+        if user_opts:
+            multi_axis = {'V', 'H', 'R', 'U', 'F'} & set(str(user_opts).split())
+            if multi_axis:
+                raise ConfigurationError(
+                    f"OASP.run: options {sorted(multi_axis)} request "
+                    "multi-component / decomposed output, which the .trf "
+                    "reader currently flattens. Pass options without "
+                    "these letters (default 'N J' returns scalar pressure) "
+                    "or read the .trf directly."
+                )
+
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
             if freqs_arr.size == 0:
@@ -1288,9 +1324,9 @@ def OASES(
     """Factory: instantiate the OASES sub-class that handles ``run_mode``.
 
     Returns an ``OAST``/``OASN``/``OASR``/``OASP`` instance configured with
-    ``**kwargs``. Sub-class-specific kwargs that the chosen class doesn't
-    consume (e.g. ``angles=`` when routing to ``OASN``) are silently
-    dropped per uacpy convention.
+    ``**kwargs``. Kwargs not accepted by the chosen sub-class raise
+    ``TypeError`` — pick the right sub-class directly if you need
+    sub-class-specific options.
 
     Parameters
     ----------
@@ -1305,7 +1341,7 @@ def OASES(
         transfer function) instead of ``OAST``. Needed for range-dependent
         envs where OAST's range-independent kernel is inappropriate.
     **kwargs
-        Forwarded to the sub-class constructor.
+        Forwarded verbatim to the sub-class constructor.
 
     Returns
     -------
@@ -1327,17 +1363,4 @@ def OASES(
             alternatives=[str(m) for m in dispatch],
             alternatives_label='run modes',
         )
-    # Per uacpy convention "irrelevant kwargs are silently ignored":
-    # drop kwargs that aren't explicit parameters of either the chosen
-    # sub-class __init__ or PropagationModel.__init__ (the base that the
-    # sub-class forwards **kwargs to). Subclass-specific kwargs that the
-    # *other* sub-classes accept (e.g. ``angles=`` for OASR, or
-    # ``compute_contour=`` for OAST) are quietly dropped when routing
-    # elsewhere instead of raising ``TypeError``.
-    import inspect
-    allowed = set(inspect.signature(cls.__init__).parameters)
-    allowed |= set(inspect.signature(PropagationModel.__init__).parameters)
-    allowed.discard('self')
-    allowed.discard('kwargs')
-    filtered = {k: v for k, v in kwargs.items() if k in allowed}
-    return cls(**filtered)
+    return cls(**kwargs)

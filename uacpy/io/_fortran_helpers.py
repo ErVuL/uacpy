@@ -7,21 +7,81 @@ arrays. They are private to ``uacpy.io`` and not part of the public surface.
 """
 
 import struct
+import warnings
 from typing import Tuple
 
 import numpy as np
 
 
-def read_fortran_record_marker(f) -> int:
-    """Read a 4-byte Fortran unformatted record-length marker (little-endian).
+_ENDIAN_WARN_EMITTED = False
+
+
+def _warn_non_little_endian(detected: str, source: str) -> None:
+    """Emit a one-shot warning the first time we decode a non-little-endian
+    Fortran file. uacpy CI runs little-endian; big-endian decode works but
+    is unvalidated."""
+    global _ENDIAN_WARN_EMITTED
+    if detected == 'big' and not _ENDIAN_WARN_EMITTED:
+        warnings.warn(
+            f"{source}: detected big-endian Fortran record framing; "
+            "uacpy decodes it correctly but this byte order is not "
+            "validated by CI.",
+            UserWarning, stacklevel=3,
+        )
+        _ENDIAN_WARN_EMITTED = True
+
+
+def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
+    """Detect Fortran-record byte order from the first 4 bytes of a file.
+
+    The Fortran framing puts a 4-byte record-length prefix at the head of
+    every record. On a well-formed file that integer is much smaller than
+    ``2**31`` in the correct endianness and absurdly large in the wrong
+    one. We pick the byte order that yields the smaller positive integer
+    (with a sanity cap of ``2**28``) and warn once if it isn't little-endian.
+
+    Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
+    """
+    if len(first4) < 4:
+        raise OSError("detect_endian: need 4 bytes to probe.")
+    little = struct.unpack('<i', first4)[0]
+    big = struct.unpack('>i', first4)[0]
+    cap = 1 << 28
+    little_ok = 0 < little < cap
+    big_ok = 0 < big < cap
+    if little_ok and not big_ok:
+        chosen = '<'
+    elif big_ok and not little_ok:
+        chosen = '>'
+    elif little_ok and big_ok:
+        chosen = '<' if little <= big else '>'
+    else:
+        raise OSError(
+            f"detect_endian: cannot resolve byte order from first record "
+            f"marker (little={little}, big={big}); file is probably corrupt."
+        )
+    _warn_non_little_endian('big' if chosen == '>' else 'little', source)
+    return chosen
+
+
+def read_fortran_record_marker(f, endian: str = '<') -> int:
+    """Read a 4-byte Fortran unformatted record-length marker.
 
     Used by Fortran sequential-unformatted record framing
     ``[len][payload][len]``.
+
+    Parameters
+    ----------
+    f : file object (binary mode)
+    endian : str, optional
+        '<' (little-endian, default) or '>' (big-endian). Pass the
+        value returned by :func:`detect_endian` after a one-time probe
+        of the file head.
     """
     marker_bytes = f.read(4)
     if len(marker_bytes) < 4:
         raise OSError("Unexpected end of file while reading record marker")
-    return struct.unpack('i', marker_bytes)[0]
+    return struct.unpack(endian + 'i', marker_bytes)[0]
 
 
 def read_fortran_record(f, fmt=None, raw=False, endian='<'):
@@ -153,22 +213,58 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
             values = np.array([])
 
         if Nx == 1:
-            x = values[0] if len(values) > 0 else 0.0
+            if len(values) < 1:
+                warnings.warn(
+                    "read_vector: Nx=1 record had no values; using 0.0.",
+                    UserWarning, stacklevel=2,
+                )
+                x = 0.0
+            else:
+                x = values[0]
         elif Nx == 2:
-            x = values[:2] if len(values) >= 2 else values
-        elif Nx > 2:
-            # AT convention: an explicit list of length Nx (with the
-            # trailing '/') is allowed and takes precedence over the
-            # 2-value linspace shorthand. Only fall back to linspace
-            # when fewer than Nx values are present.
-            if len(values) >= Nx:
-                x = values[:Nx]
-            elif len(values) > 1:
-                # 2-value shorthand: linearly spaced vector
-                x = np.linspace(values[0], values[1], Nx)
+            if len(values) >= 2:
+                x = values[:2]
             elif len(values) == 1:
+                warnings.warn(
+                    f"read_vector: Nx=2 record had 1 value; broadcasting "
+                    f"{values[0]} to both slots.",
+                    UserWarning, stacklevel=2,
+                )
+                x = np.array([values[0], values[0]])
+            else:
+                warnings.warn(
+                    "read_vector: Nx=2 record had no values; using zeros.",
+                    UserWarning, stacklevel=2,
+                )
+                x = np.zeros(2)
+        elif Nx > 2:
+            # AT semantics: either exactly 2 values (linspace shorthand)
+            # or exactly Nx values (explicit list). Other lengths fall back
+            # with a warning rather than silently producing wrong numbers.
+            if len(values) == Nx:
+                x = values
+            elif len(values) == 2:
+                x = np.linspace(values[0], values[1], Nx)
+            elif len(values) > 1:
+                warnings.warn(
+                    f"read_vector: Nx={Nx} record had {len(values)} values "
+                    f"(expected 2 or {Nx}); falling back to linspace "
+                    f"between {values[0]} and {values[-1]}.",
+                    UserWarning, stacklevel=2,
+                )
+                x = np.linspace(values[0], values[-1], Nx)
+            elif len(values) == 1:
+                warnings.warn(
+                    f"read_vector: Nx={Nx} record had 1 value; broadcasting "
+                    f"{values[0]} to all slots.",
+                    UserWarning, stacklevel=2,
+                )
                 x = np.full(Nx, values[0])
             else:
+                warnings.warn(
+                    f"read_vector: Nx={Nx} record had no values; using zeros.",
+                    UserWarning, stacklevel=2,
+                )
                 x = np.zeros(Nx)
         else:
             x = np.array([])

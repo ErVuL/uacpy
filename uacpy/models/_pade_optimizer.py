@@ -236,11 +236,14 @@ def optimal_c0(c_min: float, c_max: float, theta_max: float) -> float:
     """Picks ``c₀`` so the propagation spectrum centres on the Padé sweet
     spot ``ξ = 0``.
 
+    ``theta_max`` is in **degrees**.
+
     Lytaev (2023), Eq. (15) — *Mesh Optimization for the Acoustic
     Parabolic Equation*, https://doi.org/10.3390/jmse11030496.
     """
+    theta_max_rad = np.deg2rad(float(theta_max))
     return float(c_min * c_max * np.sqrt(
-        (2.0 + np.sin(theta_max) ** 2) / (c_min ** 2 + c_max ** 2)
+        (2.0 + np.sin(theta_max_rad) ** 2) / (c_min ** 2 + c_max ** 2)
     ))
 
 
@@ -256,7 +259,7 @@ def optimize_grid(
     c_max: float,
     x_max: float,
     c0: float,
-    theta_max: float = np.deg2rad(30.0),
+    theta_max: float = 30.0,
     eps: float = 1e-3,
     p: int = 6,
     alpha: float = 0.0,
@@ -282,7 +285,7 @@ def optimize_grid(
         ``c₀`` from Lytaev Eq. (15), call :func:`optimal_c0` and pass
         the result in here.
     theta_max : float
-        Maximum propagation angle (radians). Default 30°.
+        Maximum propagation angle in **degrees**. Default 30°.
     eps : float
         Total accuracy budget (max ``|τ · n_steps|``). Default 1e-3.
     p : int
@@ -318,7 +321,8 @@ def optimize_grid(
     """
     c0_use = float(c0)
     k0 = 2.0 * np.pi * freq / c0_use
-    xi_min = -np.sin(theta_max) ** 2 + (c0_use / c_max) ** 2 - 1.0
+    theta_max_rad = np.deg2rad(float(theta_max))
+    xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
     xi_max = (c0_use / c_min) ** 2 - 1.0
 
     # Default candidate ladders. We scan from coarse → fine and stop at
@@ -354,7 +358,7 @@ def optimize_grid(
             if dz < dz_floor or dz <= 0:
                 continue
             tau = combined_error(
-                dx, dz, k0, p, xi_min, xi_max, theta_max, alpha=alpha,
+                dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha=alpha,
             )
             total = tau * n_steps
             if total < eps:
@@ -368,7 +372,7 @@ def optimize_grid(
     if best is None:
         raise RuntimeError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
-            f"f={freq:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={np.rad2deg(theta_max):.1f}°, "
+            f"f={freq:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(theta_max):.1f}°, "
             f"x_max={x_max:.0f} m. Try a larger ε, higher Padé order p, "
             f"smaller θ_max, or a finer dz/dx ladder."
         )

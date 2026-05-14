@@ -25,7 +25,9 @@ from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
     read_fortran_record_marker as _read_fortran_record_marker,
     read_fortran_record as _read_fortran_record,
+    detect_endian,
 )
+from uacpy.io.units import km_to_m
 
 
 def read_oast_tl(
@@ -136,15 +138,17 @@ def read_oast_tl(
     expected_total = n_depths_oast * n_ranges_oast
 
     if len(tl_values) < expected_total:
+        missing = expected_total - len(tl_values)
         warnings.warn(
-            f"Got {len(tl_values)} TL values, expected {expected_total}. "
-            "Padding with last value.",
-            UserWarning, stacklevel=2
+            f"Truncated OAST output: got {len(tl_values)} TL values, "
+            f"expected {expected_total} "
+            f"(n_depths={n_depths_oast}, n_ranges={n_ranges_oast}); "
+            f"padding {missing} cells with the last sample. File: "
+            f"{tl_data_file}",
+            UserWarning, stacklevel=2,
         )
-        tl_values = np.pad(tl_values, (0, expected_total - len(tl_values)),
-                           mode='edge')
+        tl_values = np.pad(tl_values, (0, missing), mode='edge')
 
-    # Take expected amount and reshape
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 
     metadata = {
@@ -207,8 +211,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
                 f"n_ranges={n_ranges}, xoff={xoff}, dx={dx}"
             )
 
-        # Calculate range array (convert km to m)
-        ranges = (xoff + np.arange(n_ranges) * dx) * 1000.0
+        ranges = km_to_m(xoff + np.arange(n_ranges) * dx)
 
         return {
             'n_ranges': n_ranges,
@@ -276,6 +279,13 @@ def read_oasn_covariance(
 
     try:
         with open(filepath, 'rb') as f:
+            # Probe the byte order from the first int32 (n_rcv at record 5).
+            f.seek(4 * recl)
+            probe = f.read(4)
+            endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
+            ifmt = endian + 'i'
+            ffmt = endian + 'f'
+
             # Read header (first 10 records)
             # Record 1-4: Title (4 x 8 bytes = 32 characters)
             title_parts = []
@@ -287,22 +297,22 @@ def read_oasn_covariance(
 
             # Record 5: NRCV, NFREQ (2 integers)
             f.seek(4 * recl)
-            n_rcv, n_freq = struct.unpack('ii', f.read(8))
+            n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
 
             # Record 6: IZERO, IZERO (dummy)
             # Skip
 
             # Record 7: FREQ1, FREQ2 (2 floats)
             f.seek(6 * recl)
-            freq1, freq2 = struct.unpack('ff', f.read(8))
+            freq1, freq2 = struct.unpack(endian + 'ff', f.read(8))
 
             # Record 8: DELFRQ, ZERO (frequency increment)
             f.seek(7 * recl)
-            delfrq, _ = struct.unpack('ff', f.read(8))
+            delfrq, _ = struct.unpack(endian + 'ff', f.read(8))
 
             # Record 9: SSLEV, WNLEV (surface and white noise levels)
             f.seek(8 * recl)
-            sslev, wnlev = struct.unpack('ff', f.read(8))
+            sslev, wnlev = struct.unpack(endian + 'ff', f.read(8))
 
             # Record 10: ZERO, ZERO (reserved)
             # Skip
@@ -317,8 +327,10 @@ def read_oasn_covariance(
                     for ircv in range(n_rcv):
                         irec = 10 + ircv + jrcv * n_rcv + ifreq * n_rcv * n_rcv
                         f.seek(irec * recl)
-                        real, imag = struct.unpack('ff', f.read(8))
+                        real, imag = struct.unpack(endian + 'ff', f.read(8))
                         covariance[ifreq, ircv, jrcv] = complex(real, imag)
+            # Silence flake8 for unused locals defined above for clarity.
+            _ = (ifmt, ffmt)
 
         return {
             'title': title,
@@ -386,38 +398,41 @@ def read_oasn_replicas(
 
     try:
         with open(filepath, 'rb') as f:
-            # Read header
-            # Fortran unformatted files have record markers (4-byte integers before/after each record)
+            head = f.read(4)
+            f.seek(0)
+            endian = detect_endian(
+                head, source=f'read_oasn_replicas:{filepath.name}',
+            )
 
             # Read title (80 characters)
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
             title = f.read(80).decode('ascii', errors='ignore').strip()
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read NRCV, NFREQ
-            _read_fortran_record_marker(f)
-            n_rcv, n_freq = struct.unpack('ii', f.read(8))
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
+            n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read FREQ1, FREQ2, DELFRQ
-            _read_fortran_record_marker(f)
-            freq1, freq2, delfrq = struct.unpack('fff', f.read(12))
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
+            freq1, freq2, delfrq = struct.unpack(endian + 'fff', f.read(12))
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read replica grid: ZMINR, ZMAXR, NZR
-            _read_fortran_record_marker(f)
-            z_min, z_max, n_z = struct.unpack('ffi', f.read(12))
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
+            z_min, z_max, n_z = struct.unpack(endian + 'ffi', f.read(12))
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read XMINR, XMAXR, NXR
-            _read_fortran_record_marker(f)
-            x_min, x_max, n_x = struct.unpack('ffi', f.read(12))
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
+            x_min, x_max, n_x = struct.unpack(endian + 'ffi', f.read(12))
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read YMINR, YMAXR, NYR
-            _read_fortran_record_marker(f)
-            y_min, y_max, n_y = struct.unpack('ffi', f.read(12))
-            _read_fortran_record_marker(f)
+            _read_fortran_record_marker(f, endian=endian)
+            y_min, y_max, n_y = struct.unpack(endian + 'ffi', f.read(12))
+            _read_fortran_record_marker(f, endian=endian)
 
             # Read receiver positions and properties
             receiver_positions = np.zeros((n_rcv, 3))
@@ -425,25 +440,33 @@ def read_oasn_replicas(
             receiver_gains = np.zeros(n_rcv)
 
             for i in range(n_rcv):
-                _read_fortran_record_marker(f)
-                x, y, z, itype, gain = struct.unpack('fffif', f.read(20))
-                _read_fortran_record_marker(f)
+                _read_fortran_record_marker(f, endian=endian)
+                x, y, z, itype, gain = struct.unpack(
+                    endian + 'fffif', f.read(20),
+                )
+                _read_fortran_record_marker(f, endian=endian)
                 receiver_positions[i] = [x, y, z]
                 receiver_types[i] = itype
                 receiver_gains[i] = gain
 
             # Read replicas
-            replicas = np.zeros((n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64)
+            replicas = np.zeros(
+                (n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64,
+            )
 
             for ifreq in range(n_freq):
                 for iz in range(n_z):
                     for ix in range(n_x):
                         for iy in range(n_y):
                             for ircv in range(n_rcv):
-                                _read_fortran_record_marker(f)
-                                real, imag = struct.unpack('ff', f.read(8))
-                                _read_fortran_record_marker(f)
-                                replicas[ifreq, iz, ix, iy, ircv] = complex(real, imag)
+                                _read_fortran_record_marker(f, endian=endian)
+                                real, imag = struct.unpack(
+                                    endian + 'ff', f.read(8),
+                                )
+                                _read_fortran_record_marker(f, endian=endian)
+                                replicas[ifreq, iz, ix, iy, ircv] = complex(
+                                    real, imag,
+                                )
 
         return {
             'title': title,

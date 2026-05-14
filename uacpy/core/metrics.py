@@ -62,9 +62,20 @@ def _validate_tl_pair_and_window(
 
     depths = field_a.coords['depth']
     ranges = field_a.coords['range']
-    if (depths.shape != field_b.coords['depth'].shape
-            or ranges.shape != field_b.coords['range'].shape):
+    depths_b = field_b.coords['depth']
+    ranges_b = field_b.coords['range']
+    if depths.shape != depths_b.shape or ranges.shape != ranges_b.shape:
         raise ValueError(f"{fname}: depth/range axes must have matching shapes")
+    if not np.allclose(depths, depths_b, rtol=1e-6, atol=1e-6):
+        raise ValueError(
+            f"{fname}: depth axes differ — sample-cells are not aligned. "
+            "Resample one field onto the other's grid before comparing."
+        )
+    if not np.allclose(ranges, ranges_b, rtol=1e-6, atol=1e-6):
+        raise ValueError(
+            f"{fname}: range axes differ — sample-cells are not aligned. "
+            "Resample one field onto the other's grid before comparing."
+        )
 
     rmask = _resolve_window(ranges, range_window)
     zmask = _resolve_window(depths, depth_window)
@@ -88,9 +99,9 @@ def tl_rmse(
 ) -> float:
     """Root-mean-square TL difference between two TL fields.
 
-    Both fields must share the same ``depths`` and ``ranges`` axes; the
-    caller is responsible for ensuring they're sampled compatibly (e.g.
-    by passing identical ``Receiver`` objects to both models).
+    Both fields must be sampled on the same ``depths`` and ``ranges``
+    grid; the helper verifies this with :func:`numpy.allclose` and raises
+    on mismatched coordinates.
 
     Parameters
     ----------

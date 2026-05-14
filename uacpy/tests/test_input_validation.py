@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import uacpy
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.models.bellhop import Bellhop
 from uacpy.models.kraken import Kraken
 from uacpy.models.ram import RAM
@@ -30,14 +31,14 @@ from uacpy.core.environment import (
 # --- G1 monotonicity -------------------------------------------------------
 
 def test_ssp_depth_must_be_strictly_increasing():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         SoundSpeedProfile.from_pairs([(0, 1500), (10, 1490), (5, 1495)])
 
 
 def test_ssp_ranges_must_be_strictly_increasing():
     depths = np.array([0.0, 100.0])
     data = np.array([[1500.0, 1490.0, 1500.0], [1480.0, 1470.0, 1480.0]])
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         SoundSpeedProfile(
             depths=depths, data=data,
             ranges=np.array([0.0, 5000.0, 3000.0]),
@@ -45,12 +46,12 @@ def test_ssp_ranges_must_be_strictly_increasing():
 
 
 def test_ssp_duplicate_depths_rejected():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         SoundSpeedProfile.from_pairs([(0, 1500), (10, 1490), (10, 1480)])
 
 
 def test_rd_bottom_ranges_must_be_strictly_increasing():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         RangeDependentBottom(
             ranges=np.array([0.0, 5000.0, 3000.0]),
             sound_speed=np.array([1600.0, 1700.0, 1800.0]),
@@ -65,7 +66,7 @@ def test_rd_layered_bottom_ranges_must_be_strictly_increasing():
     hs = BoundaryProperties(acoustic_type='half-space',
                             sound_speed=1800, density=2.0, attenuation=0.1)
     lb = LayeredBottom(layers=[layer], halfspace=hs)
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         RangeDependentLayeredBottom(
             ranges=np.array([0.0, 1000.0, 500.0]),
             profiles=[lb, lb, lb],
@@ -73,12 +74,12 @@ def test_rd_layered_bottom_ranges_must_be_strictly_increasing():
 
 
 def test_bathymetry_must_be_strictly_increasing():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         Environment(bathymetry=[(0.0, 100.0), (5000.0, 200.0), (3000.0, 150.0)])
 
 
 def test_altimetry_must_be_strictly_increasing():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         Environment(
             bathymetry=100.0,
             altimetry=[(0.0, 0.0), (2000.0, 1.0), (1000.0, 0.5)],
@@ -86,7 +87,7 @@ def test_altimetry_must_be_strictly_increasing():
 
 
 def test_receiver_grid_ranges_must_be_increasing():
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ConfigurationError, match="strictly increasing"):
         uacpy.Receiver(depths=np.array([10.0, 20.0]),
                        ranges=np.array([1000.0, 500.0]))
 
@@ -108,12 +109,12 @@ def test_acoustic_type_alias_accepted():
 
 
 def test_acoustic_type_typo_rejected():
-    with pytest.raises(ValueError, match="not recognized"):
+    with pytest.raises(ConfigurationError, match="not recognized"):
         BoundaryProperties(acoustic_type='vaccum')
 
 
 def test_rd_bottom_acoustic_type_validated():
-    with pytest.raises(ValueError, match="not recognized"):
+    with pytest.raises(ConfigurationError, match="not recognized"):
         RangeDependentBottom(
             ranges=np.array([0.0, 1000.0]),
             sound_speed=np.array([1600.0, 1700.0]),

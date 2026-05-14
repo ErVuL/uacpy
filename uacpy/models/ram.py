@@ -493,7 +493,7 @@ class RAM(PropagationModel):
             return DEFAULT_SOUND_SPEED
         c_min = float(min(speeds))
         c_max = float(max(speeds))
-        return float(optimal_c0(c_min, c_max, np.deg2rad(self.theta_max)))
+        return float(optimal_c0(c_min, c_max, float(self.theta_max)))
 
     def _compute_zmax(self, env: Environment, freq: float, c0: Optional[float] = None) -> float:
         """
@@ -1520,10 +1520,10 @@ class RAM(PropagationModel):
                 backend=kind,
                 frequencies=frequencies,
                 Q=Q_used, T=T_used,
-                bw=bw, df=df,
+                bandwidth_hz=bw, df_hz=df,
                 dr=dr_first, dz=dz_first, zmax=zmax_used,
                 c0=c0,
-                cmin=c0
+                c_min=c0,
             )
         )
         self._attach_output_paths(
@@ -1668,8 +1668,14 @@ class RAM(PropagationModel):
         # via a warning so the user knows their target wasn't met.
         eps0 = float(self.accuracy)
         theta0 = float(self.theta_max)
+        # Floor at 15° — Collins (1993) treats 30° as the standard
+        # wide-angle PE; below 15° the operator is essentially paraxial
+        # and the term "wide-angle" stops being meaningful. Users who
+        # genuinely want narrow-angle physics should pass an explicit
+        # ``theta_max`` to the constructor.
+        theta_floor = 15.0
         eps_used, theta_used, res, last_exc = eps0, theta0, None, None
-        for theta_trial in (theta0, 20.0, 15.0, 10.0):
+        for theta_trial in (theta0, 20.0, theta_floor):
             if theta_trial > theta0:
                 continue
             theta_used = theta_trial
@@ -1681,7 +1687,7 @@ class RAM(PropagationModel):
                         c_min=c_min, c_max=c_max,
                         x_max=float(max_range),
                         c0=c0_pe,
-                        theta_max=np.deg2rad(theta_used),
+                        theta_max=float(theta_used),  # degrees
                         eps=eps_used,
                         p=int(self.np_pade),
                         alpha=0.0
@@ -1697,8 +1703,9 @@ class RAM(PropagationModel):
         if res is None:
             raise ConfigurationError(
                 f"RAM:{kind}: no Lytaev grid feasible even at ε=0.5, "
-                f"θ_max=10° for f={freq:.1f} Hz, x_max={max_range:.0f} m. "
-                f"Set ``dr``/``dz`` explicitly. Optimiser said: {last_exc}"
+                f"θ_max={theta_floor:.0f}° for f={freq:.1f} Hz, "
+                f"x_max={max_range:.0f} m. Set ``dr``/``dz`` explicitly. "
+                f"Optimiser said: {last_exc}"
             ) from last_exc
         if eps_used > eps0 or theta_used < theta0:
             warnings.warn(
@@ -2051,18 +2058,20 @@ class RAM(PropagationModel):
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
-            # Build complex pressure |p| such that
-            #   TL_dB = -20*log10(|p|) = -20*log10(|psi|*4π) - 10*log10(r)
-            # is recovered by Field.tl. We bake the cylindrical
-            # 1/sqrt(r) spreading into the magnitude by dividing
-            # |psi|*4π by sqrt(r); since we don't have psi's true phase
-            # at the receiver we keep a phase of 0 (consumers that only
-            # need TL can read field.tl, which depends on |p| only).
+            # Apply the mpiramS → engineering travelling-wave transform
+            # used by ``_run_broadband``:
+            #   psif = psi · exp(+i(k0 r + pi/4)) / (4 pi)
+            #   p    = conj(psif) · 4 pi · exp(-i pi/4) / sqrt(r)
+            # so the resulting Field carries the same phase convention
+            # as the broadband path. ``Field.tl`` only depends on |p|,
+            # but downstream consumers that need coherent integration
+            # now get a meaningful phase.
             r_safe = log_ranges.astype(np.float64)
             with np.errstate(divide='ignore', invalid='ignore'):
-                psi_mag = np.abs(pressure_rcv) * 4.0 * np.pi
-                p_mag = psi_mag / np.sqrt(r_safe)[np.newaxis, :]
-            pressure_field = p_mag.astype(np.complex128)
+                scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(r_safe)
+            pressure_field = (
+                np.conj(pressure_rcv) * scale[np.newaxis, :]
+            ).astype(np.complex128)
 
             elapsed = time.time() - start_time
             self._log(f"TL completed in {elapsed:.2f}s")
@@ -2230,11 +2239,11 @@ class RAM(PropagationModel):
                     backend='mpiramS',
                     frequencies=result['frq'],
                     dr=float(dr), dz=float(dz),
-                    Nsam=result['Nsam'],
+                    n_samples=result['Nsam'],
                     fs=result['fs'],
                     Q=result['Q'],
                     c0=result['c0'],
-                    cmin=result['cmin']
+                    c_min=result['cmin'],
                 )
             )
             # Mask sub-bottom samples with NaN for consistency with _run_tl.

@@ -5,8 +5,7 @@ Canonical surface
 
 * :func:`plot_field` — auto-shape plotter for :class:`~uacpy.Field`. Reads
   ``field.coords`` after the user's :meth:`Field.at` / :meth:`Field.isel`
-  slicing. 1 surviving axis → line; 2 surviving axes → heatmap. Optional
-  ``projection='polar'`` for ``(depth, range)`` fields.
+  slicing. 1 surviving axis → line; 2 surviving axes → heatmap.
 * :func:`compare` — overlay multiple 1-D sliced fields on one axes.
 * :func:`compare_models` — side-by-side heatmap grid of 2-D fields.
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans / arrival stems.
@@ -25,10 +24,11 @@ Cuts and slices are made on the Field, not on the plotter::
     plot_field(tl.at(range=5000))           # 1-D cut along depth
     plot_field(tf.at(frequency=200))        # narrowband heatmap at 200 Hz
     plot_field(tf.at(depth=z, range=r))     # 1-D spectrum at one point
-    plot_field(tl, projection='polar')      # polar TL view
 """
 
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -199,7 +199,6 @@ def plot_field(
     *,
     env: Optional[Environment] = None,
     value: Optional[str] = None,
-    projection: str = 'cartesian',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
@@ -233,10 +232,6 @@ def plot_field(
     value : str
         ``'tl'`` (default, dB), ``'mag'``, ``'phase'``, ``'real'``,
         ``'imag'``.
-    projection : str
-        ``'cartesian'`` (default) or ``'polar'`` (2-D ``(depth, range)``
-        only). The polar view shows the range-dependent TL azimuthally
-        symmetrically — useful for radial bird's-eye renderings.
     vmin, vmax : float, optional
         Colour limits. ``None`` picks an auto-clip for TL.
     cmap : str, optional
@@ -262,12 +257,6 @@ def plot_field(
     axes_present = list(field.coords)
     n_axes = len(axes_present)
 
-    if projection == 'polar' and axes_present != ['depth', 'range']:
-        raise ValueError(
-            "plot_field(projection='polar'): requires a 2-D "
-            f"['depth', 'range'] field; got coords {axes_present}"
-        )
-
     if stacked:
         if n_axes != 2 or 'time' not in axes_present:
             raise ValueError(
@@ -287,7 +276,7 @@ def plot_field(
     if n_axes == 2:
         return _plot_field_2d(
             field, arr, value_label, axes_present,
-            ax=ax, env=env, projection=projection,
+            ax=ax, env=env,
             vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
             figsize=figsize, show_colorbar=show_colorbar,
             contours=contours, **mpl_kw,
@@ -362,7 +351,7 @@ def _plot_field_1d(
 
 def _plot_field_2d(
     field, arr, value_label, axes_present,
-    *, ax, env, projection, vmin, vmax, cmap, value, title, figsize,
+    *, ax, env, vmin, vmax, cmap, value, title, figsize,
     show_colorbar=True, contours=None, **mpl_kw,
 ):
     if axes_present == ['depth', 'range']:
@@ -413,28 +402,6 @@ def _plot_field_2d(
     else:
         if cmap is None:
             cmap = get_cmap_for_field('tl')
-
-    if projection == 'polar':
-        if ax is None:
-            fig = plt.figure(figsize=figsize)
-            ax = fig.add_subplot(111, projection='polar')
-        else:
-            fig = ax.figure
-        # Use range as radius, depth as angle band — closest to a
-        # bird's-eye TL plot. shading='auto' lets matplotlib pick edges.
-        n_theta = max(64, len(x_coord))
-        theta = np.linspace(0, 2 * np.pi, n_theta)
-        # Repeat the (depth, range) field around the full circle so the
-        # polar view is meaningful (a single radial line per range).
-        radial = x_coord
-        Z_polar = np.tile(Z.mean(axis=0)[None, :], (n_theta, 1))
-        im = ax.pcolormesh(
-            theta, radial, Z_polar.T, vmin=vmin, vmax=vmax, cmap=cmap,
-            shading='auto', **mpl_kw,
-        )
-        ax.set_theta_zero_location('N')
-        fig.colorbar(im, ax=ax, label=value_label)
-        return fig, ax
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -541,8 +508,6 @@ def compare(
     ax.set_ylabel(vlabel)
     if value == 'tl':
         ax.invert_yaxis()
-    if common_axis == 'depth':
-        ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
     ax.legend()
     if title:
@@ -585,6 +550,24 @@ def compare_models(
     if ncols is None:
         ncols = n
     nrows = int(np.ceil(n / ncols))
+
+    ref = fields[0]
+    for f, lbl in zip(fields[1:], labels[1:]):
+        for axis in ('depth', 'range'):
+            if axis not in ref.coords or axis not in f.coords:
+                continue
+            ca = ref.coords[axis]
+            cb = f.coords[axis]
+            if ca.shape != cb.shape or not np.allclose(
+                ca, cb, rtol=1e-6, atol=1e-6
+            ):
+                warnings.warn(
+                    f"compare_models: {lbl!r} {axis} axis differs from "
+                    f"{labels[0]!r}; the shared colourbar mixes "
+                    "different sample grids.",
+                    UserWarning, stacklevel=2,
+                )
+                break
 
     if value == 'tl' and (vmin is None or vmax is None):
         cat = np.concatenate(

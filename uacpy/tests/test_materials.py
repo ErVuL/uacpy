@@ -5,6 +5,7 @@
 import pytest
 
 import uacpy
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, LayeredBottom,
 )
@@ -128,7 +129,7 @@ class TestLayeredBottomFromPresets:
         assert bot.halfspace.sound_speed == 3000.0
 
     def test_bad_entry_shape_raises(self):
-        with pytest.raises(ValueError, match="(name, thickness)"):
+        with pytest.raises(ConfigurationError, match="(name, thickness)"):
             LayeredBottom.from_presets(
                 layers=[('sand',)],
                 halfspace='limestone',

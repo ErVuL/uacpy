@@ -47,13 +47,11 @@ BIN_DIR_MPIRAMS="${BIN_ROOT}/mpirams"
 BIN_DIR_RAMSURF="${BIN_ROOT}/ramsurf"
 
 # Bellhopcuda upstream release we build against. Tags are mutable on the
-# upstream side (a maintainer can re-point v1.5 to a different commit), so
-# we also support an immutable commit SHA. If BELLHOPCUDA_COMMIT_SHA is
-# non-empty it takes precedence; otherwise we fall back to the tag with a
-# loud warning. Pin the SHA after the first known-good install:
-#     git -C uacpy/third_party/bellhopcuda rev-parse HEAD
+# upstream side, so an immutable commit SHA is preferred. When
+# BELLHOPCUDA_COMMIT_SHA is non-empty install.sh checks out that exact
+# commit; otherwise it falls back to BELLHOPCUDA_TAG with a loud warning.
 BELLHOPCUDA_TAG="v1.5"
-BELLHOPCUDA_COMMIT_SHA=""  # TODO: paste the v1.5 commit SHA for supply-chain pinning
+BELLHOPCUDA_COMMIT_SHA="b396d40ba49c2f349258b9687cfae8ff8323828f"
 
 # Default behavior: interactive
 AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
@@ -766,11 +764,11 @@ echo ""
 OASES_URL="https://acoustics.mit.edu/faculty/henrik/LAMSS/pub/Oases/oases.tar.gz"
 
 # Pin the OASES tarball to a known-good sha256 to defend against supply-chain
-# tampering. After the first verified install run:
-#     sha256sum "$OASES_TMP/oases.tar.gz"
-# and paste the resulting digest below. While empty, install.sh warns once and
-# proceeds without enforcement.
-OASES_EXPECTED_SHA256=""
+# tampering on the acoustics.mit.edu download. install.sh refuses to extract a
+# tarball whose digest does not match; on CI ($CI set) an empty pin is fatal,
+# on dev workstations it triggers a one-time warning and proceeds.
+# Recompute with: sha256sum "$OASES_TMP/oases.tar.gz" after a verified install.
+OASES_EXPECTED_SHA256="5822e0f039eb97fc4c02405848d115d4f05ea6be00feb7c1bd5689560ad3731b"
 
 if [[ "$INSTALL_OASES" != "yes" ]]; then
     echo -e "${YELLOW}=== Skipping OASES (not selected) ===${NC}"
@@ -787,8 +785,10 @@ if [ ! -d "$OASES_DIR" ]; then
     OASES_TMP="$(mktemp -d)"
     OASES_TARBALL="$OASES_TMP/oases.tar.gz"
 
+    # --proto-redir =https blocks a redirect from downgrading to HTTP.
     set +e
-    curl -fSL "$OASES_URL" -o "$OASES_TARBALL"
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+         -fSL "$OASES_URL" -o "$OASES_TARBALL"
     OASES_CURL_RC=$?
     set -e
 
@@ -812,7 +812,15 @@ if [ ! -d "$OASES_DIR" ]; then
                 OASES_SHA_OK=0
             fi
         elif [ -z "$OASES_EXPECTED_SHA256" ]; then
-            echo -e "${YELLOW}OASES_EXPECTED_SHA256 is unset; skipping checksum verification. Pin it for supply-chain integrity.${NC}"
+            if [ -n "${CI:-}" ]; then
+                echo -e "${RED}✗ OASES_EXPECTED_SHA256 is unset and \$CI is set — refusing to proceed.${NC}"
+                echo -e "${RED}  Pin OASES_EXPECTED_SHA256 in install.sh before running on CI.${NC}"
+                STATUS_OASES="failed"
+                NOTE_OASES="OASES_EXPECTED_SHA256 unset on CI"
+                OASES_SHA_OK=0
+            else
+                echo -e "${YELLOW}OASES_EXPECTED_SHA256 is unset; skipping checksum verification. Pin it for supply-chain integrity.${NC}"
+            fi
         fi
 
         if [ "$OASES_SHA_OK" -eq 1 ]; then
@@ -1155,8 +1163,8 @@ echo -e "${BLUE}=== Running quick executable sanity checks ===${NC}"
 test_runnable() {
     exe="$1"
     if [ -x "$exe" ]; then
-        # try --version or --help; ignore exit code
-        ("$exe" --version >/dev/null 2>&1) || ("$exe" --help >/dev/null 2>&1) || true
+        # Acoustics-Toolbox binaries read CLI args as env-file roots; do
+        # not invoke them here.
         echo -e "  ✓ Runnable: ${GREEN}$(basename "$exe")${NC}"
         return 0
     else
@@ -1240,5 +1248,10 @@ echo "Quick test:"
 echo "  cd uacpy && python -c \"import uacpy; print(uacpy.__version__)\""
 echo "  python uacpy/examples/example_01_basic_shallow_water.py"
 echo ""
+
+if [[ "$OVERALL" != "ok" ]]; then
+    echo -e "${RED}One or more components failed/partial. Exiting non-zero.${NC}"
+    exit 1
+fi
 exit 0
 

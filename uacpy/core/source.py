@@ -5,6 +5,8 @@ Source class for defining acoustic sources in underwater environments
 import numpy as np
 from typing import Union, List
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 class Source:
     """
@@ -53,33 +55,43 @@ class Source:
         self.frequencies = np.atleast_1d(np.array(frequencies, dtype=np.float64))
 
         if self.depths.size == 0:
-            raise ValueError("Source requires at least one depth; got an empty array")
+            raise ConfigurationError(
+                "Source requires at least one depth; got an empty array"
+            )
         if self.frequencies.size == 0:
-            raise ValueError("Source requires at least one frequency; got an empty array")
+            raise ConfigurationError(
+                "Source requires at least one frequency; got an empty array"
+            )
 
         if np.any(~np.isfinite(self.depths)):
-            raise ValueError(
-                f"source depths must be finite (no NaN/inf), got {self.depths.tolist()}"
+            raise ConfigurationError(
+                f"source depths must be finite (no NaN/inf), got "
+                f"{self.depths.tolist()}"
             )
 
         if np.any(~np.isfinite(self.frequencies)):
-            raise ValueError(
-                f"source frequencies must be finite (no NaN/inf), got {self.frequencies.tolist()}"
+            raise ConfigurationError(
+                f"source frequencies must be finite (no NaN/inf), got "
+                f"{self.frequencies.tolist()}"
             )
 
         if np.any(self.depths < 0):
-            raise ValueError(
-                f"source depths must be non-negative (down from surface), got {self.depths.tolist()}"
+            raise ConfigurationError(
+                f"source depths must be non-negative (down from surface), "
+                f"got {self.depths.tolist()}"
             )
 
         if np.any(self.frequencies <= 0):
-            raise ValueError(
-                f"source frequencies must be strictly positive (Hz), got {self.frequencies.tolist()}"
+            raise ConfigurationError(
+                f"source frequencies must be strictly positive (Hz), got "
+                f"{self.frequencies.tolist()}"
             )
 
         valid_types = ['point', 'line']
         if source_type not in valid_types:
-            raise ValueError(f"source_type must be one of {valid_types}")
+            raise ConfigurationError(
+                f"source_type must be one of {valid_types}; got {source_type!r}"
+            )
         self.source_type = source_type
 
     @property

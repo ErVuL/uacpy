@@ -20,11 +20,24 @@ class TestModalModelAgreement:
 
     @pytest.fixture
     def simple_environment(self):
-        """Create a simple Pekeris waveguide for testing."""
+        """Pekeris waveguide with a fluid half-space bottom.
+
+        Modal solvers (KrakenField, Scooter, OAST) share the same
+        wavenumber-integration/normal-mode physics on a true Pekeris
+        configuration and should agree within ~1 dB; a vacuum-bottom env
+        has no halfspace leakage channel and the inter-model spread is
+        larger.
+        """
         env = uacpy.Environment(
             name='Pekeris',
             bathymetry=100,
-            ssp=1500
+            ssp=1500,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=1700.0,
+                density=1.8,
+                attenuation=0.5,
+            ),
         )
         return env
 
@@ -152,13 +165,14 @@ class TestModalModelAgreement:
         # All models should be within reasonable range of each other
         max_diff = max(kf_scooter_diff, kf_oast_diff, scooter_oast_diff)
 
-        assert max_diff < 15.0, (
-            f"Modal models disagree significantly:\n"
+        assert max_diff < 2.0, (
+            f"Modal models disagree on Pekeris waveguide:\n"
             f"  KrakenField: {kf_tl:.2f} dB\n"
             f"  Scooter:     {scooter_tl:.2f} dB\n"
             f"  OAST:        {oast_tl:.2f} dB\n"
             f"  Max difference: {max_diff:.2f} dB\n"
-            "All modal models should agree within 15 dB."
+            "All modal models should agree within 2 dB on a fluid-bottom "
+            "Pekeris waveguide."
         )
 
     def test_mode_count_consistency(self, simple_environment, simple_source):
