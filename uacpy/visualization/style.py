@@ -1,0 +1,212 @@
+"""
+Professional matplotlib styling for UACPY visualizations.
+
+Styles are applied automatically when ``uacpy.visualization`` is imported
+(see ``visualization/__init__.py``). Callers can re-apply them with
+``apply_professional_style()`` after tweaking their own rcParams, or
+revert to matplotlib defaults with ``matplotlib.rcdefaults()``.
+"""
+import matplotlib as mpl
+
+
+# Professional color schemes
+COLORS = {
+    'primary': '#2E86AB',      # Professional blue
+    'secondary': '#A23B72',    # Accent purple
+    'success': '#06A77D',      # Success green
+    'warning': '#F18F01',      # Warning orange
+    'danger': '#C73E1D',       # Danger red
+    'dark': '#2D3142',         # Dark gray
+    'light': '#F5F5F5',        # Light gray
+    'grid': '#E0E0E0',         # Grid color
+}
+
+# Professional colormaps
+COLORMAPS = {
+    'tl': 'jet_r',             # Transmission loss: blue (low TL/good) → red (high TL/poor)
+                               # Matches Acoustic Toolbox standard: flipud(jet)
+    'ssp': 'RdYlBu_r',         # Sound speed profile (temperature-like)
+    'pressure': 'seismic',     # Pressure field
+    'phase': 'twilight',       # Phase data
+    'modes': 'cividis',        # Mode shapes
+    'bathymetry': 'terrain',   # Bathymetry
+}
+
+
+def apply_professional_style(dpi: int = 150):
+    """
+    Apply professional matplotlib styling globally.
+
+    Parameters
+    ----------
+    dpi : int, optional
+        Dots per inch for figure resolution. Default is 150 (high quality).
+        Use 300 for publication-quality figures.
+    """
+    mpl.rcdefaults()
+
+    style_dict = {
+        'figure.dpi': dpi,
+        'figure.figsize': (10, 6),
+        'figure.facecolor': 'white',
+        'figure.edgecolor': 'white',
+        'figure.autolayout': False,
+
+        'axes.facecolor': 'white',
+        'axes.edgecolor': COLORS['dark'],
+        'axes.linewidth': 1.2,
+        'axes.grid': True,
+        'axes.axisbelow': True,
+        'axes.labelsize': 12,
+        'axes.titlesize': 14,
+        'axes.titleweight': 'bold',
+        'axes.labelweight': 'normal',
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.prop_cycle': mpl.cycler(color=[
+            COLORS['primary'], COLORS['success'], COLORS['secondary'],
+            COLORS['warning'], COLORS['danger']
+        ]),
+
+        'grid.color': COLORS['grid'],
+        'grid.linestyle': '-',
+        'grid.linewidth': 0.5,
+        'grid.alpha': 0.6,
+
+        'lines.linewidth': 2.0,
+        'lines.markersize': 6,
+        'lines.markeredgewidth': 0.0,
+
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif'],
+        'font.size': 11,
+        'font.weight': 'normal',
+
+        'text.color': COLORS['dark'],
+        'text.antialiased': True,
+
+        'legend.fontsize': 10,
+        'legend.frameon': True,
+        'legend.framealpha': 0.9,
+        'legend.facecolor': 'white',
+        'legend.edgecolor': COLORS['grid'],
+        'legend.shadow': False,
+        'legend.fancybox': False,
+
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'xtick.direction': 'out',
+        'ytick.direction': 'out',
+        'xtick.major.size': 5,
+        'ytick.major.size': 5,
+        'xtick.minor.size': 3,
+        'ytick.minor.size': 3,
+        'xtick.major.width': 1.0,
+        'ytick.major.width': 1.0,
+        'xtick.color': COLORS['dark'],
+        'ytick.color': COLORS['dark'],
+
+        'savefig.dpi': dpi,
+        'savefig.facecolor': 'white',
+        'savefig.edgecolor': 'white',
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.1,
+        'savefig.transparent': False,
+
+        'image.cmap': 'RdYlBu_r',
+        'image.interpolation': 'bilinear',
+        'image.origin': 'upper',
+
+        # TrueType fonts in PDF/PS (avoids Type 3 embedding for ACM/IEEE).
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+
+        # Embed fonts in SVG.
+        'svg.fonttype': 'none',
+    }
+
+    mpl.rcParams.update(style_dict)
+
+
+# ── Sediment colour — single source of truth ─────────────────────────────
+# Change ``BOTTOM_HALFSPACE_COLOR`` and the fill + hatch colours below
+# follow automatically (they're alpha-blended derivations of it). The
+# rendered fill is opaque so it cleanly covers the water heatmap
+# underneath without translucent bleed-through.
+BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
+BOTTOM_FILL_HATCH = '///'
+
+
+def _blend(a, b, t):
+    """Alpha-blend ``a`` over ``b`` (RGB tuples or named colours), where
+    ``t`` is the weight of ``a``."""
+    import matplotlib.colors as mc
+    ra, ga, ba = mc.to_rgb(a)
+    rb, gb, bb = mc.to_rgb(b)
+    return (
+        ra * t + rb * (1 - t),
+        ga * t + gb * (1 - t),
+        ba * t + bb * (1 - t),
+    )
+
+
+# Sandy-tan fill ≈ saddlebrown × 0.35 + white × 0.65
+BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
+# Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
+BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
+BOTTOM_FILL_STYLE = {
+    'color': BOTTOM_FILL_COLOR,
+    'hatch': BOTTOM_FILL_HATCH,
+    'edgecolor': BOTTOM_HATCH_COLOR,
+    'linewidth': 0.4,
+}
+
+# Seafloor edge styles — applied above ``BOTTOM_FILL_STYLE`` at the
+# water-sediment interface. RD bathymetry traces the actual seafloor and
+# is drawn solid; a flat bottom is an idealization and is drawn dashed.
+BOTTOM_LINE_STYLE = {
+    'color': 'k',
+    'linewidth': 2.0,
+    'linestyle': '-',
+}
+BOTTOM_LINE_STYLE_FLAT = {
+    'color': 'k',
+    'linewidth': 2.0,
+    'linestyle': '--',
+}
+
+# Source/receiver marker styles — applied via ``ax.plot(..., **STYLE)``.
+SOURCE_MARKER_STYLE = {
+    'marker': '*',
+    'color': 'red',
+    'markersize': 15,
+    'markeredgecolor': 'black',
+    'markeredgewidth': 0.5,
+    'linestyle': 'none',
+}
+
+RECEIVER_MARKER_STYLE = {
+    'marker': 'o',
+    'color': 'limegreen',
+    'markersize': 8,
+    'markeredgecolor': 'black',
+    'markeredgewidth': 0.5,
+    'linestyle': 'none',
+}
+
+
+def get_cmap_for_field(field_type: str) -> str:
+    """
+    Return the colormap name associated with a field type.
+
+    Parameters
+    ----------
+    field_type : str
+        Field type ('tl', 'pressure', 'ssp', ...).
+
+    Returns
+    -------
+    cmap : str
+        Colormap name (falls back to ``'viridis'`` for unknown types).
+    """
+    return COLORMAPS.get(field_type, 'viridis')

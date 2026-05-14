@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uacpy"
+version = "0.2.4"
+description = "Unified Python interface for underwater acoustic propagation models"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "ErVuL", email = "ervul.github@gmail.com" },
+]
+keywords = [
+    "underwater acoustics",
+    "ocean acoustics",
+    "propagation",
+    "bellhop",
+    "kraken",
+    "ram",
+    "oases",
+    "scooter",
+    "sparc",
+    "bounce",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "numpy>=1.22.0,<3.0",
+    "scipy>=1.8.0,<2.0",
+    "matplotlib>=3.5.0,<4.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=6.0,<9.0",
+    "pytest-xdist>=3.0,<4.0",
+]
+dev = [
+    "uacpy[test]",
+    "pytest-cov",
+    "black",
+    "flake8",
+]
+
+[project.urls]
+Source = "https://github.com/ErVuL/uacpy"
+Issues = "https://github.com/ErVuL/uacpy/issues"
+Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
+
+[tool.setuptools.packages.find]
+exclude = ["uacpy.tests", "uacpy.tests.*"]
+
+[tool.setuptools.package-data]
+# OASES binaries are intentionally NOT listed here: OASES is academic-licensed
+# (not redistributable). It must remain a post-install user-side download via
+# `install.sh --oases yes`, never bundled into a wheel/sdist.
+uacpy = [
+    "bin/oalib/*",
+    "bin/bellhopcuda/*",
+    "bin/mpirams/*",
+    "bin/ramsurf/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["uacpy/tests"]
+# pytest-xdist is in the `test` extra and runs the suite in parallel
+# by default (one worker per logical CPU, work-stealing scheduler).
+# Install with `pip install -e ".[test]"`; override with `-n 0` for a
+# single-process run when debugging.
+addopts = "-n logical --dist=worksteal"
+markers = [
+    "slow: long-running tests (excluded by `-m 'not slow'`)",
+    "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
+    "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
+    "integration: end-to-end tests that exercise multiple subsystems",
+]

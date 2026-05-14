@@ -1,0 +1,53 @@
+Date: Mon, 2 Jun 2008 08:36:55 -0700
+From: Peter Worcester <pworcester@ucsd.edu>
+To: Brian Dushaw <dushaw@apl.washington.edu>
+Cc: Peter Worcester <pworcester@ucsd.edu>, "Colosi, John (CIV)" <jacolosi@nps.edu>,
+    Gerald L. D'Spain <gld@mpl.ucsd.edu>, Rex Andrew <rex@apl.washington.edu>,
+    Arthur B. Baggeroer <abb@boreas.mit.edu>, Javier Beron-Vera <fberon@rsmas.miami.edu>,
+    Michael G. Brown <mbrown@rsmas.miami.edu>, Bruce D. Cornuelle <bcornuelle@ucsd.edu>,
+    Matthew A. Dzieciuch <mdzieciuch@ucsd.edu>, Natalie S. Grigorieva <nsgrig@natalie.spb.su>,
+    Kevin D. Heaney <OceanSound04@yahoo.com>, Bruce M. Howe <howe@apl.washington.edu>,
+    James A. Mercer <mercer@apl.washington.edu>, Walter H. Munk <wmunk@ucsd.edu>,
+    Vladimir E. Ostashev <vladimir.ostashev@noaa.gov>, Daniel L. Rudnick <drudnick@ucsd.edu>,
+    Emmanuel Skarsoulis <eskars@iacm.forth.gr>, Ralph Stephen <rstephen@whoi.edu>,
+    Alexander G. Voronovich <alexander.voronovich@noaa.gov>, Kathleen E. Wage <kwage@gmu.edu>,
+    Michael A. Wolfson <wolfson@apl.washington.edu>, Lisa Zurk <zurkl@cecs.pdx.edu>,
+    Irina Rypina <irypina@whoi.edu>, Ilya Udovydchenkov <iudovydchenkov@whoi.edu>,
+    Tarun Chandrayadula <tchandra@gmu.edu>, "Freitas, Kimberly (Kim) (LT)" <kmfreita@nps.edu>,
+    Andy Ganse <aganse@apl.washington.edu>, Joe Sikora <sikorj@mit.edu>,
+    Lora J. Van Uffelen <lvanuffelen@ucsd.edu>, Andrew White <andrew8@apl.washington.edu>,
+    John Kemp <jkemp@whoi.edu>, Jeffrey Simmen <simmen@apl.washington.edu>,
+    Kathleen J. Vigness Raposa <Kathleen.Vigness@marineacoustics.com>,
+    Karen Scott <kscott@ucsd.edu>, Ellen Livingston <ellen.livingston@navy.mil>,
+    John A. Tague <john.a.tague@navy.mil>
+Subject: Re: NPAL:  A new Fortran 95 version of the RAM PE code
+
+Brian et al.,
+
+The (very) limited information that I have on the geo-acoustic parameters in the Philippine
+Sea is from David Knobles:
+
+*****
+At the V-3 location I have obtained an approximate geo-acoustic profile from analysis of
+transmission loss (from the 2007 data) and lofargrams from passing ships using the 1987 data.
+Also I have checked with NAVO. The sediment is soft; with a sound speed ratio slightly less
+than unity.  The effective sediment thickness at V-3 appears to be on the order of about 50
+meters.  The TL analysis suggests attenuation values on the order of about 0.15 dB/m @ 1 kHz.
+Since the sound speed ratio is less than unity the sound speed gradient is important.  Again
+the TL analysis suggests values on the order of 1.75 1/s.  We see clear evidence of scattering
+of the bottom interacting paths.
+
+I think the geo-acoustic model above should allow for approximate TL values to be produced.
+If your system depends in some manner on beam TL, then in my opinion the situation may be more
+complicated due to the scattering.  Beyond RAP range the details of CZs and their depth
+dependence is very sensitive to sensor location and the sound speed profile in the water
+column at the time of your experiment.
+
+*****
+
+Location V-3 is not far from the center of the planned tomographic array.
+
+
+
+Peter
+

@@ -1,0 +1,19 @@
+                    !  input file to PE - CAUTION:  formatted input!
+75   2.0            !  center frequency (Hz), fc, and Q value; bandwidth=fc/Q
+10.0                !  time window width (s) - expected arrival pattern duration
+1000.0              !  source depth (m) - N.B. Formatted, requires one decimal place!
+3000000.00000       !  receiver range (m)
+0.50                !  deltaz - an accuracy parameter (m)  (0.5 is liberal)
+250.0               !  deltar - an accuracy parameter (m)  (250 is liberal)
+4 1                 !  np-# pade coefficients, ns-#stability terms
+10000.0             !  rs - stability range (m); ns=0 for shorter ranges 
+50                  !  output depth  decimation (integer) (decrease if you get ripples in your matlab plots)
+test.ssp            !  Input the soundspeed filename (for single processor, use "munk" for munk canonical)
+1                   !  Flat earth transformation: 0=no, 1=yes
+1                   !  Horizontal linear interpolation flag: 0=no, 1=yes
+0                   !  Enable ocean bottom? 0=no, 1=yes (yes turns on reading the file)
+test.bth            !  Input the bathymetry filename (not used if ocean bottom = 0 above)
+1                   !  Flag for node weighting.  Set to 0 to evenly weight.
+nodewts.dat         !  File name for node weights (not used if flag is 0).
+
+

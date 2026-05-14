@@ -1,0 +1,28 @@
+The output of mpiram is stored as a direct access, binary file, "psif.dat".  
+To read this file, one must know the record length that was used when it 
+was written.  This record length likely depends on the compiler.  For this 
+reason, when the code writes the binary data file, it also writes out, or 
+saves, the record length value to "recl.dat".
+
+For the gfortran compiler, the record length can be computed as:
+
+  fc=75; Q=2; T=15; 
+% fc is center frequency, Q is Q, T is the expected width in seconds of the
+% acoustic arrival pattern.  All specified in the input file.
+  nzo=1;
+% nzo is length of zg1(1), or 1.
+  fs=4*fc;
+% sample frequency is 4*center frequency
+  bw=fc/Q;
+% bandwidth
+  df=fs/(fs*T);
+% frequency increment
+  nf=floor((bw-df)/df) + 1;
+% number of frequencies of one sign
+  nf=2*nf+1;
+% total number of frequencies
+  recl=(4*nzo) + 2*((4*nf));  
+% compute the record length - (4 bytes per number?)
+
+B.Dushaw
+March 2024

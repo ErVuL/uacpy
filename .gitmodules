@@ -1,0 +1,3 @@
+[submodule "uacpy/third_party/bellhopcuda"]
+	path = uacpy/third_party/bellhopcuda
+	url = https://github.com/A-New-BellHope/bellhopcuda.git
