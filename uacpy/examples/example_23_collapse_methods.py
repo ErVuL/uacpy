@@ -27,7 +27,7 @@ import numpy as np
 import uacpy
 from uacpy import SoundSpeedProfile
 from uacpy.models import Scooter
-from uacpy.visualization.plots import compare_models, plot_environment_advanced
+from uacpy.visualization.plots import compare_models, plot_environment
 
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
@@ -79,7 +79,7 @@ def main() -> None:
     )
 
     print("[1/2] Environment overview…")
-    fig_env, _ = plot_environment_advanced(env, source, receiver)
+    fig_env, _ = plot_environment(env)
     out_env = OUTPUT_DIR / 'example_23_environment.png'
     fig_env.savefig(out_env, dpi=150, bbox_inches='tight')
     plt.close(fig_env)
@@ -110,7 +110,7 @@ def main() -> None:
         return
 
     fig_cmp, _ = compare_models(
-        results, env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
+        results, env=env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
         suptitle='Same RD env collapsed four ways via collapse={…}',
     )
     out_cmp = OUTPUT_DIR / 'example_23_collapse_methods.png'

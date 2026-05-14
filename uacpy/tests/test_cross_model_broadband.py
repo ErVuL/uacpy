@@ -181,7 +181,7 @@ def test_broadband_time_series_envelope_peak_in_arrival_window(label):
     pulse = _gaussian_pulse(FC, fs)
     ts = tf.synthesize_time_series(pulse, sample_rate=fs)
     trace = np.asarray(ts.data[0, 0])
-    time = np.asarray(ts.time)
+    time = np.asarray(ts.times)
 
     win = _arrival_window()
     t_peak = _envelope_peak_time(trace, time, win)
@@ -213,7 +213,7 @@ def test_broadband_peak_times_agree_across_models():
         ts = tf.synthesize_time_series(pulse, sample_rate=fs)
         peaks[label] = _envelope_peak_time(
             np.asarray(ts.data[0, 0]),
-            np.asarray(ts.time),
+            np.asarray(ts.times),
             win,
         )
 
@@ -225,8 +225,8 @@ def test_broadband_peak_times_agree_across_models():
 
 
 def test_synthesize_time_series_honors_user_sample_rate():
-    """The :class:`TimeSeriesField` returned by
-    :meth:`TransferFunction.synthesize_time_series` sits on the same
+    """The :class:`Field` returned by
+    :meth:`Field.synthesize_time_series` sits on the same
     sampling grid as the source pulse — i.e. ``ts.fs == sample_rate``
     exactly."""
     env = _pekeris_env()

@@ -319,7 +319,7 @@ class PropagationModel(ABC):
         -------
         result : Result
             One of the typed :mod:`uacpy.core.results` subclasses
-            (``PressureField``, ``TransferFunction``, ``Modes``, …) determined
+            (``Field``, ``Field``, ``Modes``, …) determined
             by ``run_mode`` and the model.
         """
         pass
@@ -452,6 +452,9 @@ class PropagationModel(ABC):
         ``receiver.depth_max <= env.depth`` check above. We only warn
         here because several models (Bellhop, RAM) accept below-seafloor
         receivers natively (infinite TL, PE absorbing region).
+
+        ``receiver_type='line'`` pairs depths[i] with ranges[i] (1-D
+        compare); ``'grid'`` evaluates the depth × range cross-product.
         """
         if not env.has_range_dependent_bathymetry():
             return
@@ -460,35 +463,26 @@ class PropagationModel(ABC):
         seafloor = np.asarray(env.bathymetry_at_range(ranges), dtype=float)
 
         if receiver.receiver_type == 'line':
-            below = depths > seafloor
-            if np.any(below):
-                idx = int(np.argmax(below))
-                warnings.warn(
-                    f"{self.model_name}: receiver at "
-                    f"(range={ranges[idx]:.1f} m, depth={depths[idx]:.1f} m) "
-                    f"sits below the local seafloor "
-                    f"({seafloor[idx]:.1f} m). Results at that point will "
-                    f"reflect the model's below-bottom behaviour (e.g. "
-                    f"infinite TL, PE absorbing layer).",
-                    UserWarning, stacklevel=3,
-                )
-            return
+            mask = depths > seafloor
+            row_ranges = ranges
+            row_floors = seafloor
+        else:
+            mask = depths[:, None] > seafloor[None, :]
+            row_ranges = np.broadcast_to(ranges[None, :], mask.shape)
+            row_floors = np.broadcast_to(seafloor[None, :], mask.shape)
+            depths = np.broadcast_to(depths[:, None], mask.shape)
 
-        below_any = False
-        for sf, r in zip(seafloor, ranges):
-            mask = depths > sf
-            if np.any(mask):
-                idx = int(np.argmax(mask))
-                below_any = True
-                first_r, first_z, first_sf = r, depths[idx], sf
-                break
-        if below_any:
+        if np.any(mask):
+            flat = int(np.argmax(mask))
+            r = float(row_ranges.ravel()[flat])
+            z = float(depths.ravel()[flat])
+            sf = float(row_floors.ravel()[flat])
             warnings.warn(
-                f"{self.model_name}: receiver depth {first_z:.1f} m sits "
-                f"below the local seafloor ({first_sf:.1f} m) at range "
-                f"{first_r:.1f} m. Results there will reflect the model's "
-                f"below-bottom behaviour (e.g. infinite TL, PE absorbing "
-                f"layer).",
+                f"{self.model_name}: receiver at "
+                f"(range={r:.1f} m, depth={z:.1f} m) sits below the local "
+                f"seafloor ({sf:.1f} m). Results at that point will "
+                f"reflect the model's below-bottom behaviour (e.g. "
+                f"infinite TL, PE absorbing layer).",
                 UserWarning, stacklevel=3,
             )
 
@@ -1261,22 +1255,18 @@ class PropagationModel(ABC):
         *,
         primary_files: tuple = (),
     ) -> None:
-        """Attach work-dir output paths to ``result.metadata`` when they
-        will outlive ``run()``.
+        """Attach work-dir output paths to ``result.metadata``.
 
         For each ``(key, suffix)`` in ``primary_files``, sets
         ``result.metadata[key] = str(work_dir / f'{base_name}{suffix}')``
-        when the file exists. Also sets ``'prt_file'`` from the binary's
-        diagnostic log.
+        if the file exists at write time. Also sets ``'prt_file'`` from
+        the binary's diagnostic log when present.
 
-        No-op when ``self.cleanup`` is ``True`` (the work dir is wiped
-        in the model's ``finally`` block, so surfacing paths would
-        mislead the user). The convention across all models is therefore:
-        **paths in ``metadata`` are valid when present; their absence
-        means the files were cleaned up**.
+        Paths are always recorded; if ``self.cleanup`` wipes the work
+        dir afterwards, the user gets a plain ``FileNotFoundError`` when
+        they try to open the path — clearer than a silently missing
+        metadata key.
         """
-        if self.cleanup:
-            return
         for key, suffix in primary_files:
             path = work_dir / f'{base_name}{suffix}'
             if path.exists():

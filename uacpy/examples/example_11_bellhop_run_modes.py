@@ -297,12 +297,13 @@ def scenario_b_ray_tracing():
     from uacpy.visualization.plots import plot_rays
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10))
-    plot_rays(result, env=env, source=source, ax=axes[0],
-              title=f'Ray Paths ({bellhop.n_beams} rays, ±15° launch angles)',
-              xlim=(0, 100))
-    plot_rays(result, env=env, source=source, ax=axes[1],
-              title='Ray Paths — Zoomed View (First Convergence Zone)',
-              xlim=(20, 40), ylim=(2000, 0))
+    plot_rays(result, env=env, ax=axes[0],
+              title=f'Ray Paths ({bellhop.n_beams} rays, ±15° launch angles)')
+    axes[0].set_xlim(0, 100)
+    plot_rays(result, env=env, ax=axes[1],
+              title='Ray Paths — Zoomed View (First Convergence Zone)')
+    axes[1].set_xlim(20, 40)
+    axes[1].set_ylim(2000, 0)
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / 'example_11b_ray_tracing.png', dpi=150,
                 bbox_inches='tight')
@@ -395,13 +396,13 @@ def scenario_c_eigenrays_arrivals():
     ax_eigen = fig.add_subplot(gs[1])
     ax_arr = fig.add_subplot(gs[2]) if arrivals_ok else None
 
-    plot_rays(result_rays, env=env, source=source, receiver=receiver,
+    plot_rays(result_rays, env=env,
               ax=ax_full, linewidth=1.1, alpha=0.75,
               title=f'Context ray fan ({len(result_rays.rays)} rays, ±20°)')
 
     n_eigenrays = len(result_eigen.rays)
     if n_eigenrays > 0:
-        plot_rays(result_eigen, env=env, source=source, receiver=receiver,
+        plot_rays(result_eigen, env=env,
                   ax=ax_eigen, linewidth=1.5, alpha=0.9,
                   title=f'{n_eigenrays} eigenrays at receiver '
                   f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')

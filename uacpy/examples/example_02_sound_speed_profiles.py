@@ -78,7 +78,7 @@ import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter  # noqa: E402
-from example_helpers import create_example_report  # noqa: E402
+from plotting_utils import create_example_report  # noqa: E402
 
 
 def scenario_a_munk_profile():
@@ -158,8 +158,7 @@ def scenario_a_munk_profile():
             "SOFAR channel trapping, convergence zones, and ultra-long-range propagation. "
             "Channel axis at ~1000m depth provides optimal trapping.",
             env=env,
-            source=source,
-            receiver=receiver,
+            source=source, receiver=receiver,
             results=results,
             output_prefix="example_02a_munk"
         )
@@ -254,8 +253,7 @@ def scenario_b_pekeris_waveguide():
             "propagation with bottom loss, shear wave conversion at interface, and "
             "reduced mode count compared to rigid bottom.",
             env=env,
-            source=source,
-            receiver=receiver,
+            source=source, receiver=receiver,
             results=results,
             output_prefix="example_02b_pekeris"
         )
@@ -352,8 +350,7 @@ def scenario_c_thermocline():
             "within duct demonstrates strong trapping in isothermal layer (0-50m) with "
             "downward refraction below thermocline.",
             env=env,
-            source=source,
-            receiver=receiver,
+            source=source, receiver=receiver,
             results=results,
             output_prefix="example_02c_thermocline"
         )

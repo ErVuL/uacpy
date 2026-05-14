@@ -4,15 +4,15 @@ EXAMPLE 14: Plotting Features — Stacked Time Series and Mode Heatmaps
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE: Showcase two visualization helpers driven by real model output:
-    1. plot_time_series(stacked=True) — stacked impulse responses across ranges
-    2. plot_modes_heatmap()           — Kraken mode shapes as a 2-D pcolor panel
+    1. plot_field(stacked=True) — stacked impulse responses across ranges
+    2. plot_modes_heatmap()     — Kraken mode shapes as a 2-D pcolor panel
 
 The stacked time series uses a Bellhop ``BROADBAND`` transfer function
 synthesised against a Ricker source pulse — fast, clean, and the propagation
 delay is visible as a linear slope across stacked traces.
 
 Equivalents in the Acoustics-Toolbox MATLAB suite:
-    plotts.m     →  plot_time_series()
+    plotts.m     →  plot_field(stacked=True)
     plotmode.m   →  plot_modes_heatmap()
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.models import Bellhop, Kraken  # noqa: E402
 from uacpy.models.base import RunMode  # noqa: E402
-from uacpy.visualization import plot_time_series, plot_modes_heatmap  # noqa: E402
+from uacpy.visualization import plot_field, plot_modes_heatmap  # noqa: E402
 
 
 def _ricker(fc: float, fs: float, duration: float = 0.04) -> np.ndarray:
@@ -42,7 +42,7 @@ def _ricker(fc: float, fs: float, duration: float = 0.04) -> np.ndarray:
 
 
 def demo_stacked_time_series():
-    """plot_time_series(stacked=True) on Bellhop broadband impulse responses."""
+    """plot_field(stacked=True) on Bellhop broadband impulse responses."""
     print("\n" + "─" * 70)
     print("DEMO 1: Stacked time series (Bellhop BROADBAND → Ricker → IFFT)")
     print("─" * 70)
@@ -75,15 +75,21 @@ def demo_stacked_time_series():
     print("  Synthesising time series...", end=" ", flush=True)
     ts = tf.synthesize_time_series(source_waveform=waveform, sample_rate=fs)
     print(f"✓  shape={ts.data.shape}, "
-          f"duration={ts.time[-1]:.3f} s")
+          f"duration={ts.times[-1]:.3f} s")
 
-    fig, _ = plot_time_series(ts, stacked=True)
+    # ts has 3-D coords {depth, range, time}; slice at the single receiver
+    # depth so plot_field sees a 2-D (range, time) field. ``stacked=True``
+    # renders one offset trace per range — the seismic-waterfall view.
+    ts_2d = ts.at(depth=float(receiver.depths[0]))
+    fig, _ = plot_field(ts_2d, stacked=True,
+                        title='Stacked impulse responses per range')
     out = OUTPUT_DIR / 'example_14_time_series_stacked.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  ✓ Saved: output/{out.name}")
 
-    fig, _ = plot_time_series(ts, stacked=False)
+    # ``stacked=False`` falls back to a 2-D (range, time) heatmap.
+    fig, _ = plot_field(ts_2d, title='Time-series heatmap (range × time)')
     out = OUTPUT_DIR / 'example_14_time_series_overlaid.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -138,7 +144,7 @@ def demo_modes_heatmap():
 
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 14: plot_time_series & plot_modes_heatmap")
+    print("EXAMPLE 14: plot_field(stacked=True) & plot_modes_heatmap")
     print("═" * 80)
 
     demo_stacked_time_series()

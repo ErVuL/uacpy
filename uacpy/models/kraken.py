@@ -32,7 +32,7 @@ modes = kraken.run(env, source, receiver)  # Returns Modes typed result
 
 # Compute TL field from modes
 field_model = KrakenField()
-result = field_model.run(env, source, receiver)  # Returns PressureField (TL)
+result = field_model.run(env, source, receiver)  # Returns Field (narrowband pressure)
 
 # Complex modes for elastic bottom
 krakenc = KrakenC()
@@ -55,7 +55,7 @@ from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Modes, PressureField, TransferFunction
+from uacpy.core.results import Result, Modes, Field
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
@@ -1351,10 +1351,13 @@ class KrakenField(_KrakenBase):
                     # differ by an overall -1 (NOT a conjugation), so a
                     # plain negation aligns the two travelling-wave fields.
                     p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
-                field = TransferFunction(
+                field = Field(
                     data=p_stack,
-                    depths=receiver.depths,
-                    ranges=receiver.ranges,
+                    coords={
+                        'depth': receiver.depths,
+                        'range': receiver.ranges,
+                        'frequency': freqs_read,
+                    },
                     phase_reference='travelling_wave',
                     **self._result_kwargs(
                         source,
@@ -1366,14 +1369,11 @@ class KrakenField(_KrakenBase):
                     ),
                 )
             elif return_pressure:
-                # Negate to match Scooter / Bellhop / RAM (see broadband
-                # branch above for the prefactor algebra).
                 shd_data = read_shd_bin(str(shd_file))
                 p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
-                field = PressureField(
+                field = Field(
                     data=p,
-                    depths=receiver.depths,
-                    ranges=receiver.ranges,
+                    coords={'depth': receiver.depths, 'range': receiver.ranges},
                     **self._result_kwargs(
                         source,
                         backend='field.exe',
@@ -1384,15 +1384,14 @@ class KrakenField(_KrakenBase):
                 )
             else:
                 field = read_shd_file(shd_file)
-                kw = self._result_kwargs(
-                    source,
-                    backend='field.exe',
-                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                    mode_coupling=self.mode_coupling if is_rd else 'none',
-                    n_profiles=n_profiles,
-                )
-                extras = kw.pop('metadata', {})
-                field.tag(**kw, **extras)
+                field.model = self.model_name
+                field.backend = 'field.exe'
+                field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+                field.frequencies = np.atleast_1d(np.asarray(
+                    float(np.atleast_1d(source.frequencies)[0]), dtype=float,
+                ))
+                field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
+                field.metadata['n_profiles'] = n_profiles
 
             self._attach_output_paths(
                 field, fm.work_dir, base_name,

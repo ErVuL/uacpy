@@ -23,7 +23,7 @@ NOTE ON PRE-ARRIVAL SIDELOBES:
     period). When the IFFT window is wider than 1/df, periodic replicas
     of the impulse response appear before the geometric arrival r/c₀ —
     that's the "little bit of signal" visible upstream of 3333 ms.
-    `TransferFunction.to_time_trace` interpolates the spectrum onto a finer FFT
+    `Field.to_time_trace` interpolates the spectrum onto a finer FFT
     grid (df_fft ≤ 1 Hz) to suppress them, but residual ripple from the
     coarse source data remains. The three RAM backends use much denser
     frequency sampling (Q=2, T=5 → df = 0.2 Hz, ~250 freqs across the
@@ -237,7 +237,7 @@ def main():
         )
         print(f"  Output shape: {result_sparc.data.shape} (n_depths x nr x nt)")
         print(f"  Time step: {result_sparc.dt*1000:.3f} ms")
-        print(f"  Duration: {result_sparc.time[-1]*1000:.1f} ms")
+        print(f"  Duration: {result_sparc.times[-1]*1000:.1f} ms")
         results['SPARC'] = result_sparc
     except Exception as e:
         print(f"  SKIPPED: {e}")
@@ -271,8 +271,8 @@ def main():
         )
         print(f"  Output type: {result_das.field_type}")
         print(f"  Shape: {result_das.data.shape}")
-        print(f"  Time: {result_das.time[0]*1000:.1f} - "
-              f"{result_das.time[-1]*1000:.1f} ms")
+        print(f"  Time: {result_das.times[0]*1000:.1f} - "
+              f"{result_das.times[-1]*1000:.1f} ms")
         print(f"  Max amplitude: {np.max(np.abs(result_das.data)):.6f}")
         results['Bellhop (chirp)'] = result_das
     except Exception as e:
@@ -287,17 +287,37 @@ def main():
 
     # --- Plot A: Transfer function magnitude/phase comparison ---
     tf_models = {k: v for k, v in results.items()
-                 if v.field_type == 'transfer_function'}
+                 if 'frequency' in v.coords}
     if tf_models:
-        from uacpy.visualization.plots import plot_transfer_function
+        from uacpy.visualization.plots import compare
         depth_idx = receiver.depths.shape[0] // 2
-        depth = receiver.depths[depth_idx]
-        fig, _ = plot_transfer_function(
-            tf_models, depth_idx=depth_idx, range_idx=0,
-            show_phase=True, unwrap_phase=False,
-            title=f'Transfer functions — depth={depth:.0f} m, '
-            f'range={target_range/1000:.0f} km',
+        depth = float(receiver.depths[depth_idx])
+        # Slice each broadband Field to a single (depth, range) → leaves
+        # a 1-D spectrum over frequency. Stack magnitude (top) and phase
+        # (bottom) on a shared 2-row axes layout via the ax= kwarg.
+        traces = [
+            f.at(depth=depth, range=target_range)
+            for f in tf_models.values()
+        ]
+        labels = list(tf_models)
+        fig, (ax_mag, ax_phase) = plt.subplots(
+            2, 1, figsize=(11, 8), sharex=True,
+            gridspec_kw={'height_ratios': [1, 1], 'hspace': 0.25},
         )
+        compare(traces, labels=labels, value='mag', ax=ax_mag,
+                title='Magnitude |H(f)|')
+        compare(traces, labels=labels, value='phase', ax=ax_phase,
+                title='Phase ∠H(f)')
+        ax_mag.set_xlabel('')
+        ax_phase.set_xlabel('Frequency (Hz)', fontweight='bold')
+        # Lift the figure title above the magnitude panel so it doesn't
+        # collide with the per-axes title.
+        fig.suptitle(
+            f'Transfer functions — depth={depth:.0f} m, '
+            f'range={target_range/1000:.0f} km',
+            fontsize=13, fontweight='bold', y=0.995,
+        )
+        fig.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.97)
         fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
                     dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -307,8 +327,13 @@ def main():
     fig, ax = plt.subplots(figsize=(8, 6))
 
     for name, result in tf_models.items():
-        tl_at_fc = result.at(frequency=source.frequencies[0]).to_tl().tl
-        ax.plot(tl_at_fc, result.depths, label=name, linewidth=1.5)
+        # Slice the broadband Field down to a single (frequency, range)
+        # cell so what's left is a 1-D vector over depth.
+        depth_cut = result.at(
+            frequency=source.frequencies[0], range=target_range,
+        ).to_tl().tl
+        ax.plot(np.asarray(depth_cut).ravel(), result.depths,
+                label=name, linewidth=1.5)
 
     ax.set_xlabel('Transmission Loss (dB)')
     ax.set_ylabel('Depth (m)')
@@ -343,25 +368,25 @@ def main():
                 depth=target_depth, range=target_range,
                 t_start=t_start_common,
             )
-            ts_results[name] = (ts.time * 1000, ts.data)
+            ts_results[name] = (ts.times * 1000, ts.data)
             print(f"  {name}: {len(ts.data)} samples, "
-                  f"t=[{ts.time[0]*1000:.1f}, "
-                  f"{ts.time[-1]*1000:.1f}] ms")
+                  f"t=[{ts.times[0]*1000:.1f}, "
+                  f"{ts.times[-1]*1000:.1f}] ms")
         except Exception as e:
             print(f"  {name}: FAILED ({e})")
 
     # Add Bellhop delay-and-sum result. Bellhop TIME_SERIES returns a
-    # TimeSeriesField over a 1×1 grid; extract the single trace.
+    # Field over a 1×1 grid; extract the single trace.
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
         trace = r.at(depth=target_depth, range=target_range).data
-        ts_results['Bellhop (chirp)'] = (r.time * 1000, trace)
+        ts_results['Bellhop (chirp)'] = (r.times * 1000, trace)
 
     # Add SPARC at the first depth and last range.
     if 'SPARC' in results:
         r = results['SPARC']
         trace = r.at(depth=float(r.depths[0]), range=float(r.ranges[-1])).data
-        ts_results['SPARC'] = (r.time * 1000, trace)
+        ts_results['SPARC'] = (r.times * 1000, trace)
 
     if ts_results:
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
@@ -416,7 +441,7 @@ def main():
     # --- Plot D: Bellhop delay-and-sum detail ---
     if 'Bellhop (chirp)' in results:
         r = results['Bellhop (chirp)']
-        t_ms = r.time * 1000
+        t_ms = r.times * 1000
         data = r.at(depth=target_depth, range=target_range).data
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
@@ -448,7 +473,7 @@ def main():
     # --- Plot E: SPARC waterfall (if available) ---
     if 'SPARC' in results:
         result_sparc = results['SPARC']
-        time_ms = result_sparc.time * 1000
+        time_ms = result_sparc.times * 1000
         # New shape (n_d, n_r, n_t) — depth 0 → (n_r, n_t).
         pressure = result_sparc.data[0]
 
@@ -483,12 +508,18 @@ def main():
     print(f"\n{'Model':<20} {'Type':<20} {'Shape':<25} {'Notes'}")
     print("-" * 85)
     for name, result in results.items():
-        notes = ''
-        if result.field_type == 'transfer_function':
-            notes = f'{len(result.frequencies)} freqs'
-        elif result.field_type == 'time_series':
+        # Categorise from which axis lives in ``coords`` — broadband
+        # carries 'frequency', time-domain carries 'time'.
+        if 'frequency' in result.coords:
+            kind = 'broadband H(f)'
+            notes = f'{len(result.coords["frequency"])} freqs'
+        elif 'time' in result.coords:
+            kind = 'time series p(t)'
             notes = f"dt={result.dt*1000:.2f} ms"
-        print(f"{name:<20} {result.field_type:<20} {str(result.data.shape):<25} {notes}")
+        else:
+            kind = 'narrowband'
+            notes = ''
+        print(f"{name:<20} {kind:<20} {str(result.data.shape):<25} {notes}")
 
     print("\nModels with TIME_SERIES support:")
     print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")

@@ -304,7 +304,7 @@ class WenzNoise:
         ``ref = 1e-6 Pa = 1 µPa``, matching the underwater-acoustics
         convention used throughout :mod:`uacpy.noise`. The returned
         array is the linear power-spectral density in Pa²/Hz, ready for
-        :func:`uacpy.signal.ssrp` (which expects linear PSD in the
+        :func:`uacpy.acoustic_signal.ssrp` (which expects linear PSD in the
         signal's own pressure units).
         """
         return 10 ** (self.total / 10) * ref ** 2

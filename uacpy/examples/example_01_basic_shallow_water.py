@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.models import Bellhop  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
-from uacpy.visualization.plots import plot_transmission_loss  # noqa: E402
+from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
@@ -131,10 +131,9 @@ def main():
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Plot 1: TL field using NEW uacpy plotting module
+    # Plot 1: TL field
     ax = axes[0, 0]
-    # Use plot_transmission_loss with auto TL limits and show_colorbar=False for subplots
-    _, _ = plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
+    _, _ = plot_field(result, ax=ax, env=env)
     ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
                  fontweight='bold', fontsize=12)
 
@@ -237,7 +236,7 @@ def main():
     print("  ✓ How to visualize transmission loss")
 
     print("\nNEW Plotting features used:")
-    print("  ✓ plot_transmission_loss() with auto TL limits")
+    print("  ✓ plot_field() with auto TL limits")
     print("  ✓ jet_r colormap (blue=good, red=poor) - Acoustic Toolbox standard")
     print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
 

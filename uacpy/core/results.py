@@ -1,35 +1,11 @@
 """Typed result hierarchy for uacpy model outputs.
 
-One class per output category — ``isinstance`` is the contract.
-
-Convention
-----------
-**Spatial axes come first, the variable axis is trailing.** That means:
-
-* ``PressureField.data`` — ``(n_d, n_r)`` or ``(n_d, n_r, n_f)``; real (dB TL)
-  when ``units='dB'``, complex when ``units='complex'``
-* ``TransferFunction.data`` — ``(n_d, n_r, n_f)`` complex
-* ``TimeSeriesField.data``  — ``(n_d, n_r, n_t)`` real
-* ``TimeTrace.data``        — ``(n_t,)`` real
-
-The trailing-axis convention matches numpy's FFT default (``axis=-1``) so
-``np.fft.ifft(H)`` on a ``TransferFunction`` directly produces the time-domain
-counterpart with the same axis layout — no ``axis=`` argument or
-``moveaxis`` shuffling needed.
-
-For every grid-based result, ``data.shape[:2] == (len(depths), len(ranges))``
-holds and is enforced in the constructor.
-
 Hierarchy
 ---------
 ::
 
     Result
-    ├── _GridResult                 (private mixin; spatial accessors)
-    │   ├── PressureField           (units='dB' for TL, 'complex' for pressure)
-    │   ├── TransferFunction
-    │   └── TimeSeriesField
-    ├── TimeTrace                   (single point, no spatial grid)
+    ├── Field                       (all gridded outputs: pressure / TL / H(f) / p(t) / trace)
     ├── Arrivals                    (per-receiver list of arrivals)
     ├── Rays                        (per-source list of ray paths)
     ├── Modes                       (Kraken normal modes — depth eigenfunctions)
@@ -37,31 +13,35 @@ Hierarchy
     ├── Replicas                    (OASN MFP frequency-domain Green's-function templates)
     └── ReflectionCoefficient       (R(theta) at a boundary)
 
-Identification and shape fields (``model``, ``backend``,
-``source_depths``, ``frequencies``, ``phase_reference``, ``time``,
-``dt``, ``n_t``, ``k``, ``phi``, ``depths``, ``arrivals``,
-``by_receiver``, ``rays``, ``theta``, ``R``, ``covariance``,
-``replicas``, …) are **typed attributes** on the result class —
-read them directly: ``result.model``, ``result.frequencies``,
-``modes.k``, etc. They are *not* mirrored into ``metadata``;
-``result.metadata['model']`` raises ``KeyError``.
+:class:`Field` is the single container for everything gridded. The
+dtype + which keys are in :attr:`Field.coords` tell you the physical
+meaning of a field instance:
+
+* ``complex`` + ``{depth, range}``             — narrowband pressure
+* ``real``    + ``{depth, range}``             — TL in dB
+* ``complex`` + ``{depth, range, frequency}``  — broadband ``H(d, r, f)``
+* ``real``    + ``{depth, range, time}``       — ``p(d, r, t)``
+* ``real``    + ``{time}``                     — single-point trace
+
+Slicing (:meth:`Field.at` / :meth:`Field.isel` / :meth:`Field.max`)
+collapses named axes by dropping them from :attr:`coords` and
+recording the chosen sample in :attr:`Field.pinned`.
+
+Identification (``model``, ``backend``, ``source_depths``,
+``frequencies``, ``phase_reference``) is on every :class:`Result`;
+read directly via attributes (not via :attr:`Result.metadata`).
 
 Ad-hoc bag — Result.metadata
 ----------------------------
-``Result.metadata`` is a free-form dict reserved for genuinely
-model-specific outputs that don't have a typed attribute, e.g.
+``Result.metadata`` is a free-form dict for genuinely model-specific
+extras that don't have a typed attribute:
 
 * :class:`Bounce` ``ReflectionCoefficient`` — ``'brc_file'``,
   ``'irc_file'``, ``'c_low'``, ``'c_high'``, ``'rmax'``.
-* :class:`OAST` ``PressureField`` — ``'oast_native_ranges'``,
-  ``'interpolated'``.
+* :class:`OAST` field — ``'oast_native_ranges'``, ``'interpolated'``.
 * :class:`RAM` results — ``'c0'``, ``'dr'``, ``'dz'``, ``'zmax'``,
   ``'Q'``, ``'T'``.
 * :class:`KrakenField` results — ``'mode_coupling'``, ``'n_profiles'``.
-
-Adding a new result type? Promote shape/identification fields to typed
-attributes; only put genuinely opaque per-model extras in
-``metadata``.
 """
 
 from __future__ import annotations
@@ -80,9 +60,8 @@ from uacpy.core.exceptions import ConfigurationError
 def _complex_to_db(data: np.ndarray) -> np.ndarray:
     """``-20·log10(|data|)`` with ``|data|`` clamped to :data:`PRESSURE_FLOOR`.
 
-    Canonical TL conversion shared by :attr:`PressureField.tl`,
-    :attr:`TransferFunction.tl`, and :func:`uacpy.core.metrics._to_db`.
-    Preserves shape — no squeeze.
+    Canonical TL conversion used by :attr:`Field.tl` and the metrics in
+    :mod:`uacpy.core.metrics`. Preserves shape — no squeeze.
     """
     return -20.0 * np.log10(np.maximum(np.abs(data), PRESSURE_FLOOR))
 
@@ -91,7 +70,7 @@ class PhaseReference(str, Enum):
     """Phase convention of a complex transfer function ``H(f)``.
 
     Every uacpy wrapper normalises its native phase convention before
-    handing data to :class:`TransferFunction`; downstream consumers
+    storing data on a broadband :class:`Field`; downstream consumers
     (IFFT, time-series synthesis) only need to know whether the payload
     is in the engineering travelling-wave form or whether it lives in
     the time domain already. Inherits from ``str`` so
@@ -103,12 +82,12 @@ class PhaseReference(str, Enum):
         ``H(f)`` carries the engineering propagator ``exp(-i k0 r)``;
         ``2*Re[ifft(H)]`` lands the causal arrival at ``t = r/c0``.
         Used by Bellhop, Scooter, OASES OAST/OASP, KrakenField, and RAM
-        (mpiramS / Collins backends; the wrapper bakes the carrier into
-        the data before tagging).
+        (mpiramS / Collins backends bake the carrier into the data).
     TIME_DOMAIN_NATIVE
         SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
         already-time-domain trace; consumers that want a time series
-        should take it from ``TimeSeriesField`` instead.
+        should read the time-domain :class:`Field` from
+        ``RunMode.TIME_SERIES`` instead.
     """
     TRAVELLING_WAVE = 'travelling_wave'
     TIME_DOMAIN_NATIVE = 'time_domain_native'
@@ -200,38 +179,15 @@ class Result:
                 bits.append(f"f={float(self.frequencies[0]):.3g} Hz")
             else:
                 bits.append(f"n_f={len(self.frequencies)}")
+        extra = self._repr_extra()
+        if extra:
+            bits.append(extra)
         return f"{cls}({', '.join(bits)})"
 
-    def tag(
-        self,
-        *,
-        model: Optional[str] = None,
-        backend: Optional[str] = None,
-        source_depths: Optional[np.ndarray] = None,
-        frequencies: Optional[Union[float, np.ndarray]] = None,
-        phase_reference: Optional[str] = None,
-        **extra_metadata,
-    ) -> 'Result':
-        """Attach harmonized identification to a Result built by a reader.
-
-        Each model wrapper calls ``result.tag(model=…, backend=…,
-        source_depths=…, frequencies=…, phase_reference=…, **extras)`` after
-        the I/O reader returns. Scalar ``frequencies`` auto-wraps to a
-        length-1 ndarray. Returns ``self`` for chaining.
-        """
-        if model is not None:
-            self.model = model
-        if backend is not None:
-            self.backend = backend
-        if source_depths is not None:
-            self.source_depths = np.atleast_1d(np.asarray(source_depths, dtype=float))
-        if frequencies is not None:
-            self.frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
-        if phase_reference is not None:
-            self.phase_reference = phase_reference
-        for k, v in extra_metadata.items():
-            self.metadata[k] = v
-        return self
+    def _repr_extra(self) -> str:
+        """Override on subclasses to add a per-class size summary
+        (``n_modes=N``, ``n_rays=N``, …) to :meth:`__repr__`."""
+        return ''
 
     # Stub plot() — concrete subclasses override.
     def plot(self, **kwargs):
@@ -240,283 +196,365 @@ class Result:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Grid mixin: shared API for spatially-gridded results
+# Field — unified gridded result
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class _GridResult(Result):
-    """Mixin for results that live on a regular ``(depth, range)`` grid.
+_CANONICAL_AXIS_ORDER = ('source_depth', 'depth', 'range', 'frequency', 'time')
 
-    Provides ``depths``, ``ranges`` and the shape-checking machinery.
-    Concrete subclasses (``PressureField``, ``TransferFunction``,
-    ``TimeSeriesField``) provide a label-based ``at(...)`` slicer and
-    a ``max()`` reducer that return chain-able typed slices. The dtype
-    and units of ``data``, plus an optional third trailing axis
-    (``frequencies`` or ``time``), are subclass-specific.
+
+class Field(Result):
+    """Generic gridded result. One container for every spatially or
+    spectrally gridded uacpy output.
+
+    The dtype of :attr:`data` plus the keys in :attr:`coords` tell you
+    what the field represents:
+
+    =========================  ================================  =====================================
+    dtype                      ``coords`` keys                    Physical meaning
+    =========================  ================================  =====================================
+    complex                    ``{depth, range}``                Narrowband pressure ``p(d, r)``
+    real                       ``{depth, range}``                TL in dB
+    complex                    ``{depth, range, frequency}``     Broadband ``H(d, r, f)``
+    real                       ``{depth, range, time}``          Time-domain ``p(d, r, t)``
+    real                       ``{time}``                        Single-point trace
+    complex                    ``{source_depth, depth, range}``  Multi-source TL field
+    =========================  ================================  =====================================
+
+    ``data.shape`` matches the insertion order of :attr:`coords`. The
+    canonical order is ``source_depth → depth → range → frequency``
+    (or ``time``).
+
+    Slicing
+    -------
+    :meth:`at` (label) and :meth:`isel` (index) collapse a named axis
+    to a single sample. The axis is **dropped** from :attr:`coords` and
+    the selected coordinate value is recorded in :attr:`pinned`::
+
+        narrow = tf.at(frequency=200)
+        narrow.coords        # {'depth': ..., 'range': ...}
+        narrow.pinned        # {'frequency': 198.4}    nearest sample
+
+    :meth:`max` does the same for every axis at once (picking the
+    argmax of ``|data|``) — returns a scalar Field with empty
+    ``coords`` and every axis pinned.
     """
 
-    # Filled in by subclasses to give clearer error messages.
+    field_type = "field"
 
     def __init__(
         self,
         *,
         data: np.ndarray,
-        depths: np.ndarray,
-        ranges: np.ndarray,
+        coords: Dict[str, np.ndarray],
+        pinned: Optional[Dict[str, float]] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        data = np.asarray(data)
-        depths = np.atleast_1d(np.asarray(depths, dtype=float))
-        ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
-        if data.ndim < 2:
+        if not isinstance(coords, dict):
             raise ConfigurationError(
-                f"{type(self).__name__}.data: must be at least 2-D; "
-                f"got shape {data.shape}"
+                "Field.coords: must be a dict of axis_name → 1-D array"
             )
-        if data.shape[:2] != (len(depths), len(ranges)):
+        normalised: Dict[str, np.ndarray] = {}
+        for name, v in coords.items():
+            arr = np.atleast_1d(np.asarray(v, dtype=float))
+            if arr.ndim != 1:
+                raise ConfigurationError(
+                    f"Field.coords[{name!r}]: must be 1-D; got shape {arr.shape}"
+                )
+            normalised[name] = arr
+        self.coords: Dict[str, np.ndarray] = normalised
+
+        data = np.asarray(data)
+        expected = tuple(normalised[name].size for name in normalised)
+        if data.shape != expected:
             raise ConfigurationError(
-                f"{type(self).__name__}.data: first two axes {data.shape[:2]} "
-                f"must equal (n_depths, n_ranges) = ({len(depths)}, {len(ranges)})"
+                f"Field.data: shape {data.shape} does not match coord sizes "
+                f"{expected} (axes: {list(normalised)})"
             )
         self.data = data
-        self.depths = depths
-        self.ranges = ranges
+        self.pinned: Dict[str, float] = (
+            {k: float(v) for k, v in pinned.items()} if pinned else {}
+        )
 
-    # Shape ------------------------------------------------------------------
+    # ── shape / dtype ─────────────────────────────────────────────────
 
     @property
     def shape(self) -> Tuple[int, ...]:
         return self.data.shape
 
     @property
-    def n_depths(self) -> int:
-        return len(self.depths)
+    def axes(self) -> List[str]:
+        return list(self.coords)
 
     @property
-    def n_ranges(self) -> int:
-        return len(self.ranges)
+    def is_complex(self) -> bool:
+        return bool(np.iscomplexobj(self.data))
 
-    # Slicing — concrete subclasses (PressureField, TransferFunction,
-    # TimeSeriesField) provide a label-based ``at(...)`` that returns a
-    # chain-able typed slice. ``_GridResult`` itself is abstract w.r.t.
-    # selection.
+    @property
+    def kind(self) -> str:
+        """Physical-quantity classification from ``(dtype, coords)``.
 
+        One of ``'tl'`` (real, no time/frequency axis), ``'pressure'``
+        (complex, no frequency axis), ``'transfer_function'``
+        (complex, ``'frequency'`` axis present), or ``'time_series'``
+        (real, ``'time'`` axis present). Independent of dimensionality —
+        ``tl.at(depth=20)`` is still ``'tl'``."""
+        axes = set(self.coords)
+        if 'frequency' in axes and self.is_complex:
+            return 'transfer_function'
+        if 'time' in axes and not self.is_complex:
+            return 'time_series'
+        if self.is_complex:
+            return 'pressure'
+        return 'tl'
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Spatial gridded results
-# ─────────────────────────────────────────────────────────────────────────────
+    def __repr__(self) -> str:
+        bits = [f"kind={self.kind!r}"]
+        if self.model:
+            bits.append(f"model={self.model!r}")
+        f0 = self.f0
+        if f0 is not None and 'frequency' not in self.coords:
+            bits.append(f"f={f0:.3g} Hz")
+        bits.append(f"axes=({', '.join(self.coords) or 'scalar'})")
+        return f"Field({', '.join(bits)})"
 
-
-class PressureField(_GridResult):
-    """Acoustic pressure on a ``(depth, range)`` grid.
-
-    Strictly 2-D, narrowband, single-source — ``data.shape == (n_depths, n_ranges)``.
-    Broadband uses :class:`TransferFunction` (3-D ``(n_d, n_r, n_f)``);
-    multi-source-depth runs return a :class:`ResultStack` of
-    :class:`PressureField` slabs keyed by source depth.
-
-    Carries either complex pressure (``units='complex'``) or transmission
-    loss in dB (``units='dB'``).
-
-    Units
-    -----
-    ``units='complex'`` — model-native **source-normalized** complex pressure
-    (dimensionless; equivalently Pa @ 1 m for a unit-amplitude monopole),
-    such that ``-20·log10(|p|)`` is TL in dB re 1 m. Every uacpy model
-    (Bellhop / Kraken family / Scooter / SPARC / Bounce / RAM / OASES)
-    delivers this same convention. To convert to absolute Pa at the
-    receiver, multiply by the source amplitude — uacpy does not carry one
-    (``Source`` only has frequencies and depths, no level).
-
-    ``units='dB'`` — transmission loss, real, dB re 1 m.
-
-    Use :meth:`to_tl` to get a ``units='dB'`` view, or read the dB array
-    on the fly via :attr:`tl` (available for both unit modes).
-    """
-
-    def __init__(
-        self,
-        *,
-        data: np.ndarray,
-        depths: np.ndarray,
-        ranges: np.ndarray,
-        units: str = 'complex',
-        **kwargs,
-    ):
-        if units not in ('complex', 'dB'):
-            raise ConfigurationError(
-                f"PressureField.units: must be 'complex' or 'dB', got {units!r}"
-            )
-        self._validate_data_shape(data)
-        self.units = units
-        super().__init__(
-            data=data, depths=depths, ranges=ranges, **kwargs,
-        )
-
-    def _validate_data_shape(self, data: np.ndarray) -> None:
-        """Enforce strict 2-D ``(n_depths, n_ranges)``. Sliced views
-        relax this in :class:`SlicedPressureField`."""
-        if data.ndim != 2:
-            raise ValueError(
-                f"PressureField.data: must be 2-D (n_d, n_r); got shape "
-                f"{data.shape}. Use TransferFunction for broadband, or "
-                f"bundle per-source slabs into a ResultStack for "
-                f"multi-source results."
-            )
-
-    field_type = 'tl'
-
-    def at(
-        self,
-        *,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-    ) -> "SlicedPressureField":
-        """Label-based slicing along the depth and/or range axis.
-
-        Each kwarg picks the nearest grid sample and collapses that axis
-        to size 1. The selected axis stays in ``.data.shape`` (so the
-        returned :class:`SlicedPressureField` keeps its declared
-        dimensionality), but ``.tl`` / ``.p`` squeeze size-1 axes for
-        plot-friendly shapes.
-        """
-        sliced = self.data
-        new_depths = self.depths
-        new_ranges = self.ranges
-        if depth is not None:
-            d_idx = int(np.argmin(np.abs(self.depths - depth)))
-            sliced = sliced[d_idx:d_idx + 1, :]
-            new_depths = np.array([float(self.depths[d_idx])])
-        if range is not None:
-            r_idx = int(np.argmin(np.abs(self.ranges - range)))
-            sliced = sliced[:, r_idx:r_idx + 1]
-            new_ranges = np.array([float(self.ranges[r_idx])])
-        return SlicedPressureField(
-            data=sliced,
-            depths=new_depths,
-            ranges=new_ranges,
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-    def max(self) -> "SlicedPressureField":
-        """Slice at the global argmax of ``|data|``.
-
-        Returns a 1×1 :class:`SlicedPressureField` — ``.tl`` / ``.p`` are
-        0-D scalars (``float()``-able). Read ``.depths[0]`` /
-        ``.ranges[0]`` for the location of the max.
-        """
-        d_idx, r_idx = np.unravel_index(
-            np.argmax(np.abs(self.data)), self.data.shape,
-        )
-        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1]
-        return SlicedPressureField(
-            data=sliced,
-            depths=np.array([float(self.depths[d_idx])]),
-            ranges=np.array([float(self.ranges[r_idx])]),
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-    def to_tl(self) -> "PressureField":
-        """Return a new :class:`PressureField` with ``units='dB'`` via
-        ``-20·log10(|p|)`` — a *typed conversion* that lets the chain
-        continue (``.tl`` / ``.p`` / further slicing).
-
-        Distinct from :attr:`tl`, which is the *array accessor* and
-        always returns dB values regardless of underlying units. Use
-        :attr:`tl` for plotting / numerics; use :meth:`to_tl` when you
-        need a dB-units :class:`PressureField` to pass to a function
-        that requires it (or to drop the complex phase irrevocably).
-        No-op when ``self.units == 'dB'``. Returns the same concrete
-        subtype as ``self`` (so a :class:`SlicedPressureField.to_tl`
-        stays sliced).
-        """
-        if self.units == 'dB':
-            return self
-        return type(self)(
-            data=_complex_to_db(self.data),
-            depths=self.depths,
-            ranges=self.ranges,
-            units='dB',
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
+    # ── value accessors ───────────────────────────────────────────────
 
     @property
     def tl(self) -> np.ndarray:
-        """Transmission loss in dB. Same shape as :attr:`data`.
+        """Transmission loss in dB at ``data.shape``.
 
-        ``self.data`` directly when ``units='dB'``; computed on the fly via
-        ``-20·log10(|p|)`` when ``units='complex'``. Slice returns from
-        :meth:`sel` / :meth:`max` collapse singleton axes — they're typed
-        :class:`SlicedPressureField` and override this property.
-        """
-        if self.units == 'dB':
-            return self.data
-        return _complex_to_db(self.data)
+        ``-20·log10(|data|)`` if data is complex, otherwise ``data``
+        returned as-is (real data is taken to be already in dB).
+
+        Raises :class:`AttributeError` for ``kind='time_series'`` —
+        a time-domain trace is not transmission loss; use ``.data`` to
+        read raw samples or ``.extract_tone(f)`` to recover a complex
+        narrowband field first."""
+        if self.kind == 'time_series':
+            raise AttributeError(
+                "Field.tl: time-domain trace is not transmission loss; "
+                "use .data for raw samples or .extract_tone(f) to "
+                "recover a complex narrowband field first"
+            )
+        if self.is_complex:
+            return _complex_to_db(self.data)
+        return np.asarray(self.data, dtype=float)
 
     @property
     def p(self) -> np.ndarray:
-        """Complex pressure. Same shape as :attr:`data`.
+        """Complex pressure / transfer-function values.
 
-        Raises when ``units='dB'`` because phase has been irrecoverably
-        discarded by the ``-20·log10|p|`` step. Slice returns squeeze
-        singletons via :class:`SlicedPressureField`.
-        """
-        if self.units == 'dB':
+        Raises when :attr:`data` is real — phase has been discarded."""
+        if not self.is_complex:
             raise AttributeError(
-                "PressureField.p: only valid when units='complex'. "
-                "dB storage has no phase to return."
+                "Field.p: data is real; complex pressure unavailable"
             )
         return self.data
 
-    def mask_below_seafloor(self, bathymetry) -> "PressureField":
+    @property
+    def magnitude(self) -> np.ndarray:
+        if not self.is_complex:
+            raise AttributeError(
+                "Field.magnitude: requires complex data"
+            )
+        return np.abs(self.data)
+
+    @property
+    def phase(self) -> np.ndarray:
+        if not self.is_complex:
+            raise AttributeError("Field.phase: requires complex data")
+        return np.angle(self.data)
+
+    # ── coord-axis conveniences ───────────────────────────────────────
+
+    @property
+    def depths(self) -> Optional[np.ndarray]:
+        return self.coords.get('depth')
+
+    @property
+    def ranges(self) -> Optional[np.ndarray]:
+        return self.coords.get('range')
+
+    @property
+    def times(self) -> Optional[np.ndarray]:
+        return self.coords.get('time')
+
+    @property
+    def n_depths(self) -> int:
+        z = self.coords.get('depth')
+        return int(z.size) if z is not None else 0
+
+    @property
+    def n_ranges(self) -> int:
+        r = self.coords.get('range')
+        return int(r.size) if r is not None else 0
+
+    @property
+    def n_times(self) -> int:
+        t = self.coords.get('time')
+        return int(t.size) if t is not None else 0
+
+    @property
+    def dt(self) -> float:
+        t = self.coords.get('time')
+        if t is None or t.size < 2:
+            return 0.0
+        return float(t[1] - t[0])
+
+    @property
+    def fs(self) -> float:
+        dt = self.dt
+        return 1.0 / dt if dt > 0 else 0.0
+
+    # ── slicing ────────────────────────────────────────────────────────
+
+    def at(self, **kwargs) -> "Field":
+        """Label-based slice. Each kwarg names a coord axis; nearest
+        sample is picked and the axis is **dropped** from :attr:`coords`
+        (its selected value lands in :attr:`pinned`)."""
+        self._check_axes(kwargs)
+        idx_map = {
+            name: int(np.argmin(np.abs(self.coords[name] - float(v))))
+            for name, v in kwargs.items()
+        }
+        return self._slice(idx_map)
+
+    def isel(self, **kwargs) -> "Field":
+        """Integer-index slice. Same semantics as :meth:`at` but the
+        value is a positional index into the coord array."""
+        self._check_axes(kwargs)
+        return self._slice({name: int(i) for name, i in kwargs.items()})
+
+    def max(self) -> "Field":
+        """Slice at the global argmax of ``|data|``.
+
+        Every axis collapses to a pinned scalar; the returned Field has
+        empty :attr:`coords`, 0-D :attr:`data`, and every original axis
+        recorded in :attr:`pinned`."""
+        if self.data.size == 0:
+            raise ValueError("Field.max: data is empty")
+        flat = int(np.argmax(np.abs(self.data)))
+        idx = np.unravel_index(flat, self.data.shape)
+        idx_map = {name: int(i) for name, i in zip(self.coords, idx)}
+        return self._slice(idx_map)
+
+    def _check_axes(self, kwargs: Dict[str, Any]) -> None:
+        for name in kwargs:
+            if name not in self.coords:
+                raise ValueError(
+                    f"Field: unknown axis {name!r}; available: "
+                    f"{list(self.coords)}"
+                )
+
+    def _slice(self, idx_map: Dict[str, int]) -> "Field":
+        slicers: List[Any] = []
+        new_coords: Dict[str, np.ndarray] = {}
+        new_pinned: Dict[str, float] = dict(self.pinned)
+        for ax_pos, name in enumerate(self.coords):
+            if name in idx_map:
+                i = idx_map[name]
+                size = self.coords[name].size
+                if -size <= i < 0:
+                    i += size
+                if not (0 <= i < size):
+                    raise IndexError(
+                        f"Field: index {idx_map[name]} out of range for axis "
+                        f"{name!r} (size {size})"
+                    )
+                slicers.append(i)
+                new_pinned[name] = float(self.coords[name][i])
+            else:
+                slicers.append(slice(None))
+                new_coords[name] = self.coords[name]
+        new_data = self.data[tuple(slicers)]
+        return Field(
+            data=new_data,
+            coords=new_coords if new_coords else {},
+            pinned=new_pinned,
+            **self._id_kwargs(),
+        ) if new_coords else self._spawn_scalar(new_data, new_pinned)
+
+    def _spawn_scalar(self, new_data, new_pinned) -> "Field":
+        # Scalar Field: data is 0-D, coords empty. Re-enter via __init__
+        # by re-adding a phantom singleton coord, then immediately
+        # dropping it — simpler: bypass the dict size check by allowing
+        # empty coords here. We do so by constructing a Field via a
+        # private path.
+        f = Field.__new__(Field)
+        Result.__init__(
+            f,
+            model=self.model,
+            backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
+            metadata=dict(self.metadata),
+        )
+        f.coords = {}
+        f.data = np.asarray(new_data)
+        f.pinned = new_pinned
+        return f
+
+    def to_tl(self) -> "Field":
+        """Return a real-dB Field via ``-20·log10(|data|)``.
+
+        No-op when ``data`` is already real."""
+        if not self.is_complex:
+            return self
+        return Field(
+            data=_complex_to_db(self.data),
+            coords=dict(self.coords),
+            pinned=dict(self.pinned),
+            **self._id_kwargs(),
+        )
+
+    def _id_kwargs(self) -> dict:
+        return dict(
+            model=self.model,
+            backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
+            metadata=dict(self.metadata),
+        )
+
+    # ── (depth, range) operations ─────────────────────────────────────
+
+    def mask_below_seafloor(self, bathymetry) -> "Field":
         """Return a copy with samples below the seafloor set to NaN.
 
-        Accepts either an :class:`Environment` (its ``.bathymetry`` is
-        used) or a raw ``(N, 2)`` array of ``(range, depth)`` pairs in
-        the same shape carried by :attr:`Environment.bathymetry`. The
-        seafloor depth at each receiver range is linearly interpolated
-        from the bathymetry; receiver depths exceeding that local depth
-        are masked with NaN.
-        """
-        # Late import to avoid the results <-> environment cycle at module load.
+        Requires exactly the canonical 2-D layout
+        ``coords == {'depth': ..., 'range': ...}``."""
+        if list(self.coords) != ['depth', 'range']:
+            raise ValueError(
+                "Field.mask_below_seafloor: requires canonical "
+                f"['depth', 'range'] coords; got {list(self.coords)}"
+            )
         from uacpy.core.environment import Environment
         if isinstance(bathymetry, Environment):
             bathymetry = bathymetry.bathymetry
         bathy = np.asarray(bathymetry, dtype=float)
         if bathy.ndim != 2 or bathy.shape[1] != 2:
             raise ValueError(
-                f"PressureField.mask_below_seafloor: bathymetry must be "
-                f"shape (N, 2) or an Environment; got array shape {bathy.shape}"
+                f"Field.mask_below_seafloor: bathymetry must be shape "
+                f"(N, 2) or an Environment; got array shape {bathy.shape}"
             )
-        seafloor = np.interp(self.ranges, bathy[:, 0], bathy[:, 1])
+        ranges = self.coords['range']
+        depths = self.coords['depth']
+        seafloor = np.interp(ranges, bathy[:, 0], bathy[:, 1])
         new_data = self.data.astype(
-            np.complex128 if np.iscomplexobj(self.data) else np.float64,
-            copy=True,
+            np.complex128 if self.is_complex else np.float64, copy=True,
         )
-        for j, bd in enumerate(seafloor):
-            mask = self.depths > bd
+        for j, sf in enumerate(seafloor):
+            mask = depths > sf
             new_data[mask, j] = np.nan
-        return PressureField(
+        return Field(
             data=new_data,
-            depths=self.depths,
-            ranges=self.ranges,
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
+            coords=dict(self.coords),
+            pinned=dict(self.pinned),
+            **self._id_kwargs(),
         )
 
     def resample_to(
@@ -525,103 +563,160 @@ class PressureField(_GridResult):
         depths: np.ndarray,
         *,
         method: str = 'linear',
-    ) -> "PressureField":
+    ) -> "Field":
         """Linearly resample onto a new ``(depth, range)`` grid.
 
-        For ``units='complex'`` data, real and imaginary parts are
-        interpolated independently (a complex linear interpolation).
-        Out-of-bound queries return NaN.
-        """
+        Requires the canonical 2-D layout ``coords == {'depth', 'range'}``.
+        Complex data is interpolated component-wise. Out-of-bound queries
+        return NaN."""
+        if list(self.coords) != ['depth', 'range']:
+            raise ValueError(
+                "Field.resample_to: requires canonical ['depth', 'range'] "
+                f"coords; got {list(self.coords)}"
+            )
         from scipy.interpolate import RegularGridInterpolator
         new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
-
         DD, RR = np.meshgrid(new_depths, new_ranges, indexing='ij')
         query = np.stack([DD.ravel(), RR.ravel()], axis=-1)
-
-        if np.iscomplexobj(self.data):
+        if self.is_complex:
             interp_re = RegularGridInterpolator(
-                (self.depths, self.ranges), self.data.real,
+                (self.coords['depth'], self.coords['range']), self.data.real,
                 method=method, bounds_error=False, fill_value=np.nan,
             )
             interp_im = RegularGridInterpolator(
-                (self.depths, self.ranges), self.data.imag,
+                (self.coords['depth'], self.coords['range']), self.data.imag,
                 method=method, bounds_error=False, fill_value=np.nan,
             )
             vals = interp_re(query) + 1j * interp_im(query)
         else:
             interp = RegularGridInterpolator(
-                (self.depths, self.ranges), self.data,
+                (self.coords['depth'], self.coords['range']), self.data,
                 method=method, bounds_error=False, fill_value=np.nan,
             )
             vals = interp(query)
-
         new_data = vals.reshape(len(new_depths), len(new_ranges))
-
-        return PressureField(
+        return Field(
             data=new_data,
-            depths=new_depths,
-            ranges=new_ranges,
-            units=self.units,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
+            coords={'depth': new_depths, 'range': new_ranges},
+            pinned=dict(self.pinned),
+            **self._id_kwargs(),
         )
 
-    @property
-    def magnitude(self) -> np.ndarray:
-        if self.units == 'dB':
-            raise AttributeError(
-                "PressureField.magnitude: only valid when units='complex'"
-            )
-        return np.abs(self.data)
+    # ── broadband-only (requires 'frequency' coord) ───────────────────
 
-    @property
-    def phase(self) -> np.ndarray:
-        if self.units == 'dB':
-            raise AttributeError(
-                "PressureField.phase: only valid when units='complex'"
-            )
-        return np.angle(self.data)
+    def to_time_trace(
+        self,
+        depth: Optional[float] = None,
+        range: Optional[float] = None,
+        *,
+        source_spectrum: Optional[np.ndarray] = None,
+        window: str = "hann",
+        nfft: Optional[int] = None,
+        t_start: Optional[float] = None,
+    ) -> "Field":
+        """Single-trace IFFT of ``H(d, r, :)`` at a chosen ``(depth, range)``.
 
-
-class SlicedPressureField(PressureField):
-    """Returned by :meth:`PressureField.at` / :meth:`PressureField.max`
-    (and the same methods on :class:`TransferFunction`).
-
-    Same data semantics as :class:`PressureField`, but ``data`` may be
-    2-D ``(n_d, n_r)`` *or* 3-D ``(n_d, n_r, n_frequencies)`` — the
-    extra axis preserves the frequency dimension of a sliced
-    :class:`TransferFunction`. ``.tl`` / ``.p`` apply
-    :func:`numpy.squeeze` so chain calls give plot-friendly shapes
-    (``(N,)`` for line cuts, 0-D scalars for point queries) without
-    manual ``.squeeze()`` / ``.item()`` at the call site. Internal —
-    model wrappers always emit full :class:`PressureField` /
-    :class:`TransferFunction` instances; only slicing produces this
-    subtype.
-    """
-
-    def _validate_data_shape(self, data: np.ndarray) -> None:
-        if data.ndim not in (2, 3):
+        Requires ``coords == {'depth', 'range', 'frequency'}``. Returns
+        a single-point ``Field`` with ``coords={'time': ...}``."""
+        if list(self.coords) != ['depth', 'range', 'frequency']:
             raise ValueError(
-                f"SlicedPressureField.data: must be 2-D or 3-D; got "
-                f"shape {data.shape}"
+                "Field.to_time_trace: requires canonical "
+                "['depth', 'range', 'frequency'] coords; got "
+                f"{list(self.coords)}"
             )
+        return _ifft_to_trace(
+            self, depth=depth, range=range,
+            source_spectrum=source_spectrum,
+            window=window, nfft=nfft, t_start=t_start,
+        )
 
-    @property
-    def tl(self) -> np.ndarray:
-        return np.squeeze(PressureField.tl.fget(self))
+    def synthesize_time_series(
+        self,
+        source_waveform: np.ndarray,
+        sample_rate: float,
+        *,
+        t_start: Optional[float] = None,
+        window: str = "hann",
+        nfft: Optional[int] = None,
+    ) -> "Field":
+        """Convolve every grid trace with ``source_waveform`` to obtain a
+        time-domain Field shaped ``(n_d, n_r, n_t)``.
 
-    @property
-    def p(self) -> np.ndarray:
-        return np.squeeze(PressureField.p.fget(self))
+        Requires ``coords == {'depth', 'range', 'frequency'}``."""
+        if list(self.coords) != ['depth', 'range', 'frequency']:
+            raise ValueError(
+                "Field.synthesize_time_series: requires canonical "
+                "['depth', 'range', 'frequency'] coords; got "
+                f"{list(self.coords)}"
+            )
+        return _synthesize_time_series(
+            self,
+            source_waveform=source_waveform,
+            sample_rate=sample_rate,
+            t_start=t_start, window=window, nfft=nfft,
+        )
+
+    # ── time-domain only (requires 'time' coord) ──────────────────────
+
+    def get_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Real FFT along the time axis. Returns ``(freqs, X)``.
+
+        Requires a ``'time'`` axis."""
+        if 'time' not in self.coords:
+            raise ValueError(
+                f"Field.get_spectrum: requires a 'time' axis; "
+                f"got {list(self.coords)}"
+            )
+        time_ax = list(self.coords).index('time')
+        X = np.fft.rfft(self.data, axis=time_ax)
+        freqs = np.fft.rfftfreq(self.n_times, self.dt)
+        return freqs, X
+
+    def extract_tone(
+        self,
+        frequency: float,
+        *,
+        window: str = 'hann',
+    ) -> "Field":
+        """Extract steady-state complex pressure at one frequency from a
+        time-domain Field. Requires ``coords == {'depth', 'range', 'time'}``."""
+        if list(self.coords) != ['depth', 'range', 'time']:
+            raise ValueError(
+                "Field.extract_tone: requires canonical "
+                "['depth', 'range', 'time'] coords; got "
+                f"{list(self.coords)}"
+            )
+        if window == 'hann':
+            win = np.hanning(self.n_times)
+        elif window == 'hamming':
+            win = np.hamming(self.n_times)
+        elif window == 'blackman':
+            win = np.blackman(self.n_times)
+        elif window == 'none':
+            win = np.ones(self.n_times)
+        else:
+            raise ValueError(
+                f"Field.extract_tone: unknown window={window!r}"
+            )
+        windowed = self.data * win
+        spec = np.fft.rfft(windowed, axis=-1)
+        freqs = np.fft.rfftfreq(self.n_times, self.dt)
+        k = int(np.argmin(np.abs(freqs - frequency)))
+        amp = 2.0 * spec[..., k] / np.sum(win)
+        return Field(
+            data=amp,
+            coords={'depth': self.coords['depth'], 'range': self.coords['range']},
+            pinned={**self.pinned, 'frequency': float(freqs[k])},
+            **self._id_kwargs(),
+        )
 
 
-# Per-coordinate metadata invariants. The stacking axis is the *only*
-# axis along which slabs are allowed to differ. Other axes that live
-# on a :class:`Result` (``frequencies``, ``source_depths``) must agree
-# across slabs *unless* they are the stacking axis itself.
+# ─────────────────────────────────────────────────────────────────────────────
+# ResultStack — for non-Field stacks (e.g. multi-source Rays / Arrivals)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 _RESULTSTACK_VARYING_ATTR = {
     'source_depth': 'source_depths',
     'frequency':    'frequencies',
@@ -629,15 +724,20 @@ _RESULTSTACK_VARYING_ATTR = {
 
 
 class ResultStack:
-    """Generic stack of typed :class:`Result` slabs along one coordinate.
+    """Stack of typed :class:`Result` slabs along one coordinate.
 
-    Composition wrapper that bundles a list of slabs together with the
-    coordinate vector along which they are stacked. The coordinate can
-    be a :class:`Result` field (``source_depth``, ``frequency``) or an
-    external parameter the user varied (``wind_speed``, ``azimuth``,
-    …). Every slab carries the same concrete type, ``model``, and
-    ``backend`` — and the same metadata along every axis *except* the
-    stacking axis.
+    Bundles a list of slabs together with the coordinate vector along
+    which they are stacked. The coordinate can be a :class:`Result`
+    field (``source_depth``, ``frequency``) or an external parameter
+    the user varied. Every slab carries the same concrete type,
+    ``model``, and ``backend``, and the same identification along
+    every axis *except* the stacking axis.
+
+    For gridded results, prefer adding the varying axis to
+    :class:`Field` ``coords`` instead (e.g. multi-source TL as a Field
+    with ``coords={'source_depth', 'depth', 'range'}``); this stack is
+    intended for non-Field results (multi-source ``Rays`` /
+    ``Arrivals``).
 
     Construction
     ------------
@@ -645,15 +745,10 @@ class ResultStack:
 
     Access
     ------
-    ``stack[i]``                              i-th slab (typed :class:`Result`)
+    ``stack[i]``                              i-th slab
     ``for c, slab in stack: …``               iterate ``(coordinate, slab)`` pairs
     ``stack.at(<coordinate_name>=value)``     nearest-label lookup
     ``len(stack)``                            number of slabs
-
-    The stack does NOT expose slab-typed accessors (``.tl``, ``.rays``,
-    …); read those off the slab directly:
-    ``stack[0].tl``, ``stack.at(source_depth=50).tl``,
-    ``[slab.tl for c, slab in stack]``.
     """
 
     field_type = 'stack'
@@ -680,8 +775,6 @@ class ResultStack:
                 f"type; got {sorted(t.__name__ for t in types)}"
             )
 
-        # The stacking axis is allowed to differ across slabs; every
-        # other metadata field must agree.
         varying_attr = _RESULTSTACK_VARYING_ATTR.get(str(coordinate_name))
         shared_attrs = ['model', 'backend']
         for attr in ('frequencies', 'source_depths'):
@@ -718,17 +811,12 @@ class ResultStack:
 
     @property
     def slab_type(self) -> type:
-        """Concrete :class:`Result` subclass of every slab."""
         return type(self.slabs[0])
 
     @property
     def n_slabs(self) -> int:
         return int(self.coordinate.size)
 
-    # Universally-shared metadata. Stacking-axis-dependent attributes
-    # (``frequencies``, ``source_depths``) are intentionally NOT
-    # exposed at the stack level: read them off ``slabs[0]`` if they
-    # are shared, or off ``coordinate`` if they are the stacking axis.
     @property
     def model(self) -> str:
         return self.slabs[0].model
@@ -752,10 +840,6 @@ class ResultStack:
             yield float(c), slab
 
     def at(self, **kwargs) -> Result:
-        """Return the slab whose coordinate is closest to the value
-        passed under ``coordinate_name``. Exactly one keyword argument
-        is accepted, and its name must match :attr:`coordinate_name`.
-        """
         if len(kwargs) != 1 or self.coordinate_name not in kwargs:
             raise TypeError(
                 f"ResultStack.at(): pass exactly the stacking-axis "
@@ -774,463 +858,6 @@ class ResultStack:
         )
 
 
-class TransferFunction(_GridResult):
-    """Complex broadband transfer function ``H(d, r, f)``.
-
-    Sibling of :class:`PressureField`, not a subclass — distinct semantic
-    role: the system response used to drive time-domain synthesis. Carries
-    a required ``phase_reference`` and the synthesis helpers
-    (:meth:`synthesize_time_series`, :meth:`to_time_trace`, :meth:`to_tl`).
-
-    ``data`` shape: ``(n_depths, n_ranges, n_frequencies)`` complex.
-
-    Label-based slicing via :meth:`at` (and reduction via :meth:`max`)
-    returns a :class:`SlicedPressureField` — the slice is a pressure
-    field, no longer a transfer function, so
-    the synthesis machinery is unreachable from a slice.
-
-    See ``DOCUMENTATION.md §5.13`` for ``phase_reference`` semantics.
-    """
-    field_type = "transfer_function"
-
-    def __init__(
-        self,
-        *,
-        data: np.ndarray,
-        depths: np.ndarray,
-        ranges: np.ndarray,
-        frequencies: np.ndarray,
-        phase_reference: Union[PhaseReference, str],
-        **kwargs,
-    ):
-        if frequencies is None or len(frequencies) == 0:
-            raise ValueError(
-                "TransferFunction: requires a non-empty frequencies vector"
-            )
-        super().__init__(
-            data=data, depths=depths, ranges=ranges,
-            frequencies=frequencies, **kwargs,
-        )
-        if data.ndim != 3:
-            raise ValueError(
-                f"TransferFunction.data: must be 3-D (n_d, n_r, n_f); "
-                f"got shape {data.shape}"
-            )
-        if data.shape[2] != len(self.frequencies):
-            raise ValueError(
-                f"TransferFunction.data: axis 2 ({data.shape[2]}) does not "
-                f"match len(frequencies) ({len(self.frequencies)})"
-            )
-        if phase_reference is None or phase_reference == "":
-            raise ValueError(
-                f"TransferFunction: requires a phase_reference; "
-                f"valid: {[m.value for m in PhaseReference]}"
-            )
-        try:
-            ref = PhaseReference(phase_reference)
-        except ValueError:
-            raise ValueError(
-                f"TransferFunction: unknown phase_reference={phase_reference!r}; "
-                f"valid: {[m.value for m in PhaseReference]}"
-            ) from None
-        self.phase_reference = ref.value
-
-    @property
-    def tl(self) -> np.ndarray:
-        """TL in dB at ``data.shape`` — ``-20·log10(|H|)`` clamped to
-        :data:`PRESSURE_FLOOR`."""
-        return _complex_to_db(self.data)
-
-    @property
-    def p(self) -> np.ndarray:
-        """Complex transfer-function values, shape ``data.shape``."""
-        return self.data
-
-    # Time-domain conversion ------------------------------------------------
-    def to_time_trace(
-        self,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-        *,
-        source_spectrum: Optional[np.ndarray] = None,
-        window: str = "hann",
-        nfft: Optional[int] = None,
-        t_start: Optional[float] = None,
-    ) -> "TimeTrace":
-        """Single-trace IFFT of ``H(d, r, :)`` at a chosen ``(depth, range)``.
-
-        Returns a :class:`TimeTrace` with ``data`` shape ``(n_t,)``.
-        """
-        return _ifft_to_trace(
-            self, depth=depth, range=range,
-            source_spectrum=source_spectrum,
-            window=window, nfft=nfft, t_start=t_start,
-        )
-
-    def to_tl(self) -> "SlicedPressureField":
-        """Return a ``units='dB'`` view of the full TF — magnitude in dB
-        at every (depth, range, frequency) bin via ``-20·log10(|H|)``
-        clamped to :data:`PRESSURE_FLOOR`. Chain with ``sel(...)`` to
-        narrow further (``tf.at(frequency=200).to_tl()`` for one freq,
-        ``tf.at(depth=z, range=r).to_tl()`` for TL spectrum at a point).
-        """
-        tl = _complex_to_db(self.data)
-        return SlicedPressureField(
-            data=tl, depths=self.depths, ranges=self.ranges,
-            units='dB',
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-    def synthesize_time_series(
-        self,
-        source_waveform: np.ndarray,
-        sample_rate: float,
-        *,
-        t_start: Optional[float] = None,
-        window: str = "hann",
-        nfft: Optional[int] = None,
-    ) -> "TimeSeriesField":
-        """Convolve every grid trace with ``source_waveform`` to obtain a
-        :class:`TimeSeriesField` shaped ``(n_d, n_r, n_t)``."""
-        return _synthesize_time_series(
-            self, source_waveform=source_waveform, sample_rate=sample_rate,
-            t_start=t_start, window=window, nfft=nfft,
-        )
-
-    # Label-based selection. Spatial slicing degrades type — the slice
-    # is a complex pressure field, no longer a transfer function
-    # (synthesis machinery only operates on the full TF).
-
-    def at(
-        self,
-        *,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-        frequency: Optional[float] = None,
-    ) -> "SlicedPressureField":
-        sliced = self.data
-        new_depths = self.depths
-        new_ranges = self.ranges
-        new_freqs = self.frequencies
-        if depth is not None:
-            d_idx = int(np.argmin(np.abs(self.depths - depth)))
-            sliced = sliced[d_idx:d_idx + 1, ...]
-            new_depths = np.array([float(self.depths[d_idx])])
-        if range is not None:
-            r_idx = int(np.argmin(np.abs(self.ranges - range)))
-            sliced = sliced[:, r_idx:r_idx + 1, ...]
-            new_ranges = np.array([float(self.ranges[r_idx])])
-        if frequency is not None:
-            f_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
-            sliced = sliced[..., f_idx:f_idx + 1]
-            new_freqs = np.array([float(self.frequencies[f_idx])])
-        return SlicedPressureField(
-            data=sliced,
-            depths=new_depths, ranges=new_ranges,
-            units='complex',
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=new_freqs,
-            metadata=dict(self.metadata),
-        )
-
-    def max(self) -> "SlicedPressureField":
-        """Slice at the global argmax of ``|H|`` across **every** axis
-        — ``.tl`` / ``.p`` are 0-D scalars; the picked frequency lands
-        in ``.frequencies[0]`` (and the picked location in
-        ``.depths[0]`` / ``.ranges[0]``)."""
-        idx = np.unravel_index(np.argmax(np.abs(self.data)), self.data.shape)
-        d_idx, r_idx, f_idx = idx[0], idx[1], idx[2]
-        sliced = self.data[d_idx:d_idx + 1, r_idx:r_idx + 1, f_idx:f_idx + 1]
-        return SlicedPressureField(
-            data=sliced,
-            depths=np.array([float(self.depths[d_idx])]),
-            ranges=np.array([float(self.ranges[r_idx])]),
-            units='complex',
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=np.array([float(self.frequencies[f_idx])]),
-            metadata=dict(self.metadata),
-        )
-
-
-class TimeSeriesField(_GridResult):
-    """Real time-domain pressure on a ``(depth, range)`` grid.
-
-    ``data`` shape: ``(n_depths, n_ranges, n_t)`` real. Time axis lives
-    in ``self.time``; ``self.dt``, ``self.fs``, and ``self.n_t`` are
-    derived properties.
-    """
-    field_type = "time_series"
-
-    def __init__(
-        self,
-        *,
-        data: np.ndarray,
-        depths: np.ndarray,
-        ranges: np.ndarray,
-        time: np.ndarray,
-        **kwargs,
-    ):
-        super().__init__(
-            data=data, depths=depths, ranges=ranges, **kwargs,
-        )
-        if data.ndim != 3:
-            raise ValueError(
-                f"TimeSeriesField.data: must be 3-D (n_d, n_r, n_t); "
-                f"got shape {data.shape}"
-            )
-        time = np.asarray(time, dtype=float)
-        if data.shape[2] != len(time):
-            raise ValueError(
-                f"TimeSeriesField.data: axis 2 ({data.shape[2]}) does not "
-                f"match len(time) ({len(time)})"
-            )
-        self.time = time
-
-    @property
-    def n_t(self) -> int:
-        return self.data.shape[2]
-
-    @property
-    def dt(self) -> float:
-        if len(self.time) >= 2:
-            return float(self.time[1] - self.time[0])
-        return float(self.metadata.get('dt', 0.0))
-
-    @property
-    def fs(self) -> float:
-        dt = self.dt
-        if dt > 0:
-            return 1.0 / dt
-        return float(self.metadata.get('fs', 0.0))
-
-    def get_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(freqs, X)`` from a real FFT along the time axis.
-
-        Mirrors :meth:`TimeTrace.spectrum` but operates on the full
-        ``(n_d, n_r, n_t)`` grid: ``X.shape == (n_d, n_r, n_freq)`` with
-        ``n_freq == n_t // 2 + 1`` and ``freqs == np.fft.rfftfreq(n_t, dt)``.
-        """
-        X = np.fft.rfft(self.data, axis=-1)
-        freqs = np.fft.rfftfreq(self.n_t, self.dt)
-        return freqs, X
-
-    def extract_tone(
-        self,
-        frequency: float,
-        *,
-        window: str = 'hann',
-    ) -> "PressureField":
-        """Extract the steady-state complex pressure at one frequency.
-
-        Applies a window along the time axis to suppress spectral leakage,
-        then takes the rfft and picks the bin nearest ``frequency``. The
-        ``2/sum(window)`` normalisation recovers the full complex
-        amplitude (rfft sees only the +ω side of a real cosine's symmetric
-        Dirac pair).
-
-        Returns a :class:`PressureField` with ``units='complex'`` and shape
-        ``(n_d, n_r)``. The receiver grid is preserved verbatim — this
-        method is the time-domain → narrowband-pressure analogue of
-        ``PressureField.at(frequency=f)``.
-        """
-        if window == 'hann':
-            win = np.hanning(self.n_t)
-        elif window == 'hamming':
-            win = np.hamming(self.n_t)
-        elif window == 'blackman':
-            win = np.blackman(self.n_t)
-        elif window == 'none':
-            win = np.ones(self.n_t)
-        else:
-            raise ValueError(
-                f"TimeSeriesField.extract_tone: unknown window={window!r}"
-            )
-
-        # Windowed rfft along the trailing time axis.
-        windowed = self.data * win
-        spec = np.fft.rfft(windowed, axis=-1)
-        freqs = np.fft.rfftfreq(self.n_t, self.dt)
-        k = int(np.argmin(np.abs(freqs - frequency)))
-        amp = 2.0 * spec[..., k] / np.sum(win)
-
-        return PressureField(
-            data=amp,
-            depths=self.depths,
-            ranges=self.ranges,
-            units='complex',
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=float(freqs[k]),
-            metadata=dict(self.metadata),
-        )
-
-    def at(
-        self,
-        *,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-        time: Optional[float] = None,
-    ) -> Union["TimeSeriesField", "TimeTrace"]:
-        """Label-based slice along (depth, range, time). When **both**
-        spatial axes are specified the result degrades to :class:`TimeTrace`
-        (the natural "single-point trace"); otherwise returns a sliced
-        :class:`TimeSeriesField` with the same 3-D layout (selected axes
-        collapsed to size 1).
-        """
-        sliced = self.data
-        new_depths = self.depths
-        new_ranges = self.ranges
-        new_time = self.time
-        if depth is not None:
-            d_idx = int(np.argmin(np.abs(self.depths - depth)))
-            sliced = sliced[d_idx:d_idx + 1, ...]
-            new_depths = np.array([float(self.depths[d_idx])])
-        if range is not None:
-            r_idx = int(np.argmin(np.abs(self.ranges - range)))
-            sliced = sliced[:, r_idx:r_idx + 1, ...]
-            new_ranges = np.array([float(self.ranges[r_idx])])
-        if time is not None:
-            ti = int(np.argmin(np.abs(self.time - time)))
-            sliced = sliced[..., ti:ti + 1]
-            new_time = np.array([float(self.time[ti])])
-        if depth is not None and range is not None:
-            return TimeTrace(
-                data=sliced[0, 0, :].copy(),
-                time=new_time,
-                depth=float(new_depths[0]),
-                range=float(new_ranges[0]),
-                model=self.model, backend=self.backend,
-                source_depths=self.source_depths,
-                frequencies=self.frequencies,
-                metadata=dict(self.metadata),
-            )
-        return TimeSeriesField(
-            data=sliced,
-            depths=new_depths,
-            ranges=new_ranges,
-            time=new_time,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-    def max(self) -> "TimeTrace":
-        """Slice at the global argmax of ``|data|`` across **every** axis
-        (depth, range, time). Returns a 1-element :class:`TimeTrace`
-        carrying the loudest sample at the loudest spatial cell — the
-        ``(depth, range)`` location lives in ``self.depth`` /
-        ``self.range`` and the time in ``self.time[0]``."""
-        flat = int(np.argmax(np.abs(self.data)))
-        d_idx, r_idx, t_idx = np.unravel_index(flat, self.data.shape)
-        return TimeTrace(
-            data=self.data[d_idx, r_idx, t_idx:t_idx + 1].copy(),
-            time=self.time[t_idx:t_idx + 1],
-            depth=float(self.depths[d_idx]),
-            range=float(self.ranges[r_idx]),
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Time-domain — single point
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TimeTrace(Result):
-    """Real pressure ``p(t)`` at a single ``(depth, range)`` point.
-
-    ``data`` shape: ``(n_t,)`` real.
-    """
-    field_type = "time_trace"
-
-    def __init__(
-        self,
-        *,
-        data: np.ndarray,
-        time: np.ndarray,
-        depth: float,
-        range: float,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        data = np.asarray(data)
-        if data.ndim != 1:
-            raise ValueError(
-                f"TimeTrace.data: must be 1-D; got shape {data.shape}"
-            )
-        time = np.asarray(time, dtype=float)
-        if len(time) != len(data):
-            raise ValueError(
-                f"TimeTrace: len(time)={len(time)} does not match "
-                f"len(data)={len(data)}"
-            )
-        self.data = data
-        self.time = time
-        self.depth = float(depth)
-        self.range = float(range)
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        return self.data.shape
-
-    @property
-    def n_t(self) -> int:
-        return int(len(self.data))
-
-    @property
-    def dt(self) -> float:
-        if len(self.time) >= 2:
-            return float(self.time[1] - self.time[0])
-        return float(self.metadata.get('dt', 0.0))
-
-    @property
-    def fs(self) -> float:
-        dt = self.dt
-        if dt > 0:
-            return 1.0 / dt
-        return float(self.metadata.get('fs', 0.0))
-
-    def spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(freqs, X)`` from a real FFT of ``self.data``."""
-        X = np.fft.rfft(self.data)
-        freqs = np.fft.rfftfreq(self.n_t, self.dt)
-        return freqs, X
-
-    def at(self, *, time: Optional[float] = None) -> "TimeTrace":
-        """Label-based slice along the time axis. Returns a 1-element
-        :class:`TimeTrace` carrying the value at the nearest sample."""
-        if time is None:
-            return self
-        ti = int(np.argmin(np.abs(self.time - time)))
-        return TimeTrace(
-            data=self.data[ti:ti + 1].copy(),
-            time=self.time[ti:ti + 1],
-            depth=self.depth, range=self.range,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            metadata=dict(self.metadata),
-        )
-
-    # 1-element ndarrays for plotting helpers that expect a vector.
-    @property
-    def depths(self) -> np.ndarray:
-        return np.array([self.depth])
-
-    @property
-    def ranges(self) -> np.ndarray:
-        return np.array([self.range])
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Sparse / non-grid results
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1246,6 +873,9 @@ def _arrival_kind(n_top: int, n_bot: int) -> str:
     return 'direct'
 
 
+_BOUNCE_KINDS = ('direct', 'surface', 'bottom', 'both')
+
+
 def _bounce_in_bounds(value: int, spec) -> bool:
     """Match ``value`` against an int (exact) or ``(lo, hi)`` tuple
     (closed range, ``None`` = unbounded). Shared with :class:`Rays`."""
@@ -1259,6 +889,27 @@ def _bounce_in_bounds(value: int, spec) -> bool:
     if hi is not None and value > hi:
         return False
     return True
+
+
+def _bounce_predicate(kind, top, bot):
+    """Build a predicate ``(n_top, n_bot) -> bool`` for bounce filtering.
+
+    Shared by :class:`Arrivals` and :class:`Rays`. ``kind`` is one of
+    :data:`_BOUNCE_KINDS` (or ``None``); ``top`` / ``bot`` are
+    int / (lo, hi) / None specs matching :func:`_bounce_in_bounds`.
+    """
+    if kind is not None and kind not in _BOUNCE_KINDS:
+        raise ValueError(
+            f"bounce filter: kind={kind!r} not in {_BOUNCE_KINDS}"
+        )
+
+    def predicate(n_top: int, n_bot: int) -> bool:
+        if kind is not None and _arrival_kind(n_top, n_bot) != kind:
+            return False
+        return (_bounce_in_bounds(n_top, top)
+                and _bounce_in_bounds(n_bot, bot))
+
+    return predicate
 
 
 class Arrivals(Result):
@@ -1348,6 +999,9 @@ class Arrivals(Result):
     def __iter__(self):
         return iter(self.arrivals)
 
+    def _repr_extra(self) -> str:
+        return f"n_arrivals={len(self.arrivals)}"
+
     # Per-field bulk views ---------------------------------------------------
 
     @property
@@ -1396,18 +1050,10 @@ class Arrivals(Result):
         ``{'direct', 'surface', 'bottom', 'both'}``; ``top`` / ``bot`` are
         an int (exact) or ``(lo, hi)`` tuple (closed range, ``None`` =
         unbounded)."""
-        valid = ('direct', 'surface', 'bottom', 'both')
-        if kind is not None and kind not in valid:
-            raise ValueError(
-                f"Arrivals.filter_by_bounces: kind={kind!r} not in {valid}"
-            )
-
-        def pred(a):
-            if kind is not None and a['kind'] != kind:
-                return False
-            return (_bounce_in_bounds(int(a['n_top_bounces']), top)
-                    and _bounce_in_bounds(int(a['n_bot_bounces']), bot))
-        return self.filter(pred)
+        pred = _bounce_predicate(kind, top, bot)
+        return self.filter(
+            lambda a: pred(int(a['n_top_bounces']), int(a['n_bot_bounces']))
+        )
 
     def in_delay_window(
         self,
@@ -1489,6 +1135,10 @@ class Rays(Result):
             if receiver_ranges is not None else None
         )
 
+    def _repr_extra(self) -> str:
+        kind = 'eigenrays' if self.is_eigen else 'rays'
+        return f"n_{kind}={len(self.rays)}"
+
     # ------------------------------------------------------------------
     # Filtering helpers — pure data subsets. ``is_eigen`` is preserved
     # (a subset of a fan stays a fan; a subset of eigenrays stays
@@ -1522,30 +1172,13 @@ class Rays(Result):
                            at least one bottom bounce; ``top=(0, 1)``
                            keeps 0–1 surface bounces.
         """
-        kind_map = {
-            'direct': lambda r: int(r.get('n_top_bounces', 0) or 0) == 0
-            and int(r.get('n_bot_bounces', 0) or 0) == 0,
-            'surface': lambda r: int(r.get('n_top_bounces', 0) or 0) > 0
-            and int(r.get('n_bot_bounces', 0) or 0) == 0,
-            'bottom': lambda r: int(r.get('n_bot_bounces', 0) or 0) > 0
-            and int(r.get('n_top_bounces', 0) or 0) == 0,
-            'both': lambda r: int(r.get('n_top_bounces', 0) or 0) > 0
-            and int(r.get('n_bot_bounces', 0) or 0) > 0,
-        }
-        if kind is not None and kind not in kind_map:
-            raise ValueError(
-                f"Arrivals.filter: kind={kind!r} not in {sorted(kind_map)}"
+        pred = _bounce_predicate(kind, top, bot)
+        return self.filter(
+            lambda r: pred(
+                int(r.get('n_top_bounces', 0) or 0),
+                int(r.get('n_bot_bounces', 0) or 0),
             )
-
-        def pred(ray):
-            if kind is not None and not kind_map[kind](ray):
-                return False
-            n_top = int(ray.get('n_top_bounces', 0) or 0)
-            n_bot = int(ray.get('n_bot_bounces', 0) or 0)
-            return (_bounce_in_bounds(n_top, top)
-                    and _bounce_in_bounds(n_bot, bot))
-
-        return self.filter(pred)
+        )
 
     def filter_by_launch_angle(
         self,
@@ -1745,6 +1378,9 @@ class Modes(Result):
             )
         self.n_modes = int(n_modes if n_modes is not None else len(self.k))
 
+    def _repr_extra(self) -> str:
+        return f"n_modes={self.n_modes}, n_z={self.depths.size}"
+
     @property
     def data(self) -> np.ndarray:      # alias for plot helpers
         return self.phi
@@ -1826,9 +1462,8 @@ class Modes(Result):
 
     def with_attenuation(
         self,
-        alpha_db_per_m: Optional[Union[float, np.ndarray]] = None,
+        alpha_db_per_m: Union[float, np.ndarray],
         *,
-        absorption: Optional['Absorption'] = None,
         sound_speed_z: Union[float, np.ndarray] = 1500.0,
         density_z: Union[float, np.ndarray] = 1.0,
         bottom=None,
@@ -1843,22 +1478,13 @@ class Modes(Result):
         replacing any prior ``k.imag``. The ``1/ρ``-weighted denominator
         matches the Kraken-class normalisation ``∫|ψ|²/ρ dz = 1``.
 
-        Pass volume attenuation in one of two equivalent ways:
-
-        - ``alpha_db_per_m`` — explicit scalar or ``α(z)`` array (dB/m).
-        - ``absorption`` — a :class:`uacpy.core.absorption.Thorp` or
-          :class:`FrancoisGarrison` instance (the same objects you would
-          attach to ``env.absorption``). Other Absorption subclasses are
-          not supported by the modal perturbation kernel.
-
         Parameters
         ----------
-        alpha_db_per_m : float or ndarray, optional
-            Per-depth volume attenuation in dB/m. Mutually exclusive
-            with ``absorption``.
-        absorption : Absorption, optional
-            ``Thorp()`` or ``FrancoisGarrison(...)``. Mutually exclusive
-            with ``alpha_db_per_m``.
+        alpha_db_per_m : float or ndarray
+            Per-depth volume attenuation in dB/m, sampled on
+            :attr:`depths`. Scalar broadcasts to every depth. Build one
+            from an :class:`~uacpy.core.absorption.Absorption` via
+            ``absorption.alpha_db_per_m(modes.f0, modes.depths)``.
         sound_speed_z : float or ndarray
             ``c(z)`` in m/s. Defaults to 1500.
         density_z : float or ndarray
@@ -1875,63 +1501,19 @@ class Modes(Result):
         Modes
             New :class:`Modes` instance with updated complex ``k``.
         """
-        if (alpha_db_per_m is None) == (absorption is None):
-            raise ValueError(
-                "Modes.with_attenuation: pass exactly one of "
-                "alpha_db_per_m or absorption."
-            )
         omega = 2.0 * np.pi * float(self.f0 or 0.0)
         if omega == 0.0:
             raise ValueError(
                 "Modes.with_attenuation: requires Modes.f0 to be set."
             )
-        if absorption is not None:
-            from uacpy.core.absorption import (
-                Thorp, FrancoisGarrison, Absorption as _Absorption,
+        a = np.asarray(alpha_db_per_m, dtype=float).ravel()
+        if a.size == 1:
+            a = np.full_like(self.depths, float(a.item()))
+        elif a.shape != self.depths.shape:
+            raise ValueError(
+                f"Modes.with_attenuation: alpha shape {a.shape} "
+                f"must match depths {self.depths.shape} (or scalar)."
             )
-            if not isinstance(absorption, _Absorption):
-                raise TypeError(
-                    "Modes.with_attenuation: absorption must be an "
-                    "Absorption subclass; got "
-                    f"{type(absorption).__name__}"
-                )
-            f0 = float(self.f0)
-            if isinstance(absorption, Thorp):
-                f_khz = f0 / 1000.0
-                a_db_per_km = (
-                    0.11 * f_khz ** 2 / (1.0 + f_khz ** 2)
-                    + 44.0 * f_khz ** 2 / (4100.0 + f_khz ** 2)
-                    + 2.75e-4 * f_khz ** 2
-                    + 0.003
-                )
-                a_const = a_db_per_km / 1000.0
-                a = np.full_like(self.depths, a_const)
-            elif isinstance(absorption, FrancoisGarrison):
-                from uacpy.core.acoustics import absorption as _fg_attn
-                a = np.empty_like(self.depths)
-                for i, z in enumerate(self.depths):
-                    ratio = float(_fg_attn(
-                        frequency=f0, distance=1000.0,
-                        temperature=absorption.temperature_c,
-                        salinity=absorption.salinity_psu,
-                        depth=float(z), pH=absorption.pH,
-                    ))
-                    a[i] = -20.0 * np.log10(ratio) / 1000.0
-            else:
-                raise ValueError(
-                    f"Modes.with_attenuation: only Thorp and "
-                    f"FrancoisGarrison are supported; got "
-                    f"{type(absorption).__name__}."
-                )
-        else:
-            a = np.asarray(alpha_db_per_m, dtype=float).ravel()
-            if a.size == 1:
-                a = np.full_like(self.depths, float(a.item()))
-            elif a.shape != self.depths.shape:
-                raise ValueError(
-                    f"Modes.with_attenuation: alpha shape {a.shape} "
-                    f"must match depths {self.depths.shape} (or scalar)."
-                )
         c_arr = np.asarray(sound_speed_z, dtype=float).ravel()
         if c_arr.size == 1:
             c_arr = np.full_like(self.depths, float(c_arr.item()))
@@ -1997,8 +1579,8 @@ class Modes(Result):
         receiver_depths: np.ndarray,
         ranges_m: np.ndarray,
         source_density: float = 1.0,
-    ) -> "PressureField":
-        """Coherent TL field built from the modal sum.
+    ) -> "Field":
+        """Coherent complex pressure field built from the modal sum.
 
         Asymptotic far-field form of the cylindrical-source modal
         expansion (large ``k_m·r``):
@@ -2020,8 +1602,9 @@ class Modes(Result):
 
         Returns
         -------
-        PressureField
-            ``units='complex'``, shape ``(len(receiver_depths), len(ranges_m))``.
+        Field
+            Complex narrowband ``Field`` with
+            ``coords={'depth': receiver_depths, 'range': ranges_m}``.
         """
         z_s = float(source_depth)
         z_r = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
@@ -2060,12 +1643,9 @@ class Modes(Result):
         rho_s = float(source_density) * 1000.0  # g/cm³ → kg/m³
         pref = 1j * np.exp(-1j * np.pi / 4.0) / (rho_s * np.sqrt(8.0 * np.pi))
         P = pref * P / sqrt_r[None, :]
-        from uacpy.core.results import PressureField
-        return PressureField(
+        return Field(
             data=P,
-            depths=z_r,
-            ranges=r,
-            units='complex',
+            coords={'depth': z_r, 'range': r},
             model=self.model, backend='modal_sum',
             source_depths=np.array([z_s]),
             frequencies=self.frequencies,
@@ -2128,6 +1708,9 @@ class Covariance(Result):
     @property
     def n_receivers(self) -> int:
         return int(self.covariance.shape[1])
+
+    def _repr_extra(self) -> str:
+        return f"n_rcv={self.n_receivers}"
 
     def _replica_grid(self, replicas: "Replicas") -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """Validate and reshape the replica field to ``(n_f, n_pts, n_rcv)``."""
@@ -2280,6 +1863,9 @@ class Replicas(Result):
     def n_replica_points(self) -> int:
         return int(self.replicas.shape[1] * self.replicas.shape[2] * self.replicas.shape[3])
 
+    def _repr_extra(self) -> str:
+        return f"n_pts={self.n_replica_points}, n_rcv={self.n_receivers}"
+
 
 class ReflectionCoefficient(Result):
     """Angle-dependent reflection coefficient ``R(theta[, f])``.
@@ -2354,6 +1940,10 @@ class ReflectionCoefficient(Result):
     def is_broadband(self) -> bool:
         return self.R.ndim == 2
 
+    def _repr_extra(self) -> str:
+        kind = 'broadband' if self.is_broadband else 'narrowband'
+        return f"n_θ={self.n_angles}, {kind}"
+
     def at(
         self,
         *,
@@ -2407,12 +1997,12 @@ class ReflectionCoefficient(Result):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IFFT helpers used by TransferFunction
+# IFFT helpers used by Field
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _ifft_to_trace(
-    tf: "TransferFunction",
+    tf: "Field",
     *,
     depth: Optional[float],
     range: Optional[float],
@@ -2421,8 +2011,8 @@ def _ifft_to_trace(
     nfft: Optional[int],
     t_start: Optional[float],
     sample_rate: Optional[float] = None,
-) -> "TimeTrace":
-    """IFFT one (depth, range) cell of a TransferFunction → TimeTrace.
+) -> "Field":
+    """IFFT one (depth, range) cell of a broadband Field → time-domain trace Field.
 
     Places each model frequency at bin ``round(f/df)`` (with df capped at
     1 Hz for a ≥ 1-second window); when ``df`` is finer than the data
@@ -2432,7 +2022,9 @@ def _ifft_to_trace(
     largest frequency bin sits below Nyquist.
     """
     data = tf.data                                # (n_d, n_r, n_f)
-    freqs = np.asarray(tf.frequencies, dtype=float)
+    freqs = np.asarray(tf.coords['frequency'], dtype=float)
+    depths = tf.coords['depth']
+    ranges = tf.coords['range']
     n_d, n_r, n_freq = data.shape
 
     if n_freq < 2:
@@ -2444,20 +2036,20 @@ def _ifft_to_trace(
         raise ValueError(
             "_ifft_to_trace: phase_reference='time_domain_native' is not a "
             "frequency-domain transfer function; the producing model "
-            "(SPARC) returned p(t) directly — use the TimeSeriesField result "
+            "(SPARC) returned p(t) directly — read the time-domain Field "
             "from RunMode.TIME_SERIES instead of synthesising via IFFT"
         )
 
     d_idx = (
-        int(np.argmin(np.abs(tf.depths - depth))) if depth is not None
+        int(np.argmin(np.abs(depths - depth))) if depth is not None
         else n_d // 2
     )
     r_idx = (
-        int(np.argmin(np.abs(tf.ranges - range))) if range is not None
+        int(np.argmin(np.abs(ranges - range))) if range is not None
         else 0
     )
-    actual_depth = float(tf.depths[d_idx])
-    actual_range = float(tf.ranges[r_idx])
+    actual_depth = float(depths[d_idx])
+    actual_range = float(ranges[r_idx])
 
     spectrum = data[d_idx, r_idx, :].copy()
     spectrum = np.nan_to_num(spectrum, nan=0.0)
@@ -2470,8 +2062,6 @@ def _ifft_to_trace(
 
     if nfft is None:
         nfft_min = max(int(tf.metadata.get('Nsam', 0)) or 0, 4 * n_freq)
-        # fs >= 2*fmax → nfft*df >= 2*max_bin*df, so nfft >= 2*max_bin+2
-        # so the highest populated bin sits strictly below Nyquist.
         nfft_target = max(nfft_min, 2 * max_bin + 2)
         if sample_rate is not None:
             nfft_target = max(nfft_target, int(np.ceil(sample_rate / df)))
@@ -2501,9 +2091,6 @@ def _ifft_to_trace(
     if t_start is None:
         T_window = nfft * dt
         lead = min(0.5 * T_window, 0.25)
-        # Slowest mode (cmin) when a model knows it; otherwise reference
-        # speed c0; otherwise the package default. Anchors the IFFT
-        # window so the earliest arrival isn't clipped by the lead-in.
         anchor_speed = float(tf.metadata.get(
             'cmin',
             tf.metadata.get('c0', DEFAULT_SOUND_SPEED),
@@ -2542,36 +2129,34 @@ def _ifft_to_trace(
     result = 2.0 * np.real(np.fft.ifft(padded))
     time = t_start + np.arange(nfft) * dt
 
-    return TimeTrace(
+    return Field(
         data=result,
-        time=time,
-        depth=actual_depth,
-        range=actual_range,
+        coords={'time': time},
+        pinned={'depth': actual_depth, 'range': actual_range},
         model=tf.model,
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
-        metadata={
-            'window': window,
-            'source_model': tf.model,
-        },
+        phase_reference=tf.phase_reference,
+        metadata={'window': window, 'source_model': tf.model},
     )
 
 
 def _synthesize_time_series(
-    tf: "TransferFunction",
+    tf: "Field",
     *,
     source_waveform: np.ndarray,
     sample_rate: float,
     t_start: Optional[float],
     window: str,
     nfft: Optional[int],
-) -> "TimeSeriesField":
-    """Convolve every grid cell of a TransferFunction with a source waveform.
+) -> "Field":
+    """Convolve every grid cell of a broadband Field with a source waveform.
 
-    Output shape: ``(n_d, n_r, n_t)``. ``nfft`` is sized so the IFFT
-    sample rate equals ``sample_rate`` (rounded up to a power of two), so
-    the returned trace is on the same sampling grid as the source pulse.
+    Output: a time-domain Field with ``coords={'depth', 'range', 'time'}``.
+    ``nfft`` is sized so the IFFT sample rate equals ``sample_rate``
+    (rounded up to a power of two), so the returned trace is on the same
+    sampling grid as the source pulse.
     """
     wf = np.asarray(source_waveform, dtype=float).ravel()
     n_src = len(wf)
@@ -2592,11 +2177,12 @@ def _synthesize_time_series(
     from scipy.interpolate import interp1d
     re_interp = interp1d(src_freqs, src_fft.real, bounds_error=False, fill_value=0.0)
     im_interp = interp1d(src_freqs, src_fft.imag, bounds_error=False, fill_value=0.0)
-    source_spectrum = re_interp(tf.frequencies) + 1j * im_interp(tf.frequencies)
+    freqs = tf.coords['frequency']
+    source_spectrum = re_interp(freqs) + 1j * im_interp(freqs)
 
     n_d, n_r, _ = tf.data.shape
-    depths = np.asarray(tf.depths)
-    ranges = np.asarray(tf.ranges)
+    depths = np.asarray(tf.coords['depth'])
+    ranges = np.asarray(tf.coords['range'])
 
     if t_start is None:
         t0_trace = _ifft_to_trace(
@@ -2605,7 +2191,7 @@ def _synthesize_time_series(
             window=window, nfft=nfft, t_start=None,
             sample_rate=sample_rate,
         )
-        t_start = float(t0_trace.time[0]) if len(t0_trace.time) else 0.0
+        t_start = float(t0_trace.coords['time'][0]) if t0_trace.n_times else 0.0
 
     out = None
     time_vec = None
@@ -2618,23 +2204,19 @@ def _synthesize_time_series(
                 sample_rate=sample_rate,
             )
             if out is None:
-                time_vec = tr.time
-                out = np.zeros((n_d, n_r, len(tr.data)), dtype=tr.data.dtype)
+                time_vec = tr.coords['time']
+                out = np.zeros((n_d, n_r, tr.n_times), dtype=tr.data.dtype)
             out[di, ri, :] = tr.data
 
-    return TimeSeriesField(
+    return Field(
         data=out,
-        depths=depths,
-        ranges=ranges,
-        time=time_vec,
+        coords={'depth': depths, 'range': ranges, 'time': time_vec},
         model=tf.model,
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
-        metadata={
-            'source_waveform_fs': sample_rate,
-            'window': window,
-        },
+        phase_reference=tf.phase_reference,
+        metadata={'source_waveform_fs': sample_rate, 'window': window},
     )
 
 
@@ -2646,11 +2228,8 @@ def _synthesize_time_series(
 __all__ = [
     "Result",
     "PhaseReference",
-    # Spatial
-    "PressureField", "TransferFunction",
-    # Time-domain
-    "TimeSeriesField", "TimeTrace",
-    # Sparse / non-grid
+    "Field",
+    "ResultStack",
     "Arrivals", "Rays", "Modes",
     "Covariance", "Replicas",
     "ReflectionCoefficient",

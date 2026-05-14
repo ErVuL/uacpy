@@ -7,7 +7,6 @@ Styles are applied automatically when ``uacpy.visualization`` is imported
 revert to matplotlib defaults with ``matplotlib.rcdefaults()``.
 """
 import matplotlib as mpl
-from typing import Optional
 
 
 # Professional color schemes
@@ -20,20 +19,6 @@ COLORS = {
     'dark': '#2D3142',         # Dark gray
     'light': '#F5F5F5',        # Light gray
     'grid': '#E0E0E0',         # Grid color
-}
-
-# Professional color palettes for model comparisons
-MODEL_COLORS = {
-    'Bellhop': '#2E86AB',      # Blue
-    'RAM': '#06A77D',        # Green
-    'Kraken': '#A23B72',       # Purple
-    'KrakenField': '#8B2F97',  # Dark purple
-    'Scooter': '#F18F01',      # Orange
-    'SPARC': '#C73E1D',        # Red
-    'OASN': '#1B998B',         # Teal
-    'OASR': '#2D6A4F',         # Dark green
-    'OASP': '#E76F51',         # Coral
-    'OAST': '#E9C46A',         # Yellow
 }
 
 # Professional colormaps
@@ -143,36 +128,32 @@ def apply_professional_style(dpi: int = 150):
     mpl.rcParams.update(style_dict)
 
 
-def get_model_color(model_name: str) -> str:
-    """
-    Return the professional color assigned to a model.
-
-    Parameters
-    ----------
-    model_name : str
-        Model name.
-
-    Returns
-    -------
-    color : str
-        Hex color code (falls back to the primary color for unknown models).
-    """
-    return MODEL_COLORS.get(model_name, COLORS['primary'])
-
-
-BOTTOM_CMAP = 'YlOrBr'
+# ── Sediment colour — single source of truth ─────────────────────────────
+# Change ``BOTTOM_HALFSPACE_COLOR`` and the fill + hatch colours below
+# follow automatically (they're alpha-blended derivations of it). The
+# rendered fill is opaque so it cleanly covers the water heatmap
+# underneath without translucent bleed-through.
 BOTTOM_HALFSPACE_COLOR = 'saddlebrown'
 BOTTOM_FILL_HATCH = '///'
-# Sediment fill — opaque sandy-tan with brownish-gray diagonal hatching.
-# Both colours are pre-blended to reproduce the *rendered appearance* of
-# ``saddlebrown × black × alpha=0.35`` from ``plot_rd_bottom`` /
-# ``plot_rd_layered_bottom`` without using a translucent alpha (which
-# would let the TL heatmap below the seafloor bleed through and break
-# the masking). Apply via ``ax.fill_between(..., **BOTTOM_FILL_STYLE)``.
-#   ``#d6beac`` ≈ saddlebrown × 0.35 + white × 0.65  (sandy-tan fill)
-#   ``#8d7a70`` ≈ black × 0.35 + #d6beac × 0.65      (brownish-gray hatch)
-BOTTOM_FILL_COLOR = '#d6beac'
-BOTTOM_HATCH_COLOR = '#8d7a70'
+
+
+def _blend(a, b, t):
+    """Alpha-blend ``a`` over ``b`` (RGB tuples or named colours), where
+    ``t`` is the weight of ``a``."""
+    import matplotlib.colors as mc
+    ra, ga, ba = mc.to_rgb(a)
+    rb, gb, bb = mc.to_rgb(b)
+    return (
+        ra * t + rb * (1 - t),
+        ga * t + gb * (1 - t),
+        ba * t + bb * (1 - t),
+    )
+
+
+# Sandy-tan fill ≈ saddlebrown × 0.35 + white × 0.65
+BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
+# Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
+BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
 BOTTOM_FILL_STYLE = {
     'color': BOTTOM_FILL_COLOR,
     'hatch': BOTTOM_FILL_HATCH,
@@ -229,70 +210,3 @@ def get_cmap_for_field(field_type: str) -> str:
         Colormap name (falls back to ``'viridis'`` for unknown types).
     """
     return COLORMAPS.get(field_type, 'viridis')
-
-
-def format_axes_professional(ax, title: Optional[str] = None,
-                             xlabel: Optional[str] = None,
-                             ylabel: Optional[str] = None):
-    """
-    Apply professional formatting to a single axes.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to format.
-    title : str, optional
-        Axes title.
-    xlabel : str, optional
-        X-axis label.
-    ylabel : str, optional
-        Y-axis label.
-    """
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-
-    if xlabel:
-        ax.set_xlabel(xlabel, fontsize=12, fontweight='normal')
-
-    if ylabel:
-        ax.set_ylabel(ylabel, fontsize=12, fontweight='normal')
-
-    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-    ax.set_axisbelow(True)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
-    ax.spines['bottom'].set_linewidth(1.2)
-    ax.spines['left'].set_linewidth(1.2)
-
-    ax.tick_params(axis='both', which='major', labelsize=10,
-                   length=5, width=1.0, direction='out')
-
-
-def create_professional_colorbar(fig, im, ax, label: str = ''):
-    """
-    Create a professional-looking colorbar.
-
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-        Figure object.
-    im : matplotlib.image.AxesImage
-        Image to create a colorbar for.
-    ax : matplotlib.axes.Axes
-        Axes the image is on.
-    label : str, optional
-        Colorbar label.
-
-    Returns
-    -------
-    cbar : matplotlib.colorbar.Colorbar
-        Colorbar object.
-    """
-    cbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.046)
-    cbar.set_label(label, fontsize=11, fontweight='normal')
-    cbar.ax.tick_params(labelsize=10)
-    cbar.outline.set_linewidth(1.0)
-
-    return cbar

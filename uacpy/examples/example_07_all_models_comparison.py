@@ -44,9 +44,7 @@ from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import RangeDependentBottom  # noqa: E402
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_ssp_2d,
-    plot_rd_bottom,
-    plot_environment_advanced,
+    plot_environment,
     compare_models,
 )
 
@@ -201,42 +199,35 @@ def main():
     print("GENERATING VISUALIZATIONS")
     print("=" * 70)
 
-    # Plot 1: Advanced environment overview
-    print("\n[1/5] Environment overview...")
-    fig1, axes1 = plot_environment_advanced(env, source, receiver)
-    plt.savefig(OUTPUT_DIR / 'example_07_environment.png', dpi=150, bbox_inches='tight')
+    # Plot 1: Environment overview — single panel showing the water
+    # column (Blues) + bottom (YlOrBr) on one figure.
+    print("\n[1/3] Environment overview...")
+    fig1, ax_env = plot_environment(env)
+    ax_env.set_title('Thermal Front: 2D Range-Dependent SSP + bottom')
+    fig1.savefig(OUTPUT_DIR / 'example_07_environment.png', dpi=150,
+                 bbox_inches='tight')
+    plt.close(fig1)
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_07_environment.png'}")
 
-    # Plot 2: 2D SSP heatmap
-    print("[2/5] 2D SSP heatmap...")
-    fig2, ax2 = plot_ssp_2d(env, cmap='RdYlBu_r')
-    ax2.set_title('Thermal Front: 2D Range-Dependent SSP')
-    plt.savefig(OUTPUT_DIR / 'example_07_ssp_2d.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_07_ssp_2d.png'}")
-
-    # Plot 3: Range-dependent bottom (geological cross-section)
-    print("[3/5] Range-dependent bottom...")
-    fig3, _ = plot_rd_bottom(env)
-    fig3.savefig(OUTPUT_DIR / 'example_07_bottom.png', dpi=150, bbox_inches='tight')
-    plt.close(fig3)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_07_bottom.png'}")
-
-    # Plot 4: Model comparison
+    # Plot 2: Side-by-side TL fields, shared colour scale.
     if len(results) >= 2:
-        print("[4/5] Model comparison...")
-        fig4, axes4 = compare_models(results, env)
-        plt.savefig(OUTPUT_DIR / 'example_07_comparison.png', dpi=150, bbox_inches='tight')
+        print("[2/3] Model comparison...")
+        fig2, _ = compare_models(results, env=env)
+        fig2.savefig(OUTPUT_DIR / 'example_07_comparison.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig2)
         print(f"  ✓ Saved: {OUTPUT_DIR / 'example_07_comparison.png'}")
 
-    # Plot 5: TL fields with contour overlay and shared colorbar
+    # Plot 3: TL fields with shared colour scale + contour overlay.
     if len(results) > 0:
-        print("[5/5] TL fields with contour overlay...")
-        fig5, _ = compare_models(
-            results, env, ncols=3, vmin=50, vmax=110, contours=[70, 90],
+        print("[3/3] TL fields with contour overlay...")
+        fig3, _ = compare_models(
+            results, env=env, ncols=3, vmin=50, vmax=110,
+            contours=[70, 90],
             suptitle='All Models — TL with 70/90 dB contours',
         )
-        fig5.savefig(OUTPUT_DIR / 'example_07_models.png', dpi=150)
-        plt.close(fig5)
+        fig3.savefig(OUTPUT_DIR / 'example_07_models.png', dpi=150)
+        plt.close(fig3)
         print(f"  ✓ Saved: {OUTPUT_DIR / 'example_07_models.png'}")
 
     # ═══════════════════════════════════════════════════════════════════════

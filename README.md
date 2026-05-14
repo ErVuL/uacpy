@@ -310,15 +310,14 @@ import matplotlib.pyplot as plt
 
 import uacpy
 from uacpy.models import Bellhop, RunMode
-from uacpy.core.environment import BoundaryProperties
-from uacpy.visualization.plots import plot_transmission_loss
+from uacpy.visualization import plot_field
 
 # 1. Environment — isovelocity water over a fluid half-space bottom
 env = uacpy.Environment(
     name="Pekeris Waveguide",
     bathymetry=100.0,
     ssp=1500.0,
-    bottom=BoundaryProperties(
+    bottom=uacpy.BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1600.0,
         density=1.5,
@@ -343,7 +342,7 @@ result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
 
 # 5. Plot the TL field
 fig, ax = plt.subplots(figsize=(8, 4))
-plot_transmission_loss(result, env, ax=ax, show_colorbar=True)
+plot_field(result, env=env, ax=ax)
 plt.tight_layout()
 plt.show()
 ```

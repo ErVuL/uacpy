@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from uacpy.core.results import Modes, PressureField
+from uacpy.core.results import Modes, Field
 
 
 def _pekeris_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
@@ -46,26 +46,18 @@ class TestWithAttenuation:
     def test_thorp_absorption(self):
         from uacpy.core.absorption import Thorp
         modes = _pekeris_modes(freq=1000.0)
-        out = modes.with_attenuation(absorption=Thorp())
+        alpha = Thorp().alpha_db_per_m(modes.f0, modes.depths)
+        out = modes.with_attenuation(alpha)
         assert np.all(out.k.imag > 0)
 
     def test_francois_garrison_absorption(self):
         from uacpy.core.absorption import FrancoisGarrison
         modes = _pekeris_modes(freq=1000.0)
-        out = modes.with_attenuation(
-            absorption=FrancoisGarrison(
-                temperature_c=15.0, salinity_psu=35.0, pH=8.1, z_bar_m=50.0,
-            ),
+        fg = FrancoisGarrison(
+            temperature_c=15.0, salinity_psu=35.0, pH=8.1, z_bar_m=50.0,
         )
+        out = modes.with_attenuation(fg.alpha_db_per_m(modes.f0, modes.depths))
         assert np.all(out.k.imag > 0)
-
-    def test_one_of_attenuation_args_required(self):
-        from uacpy.core.absorption import Thorp
-        modes = _pekeris_modes()
-        with pytest.raises(ValueError, match="exactly one of"):
-            modes.with_attenuation()
-        with pytest.raises(ValueError, match="exactly one of"):
-            modes.with_attenuation(0.005, absorption=Thorp())
 
     def test_depth_dependent_alpha_weighted_by_phi_square(self):
         modes = _pekeris_modes()
@@ -90,8 +82,8 @@ class TestModalPropagationLoss:
         pf = modes.modal_propagation_loss(
             source_depth=20.0, receiver_depths=depths, ranges_m=ranges,
         )
-        assert isinstance(pf, PressureField)
-        assert pf.units == 'complex'
+        assert isinstance(pf, Field)
+        assert pf.is_complex
         assert pf.data.shape == (5, 10)
         assert np.all(np.isfinite(pf.data))
 

@@ -1,9 +1,11 @@
 """Tests for the uniform file-path-in-metadata convention.
 
-Every model attaches its primary output paths (and ``prt_file``) to
-``result.metadata`` when ``cleanup=False`` (i.e. files persist past
-``run()``). When ``cleanup=True`` the work dir is wiped and the keys
-are absent — that's the discoverable signal.
+Every model writes its primary output paths (and ``prt_file``) into
+``result.metadata`` for every run. When ``cleanup=True`` the work dir
+is wiped after the wrapper returns, so the recorded paths point at
+files that no longer exist — the caller surfaces this naturally as a
+``FileNotFoundError`` if they try to open one. When ``cleanup=False``
+the paths point at live files.
 
 These tests use representative models that don't require multi-second
 binary runs at slow scale.
@@ -56,12 +58,13 @@ def test_bellhop_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_bellhop_paths_absent_when_cleanup_true():
+def test_bellhop_paths_point_to_missing_files_when_cleanup_true():
     env, src, rcv = _basic_setup()
     bh = Bellhop(verbose=False)                       # default cleanup=True
     field = bh.run(env, src, rcv)
-    assert 'shd_file' not in field.metadata
-    assert 'prt_file' not in field.metadata
+    # Paths are recorded but the files have been wiped.
+    assert 'shd_file' in field.metadata
+    assert not os.path.exists(field.metadata['shd_file'])
 
 
 # ----------------------------------------------------------------------
@@ -78,11 +81,12 @@ def test_kraken_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_kraken_paths_absent_when_cleanup_true():
+def test_kraken_paths_point_to_missing_files_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kr = Kraken(verbose=False)
     modes = kr.run(env, src, rcv)
-    assert 'mod_file' not in modes.metadata
+    assert 'mod_file' in modes.metadata
+    assert not os.path.exists(modes.metadata['mod_file'])
 
 
 # ----------------------------------------------------------------------
@@ -102,7 +106,7 @@ def test_bounce_paths_present_when_work_dir_pinned(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_bounce_paths_absent_when_no_work_dir():
+def test_bounce_paths_point_to_missing_files_when_no_work_dir():
     env = _elastic_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
@@ -110,9 +114,9 @@ def test_bounce_paths_absent_when_no_work_dir():
     res = bn.run(env, src, rcv)
     # In-memory data still there
     assert res.theta is not None and len(res.theta) > 0
-    # File paths absent — work dir was wiped
-    assert 'brc_file' not in res.metadata
-    assert 'irc_file' not in res.metadata
+    # Paths recorded but the work dir was wiped.
+    assert 'brc_file' in res.metadata
+    assert not os.path.exists(res.metadata['brc_file'])
 
 
 # ----------------------------------------------------------------------
@@ -129,12 +133,12 @@ def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_krakenfield_paths_absent_when_cleanup_true():
+def test_krakenfield_paths_point_to_missing_files_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kf = KrakenField(verbose=False)
     field = kf.run(env, src, rcv)
-    assert 'shd_file' not in field.metadata
-    assert 'mod_file' not in field.metadata
+    assert 'shd_file' in field.metadata
+    assert not os.path.exists(field.metadata['shd_file'])
 
 
 # ----------------------------------------------------------------------
@@ -175,16 +179,16 @@ def test_sparc_paths_present_when_cleanup_false(tmp_path):
 
 @pytest.mark.slow
 @pytest.mark.requires_binary
-def test_sparc_paths_absent_when_cleanup_true():
+def test_sparc_paths_point_to_missing_files_when_cleanup_true():
     env = _sparc_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.linspace(500, 3000, 8))
     sp = SPARC(verbose=False)
     field = sp.run(env, src, rcv)
-    assert 'rts_file' not in field.metadata
-    assert 'grn_file' not in field.metadata
-    assert 'prt_file' not in field.metadata
+    for key in ('rts_file', 'grn_file', 'prt_file'):
+        if key in field.metadata:
+            assert not os.path.exists(field.metadata[key])
 
 
 # ----------------------------------------------------------------------
@@ -205,11 +209,12 @@ def test_ram_mpirams_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_ram_mpirams_paths_absent_when_cleanup_true():
+def test_ram_mpirams_paths_point_to_missing_files_when_cleanup_true():
     env, src, rcv = _basic_setup()
     ram = RAM(verbose=False, dr=20.0, dz=2.0)
     field = ram.run(env, src, rcv)
-    assert 'psif_file' not in field.metadata
+    if 'psif_file' in field.metadata:
+        assert not os.path.exists(field.metadata['psif_file'])
 
 
 # ----------------------------------------------------------------------
@@ -220,13 +225,13 @@ def test_ram_mpirams_paths_absent_when_cleanup_true():
 @pytest.mark.requires_binary
 def test_bellhop_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
     """``work_dir`` pinned + ``cleanup=True`` ⇒ directory is removed
-    after run(); the absence of file-path keys mirrors the on-disk state."""
+    after run(); the recorded paths point at files that no longer exist."""
     env, src, rcv = _basic_setup()
     work = tmp_path / 'bellhop_pinned'
     bh = Bellhop(verbose=False, work_dir=work, cleanup=True)
     field = bh.run(env, src, rcv)
-    assert 'shd_file' not in field.metadata
-    assert 'prt_file' not in field.metadata
+    assert 'shd_file' in field.metadata
+    assert not os.path.exists(field.metadata['shd_file'])
     assert not work.exists(), (
         f"cleanup=True should remove the work_dir; {work} still exists"
     )
@@ -245,8 +250,9 @@ def test_bounce_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
     res = bn.run(env, src, rcv)
     # In-memory data still good
     assert res.theta is not None and len(res.theta) > 0
-    # No paths exposed and dir gone
-    assert 'brc_file' not in res.metadata
+    # Path recorded but the dir is gone.
+    assert 'brc_file' in res.metadata
+    assert not os.path.exists(res.metadata['brc_file'])
     assert not work.exists()
 
 

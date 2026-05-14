@@ -4,9 +4,9 @@ EXAMPLE 24: Synthesize a time series from H(f)
 
 End-to-end frequency → time-domain workflow:
 
-1. Run Bellhop in BROADBAND mode → :class:`TransferFunction` H(d, r, f).
+1. Run Bellhop in BROADBAND mode → :class:`Field` H(d, r, f).
 2. Build a Gaussian-windowed sinusoid as the source waveform p_s(t).
-3. Call ``H.synthesize_time_series(p_s, fs)`` → :class:`TimeSeriesField`.
+3. Call ``H.synthesize_time_series(p_s, fs)`` → :class:`Field`.
 4. Plot |H(f)| at one cell and the matching synthesized p(t).
 
 ENVIRONMENT
@@ -71,8 +71,8 @@ def main():
 
     # 3. Synthesize p(t) = IFFT(H · S)
     ts = H.synthesize_time_series(p_src, sample_rate=fs)
-    print(f"TimeSeriesField shape: {ts.data.shape}, "
-          f"dt={ts.dt*1e3:.3f} ms, nt={ts.n_t}")
+    print(f"Field shape: {ts.data.shape}, "
+          f"dt={ts.dt*1e3:.3f} ms, nt={ts.n_times}")
 
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
@@ -89,7 +89,7 @@ def main():
     axes[0].grid(True, alpha=0.3)
 
     p_trace = ts.at(depth=target_depth_m, range=target_range_m).data
-    axes[1].plot(ts.time * 1e3, p_trace, 'C1-', lw=1.0)
+    axes[1].plot(ts.times * 1e3, p_trace, 'C1-', lw=1.0)
     axes[1].set_xlabel('Time (ms)')
     axes[1].set_ylabel('p(t)')
     axes[1].set_title('Synthesized time series')

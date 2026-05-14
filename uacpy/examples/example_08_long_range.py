@@ -136,8 +136,7 @@ def main():
             description="Very long-range propagation (150 km) in deep SOFAR channel. "
             "Demonstrates convergence zones, channel trapping, and model efficiency.",
             env=env,
-            source=source,
-            receiver=receiver,
+            source=source, receiver=receiver,
             results=results,
             output_prefix="example_08"
         )

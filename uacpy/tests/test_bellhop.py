@@ -4,6 +4,8 @@ import pytest
 import numpy as np
 
 from uacpy.models import Bellhop
+from uacpy import Field
+from uacpy.core.results import Rays, Arrivals
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
 
@@ -44,7 +46,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.COHERENT_TL
         )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
         assert np.all(result.tl > 0), "TL should be positive"
@@ -60,7 +62,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.INCOHERENT_TL
         )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
 
@@ -75,7 +77,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.SEMICOHERENT_TL
         )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
 
@@ -90,7 +92,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.RAYS
         )
 
-        assert result.field_type == 'rays'
+        assert isinstance(result, Rays)
         assert result.is_eigen is False
         # Receiver / source geometry attached by the wrapper.
         assert result.receiver_depths is not None
@@ -118,7 +120,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.EIGENRAYS
         )
 
-        assert result.field_type == 'rays'
+        assert isinstance(result, Rays)
         # Wrapper must mark this as solver-computed eigenrays.
         assert result.is_eigen is True
         assert len(result.rays) > 0
@@ -133,7 +135,7 @@ class TestBellhopRunModes:
             setup_env, setup_source,
             range=3000.0, depth=50.0,
         )
-        assert rays.field_type == 'rays'
+        assert isinstance(rays, Rays)
         assert rays.is_eigen is True
         # Receiver positions reflect the single target point.
         assert rays.receiver_ranges is not None
@@ -201,7 +203,7 @@ class TestBellhopRunModes:
             run_mode=RunMode.ARRIVALS
         )
 
-        assert result.field_type == 'arrivals'
+        assert isinstance(result, Arrivals)
         assert result.by_receiver is not None
 
 
@@ -229,7 +231,7 @@ class TestAdvancedBeamTypes:
         """Test Gaussian beam (type 'B' - default)."""
         bellhop = Bellhop(verbose=False, beam_type='B')
         result = bellhop.run(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -237,7 +239,7 @@ class TestAdvancedBeamTypes:
         """Test geometric hat beam (type 'G')."""
         bellhop = Bellhop(verbose=False, beam_type='G')
         result = bellhop.run(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -245,7 +247,7 @@ class TestAdvancedBeamTypes:
         """Test simple Gaussian beam (type 'S')."""
         bellhop = Bellhop(verbose=False, beam_type='S')
         result = bellhop.run(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -253,7 +255,7 @@ class TestAdvancedBeamTypes:
         """Test Cartesian beam (type 'C')."""
         bellhop = Bellhop(verbose=False, beam_type='C')
         result = bellhop.run(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -261,7 +263,7 @@ class TestAdvancedBeamTypes:
         """Test ray-centered beam (type 'R')."""
         bellhop = Bellhop(verbose=False, beam_type='R')
         result = bellhop.run(env=env, source=source, receiver=receiver)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
 
@@ -366,13 +368,13 @@ class TestBellhopRangeDependentSSP:
 
 class TestBellhopMultiSourceDepth:
     """Bellhop's ``.shd`` carries one slab per source depth. Single-source
-    runs return a :class:`PressureField`; multi-source runs return a
-    :class:`ResultStack` of :class:`PressureField` slabs keyed by
+    runs return a :class:`Field`; multi-source runs return a
+    :class:`ResultStack` of :class:`Field` slabs keyed by
     source depth."""
 
     @pytest.mark.requires_binary
     def test_multi_source_returns_result_stack(self):
-        from uacpy.core.results import PressureField, ResultStack
+        from uacpy.core.results import ResultStack
         env = Environment(
             name='multi-src-shape', bathymetry=100.0, ssp=1500.0,
         )
@@ -384,21 +386,21 @@ class TestBellhopMultiSourceDepth:
         bh = Bellhop(verbose=False)
         result = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
         assert isinstance(result, ResultStack)
-        assert result.slab_type is PressureField
+        assert result.slab_type is Field
         np.testing.assert_allclose(
             np.sort(result.coordinate), np.array([30.0, 50.0, 70.0])
         )
         assert result.coordinate_name == 'source_depth'
         assert result.n_slabs == 3
         assert len(result) == 3
-        # Each slab is a 2-D PressureField on the same receiver grid.
+        # Each slab is a 2-D Field on the same receiver grid.
         for sd, slab in result:
-            assert isinstance(slab, PressureField)
+            assert isinstance(slab, Field)
             assert slab.data.shape == (9, 11)
 
     @pytest.mark.requires_binary
     def test_single_source_returns_pressure_field(self):
-        from uacpy.core.results import PressureField, ResultStack
+        from uacpy.core.results import ResultStack
         env = Environment(
             name='single-src-shape', bathymetry=100.0, ssp=1500.0,
         )
@@ -409,7 +411,7 @@ class TestBellhopMultiSourceDepth:
         )
         bh = Bellhop(verbose=False)
         result = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-        assert isinstance(result, PressureField)
+        assert isinstance(result, Field)
         assert not isinstance(result, ResultStack)
         assert result.data.shape == (9, 11)
 
@@ -438,10 +440,9 @@ class TestBellhopMultiSourceDepth:
     @pytest.mark.requires_binary
     def test_at_source_depth_recovers_middle_slab(self):
         """``stack.at(source_depth=z)`` returns the matching
-        :class:`PressureField` slab, and that slab's TL matches a
+        :class:`Field` slab, and that slab's TL matches a
         single-source run at the same depth (within Bellhop's beam-
         partitioning round-off)."""
-        from uacpy.core.results import PressureField
         env = Environment(
             name='multi-src-at', bathymetry=100.0, ssp=1500.0,
         )
@@ -456,7 +457,7 @@ class TestBellhopMultiSourceDepth:
             receiver, run_mode=RunMode.COHERENT_TL,
         )
         slab = stack.at(source_depth=50.0)
-        assert isinstance(slab, PressureField)
+        assert isinstance(slab, Field)
         assert slab.data.shape == (9, 10)
 
         single = bh.run(

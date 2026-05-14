@@ -25,7 +25,7 @@ from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment, BoundaryProperties
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, TimeSeriesField, TransferFunction
+from uacpy.core.results import Result, Field
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
 )
@@ -528,7 +528,7 @@ class Bellhop(PropagationModel):
             ``[fc*(1 - bw), fc*(1 + bw)]`` with ``bw =
             _DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (1.0). These module-level
             constants govern the IFFT resolution of the resulting
-            ``TransferFunction``; pass ``frequencies=`` explicitly to
+            ``Field``; pass ``frequencies=`` explicitly to
             override.
         source_waveform : ndarray, optional
             Time-domain source waveform for delay-and-sum synthesis
@@ -553,7 +553,7 @@ class Bellhop(PropagationModel):
 
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
-            # source_waveform → TransferFunction; with it → TimeSeriesField (1×1 grid).
+            # source_waveform → Field; with it → Field (1×1 grid).
             return self._run_broadband(
                 env, source, receiver,
                 frequencies=frequencies,
@@ -878,23 +878,25 @@ class Bellhop(PropagationModel):
                     slab.receiver_depths = rcv_d
                     slab.receiver_ranges = rcv_r
 
-            kw = self._result_kwargs(
-                source,
-                backend=self.model_name.lower(),
-                frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                phase_reference='travelling_wave',
+            f0 = np.atleast_1d(np.asarray(
+                float(np.atleast_1d(source.frequencies)[0]), dtype=float,
+            ))
+            slabs_to_set = (
+                result.slabs if isinstance(result, ResultStack) else [result]
             )
-            extras = kw.pop('metadata', {})
-
-            to_tag = result.slabs if isinstance(result, ResultStack) else [result]
-            for i, slab in enumerate(to_tag):
+            for i, slab in enumerate(slabs_to_set):
+                slab.model = self.model_name
+                slab.backend = self.model_name.lower()
                 if isinstance(result, ResultStack):
-                    slab_kw = {**kw,
-                               'source_depths': np.array(
-                                   [float(result.coordinate[i])])}
+                    slab.source_depths = np.array(
+                        [float(result.coordinate[i])], dtype=float,
+                    )
                 else:
-                    slab_kw = kw
-                slab.tag(**slab_kw, **extras)
+                    slab.source_depths = np.atleast_1d(np.asarray(
+                        source.depths, dtype=float,
+                    ))
+                slab.frequencies = f0
+                slab.phase_reference = 'travelling_wave'
                 self._attach_output_paths(
                     slab, fm.work_dir, base_name,
                     primary_files=(
@@ -1037,14 +1039,14 @@ class Bellhop(PropagationModel):
         run arrivals at center frequency, then either:
 
         1. **Without source_waveform**: build frequency-domain transfer function
-           H(f) from arrivals → returns ``TransferFunction``. Use
-           ``TransferFunction.to_time_trace()`` (raw IFFT) or
-           ``TransferFunction.synthesize_time_series(source_waveform, sample_rate)``
+           H(f) from arrivals → returns ``Field``. Use
+           ``Field.to_time_trace()`` (raw IFFT) or
+           ``Field.synthesize_time_series(source_waveform, sample_rate)``
            (windowed convolution) downstream.
 
         2. **With source_waveform**: perform delay-and-sum convolution of the
            time-domain waveform with each arrival (amplitude, phase, delay)
-           → returns :class:`TimeSeriesField` directly.
+           → returns :class:`Field` directly.
 
         This is a key advantage of ray tracing: the ray geometry (paths, travel
         times) is frequency-independent, so a single arrivals calculation at fc
@@ -1091,10 +1093,10 @@ class Bellhop(PropagationModel):
         Returns
         -------
         result : Result
-            If source_waveform is None: ``TransferFunction``
+            If source_waveform is None: ``Field``
                 (call ``.to_time_trace()`` or
                 ``.synthesize_time_series(...)`` to get a time series).
-            If source_waveform is provided: ``TimeSeriesField``
+            If source_waveform is provided: ``Field``
                 with data shape (n_depths, n_ranges, n_samples) and
                 metadata containing 'time', 'dt', 'fs'.
         """
@@ -1154,11 +1156,13 @@ class Bellhop(PropagationModel):
                     m = min(len(rts), n_t)
                     data[ird, irr, :m] = np.asarray(rts[:m], dtype=float)
 
-            return TimeSeriesField(
+            return Field(
                 data=data,
-                depths=np.asarray(rz, dtype=float),
-                ranges=np.asarray(rr, dtype=float),
-                time=t_vec,
+                coords={
+                    'depth': np.asarray(rz, dtype=float),
+                    'range': np.asarray(rr, dtype=float),
+                    'time': t_vec,
+                },
                 **self._result_kwargs(
                     source, backend='bellhop', frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
@@ -1190,10 +1194,13 @@ class Bellhop(PropagationModel):
 
         c0 = float(env.ssp.data[0, 0])
 
-        return TransferFunction(
+        return Field(
             data=H,
-            ranges=rr,
-            depths=rz,
+            coords={
+                'depth': np.asarray(rz, dtype=float),
+                'range': np.asarray(rr, dtype=float),
+                'frequency': frequencies,
+            },
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,

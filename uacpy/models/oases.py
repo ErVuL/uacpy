@@ -46,7 +46,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, PressureField, TransferFunction,
+    Result, Field,
     Covariance, Replicas, ReflectionCoefficient,
 )
 from uacpy.core.exceptions import (
@@ -379,11 +379,9 @@ class OAST(PropagationModel):
                 frequencies=float(np.atleast_1d(source.frequencies)[0]),
             )
             kw['metadata'].update(metadata)
-            native = PressureField(
-                units="dB",
+            native = Field(
                 data=tl_data,
-                depths=native_depths,
-                ranges=native_ranges,
+                coords={'depth': native_depths, 'range': native_ranges},
                 **kw,
             )
             receiver_ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
@@ -992,8 +990,8 @@ class OASP(PropagationModel):
     Notes
     -----
     Broadband-oriented; supports ``RunMode.BROADBAND`` (returns a
-    :class:`TransferFunction`) and ``RunMode.TIME_SERIES`` (returns a
-    :class:`TimeSeriesField` after ``synthesize_time_series``). For a
+    :class:`Field`) and ``RunMode.TIME_SERIES`` (returns a
+    :class:`Field` after ``synthesize_time_series``). For a
     single-cell trace use ``tf.to_time_trace(depth, range)``. Can be
     expensive (reduce ``n_time_samples`` for speed). For range-dependent
     problems, RAM is recommended.
@@ -1103,8 +1101,8 @@ class OASP(PropagationModel):
         Returns
         -------
         result : Result
-            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
-            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
+            :class:`Field` for COHERENT_TL, :class:`Field`
+            for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         n_time_samples = self.n_time_samples
         freq_max = self.freq_max
@@ -1200,10 +1198,13 @@ class OASP(PropagationModel):
                 # axis is the variable dim. Source axes: (freq, range, depth).
                 tf_reordered = np.transpose(transfer_func, (2, 1, 0))
 
-                result = TransferFunction(
+                result = Field(
                     data=tf_reordered,
-                    depths=trf_data['depths'],
-                    ranges=trf_data['ranges'],
+                    coords={
+                        'depth': trf_data['depths'],
+                        'range': trf_data['ranges'],
+                        'frequency': trf_data['freq'],
+                    },
                     phase_reference='travelling_wave',
                     **self._result_kwargs(
                         source,
@@ -1231,11 +1232,12 @@ class OASP(PropagationModel):
 
                 p_at_freq = transfer_func[freq_idx, :, :].T  # (n_d, n_r)
 
-                result = PressureField(
-                    units="complex",
+                result = Field(
                     data=p_at_freq,
-                    depths=trf_data['depths'],
-                    ranges=trf_data['ranges'],
+                    coords={
+                        'depth': trf_data['depths'],
+                        'range': trf_data['ranges'],
+                    },
                     **self._result_kwargs(
                         source,
                         backend='oasp',

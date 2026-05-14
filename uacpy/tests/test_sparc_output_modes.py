@@ -11,6 +11,7 @@ import pytest
 import numpy as np
 
 from uacpy import Environment, Source, Receiver
+from uacpy import Field
 from uacpy.models import SPARC
 
 
@@ -67,7 +68,7 @@ class TestSPARCOutputModes:
         )
 
         assert result is not None
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.data is not None
         assert result.data.shape == (len(receiver_grid.depths), len(receiver_grid.ranges))
         assert result.metadata.get('output_mode') == 'R'
@@ -96,7 +97,7 @@ class TestSPARCOutputModes:
         )
 
         assert result is not None
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.data is not None
         assert result.data.shape == (len(depths), len(ranges))
         assert result.metadata.get('output_mode') == 'D'
@@ -121,7 +122,7 @@ class TestSPARCOutputModes:
         )
 
         assert result is not None
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.data is not None
         # Snapshot mode provides full 2D field
         assert result.data.ndim == 2

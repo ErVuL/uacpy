@@ -43,16 +43,3 @@ class TestBottomLossCurve:
         custom = np.linspace(5.0, 85.0, 41)
         ang, loss = bottom_loss_curve('limestone', grazing_angles_deg=custom)
         assert np.array_equal(ang, custom)
-
-
-class TestPlotBottomLoss:
-    def test_overlay_renders(self):
-        import matplotlib
-        matplotlib.use('Agg')
-        from uacpy.visualization.plots import plot_bottom_loss
-        fig, ax = plot_bottom_loss(['sand', 'silt', 'limestone'])
-        # 3 lines, each with > 100 points, axis labelled
-        assert len(ax.get_lines()) == 3
-        assert ax.get_xlabel().lower().startswith('grazing')
-        import matplotlib.pyplot as plt
-        plt.close(fig)

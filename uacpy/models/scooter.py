@@ -266,8 +266,9 @@ class Scooter(PropagationModel):
         Returns
         -------
         result : Result
-            :class:`PressureField` for COHERENT_TL, :class:`TransferFunction`
-            for BROADBAND, :class:`TimeSeriesField` for TIME_SERIES.
+            :class:`Field` — narrowband complex pressure for COHERENT_TL,
+            broadband complex ``H(f)`` for BROADBAND, real ``p(d, r, t)``
+            for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
 
@@ -359,15 +360,12 @@ class Scooter(PropagationModel):
                     grn_data, receiver.ranges, method='fft_hankel',
                     **transform_kwargs,
                 )
-            kw = self._result_kwargs(
-                source,
-                backend='scooter.exe',
-                frequencies=(broadband_freqs if broadband_mode
-                             else float(source.frequencies[0])),
-                phase_reference='travelling_wave',
-            )
-            extras = kw.pop('metadata', {})
-            result.tag(**kw, **extras)
+            result.model = self.model_name
+            result.backend = 'scooter.exe'
+            result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+            freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
+            result.frequencies = np.atleast_1d(np.asarray(freqs, dtype=float))
+            result.phase_reference = 'travelling_wave'
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,

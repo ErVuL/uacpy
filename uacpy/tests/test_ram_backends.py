@@ -10,6 +10,7 @@ from uacpy.core.environment import (
     LayeredBottom,
     SedimentLayer,
 )
+from uacpy import Field
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.io.ramsurf_writer import write_ramin
@@ -238,7 +239,7 @@ class TestCollinsBinaries:
         src, rcv = self._src_rcv()
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.backend == 'ramsurf'
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
@@ -251,7 +252,7 @@ class TestCollinsBinaries:
         src, rcv = self._src_rcv()
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.backend == 'rams'
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
@@ -267,7 +268,7 @@ class TestCollinsBinaries:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=2.0)
         f = ram.run(env, src, rcv, run_mode=RunMode.BROADBAND)
-        assert f.field_type == 'transfer_function'
+        assert isinstance(f, Field)
         assert f.backend == 'ramsurf'
         assert f.phase_reference == 'travelling_wave'
         # Shape: (n_d, n_r, n_f) — trailing axis is variable.

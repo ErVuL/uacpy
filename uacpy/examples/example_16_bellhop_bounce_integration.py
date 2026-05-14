@@ -16,8 +16,8 @@ FEATURES DEMONSTRATED:
     - Bellhop.run_with_bounce() for explicit BOUNCE parameters
     - LayeredBottom + SedimentLayer for depth-dependent sediment
     - RangeDependentBottom with RAM (true Fortran RD support)
-    - plot_transmission_loss(), plot_layered_bottom(), plot_rd_bottom()
-    - plot_ssp_2d(), plot_environment_advanced()
+    - plot_field(), plot_environment(), plot_environment()
+    - plot_environment(), plot_environment()
 
 ===============================================================================
 """
@@ -39,16 +39,30 @@ from uacpy import (  # noqa: E402
 )
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_transmission_loss,
-    plot_layered_bottom,
-    plot_rd_layered_bottom,
-    plot_rd_bottom,
-    plot_ssp_2d,
-    plot_environment_advanced,
+    plot_field,
+    plot_environment,
 )
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
+                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
+    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
+
+    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
+    ``vmax = +diff_vmax``.
+    """
+    from uacpy import Field
+    from uacpy.visualization import plot_field
+    if diff_vmax is not None:
+        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
+    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
+    return plot_field(
+        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
+        cmap='RdBu_r', title=title, **kw,
+    )
 
 
 def demo_bellhop_bounce():
@@ -101,18 +115,16 @@ def demo_bellhop_bounce():
     print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
     print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
     print(f"Max |diff|:    {np.nanmax(np.abs(diff)):.1f} dB")
-
-    from uacpy.visualization.plots import plot_tl_difference
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     vmin, vmax = 40, 90
-    plot_transmission_loss(result_hs, env, ax=axes[0],
+    plot_field(result_hs, env=env, ax=axes[0],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
     axes[0].set_title('Half-space (no shear)', fontsize=11, fontweight='bold')
-    plot_transmission_loss(result_bounce, env, ax=axes[1],
+    plot_field(result_bounce, env=env, ax=axes[1],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
     axes[1].set_title('BOUNCE (with shear)', fontsize=11, fontweight='bold')
     axes[1].set_ylabel('')
-    plot_tl_difference(result_bounce, result_hs, env, ax=axes[2],
+    _plot_tl_difference(result_bounce, result_hs, env, ax=axes[2],
                        label='BOUNCE − half-space',
                        diff_vmax=10, show_colorbar=False)
     axes[2].set_title('BOUNCE − half-space', fontsize=11, fontweight='bold')
@@ -136,7 +148,7 @@ def demo_bellhop_bounce():
     print("  ✓ Saved: output/example_16_bounce_comparison.png")
 
     # Also plot TL with contours using the plot function
-    fig2, ax2 = plot_transmission_loss(result_bounce, env, contours=[60, 70, 80])
+    fig2, ax2 = plot_field(result_bounce, env=env, contours=[60, 70, 80])
     ax2.set_title('Bellhop + BOUNCE TL with Contours')
     plt.savefig(OUTPUT_DIR / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_bounce_tl.png")
@@ -191,7 +203,7 @@ def demo_layered_bottom():
         print(f"Scooter TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
         # Plot TL
-        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 80, 90])
+        fig1, ax1 = plot_field(result, env=env, contours=[70, 80, 90])
         ax1.set_title('Scooter TL — Layered Sediment (3 layers + halfspace)')
         plt.savefig(OUTPUT_DIR / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: output/example_16_layered_tl.png")
@@ -201,12 +213,12 @@ def demo_layered_bottom():
         traceback.print_exc()
 
     # Plot layered bottom structure
-    fig2, ax2 = plot_layered_bottom(env)
+    fig2, ax2 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_layered_structure.png")
 
     # Plot environment overview
-    fig3, axes3 = plot_environment_advanced(env, source, receiver)
+    fig3, axes3 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_layered_env.png")
 
@@ -267,7 +279,7 @@ def demo_range_dependent_bottom():
         result = ram.run(env, source, receiver)
         print(f"RAM TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
 
-        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
+        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
         plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
@@ -277,17 +289,17 @@ def demo_range_dependent_bottom():
         traceback.print_exc()
 
     # Plot RD bottom properties
-    fig2, _ = plot_rd_bottom(env)
+    fig2, _ = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_bottom_props.png")
 
     # Plot 2D SSP
-    fig3, ax3 = plot_ssp_2d(env)
+    fig3, ax3 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_ssp.png")
 
     # Plot full environment
-    fig4, axes4 = plot_environment_advanced(env, source, receiver)
+    fig4, axes4 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_env.png")
 
@@ -381,7 +393,7 @@ def demo_rd_layered_bottom():
         print(f"RAM TL: {np.nanmin(result.tl):.1f} to "
               f"{np.nanmax(result.tl):.1f} dB")
 
-        fig1, ax1 = plot_transmission_loss(result, env, contours=[70, 85, 100])
+        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
         ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
         plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
                     bbox_inches='tight')
@@ -392,7 +404,7 @@ def demo_rd_layered_bottom():
         traceback.print_exc()
 
     # Plot the RD layered structure
-    fig2, axes2 = plot_rd_layered_bottom(env)
+    fig2, axes2 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rdl_structure.png', dpi=150,
                 bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rdl_structure.png")
@@ -415,12 +427,12 @@ def main():
     print("  - LayeredBottom with Scooter (NMEDIA > 1)")
     print("  - Range-dependent bottom (scalar) with RAM")
     print("  - Range-dependent LAYERED bottom (depth+range) with RAM")
-    print("  - plot_transmission_loss() with contours")
-    print("  - plot_layered_bottom() for sediment structure")
-    print("  - plot_rd_layered_bottom() for RD layered structure")
-    print("  - plot_rd_bottom() for RD bottom")
-    print("  - plot_ssp_2d() for range-dependent SSP")
-    print("  - plot_environment_advanced() for full overview")
+    print("  - plot_field() with contours")
+    print("  - plot_environment() for sediment structure")
+    print("  - plot_environment() for RD layered structure")
+    print("  - plot_environment() for RD bottom")
+    print("  - plot_environment() for range-dependent SSP")
+    print("  - plot_environment() for full overview")
 
     print("\n✓ Example 16 complete\n")
     return 0

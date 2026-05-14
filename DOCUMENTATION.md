@@ -46,22 +46,22 @@ it is not redistributable.
 import numpy as np, matplotlib.pyplot as plt
 import uacpy
 from uacpy.models import Bellhop
-from uacpy.visualization import plot_transmission_loss
+from uacpy.visualization import plot_field
 
 env      = uacpy.Environment(name='shallow', bathymetry=100.0, ssp=1500.0)
 source   = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(depths=np.linspace(0, 100, 101),
                           ranges=np.linspace(100, 10_000, 200))
 
-field = Bellhop().compute_tl(env, source, receiver)
-plot_transmission_loss(field, env=env)
+field = Bellhop().compute_tl(env, source, receiver)   # or .run(...)
+plot_field(field, env=env)
 plt.show()
 ```
 
 The full public surface lives on `uacpy.*` — `dir(uacpy)` is the index.
 Models are in `uacpy.models`, visualization in `uacpy.visualization`,
-signal processing in `uacpy.signal` (alias for the on-disk
-`uacpy.acoustic_signal` package — pulled in to dodge stdlib `signal`).
+signal processing in `uacpy.acoustic_signal`, cross-model TL metrics
+in `uacpy.metrics`.
 
 ---
 
@@ -303,7 +303,11 @@ Useful methods:
 
 ```python
 BoundaryProperties(
-    acoustic_type='vacuum',      # vacuum | rigid | half-space | grain-size | file
+    acoustic_type=None,          # auto-inferred when omitted: 'file' if
+                                 # reflection_file is set, 'half-space' if
+                                 # any cp/ρ/α/cs/roughness is non-default,
+                                 # 'vacuum' otherwise. Pass explicitly for
+                                 # 'rigid' or 'grain-size'.
     sound_speed=1600.0,          # m/s (compressional)
     density=1.5,                 # g/cm³
     attenuation=0.5,             # dB/λ (compressional)
@@ -419,8 +423,9 @@ bathy = np.array([[0, 100], [5000, 150], [10000, 200]])   # (range_m, depth_m)
 env = uacpy.Environment(name='slope', ssp=1500, bathymetry=bathy)
 
 # Rough sea surface (Bellhop and RAM ramsurf only — others drop it)
-alt = uacpy.generate_sea_surface(max_range=10_000, wind_speed_ms=10.0,
-                                 n_points=500, seed=0xACED)
+from uacpy.core import generate_sea_surface
+alt = generate_sea_surface(max_range=10_000, wind_speed_ms=10.0,
+                           n_points=500, seed=0xACED)
 env = uacpy.Environment(name='rough', bathymetry=100, ssp=1500, altimetry=alt)
 ```
 
@@ -478,7 +483,6 @@ Absorption subclasses are not supported by the modal kernel.
 uacpy.Source(
     depths,                # float or array — positive, down from surface (m)
     frequencies,           # float or array — Hz (multiple ⇒ broadband sweep)
-    angles=None,           # launch angles (deg). Default linspace(-80, 80, 361)
     source_type='point',   # 'point' | 'line'
 )
 
@@ -489,13 +493,17 @@ uacpy.Receiver(
 )
 ```
 
+Solver knobs that used to live on `Source` (launch angles) or
+`BoundaryProperties` (`reflection_cmin`/`cmax`/`rmax`) now live on the
+consuming model — e.g. `Bellhop(alpha=(-80, 80))`, `Kraken(c_low=…)`.
+
 - `'grid'` builds a full `depths × ranges` mesh.
 - `'line'` pairs `depths[i]` with `ranges[i]` (same length, or one is
   scalar broadcast).
 - A single hydrophone is just `Receiver(depths=[d], ranges=[r])` — there
   is no `'point'` receiver type.
 - Time-series / broadband models always populate the full grid; extract
-  a trace via `TransferFunction.to_time_trace(depth=, range=)` or
+  a trace via `Field.to_time_trace(depth=, range=)` or
   `synthesize_time_series(depth=, range=)` on the returned typed result.
 
 `Source(frequencies=[…])` with more than one frequency on a
@@ -544,9 +552,10 @@ Scooter, RAM).
 | Reflection file (.brc / .trc) | ✓ | – | ✓ | ✓ | ✓ | – | – | **output** |
 | Altimetry | ✓ | auto → ramsurf1.5 | – | – | – | – | – | – |
 
-Each model declares its env-shape capability via 7 boolean flags
-(`_supports_*`) on `__init__`; `_project_environment` walks every axis
-on `run()` and reduces unsupported ones via the matching collapse key.
+Each model declares its env-shape capability via boolean flags on
+`__init__`; `_project_environment` walks every axis on `run()` and
+reduces unsupported ones via the matching collapse key, with one
+`UserWarning` per dropped feature.
 
 **Collapse keys (one per axis):**
 
@@ -571,18 +580,12 @@ since it segments bathy/SSP natively but still needs to collapse the
 bottom axis. Bellhop, BellhopCUDA, OASR (SSP irrelevant), and RAM use
 the global defaults.
 
-`Bellhop.run(env, …)` **auto-routes through BOUNCE** for any env with a
-`LayeredBottom`, `RangeDependentLayeredBottom`, elastic halfspace, or
-`RangeDependentBottom` with non-zero `shear_speed` anywhere along range
-(emits one `UserWarning`). The user's `Bellhop(collapse={…})` dict is
-forwarded to the spawned Bounce, so the same constructor controls how a
-range-dependent env reduces to BOUNCE's single BRC. The Bellhop result
-carries the in-memory bounce result on
-`result.metadata['bounce_result']` (a typed `ReflectionCoefficient`
-with `.theta`/`.R`/`.phi`) so the user can inspect or plot the BRC
-without re-running BOUNCE. Use `Bellhop.run_with_bounce(...)` for
-explicit control over BOUNCE parameters (`c_low`, `c_high`, `rmax`),
-or pass `auto_bounce=False` to skip the auto-route entirely.
+`Bellhop` **auto-routes through BOUNCE** for any env with a layered or
+elastic bottom (one `UserWarning`, the parent's `collapse={…}` dict is
+forwarded to the spawned Bounce). The typed `ReflectionCoefficient`
+sits on `result.metadata['bounce_result']` for inspection without
+re-running BOUNCE. Use `Bellhop.run_with_bounce(...)` to override
+`c_low`/`c_high`/`rmax`, or `Bellhop(auto_bounce=False)` to disable.
 
 ### 5.3 Bellhop / BellhopCUDA — Gaussian beam / ray tracing
 
@@ -601,7 +604,7 @@ field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 ts = bh.run(env, source, receiver,
             run_mode=RunMode.TIME_SERIES,
             source_waveform=s, sample_rate=fs)
-trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
+trace = ts.to_time_trace(depth=50.0, range=2000.0)    # 1-D Field over time
 ```
 
 **Caveats:**
@@ -613,7 +616,7 @@ trace = ts.get_trace(depth=50.0, range=2000.0)        # → TimeTrace
   parsing is not implemented.
 - Bellhop is the only model that natively writes a multi-source-depth
   grid; passing ``Source(depths=[z1, z2, …])`` returns a
-  :class:`uacpy.ResultStack` of slabs (one :class:`PressureField` per
+  :class:`uacpy.ResultStack` of slabs (one :class:`Field` per
   source for TL modes, one :class:`Rays` for ``RAYS``/``EIGENRAYS``,
   one :class:`Arrivals` for ``ARRIVALS``). The stack carries the
   source-depth labels in ``stack.coordinate`` (with
@@ -760,7 +763,7 @@ Examples: 05, 18, 19, 20, 22.
 ### 5.8 SPARC — time-domain PE
 
 Range-independent time-marched FFP. Native time-domain — `RunMode.TIME_SERIES`
-returns a `TimeSeriesField` directly, shape `(n_d, n_r, n_t)`.
+returns a `Field` directly, shape `(n_d, n_r, n_t)`.
 
 ```python
 from uacpy.models import SPARC
@@ -810,18 +813,10 @@ res.metadata['brc_file']                      # ./bounce_out/...brc — valid pa
 res.metadata['irc_file']                      # Kraken consumer
 ```
 
-Bounce uses the same uniform ``(work_dir, cleanup)`` rule as every
-other model: a user-pinned ``work_dir`` defaults ``cleanup=False`` and
-the ``.brc`` / ``.irc`` files persist; an unpinned ``work_dir``
-defaults ``cleanup=True`` and the temp dir is wiped when ``run()``
-returns. In the latter case ``result.metadata`` omits the (now stale)
-file-path keys, so the absence is the signal — try chaining to a
-consumer model and you'll see ``KeyError`` immediately.
-
-Bounce overrides defaults to `'bottom': 'median'` and
-`'rd_layered_layers': 'preserve'` because it produces ONE BRC consumed
-across the whole receiver-range axis. Bellhop's auto-route forwards the
-parent's `Bellhop(collapse={…})` overrides to the spawned Bounce.
+Pin `work_dir` to persist the `.brc` / `.irc` files (default
+`cleanup=True` wipes the tempdir; see §2 for the rule). Per-model
+defaults: `'bottom': 'median'`, `'rd_layered_layers': 'preserve'` —
+one BRC consumed across the whole receiver-range axis.
 
 Examples: 15, 16.
 
@@ -884,12 +879,8 @@ subclass:
 
 ```
 Result                              identification + metadata
-├── PressureField                   (n_d, n_r) or (n_d, n_r, n_f); units='complex' (default) or 'dB'
-│                                   .tl always works; .p only when complex
-├── TransferFunction                (n_d, n_r, n_f) complex; sibling of PressureField
-│                                   carries phase_reference + .synthesize_time_series / .to_time_trace / .to_tl
-├── TimeSeriesField                 (n_d, n_r, n_t) real, p(t) on a grid
-├── TimeTrace                       (n_t,) real, p(t) at one (depth, range)
+├── Field                           one container for every gridded output
+│                                   data + coords (varying axes) + pinned (collapsed-to-scalar coords)
 ├── Arrivals                        flat list of arrival events
 ├── Rays                            list of ray polylines
 ├── Modes                           Kraken normal modes (.k complex wavenumbers, .phi eigenfunctions)
@@ -898,43 +889,58 @@ Result                              identification + metadata
 └── ReflectionCoefficient           .theta + .R / .phi (n_θ,) or (n_θ, n_f)
 ```
 
-### Trailing-axis convention
+### Field — one container, dtype × coords disambiguates
 
-The variable axis is always trailing — `np.fft.ifft(H)` works without an
-axis argument:
+`Field` collapses what used to be five separate gridded types. The
+dtype of `.data` plus which keys appear in `.coords` tell you what
+the field represents:
 
-| Result | Shape |
-|---|---|
-| `PressureField` (narrowband) | `(n_d, n_r)` |
-| `PressureField` (broadband) / `TransferFunction` | `(n_d, n_r, n_f)` |
-| `TimeSeriesField` | `(n_d, n_r, n_t)` |
-| `TimeTrace` | `(n_t,)` |
-| `Covariance` | `(n_f, n_rcv, n_rcv)` |
-| `Replicas` | `(n_f, n_z, n_x, n_y, n_rcv)` |
+| dtype     | `coords` keys                          | Physical meaning                  |
+|-----------|----------------------------------------|-----------------------------------|
+| complex   | `{depth, range}`                       | narrowband pressure `p(d, r)`     |
+| real      | `{depth, range}`                       | TL in dB                          |
+| complex   | `{depth, range, frequency}`            | broadband `H(d, r, f)`            |
+| real      | `{depth, range, time}`                 | `p(d, r, t)`                      |
+| real      | `{time}`                               | single-point trace                |
+| complex   | `{source_depth, depth, range}`         | multi-source TL field             |
 
-### Slicing — `.at()` / `.max()` / `.data`
+`data.shape` matches the insertion order of `coords`, so the variable
+axis is always trailing — `np.fft.ifft(H)` works without an axis kwarg.
+
+### Slicing — `.at()` / `.isel()` / `.max()`
+
+Slicing **drops the named axis** from `coords` and records the chosen
+sample in `pinned`:
 
 | Method | Selector | Behaviour |
 |---|---|---|
-| `.at(depth=, range=, frequency=, time=)` | label (m / Hz / s) | nearest grid point via `argmin(|axis - value|)`; returns a typed slice |
-| `.max()` | none | global `argmax(|data|)` across all axes |
-| `.data[…]` | numpy slicing | raw ndarray (no axis labels, no metadata) |
-
-**Auto-squeeze on slices.** A full grid preserves shape
-(`field.tl.shape == field.data.shape`); a *sliced* field is
-`SlicedPressureField` and squeezes singleton axes on `.tl` / `.p`:
+| `.at(depth=, range=, frequency=, time=)` | label (m / Hz / s) | nearest grid point via `argmin(|axis - value|)`; drops named axes |
+| `.isel(depth=, range=, frequency=, time=)` | integer index | identical to `.at` but positional |
+| `.max()` | none | global `argmax(|data|)` across all axes — every coord ends up in `pinned` |
 
 ```python
-field.at(depth=50).tl                 # (n_r,) — plt-ready
-field.at(range=2000, depth=50).tl     # 0-D scalar
-field.at(frequency=200).tl            # (n_d, n_r) for a broadband field
-field.max().tl                        # 0-D scalar at global argmax(|data|)
+narrow = tf.at(frequency=200)
+narrow.coords         # {'depth': ..., 'range': ...}    — frequency dropped
+narrow.pinned         # {'frequency': 198.4}            — nearest sample
+narrow.data.shape     # (n_d, n_r) — no zombie axes
+
+peak = field.max()
+peak.coords           # {}             — all collapsed
+peak.pinned           # {'depth': ..., 'range': ...}
+float(peak.tl)        # the peak TL in dB
 ```
 
-**`.tl` vs `.data`.** Use `.tl` for plotting (always dB, always
-plot-friendly shape). Use `.data` inside numerical code that pairs the
-field with a 2-D mask — auto-squeeze on a sliced `.tl` can drop axis
-identity. `_complex_to_db` from `core.results` converts when needed.
+**Value accessors.** `field.tl` always returns dB (computed from
+`|data|` for complex data, `data` as-is for real). `field.p` returns
+complex pressure; raises `AttributeError` if data is real (no phase
+to expose). `field.magnitude` / `field.phase` likewise require complex
+data.
+
+**Classification.** `field.kind` returns one of `'tl'`, `'pressure'`,
+`'transfer_function'`, `'time_series'` — derived from `(dtype, coords)`
+without relying on the originating model. The same string also appears
+in `repr(field)` so REPL output reads `Field(kind='tl', model='…',
+f=… Hz, axes=(depth, range))`.
 
 `SoundSpeedProfile` and `RangeDependentBottom` split nearest vs.
 interpolation: `.at(...)` is nearest, `.eval(...)` interpolates.
@@ -990,7 +996,7 @@ result.metadata['shd_file']                   # → './out/bellhop_run.shd'
 
 ### Phase reference
 
-`TransferFunction.phase_reference` is a `PhaseReference` enum (subclass
+`Field.phase_reference` is a `PhaseReference` enum (subclass
 of `str`). Two values today:
 
 - **`'travelling_wave'`** — Bellhop / Scooter / OASP / KrakenField /
@@ -1004,7 +1010,7 @@ of `str`). Two values today:
 - **`'time_domain_native'`** — SPARC `RunMode.TIME_SERIES`. Result data
   is real `p(t)` direct from the solver; no phase reconstruction needed.
 
-`TransferFunction.synthesize_time_series(...)` and `.to_time_trace(...)`
+`Field.synthesize_time_series(...)` and `.to_time_trace(...)`
 honour both transparently. Cross-model agreement is verified in
 `tests/test_cross_model_broadband.py` (~6 dB of Scooter on a Pekeris
 reference; IFFT envelope peaks within 100 ms).
@@ -1046,80 +1052,92 @@ For multi-receiver eigenray runs, pass a `Receiver` instead of
 
 ## 7. Visualization
 
-`uacpy.visualization` ships ~30 plot helpers. Every result type has a
-`.plot(env=env)` method that auto-dispatches to the appropriate helper
-— that's the canonical entry point:
+`uacpy.visualization` ships a **canonical 13-function surface**. Slice
+the `Field` first (`.at()` / `.isel()`) and the auto-shape plotters do
+the rest. Every result type has a `.plot(env=env)` method that
+dispatches to the right helper.
 
 ```python
 field = bellhop.run(env, source, receiver)
-fig, ax, im = field.plot(env=env)               # → plot_transmission_loss
-modes.plot(n_modes=6)                            # → plot_modes
-arrivals.plot()                                  # → plot_arrivals
-rays.plot(env=env)                               # → plot_rays
-tf.plot()                                        # → plot_transfer_function or _slice
+fig, ax = field.plot(env=env)                    # → plot_field heatmap
+modes.plot()                                      # → plot_mode_functions
+arrivals.plot()                                   # → plot_arrivals
+rays.plot(env=env)                                # → plot_rays
 ```
 
-The uacpy rcParams (grid, fonts, colours) are applied automatically when
-`uacpy.visualization` is imported. To re-apply after fiddling with
-matplotlib defaults:
+The uacpy rcParams (grid, fonts, colours) are applied automatically on
+import. To re-apply after fiddling with matplotlib defaults:
 
 ```python
 from uacpy.visualization.style import apply_professional_style
 apply_professional_style()
 ```
 
-### Helpers by category
+### The 13 helpers
 
-| Category | Helpers |
+| Helper | Takes | Notes |
+|---|---|---|
+| `plot_field(field, env=None, *, value='tl', projection='cartesian', stacked=False, contours=None, ...)` | `Field` | Auto-shape: 1 surviving coord → line, 2 → heatmap. `projection='polar'` for 2-D (depth, range). `stacked=True` for 2-D `(X, time)` → waterfall. `value` ∈ `'tl' \| 'mag' \| 'phase' \| 'real' \| 'imag'`. |
+| `compare(fields, labels=None, *, value='tl')` | list of 1-D `Field`s | Overlay multiple sliced fields on one axes. |
+| `compare_models(fields, labels=None, *, env=None, ncols=None, contours=None, ...)` | list/dict of 2-D `Field`s | Side-by-side heatmap grid with one shared colourbar. |
+| `plot_rays(rays, *, env=None, color_by='bounces', ...)` | `Rays` | Direct/surface/bottom/both colour-coded; auto-overlays seafloor and source/receivers. |
+| `plot_arrivals(arrivals, ...)` | `Arrivals` | Stem plot, same multipath palette as `plot_rays`. |
+| `plot_environment(env, *, source=None, receiver=None)` | `Environment` | **Single panel** showing water column (Blues, by SSP) + bottom (YlOrBr, by cs) on the same axes. Auto-branches over the four bottom flavours (half-space / `LayeredBottom` / `RangeDependentBottom` / `RangeDependentLayeredBottom`); each layer / Voronoi cell / RDLB column is colored by its `sound_speed`, with a per-flavour property-card legend. **Two colorbars**: `Water cp` (left) and `Bottom cp` (right; suppressed when bottom is a single half-space). `source=` adds a red star at `(r=0, z=src.depths)`; `receiver=` adds green markers, auto-decimated to ≤20×20 with the decimation labelled on the x-axis (`(receivers: N×M, 1/n×1/m shown)`). |
+| `plot_mode_functions(modes, n_modes=None, ...)` | `Modes` | Overlaid `ψ_m(z)` curves. |
+| `plot_mode_wavenumbers(modes, ...)` | `Modes` | `Re(k_m)` scatter + `Im` twin axis when leaky. |
+| `plot_modes_heatmap(modes, *, mode_range=None, normalize=True, cmap='RdBu_r')` | `Modes` | Heatmap of `ψ_m(z)` across mode index. |
+| `plot_reflection_coefficient(rc, *, show_phase=False)` | `ReflectionCoefficient` | Narrowband line / broadband heatmap auto-detected. |
+| `plot_covariance(cov, *, freq_idx=0)` | `Covariance` | OASN spatial covariance heatmap. |
+| `plot_replicas(rep, *, freq_idx=0, sensor_idx=0)` | `Replicas` | MFP replica magnitude over (z, x). |
+| `plot_result(result, env=None, **kw)` | any `Result` | Type-dispatch — used by `Result.plot()`. |
+
+Every helper accepts `ax=None` (kw-only after the first positional —
+caller can pass a pre-built axes for multi-panel layouts) and returns
+`(fig, ax)`.
+
+### Slicing replaces specialised plotters
+
+| What you used to write | What you write now |
 |---|---|
-| **TL** | `plot_transmission_loss`, `plot_transmission_loss_polar`, `plot_range_cut`, `plot_depth_cut`, `plot_tl_difference` |
-| **Rays** | `plot_rays` (auto-truncates eigenrays at closest approach) |
-| **Modes** | `plot_modes`, `plot_mode_functions`, `plot_modes_heatmap`, `plot_mode_wavenumbers`, `plot_dispersion_curves` |
-| **Environment** | `plot_environment`, `plot_environment_advanced`, `plot_ssp`, `plot_ssp_2d`, `plot_bathymetry`, `plot_bottom_properties`, `plot_rd_bottom`, `plot_layered_bottom`, `plot_rd_layered_bottom`, `plot_bottom_loss` |
-| **Time / spectrum** | `plot_time_series`, `plot_time_trace`, `plot_arrivals`, `plot_transfer_function`, `plot_transfer_function_slice`, `plot_phase_field` |
-| **Other results** | `plot_reflection_coefficient`, `plot_reflection_coefficient_heatmap`, `plot_covariance`, `plot_replicas` |
-| **Multi-model** | `compare_models`, `compare_range_cuts`, `plot_model_comparison_matrix` |
+| `plot_range_cut(field, depth=50)` | `plot_field(field.at(depth=50))` |
+| `plot_depth_cut(field, range=5000)` | `plot_field(field.at(range=5000))` |
+| `plot_transfer_function(tf)` | `plot_field(tf)` |
+| `plot_transfer_function_slice(tf, f=200)` | `plot_field(tf.at(frequency=200))` |
+| `plot_time_trace(trace)` | `plot_field(trace)` |
+| `plot_transmission_loss_polar(field)` | `plot_field(field, projection='polar')` |
+| `plot_ssp(env)` / `plot_bathymetry(env)` | `plot_environment(env)` |
 
-Two canonical patterns:
+### Two canonical patterns
 
 ```python
-# TL with shared colourbar across models
-from uacpy.visualization import plot_transmission_loss, compare_models
-fig, ax, im = plot_transmission_loss(field, env=env,
-                                     vmin=None, vmax=None,    # auto: median + 0.75·std rounded
-                                     contours=[70, 80, 90])
-compare_models({'Bellhop': f_bh, 'RAM': f_ram, 'KrakenField': f_kf},
-               env=env, vmin=30, vmax=90)
+# Single TL field with seafloor + contours
+fig, ax = plot_field(field, env=env, contours=[70, 80, 90])
 
-# Signed TL difference (a − b) on diverging cmap, with matched bathy floor
-from uacpy.visualization import plot_tl_difference
-plot_tl_difference(f_ram, f_bh, env=env, label='RAM − Bellhop', diff_vmax=10)
+# Multi-model comparison with one shared colourbar
+compare_models({'Bellhop': f_bh, 'RAM': f_ram, 'KrakenField': f_kf},
+               env=env, contours=[70, 80])
 ```
 
-For per-helper kwargs, read the docstrings (`help(plot_rays)`).
-Examples 14 and 17 tour the visualization surface end-to-end.
+For per-helper kwargs, read the docstrings (`help(plot_field)`).
+Examples 04 / 14 / 17 / 18 walk through the visualization surface.
 
 ---
 
 ## 8. Signal Processing
 
-Reachable as `uacpy.signal` (alias for the on-disk `acoustic_signal`
-package; the alias is an attribute of `uacpy`, so `import uacpy.signal`
-does not work — use `import uacpy; sig = uacpy.signal`).
-
-Three sub-modules:
+Reachable as `uacpy.acoustic_signal`. Three sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `uacpy.signal.generation` | Waveforms (CW, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `cw`, `sweep`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
-| `uacpy.signal.processing` | Beamforming, source/noise scaling, Fourier synthesis | `planewave_rep`, `beamform`, `add_noise`, `fourier_synthesis` |
-| `uacpy.signal.analysis` | Class-based estimators | `PSD`, `PPSD`, `Spectrogram`, `SEL`, `FRF`, `FKTransform` |
+| `uacpy.acoustic_signal.generation` | Waveforms (CW, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `cw`, `sweep`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
+| `uacpy.acoustic_signal.processing` | Beamforming, source/noise scaling, Fourier synthesis | `planewave_rep`, `beamform`, `add_noise`, `fourier_synthesis` |
+| `uacpy.acoustic_signal.analysis` | Class-based estimators | `PSD`, `PPSD`, `Spectrogram`, `SEL`, `FRF`, `FKTransform` |
 
 Three canonical patterns:
 
 ```python
 import uacpy
-sig = uacpy.signal
+sig = uacpy.acoustic_signal
 
 # 1. Build a waveform — chirps return (signal, time); cw/sweep return signal only
 s, t = sig.lfm_chirp(fmin=100.0, fmax=1000.0, T=1.0, sample_rate=10000)
@@ -1141,7 +1159,7 @@ PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
 For per-class kwargs / methods, read the docstrings
-(`help(uacpy.signal.analysis.FRF)`). Examples 09, 10 walk through the
+(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10 walk through the
 common workflows.
 
 Scientific content in `uacpy.core.acoustics` is adapted from arlpy
@@ -1177,12 +1195,12 @@ fig, ax = wenz.plot()                    # stacked components
 `water_depth ∈ {deep, shallow}`. Wind speed in **knots**.
 
 Round-trip a noise spectrum to a time-domain realisation with
-`uacpy.signal.ssrp` and verify with `PPSD`:
+`uacpy.acoustic_signal.ssrp` and verify with `PPSD`:
 
 ```python
 Pxx = wenz.as_psd()                                  # Pa²/Hz
-t, x, fs = uacpy.signal.ssrp(Pxx, wenz.frequencies, duration=30.0)
-ppsd = uacpy.signal.PPSD(ref=1e-6, seg_duration=1.0)
+t, x, fs = uacpy.acoustic_signal.ssrp(Pxx, wenz.frequencies, duration=30.0)
+ppsd = uacpy.acoustic_signal.PPSD(ref=1e-6, seg_duration=1.0)
 ppsd.compute(x, fs); ppsd.plot()
 ```
 
@@ -1285,14 +1303,14 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 04 | `example_04_bellhop_advanced.py` | Beam types, source patterns, advanced rays | |
 | 05 | `example_05_ram_advanced.py` | RAM (mpiramS) with sloping shelf + RD bottom | |
 | 06 | `example_06_kraken_advanced.py` | Modal analysis with Kraken | |
-| 07 | `example_07_all_models_comparison.py` | All models side by side, `compare_models` + `plot_rd_bottom` | |
+| 07 | `example_07_all_models_comparison.py` | All models side by side, `compare_models` + `plot_environment` | |
 | 08 | `example_08_long_range.py` | Convergence-zone propagation | |
 | 09 | `example_09_ambient_noise.py` | Wenz noise + ssrp synthesis + PPSD verification | |
 | 10 | `example_10_signal_processing.py` | CW, chirps, matched filtering | |
 | 11 | `example_11_bellhop_run_modes.py` | Every Bellhop run mode + `compute_eigenrays` | |
 | 12 | `example_12_attenuation_models.py` | Thorp / Francois-Garrison / biological | |
 | 13 | `example_13_oases_suite.py` | OAST / OASN / OASR / OASP | |
-| 14 | `example_14_new_plotting_features.py` | Visualization tour | |
+| 14 | `example_14_plotting_features.py` | Visualization tour | |
 | 15 | `example_15_elastic_boundaries_comparison.py` | Fluid vs elastic bottoms | |
 | 16 | `example_16_bellhop_bounce_integration.py` | `Bellhop.run_with_bounce()` + `LayeredBottom` | |
 | 17 | `example_17_boundary_conditions_layered.py` | Surface BC + layered bottoms (RD layered, preset stacks) | ✓ |
@@ -1302,7 +1320,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 21 | `example_21_bellhop_vs_ramsurf.py` | Bellhop vs ramsurf with rough surface | |
 | 22 | `example_22_ram_lytaev_grid.py` | RAM Lytaev (2023) Padé grid optimizer | ✓ |
 | 23 | `example_23_collapse_methods.py` | Same RD env collapsed multiple ways via `collapse={…}` | |
-| 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `TransferFunction.synthesize_time_series` | |
+| 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
 
 Smoke test:

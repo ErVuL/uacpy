@@ -23,7 +23,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy.visualization.plots import plot_bottom_loss  # noqa: E402
+from uacpy.core.acoustics import bottom_loss_curve  # noqa: E402
 
 
 def main():
@@ -56,11 +56,15 @@ def main():
     axes[0].legend(loc='lower left', fontsize=10)
     axes[0].grid(True, alpha=0.3)
 
-    plot_bottom_loss(
-        ['clay', 'silt', 'sand', 'gravel', 'moraine',
-         'chalk', 'limestone', 'basalt'],
-        ax=axes[1],
-    )
+    for name in ['clay', 'silt', 'sand', 'gravel', 'moraine',
+                 'chalk', 'limestone', 'basalt']:
+        angles, loss_db = bottom_loss_curve(name)
+        axes[1].plot(angles, loss_db, label=name, lw=1.5)
+    axes[1].set_xlabel('Grazing angle (°)')
+    axes[1].set_ylabel('Bottom loss (dB)')
+    axes[1].set_title('Plane-wave bottom loss')
+    axes[1].legend(loc='upper right', fontsize=9)
+    axes[1].grid(True, alpha=0.3)
 
     fig.tight_layout()
     out = out_dir / 'example_25_canonical_presets.png'

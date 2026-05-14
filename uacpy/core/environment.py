@@ -12,6 +12,8 @@ import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
+from uacpy.core.exceptions import ConfigurationError
+
 if TYPE_CHECKING:
     from uacpy.core.absorption import Absorption  # noqa: F401
 
@@ -106,6 +108,17 @@ class SedimentLayer:
         if self.density <= 0:
             raise ValueError(f"SedimentLayer: density must be positive (g/cm^3); got {self.density}")
 
+    def __repr__(self) -> str:
+        bits = [
+            f"thickness={self.thickness:g} m",
+            f"cp={self.sound_speed:g} m/s",
+            f"ρ={self.density:g}",
+            f"α={self.attenuation:g}",
+        ]
+        if self.shear_speed > 0:
+            bits.append(f"cs={self.shear_speed:g} m/s")
+        return f"SedimentLayer({', '.join(bits)})"
+
     @classmethod
     def from_preset(cls, name: str, *, thickness: float, **overrides) -> "SedimentLayer":
         """Build a :class:`SedimentLayer` from a :mod:`uacpy.core.materials`
@@ -141,8 +154,12 @@ class BoundaryProperties:
 
     Attributes
     ----------
-    acoustic_type : str
-        Boundary type: 'vacuum', 'rigid', 'half-space', 'grain-size', 'file'
+    acoustic_type : str, optional
+        Boundary type: 'vacuum', 'rigid', 'half-space', 'grain-size', 'file'.
+        Inferred from the supplied parameters when omitted: ``reflection_file``
+        → ``'file'``, any non-default cp/ρ/α/cs/roughness → ``'half-space'``,
+        nothing → ``'vacuum'``. Pass ``acoustic_type='rigid'`` or
+        ``'grain-size'`` explicitly — they're physically distinct models.
     density : float
         Density (g/cm³)
     sound_speed : float
@@ -183,7 +200,7 @@ class BoundaryProperties:
     >>> env = Environment(name="test", bathymetry=100, bottom=bottom)
     """
 
-    acoustic_type: str = 'vacuum'
+    acoustic_type: Optional[str] = None
     density: float = 1.5
     sound_speed: float = 1600.0
     attenuation: float = 0.5
@@ -207,7 +224,69 @@ class BoundaryProperties:
                 f"BoundaryProperties: shear_attenuation must be non-negative; "
                 f"got {self.shear_attenuation}"
             )
+
+        # Detect which acoustic params differ from their dataclass defaults.
+        # We use this both for auto-inference (when acoustic_type is None) and
+        # for the explicit-conflict guard below.
+        half_space_offenders = []
+        if self.sound_speed != 1600.0:
+            half_space_offenders.append(f"sound_speed={self.sound_speed:g}")
+        if self.density != 1.5:
+            half_space_offenders.append(f"density={self.density:g}")
+        if self.attenuation != 0.5:
+            half_space_offenders.append(f"attenuation={self.attenuation:g}")
+        if self.shear_speed != 0.0:
+            half_space_offenders.append(f"shear_speed={self.shear_speed:g}")
+        if self.shear_attenuation != 0.0:
+            half_space_offenders.append(f"shear_attenuation={self.shear_attenuation:g}")
+        if self.roughness != 0.0:
+            half_space_offenders.append(f"roughness={self.roughness:g}")
+
+        if self.acoustic_type is None:
+            # Auto-infer from the supplied parameters. 'grain-size' and
+            # 'rigid' remain opt-in — they're physically distinct models,
+            # not just a parameter pattern.
+            if self.reflection_file is not None:
+                self.acoustic_type = 'file'
+            elif half_space_offenders:
+                self.acoustic_type = 'half-space'
+            else:
+                self.acoustic_type = 'vacuum'
+
         _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
+
+        # Explicit-conflict guard: vacuum/rigid ignore half-space params,
+        # so explicitly setting one alongside non-default cp/ρ/α/cs is a
+        # mistake the auto-infer path would never make.
+        if self.acoustic_type in ('vacuum', 'rigid'):
+            offenders = list(half_space_offenders)
+            if self.reflection_file is not None:
+                offenders.append(f"reflection_file={self.reflection_file!r}")
+            if offenders:
+                raise ConfigurationError(
+                    f"BoundaryProperties(acoustic_type={self.acoustic_type!r}) "
+                    f"ignores half-space acoustic parameters, but you set "
+                    f"{', '.join(offenders)}. Drop ``acoustic_type=`` to let "
+                    f"uacpy infer 'half-space', or remove the conflicting "
+                    f"parameters."
+                )
+
+    def __repr__(self) -> str:
+        if self.acoustic_type in ('vacuum', 'rigid'):
+            return f"BoundaryProperties({self.acoustic_type})"
+        if self.acoustic_type == 'file':
+            return (
+                f"BoundaryProperties(file={self.reflection_file!r})"
+            )
+        bits = [self.acoustic_type,
+                f"cp={self.sound_speed:g} m/s",
+                f"ρ={self.density:g}",
+                f"α={self.attenuation:g}"]
+        if self.shear_speed > 0:
+            bits.append(f"cs={self.shear_speed:g} m/s")
+        if self.roughness > 0:
+            bits.append(f"σ={self.roughness:g} m")
+        return f"BoundaryProperties({', '.join(bits)})"
 
     @classmethod
     def from_preset(cls, name: str, **overrides) -> "BoundaryProperties":
@@ -263,9 +342,10 @@ class RangeDependentBottom:
         Shear wave speed at each range (m/s), shape (N,). Default is 0 (fluid).
     shear_attenuation : ndarray, optional
         Shear attenuation at each range (dB/wavelength), shape (N,). Default 0.
-    acoustic_type : str
-        Boundary type (same at all ranges): 'vacuum', 'rigid', 'half-space', etc.
-        Default is 'vacuum' for consistency with BoundaryProperties.
+    acoustic_type : str, optional
+        Boundary type (same at all ranges): 'half-space' (default — inferred
+        from the required cp/ρ/α arrays), 'grain-size', 'file'. 'vacuum' /
+        'rigid' are rejected because they would discard the supplied arrays.
 
     Examples
     --------
@@ -291,10 +371,15 @@ class RangeDependentBottom:
     attenuation: np.ndarray
     shear_speed: np.ndarray = None
     shear_attenuation: np.ndarray = None
-    acoustic_type: str = 'vacuum'
+    acoustic_type: Optional[str] = None
 
     def __post_init__(self):
         """Validate array lengths and set defaults."""
+        # Range-dependent bottoms always carry user-supplied cp/ρ/α arrays,
+        # so 'half-space' is the only physically coherent default. 'rigid'
+        # and 'grain-size' remain opt-in via explicit ``acoustic_type=``.
+        if self.acoustic_type is None:
+            self.acoustic_type = 'half-space'
         _validate_acoustic_type(self.acoustic_type, "RangeDependentBottom")
         self.ranges = np.asarray(self.ranges, dtype=float).ravel()
         _require_strictly_increasing(self.ranges, "RangeDependentBottom.ranges")
@@ -312,6 +397,27 @@ class RangeDependentBottom:
             self.shear_speed = np.zeros(n)
         if self.shear_attenuation is None:
             self.shear_attenuation = np.zeros(n)
+
+        # Explicit-conflict guard: vacuum/rigid ignore cp/ρ/α, so pairing
+        # them with an RD bottom (which requires those arrays) is wrong.
+        if self.acoustic_type in ('vacuum', 'rigid'):
+            raise ConfigurationError(
+                f"RangeDependentBottom(acoustic_type={self.acoustic_type!r}) "
+                f"is incoherent — vacuum/rigid boundaries ignore cp/ρ/α, "
+                f"but RangeDependentBottom requires those arrays. Drop "
+                f"``acoustic_type=`` to let uacpy infer 'half-space'."
+            )
+
+    def __repr__(self) -> str:
+        n = len(self.ranges)
+        r_lo, r_hi = float(self.ranges[0]) / 1000, float(self.ranges[-1]) / 1000
+        c_lo, c_hi = float(np.min(self.sound_speed)), float(np.max(self.sound_speed))
+        elastic = " elastic" if np.any(np.asarray(self.shear_speed) > 0) else ""
+        return (
+            f"RangeDependentBottom({self.acoustic_type}{elastic}, "
+            f"n={n}, range=[{r_lo:g}, {r_hi:g}] km, "
+            f"cp=[{c_lo:g}, {c_hi:g}] m/s)"
+        )
 
     def eval(self, *, range: float, interp: str = 'linear') -> BoundaryProperties:
         """``BoundaryProperties`` at the requested range (m).
@@ -419,6 +525,17 @@ class LayeredBottom:
     def __post_init__(self):
         if not self.layers:
             raise ValueError("LayeredBottom: requires at least one SedimentLayer; got 0")
+
+    def __repr__(self) -> str:
+        n = len(self.layers)
+        thick = self.total_thickness()
+        bits = [f"n_layers={n}", f"thickness={thick:g} m"]
+        if any(layer.shear_speed > 0 for layer in self.layers):
+            bits.append("elastic")
+        bits.append(f"halfspace={self.halfspace.acoustic_type}")
+        if self.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
+            bits.append(f"cp={self.halfspace.sound_speed:g} m/s")
+        return f"LayeredBottom({', '.join(bits)})"
 
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m)."""
@@ -723,6 +840,17 @@ class RangeDependentLayeredBottom:
                 f"must match ranges length ({n})"
             )
 
+    def __repr__(self) -> str:
+        n = len(self.ranges)
+        r_lo = float(self.ranges[0]) / 1000
+        r_hi = float(self.ranges[-1]) / 1000
+        max_layers = max(len(p.layers) for p in self.profiles)
+        return (
+            f"RangeDependentLayeredBottom(n_profiles={n}, "
+            f"range=[{r_lo:g}, {r_hi:g}] km, "
+            f"max_layers={max_layers})"
+        )
+
     def max_total_thickness(self) -> float:
         """Maximum total sediment thickness across all range points."""
         return max(p.total_thickness() for p in self.profiles)
@@ -894,6 +1022,22 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: shape={self.shape!r} not in "
                 f"{_VALID_SSP_SHAPES}"
             )
+
+    def __repr__(self) -> str:
+        c_lo = float(np.min(self.data))
+        c_hi = float(np.max(self.data))
+        bits = [
+            f"shape={self.shape!r}",
+            f"n_z={self.depths.size}",
+            f"z=[{float(self.depths[0]):g}, {float(self.depths[-1]):g}] m",
+        ]
+        if self.is_range_dependent:
+            r_lo = float(self.ranges[0]) / 1000
+            r_hi = float(self.ranges[-1]) / 1000
+            bits.append(f"n_r={self.data.shape[1]}")
+            bits.append(f"range=[{r_lo:g}, {r_hi:g}] km")
+        bits.append(f"c=[{c_lo:g}, {c_hi:g}] m/s")
+        return f"SoundSpeedProfile({', '.join(bits)})"
 
     @property
     def is_range_dependent(self) -> bool:

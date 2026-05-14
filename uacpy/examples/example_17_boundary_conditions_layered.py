@@ -225,8 +225,9 @@ def main():
     from uacpy.models.ram import RAM
     from uacpy.models.bellhop import Bellhop
     from uacpy.visualization.plots import (
-        plot_transmission_loss, plot_rd_layered_bottom,
-    )
+    plot_field,
+    plot_environment,
+)
 
     # (label, setup_fn, model_class)
     scenarios = [
@@ -277,7 +278,7 @@ def main():
         field = fields[idx]
         env = envs_out[idx]
         if field is not None:
-            plot_transmission_loss(field, env, ax=ax, show_colorbar=False,
+            plot_field(field, env=env, ax=ax, show_colorbar=False,
                                    vmin=vmin, vmax=vmax)
             if ax.collections:
                 tl_im = ax.collections[0]
@@ -304,7 +305,7 @@ def main():
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
         if env.has_range_dependent_layered_bottom():
-            fig_b, _ = plot_rd_layered_bottom(env)
+            fig_b, _ = plot_environment(env)
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')
             plt.close(fig_b)

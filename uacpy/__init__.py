@@ -21,11 +21,13 @@ __author__ = 'ErVuL'
 
 from uacpy._log import install_warning_formatter as _install_warning_formatter
 
+import sys as _sys
+
 from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
-    SoundSpeedProfile, generate_sea_surface,
+    SoundSpeedProfile,
 )
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
@@ -33,9 +35,7 @@ from uacpy.core.absorption import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, PhaseReference,
-    PressureField, TransferFunction, ResultStack,
-    TimeSeriesField, TimeTrace,
+    Result, PhaseReference, Field, ResultStack,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
@@ -56,16 +56,16 @@ from uacpy import models
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.visualization import plots as plot
 from uacpy import io
-
-# Exposed as `uacpy.signal`; the package is named `acoustic_signal` to avoid
-# colliding with Python's stdlib `signal` module.
-from uacpy import acoustic_signal as signal
-
+from uacpy import acoustic_signal
 from uacpy import noise
 from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
-from uacpy.core.metrics import tl_rmse
+
+# Cross-model comparison metrics — exposed as a submodule namespace
+# (``import uacpy.metrics`` works) and as the ``uacpy.metrics`` attribute.
+from uacpy.core import metrics
+_sys.modules['uacpy.metrics'] = metrics
 
 __all__ = [
     'Source',
@@ -76,13 +76,10 @@ __all__ = [
     'LayeredBottom',
     'RangeDependentLayeredBottom',
     'SoundSpeedProfile',
-    'generate_sea_surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
-    'Result', 'PhaseReference',
-    'PressureField', 'TransferFunction', 'ResultStack',
-    'TimeSeriesField', 'TimeTrace',
+    'Result', 'PhaseReference', 'Field', 'ResultStack',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
@@ -98,11 +95,11 @@ __all__ = [
     'models',
     'plot',
     'io',
-    'signal',
+    'acoustic_signal',
     'noise',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
-    'tl_rmse',
+    'metrics',
     '__version__',
 ]
 

@@ -41,11 +41,11 @@ from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import RangeDependentBottom  # noqa: E402
 from uacpy.models import Kraken, KrakenField, KrakenC  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_transmission_loss,
-    plot_modes,
+    plot_field,
+    plot_mode_functions,
     plot_mode_wavenumbers,
     plot_modes_heatmap,
-    plot_rd_bottom
+    plot_environment,
 )
 
 
@@ -69,13 +69,18 @@ def main():
         [20000, 400],   # Deep water
     ])
 
-    # Range-dependent bottom: sand on shelf, rock on slope
+    # Range-dependent bottom: sand on shelf, rock on slope. The bottom's
+    # property nodes are intentionally on a different range vector than
+    # the bathymetry — they're independent fields in uacpy. Geologically,
+    # the seafloor shape (bathy) and the sediment-to-rock transition
+    # (bottom properties) are set by different processes and don't have
+    # to switch at the same ranges.
     bottom_rd = RangeDependentBottom(
-        ranges=bathymetry[:, 0].astype(float),
-        sound_speed=np.array([1600, 1620, 1650, 1700, 1800]),  # Hardening
-        density=np.array([1.5, 1.6, 1.7, 1.9, 2.2]),           # Compacting
-        attenuation=np.array([0.8, 0.7, 0.5, 0.4, 0.2]),       # Less lossy
-        shear_speed=np.array([0, 0, 200, 400, 600]),           # Rock on slope
+        ranges=np.array([0.0, 6000.0, 12000.0, 18000.0]),
+        sound_speed=np.array([1600, 1650, 1750, 1800]),  # Hardening
+        density=np.array([1.5, 1.7, 2.0, 2.2]),          # Compacting
+        attenuation=np.array([0.8, 0.5, 0.3, 0.2]),      # Less lossy
+        shear_speed=np.array([0, 0, 400, 600]),          # Rock on slope
         acoustic_type='half-space'
     )
 
@@ -200,7 +205,7 @@ def main():
     print("[4/4] Generating plots...")
 
     # Plot 1: Environment with bottom properties
-    fig1, _ = plot_rd_bottom(env)
+    fig1, _ = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_06_bottom.png")
 
@@ -268,7 +273,7 @@ def main():
 
         # Use plot_modes with show_imaginary=True
         try:
-            fig2c, (ax_modes, ax_k) = plot_modes(
+            fig2c, (ax_modes, ax_k) = plot_mode_functions(
                 modes_field,
                 show_imaginary=True  # Show imaginary parts as dashed lines
             )
@@ -303,9 +308,8 @@ def main():
     # Plot 3: Coupled mode TL field
     # Using auto TL limits and contour overlays
     if result is not None:
-        fig3, ax3 = plot_transmission_loss(
-            result, env,
-            contours=[70, 85, 100],  # Add labeled contours
+        fig3, ax3 = plot_field(
+            result, env=env, contours=[70, 85, 100],  # Add labeled contours
             show_colorbar=True
         )
         ax3.set_title('KrakenField: Adiabatic Mode Coupling\nContinental Shelf Transition\n' +

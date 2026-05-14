@@ -12,6 +12,7 @@ from uacpy.models import (
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.results import Field, Modes, ReflectionCoefficient
 
 
 @pytest.mark.requires_binary
@@ -29,7 +30,7 @@ class TestBellhop:
             receiver=receiver_small
         )
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape[0] == len(receiver_small.depths)
 
     def test_bellhopcuda_compute_tl(self, simple_env, source, receiver_small):
@@ -43,7 +44,7 @@ class TestBellhop:
         except ExecutableNotFoundError:
             pytest.skip("bellhopcuda / bellhopcxx binary not installed")
         result = bhc.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
 
@@ -60,7 +61,7 @@ class TestKraken:
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source)
 
-        assert modes.field_type == 'modes'
+        assert isinstance(modes, Modes)
         assert modes.k is not None
         assert modes.phi is not None
         assert len(modes.k) > 0
@@ -97,7 +98,7 @@ class TestKrakenField:
         kf = KrakenField(verbose=False)
         result = kf.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
 
@@ -136,7 +137,7 @@ class TestBounce:
             receiver=receiver_small,
         )
 
-        assert result.field_type == 'reflection_coefficients'
+        assert isinstance(result, ReflectionCoefficient)
         assert 'brc_file' in result.metadata
         assert result.metadata['brc_file'] is not None
 
@@ -169,7 +170,7 @@ class TestBounce:
         result = bounce.compute_reflection(
             env=env_elastic, source=source, receiver=receiver_small,
         )
-        assert result.field_type == 'reflection_coefficients'
+        assert isinstance(result, ReflectionCoefficient)
 
 
 @pytest.mark.requires_binary
@@ -181,7 +182,7 @@ class TestRAM:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape[0] > 0  # Has depth dimension
         assert result.shape[1] > 0  # Has range dimension
         assert np.all(np.isfinite(result.data))
@@ -197,7 +198,7 @@ class TestRAM:
             simple_env, source, receiver,
             run_mode=RunMode.BROADBAND
         )
-        assert result.field_type == 'transfer_function'
+        assert isinstance(result, Field)
         assert np.iscomplexobj(result.data)
         # Shape: (n_d, n_r, n_f) — trailing axis is the
         # variable dimension (frequency, here).
@@ -219,7 +220,7 @@ class TestRAM:
     @pytest.mark.slow
     def test_ram_compute_time_series_helper(self, simple_env, source):
         """Verify the convenience method ``RAM.compute_time_series`` runs."""
-        from uacpy.core.results import TimeSeriesField
+        from uacpy.core.results import Field
         ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
         fs = 4000.0
@@ -233,7 +234,7 @@ class TestRAM:
             simple_env, source, receiver,
             source_waveform=wf, sample_rate=fs,
         )
-        assert isinstance(result, TimeSeriesField)
+        assert isinstance(result, Field)
         assert result.data.shape[0] == 1
         assert result.data.shape[1] == 1
 
@@ -328,7 +329,7 @@ class TestModelConsistency:
             modes = KrakenC(
                 verbose=False, c_low=c_low_brc, c_high=c_high_brc,
             ).run(env=env_with_rc, source=source, receiver=receiver_small)
-            assert modes.field_type == 'modes'
+            assert isinstance(modes, Modes)
             assert modes.k is not None and len(modes.k) > 0
             assert modes.phi.shape[1] == len(modes.k)
             assert np.all(np.isfinite(modes.k))
@@ -343,7 +344,7 @@ class TestModelConsistency:
             result = model.compute_tl(
                 env=env_with_rc, source=source, receiver=receiver_small,
             )
-            assert result.field_type == 'tl'
+            assert isinstance(result, Field)
             assert result.shape == (
                 len(receiver_small.depths), len(receiver_small.ranges)
             )

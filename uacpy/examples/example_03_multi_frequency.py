@@ -60,7 +60,7 @@ import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
-from example_helpers import create_example_report  # noqa: E402
+from plotting_utils import create_example_report  # noqa: E402
 
 
 def main():
@@ -139,8 +139,7 @@ def main():
             description="Thermocline environment demonstrating frequency-dependent propagation, "
             "surface duct trapping, and modal characteristics across frequencies.",
             env=env,
-            source=source,
-            receiver=receiver,
+            source=source, receiver=receiver,
             results=results,
             output_prefix="example_03"
         )

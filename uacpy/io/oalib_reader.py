@@ -23,7 +23,7 @@ from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
 from uacpy.core.results import (
-    PressureField, ResultStack, Arrivals, Rays,
+    Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import read_vector as _read_vector
 
@@ -33,16 +33,15 @@ def read_shd_file(filepath: Union[str, Path]):
 
     Thin wrapper around :func:`read_shd_bin`. Returns:
 
-      * :class:`PressureField` when the file carries a single source
-        depth — the common case.
-      * :class:`ResultStack` of :class:`PressureField` slabs when
-        multiple source depths are present (Bellhop multi-source runs).
+      * :class:`Field` (complex narrowband pressure, ``coords={'depth',
+        'range'}``) when the file carries a single source depth — the
+        common case.
+      * :class:`ResultStack` of single-source :class:`Field` slabs when
+        multiple source depths are present.
 
-    Each :class:`PressureField` carries ``units='complex'``. Use
-    ``.tl`` (or ``.to_tl()``) to materialise transmission loss in dB.
     Multi-frequency ``.shd`` files raise :class:`ValueError` — call
-    :func:`read_shd_bin` directly and construct a
-    :class:`TransferFunction` from the broadband cube instead.
+    :func:`read_shd_bin` directly and construct a broadband
+    :class:`Field` from the cube instead.
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
@@ -59,7 +58,7 @@ def read_shd_file(filepath: Union[str, Path]):
         raise ValueError(
             f"read_shd_file: {filepath} contains {nfreq} frequencies; "
             "use read_shd_bin(filepath) for the full broadband payload "
-            "and construct a TransferFunction from it."
+            "and construct a broadband Field from it."
         )
 
     pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
@@ -74,12 +73,10 @@ def read_shd_file(filepath: Union[str, Path]):
         'atten': shd['atten'],
     }
 
-    def _slab(isz: int) -> PressureField:
-        return PressureField(
+    def _slab(isz: int) -> Field:
+        return Field(
             data=pressure[0, isz, :, :],
-            units='complex',
-            ranges=pos['r']['r'],
-            depths=pos['r']['z'],
+            coords={'depth': pos['r']['z'], 'range': pos['r']['r']},
             model='', backend='',
             source_depths=np.array([float(source_depths[isz])]),
             frequencies=freqs,
@@ -1297,8 +1294,8 @@ def rts_to_pressure(
     Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
     single-bin DFT. Both return ``(p_at_freq, ranges)`` where
     ``p_at_freq`` is the model-native, source-normalised complex pressure
-    (suitable for ``PressureField(units='complex',
-    phase_reference='travelling_wave')``).
+    suitable for wrapping in a complex narrowband :class:`Field`
+    (``coords={'depth', 'range'}``, ``phase_reference='travelling_wave'``).
 
     Used by :class:`uacpy.models.SPARC` to project the native
     time-domain pressure onto a steady-state field at the source frequency.

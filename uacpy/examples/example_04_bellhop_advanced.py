@@ -39,7 +39,7 @@ import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import RangeDependentBottom  # noqa: E402
 from uacpy.models import Bellhop  # noqa: E402
-from uacpy.visualization.plots import plot_transmission_loss, plot_environment_advanced, plot_rays  # noqa: E402
+from uacpy.visualization.plots import plot_field, plot_environment, plot_rays  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
@@ -176,11 +176,10 @@ def main():
         stack = bellhop_multi.run(
             env, source_multi, receiver, run_mode=RunMode.COHERENT_TL,
         )
-        # ``stack`` is a ResultStack of PressureField slabs. Iterate to
-        # walk (source_depth, slab) pairs, or stack.at(source_depth=z)
-        # to pick a single 2-D PressureField by label. Slab accessors
-        # (.tl, .p, .at(depth=, range=)) live on the PressureField,
-        # not on the stack itself.
+        # ``stack`` is a ResultStack of Field slabs. Iterate to walk
+        # (source_depth, slab) pairs, or stack.at(source_depth=z) to
+        # pick a single 2-D Field by label. Slab accessors (.tl, .p,
+        # .at(depth=, range=)) live on the Field, not on the stack.
         print(f"  ✓ Success — ResultStack of {stack.slab_type.__name__} "
               f"with {stack.n_slabs} source-depth slabs")
         for sd_value, slab in stack:
@@ -222,7 +221,7 @@ def main():
     print("\nGenerating plots...")
 
     # Plot 1: Environment setup with range-dependent bottom
-    fig1, axes1 = plot_environment_advanced(env, source, receiver)
+    fig1, axes1 = plot_environment(env)
     plt.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_04_environment.png")
 
@@ -232,12 +231,12 @@ def main():
         fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         # Disable individual colorbars, add contours at 70, 85, 100 dB
-        _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
+        _, _ = plot_field(result_thorp, env=env, ax=ax1,
                                       show_colorbar=False,
                                       contours=[70, 85, 100])
         ax1.set_title('Standard Gaussian Beams\n(with Thorp attenuation)')
 
-        _, _ = plot_transmission_loss(result_cerveny, env, ax=ax2,
+        _, _ = plot_field(result_cerveny, env=env, ax=ax2,
                                       show_colorbar=False,
                                       contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
@@ -260,11 +259,11 @@ def main():
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-        _, _ = plot_transmission_loss(result_thorp, env, ax=ax1,
+        _, _ = plot_field(result_thorp, env=env, ax=ax1,
                                       show_colorbar=False)
         ax1.set_title('Point Source (Cylindrical)\nRunType: CB R2')
 
-        _, _ = plot_transmission_loss(result_line, env, ax=ax2,
+        _, _ = plot_field(result_line, env=env, ax=ax2,
                                       show_colorbar=False)
         ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
 
@@ -282,10 +281,10 @@ def main():
         print("  ✓ Saved: example_04_source_comparison.png")
 
     # Plot 4: Ray trace
-    # Using color_by_bounces=True for ray color-coding
+    # Using color_by="bounces" for ray color-coding
     if result_rays is not None:
-        fig4, ax4 = plot_rays(result_rays, env,
-                              color_by_bounces=True)  # Color-code rays by bounce type
+        fig4, ax4 = plot_rays(result_rays, env=env,
+                              color_by="bounces")  # Color-code rays by bounce type
         ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
                       '(rays colored by bounce type - R/G/B/K)')
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
@@ -298,7 +297,7 @@ def main():
         if n_sd == 1:
             axes5 = [axes5]
         for ax, (sd_value, slab) in zip(axes5, stack):
-            plot_transmission_loss(slab.to_tl(), env, ax=ax,
+            plot_field(slab.to_tl(), env=env, ax=ax,
                                    show_colorbar=False)
             # Mark the source location (r = 0 km, z = source depth)
             # — TL plots use km on x and m on y.
@@ -315,7 +314,7 @@ def main():
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
         plt.suptitle(
             'Bellhop multi-source-depth: one binary call, '
-            'ResultStack[PressureField] slabs',
+            'ResultStack[Field] slabs',
             fontsize=15, fontweight='bold',
         )
         plt.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
@@ -327,7 +326,7 @@ def main():
     print("  ✓ Cerveny beam parameters")
     print("  ✓ Thorp volume attenuation")
     print("  ✓ Point vs Line sources")
-    print("  ✓ Multi-source-depth → ResultStack[PressureField] (.at(source_depth=z))")
+    print("  ✓ Multi-source-depth → ResultStack[Field] (.at(source_depth=z))")
     print("  ✓ Beam shift on reflection")
     print("  ✓ Range-dependent bottom properties")
     print("  ✓ Continental shelf scenario")

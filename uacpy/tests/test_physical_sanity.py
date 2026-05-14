@@ -16,6 +16,8 @@ import pytest
 import numpy as np
 
 import uacpy
+from uacpy import Field
+from uacpy.core.results import Modes
 from uacpy.models import Bellhop, Kraken, KrakenField, RAM
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
 
@@ -77,7 +79,7 @@ class TestPekerisWaveguide:
         result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
 
         # Basic validation
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
         # Physics validation
@@ -128,7 +130,7 @@ class TestPekerisWaveguide:
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(pekeris_env, pekeris_source, n_modes=20)
 
-        assert modes.field_type == 'modes'
+        assert isinstance(modes, Modes)
         assert modes.k is not None, "Should have wavenumber data"
         assert modes.phi is not None, "Should have mode functions"
 
@@ -239,7 +241,7 @@ class TestRangeDependentPhysicalSanity:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(slope_env, slope_source, slope_receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
         assert result.shape == (len(slope_receiver.depths), len(slope_receiver.ranges))
 
@@ -258,7 +260,7 @@ class TestRangeDependentPhysicalSanity:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(slope_env, slope_source, slope_receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
         # TL should be physically reasonable
@@ -317,7 +319,7 @@ class TestMunkProfile:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(munk_env, munk_source, munk_receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
         # Check for sound channel effect

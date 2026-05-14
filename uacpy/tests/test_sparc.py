@@ -5,7 +5,7 @@ import warnings
 import pytest
 import numpy as np
 
-from uacpy.core.results import TimeSeriesField
+from uacpy.core.results import Field
 from uacpy.models import SPARC
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver, BoundaryProperties
@@ -38,7 +38,7 @@ class TestSPARCBasic:
         sparc = SPARC(verbose=False)
         result = sparc.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
 
@@ -48,7 +48,7 @@ class TestSPARCTimeSeries:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_sparc_time_series_returns_time_series_field(self):
-        """SPARC TIME_SERIES returns a real-valued TimeSeriesField."""
+        """SPARC TIME_SERIES returns a real-valued Field."""
         env = Environment(
             name="sparc_ts",
             bathymetry=100.0,
@@ -67,13 +67,13 @@ class TestSPARCTimeSeries:
             run_mode=RunMode.TIME_SERIES,
         )
 
-        assert isinstance(result, TimeSeriesField)
+        assert isinstance(result, Field)
         assert result.data.shape[0] == len(receiver.depths)
         assert result.data.shape[1] == len(receiver.ranges)
         assert result.data.shape[2] > 0
         assert np.isrealobj(result.data)
         assert np.all(np.isfinite(result.data))
-        assert hasattr(result, 'time')
+        assert result.times is not None and result.times.size > 0
 
 
 # ---------------------------------------------------------------------

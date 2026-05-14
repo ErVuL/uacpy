@@ -6,6 +6,7 @@ import pytest
 import warnings
 import numpy as np
 import uacpy
+from uacpy import Field
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
@@ -45,7 +46,7 @@ class TestRangeDependentEnvironment:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=densities,
-            attenuation=attenuations
+            attenuation=attenuations,
         )
 
         env = uacpy.Environment(
@@ -198,7 +199,7 @@ class TestModelWithRangeDependence:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         assert result.shape == (3, 3)
 
     @pytest.mark.requires_binary
@@ -229,7 +230,7 @@ class TestModelWithRangeDependence:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
         # RAM computes on its own internal grid
         assert result.shape[0] > 0  # Has depth dimension
         assert result.shape[1] > 0  # Has range dimension
@@ -247,7 +248,7 @@ class TestModelWithRangeDependence:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=densities,
-            attenuation=attenuations
+            attenuation=attenuations,
         )
 
         env = uacpy.Environment(
@@ -266,7 +267,7 @@ class TestModelWithRangeDependence:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
 
-        assert result.field_type == 'tl'
+        assert isinstance(result, Field)
 
 
 class TestRangeDependentConsistency:
@@ -302,7 +303,7 @@ class TestRangeDependentConsistency:
             ranges=ranges,
             sound_speed=sound_speeds,
             density=np.array([1.5, 1.5, 1.5]),
-            attenuation=np.array([0.5, 0.5, 0.5])
+            attenuation=np.array([0.5, 0.5, 0.5]),
         )
 
         env = uacpy.Environment(
@@ -536,7 +537,7 @@ class TestWarnings:
             ranges=np.array([0, 10000]),
             sound_speed=np.array([1600, 1700]),
             density=np.array([1.5, 1.7]),
-            attenuation=np.array([0.5, 0.3])
+            attenuation=np.array([0.5, 0.3]),
         )
         env = uacpy.Environment(name='test', bathymetry=100, bottom=rd_bottom)
         source = uacpy.Source(frequencies=100, depths=25)

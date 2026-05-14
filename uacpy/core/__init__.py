@@ -14,9 +14,7 @@ from uacpy.core.absorption import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, PhaseReference,
-    PressureField, TransferFunction,
-    TimeSeriesField, TimeTrace,
+    Result, PhaseReference, Field, ResultStack,
     Arrivals, Rays, Modes,
     Covariance, Replicas,
     ReflectionCoefficient,
@@ -32,6 +30,7 @@ from uacpy.core.exceptions import (
 
 from uacpy.core import acoustics
 from uacpy.core import materials
+from uacpy.core import metrics
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 from uacpy.core.constants import (
     AttenuationUnits, BoundaryType,
@@ -50,9 +49,7 @@ __all__ = [
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
-    'Result', 'PhaseReference',
-    'PressureField', 'TransferFunction',
-    'TimeSeriesField', 'TimeTrace',
+    'Result', 'PhaseReference', 'Field', 'ResultStack',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas',
     'ReflectionCoefficient',
@@ -64,5 +61,6 @@ __all__ = [
     'ConfigurationError',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
+    'metrics',
     'AttenuationUnits', 'BoundaryType',
 ]
