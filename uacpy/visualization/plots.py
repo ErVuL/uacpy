@@ -700,33 +700,38 @@ def plot_rays(
         # Surface line styled to match the AT convention.
         ax.axhline(0, color='steelblue', linewidth=1.5, alpha=0.55,
                    zorder=ZORDER_SURFACE)
-        ranges_for_overlay = np.asarray(
-            rays.receiver_ranges if rays.receiver_ranges is not None
-            else [0.0, max_r_km * 1000.0]
-        )
+        # Anchor the seafloor overlay from x=0 (source range) to the
+        # furthest receiver, so the bathy fill flush-spans the chart and
+        # leaves no white sliver under the rays at small ranges.
+        if rays.receiver_ranges is not None and len(rays.receiver_ranges):
+            r_hi = float(np.max(rays.receiver_ranges))
+        else:
+            r_hi = max_r_km * 1000.0
+        ranges_for_overlay = np.array([0.0, r_hi])
         _overlay_seafloor(ax, env, ranges_for_overlay)
 
     if show_receivers and rays.receiver_ranges is not None and rays.receiver_depths is not None:
-        rr = np.atleast_1d(rays.receiver_ranges) / 1000.0
-        rd = np.atleast_1d(rays.receiver_depths)
+        rr_full = np.atleast_1d(rays.receiver_ranges) / 1000.0
+        rd_full = np.atleast_1d(rays.receiver_depths)
+        # Dense receiver grids drown out the rays — decimate each axis
+        # independently to keep the lattice visible (10 down × 20 across
+        # max, matching plot_environment).
+        max_range_dots = 20
+        max_depth_dots = 10
+        step_r = max(1, rr_full.size // max_range_dots)
+        step_d = max(1, rd_full.size // max_depth_dots)
+        rr = rr_full[::step_r]
+        rd = rd_full[::step_d]
         RR, RD = np.meshgrid(rr, rd)
-        x = RR.ravel()
-        y = RD.ravel()
-        # Dense receiver grids drown out the rays — downsample so at
-        # most ~80 markers are drawn (keeps the corners + a sparse
-        # interior sample).
-        if x.size > 80:
-            step = max(1, x.size // 80)
-            x = x[::step]
-            y = y[::step]
         # Shrink the marker for ray-fan plots — receivers are sampling
         # points, not the visual focus.
         rcv_style = dict(RECEIVER_MARKER_STYLE)
         rcv_style['markersize'] = min(rcv_style.get('markersize', 8), 4)
-        ax.plot(x, y, zorder=ZORDER_RECEIVERS, **rcv_style)
-        # Clip the x-axis to the receiver extent so rays don't trail
-        # off into empty bathy-less range.
-        ax.set_xlim(0.0, float(np.max(rr)))
+        ax.plot(RR.ravel(), RD.ravel(),
+                zorder=ZORDER_RECEIVERS, **rcv_style)
+        # Clip the x-axis to the full receiver extent (not the decimated
+        # subset) so rays don't trail off into empty bathy-less range.
+        ax.set_xlim(0.0, float(np.max(rr_full)))
     if show_source and rays.source_depths is not None and rays.source_depths.size:
         for sd in rays.source_depths:
             ax.plot([0.0], [float(sd)], zorder=ZORDER_SOURCE,
