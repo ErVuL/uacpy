@@ -253,3 +253,74 @@ def test_pinned_work_dir_cleanup_false_dir_persists(tmp_path):
     bh = Bellhop(verbose=False, work_dir=work)   # cleanup defaults False
     bh.run(env, src, rcv)
     assert work.exists() and any(work.iterdir())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Documentation-drift detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _registered_keys_for(model_name: str) -> set:
+    """Return the set of metadata keys ``_DOCUMENTED_METADATA`` declares
+    for ``model_name``, unioned with the universal keys."""
+    from uacpy.core.results import _DOCUMENTED_METADATA, _UNIVERSAL_METADATA
+    documented = {k for (m, k) in _DOCUMENTED_METADATA if m == model_name}
+    return documented | set(_UNIVERSAL_METADATA)
+
+
+# (model_cls, run_kwargs) — keep small fast runs; covers the path that
+# actually attaches metadata keys. ``work_dir`` is pinned so the
+# ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
+def _drift_cases():
+    from uacpy.models import (
+        Bellhop, Bounce, Kraken, KrakenField, RAM, Scooter, SPARC,
+        OAST, OASR, OASP,
+    )
+    return [
+        ('Bellhop', Bellhop, {}, {}),
+        ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax=10000.0), {}),
+        ('Kraken',  Kraken,  {}, dict(run_mode=uacpy.RunMode.MODES)),
+        ('KrakenField', KrakenField, {}, {}),
+        ('RAM',     RAM,     {}, {}),
+        ('Scooter', Scooter, {}, {}),
+        ('SPARC',   SPARC,   dict(n_t_out=256), {}),
+        ('OAST',    OAST,    {}, {}),
+        ('OASR',    OASR,    {}, dict(run_mode=uacpy.RunMode.REFLECTION)),
+        ('OASP',    OASP,    {}, dict(run_mode=uacpy.RunMode.BROADBAND)),
+    ]
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize(
+    "name,model_cls,ctor_extras,run_extras",
+    _drift_cases(),
+    ids=[c[0] for c in _drift_cases()],
+)
+def test_metadata_keys_are_all_documented(
+    name, model_cls, ctor_extras, run_extras, tmp_path,
+):
+    """Every key written into ``result.metadata`` by a concrete model
+    must appear in ``_DOCUMENTED_METADATA`` (or ``_UNIVERSAL_METADATA``).
+
+    Catches drift: a wrapper adding a new ``result.metadata[k] = v`` line
+    without registering ``(model_name, k)`` lets ``Result.list_metadata()``
+    silently report the new key as undocumented. This parametrized check
+    fails loudly instead.
+    """
+    env, src, rcv = _basic_setup()
+    if name == 'OASR':
+        # OASR needs an elastic bottom for a meaningful reflection result.
+        env = _elastic_env()
+    work = tmp_path / f'{name.lower()}_drift'
+    model = model_cls(work_dir=work, cleanup=False, verbose=False, **ctor_extras)
+    result = model.run(env, src, rcv, **run_extras)
+
+    attached = set(result.metadata.keys())
+    documented = _registered_keys_for(result.model)
+    undocumented = attached - documented
+    assert not undocumented, (
+        f"{result.model}: result.metadata has key(s) {sorted(undocumented)} "
+        f"that are not registered in _DOCUMENTED_METADATA. "
+        f"Add an entry per (model, key) in uacpy/core/results.py or fix the "
+        f"wrapper to drop the unregistered key."
+    )

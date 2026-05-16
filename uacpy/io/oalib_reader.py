@@ -66,14 +66,6 @@ def read_shd_file(filepath: Union[str, Path]):
     pos = shd['Pos']
     source_depths = np.atleast_1d(np.asarray(pos['s']['z'], dtype=float))
 
-    metadata = {
-        'title': shd['title'],
-        'plot_type': shd['PlotType'],
-        'source_file': str(filepath),
-        'freq0': shd['freq0'],
-        'atten': shd['atten'],
-    }
-
     def _slab(isz: int) -> Field:
         return Field(
             data=pressure[0, isz, :, :],
@@ -81,7 +73,6 @@ def read_shd_file(filepath: Union[str, Path]):
             model='', backend='',
             source_depths=np.array([float(source_depths[isz])]),
             frequencies=freqs,
-            metadata=dict(metadata),
         )
 
     if len(source_depths) == 1:
