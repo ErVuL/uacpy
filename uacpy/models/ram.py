@@ -37,6 +37,7 @@ from typing import Optional, List, Union
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models._pe_phase import psi_to_travelling_wave
 from uacpy.core.environment import (
     Environment, LayeredBottom, RangeDependentLayeredBottom,
 )
@@ -1476,28 +1477,22 @@ class RAM(PropagationModel):
             im = interp_im(pts).reshape(DD.shape)
             H[:, :, k] = re + 1j * im
 
-        # Bake the engineering travelling-wave carrier into H so every
-        # broadband-capable model hands the IFFT pipeline the same shape
-        # of complex pressure. The two Collins binaries write DIFFERENT
-        # quantities:
-        #
-        # * rams0.5 multiplies its march variable by g0 = exp(+i k0 dr)
-        #   each step (rams0.5.f:830-831), so the file already carries
-        #   ψ·exp(+i k0 r); a single conj(·) flips it to ψ̄·exp(-i k0 r).
-        #
-        # * ramsurf1.5 has no g0 (ramsurf1.5.f:310), so the file is the
-        #   bare envelope ψ; conj(·) then explicit exp(-i k0 r) multiply
-        #   produces the same target form.
+        # Convert each backend's raw output to the engineering travelling-
+        # wave form. See ``models/_pe_phase.py`` for the per-convention
+        # math. H is shaped (n_d, n_r, n_f) here; the Collins binaries
+        # already include the 1/√r radial scaling in the file they write,
+        # so ``apply_radial=False``.
         c0 = self._resolve_c0(env)
-        if kind == 'rams':
-            H = np.conj(H)
-        else:
-            omega = 2.0 * np.pi * frequencies
-            k0 = omega / c0
-            carrier = np.exp(
-                -1j * k0[None, None, :] * rcv_r[None, :, None]
-            )
-            H = np.conj(H) * carrier
+        omega = 2.0 * np.pi * np.asarray(frequencies, dtype=np.float64)
+        H = psi_to_travelling_wave(
+            H,
+            convention=kind,
+            ranges_m=rcv_r,
+            range_axis=1,
+            k0=omega / c0,
+            freq_axis=2,
+            apply_radial=False,
+        )
 
         field = Field(
             data=H,
@@ -2046,20 +2041,17 @@ class RAM(PropagationModel):
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
-            # Apply the mpiramS → engineering travelling-wave transform
-            # used by ``_run_broadband``:
-            #   psif = psi · exp(+i(k0 r + pi/4)) / (4 pi)
-            #   p    = conj(psif) · 4 pi · exp(-i pi/4) / sqrt(r)
-            # so the resulting Field carries the same phase convention
-            # as the broadband path. ``Field.tl`` only depends on |p|,
-            # but downstream consumers that need coherent integration
-            # now get a meaningful phase.
-            r_safe = log_ranges.astype(np.float64)
+            # Convert the mpiramS .psif output to engineering travelling-
+            # wave pressure (see ``models/_pe_phase.py``). ``Field.tl``
+            # only needs |p|, but downstream consumers that do coherent
+            # integration get a meaningful phase.
             with np.errstate(divide='ignore', invalid='ignore'):
-                scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(r_safe)
-            pressure_field = (
-                np.conj(pressure_rcv) * scale[np.newaxis, :]
-            ).astype(np.complex128)
+                pressure_field = psi_to_travelling_wave(
+                    pressure_rcv,
+                    convention='mpiramS',
+                    ranges_m=log_ranges,
+                    range_axis=1,
+                ).astype(np.complex128)
 
             elapsed = time.time() - start_time
             self._log(f"TL completed in {elapsed:.2f}s")
@@ -2067,6 +2059,7 @@ class RAM(PropagationModel):
             field = Field(
                 data=pressure_field,
                 coords={'depth': receiver.depths, 'range': receiver.ranges},
+                phase_reference='travelling_wave',
                 **self._result_kwargs(
                     source,
                     backend='mpiramS',
@@ -2188,9 +2181,14 @@ class RAM(PropagationModel):
                     UserWarning, stacklevel=2
                 )
                 rout_safe[rout_safe <= 0.0] = clip_to
-            scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(rout_safe)
-            # Broadcast: psif is (nzo, nf, nr), scale is (nr,)
-            pressure = np.conj(psif) * scale[np.newaxis, np.newaxis, :]
+            # psif shape: (nzo, nf, nr) — convert to engineering
+            # travelling-wave pressure via models/_pe_phase.py.
+            pressure = psi_to_travelling_wave(
+                psif,
+                convention='mpiramS',
+                ranges_m=rout_safe,
+                range_axis=2,
+            )
 
             # Map to receiver depth grid. PE domain extends below the
             # seafloor; output only the requested receiver depths.

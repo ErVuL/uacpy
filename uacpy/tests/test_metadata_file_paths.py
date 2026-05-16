@@ -291,6 +291,7 @@ def _drift_cases():
 
 
 @pytest.mark.requires_binary
+@pytest.mark.filterwarnings("ignore::UserWarning")
 @pytest.mark.parametrize(
     "name,model_cls,ctor_extras,run_extras",
     _drift_cases(),

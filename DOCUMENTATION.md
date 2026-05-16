@@ -796,8 +796,9 @@ position 1 = pulse shape (`PRASHNGFBM` — `T`/`C` are listed in
 envelope).
 
 **Caveats:**
-- Source pulse is constructor-driven (`pulse_type`); `source_waveform=`
-  / `sample_rate=` on `run()` are silently ignored for API uniformity.
+- Source pulse is constructor-driven (`pulse_type`); passing
+  `source_waveform=` / `sample_rate=` to `SPARC.run()` emits a
+  `UserWarning` — they have no effect on the SPARC simulation.
 - `output_mode='S'` (snapshot) FFTs the snapshot's tout axis — the
   source frequency must stay below the snapshot Nyquist (`0.5/dt`); the
   wrapper raises with a remediation hint if not.
