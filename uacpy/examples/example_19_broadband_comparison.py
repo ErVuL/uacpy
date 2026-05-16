@@ -57,7 +57,7 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 import uacpy  # noqa: E402
-from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField  # noqa: E402
+from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField, OASP  # noqa: E402
 from uacpy.models.base import RunMode  # noqa: E402
 
 
@@ -222,18 +222,46 @@ def main():
         print(f"  SKIPPED: {e}")
 
     # =========================================================================
+    # 5b. OASP BROADBAND (OASES wavenumber-integration broadband)
+    # =========================================================================
+    print("\n--- OASP Broadband ---")
+    try:
+        # OASP rebuilds an equispaced (n_time_samples, freq_max) grid; pass
+        # the broadband sweep parameters on the constructor.
+        oasp = OASP(
+            verbose=False,
+            n_time_samples=512,
+            freq_max=float(frequencies[-1]),
+            freq_min=float(frequencies[0]),
+        )
+        result_oasp = oasp.run(
+            env, source, receiver,
+            run_mode=RunMode.BROADBAND,
+            frequencies=frequencies,
+        )
+        print(f"  Output shape: {result_oasp.data.shape} (depth x range x freq)")
+        print(f"  Frequencies: {result_oasp.frequencies[0]:.1f} - "
+              f"{result_oasp.frequencies[-1]:.1f} Hz "
+              f"({len(result_oasp.frequencies)} bins)")
+        results['OASP'] = result_oasp
+    except Exception as e:
+        print(f"  SKIPPED: {e}")
+
+    # =========================================================================
     # 6. SPARC TIME-DOMAIN (direct time-marching)
     # =========================================================================
     print("\n--- SPARC Time-Domain ---")
     try:
-        sparc = SPARC(verbose=False, n_t_out=1001, t_max=4.0)
+        sparc = SPARC(
+            verbose=False, n_t_out=1001, t_max=4.0,
+            f_min=50.0, f_max=200.0,
+        )
         receiver_sparc = uacpy.Receiver(
             depths=np.array([50.0]),
             ranges=np.linspace(500, 5000, 5)
         )
         result_sparc = sparc.run(
             env, source, receiver_sparc, run_mode=RunMode.TIME_SERIES,
-            f_min=50.0, f_max=200.0,
         )
         print(f"  Output shape: {result_sparc.data.shape} (n_depths x nr x nt)")
         print(f"  Time step: {result_sparc.dt*1000:.3f} ms")
@@ -266,8 +294,6 @@ def main():
             run_mode=RunMode.TIME_SERIES,
             source_waveform=chirp,
             sample_rate=fs,
-            depth=target_depth,
-            range=target_range,
         )
         print(f"  Output type: {result_das.field_type}")
         print(f"  Shape: {result_das.data.shape}")

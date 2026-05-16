@@ -356,10 +356,12 @@ def scenario_c_eigenrays_arrivals():
     print(f"    • Filtering eigenrays "
           f"(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)...",
           end=" ", flush=True)
+    eigen_target = uacpy.Receiver(
+        depths=[float(receiver.depths[0])],
+        ranges=[float(receiver.ranges[0])],
+    )
     result_eigen = bellhop_eigen.compute_eigenrays(
-        env, source,
-        range=float(receiver.ranges[0]),
-        depth=float(receiver.depths[0]),
+        env, source, eigen_target,
     ).filter_by_miss_distance(wavelength_m / 4).top_n_by_miss(12).truncate_at_receiver()
     print("✓")
 
@@ -462,9 +464,9 @@ def scenario_d_compute_eigenrays_pekeris():
           f"(r={target_range_m/1000:.1f} km, z={target_depth_m:.0f} m)...",
           end=" ", flush=True)
     bellhop = Bellhop(verbose=False, alpha=(-30, 30), n_beams=2001)
+    target = uacpy.Receiver(depths=[target_depth_m], ranges=[target_range_m])
     rays = bellhop.compute_eigenrays(
-        env, source,
-        range=target_range_m, depth=target_depth_m,
+        env, source, target,
     ).top_n_by_miss(8).truncate_at_receiver()
     print("✓")
 

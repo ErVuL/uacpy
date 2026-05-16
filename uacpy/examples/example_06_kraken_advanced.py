@@ -227,17 +227,34 @@ def main():
         axes2[0].legend()
         axes2[0].grid(True, alpha=0.3)
 
-        # Deep water modes
+        # Deep water modes (KrakenC). The elastic bottom (shear_speed > 0
+        # at the rocky slope) admits Scholte/interface waves whose phase
+        # velocity sits below the water sound speed — KrakenC numbers
+        # those first (highest Re(k)). Filter to the trapped water-column
+        # modes (c_phase between c_min(water) and c_p(bottom)) so the
+        # plotted shapes are comparable to the shallow-water panel.
         phi_d = modes_deep.phi
         z_d = modes_deep.depths
         M_d = phi_d.shape[1]
-        n_show = min(5, M_d)
-        for i in range(n_show):
+        fc = float(modes_deep.f0)
+        c_water_min = float(np.min(ssp_data[:, 1]))
+        c_phase = 2 * np.pi * fc / modes_deep.k.real
+        n_interface = int(np.sum(c_phase < c_water_min))
+        if n_interface:
+            print(f"  Skipped {n_interface} interface mode(s) "
+                  f"(c_phase < {c_water_min:.0f} m/s — Scholte/Stoneley type).")
+        trapped = np.where(c_phase >= c_water_min)[0]
+        n_show = min(5, trapped.size)
+        for j in range(n_show):
+            i = trapped[j]
             axes2[1].plot(phi_d[:, i].real, z_d, label=f'Mode {i+1}')
         axes2[1].invert_yaxis()
         axes2[1].set_xlabel('Mode Amplitude')
         axes2[1].set_ylabel('Depth (m)')
-        axes2[1].set_title(f'Deep Water Modes (400m)\n{M_d} total modes')
+        axes2[1].set_title(
+            f'Deep Water Modes (400m)\n{M_d} total ({n_interface} interface, '
+            f'{M_d - n_interface} trapped — showing first {n_show} trapped)'
+        )
         axes2[1].legend()
         axes2[1].grid(True, alpha=0.3)
 

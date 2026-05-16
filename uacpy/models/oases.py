@@ -241,6 +241,11 @@ class OAST(PropagationModel):
         compute_contour: bool = False,
         compute_depth_average: bool = False,
         complex_contour: bool = True,
+        options: Optional[str] = None,
+        integration_offset: float = 0.0,
+        nw_samples: int = -1,
+        plot_rmin: Optional[float] = None,
+        plot_rmax: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -253,6 +258,16 @@ class OAST(PropagationModel):
         self.compute_contour = bool(compute_contour)
         self.compute_depth_average = bool(compute_depth_average)
         self.complex_contour = bool(complex_contour)
+        # Raw OASES option string (e.g. ``'N J T C'``). ``None`` lets the
+        # wrapper derive it from compute_contour / compute_depth_average /
+        # complex_contour.
+        self.options = options
+        self.integration_offset = float(integration_offset)
+        # ``-1`` lets the OASES kernel pick its own wavenumber sample count.
+        self.nw_samples = int(nw_samples)
+        # Plot-axis bounds in metres. ``None`` → 0 / receiver.range_max.
+        self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
+        self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
 
         self._supported_modes = [RunMode.COHERENT_TL]
         # OAST: range-independent wavenumber integration; multi-layer
@@ -286,7 +301,6 @@ class OAST(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        **kwargs
     ) -> Result:
         """
         Run OAST transmission loss computation
@@ -299,8 +313,6 @@ class OAST(PropagationModel):
             Acoustic source
         receiver : Receiver
             Receiver array
-        **kwargs
-            Additional OAST parameters (e.g. ``options='N J T C'``).
 
         Returns
         -------
@@ -308,12 +320,6 @@ class OAST(PropagationModel):
             Transmission loss field
         """
         run_mode = self._resolve_run_mode(run_mode)
-
-        if kwargs.pop('broadband', False):
-            raise ConfigurationError(
-                "OAST does not support broadband TRF; call OASP directly or "
-                "use OASES(broadband=True) (the factory dispatches to OASP)."
-            )
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -323,11 +329,12 @@ class OAST(PropagationModel):
             base_name = 'oast_run'
             input_file = fm.get_path(f'{base_name}.dat')
 
-            # Translate the typed kwargs into OAST option letters. The user
-            # can still pass a raw `options=` string (e.g. 'N J T C') via
-            # **kwargs as an escape hatch — it wins over the typed flags.
-            user_options = kwargs.pop('options', None)
-            if user_options is None:
+            # OAST option letters: raw ``self.options`` wins; otherwise
+            # derive from the typed compute_contour / compute_depth_average
+            # / complex_contour flags.
+            if self.options is not None:
+                user_options = self.options
+            else:
                 opt = ['N', 'T']                            # Normal stress + TL table
                 if self.complex_contour:
                     opt.append('J')
@@ -338,13 +345,21 @@ class OAST(PropagationModel):
                 user_options = ' '.join(opt)
 
             self._log(f"Writing OAST input file: {input_file} (options={user_options})")
+            writer_kwargs: dict = {
+                'integration_offset': self.integration_offset,
+                'nw_samples': self.nw_samples,
+            }
+            if self.plot_rmin is not None:
+                writer_kwargs['plot_rmin'] = self.plot_rmin
+            if self.plot_rmax is not None:
+                writer_kwargs['plot_rmax'] = self.plot_rmax
             write_oast_input(
                 filepath=input_file,
                 env=env,
                 source=source,
                 receiver=receiver,
                 options=user_options,
-                **kwargs,
+                **writer_kwargs,
             )
 
             self._execute(input_file, fm.work_dir)
@@ -474,6 +489,45 @@ class OASN(PropagationModel):
     def __init__(
         self,
         executable: Optional[Path] = None,
+        # Output / option control
+        options: Optional[str] = None,
+        # Noise field (Block VIII): broad-area sources expressed as
+        # spectral levels (dB re 1 µPa²/Hz) at three depths.
+        surface_noise_level: float = 0.0,
+        white_noise_level: float = 0.0,
+        deep_noise_level: float = 0.0,
+        deep_source_depth: Optional[float] = None,
+        # Discrete (point) sources — list of dicts; each may carry
+        # 'depth' (m), 'x' (m), 'y' (m), 'level' (dB), 'phase' (rad).
+        discrete_sources: Optional[list] = None,
+        # Replica candidate-position grid (Block X). x/y/z in metres on
+        # the public API, converted to km at write time. ``None`` lets
+        # the writer apply OASES defaults (10 / depth-10 in z, 100 /
+        # 10000 in x, 0 / 0 in y).
+        xmin: Optional[float] = None,
+        xmax: Optional[float] = None,
+        nx: int = 50,
+        ymin: Optional[float] = None,
+        ymax: Optional[float] = None,
+        ny: int = 1,
+        zmin: Optional[float] = None,
+        zmax: Optional[float] = None,
+        nz: int = 20,
+        # Phase-speed bounds for the wavenumber integrations (m/s).
+        # Applied identically to OASN Block VIII (noise / discrete
+        # sources) and Block X (replica generator). ``None`` → writer
+        # derives c_water_min * 0.95 (cmin) and 1e8 (cmax).
+        cmin: Optional[float] = None,
+        cmax: Optional[float] = None,
+        # Wavenumber-axis sampling & TL plot axes.
+        integration_offset: float = 0.0,
+        nw_samples: int = -1,
+        plot_rmin: Optional[float] = None,
+        plot_rmax: Optional[float] = None,
+        # Frequency-line extras: vrec (m/s, vertical receiver velocity
+        # for Doppler), offdb (single-mode horizontal offset).
+        vrec: float = 0.0,
+        offdb: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -482,6 +536,31 @@ class OASN(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
+        self.options = options
+        self.surface_noise_level = float(surface_noise_level)
+        self.white_noise_level = float(white_noise_level)
+        self.deep_noise_level = float(deep_noise_level)
+        self.deep_source_depth = (
+            float(deep_source_depth) if deep_source_depth is not None else None
+        )
+        self.discrete_sources = list(discrete_sources) if discrete_sources else None
+        self.xmin = xmin
+        self.xmax = xmax
+        self.nx = int(nx)
+        self.ymin = ymin
+        self.ymax = ymax
+        self.ny = int(ny)
+        self.zmin = zmin
+        self.zmax = zmax
+        self.nz = int(nz)
+        self.cmin = cmin
+        self.cmax = cmax
+        self.integration_offset = float(integration_offset)
+        self.nw_samples = int(nw_samples)
+        self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
+        self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
+        self.vrec = float(vrec)
+        self.offdb = float(offdb) if offdb is not None else None
 
         self._supported_modes = [RunMode.COVARIANCE, RunMode.REPLICA]
         # OASN: range-independent covariance / replica field; multi-layer
@@ -509,13 +588,82 @@ class OASN(PropagationModel):
         if not self.executable.exists():
             raise ExecutableNotFoundError('OASN', str(self.executable))
 
+    def _build_writer_kwargs(self, run_mode: 'RunMode') -> dict:
+        """Materialise the writer's expected kwarg dict from ``self.*``.
+
+        Translates uacpy's public API (singular names, metres) to the
+        OASES file format the writer consumes (plural names for
+        cmins/cmaxs, km for x/y axes). Only keys whose stored value is
+        non-default are emitted, so the writer falls back to its own
+        defaults for everything the user did not set.
+        """
+        kw: dict = {
+            'integration_offset': self.integration_offset,
+            'nw_samples': self.nw_samples,
+            'surface_noise_level': self.surface_noise_level,
+            'white_noise_level': self.white_noise_level,
+            'deep_noise_level': self.deep_noise_level,
+            'vrec': self.vrec,
+        }
+        if self.deep_source_depth is not None:
+            kw['deep_source_depth'] = self.deep_source_depth
+        if self.offdb is not None:
+            kw['offdb'] = self.offdb
+        if self.plot_rmin is not None:
+            kw['plot_rmin'] = self.plot_rmin
+        if self.plot_rmax is not None:
+            kw['plot_rmax'] = self.plot_rmax
+
+        # Phase-speed bounds applied identically to OASN's noise and
+        # replica integrations (singular on the public API, plural-with-
+        # suffix in the writer per OASES's CMINS/CMAXS variable names).
+        if self.cmin is not None:
+            kw['cmins_discrete'] = self.cmin
+            kw['cmins_replica'] = self.cmin
+        if self.cmax is not None:
+            kw['cmaxs_discrete'] = self.cmax
+            kw['cmaxs_replica'] = self.cmax
+
+        # Replica grid x/y in km on disk; z in metres. nx/ny/nz always
+        # forwarded so the writer reuses uacpy defaults rather than its
+        # own OASES-doc ones when the user did not override.
+        kw['replica_nx'] = self.nx
+        kw['replica_ny'] = self.ny
+        kw['replica_nz'] = self.nz
+        if self.xmin is not None:
+            kw['replica_xmin'] = float(m_to_km(self.xmin))
+        if self.xmax is not None:
+            kw['replica_xmax'] = float(m_to_km(self.xmax))
+        if self.ymin is not None:
+            kw['replica_ymin'] = float(m_to_km(self.ymin))
+        if self.ymax is not None:
+            kw['replica_ymax'] = float(m_to_km(self.ymax))
+        if self.zmin is not None:
+            kw['replica_zmin'] = self.zmin
+        if self.zmax is not None:
+            kw['replica_zmax'] = self.zmax
+
+        # ``discrete_sources`` carry per-source x/y in metres (uacpy
+        # API); OASES writes them in km (oasn.tex:343).
+        if self.discrete_sources:
+            converted = []
+            for ds in self.discrete_sources:
+                ds_km = dict(ds)
+                if 'x' in ds_km:
+                    ds_km['x'] = float(m_to_km(ds_km['x']))
+                if 'y' in ds_km:
+                    ds_km['y'] = float(m_to_km(ds_km['y']))
+                converted.append(ds_km)
+            kw['discrete_sources'] = converted
+
+        return kw
+
     def run(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        **kwargs
     ) -> Result:
         """
         Run OASN.
@@ -524,12 +672,9 @@ class OASN(PropagationModel):
         ----------
         run_mode : RunMode, optional
             ``RunMode.COVARIANCE`` (default) → :class:`Covariance`.
-            ``RunMode.REPLICA`` → :class:`Replicas` (requires Block-X
-            replica-grid kwargs: ``replica_zmin``, ``replica_zmax``,
-            ``replica_nz``, ``replica_xmin``, ``replica_xmax``,
-            ``replica_nx``).
-        **kwargs
-            Additional OASN parameters forwarded to :func:`write_oasn_input`.
+            ``RunMode.REPLICA`` → :class:`Replicas` (build the OASN
+            instance with ``xmin``/``xmax``/``zmin``/``zmax``/… already
+            set on the constructor; sweeps go through ``model.copy(...)``).
 
         Returns
         -------
@@ -545,37 +690,16 @@ class OASN(PropagationModel):
         if source_freqs.size > 1:
             _oases_resample_frequencies(source_freqs, self.model_name)
 
-        # Public API uses metres for x/y; OASES expects km. Build a
-        # shallow copy with the relevant axis kwargs converted so we
-        # don't mutate the caller's dict (z-axis stays metres — OASES
-        # accepts those).
-        kwargs = dict(kwargs)
-        if run_mode == RunMode.REPLICA:
-            for k in ('replica_xmin', 'replica_xmax',
-                      'replica_ymin', 'replica_ymax'):
-                if k in kwargs:
-                    kwargs[k] = float(m_to_km(kwargs[k]))
-        # ``discrete_sources`` carries per-source x/y in metres in the
-        # uacpy API; OASES writes them in km (oasn.tex:343). Convert.
-        if 'discrete_sources' in kwargs:
-            converted = []
-            for ds in kwargs['discrete_sources']:
-                ds_km = dict(ds)
-                if 'x' in ds_km:
-                    ds_km['x'] = float(m_to_km(ds_km['x']))
-                if 'y' in ds_km:
-                    ds_km['y'] = float(m_to_km(ds_km['y']))
-                converted.append(ds_km)
-            kwargs['discrete_sources'] = converted
-
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-        # Force the OASN options block to include the file output we need.
-        # The user can pass a custom 'options' to add other letters (J, F, …),
-        # but N (covariance) or R (replica) is added automatically based on
-        # run_mode so the wrapper's contract (return type) is honoured.
-        user_options = kwargs.pop('options', None) or 'J'
+        writer_kwargs = self._build_writer_kwargs(run_mode)
+
+        # The OASN options block must include the file output the run
+        # mode produces. The user-supplied options (or default 'J') win
+        # for additional letters (F, …); N (covariance) or R (replica)
+        # is added automatically based on run_mode.
+        user_options = self.options or 'J'
         opt_tokens = set(user_options.split())
         if run_mode == RunMode.COVARIANCE:
             opt_tokens.add('N')
@@ -598,7 +722,7 @@ class OASN(PropagationModel):
                 source=source,
                 receiver=receiver,
                 options=options,
-                **kwargs,
+                **writer_kwargs,
             )
             self._execute(base_name, fm.work_dir)
 
@@ -656,8 +780,9 @@ class OASN(PropagationModel):
                     self.model_name, return_code=0, stdout=None,
                     stderr=(
                         f"OASN did not produce a replica file. Checked: "
-                        f"{rpo_file}, {fort14_file}. Pass "
-                        "replica_zmin/zmax/nz and replica_xmin/xmax/nx kwargs."
+                        f"{rpo_file}, {fort14_file}. Set the replica grid "
+                        "via OASN(xmin=…, xmax=…, nx=…, zmin=…, zmax=…, "
+                        "nz=…) on the constructor."
                     ),
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
@@ -764,6 +889,9 @@ class OASR(PropagationModel):
         angles: Optional[np.ndarray] = None,
         angle_type: str = 'grazing',
         reflection_type: str = 'P-P',
+        options: Optional[str] = None,
+        angle_output_increment: Optional[int] = None,
+        interface_roughness: Optional[list] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -775,7 +903,8 @@ class OASR(PropagationModel):
         executable : Path, optional
             Path to OASR executable. Auto-detected if None.
         angles : ndarray, optional
-            Angles to compute (degrees). Default: np.linspace(0, 90, 181).
+            Angle grid in degrees. Default: ``np.linspace(0, 90, 181)``.
+            Pass a non-uniform ndarray for adaptive sampling.
         angle_type : str, optional
             'grazing' (OASES native) or 'incidence' (converted via
             ``grazing = 90 - incidence`` before being written to the input
@@ -784,13 +913,32 @@ class OASR(PropagationModel):
             One of 'P-P' (default), 'P-SV', 'P-Slow' (Biot only), or
             'transmission'. Translates to the OASR option letter
             ('N' / 'S' / 'B' / 't').
+        options : str, optional
+            Raw OASES option string. ``None`` lets the wrapper derive
+            it from ``reflection_type``.
+        angle_output_increment : int, optional
+            Decimation factor for the output angle table. ``None`` keeps
+            every sample.
+        interface_roughness : list, optional
+            Per-interface RMS roughness in metres (one entry per layer
+            interface, ordered top → bottom).
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
         )
-        self.angles = angles
+        self.angles = (
+            np.asarray(angles, dtype=float) if angles is not None else None
+        )
         self.angle_type = angle_type
         self.reflection_type = reflection_type
+        self.options = options
+        self.angle_output_increment = (
+            int(angle_output_increment)
+            if angle_output_increment is not None else None
+        )
+        self.interface_roughness = (
+            list(interface_roughness) if interface_roughness else None
+        )
 
         # OASR is strictly a boundary-reflection solver; it does not produce
         # transmission loss. Declare that explicitly.
@@ -825,8 +973,8 @@ class OASR(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
         frequencies: Optional[np.ndarray] = None,
-        **kwargs
     ) -> Result:
         """Run OASR.
 
@@ -842,20 +990,15 @@ class OASR(PropagationModel):
         Parameters
         ----------
         frequencies : ndarray, optional
-            Explicit frequency vector (Hz) — preferred multi-frequency
-            interface. The min, max and length are forwarded as
-            ``freq_min`` / ``freq_max`` / ``n_frequencies`` to the writer.
-        **kwargs
-            Forwarded to :func:`write_oasr_input`. ``freq_min``,
-            ``freq_max``, ``n_frequencies`` are still accepted as
-            alternatives but ``frequencies=`` is the documented path.
+            Explicit frequency vector (Hz). When provided, overrides
+            ``source.frequencies``. OASES treats the sweep as
+            equispaced — uacpy resamples and warns if your vector is not.
         """
         run_mode = self._resolve_run_mode(run_mode)
 
-        angles = self.angles
-        angle_type = self.angle_type
-        reflection_type = self.reflection_type
+        angles = self.angles if self.angles is not None else np.linspace(0, 90, 181)
 
+        writer_kwargs: dict = {}
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
             if freqs_arr.size == 0:
@@ -863,30 +1006,22 @@ class OASR(PropagationModel):
                     "OASR.run(frequencies=…) requires at least one "
                     "positive frequency."
                 )
-            for sweep_key in ('freq_min', 'freq_max', 'n_frequencies'):
-                if sweep_key in kwargs:
-                    raise ConfigurationError(
-                        f"OASR.run: pass either frequencies=… or "
-                        f"{sweep_key}=…, not both."
-                    )
             fmin, fmax, n_freq, _ = _oases_resample_frequencies(
                 freqs_arr, 'OASR',
             )
-            kwargs['freq_min'] = fmin
-            kwargs['freq_max'] = fmax
-            kwargs['n_frequencies'] = n_freq
+            writer_kwargs['freq_min'] = fmin
+            writer_kwargs['freq_max'] = fmax
+            writer_kwargs['n_frequencies'] = n_freq
+
+        if self.options is not None:
+            writer_kwargs['options'] = self.options
+        if self.angle_output_increment is not None:
+            writer_kwargs['angle_output_increment'] = self.angle_output_increment
+        if self.interface_roughness is not None:
+            writer_kwargs['interface_roughness'] = self.interface_roughness
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
-
-        # Only synthesize a default angle grid when the user passed neither an
-        # explicit ``angles=`` array nor angle_min/angle_max/n_angles via kwargs.
-        if angles is None:
-            user_specified_angle_kwargs = (
-                'angle_min' in kwargs or 'angle_max' in kwargs or 'n_angles' in kwargs
-            )
-            if not user_specified_angle_kwargs:
-                angles = np.linspace(0, 90, 181)
 
         fm = self._setup_file_manager()
 
@@ -901,9 +1036,9 @@ class OASR(PropagationModel):
                 source=source,
                 receiver=receiver,
                 angles=angles,
-                angle_type=angle_type,
-                reflection_type=reflection_type,
-                **kwargs,
+                angle_type=self.angle_type,
+                reflection_type=self.reflection_type,
+                **writer_kwargs,
             )
 
             self._execute(input_file, fm.work_dir)
@@ -915,7 +1050,7 @@ class OASR(PropagationModel):
             # option in the OASR options string), so .trc wins; the user
             # can pass options='p ...' to switch to slowness sampling, in
             # which case we prefer .rco.
-            requested_opts = (kwargs.get('options') or '').split()
+            requested_opts = (self.options or '').split()
             wants_slowness = 'p' in requested_opts
             search = ['.rco', '.trc'] if wants_slowness else ['.trc', '.rco']
             search += ['.023', 'fort.023']
@@ -950,7 +1085,7 @@ class OASR(PropagationModel):
                     backend='oasr',
                     frequencies=freqs_arr if len(freqs_arr) else None,
                     sampling_type=data.get('sampling_type', 'angle'),
-                    reflection_type=reflection_type,
+                    reflection_type=self.reflection_type,
                 ),
             )
             self._attach_output_paths(
@@ -1033,6 +1168,13 @@ class OASP(PropagationModel):
         executable: Optional[Path] = None,
         n_time_samples: int = 4096,
         freq_max: float = 250.0,
+        freq_min: float = 0.0,
+        center_frequency: Optional[float] = None,
+        freq_output_increment: Optional[int] = None,
+        options: Optional[str] = None,
+        range_start: Optional[float] = None,
+        integration_offset: float = 0.0,
+        nw_samples: int = -1,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -1044,16 +1186,49 @@ class OASP(PropagationModel):
         executable : Path, optional
             Path to OASP executable. Auto-detected if None.
         n_time_samples : int, optional
-            Number of time samples for FFT. Default: 4096.
+            Power-of-two FFT length (samples per receiver trace).
+            Default 4096.
         freq_max : float, optional
-            Maximum frequency for FFT (Hz). Default: 250.
+            Upper edge of the OASP broadband sweep (Hz). Default 250.
+        freq_min : float, optional
+            Lower edge of the OASP broadband sweep (Hz). Default 0.0.
+        center_frequency : float, optional
+            Carrier frequency for the pulse (Hz). ``None`` defaults to
+            ``source.frequencies[0]`` at ``run()`` time.
+        freq_output_increment : int, optional
+            Decimation factor for the .trf frequency axis. ``None`` →
+            ``max(1, n_frequencies // 10)``.
+        options : str, optional
+            Raw OASES option string. ``None`` defers to the writer's
+            default (``'N'``).
+        range_start : float, optional
+            First receiver range (m). ``None`` defaults to
+            ``receiver.ranges.min()``.
+        integration_offset : float, optional
+            Wavenumber-contour offset (dB/wavelength). Default 0.
+        nw_samples : int, optional
+            Wavenumber sample count. ``-1`` lets OASP auto-pick.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             **kwargs,
         )
-        self.n_time_samples = n_time_samples
-        self.freq_max = freq_max
+        self.n_time_samples = int(n_time_samples)
+        self.freq_max = float(freq_max)
+        self.freq_min = float(freq_min)
+        self.center_frequency = (
+            float(center_frequency) if center_frequency is not None else None
+        )
+        self.freq_output_increment = (
+            int(freq_output_increment)
+            if freq_output_increment is not None else None
+        )
+        self.options = options
+        self.range_start = (
+            float(range_start) if range_start is not None else None
+        )
+        self.integration_offset = float(integration_offset)
+        self.nw_samples = int(nw_samples)
 
         self._supported_modes = [
             RunMode.COHERENT_TL,
@@ -1091,10 +1266,10 @@ class OASP(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
-        **kwargs
     ) -> Result:
         """
         Run OASP parabolic equation computation
@@ -1116,8 +1291,6 @@ class OASP(PropagationModel):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
-        **kwargs
-            Additional OASP parameters
 
         Returns
         -------
@@ -1133,9 +1306,8 @@ class OASP(PropagationModel):
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce
         # multi-axis output rather than silently discard data.
-        user_opts = kwargs.get('options')
-        if user_opts:
-            multi_axis = {'V', 'H', 'R', 'U', 'F'} & set(str(user_opts).split())
+        if self.options:
+            multi_axis = {'V', 'H', 'R', 'U', 'F'} & set(str(self.options).split())
             if multi_axis:
                 raise ConfigurationError(
                     f"OASP.run: options {sorted(multi_axis)} request "
@@ -1177,18 +1349,25 @@ class OASP(PropagationModel):
                 else:
                     n_time_samples = 2
 
-        if run_mode == RunMode.TIME_SERIES and (
-            source_waveform is None or sample_rate is None
-        ):
-            raise ConfigurationError(
-                "OASP.run(run_mode=TIME_SERIES) requires source_waveform "
-                "and sample_rate. For the broadband transfer function "
-                "H(f), use run_mode=RunMode.BROADBAND."
-            )
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         fm = self._setup_file_manager()
+
+        writer_kwargs: dict = {
+            'integration_offset': self.integration_offset,
+            'nw_samples': self.nw_samples,
+            'freq_min': self.freq_min,
+        }
+        if self.center_frequency is not None:
+            writer_kwargs['center_frequency'] = self.center_frequency
+        if self.freq_output_increment is not None:
+            writer_kwargs['freq_output_increment'] = self.freq_output_increment
+        if self.options is not None:
+            writer_kwargs['options'] = self.options
+        if self.range_start is not None:
+            writer_kwargs['range_start'] = self.range_start
 
         try:
             base_name = 'oasp_run'
@@ -1201,7 +1380,7 @@ class OASP(PropagationModel):
                 receiver=receiver,
                 n_time_samples=n_time_samples,
                 freq_max=freq_max,
-                **kwargs
+                **writer_kwargs,
             )
 
             # Run executable

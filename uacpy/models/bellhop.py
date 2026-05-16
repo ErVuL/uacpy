@@ -311,6 +311,12 @@ class Bellhop(PropagationModel):
         n_image: int = 1,
         ib_win: int = 4,
         component: str = 'P',
+        beam_shift: bool = False,
+        # Broadband synthesis knobs (BROADBAND / TIME_SERIES paths)
+        n_freqs: int = DEFAULT_BROADBAND_N_FREQS,
+        bandwidth_factor: float = DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+        time_window: Optional[float] = None,
+        t_start: Optional[float] = None,
         auto_bounce: bool = True,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -449,6 +455,17 @@ class Bellhop(PropagationModel):
         self.n_image = int(n_image)
         self.ib_win = int(ib_win)
         self.component = component
+        self.beam_shift = bool(beam_shift)
+        self.n_freqs = int(n_freqs)
+        self.bandwidth_factor = float(bandwidth_factor)
+        # Broadband synthesis window. ``None`` lets ``_run_broadband``
+        # auto-derive from the latest arrival + source waveform duration.
+        self.time_window = (
+            float(time_window) if time_window is not None else None
+        )
+        self.t_start = (
+            float(t_start) if t_start is not None else None
+        )
         self.auto_bounce = bool(auto_bounce)
         _validate_arrivals_format(arrivals_format)
         self.arrivals_format = arrivals_format
@@ -497,10 +514,10 @@ class Bellhop(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
-        **kwargs
     ) -> Result:
         """
         Run Bellhop simulation
@@ -526,13 +543,6 @@ class Bellhop(PropagationModel):
             (``RunMode.TIME_SERIES``). Requires ``sample_rate``.
         sample_rate : float, optional
             Sample rate (Hz) accompanying ``source_waveform``.
-        **kwargs
-            Advanced Cerveny/Simple-Gaussian beam parameters (used when
-            ``beam_type`` is 'C', 'R' or 'S'):
-            beam_width_type ('F'/'M'/'W'), beam_curvature ('D'/'S'/'Z'),
-            eps_multiplier, r_loop, n_image, ib_win, component.
-            Broadband-only: ``time_window``, ``t_start``, ``n_freqs``,
-            ``bandwidth_factor`` (see :meth:`_run_broadband`).
 
         Returns
         -------
@@ -550,7 +560,6 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
-                **kwargs,
             )
 
         # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires only on
@@ -576,7 +585,6 @@ class Bellhop(PropagationModel):
                     frequencies=frequencies,
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
-                    **kwargs,
                 ))
             return ResultStack(
                 slabs=slabs, coordinate=source.depths,
@@ -634,7 +642,6 @@ class Bellhop(PropagationModel):
                     frequencies=frequencies,
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
-                    **kwargs,
                 )
             # auto_bounce=False: fall through. ``_project_environment``
             # below will collapse the bottom via the user's
@@ -758,20 +765,6 @@ class Bellhop(PropagationModel):
                 use_sbp = True
                 self._log(f"Wrote source beam pattern: {sbp_dest}")
 
-            # Beam advanced kwargs: per-call user kwargs (in `kwargs`)
-            # win over constructor defaults.
-            beam_kw = {
-                'beam_width_type': self.beam_width_type,
-                'beam_curvature': self.beam_curvature,
-                'eps_multiplier': self.eps_multiplier,
-                'r_loop': self.r_loop,
-                'n_image': self.n_image,
-                'ib_win': self.ib_win,
-                'component': self.component,
-            }
-            for k_, v_ in beam_kw.items():
-                kwargs.setdefault(k_, v_)
-
             write_bellhop_env_file(
                 filepath=env_file,
                 env=env,
@@ -788,8 +781,15 @@ class Bellhop(PropagationModel):
                 z_box=self.z_box,
                 r_box=self.r_box,
                 source_beam_pattern=use_sbp,
+                beam_width_type=self.beam_width_type,
+                beam_curvature=self.beam_curvature,
+                eps_multiplier=self.eps_multiplier,
+                r_loop=self.r_loop,
+                n_image=self.n_image,
+                ib_win=self.ib_win,
+                component=self.component,
+                beam_shift=self.beam_shift,
                 **extra_writer_kwargs,
-                **kwargs,
             )
 
             # Run Bellhop
@@ -916,7 +916,6 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
-        **kwargs
     ) -> Result:
         """
         Run Bellhop using BOUNCE-generated reflection coefficients.
@@ -941,8 +940,6 @@ class Bellhop(PropagationModel):
             Maximum phase velocity for reflection table (m/s). Default 10000.
         rmax : float, optional
             Maximum range for angular resolution (m). Default 10000.
-        **kwargs
-            Additional parameters passed to Bellhop.run()
 
         Returns
         -------
@@ -986,7 +983,6 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
-                **kwargs,
             )
 
             # Strip the about-to-be-invalid file paths (work dir is wiped
@@ -1008,11 +1004,6 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
-        time_window: Optional[float] = None,
-        t_start: Optional[float] = None,
-        n_freqs: int = DEFAULT_BROADBAND_N_FREQS,
-        bandwidth_factor: float = DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
-        **kwargs
     ) -> Result:
         """
         Run Bellhop in broadband mode to produce a time-series or
@@ -1055,25 +1046,13 @@ class Bellhop(PropagationModel):
         sample_rate : float, optional
             Sample rate in Hz. Required when source_waveform is provided.
             For transfer function mode, ignored.
-        time_window : float, optional
-            Duration of the output time window in seconds. If None,
-            estimated automatically from arrival delays.
-        t_start : float, optional
-            Start time (s) of the delay-and-sum output window. Forwarded to
-            :func:`delayandsum`. If None, set to just before the earliest
-            arrival. Only used when ``source_waveform`` is provided.
-        n_freqs : int, optional
-            Number of frequency points for transfer function mode.
-            Default: ``DEFAULT_BROADBAND_N_FREQS`` (128). Ignored when
-            source_waveform is provided.
-        bandwidth_factor : float, optional
-            Fractional bandwidth around fc — band is
-            ``[fc·(1-bw/2), fc·(1+bw/2)]``. ``bw=1.0`` gives
-            ``[0.5·fc, 1.5·fc]`` (a single octave). Default:
-            ``DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5). Ignored when
-            source_waveform is provided.
-        **kwargs
-            Additional Bellhop parameters (beam_type, etc.)
+
+        Constructor-controlled (``Bellhop(time_window=…, t_start=…,
+        n_freqs=…, bandwidth_factor=…)``):
+            ``time_window`` (s), ``t_start`` (s), ``n_freqs`` (TF bin
+            count, default ``DEFAULT_BROADBAND_N_FREQS=128``),
+            ``bandwidth_factor`` (fractional band around fc, default
+            ``DEFAULT_BROADBAND_BANDWIDTH_FACTOR=0.5``).
 
         Returns
         -------
@@ -1097,7 +1076,7 @@ class Bellhop(PropagationModel):
 
         # Step 1: Run Bellhop in arrivals mode
         self._log("Running in arrivals mode (broadband path)...")
-        arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
+        arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
 
         arrivals_by_rcv = arr_field.by_receiver
         rz = arr_field.receiver_depths
@@ -1123,8 +1102,8 @@ class Bellhop(PropagationModel):
                 source_timeseries=source_waveform,
                 sample_rate=sample_rate,
                 fc=fc,
-                time_window=time_window,
-                t_start=t_start,
+                time_window=self.time_window,
+                t_start=self.t_start,
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
@@ -1165,10 +1144,10 @@ class Bellhop(PropagationModel):
 
         # ── Path B: frequency-domain transfer function ──
         if frequencies is None:
-            half_bw = 0.5 * bandwidth_factor
+            half_bw = 0.5 * self.bandwidth_factor
             f_min = max(1.0, fc * (1.0 - half_bw))
             f_max = fc * (1.0 + half_bw)
-            frequencies = np.linspace(f_min, f_max, n_freqs)
+            frequencies = np.linspace(f_min, f_max, self.n_freqs)
 
         frequencies = np.asarray(frequencies, dtype=float)
         n_freq = len(frequencies)

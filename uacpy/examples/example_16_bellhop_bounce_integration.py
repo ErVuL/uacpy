@@ -105,7 +105,7 @@ def demo_bellhop_bounce():
     result_bounce = bellhop.run_with_bounce(
         env, source, receiver,
         run_mode=RunMode.COHERENT_TL,
-        cmin=1400.0, cmax=10000.0, rmax=10000.0,
+        c_low=1400.0, c_high=10000.0, rmax=10000.0,
     )
 
     # Compare

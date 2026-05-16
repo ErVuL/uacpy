@@ -818,10 +818,10 @@ class RAM(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
-        **kwargs
     ) -> Result:
         """
         Run RAM (mpiramS) simulation.
@@ -852,8 +852,6 @@ class RAM(PropagationModel):
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
-        **kwargs
-            Silently ignored (warns on unknown kwargs).
 
         Returns
         -------
@@ -889,12 +887,7 @@ class RAM(PropagationModel):
             if run_mode == RunMode.BROADBAND:
                 return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
-                if source_waveform is None or sample_rate is None:
-                    raise ConfigurationError(
-                        "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
-                        "and sample_rate. For the broadband transfer function "
-                        "H(f), use run_mode=RunMode.BROADBAND."
-                    )
+                self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
                 tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
@@ -914,12 +907,7 @@ class RAM(PropagationModel):
                 env, source, receiver, kind=backend
             )
         if run_mode == RunMode.TIME_SERIES:
-            if source_waveform is None or sample_rate is None:
-                raise ConfigurationError(
-                    f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
-                    f"source_waveform and sample_rate. For the broadband "
-                    f"transfer function H(f), use run_mode=RunMode.BROADBAND."
-                )
+            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             tf = self._run_collins_broadband(
                 env, source, receiver, kind=backend
             )

@@ -459,3 +459,45 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     row1 = list(map(float, lines[3].split()))
     assert row0 == [1500.0, 1495.0, 1485.0]
     assert row1 == [1480.0, 1475.0, 1465.0]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Unknown run() kwargs → TypeError (Python rejects them at the call site
+# since ``**kwargs`` is no longer present on any concrete ``run()``).
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _all_concrete_models():
+    from uacpy.models.bellhop import Bellhop, BellhopCUDA
+    from uacpy.models.bounce import Bounce
+    from uacpy.models.kraken import Kraken, KrakenC, KrakenField
+    from uacpy.models.oases import OAST, OASN, OASR, OASP
+    from uacpy.models.ram import RAM
+    from uacpy.models.scooter import Scooter
+    from uacpy.models.sparc import SPARC
+    return [
+        Bellhop, BellhopCUDA, Bounce,
+        Kraken, KrakenC, KrakenField,
+        OAST, OASN, OASR, OASP,
+        RAM, Scooter, SPARC,
+    ]
+
+
+@pytest.mark.parametrize(
+    "model_cls",
+    _all_concrete_models(),
+    ids=[cls.__name__ for cls in _all_concrete_models()],
+)
+def test_run_rejects_unknown_kwarg(model_cls):
+    """Every concrete ``run()`` declares its full keyword set; unknown
+    names raise :class:`TypeError` at the call site.
+
+    Pre-binary failure path — pure-Python, no ``requires_binary`` marker.
+    """
+    env = uacpy.Environment(name='unknown-kwarg', bathymetry=100.0, ssp=1500.0)
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[25.0, 50.0], ranges=[1000.0, 2000.0])
+
+    model = model_cls()
+    with pytest.raises(TypeError, match=r"unexpected keyword argument"):
+        model.run(env, src, rcv, totally_bogus_kwarg=1)

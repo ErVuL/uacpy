@@ -129,11 +129,27 @@ Model(
 )
 ```
 
-**Configuration is constructor-only.** Every tuning knob (beam_type, dr,
-…) is set when you build the wrapper. To sweep parameters, construct one
-model per parameter set. `run()` accepts only the standard
-`(env, source, receiver, run_mode, frequencies, source_waveform,
-sample_rate)` plus narrow per-model writer pass-through.
+**One configuration rule, three input categories.**
+
+1. **Model configuration** — every tuning knob (`beam_type`, `dr`,
+   `np_pade`, OASN's replica grid, OASP's `n_time_samples`, …) lives on
+   the **constructor**. There is no `set_params()`, no per-call escape
+   hatch. To sweep parameters: build one instance per set, or use
+   `model.copy(**overrides)` to derive a new instance from an existing
+   one (the original is untouched).
+2. **Physics scenario** — `env`, `source`, `receiver` go positionally
+   into `run()`.
+3. **Per-call request** — `run_mode` plus the signal kwargs
+   `frequencies=`, `source_waveform=`, `sample_rate=` are the **only**
+   kwargs `run()` accepts. Every model has the same fixed signature:
+   `run(env, source, receiver, run_mode=None, *, frequencies=None,
+   source_waveform=None, sample_rate=None)`. KrakenField additionally
+   takes `n_modes=` for the field reconstruction limit.
+
+**Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
+so `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) raises at
+the call site with Python's standard `unexpected keyword argument`
+message. The model knob you wanted is `Bellhop(n_beams=10)` (constructor).
 
 Volume absorption is environmental, not model-level: attach a
 `Thorp()` / `FrancoisGarrison(...)` / `Biological(...)` /
@@ -145,12 +161,8 @@ See *Volume Absorption* below.
 (Bellhop, Scooter, KrakenField, OASP, RAM) takes `source_waveform=` +
 `sample_rate=` on `run()`. Models with a broadband path also accept
 `frequencies=` for an explicit override of `source.frequencies`. SPARC
-computes p(t) from its native source pulse and ignores both silently.
-
-**Irrelevant kwargs are silently ignored** (per uacpy convention — same
-as Python's `dict()` constructor with an unknown keyword). A typo like
-`Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) silently
-uses the default `n_beams`.
+builds p(t) from its native `pulse_type` (constructor); passing
+`source_waveform`/`sample_rate` to `SPARC.run()` emits a `UserWarning`.
 
 ### Persisting output files (`work_dir` + `cleanup`)
 

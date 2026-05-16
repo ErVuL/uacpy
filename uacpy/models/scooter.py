@@ -236,10 +236,10 @@ class Scooter(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode=None,
+        *,
         frequencies: Optional['np.ndarray'] = None,
         source_waveform=None,
         sample_rate=None,
-        **kwargs
     ) -> Result:
         """
         Run Scooter simulation
@@ -264,8 +264,6 @@ class Scooter(PropagationModel):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
-        **kwargs
-            Additional Scooter parameters
 
         Returns
         -------
@@ -275,15 +273,7 @@ class Scooter(PropagationModel):
             for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
-
-        if run_mode == RunMode.TIME_SERIES and (
-            source_waveform is None or sample_rate is None
-        ):
-            raise ConfigurationError(
-                "Scooter.run(run_mode=TIME_SERIES) requires source_waveform "
-                "and sample_rate. For the broadband transfer function "
-                "H(f), use run_mode=RunMode.BROADBAND."
-            )
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
 
         env = self._project_environment(env)
 
@@ -324,7 +314,6 @@ class Scooter(PropagationModel):
             self._write_scooter_env(
                 env_file, env, source, receiver,
                 frequencies=broadband_freqs,
-                **kwargs
             )
 
             self._log("Running...")
@@ -393,7 +382,15 @@ class Scooter(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _write_scooter_env(self, filepath, env, source, receiver, **kwargs):
+    def _write_scooter_env(
+        self,
+        filepath,
+        env,
+        source,
+        receiver,
+        *,
+        frequencies=None,
+    ):
         """
         Write Scooter environment file using shared ATEnvWriter
 
@@ -407,8 +404,6 @@ class Scooter(PropagationModel):
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
-
-        frequencies = kwargs.get('frequencies', None)
 
         # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
         # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
