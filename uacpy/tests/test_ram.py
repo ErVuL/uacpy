@@ -35,37 +35,27 @@ class TestRAMAdvancedParameters:
     @pytest.mark.parametrize('np_pade', [2, 6, 8])
     def test_ram_pade_order(self, ram_env, ram_source, ram_receiver, np_pade):
         """RAM converges across the supported Padé-coefficient counts."""
-        ram = RAM(verbose=False, dr=20.0, dz=2.0)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0, np_pade=np_pade)
         result = ram.compute_tl(
-            env=ram_env,
-            source=ram_source,
-            receiver=ram_receiver,
-            np_pade=np_pade,
+            env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
         """Test RAM stability parameter."""
-        ram = RAM(verbose=False, dr=20.0, dz=2.0)
+        ram = RAM(verbose=False, dr=20.0, dz=2.0, ns_stability=1)
         result = ram.compute_tl(
-            env=ram_env,
-            source=ram_source,
-            receiver=ram_receiver,
-            ns_stability=1
+            env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
         """Test RAM with custom range and depth steps."""
-        ram = RAM(verbose=False, dr=20.0, dz=2.0)
+        ram = RAM(verbose=False, dr=10.0, dz=0.5)
         result = ram.compute_tl(
-            env=ram_env,
-            source=ram_source,
-            receiver=ram_receiver,
-            dr=10.0,  # 10m range step
-            dz=0.5    # 0.5m depth step
+            env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))

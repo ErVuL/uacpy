@@ -131,10 +131,9 @@ class TestBellhopRunModes:
         """Test Bellhop.compute_eigenrays one-call API."""
         bellhop = Bellhop(verbose=False)
 
-        rays = bellhop.compute_eigenrays(
-            setup_env, setup_source,
-            range=3000.0, depth=50.0,
-        )
+        from uacpy import Receiver
+        rcv = Receiver(depths=[50.0], ranges=[3000.0])
+        rays = bellhop.compute_eigenrays(setup_env, setup_source, rcv)
         assert isinstance(rays, Rays)
         assert rays.is_eigen is True
         # Receiver positions reflect the single target point.

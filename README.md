@@ -92,12 +92,6 @@ message if anything is missing — it does *not* install system packages
 itself. Provision the toolchain once for your platform, then run the
 build.
 
-> **OASES supply-chain note.** `install.sh` downloads OASES over HTTPS from
-> MIT and supports an optional sha256 pin via the `OASES_EXPECTED_SHA256`
-> variable in the script (currently empty). Once you have a verified-good
-> install on your platform, pin that hash locally for reproducibility and
-> tamper-detection on subsequent rebuilds.
-
 ---
 
 ### 🐧 Linux
@@ -282,8 +276,8 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 25 example scripts numbered
-sequentially (`example_01_*.py` through `example_25_*.py`); the full
+Inside `uacpy/uacpy/examples/` you will find 26 example scripts numbered
+sequentially (`example_01_*.py` through `example_26_*.py`); the full
 suite runs in a few minutes on a laptop. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.

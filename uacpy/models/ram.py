@@ -37,6 +37,7 @@ from typing import Optional, List, Union
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models._pe_phase import psi_to_travelling_wave
 from uacpy.core.environment import (
     Environment, LayeredBottom, RangeDependentLayeredBottom,
 )
@@ -495,6 +496,66 @@ class RAM(PropagationModel):
         c_max = float(max(speeds))
         return float(optimal_c0(c_min, c_max, float(self.theta_max)))
 
+    def _resolve_broadband_grid(self, source: Source):
+        """Resolve ``(fc, Q, T)`` for the native broadband sweep.
+
+        mpiramS and the Collins binaries don't accept an arbitrary
+        frequency list — their internal loop is parameterised as
+
+            band = fc · [1 - 1/Q, 1 + 1/Q]     (width = 2·fc/Q)
+            Δf   = 1/T
+
+        For a multi-element ``frequencies`` array, ``fc`` is always taken
+        from the array's centre (the band midpoint) — a band naturally
+        identifies its centre frequency, not its lower edge. ``Q`` and
+        ``T`` come from the array's half-width and spacing when not
+        pinned on the constructor; pinned values take precedence. A
+        warning fires whenever either ``Q`` or ``T`` was auto-derived.
+        Single-element arrays trivially use ``frequencies[0]`` as fc.
+        """
+        freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if len(freqs) == 1:
+            Q = 2.0 if self.Q is None else float(self.Q)
+            T = 10.0 if self.T is None else float(self.T)
+            return float(freqs[0]), Q, T
+
+        f_min, f_max = float(freqs[0]), float(freqs[-1])
+        if f_max <= f_min:
+            raise ConfigurationError(
+                f"RAM BROADBAND: degenerate frequency range "
+                f"[{f_min}, {f_max}] Hz."
+            )
+        spacings = np.diff(freqs)
+        if not np.allclose(spacings, spacings[0], rtol=1e-4):
+            raise ConfigurationError(
+                f"RAM BROADBAND: non-uniform frequency spacing "
+                f"(min Δf={spacings.min():.4g}, max Δf={spacings.max():.4g} Hz). "
+                f"mpiramS / Collins broadband sweep is uniform — either pass "
+                f"uniformly spaced frequencies, or set `Q` and `T` on the "
+                f"constructor and pass a single fc."
+            )
+        df = float(spacings[0])
+        fc = 0.5 * (f_min + f_max)
+        half_width = 0.5 * (f_max - f_min)
+        Q_auto = fc / half_width
+        T_auto = 1.0 / df
+        Q = Q_auto if self.Q is None else float(self.Q)
+        T = T_auto if self.T is None else float(self.T)
+        if self.Q is None or self.T is None:
+            warnings.warn(
+                f"RAM BROADBAND: mpiramS / Collins use an internal "
+                f"(fc, Q, T) sweep. From the {len(freqs)}-element "
+                f"frequency array ({f_min:.2f}-{f_max:.2f} Hz, "
+                f"Δf={df:.4g} Hz), picked fc={fc:.2f} Hz "
+                f"(band centre), Q={Q:.4f} "
+                f"({'pinned' if self.Q is not None else 'auto'}), "
+                f"T={T:.4f} s "
+                f"({'pinned' if self.T is not None else 'auto'}). "
+                f"To silence, pin both `Q=` and `T=` on the constructor.",
+                UserWarning, stacklevel=3,
+            )
+        return fc, Q, T
+
     def _compute_zmax(self, env: Environment, freq: float, c0: Optional[float] = None) -> float:
         """
         Compute PE domain depth (zmax) that extends below the seafloor.
@@ -818,10 +879,11 @@ class RAM(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
-        **kwargs
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run RAM (mpiramS) simulation.
@@ -852,8 +914,14 @@ class RAM(PropagationModel):
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
-        **kwargs
-            Silently ignored (warns on unknown kwargs).
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            auto-derived broadband grid is tight enough (``Δf =
+            1/output_duration``) — for mpiramS this also tightens the
+            ``(fc, Q, T)`` sweep parameters via
+            ``_resolve_broadband_grid``. Defaults to
+            ``len(source_waveform)/sample_rate``.
 
         Returns
         -------
@@ -862,6 +930,12 @@ class RAM(PropagationModel):
             for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        source_waveform = self._pad_waveform_to_duration(
+            source_waveform, sample_rate, output_duration,
+        )
+        frequencies = self._resolve_time_series_frequencies(
+            run_mode, source, frequencies, source_waveform, sample_rate,
+        )
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -889,12 +963,7 @@ class RAM(PropagationModel):
             if run_mode == RunMode.BROADBAND:
                 return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
-                if source_waveform is None or sample_rate is None:
-                    raise ConfigurationError(
-                        "RAM.run(run_mode=TIME_SERIES) requires source_waveform "
-                        "and sample_rate. For the broadband transfer function "
-                        "H(f), use run_mode=RunMode.BROADBAND."
-                    )
+                self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
                 tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
@@ -914,12 +983,7 @@ class RAM(PropagationModel):
                 env, source, receiver, kind=backend
             )
         if run_mode == RunMode.TIME_SERIES:
-            if source_waveform is None or sample_rate is None:
-                raise ConfigurationError(
-                    f"RAM:{backend}.run(run_mode=TIME_SERIES) requires "
-                    f"source_waveform and sample_rate. For the broadband "
-                    f"transfer function H(f), use run_mode=RunMode.BROADBAND."
-                )
+            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             tf = self._run_collins_broadband(
                 env, source, receiver, kind=backend
             )
@@ -1388,10 +1452,8 @@ class RAM(PropagationModel):
         elastic stability angle has to vary across the band.
         """
 
-        fc = float(np.atleast_1d(source.frequencies)[0])
+        fc, Q_used, T_used = self._resolve_broadband_grid(source)
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
-        Q_used = 2.0 if self.Q is None else float(self.Q)
-        T_used = 10.0 if self.T is None else float(self.T)
         bw = fc / Q_used
         df = 1.0 / T_used
         nf1 = max(1, int(np.floor((bw - df) / df)))
@@ -1488,28 +1550,22 @@ class RAM(PropagationModel):
             im = interp_im(pts).reshape(DD.shape)
             H[:, :, k] = re + 1j * im
 
-        # Bake the engineering travelling-wave carrier into H so every
-        # broadband-capable model hands the IFFT pipeline the same shape
-        # of complex pressure. The two Collins binaries write DIFFERENT
-        # quantities:
-        #
-        # * rams0.5 multiplies its march variable by g0 = exp(+i k0 dr)
-        #   each step (rams0.5.f:830-831), so the file already carries
-        #   ψ·exp(+i k0 r); a single conj(·) flips it to ψ̄·exp(-i k0 r).
-        #
-        # * ramsurf1.5 has no g0 (ramsurf1.5.f:310), so the file is the
-        #   bare envelope ψ; conj(·) then explicit exp(-i k0 r) multiply
-        #   produces the same target form.
+        # Convert each backend's raw output to the engineering travelling-
+        # wave form. See ``models/_pe_phase.py`` for the per-convention
+        # math. H is shaped (n_d, n_r, n_f) here; the Collins binaries
+        # already include the 1/√r radial scaling in the file they write,
+        # so ``apply_radial=False``.
         c0 = self._resolve_c0(env)
-        if kind == 'rams':
-            H = np.conj(H)
-        else:
-            omega = 2.0 * np.pi * frequencies
-            k0 = omega / c0
-            carrier = np.exp(
-                -1j * k0[None, None, :] * rcv_r[None, :, None]
-            )
-            H = np.conj(H) * carrier
+        omega = 2.0 * np.pi * np.asarray(frequencies, dtype=np.float64)
+        H = psi_to_travelling_wave(
+            H,
+            convention=kind,
+            ranges_m=rcv_r,
+            range_axis=1,
+            k0=omega / c0,
+            freq_axis=2,
+            apply_radial=False,
+        )
 
         field = Field(
             data=H,
@@ -1792,7 +1848,10 @@ class RAM(PropagationModel):
                 f"f={freq:.0f} Hz). The Lytaev accuracy budget "
                 f"ε={self.accuracy:.0e} is no longer met — expect TL "
                 f"errors larger than the target. Set dr/dz explicitly "
-                f"to override.",
+                f"to override. For broadband sweeps the cap is computed "
+                f"at the *lowest* frequency in the sweep, so it may be "
+                f"sub-Nyquist for the upper band — pin dz≈λ(f_max)/8 "
+                f"to resolve the full pulse spectrum.",
                 UserWarning, stacklevel=3
             )
 
@@ -2058,20 +2117,17 @@ class RAM(PropagationModel):
                 )
                 log_ranges[log_ranges <= 0.0] = dr
 
-            # Apply the mpiramS → engineering travelling-wave transform
-            # used by ``_run_broadband``:
-            #   psif = psi · exp(+i(k0 r + pi/4)) / (4 pi)
-            #   p    = conj(psif) · 4 pi · exp(-i pi/4) / sqrt(r)
-            # so the resulting Field carries the same phase convention
-            # as the broadband path. ``Field.tl`` only depends on |p|,
-            # but downstream consumers that need coherent integration
-            # now get a meaningful phase.
-            r_safe = log_ranges.astype(np.float64)
+            # Convert the mpiramS .psif output to engineering travelling-
+            # wave pressure (see ``models/_pe_phase.py``). ``Field.tl``
+            # only needs |p|, but downstream consumers that do coherent
+            # integration get a meaningful phase.
             with np.errstate(divide='ignore', invalid='ignore'):
-                scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(r_safe)
-            pressure_field = (
-                np.conj(pressure_rcv) * scale[np.newaxis, :]
-            ).astype(np.complex128)
+                pressure_field = psi_to_travelling_wave(
+                    pressure_rcv,
+                    convention='mpiramS',
+                    ranges_m=log_ranges,
+                    range_axis=1,
+                ).astype(np.complex128)
 
             elapsed = time.time() - start_time
             self._log(f"TL completed in {elapsed:.2f}s")
@@ -2079,6 +2135,7 @@ class RAM(PropagationModel):
             field = Field(
                 data=pressure_field,
                 coords={'depth': receiver.depths, 'range': receiver.ranges},
+                phase_reference='travelling_wave',
                 **self._result_kwargs(
                     source,
                     backend='mpiramS',
@@ -2106,7 +2163,7 @@ class RAM(PropagationModel):
         """
         start_time = time.time()
 
-        freq = float(source.frequencies[0])
+        freq, Q_bb, T_bb = self._resolve_broadband_grid(source)
         zsrc = float(source.depths[0])
         ranges = receiver.ranges
         rmax = float(np.max(ranges))
@@ -2121,9 +2178,6 @@ class RAM(PropagationModel):
                 dr = dr_auto
             if dz is None:
                 dz = dz_auto
-
-        Q_bb = 2.0 if self.Q is None else float(self.Q)
-        T_bb = 10.0 if self.T is None else float(self.T)
         self._log(
             f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
             f"dr={dr:.1f} m, dz={dz:.3f} m"
@@ -2200,9 +2254,14 @@ class RAM(PropagationModel):
                     UserWarning, stacklevel=2
                 )
                 rout_safe[rout_safe <= 0.0] = clip_to
-            scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(rout_safe)
-            # Broadcast: psif is (nzo, nf, nr), scale is (nr,)
-            pressure = np.conj(psif) * scale[np.newaxis, np.newaxis, :]
+            # psif shape: (nzo, nf, nr) — convert to engineering
+            # travelling-wave pressure via models/_pe_phase.py.
+            pressure = psi_to_travelling_wave(
+                psif,
+                convention='mpiramS',
+                ranges_m=rout_safe,
+                range_axis=2,
+            )
 
             # Map to receiver depth grid. PE domain extends below the
             # seafloor; output only the requested receiver depths.

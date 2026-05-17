@@ -144,11 +144,13 @@ class TestOASN:
             depths=np.linspace(40.0, 60.0, 5),
             ranges=[1000.0],
         )
-        oasn = OASN(verbose=False)
+        oasn = OASN(
+            verbose=False,
+            zmin=20.0, zmax=80.0, nz=4,
+            xmin=500.0, xmax=2000.0, nx=4,  # metres
+        )
         rep = oasn.compute_replicas(
             env=oasn_env, source=source, receiver=rcv_array,
-            replica_zmin=20.0, replica_zmax=80.0, replica_nz=4,
-            replica_xmin=500.0, replica_xmax=2000.0, replica_nx=4,  # metres
         )
         assert isinstance(rep, Replicas)
         assert isinstance(rep, Replicas)

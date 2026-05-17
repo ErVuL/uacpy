@@ -262,7 +262,6 @@ class Bounce(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
-        **kwargs
     ) -> Result:
         """
         Run BOUNCE reflection coefficient computation.
@@ -285,8 +284,6 @@ class Bounce(PropagationModel):
             Must be ``RunMode.REFLECTION`` (the only mode BOUNCE emits)
             or ``None`` (defaults to REFLECTION). Other values raise
             :class:`UnsupportedFeatureError`.
-        **kwargs
-            Additional parameters passed to the ENV file writer.
 
         Returns
         -------
@@ -374,7 +371,6 @@ class Bounce(PropagationModel):
                 c_low=self.c_low,
                 c_high=self.c_high,
                 rmax=rmax,
-                **kwargs
             )
 
             self._log("Running...")
@@ -446,7 +442,6 @@ class Bounce(PropagationModel):
         c_low: float,
         c_high: float,
         rmax: float,
-        **kwargs
     ):
         """
         Write BOUNCE input file using ATEnvWriter

@@ -331,7 +331,6 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         run_mode: Optional['RunMode'] = None,
-        **kwargs
     ) -> Result:
         """Run the propagation model.
 
@@ -345,18 +344,21 @@ class PropagationModel(ABC):
         instance is created. To sweep parameters, instantiate one model
         per parameter set.
 
-        Mode-specific kwargs follow a fixed convention: every
-        TIME_SERIES-capable wrapper accepts ``source_waveform=`` and
-        ``sample_rate=`` as explicit keyword arguments on ``run()``
-        (Bellhop, Scooter, KrakenField, OASP, RAM); SPARC computes
-        p(t) from its native source pulse and rejects both. Models with
-        a broadband transfer-function path also accept ``frequencies=``
-        as an explicit override for ``source.frequencies``. Bounce takes
-        a required ``output_dir=`` for persisting ``.brc`` / ``.irc``.
-
-        Unrecognised kwargs are silently ignored (per uacpy convention)
-        and otherwise threaded into the env-file writer for
-        model-specific format quirks (e.g. Bellhop's ``beam_shift``).
+        ``run()`` accepts a fixed keyword-only set: ``frequencies``,
+        ``source_waveform``, ``sample_rate``, ``output_duration``. Every
+        TIME_SERIES-capable wrapper (Bellhop, Scooter, KrakenField,
+        OASP, RAM) consumes ``source_waveform`` and ``sample_rate``;
+        SPARC warns that they are ignored (it uses its constructor
+        ``pulse_type``). ``output_duration`` is the desired output time
+        window (seconds); when given, the IFFT-based wrappers zero-pad
+        the source waveform internally so the auto-derived broadband
+        grid is tight enough (``Δf = 1/output_duration``), and Bellhop
+        maps it to ``time_window`` for delay-and-sum synthesis. Models
+        with a broadband path consume ``frequencies`` as an explicit
+        override for ``source.frequencies``. KrakenField additionally
+        takes ``n_modes`` for the field reconstruction limit. No
+        other kwargs are accepted — passing one raises
+        :class:`TypeError`.
 
         Parameters
         ----------
@@ -370,9 +372,6 @@ class PropagationModel(ABC):
             Output type to compute. ``None`` selects the model's natural
             default (typically ``RunMode.COHERENT_TL``). Each wrapper's
             :attr:`supported_modes` lists what it accepts.
-        **kwargs
-            Mode-specific extras and writer pass-through. See subclass
-            docstrings.
 
         Returns
         -------
@@ -391,6 +390,126 @@ class PropagationModel(ABC):
         RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
         RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS, RunMode.MODES,
     })
+
+    def _require_timeseries_signal(
+        self,
+        run_mode: 'RunMode',
+        source_waveform,
+        sample_rate,
+    ) -> None:
+        """Raise :class:`ConfigurationError` when the caller asked for a
+        :attr:`RunMode.TIME_SERIES` result but did not supply both
+        ``source_waveform`` and ``sample_rate``.
+
+        Used by every wrapper that synthesises p(t) from a broadband
+        transfer function (Bellhop, RAM, Scooter, KrakenField, OASP).
+        SPARC has its own pulse mechanism (``pulse_type``) and does not
+        call this helper.
+        """
+        if run_mode == RunMode.TIME_SERIES and (
+            source_waveform is None or sample_rate is None
+        ):
+            raise ConfigurationError(
+                f"{self.model_name}.run(run_mode=TIME_SERIES) requires "
+                f"source_waveform and sample_rate. For the broadband "
+                f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+            )
+
+    def _pad_waveform_to_duration(
+        self, source_waveform, sample_rate, output_duration,
+    ):
+        """Zero-pad ``source_waveform`` so its duration is at least
+        ``output_duration`` seconds. Returns the (possibly padded) array
+        unchanged when ``output_duration`` is ``None`` or already met.
+
+        Used by every IFFT-based TIME_SERIES wrapper so the user can
+        request a longer output than the source pulse without having to
+        pre-pad: ``Field.synthesize_time_series`` sets output duration
+        = waveform duration, and the auto-derived broadband grid uses
+        ``Δf = 1 / waveform_duration``.
+        """
+        if (
+            output_duration is None
+            or source_waveform is None
+            or sample_rate is None
+            or sample_rate <= 0
+        ):
+            return source_waveform
+        wf = np.asarray(source_waveform, dtype=float).ravel()
+        n_needed = int(np.ceil(float(output_duration) * float(sample_rate)))
+        if wf.size >= n_needed:
+            return source_waveform
+        pad = np.zeros(n_needed - wf.size, dtype=wf.dtype)
+        return np.concatenate([wf, pad])
+
+    def _resolve_time_series_frequencies(
+        self,
+        run_mode: 'RunMode',
+        source: 'Source',
+        frequencies,
+        source_waveform,
+        sample_rate,
+        threshold_db: float = -40.0,
+    ):
+        """Resolve the broadband frequency grid for TIME_SERIES dispatch.
+
+        When ``run_mode == TIME_SERIES`` and the caller did not pass
+        ``frequencies=``, derive one from the source waveform: Δf =
+        ``sample_rate / n_samples`` (= 1 / waveform duration), band edges
+        from the spectral support above ``threshold_db`` below the peak
+        (default −40 dB). Pinning ``frequencies=`` skips derivation.
+        Other run-modes pass through unchanged.
+
+        Returns the resolved ndarray (uniformly spaced, Hz), or ``None``
+        when no override applies. Emits a single ``UserWarning`` so the
+        user sees what band/Δf were picked.
+        """
+        if (
+            run_mode != RunMode.TIME_SERIES
+            or frequencies is not None
+            or source_waveform is None
+            or sample_rate is None
+        ):
+            return frequencies
+        wf = np.asarray(source_waveform, dtype=float).ravel()
+        n = wf.size
+        if n < 2 or sample_rate <= 0:
+            return frequencies
+        fs = float(sample_rate)
+        df = fs / n
+        spectrum = np.abs(np.fft.rfft(wf))
+        src_freqs = np.fft.rfftfreq(n, 1.0 / fs)
+        peak = spectrum.max()
+        if peak <= 0:
+            raise ConfigurationError(
+                f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                f"source_waveform is identically zero."
+            )
+        threshold = peak * 10.0 ** (threshold_db / 20.0)
+        significant = spectrum >= threshold
+        if not significant.any():
+            raise ConfigurationError(
+                f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                f"source_waveform has no spectral content above "
+                f"{threshold_db} dB."
+            )
+        i_lo = int(np.argmax(significant))
+        i_hi = len(significant) - 1 - int(np.argmax(significant[::-1]))
+        f_min = max(float(src_freqs[i_lo]), df)
+        f_max = float(src_freqs[i_hi])
+        if f_max <= f_min:
+            f_max = f_min + df
+        n_freqs = int(round((f_max - f_min) / df)) + 1
+        derived = np.linspace(f_min, f_max, n_freqs)
+        warnings.warn(
+            f"{self.model_name}.run(run_mode=TIME_SERIES): no "
+            f"`frequencies=` passed; auto-derived {n_freqs} freqs from "
+            f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
+            f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB). Pass "
+            f"`frequencies=` to silence.",
+            UserWarning, stacklevel=3,
+        )
+        return derived
 
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
@@ -586,7 +705,8 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
+        *,
+        run_mode: 'RunMode' = None,
     ) -> Result:
         """Compute transmission loss (thin wrapper around ``run``).
 
@@ -599,8 +719,10 @@ class PropagationModel(ABC):
         receiver : Receiver
             Receiver grid. Required — depth/range resolution is a physical
             decision and is not auto-generated.
-        **kwargs
-            Forwarded to :meth:`run`.
+        run_mode : RunMode, optional
+            ``COHERENT_TL`` (default), ``INCOHERENT_TL`` or
+            ``SEMICOHERENT_TL``. Other modes raise — call ``model.run()``
+            directly for those.
 
         Returns
         -------
@@ -620,10 +742,8 @@ class PropagationModel(ABC):
                 "transmission loss computation",
                 alternatives=['Bellhop', 'KrakenField', 'RAM', 'Scooter', 'OAST'],
             )
-        # Allow callers to echo run_mode=COHERENT_TL/INCOHERENT_TL/SEMICOHERENT_TL
-        # but reject anything off-the-TL-family — the explicit method choice
-        # already pins the intent.
-        run_mode = kwargs.pop('run_mode', RunMode.COHERENT_TL)
+        if run_mode is None:
+            run_mode = RunMode.COHERENT_TL
         if run_mode not in (
             RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
         ):
@@ -632,14 +752,13 @@ class PropagationModel(ABC):
                 f"INCOHERENT_TL / SEMICOHERENT_TL are accepted. Call "
                 f"{self.model_name}.run(run_mode=…) for other modes."
             )
-        return self.run(env, source, receiver, run_mode=run_mode, **kwargs)
+        return self.run(env, source, receiver, run_mode=run_mode)
 
     def compute_rays(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
     ) -> Result:
         """Compute ray paths (thin wrapper around ``run``).
 
@@ -659,14 +778,13 @@ class PropagationModel(ABC):
                 "ray path computation",
                 alternatives=['Bellhop'],
             )
-        return self.run(env, source, receiver, run_mode=RunMode.RAYS, **kwargs)
+        return self.run(env, source, receiver, run_mode=RunMode.RAYS)
 
     def compute_arrivals(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs
     ) -> Result:
         """
         Compute the arrival structure (convenience wrapper around ``run``).
@@ -679,8 +797,6 @@ class PropagationModel(ABC):
             Acoustic source.
         receiver : Receiver
             Receiver array.
-        **kwargs
-            Additional model-specific parameters.
 
         Returns
         -------
@@ -703,15 +819,13 @@ class PropagationModel(ABC):
                 "arrival computation",
                 alternatives=['Bellhop']
             )
-
-        return self.run(env, source, receiver, run_mode=RunMode.ARRIVALS, **kwargs)
+        return self.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
 
     def compute_modes(
         self,
         env: Environment,
         source: Source,
         n_modes: int = None,
-        **kwargs
     ) -> Result:
         """
         Compute normal modes (convenience wrapper around ``run``).
@@ -725,8 +839,6 @@ class PropagationModel(ABC):
             Acoustic source (used for frequency).
         n_modes : int, optional
             Number of modes to compute. If ``None``, all modes are computed.
-        **kwargs
-            Additional model-specific parameters.
 
         Returns
         -------
@@ -758,9 +870,9 @@ class PropagationModel(ABC):
             # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
 
-        return self._compute_modes_impl(env, source, n_modes, **kwargs)
+        return self._compute_modes_impl(env, source, n_modes)
 
-    def _compute_modes_impl(self, env, source, n_modes, **kwargs):
+    def _compute_modes_impl(self, env, source, n_modes):
         """
         Model-specific mode computation implementation.
 
@@ -769,34 +881,26 @@ class PropagationModel(ABC):
         dummy_receiver = Receiver(depths=[0.0], ranges=[0.0])
         return self.run(
             env, source, dummy_receiver,
-            run_mode=RunMode.MODES, n_modes=n_modes, **kwargs
+            run_mode=RunMode.MODES, n_modes=n_modes,
         )
 
     def compute_eigenrays(
         self,
         env: Environment,
         source: Source,
-        receiver: Optional[Receiver] = None,
-        range: Optional[float] = None,
-        depth: Optional[float] = None,
-        **kwargs,
+        receiver: Receiver,
     ) -> Result:
         """Compute eigenrays — rays that arrive at the receiver(s).
 
-        Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Accepts
-        either a ``Receiver`` directly or a single-point shortcut via
-        ``range=``/``depth=`` (a 1-point Receiver is built
-        internally). Returns the raw :class:`Rays` from the solver.
+        Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Returns
+        the raw :class:`Rays` from the solver. For a single-point target
+        build a 1-point ``Receiver`` first:
 
-        Filtering / sorting / truncation lives on :class:`Rays`. To select
-        the closest paths, chain a Rays method:
-
-        >>> rays = bellhop.compute_eigenrays(env, source, range=2000, depth=30)
+        >>> receiver = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
+        >>> rays = bellhop.compute_eigenrays(env, source, receiver)
         >>> close = rays.top_n_by_miss(8).truncate_at_receiver()
         >>> direct = rays.filter_by_bounces(kind='direct')
         >>> within = rays.filter_by_miss_distance(max_miss=15.0)
-
-        ``**kwargs`` forwards to :meth:`run`.
         """
         if not self.supports_mode(RunMode.EIGENRAYS):
             raise UnsupportedFeatureError(
@@ -804,32 +908,13 @@ class PropagationModel(ABC):
                 "eigenray computation",
                 alternatives=['Bellhop'],
             )
-
-        single_point = range is not None and depth is not None
-        if receiver is None:
-            if not single_point:
-                raise ConfigurationError(
-                    "compute_eigenrays requires either receiver=… or both "
-                    "range=… and depth=…"
-                )
-            receiver = Receiver(
-                depths=np.array([float(depth)]),
-                ranges=np.array([float(range)]),
-            )
-        elif single_point:
-            raise ConfigurationError(
-                "Pass either receiver=… OR (range, depth), not both."
-            )
-
-        return self.run(env, source, receiver,
-                        run_mode=RunMode.EIGENRAYS, **kwargs)
+        return self.run(env, source, receiver, run_mode=RunMode.EIGENRAYS)
 
     def compute_reflection(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
     ) -> Result:
         """Compute plane-wave reflection coefficients.
 
@@ -844,25 +929,23 @@ class PropagationModel(ABC):
                 "reflection coefficient computation",
                 alternatives=['Bounce', 'OASR'],
             )
-        return self.run(
-            env, source, receiver, run_mode=RunMode.REFLECTION, **kwargs,
-        )
+        return self.run(env, source, receiver, run_mode=RunMode.REFLECTION)
 
     def compute_time_series(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
+        *,
         source_waveform=None,
         sample_rate=None,
-        **kwargs,
     ) -> Result:
         """Compute time-domain pressure p(t) at the receiver(s).
 
         Forwards ``source_waveform`` and ``sample_rate`` to
         ``run(run_mode=RunMode.TIME_SERIES)``. SPARC ignores both (it
-        builds p(t) from its native pulse); every other TIME_SERIES
-        model requires them.
+        builds p(t) from its native ``pulse_type``); every other
+        TIME_SERIES model requires them.
         """
         if not self.supports_mode(RunMode.TIME_SERIES):
             raise UnsupportedFeatureError(
@@ -876,7 +959,6 @@ class PropagationModel(ABC):
             run_mode=RunMode.TIME_SERIES,
             source_waveform=source_waveform,
             sample_rate=sample_rate,
-            **kwargs,
         )
 
     def compute_transfer_function(
@@ -884,11 +966,14 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
+        *,
+        frequencies=None,
     ) -> Result:
         """Compute broadband complex transfer function H(f).
 
-        Dispatches to ``run(run_mode=RunMode.BROADBAND)``.
+        Dispatches to ``run(run_mode=RunMode.BROADBAND)``. Pass
+        ``frequencies=`` to override ``source.frequencies`` for the
+        sweep.
         """
         if not self.supports_mode(RunMode.BROADBAND):
             raise UnsupportedFeatureError(
@@ -899,7 +984,8 @@ class PropagationModel(ABC):
             )
         return self.run(
             env, source, receiver,
-            run_mode=RunMode.BROADBAND, **kwargs,
+            run_mode=RunMode.BROADBAND,
+            frequencies=frequencies,
         )
 
     def compute_covariance(
@@ -907,7 +993,6 @@ class PropagationModel(ABC):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
     ) -> Result:
         """Compute hydrophone-array covariance matrix C(f, i, j).
 
@@ -920,17 +1005,13 @@ class PropagationModel(ABC):
                 "covariance-matrix computation",
                 alternatives=['OASN'],
             )
-        return self.run(
-            env, source, receiver,
-            run_mode=RunMode.COVARIANCE, **kwargs,
-        )
+        return self.run(env, source, receiver, run_mode=RunMode.COVARIANCE)
 
     def compute_replicas(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-        **kwargs,
     ) -> Result:
         """Compute replica fields at the array elements per candidate
         source position (matched-field-processing templates).
@@ -944,10 +1025,7 @@ class PropagationModel(ABC):
                 "replica-field computation",
                 alternatives=['OASN'],
             )
-        return self.run(
-            env, source, receiver,
-            run_mode=RunMode.REPLICA, **kwargs,
-        )
+        return self.run(env, source, receiver, run_mode=RunMode.REPLICA)
 
     def _find_executable_in_paths(
         self,
@@ -1432,5 +1510,100 @@ class PropagationModel(ABC):
         return receiver
 
     def __repr__(self) -> str:
-        tmpfs_str = "tmpfs" if self.use_tmpfs else "disk"
-        return f"{self.model_name}(io={tmpfs_str}, verbose={self.verbose})"
+        """``ClassName(arg=val, …)`` showing only constructor params whose
+        current value differs from the constructor default.
+
+        Walks ``__init__`` along the MRO (subclasses forward to
+        ``super().__init__(**kwargs)``, so the union of named parameters
+        across the chain is the full configuration surface). Reads each
+        param off ``self.<name>`` — the same contract that powers
+        ``model.copy``. Ndarrays and long sequences are summarised so
+        the result stays one-line-readable even when a model has many
+        knobs.
+        """
+        bits: List[str] = []
+        for name, default in _collect_init_params(type(self)):
+            if not hasattr(self, name):
+                continue
+            value = getattr(self, name)
+            if default is not _NO_DEFAULT and _values_equal(value, default):
+                continue
+            bits.append(f"{name}={_short_repr(value)}")
+        return f"{type(self).__name__}({', '.join(bits)})"
+
+
+_NO_DEFAULT = object()
+
+
+def _collect_init_params(cls) -> List[tuple]:
+    """Walk ``cls.__mro__`` for every ``__init__`` and collect named
+    parameters (excluding ``self`` and ``**kwargs``) in declaration order,
+    deduplicated by name (subclass declaration wins).
+
+    Returns a list of ``(name, default_or_NO_DEFAULT)`` pairs. Used by
+    :meth:`PropagationModel.__repr__` and parallels what
+    :meth:`PropagationModel.copy` introspects.
+    """
+    import inspect as _inspect
+
+    seen: Dict[str, object] = {}
+    order: List[str] = []
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        init = klass.__dict__.get('__init__')
+        if init is None:
+            continue
+        try:
+            sig = _inspect.signature(init)
+        except (TypeError, ValueError):
+            continue
+        for name, param in sig.parameters.items():
+            if name == 'self':
+                continue
+            if param.kind == _inspect.Parameter.VAR_KEYWORD:
+                continue
+            if param.kind == _inspect.Parameter.VAR_POSITIONAL:
+                continue
+            if name in seen:
+                continue
+            seen[name] = (
+                param.default if param.default is not _inspect.Parameter.empty
+                else _NO_DEFAULT
+            )
+            order.append(name)
+    return [(name, seen[name]) for name in order]
+
+
+def _values_equal(a, b) -> bool:
+    """Compare two configuration values, tolerating ndarray equality."""
+    if a is b:
+        return True
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        try:
+            return bool(np.array_equal(np.asarray(a), np.asarray(b)))
+        except Exception:
+            return False
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
+
+def _short_repr(value, *, list_limit: int = 6) -> str:
+    """Compact ``repr`` for a constructor value, summarising big arrays.
+
+    Used by :meth:`PropagationModel.__repr__` so ``print(model)`` stays
+    short even when a knob holds a large ndarray or list.
+    """
+    if isinstance(value, np.ndarray):
+        if value.size <= list_limit:
+            return repr(value.tolist())
+        return f"ndarray(shape={tuple(value.shape)}, dtype={value.dtype})"
+    if isinstance(value, (list, tuple)):
+        if len(value) <= list_limit:
+            return repr(value)
+        return f"{type(value).__name__}(len={len(value)})"
+    if isinstance(value, Path):
+        return repr(str(value))
+    return repr(value)

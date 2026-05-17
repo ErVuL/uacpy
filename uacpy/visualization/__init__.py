@@ -5,6 +5,13 @@ Canonical surface
 * :func:`plot_field` — auto-shape plotter for :class:`~uacpy.Field`. Slice
   with :meth:`Field.at` / :meth:`Field.isel` first to control what gets
   drawn (1-D line cut vs 2-D heatmap).
+* :func:`animate_field` — animate a time-series ``Field`` (returns a
+  :class:`~matplotlib.animation.FuncAnimation`).
+* :func:`save_animation` — one-liner GIF/MP4 export wrapping
+  :func:`animate_field` (writer inferred from suffix).
+* :func:`plot_time_snapshots` — time-series analogue of
+  :func:`compare_models`: per-model rows × per-time columns of
+  ``p(d, r, t)``.
 * :func:`compare` — overlay 1-D sliced fields.
 * :func:`compare_models` — side-by-side heatmap grid.
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans, arrival stems.
@@ -26,6 +33,9 @@ from uacpy.visualization.style import apply_professional_style
 from uacpy.visualization.plots import (
     plot_result,
     plot_field,
+    animate_field,
+    save_animation,
+    plot_time_snapshots,
     compare,
     compare_models,
     plot_rays,
@@ -42,6 +52,9 @@ from uacpy.visualization.plots import (
 __all__ = [
     'plot_result',
     'plot_field',
+    'animate_field',
+    'save_animation',
+    'plot_time_snapshots',
     'compare',
     'compare_models',
     'plot_rays',

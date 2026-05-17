@@ -67,12 +67,10 @@ def main():
 
     print("[2/4] Running OASN (spatial covariance)...", end=" ", flush=True)
     try:
-        oasn = OASN(verbose=False)
         # Without surface_noise_level the cov collapses to the 0 dB
         # white-noise floor (identity); 70 dB ≈ Wenz amplitude at 100 Hz.
-        result_oasn = oasn.compute_covariance(
-            env, source, receiver, surface_noise_level=70.0,
-        )
+        oasn = OASN(verbose=False, surface_noise_level=70.0)
+        result_oasn = oasn.compute_covariance(env, source, receiver)
         print("✓")
         oasn_success = True
     except Exception as e:

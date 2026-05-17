@@ -63,7 +63,6 @@ from uacpy.core.constants import (
     DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
     C_LOW_FACTOR_KRAKEN,
 )
-import inspect
 import shutil
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
@@ -127,6 +126,8 @@ class _KrakenBase(PropagationModel):
         interp_ssp: Optional[str] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
+        rmax_m: Optional[float] = None,
+        mode_depth_grid: Optional[np.ndarray] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -149,6 +150,20 @@ class _KrakenBase(PropagationModel):
         self.leaky_modes = leaky_modes
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
+        )
+        # ``rmax_m`` caps the modal-solver phase-speed search range and
+        # field.exe's modal-sum interpolation window (Kraken/KrakenC
+        # ``RMax`` field). ``None`` → derive at ``run()`` from
+        # ``receiver.range_max``: 1.05× for narrowband COHERENT_TL,
+        # 3× for broadband / time-series so the outermost receivers
+        # sit well inside the interpolation band across the sweep.
+        # Fallback 100 km when no receiver range is available.
+        self.rmax_m = float(rmax_m) if rmax_m is not None else None
+        # ``mode_depth_grid`` overrides ``compute_modes``'s dense depth
+        # grid. ``None`` → sample at ``mode_points_per_meter`` density.
+        self.mode_depth_grid = (
+            np.asarray(mode_depth_grid, dtype=float)
+            if mode_depth_grid is not None else None
         )
 
         if leaky_modes:
@@ -222,12 +237,18 @@ class _KrakenBase(PropagationModel):
         return result
 
     @staticmethod
-    def _compute_rmax_m(receiver, fallback_m: float = 100_000.0) -> float:
+    def _compute_rmax_m(
+        receiver, fallback_m: float = 100_000.0, *, multiplier: float = 1.05,
+    ) -> float:
         """Derive field-computation RMax (m) from receiver ranges.
 
-        Adds a 5 % buffer so field.exe doesn't clip the outermost ranges.
-        Falls back to ``fallback_m`` if the receiver has no explicit range
-        vector (e.g. mode-only Kraken runs).
+        Multiplies the largest receiver range by ``multiplier`` so
+        field.exe's modal-sum interpolation has headroom. ``1.05`` (5 %)
+        is enough for narrowband COHERENT_TL where only the modal-decay
+        edge matters; broadband / time-series synthesis benefits from
+        ``≥3`` so the outermost receivers sit well inside the
+        interpolation band across the whole pulse spectrum. Falls back
+        to ``fallback_m`` if the receiver has no range vector.
         """
         if receiver is None:
             return float(fallback_m)
@@ -237,9 +258,18 @@ class _KrakenBase(PropagationModel):
         rmax_m = float(np.max(np.asarray(ranges, dtype=float)))
         if rmax_m <= 0:
             return float(fallback_m)
-        return rmax_m * 1.05
+        return rmax_m * float(multiplier)
 
-    def _write_kraken_env(self, filepath, env, source, **kwargs):
+    def _write_kraken_env(
+        self,
+        filepath,
+        env,
+        source,
+        *,
+        receiver_obj: Optional[Receiver] = None,
+        receiver_depths=(100.0,),
+        frequencies: Optional[np.ndarray] = None,
+    ):
         """
         Write Kraken environment file using shared ATEnvWriter
 
@@ -274,12 +304,19 @@ class _KrakenBase(PropagationModel):
             trc_dest = Path(filepath).with_suffix('.trc')
             shutil.copy(src, trc_dest)
 
-        receiver_obj = kwargs.get('receiver_obj', None)
-        receiver_depths = kwargs.get('receiver_depths', [100.0])
-        rmax_m = kwargs.get('rmax_m', None)
-        if rmax_m is None:
-            rmax_m = self._compute_rmax_m(receiver_obj, fallback_m=100_000.0)
-        frequencies = kwargs.get('frequencies', None)
+        # Broadband / time-series synthesis needs RMax well past the
+        # outermost receiver so the modal-sum interpolation edge stays
+        # clear at every frequency in the sweep. Narrowband COHERENT_TL
+        # only needs to clear the modal-decay edge — 5 % is enough.
+        is_broadband = frequencies is not None and len(np.atleast_1d(frequencies)) > 1
+        rmax_m = (
+            self.rmax_m
+            if self.rmax_m is not None
+            else self._compute_rmax_m(
+                receiver_obj, fallback_m=100_000.0,
+                multiplier=3.0 if is_broadband else 1.05,
+            )
+        )
 
         with open(filepath, 'w') as f:
             write_header(
@@ -346,7 +383,7 @@ class _KrakenBase(PropagationModel):
             self._attach_prt_tail(exc, work_dir, base_name)
             raise
 
-    def _compute_modes_impl(self, env, source, n_modes, **kwargs):
+    def _compute_modes_impl(self, env, source, n_modes):
         """Override base class: use a dense depth grid for mode sampling.
 
         ``PropagationModel._compute_modes_impl`` uses a dummy receiver
@@ -359,16 +396,16 @@ class _KrakenBase(PropagationModel):
         Parameters
         ----------
         env, source, n_modes : see PropagationModel.compute_modes
-        mode_depth_grid : array-like, optional (kwarg)
-            User-supplied mode sampling depths. If omitted the grid is
-            ``max(100, total_depth * mode_points_per_meter)`` points
-            linearly spaced from 0 to the total media depth.
+
+        The depth sampling grid comes from ``self.mode_depth_grid`` (set
+        via the constructor). When ``None`` the grid is
+        ``max(100, total_depth * mode_points_per_meter)`` points linearly
+        spaced from 0 to the total media depth.
         """
         from uacpy.core.receiver import Receiver as _Receiver
 
-        override = kwargs.pop('mode_depth_grid', None)
-        if override is not None:
-            mode_depths = np.asarray(override, dtype=float)
+        if self.mode_depth_grid is not None:
+            mode_depths = self.mode_depth_grid
         else:
             total_depth = env.depth
             if env.has_layered_bottom():
@@ -379,17 +416,9 @@ class _KrakenBase(PropagationModel):
             mode_depths = np.linspace(0.0, float(total_depth), n_pts)
 
         dense_receiver = _Receiver(depths=mode_depths, ranges=[0.0])
-        # Kraken/KrakenC.run ignore run_mode (they only compute modes); only
-        # pass it if the concrete class advertises the kwarg (KrakenField).
-        sig = inspect.signature(self.run)
-        if 'run_mode' in sig.parameters:
-            return self.run(
-                env, source, dense_receiver,
-                run_mode=RunMode.MODES, n_modes=n_modes, **kwargs,
-            )
         return self.run(
             env, source, dense_receiver,
-            n_modes=n_modes, **kwargs,
+            run_mode=RunMode.MODES, n_modes=n_modes,
         )
 
     def _read_modes_file(self, filepath: Path) -> Dict:
@@ -616,7 +645,6 @@ class Kraken(_KrakenBase):
         run_mode: Optional[RunMode] = None,
         *,
         n_modes: Optional[int] = None,
-        **kwargs
     ) -> Result:
         """
         Compute normal modes
@@ -664,7 +692,7 @@ class Kraken(_KrakenBase):
             )
             return krakenc.run(
                 env, source, receiver, run_mode=run_mode,
-                n_modes=n_modes, **kwargs,
+                n_modes=n_modes,
             )
 
         env = self._project_environment(env)
@@ -680,7 +708,6 @@ class Kraken(_KrakenBase):
                 env_file, env, source,
                 receiver_obj=receiver,
                 receiver_depths=receiver.depths,
-                **kwargs,
             )
 
             self._log("Running Kraken...")
@@ -778,7 +805,6 @@ class KrakenC(_KrakenBase):
         run_mode: Optional[RunMode] = None,
         *,
         n_modes: Optional[int] = None,
-        **kwargs
     ) -> Result:
         """
         Compute complex normal modes.
@@ -807,7 +833,6 @@ class KrakenC(_KrakenBase):
                 env_file, env, source,
                 receiver_obj=receiver,
                 receiver_depths=receiver.depths,
-                **kwargs,
             )
 
             self._log("Running KrakenC...")
@@ -1065,11 +1090,12 @@ class KrakenField(_KrakenBase):
         source: Source,
         receiver: Receiver,
         run_mode=None,
+        *,
         frequencies: Optional[np.ndarray] = None,
         n_modes: Optional[int] = None,
         source_waveform=None,
         sample_rate=None,
-        **kwargs
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Compute TL field using normal modes.
@@ -1097,6 +1123,12 @@ class KrakenField(_KrakenBase):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            auto-derived broadband grid is tight enough (``Δf =
+            1/output_duration``). Defaults to
+            ``len(source_waveform)/sample_rate``.
         """
         # Early gate: coupled-mode field calculations cannot be
         # combined with incoherent mode addition. AT's field.f90
@@ -1149,18 +1181,16 @@ class KrakenField(_KrakenBase):
         run_mode = self._resolve_run_mode(run_mode, default=smart_default)
 
         if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
-            if run_mode == RunMode.TIME_SERIES and (
-                source_waveform is None or sample_rate is None
-            ):
-                raise ConfigurationError(
-                    "KrakenField.run(run_mode=TIME_SERIES) requires "
-                    "source_waveform and sample_rate. For the broadband "
-                    "transfer function H(f), use run_mode=RunMode.BROADBAND."
-                )
+            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+            source_waveform = self._pad_waveform_to_duration(
+                source_waveform, sample_rate, output_duration,
+            )
+            frequencies = self._resolve_time_series_frequencies(
+                run_mode, source, frequencies, source_waveform, sample_rate,
+            )
             tf = self._compute_broadband_field(
                 env, source, receiver,
                 frequencies=frequencies, n_modes=n_modes,
-                **kwargs
             )
             if run_mode == RunMode.TIME_SERIES:
                 return tf.synthesize_time_series(
@@ -1172,7 +1202,7 @@ class KrakenField(_KrakenBase):
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         return self._compute_field_via_exe(
-            env, source, receiver, n_modes=n_modes, **kwargs
+            env, source, receiver, n_modes=n_modes,
         )
 
 # ── field.exe pipeline ──────────────────────────────────────────────
@@ -1180,7 +1210,6 @@ class KrakenField(_KrakenBase):
     def _compute_field_via_exe(
         self, env, source, receiver,
         return_pressure=False, n_modes=None, frequencies=None,
-        **kwargs,
     ):
         """Compute field using kraken.exe → field.exe AT pipeline.
 
@@ -1296,9 +1325,7 @@ class KrakenField(_KrakenBase):
                     env_file, env, source,
                     receiver_obj=receiver_for_modes,
                     receiver_depths=mode_depths,
-                    rmax_m=float(np.max(receiver.ranges)),
                     frequencies=freq_vec if broadband else None,
-                    **kwargs
                 )
 
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
@@ -1457,7 +1484,7 @@ class KrakenField(_KrakenBase):
 
     def _compute_broadband_field(
         self, env, source, receiver,
-        frequencies=None, n_modes=None, **kwargs,
+        frequencies=None, n_modes=None,
     ):
         """
         Compute broadband transfer function.
@@ -1494,5 +1521,4 @@ class KrakenField(_KrakenBase):
             env, source, receiver,
             frequencies=frequencies,
             n_modes=n_modes,
-            **kwargs,
         )
