@@ -140,11 +140,12 @@ Model(
 2. **Physics scenario** — `env`, `source`, `receiver` go positionally
    into `run()`.
 3. **Per-call request** — `run_mode` plus the signal kwargs
-   `frequencies=`, `source_waveform=`, `sample_rate=` are the **only**
-   kwargs `run()` accepts. Every model has the same fixed signature:
-   `run(env, source, receiver, run_mode=None, *, frequencies=None,
-   source_waveform=None, sample_rate=None)`. KrakenField additionally
-   takes `n_modes=` for the field reconstruction limit.
+   `frequencies=`, `source_waveform=`, `sample_rate=`, `output_duration=`
+   are the **only** kwargs `run()` accepts. Every model has the same
+   fixed signature: `run(env, source, receiver, run_mode=None, *,
+   frequencies=None, source_waveform=None, sample_rate=None,
+   output_duration=None)`. KrakenField additionally takes `n_modes=`
+   for the field reconstruction limit.
 
 **Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
 so `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) raises at
@@ -160,9 +161,21 @@ See *Volume Absorption* below.
 **Mode-specific kwargs.** Every `RunMode.TIME_SERIES`-capable wrapper
 (Bellhop, Scooter, KrakenField, OASP, RAM) takes `source_waveform=` +
 `sample_rate=` on `run()`. Models with a broadband path also accept
-`frequencies=` for an explicit override of `source.frequencies`. SPARC
-builds p(t) from its native `pulse_type` (constructor); passing
-`source_waveform`/`sample_rate` to `SPARC.run()` emits a `UserWarning`.
+`frequencies=` for an explicit override of `source.frequencies`. Pass
+`output_duration=` for a specific output time window (seconds) — the
+IFFT wrappers zero-pad the waveform internally so `Δf = 1/output_duration`
+falls out of the synthesis, and Bellhop maps it to `time_window` with
+`t_start=0`. SPARC builds p(t) from its native `pulse_type` (constructor);
+passing `source_waveform`/`sample_rate` to `SPARC.run()` emits a
+`UserWarning`.
+
+**Auto-derived broadband grids.** When you call `run_mode=TIME_SERIES`
+without `frequencies=`, the wrapper derives a uniform grid from the
+source-waveform spectrum (`Δf = sample_rate / n_samples`, band edges
+where the spectrum is ≥ −40 dB below peak) and emits a `UserWarning`
+reporting what it picked. Pin `frequencies=` to skip the derivation.
+`Field.synthesize_time_series` additionally warns if `1/Δf <
+waveform_duration` (DFT wraparound).
 
 ### Persisting output files (`work_dir` + `cleanup`)
 
@@ -707,7 +720,7 @@ transform (`uacpy.io.grn_reader`).
 
 ```python
 from uacpy.models import Scooter
-sc = Scooter(rmax_multiplier=2.0,           # padding for k-resolution
+sc = Scooter(rmax_multiplier=None,          # None → 2.0 (COHERENT_TL) or 3.0 (BROADBAND/TIME_SERIES)
              source_type='R',                # 'R' cylindrical | 'X' Cartesian
              spectrum='positive',            # 'positive' (fast) | 'negative' | 'both'
              field_interp='O')               # 'O' polynomial | 'P' Padé
@@ -783,7 +796,7 @@ sp = SPARC(output_mode='R',          # 'R' horizontal array | 'D' vertical | 'S'
            pulse_type='PN+B',         # 4-char source pulse code
            n_t_out=512,               # power-of-2 default for IFFT
            t_max=None,                # None ⇒ 2.5 × travel time
-           rmax_safety_margin=1.0001)
+           rmax_safety_margin=None)   # None → 1.0001 (COHERENT_TL) or 3.0 (TIME_SERIES)
 field = sp.run(env, source, receiver)
 ```
 
@@ -1134,11 +1147,14 @@ Note that this call mutates process-global `mpl.rcParams` and persists
 across subsequent plots — wrap in `matplotlib.rc_context()` if you
 want it scoped.
 
-### The 13 helpers
+### The 16 helpers
 
 | Helper | Takes | Notes |
 |---|---|---|
 | `plot_field(field, env=None, *, value='tl', stacked=False, contours=None, ...)` | `Field` | Auto-shape: 1 surviving coord → line, 2 → heatmap. `stacked=True` for 2-D `(X, time)` → waterfall. `value` ∈ `'tl' \| 'mag' \| 'phase' \| 'real' \| 'imag'`. |
+| `animate_field(field, *, env=None, fps=30, frame_stride=None, p_max=None, aspect='auto', ...)` | time-series `Field` | Returns a `matplotlib.animation.FuncAnimation` of `p(d, r, t)`. |
+| `save_animation(field, path, *, fps=20, **animate_kwargs)` | time-series `Field` | One-liner GIF/MP4 export wrapping `animate_field`; writer inferred from `path` suffix (`.gif` → Pillow, `.mp4` → ffmpeg). |
+| `plot_time_snapshots(fields, times_s, *, env=None, p_max=None, ...)` | dict/list of time-series `Field`s + times | Per-model rows × per-time columns of `p(d, r, t)`. Time-series analogue of `compare_models`; per-row colour scale by default. |
 | `compare(fields, labels=None, *, value='tl')` | list of 1-D `Field`s | Overlay multiple sliced fields on one axes. |
 | `compare_models(fields, labels=None, *, env=None, ncols=None, contours=None, ...)` | list/dict of 2-D `Field`s | Side-by-side heatmap grid with one shared colourbar. |
 | `plot_rays(rays, *, env=None, color_by='bounces', ...)` | `Rays` | Direct/surface/bottom/both colour-coded; auto-overlays seafloor and source/receivers. |
@@ -1382,6 +1398,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 23 | `example_23_collapse_methods.py` | Same RD env collapsed multiple ways via `collapse={…}` | |
 | 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
+| 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / KrakenField / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
 
 Smoke test:
 

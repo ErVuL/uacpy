@@ -1270,6 +1270,7 @@ class OASP(PropagationModel):
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run OASP parabolic equation computation
@@ -1291,6 +1292,12 @@ class OASP(PropagationModel):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            broadband frequency grid is tight enough (``Δf =
+            1/output_duration``) to span this window without DFT
+            wraparound. Defaults to ``len(source_waveform)/sample_rate``.
 
         Returns
         -------
@@ -1302,6 +1309,13 @@ class OASP(PropagationModel):
         freq_max = self.freq_max
 
         run_mode = self._resolve_run_mode(run_mode)
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+        source_waveform = self._pad_waveform_to_duration(
+            source_waveform, sample_rate, output_duration,
+        )
+        frequencies = self._resolve_time_series_frequencies(
+            run_mode, source, frequencies, source_waveform, sample_rate,
+        )
 
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce
@@ -1348,8 +1362,6 @@ class OASP(PropagationModel):
                     n_time_samples = 1 << (target - 1).bit_length()
                 else:
                     n_time_samples = 2
-
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)

@@ -151,10 +151,13 @@ class _KrakenBase(PropagationModel):
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
         )
-        # ``rmax_m`` caps the modal-solver phase-speed search range
-        # (Kraken/KrakenC ``RMax`` field). ``None`` → derive at ``run()``
-        # from ``receiver.range_max`` (fallback 100 km when no receiver
-        # range is available).
+        # ``rmax_m`` caps the modal-solver phase-speed search range and
+        # field.exe's modal-sum interpolation window (Kraken/KrakenC
+        # ``RMax`` field). ``None`` → derive at ``run()`` from
+        # ``receiver.range_max``: 1.05× for narrowband COHERENT_TL,
+        # 3× for broadband / time-series so the outermost receivers
+        # sit well inside the interpolation band across the sweep.
+        # Fallback 100 km when no receiver range is available.
         self.rmax_m = float(rmax_m) if rmax_m is not None else None
         # ``mode_depth_grid`` overrides ``compute_modes``'s dense depth
         # grid. ``None`` → sample at ``mode_points_per_meter`` density.
@@ -234,12 +237,18 @@ class _KrakenBase(PropagationModel):
         return result
 
     @staticmethod
-    def _compute_rmax_m(receiver, fallback_m: float = 100_000.0) -> float:
+    def _compute_rmax_m(
+        receiver, fallback_m: float = 100_000.0, *, multiplier: float = 1.05,
+    ) -> float:
         """Derive field-computation RMax (m) from receiver ranges.
 
-        Adds a 5 % buffer so field.exe doesn't clip the outermost ranges.
-        Falls back to ``fallback_m`` if the receiver has no explicit range
-        vector (e.g. mode-only Kraken runs).
+        Multiplies the largest receiver range by ``multiplier`` so
+        field.exe's modal-sum interpolation has headroom. ``1.05`` (5 %)
+        is enough for narrowband COHERENT_TL where only the modal-decay
+        edge matters; broadband / time-series synthesis benefits from
+        ``≥3`` so the outermost receivers sit well inside the
+        interpolation band across the whole pulse spectrum. Falls back
+        to ``fallback_m`` if the receiver has no range vector.
         """
         if receiver is None:
             return float(fallback_m)
@@ -249,7 +258,7 @@ class _KrakenBase(PropagationModel):
         rmax_m = float(np.max(np.asarray(ranges, dtype=float)))
         if rmax_m <= 0:
             return float(fallback_m)
-        return rmax_m * 1.05
+        return rmax_m * float(multiplier)
 
     def _write_kraken_env(
         self,
@@ -295,10 +304,18 @@ class _KrakenBase(PropagationModel):
             trc_dest = Path(filepath).with_suffix('.trc')
             shutil.copy(src, trc_dest)
 
+        # Broadband / time-series synthesis needs RMax well past the
+        # outermost receiver so the modal-sum interpolation edge stays
+        # clear at every frequency in the sweep. Narrowband COHERENT_TL
+        # only needs to clear the modal-decay edge — 5 % is enough.
+        is_broadband = frequencies is not None and len(np.atleast_1d(frequencies)) > 1
         rmax_m = (
             self.rmax_m
             if self.rmax_m is not None
-            else self._compute_rmax_m(receiver_obj, fallback_m=100_000.0)
+            else self._compute_rmax_m(
+                receiver_obj, fallback_m=100_000.0,
+                multiplier=3.0 if is_broadband else 1.05,
+            )
         )
 
         with open(filepath, 'w') as f:
@@ -1078,6 +1095,7 @@ class KrakenField(_KrakenBase):
         n_modes: Optional[int] = None,
         source_waveform=None,
         sample_rate=None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Compute TL field using normal modes.
@@ -1105,6 +1123,12 @@ class KrakenField(_KrakenBase):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            auto-derived broadband grid is tight enough (``Δf =
+            1/output_duration``). Defaults to
+            ``len(source_waveform)/sample_rate``.
         """
         # Early gate: coupled-mode field calculations cannot be
         # combined with incoherent mode addition. AT's field.f90
@@ -1158,6 +1182,12 @@ class KrakenField(_KrakenBase):
 
         if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
             self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+            source_waveform = self._pad_waveform_to_duration(
+                source_waveform, sample_rate, output_duration,
+            )
+            frequencies = self._resolve_time_series_frequencies(
+                run_mode, source, frequencies, source_waveform, sample_rate,
+            )
             tf = self._compute_broadband_field(
                 env, source, receiver,
                 frequencies=frequencies, n_modes=n_modes,

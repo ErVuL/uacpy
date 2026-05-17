@@ -128,14 +128,23 @@ def _uacpy_format_warning(
 
     Output: ``[YYYY/MM/DD HH:MM:SS UTC] [<CATEGORY>] [<module>:<lineno>] message``.
     Installed by :func:`install_warning_formatter`.
+
+    Guarded against interpreter-shutdown teardown: when matplotlib (or
+    any other library) emits a warning during ``__del__`` after Python
+    has started tearing down ``sys.modules``, ``datetime`` /
+    ``_source_from_filename`` may be unavailable. Fall back to a plain
+    str(message) in that case so the warning isn't lost.
     """
-    ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
-    cat_name = getattr(category, '__name__', str(category))
-    label = 'WARN' if cat_name == 'UserWarning' else cat_name.replace(
-        'Warning', '',
-    ).upper() or 'WARN'
-    source = f"{_source_from_filename(filename)}:{lineno}"
-    return f"[{ts}] [{label}] [{source}] {message}\n"
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
+        cat_name = getattr(category, '__name__', str(category))
+        label = 'WARN' if cat_name == 'UserWarning' else cat_name.replace(
+            'Warning', '',
+        ).upper() or 'WARN'
+        source = f"{_source_from_filename(filename)}:{lineno}"
+        return f"[{ts}] [{label}] [{source}] {message}\n"
+    except Exception:
+        return f"{filename}:{lineno}: {category.__name__}: {message}\n"
 
 
 def install_warning_formatter() -> None:

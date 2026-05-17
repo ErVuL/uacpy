@@ -345,10 +345,15 @@ class PropagationModel(ABC):
         per parameter set.
 
         ``run()`` accepts a fixed keyword-only set: ``frequencies``,
-        ``source_waveform``, ``sample_rate``. Every TIME_SERIES-capable
-        wrapper (Bellhop, Scooter, KrakenField, OASP, RAM) consumes
-        ``source_waveform`` and ``sample_rate``; SPARC warns that they
-        are ignored (it uses its constructor ``pulse_type``). Models
+        ``source_waveform``, ``sample_rate``, ``output_duration``. Every
+        TIME_SERIES-capable wrapper (Bellhop, Scooter, KrakenField,
+        OASP, RAM) consumes ``source_waveform`` and ``sample_rate``;
+        SPARC warns that they are ignored (it uses its constructor
+        ``pulse_type``). ``output_duration`` is the desired output time
+        window (seconds); when given, the IFFT-based wrappers zero-pad
+        the source waveform internally so the auto-derived broadband
+        grid is tight enough (``Δf = 1/output_duration``), and Bellhop
+        maps it to ``time_window`` for delay-and-sum synthesis. Models
         with a broadband path consume ``frequencies`` as an explicit
         override for ``source.frequencies``. KrakenField additionally
         takes ``n_modes`` for the field reconstruction limit. No
@@ -409,6 +414,102 @@ class PropagationModel(ABC):
                 f"source_waveform and sample_rate. For the broadband "
                 f"transfer function H(f), use run_mode=RunMode.BROADBAND."
             )
+
+    def _pad_waveform_to_duration(
+        self, source_waveform, sample_rate, output_duration,
+    ):
+        """Zero-pad ``source_waveform`` so its duration is at least
+        ``output_duration`` seconds. Returns the (possibly padded) array
+        unchanged when ``output_duration`` is ``None`` or already met.
+
+        Used by every IFFT-based TIME_SERIES wrapper so the user can
+        request a longer output than the source pulse without having to
+        pre-pad: ``Field.synthesize_time_series`` sets output duration
+        = waveform duration, and the auto-derived broadband grid uses
+        ``Δf = 1 / waveform_duration``.
+        """
+        if (
+            output_duration is None
+            or source_waveform is None
+            or sample_rate is None
+            or sample_rate <= 0
+        ):
+            return source_waveform
+        wf = np.asarray(source_waveform, dtype=float).ravel()
+        n_needed = int(np.ceil(float(output_duration) * float(sample_rate)))
+        if wf.size >= n_needed:
+            return source_waveform
+        pad = np.zeros(n_needed - wf.size, dtype=wf.dtype)
+        return np.concatenate([wf, pad])
+
+    def _resolve_time_series_frequencies(
+        self,
+        run_mode: 'RunMode',
+        source: 'Source',
+        frequencies,
+        source_waveform,
+        sample_rate,
+        threshold_db: float = -40.0,
+    ):
+        """Resolve the broadband frequency grid for TIME_SERIES dispatch.
+
+        When ``run_mode == TIME_SERIES`` and the caller did not pass
+        ``frequencies=``, derive one from the source waveform: Δf =
+        ``sample_rate / n_samples`` (= 1 / waveform duration), band edges
+        from the spectral support above ``threshold_db`` below the peak
+        (default −40 dB). Pinning ``frequencies=`` skips derivation.
+        Other run-modes pass through unchanged.
+
+        Returns the resolved ndarray (uniformly spaced, Hz), or ``None``
+        when no override applies. Emits a single ``UserWarning`` so the
+        user sees what band/Δf were picked.
+        """
+        if (
+            run_mode != RunMode.TIME_SERIES
+            or frequencies is not None
+            or source_waveform is None
+            or sample_rate is None
+        ):
+            return frequencies
+        wf = np.asarray(source_waveform, dtype=float).ravel()
+        n = wf.size
+        if n < 2 or sample_rate <= 0:
+            return frequencies
+        fs = float(sample_rate)
+        df = fs / n
+        spectrum = np.abs(np.fft.rfft(wf))
+        src_freqs = np.fft.rfftfreq(n, 1.0 / fs)
+        peak = spectrum.max()
+        if peak <= 0:
+            raise ConfigurationError(
+                f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                f"source_waveform is identically zero."
+            )
+        threshold = peak * 10.0 ** (threshold_db / 20.0)
+        significant = spectrum >= threshold
+        if not significant.any():
+            raise ConfigurationError(
+                f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                f"source_waveform has no spectral content above "
+                f"{threshold_db} dB."
+            )
+        i_lo = int(np.argmax(significant))
+        i_hi = len(significant) - 1 - int(np.argmax(significant[::-1]))
+        f_min = max(float(src_freqs[i_lo]), df)
+        f_max = float(src_freqs[i_hi])
+        if f_max <= f_min:
+            f_max = f_min + df
+        n_freqs = int(round((f_max - f_min) / df)) + 1
+        derived = np.linspace(f_min, f_max, n_freqs)
+        warnings.warn(
+            f"{self.model_name}.run(run_mode=TIME_SERIES): no "
+            f"`frequencies=` passed; auto-derived {n_freqs} freqs from "
+            f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
+            f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB). Pass "
+            f"`frequencies=` to silence.",
+            UserWarning, stacklevel=3,
+        )
+        return derived
 
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a

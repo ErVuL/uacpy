@@ -155,7 +155,16 @@ class SPARC(PropagationModel):
     max_depths : int, optional
         Cap on receiver depths (looped in wrapper). Default ``20``.
     rmax_safety_margin : float, optional
-        Margin so SPARC's RMax > max receiver range. Default ``1.0001``.
+        Multiplier applied to ``receiver.ranges.max()`` to set SPARC's
+        ``RMax``. Default ``1.0001`` — fine for ``COHERENT_TL`` because
+        the downstream time-FFT averages the FFT-Hankel periodic image
+        out. **For ``RunMode.TIME_SERIES`` use ~2 or more** so the
+        periodic alias of the source falls outside the receiver array:
+        the inverse Hankel transform (``TransformG.f90``) is FFT-based
+        with period = ``RMax`` in range, so with the default margin the
+        source at r=0 appears as a non-physical replica at
+        r = receiver.ranges.max(). Increasing this knob roughly
+        proportionally increases ``Nk`` and SPARC runtime.
     timeout : float, optional
         Subprocess timeout per run (s). Default ``180.0``.
     use_tmpfs, verbose, work_dir, cleanup, collapse : optional
@@ -211,7 +220,7 @@ class SPARC(PropagationModel):
         t_start: float = -0.1,
         t_mult: float = 0.999,
         max_depths: int = 20,
-        rmax_safety_margin: float = 1.0001,
+        rmax_safety_margin: Optional[float] = None,
         f_min: Optional[float] = None,
         f_max: Optional[float] = None,
         sound_speed: Optional[float] = None,
@@ -254,11 +263,13 @@ class SPARC(PropagationModel):
         max_depths : int, optional
             Maximum number of depths before warning. Default: 20.
         rmax_safety_margin : float, optional
-            Multiplicative round-off margin on SPARC's RMax so it strictly
-            exceeds the largest receiver range (absorbs float roundoff when
-            the user asks for ranges equal to the max). Default: 1.0001
-            (0.01% margin). Distinct from Scooter's ``rmax_multiplier``
-            which doubles the simulated range to absorb wraparound.
+            Multiplier on ``receiver.ranges.max()`` to set SPARC's RMax.
+            SPARC's inverse Hankel transform (TransformG.f90) is FFT-based,
+            so the r-domain output is periodic with period RMax — the
+            source's image at r=RMax contaminates the receivers unless
+            RMax is pushed well past them. Default: ``None`` → 1.0001
+            (0.01%, round-off only) for COHERENT_TL; 3.0 (alias at 3×
+            receiver max) for TIME_SERIES.
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """
@@ -425,7 +436,7 @@ class SPARC(PropagationModel):
 
                     # Write environment file
                     env_file = fm.get_path(f'{base_name}.env')
-                    self._write_sparc_env(env_file, env, source, receiver)
+                    self._write_sparc_env(env_file, env, source, receiver, run_mode)
                     self._run_sparc(base_name, fm.work_dir)
                     rts_file = fm.get_path(f'{base_name}.rts')
                     if not rts_file.exists():
@@ -487,7 +498,7 @@ class SPARC(PropagationModel):
                         # Write environment file for this depth
                         depth_base = f'{base_name}_d{idx}'
                         env_file = fm.get_path(f'{depth_base}.env')
-                        self._write_sparc_env(env_file, env, source, single_receiver)
+                        self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
 
                         # Run SPARC for this depth
                         if self.verbose:
@@ -572,7 +583,7 @@ class SPARC(PropagationModel):
                 if len(receiver.ranges) == 1:
                     # Single range - run once
                     env_file = fm.get_path(f'{base_name}.env')
-                    self._write_sparc_env(env_file, env, source, receiver)
+                    self._write_sparc_env(env_file, env, source, receiver, run_mode)
 
                     self._run_sparc(base_name, fm.work_dir)
 
@@ -602,7 +613,7 @@ class SPARC(PropagationModel):
 
                         range_base = f'{base_name}_r{idx}'
                         env_file = fm.get_path(f'{range_base}.env')
-                        self._write_sparc_env(env_file, env, source, single_receiver)
+                        self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
 
                         if self.verbose:
                             self._log(f"  Range {idx+1}/{len(receiver.ranges)}: {range:.1f}m")
@@ -646,7 +657,7 @@ class SPARC(PropagationModel):
 
                 # Write environment file
                 env_file = fm.get_path(f'{base_name}.env')
-                self._write_sparc_env(env_file, env, source, receiver)
+                self._write_sparc_env(env_file, env, source, receiver, run_mode)
                 self._run_sparc(base_name, fm.work_dir)
 
                 # Read Green's function file
@@ -749,7 +760,21 @@ class SPARC(PropagationModel):
             e.bottom.acoustic_type = 'rigid'
         return e
 
-    def _write_sparc_env(self, filepath, env, source, receiver):
+    def _resolve_rmax_safety_margin(self, run_mode: RunMode) -> float:
+        """Pick the effective ``rmax_safety_margin`` for this run.
+
+        SPARC's inverse Hankel transform (``TransformG.f90``) is FFT-based,
+        so the r-domain output is periodic with period ``RMax``. In
+        ``COHERENT_TL`` the time-FFT averages over the aliased image and
+        a ppm-level margin suffices; in ``TIME_SERIES`` the alias is a
+        visible non-physical wave at the far range edge unless ``RMax``
+        is pushed well past the receivers. User-pinned values win.
+        """
+        if self.rmax_safety_margin is not None:
+            return float(self.rmax_safety_margin)
+        return 3.0 if run_mode == RunMode.TIME_SERIES else 1.0001
+
+    def _write_sparc_env(self, filepath, env, source, receiver, run_mode):
         """
         Write SPARC environment file using shared ATEnvWriter
 
@@ -814,10 +839,11 @@ class SPARC(PropagationModel):
 
             # SPARC-SPECIFIC SECTIONS
 
-            # RMax must strictly exceed the largest receiver range; pad by a
-            # small multiplicative margin (default 1 ppm) to absorb float
-            # roundoff when the user requests ranges exactly at the max.
-            rmax_m = float(receiver.ranges.max()) * self.rmax_safety_margin
+            # RMax is the period of SPARC's inverse Hankel FFT — too tight
+            # leaks the source's r=RMax image into the receiver area.
+            # Margin policy in ``_resolve_rmax_safety_margin``.
+            margin = self._resolve_rmax_safety_margin(run_mode)
+            rmax_m = float(receiver.ranges.max()) * margin
             write_phase_speed_and_rmax(
                 f, env,
                 rmax_m=rmax_m,

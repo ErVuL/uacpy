@@ -496,6 +496,66 @@ class RAM(PropagationModel):
         c_max = float(max(speeds))
         return float(optimal_c0(c_min, c_max, float(self.theta_max)))
 
+    def _resolve_broadband_grid(self, source: Source):
+        """Resolve ``(fc, Q, T)`` for the native broadband sweep.
+
+        mpiramS and the Collins binaries don't accept an arbitrary
+        frequency list — their internal loop is parameterised as
+
+            band = fc · [1 - 1/Q, 1 + 1/Q]     (width = 2·fc/Q)
+            Δf   = 1/T
+
+        For a multi-element ``frequencies`` array, ``fc`` is always taken
+        from the array's centre (the band midpoint) — a band naturally
+        identifies its centre frequency, not its lower edge. ``Q`` and
+        ``T`` come from the array's half-width and spacing when not
+        pinned on the constructor; pinned values take precedence. A
+        warning fires whenever either ``Q`` or ``T`` was auto-derived.
+        Single-element arrays trivially use ``frequencies[0]`` as fc.
+        """
+        freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if len(freqs) == 1:
+            Q = 2.0 if self.Q is None else float(self.Q)
+            T = 10.0 if self.T is None else float(self.T)
+            return float(freqs[0]), Q, T
+
+        f_min, f_max = float(freqs[0]), float(freqs[-1])
+        if f_max <= f_min:
+            raise ConfigurationError(
+                f"RAM BROADBAND: degenerate frequency range "
+                f"[{f_min}, {f_max}] Hz."
+            )
+        spacings = np.diff(freqs)
+        if not np.allclose(spacings, spacings[0], rtol=1e-4):
+            raise ConfigurationError(
+                f"RAM BROADBAND: non-uniform frequency spacing "
+                f"(min Δf={spacings.min():.4g}, max Δf={spacings.max():.4g} Hz). "
+                f"mpiramS / Collins broadband sweep is uniform — either pass "
+                f"uniformly spaced frequencies, or set `Q` and `T` on the "
+                f"constructor and pass a single fc."
+            )
+        df = float(spacings[0])
+        fc = 0.5 * (f_min + f_max)
+        half_width = 0.5 * (f_max - f_min)
+        Q_auto = fc / half_width
+        T_auto = 1.0 / df
+        Q = Q_auto if self.Q is None else float(self.Q)
+        T = T_auto if self.T is None else float(self.T)
+        if self.Q is None or self.T is None:
+            warnings.warn(
+                f"RAM BROADBAND: mpiramS / Collins use an internal "
+                f"(fc, Q, T) sweep. From the {len(freqs)}-element "
+                f"frequency array ({f_min:.2f}-{f_max:.2f} Hz, "
+                f"Δf={df:.4g} Hz), picked fc={fc:.2f} Hz "
+                f"(band centre), Q={Q:.4f} "
+                f"({'pinned' if self.Q is not None else 'auto'}), "
+                f"T={T:.4f} s "
+                f"({'pinned' if self.T is not None else 'auto'}). "
+                f"To silence, pin both `Q=` and `T=` on the constructor.",
+                UserWarning, stacklevel=3,
+            )
+        return fc, Q, T
+
     def _compute_zmax(self, env: Environment, freq: float, c0: Optional[float] = None) -> float:
         """
         Compute PE domain depth (zmax) that extends below the seafloor.
@@ -823,6 +883,7 @@ class RAM(PropagationModel):
         frequencies=None,
         source_waveform=None,
         sample_rate=None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run RAM (mpiramS) simulation.
@@ -853,6 +914,14 @@ class RAM(PropagationModel):
             1-D source pulse (required for ``TIME_SERIES``).
         sample_rate : float, optional
             Source-waveform sampling rate in Hz (required for ``TIME_SERIES``).
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            auto-derived broadband grid is tight enough (``Δf =
+            1/output_duration``) — for mpiramS this also tightens the
+            ``(fc, Q, T)`` sweep parameters via
+            ``_resolve_broadband_grid``. Defaults to
+            ``len(source_waveform)/sample_rate``.
 
         Returns
         -------
@@ -861,6 +930,12 @@ class RAM(PropagationModel):
             for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        source_waveform = self._pad_waveform_to_duration(
+            source_waveform, sample_rate, output_duration,
+        )
+        frequencies = self._resolve_time_series_frequencies(
+            run_mode, source, frequencies, source_waveform, sample_rate,
+        )
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -1377,10 +1452,8 @@ class RAM(PropagationModel):
         elastic stability angle has to vary across the band.
         """
 
-        fc = float(np.atleast_1d(source.frequencies)[0])
+        fc, Q_used, T_used = self._resolve_broadband_grid(source)
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
-        Q_used = 2.0 if self.Q is None else float(self.Q)
-        T_used = 10.0 if self.T is None else float(self.T)
         bw = fc / Q_used
         df = 1.0 / T_used
         nf1 = max(1, int(np.floor((bw - df) / df)))
@@ -1775,7 +1848,10 @@ class RAM(PropagationModel):
                 f"f={freq:.0f} Hz). The Lytaev accuracy budget "
                 f"ε={self.accuracy:.0e} is no longer met — expect TL "
                 f"errors larger than the target. Set dr/dz explicitly "
-                f"to override.",
+                f"to override. For broadband sweeps the cap is computed "
+                f"at the *lowest* frequency in the sweep, so it may be "
+                f"sub-Nyquist for the upper band — pin dz≈λ(f_max)/8 "
+                f"to resolve the full pulse spectrum.",
                 UserWarning, stacklevel=3
             )
 
@@ -2087,7 +2163,7 @@ class RAM(PropagationModel):
         """
         start_time = time.time()
 
-        freq = float(source.frequencies[0])
+        freq, Q_bb, T_bb = self._resolve_broadband_grid(source)
         zsrc = float(source.depths[0])
         ranges = receiver.ranges
         rmax = float(np.max(ranges))
@@ -2102,9 +2178,6 @@ class RAM(PropagationModel):
                 dr = dr_auto
             if dz is None:
                 dz = dz_auto
-
-        Q_bb = 2.0 if self.Q is None else float(self.Q)
-        T_bb = 10.0 if self.T is None else float(self.T)
         self._log(
             f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
             f"dr={dr:.1f} m, dz={dz:.3f} m"

@@ -54,8 +54,11 @@ class Scooter(PropagationModel):
     roughness : float, optional
         Bottom RMS roughness (m). Default ``0``.
     rmax_multiplier : float, optional
-        Padding for k-resolution; Scooter's spectral RMax becomes
-        ``receiver.range.max() * rmax_multiplier``. Default ``2.0``.
+        Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
+        ``RMax`` — the period of its FFT-based inverse Hankel transform
+        (``TransformG.f90``). Default ``None`` → 2.0 for ``COHERENT_TL``,
+        3.0 for ``BROADBAND`` / ``TIME_SERIES`` (the alias is otherwise
+        visible as a wave from the far range edge).
     source_type : str, optional
         FLP Opt(1): ``'R'`` cylindrical (default) | ``'X'`` Cartesian.
     spectrum : str, optional
@@ -105,7 +108,7 @@ class Scooter(PropagationModel):
         c_high: Optional[float] = None,
         n_mesh: int = 0,
         roughness: float = 0.0,
-        rmax_multiplier: float = 2.0,
+        rmax_multiplier: Optional[float] = None,
         interp_ssp: Optional[str] = None,
         source_type: str = 'R',
         spectrum: str = 'positive',
@@ -130,7 +133,10 @@ class Scooter(PropagationModel):
         roughness : float, optional
             Bottom roughness (m). Default: 0.0.
         rmax_multiplier : float, optional
-            Multiply max receiver range for wavenumber resolution. Default: 2.0.
+            Multiply max receiver range for wavenumber resolution.
+            Default ``None`` → 2.0 for ``COHERENT_TL``, 3.0 for
+            ``BROADBAND`` / ``TIME_SERIES`` (the FFT-Hankel alias is
+            otherwise visible as a wave from the far range edge).
         source_type : {'R', 'X'}, optional
             FLP Option(1:1). 'R' = cylindrical (point source, default),
             'X' = Cartesian (line source). The in-tree Hankel transform
@@ -240,6 +246,7 @@ class Scooter(PropagationModel):
         frequencies: Optional['np.ndarray'] = None,
         source_waveform=None,
         sample_rate=None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run Scooter simulation
@@ -264,6 +271,12 @@ class Scooter(PropagationModel):
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
             Sampling rate of ``source_waveform`` in Hz.
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``. When
+            given, the source waveform is zero-padded internally so the
+            broadband frequency grid is tight enough (``Δf =
+            1/output_duration``). Defaults to
+            ``len(source_waveform)/sample_rate``.
 
         Returns
         -------
@@ -274,6 +287,12 @@ class Scooter(PropagationModel):
         """
         run_mode = self._resolve_run_mode(run_mode)
         self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+        source_waveform = self._pad_waveform_to_duration(
+            source_waveform, sample_rate, output_duration,
+        )
+        frequencies = self._resolve_time_series_frequencies(
+            run_mode, source, frequencies, source_waveform, sample_rate,
+        )
 
         env = self._project_environment(env)
 
@@ -314,6 +333,7 @@ class Scooter(PropagationModel):
             self._write_scooter_env(
                 env_file, env, source, receiver,
                 frequencies=broadband_freqs,
+                run_mode=run_mode,
             )
 
             self._log("Running...")
@@ -382,6 +402,21 @@ class Scooter(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
+        """Pick the effective ``rmax_multiplier`` for this run.
+
+        Scooter's inverse Hankel transform (``TransformG.f90``, shared
+        with SPARC) is FFT-based, so the r-domain output is periodic
+        with period ``RMax = receiver_max × rmax_multiplier``. The
+        ``COHERENT_TL`` time-FFT averages over the alias; ``TIME_SERIES``
+        and ``BROADBAND`` syntheses leave the alias visible as a wave
+        from the far range edge unless the multiplier is ≳3. User-pinned
+        values win.
+        """
+        if self.rmax_multiplier is not None:
+            return float(self.rmax_multiplier)
+        return 3.0 if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND) else 2.0
+
     def _write_scooter_env(
         self,
         filepath,
@@ -390,6 +425,7 @@ class Scooter(PropagationModel):
         receiver,
         *,
         frequencies=None,
+        run_mode=RunMode.COHERENT_TL,
     ):
         """
         Write Scooter environment file using shared ATEnvWriter
@@ -440,7 +476,7 @@ class Scooter(PropagationModel):
                 emit_reflection_table_block=False,
             )
 
-            rmax_m = float(receiver.ranges.max()) * self.rmax_multiplier
+            rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)
             from uacpy.io.oalib_writer import resolve_phase_speed_bounds
             cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
             if self.c_low is None or self.c_high is None:

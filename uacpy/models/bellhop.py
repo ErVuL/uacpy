@@ -518,6 +518,7 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run Bellhop simulation
@@ -543,6 +544,14 @@ class Bellhop(PropagationModel):
             (``RunMode.TIME_SERIES``). Requires ``sample_rate``.
         sample_rate : float, optional
             Sample rate (Hz) accompanying ``source_waveform``.
+        output_duration : float, optional
+            Desired output duration (seconds) for ``TIME_SERIES``.
+            Bellhop maps this to ``time_window`` for the delay-and-sum
+            synthesis and defaults ``t_start=0`` (so its time clock
+            starts at source emission, matching the wave-equation
+            solvers). When ``None``, falls back to the constructor's
+            ``time_window`` / ``t_start`` (which auto-derive from the
+            latest arrival and source waveform duration).
 
         Returns
         -------
@@ -560,6 +569,7 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
+                output_duration=output_duration,
             )
 
         # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires only on
@@ -1004,6 +1014,7 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run Bellhop in broadband mode to produce a time-series or
@@ -1072,7 +1083,36 @@ class Bellhop(PropagationModel):
                 f"Python over Source(depths=z, ...) and stack the "
                 f"results, or pick one depth for this run."
             )
-        fc = float(np.atleast_1d(source.frequencies)[0])
+        # fc is the single carrier frequency Bellhop runs the ray tracer
+        # at. If the user passed a multi-element frequency array (band),
+        # take the band centre — frequencies[0] would map a [50, 350]
+        # band to fc=50, which is the same footgun RAM's
+        # ``_resolve_broadband_grid`` avoids.
+        src_freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        fc = (
+            float(0.5 * (src_freqs.min() + src_freqs.max()))
+            if src_freqs.size > 1
+            else float(src_freqs[0])
+        )
+        # Run-time ``output_duration`` overrides the constructor's
+        # ``time_window`` for this call. ``delayandsum`` consumes
+        # ``time_window`` to size the per-cell synthesis grid. When the
+        # caller asks for a specific duration they typically want the
+        # trace anchored at the source-emission instant (t=0) to align
+        # with the other broadband solvers; default ``t_start`` to 0
+        # in that case so each cell's clock starts at emission rather
+        # than at "just before the earliest arrival" (delayandsum's
+        # default), which would shift every cell by its own delay.
+        effective_time_window = (
+            float(output_duration)
+            if output_duration is not None
+            else self.time_window
+        )
+        effective_t_start = (
+            self.t_start
+            if self.t_start is not None
+            else (0.0 if output_duration is not None else None)
+        )
 
         # Step 1: Run Bellhop in arrivals mode
         self._log("Running in arrivals mode (broadband path)...")
@@ -1102,8 +1142,8 @@ class Bellhop(PropagationModel):
                 source_timeseries=source_waveform,
                 sample_rate=sample_rate,
                 fc=fc,
-                time_window=self.time_window,
-                t_start=self.t_start,
+                time_window=effective_time_window,
+                t_start=effective_t_start,
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate

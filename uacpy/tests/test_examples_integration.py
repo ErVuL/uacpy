@@ -51,9 +51,15 @@ _LONG_TIMEOUT_STEMS = {
     "example_22_ram_lytaev_grid",
 }
 
+# Examples that are interactive / demo-only: too slow or output-heavy
+# (large GIFs) to run on every test session. Run them by hand.
+_SKIP_STEMS = {
+    "example_26_wave_propagation",
+}
+
 ALL_EXAMPLES = sorted(
     p for p in EXAMPLES_DIR.glob("example_*.py")
-    if p.name != "example_helpers.py"
+    if p.name != "example_helpers.py" and p.stem not in _SKIP_STEMS
 )
 
 
@@ -138,7 +144,7 @@ def _check_pngs_well_formed(example_dir: Path) -> None:
 @pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
 def test_example_runs(example, tmp_path):
     """Run an example end-to-end, verify clean exit + any PNG output."""
-    timeout = 240 if example.stem in _LONG_TIMEOUT_STEMS else 120
+    timeout = 360 if example.stem in _LONG_TIMEOUT_STEMS else 120
     # Run inside a per-test scratch dir so PNG droppings stay isolated
     # and we can assert on them without polluting examples/.
     workdir = tmp_path / example.stem

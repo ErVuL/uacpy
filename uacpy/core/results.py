@@ -2519,6 +2519,25 @@ def _synthesize_time_series(
             f"got {sample_rate}"
         )
 
+    tf_freqs = np.asarray(tf.coords['frequency'], dtype=float)
+    if tf_freqs.size > 1:
+        df_tf = float(np.diff(tf_freqs).mean())
+        t_dft = 1.0 / df_tf if df_tf > 0 else float('inf')
+        t_dur = n_src / float(sample_rate)
+        # One-sample tolerance: float roundoff in Δf can make t_dft and
+        # t_dur evaluate as < when they should be ==. Real wraparound
+        # has t_dft short by *many* samples.
+        if t_dft < t_dur - 1.0 / float(sample_rate):
+            import warnings
+            warnings.warn(
+                f"synthesize_time_series: DFT period 1/Δf = {t_dft:.4f}s "
+                f"is shorter than the source-waveform duration "
+                f"{t_dur:.4f}s — the late-time response wraps back into "
+                f"early bins. Refine the frequency grid to Δf ≤ "
+                f"{1.0/t_dur:.4g} Hz, or shorten the waveform.",
+                UserWarning, stacklevel=3,
+            )
+
     src_fft = np.fft.rfft(wf)
     src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)
 
