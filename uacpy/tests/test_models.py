@@ -218,8 +218,14 @@ class TestRAM:
                     run_mode=RunMode.TIME_SERIES)
 
     @pytest.mark.slow
+    @pytest.mark.filterwarnings("ignore::UserWarning")
     def test_ram_compute_time_series_helper(self, simple_env, source):
-        """Verify the convenience method ``RAM.compute_time_series`` runs."""
+        """Verify the convenience method ``RAM.compute_time_series`` runs.
+
+        The helper takes no ``frequencies=`` so the auto-derive in
+        ``_resolve_time_series_frequencies`` fires; the warning is
+        expected behaviour, filtered here.
+        """
         from uacpy.core.results import Field
         ram = RAM(Q=2.0, T=2.0, dr=20.0, dz=2.0, verbose=False)
         receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))

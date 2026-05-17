@@ -168,3 +168,84 @@ def test_animate_field_handles_alternate_coord_order():
     )
     ani = animate_field(field, frame_stride=1)
     assert len(list(ani.new_frame_seq())) == 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# save_animation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_save_animation_gif(tmp_path):
+    """Writer inferred from `.gif` suffix → PillowWriter; output file
+    is non-empty."""
+    from uacpy.visualization import save_animation
+
+    field = _make_synthetic_field(n_t=40, t_max=1.0)
+    out = save_animation(field, tmp_path / 'pulse.gif',
+                         fps=10, frame_stride=4)
+    assert out.exists()
+    assert out.stat().st_size > 1024  # > 1 KiB, real animation
+
+
+def test_save_animation_rejects_unknown_suffix(tmp_path):
+    from uacpy.visualization import save_animation
+
+    field = _make_synthetic_field(n_t=10)
+    with pytest.raises(ValueError, match=r"cannot infer writer"):
+        save_animation(field, tmp_path / 'pulse.xyz')
+
+
+def test_save_animation_closes_figure(tmp_path):
+    """Calling save_animation should not leak open figures."""
+    import matplotlib.pyplot as plt
+    from uacpy.visualization import save_animation
+
+    plt.close('all')
+    n_open_before = len(plt.get_fignums())
+
+    field = _make_synthetic_field(n_t=20)
+    save_animation(field, tmp_path / 'pulse.gif',
+                   fps=10, frame_stride=4)
+
+    n_open_after = len(plt.get_fignums())
+    assert n_open_after == n_open_before
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# plot_time_snapshots
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_plot_time_snapshots_grid_shape():
+    """One row per field, one column per requested time."""
+    from uacpy.visualization import plot_time_snapshots
+
+    fields = {
+        'A': _make_synthetic_field(n_t=40, t_max=1.0),
+        'B': _make_synthetic_field(n_t=40, t_max=1.0),
+    }
+    fig, axes = plot_time_snapshots(fields, times_s=(0.2, 0.5, 0.8))
+    assert axes.shape == (2, 3)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_plot_time_snapshots_empty_raises():
+    from uacpy.visualization import plot_time_snapshots
+
+    with pytest.raises(ValueError, match='empty'):
+        plot_time_snapshots({}, times_s=(0.1,))
+
+
+def test_plot_time_snapshots_global_pmax():
+    """``p_max`` scalar applies the same colour scale to every panel."""
+    from uacpy.visualization import plot_time_snapshots
+    import matplotlib.pyplot as plt
+
+    fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
+    fig, axes = plot_time_snapshots(fields, times_s=(0.1, 0.3),
+                                     p_max=0.5)
+    for ax in axes.flat:
+        im = ax.get_images()[0]
+        assert im.get_clim() == (-0.5, 0.5)
+    plt.close(fig)

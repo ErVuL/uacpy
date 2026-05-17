@@ -51,7 +51,9 @@ class TestKrakenFieldBroadband:
         n = 256
         t = np.arange(n) / fs
         waveform = np.sin(2 * np.pi * 100.0 * t) * np.hanning(n)
-        frequencies = np.linspace(60.0, 140.0, 9)
+        # Δf small enough that 1/Δf ≥ waveform duration (256/2000 = 0.128s)
+        # → no DFT-wraparound warning from synthesize_time_series.
+        frequencies = np.linspace(60.0, 140.0, 17)
 
         kf = KrakenField(verbose=False)
         result = kf.run(

@@ -177,6 +177,29 @@ reporting what it picked. Pin `frequencies=` to skip the derivation.
 `Field.synthesize_time_series` additionally warns if `1/Δf <
 waveform_duration` (DFT wraparound).
 
+**Canonical TIME_SERIES recipe** (works on RAM / Scooter / KrakenField
+/ Bellhop / OASP):
+
+```python
+# Build any 1-D source pulse — Gaussian, chirp, whatever.
+waveform = some_pulse(...)
+field = model.run(
+    env, source, receiver,
+    run_mode=RunMode.TIME_SERIES,
+    source_waveform=waveform,
+    sample_rate=fs,
+    output_duration=0.18,   # desired output window (s); waveform is
+                            # zero-padded internally if shorter.
+)
+# field.kind == 'time_series', coords={'depth', 'range', 'time'}
+```
+
+Every per-model alias / wrap / band-derivation knob (SPARC's
+`rmax_safety_margin`, Scooter's `rmax_multiplier`, KrakenField's
+`rmax_m`, RAM's `Q` / `T`) auto-widens for TIME_SERIES — there's
+nothing to tune at the call site for the common case. Pin any of
+them on the constructor when you want explicit control.
+
 ### Persisting output files (`work_dir` + `cleanup`)
 
 Every model writes its binary inputs and outputs into a **work
@@ -628,7 +651,8 @@ field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 # Time series: per-receiver delay-and-sum via arrivals
 ts = bh.run(env, source, receiver,
             run_mode=RunMode.TIME_SERIES,
-            source_waveform=s, sample_rate=fs)
+            source_waveform=s, sample_rate=fs,
+            output_duration=0.5)              # → time_window for delay-and-sum
 trace = ts.to_time_trace(depth=50.0, range=2000.0)    # 1-D Field over time
 ```
 
