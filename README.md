@@ -140,7 +140,7 @@ pip install -e .
 
 ---
 
-### 🍎 macOS (NOT TESTED)
+### 🍎 macOS
 
 **1. Install dependencies**
 
@@ -297,6 +297,8 @@ pip install -e ".[test]"
 # For development (test deps + black, flake8, pytest-cov)
 pip install -e ".[dev]"
 ```
+
+> With macOS you may need to use **pip install -e .\[xxx\]**.
 
 ### Run all tests
 

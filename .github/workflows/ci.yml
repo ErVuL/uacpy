@@ -31,11 +31,9 @@ jobs:
 
     steps:
       - name: Checkout (recursive submodules)
-        # bellhopcuda is a git submodule; install.sh's pin_bellhopcuda_tag
-        # then forces it to BELLHOPCUDA_TAG (currently "v1.5").
-        # TODO: if install.sh ever switches from a tag to a commit-SHA pin
-        # (BHC_COMMIT_SHA), revisit whether this checkout step needs to
-        # fetch unshallowed history for that SHA to be reachable.
+        # bellhopcuda is a git submodule pinned to BELLHOPCUDA_COMMIT_SHA
+        # in install.sh. pin_bellhopcuda_tag fetches the SHA from origin on
+        # demand if it is not reachable from the submodule's shallow clone.
         uses: actions/checkout@v5
         with:
           submodules: recursive

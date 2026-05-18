@@ -59,8 +59,6 @@ FORCE=0
 BELLHOP_VERSION="" # "fortran", "cxx", or "cuda" (empty => prompt/auto)
 INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
 
-ENABLE_OPENMP=1
-
 # -------------------------
 # Per-component build status
 # -------------------------
@@ -93,13 +91,17 @@ print_status_row() {
 }
 
 # Fortran architecture flags shared by every Fortran build in this script
-# (OALIB, mpiramS). OASES is excluded — it ships -O2 with no -march and is
-# already portable. Default targets the build host (-march=native), giving
-# the best local performance but producing a binary tied to the build CPU's
-# instruction-set extensions (e.g. AVX-512). CI overrides this with
-# UACPY_FORTRAN_ARCH_FLAGS=-march=x86-64-v3 so the cached binaries are
-# portable across the full GitHub-hosted runner pool.
-FORTRAN_ARCH_FLAGS="${UACPY_FORTRAN_ARCH_FLAGS:--march=native -mtune=native}"
+# (OALIB, mpiramS, ramsurf). OASES is excluded — it ships -O2 with no
+# -march and is already portable. Default targets the build host: -march=native
+# on x86, -mcpu=native on aarch64. gfortran on aarch64 rejects CPU names like
+# apple-m2 under -march= (which only accepts the fixed armv8.x-a/armv9.x-a
+# list) — the equivalent knob there is -mcpu=. Set UACPY_FORTRAN_ARCH_FLAGS
+# (e.g. "-march=x86-64-v3") to produce binaries portable across a CPU family
+# instead of pinned to the build host.
+case "$(uname -m)" in
+    arm64|aarch64) FORTRAN_ARCH_FLAGS="${UACPY_FORTRAN_ARCH_FLAGS:--mcpu=native}" ;;
+    *)             FORTRAN_ARCH_FLAGS="${UACPY_FORTRAN_ARCH_FLAGS:--march=native -mtune=native}" ;;
+esac
 
 # -------------------------
 # Helpers
@@ -273,20 +275,14 @@ else
 fi
 echo ""
 
-# Apple's clang lacks OpenMP support unless Homebrew's libomp is installed;
-# building -fopenmp without it fails at link time. gfortran from brew works
-# but the C/C++ side of bellhopcuda still needs libomp. Disable OpenMP on
-# macOS hosts that don't have it.
-if [ "$OS" = "macOS" ] && [ "$ENABLE_OPENMP" -eq 1 ]; then
-    BREW_OMP_PREFIX=""
-    if command_exists brew; then
-        BREW_OMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
-    fi
-    if [ -z "$BREW_OMP_PREFIX" ] || [ ! -d "$BREW_OMP_PREFIX" ]; then
-        echo -e "${YELLOW}macOS detected without Homebrew libomp; disabling OpenMP for this build (brew install libomp to re-enable).${NC}"
-        ENABLE_OPENMP=0
-    fi
-fi
+# OpenMP usage per component:
+#   - OALIB (AT):     no OpenMP directives
+#   - bellhopcxx/cuda: no OpenMP in the cmake config
+#   - ramsurf:        no OpenMP directives
+#   - mpiramS:        !$OMP loop in peramx.f90 — requires -fopenmp
+# Only mpiramS links libgomp, which gfortran provides natively on every
+# supported platform (brew's libomp is the LLVM/clang runtime and is
+# unrelated).
 
 # -------------------------
 # Choose Bellhop variant
@@ -646,14 +642,13 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     fi
     mkdir -p "$BUILD_DIR"
 
-    # BHC_BUILD_EXAMPLES=OFF skips the bellhopcuda/examples/*.cpp programs —
-    # uacpy doesn't use them, and at least examples/background.cpp is missing
-    # an explicit #include <cstring> that GCC >= 13 no longer transitively
-    # provides, which breaks the overall build.
-    # bellhopcuda v1.5+ sets CMAKE_CUDA_ARCHITECTURES=native, so nvcc targets
-    # the local GPU automatically — no GPU-name table or CUDA_ARCH_OVERRIDE
-    # workaround needed.
-    CMAKE_OPTIONS="-DCMAKE_BUILD_TYPE=Release -DBHC_ENABLE_TESTS=OFF -DBHC_BUILD_EXAMPLES=OFF"
+    # BHC_BUILD_EXAMPLES=OFF skips the bellhopcuda/examples/*.cpp programs.
+    # uacpy doesn't use them, and at least examples/background.cpp depends
+    # on a transitive #include <cstring> that GCC >= 13 no longer provides,
+    # so leaving examples enabled breaks the overall build.
+    # bellhopcuda v1.5+ sets CMAKE_CUDA_ARCHITECTURES=native via SetupCommon,
+    # so nvcc auto-targets the local GPU.
+    CMAKE_OPTIONS="-DCMAKE_BUILD_TYPE=Release -DBHC_BUILD_EXAMPLES=OFF"
     if [[ "$BELLHOP_VERSION" == "cuda" ]]; then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBHC_ENABLE_CUDA=ON"
         echo -e "  - CUDA support: ON (compute arch: native — auto-targeted)"
@@ -710,13 +705,13 @@ echo -e "${BLUE}=== Building OALIB (Acoustics-Toolbox) ===${NC}"
 
 cd "$OALIB_DIR"
 
-OALIB_FFLAGS="${FORTRAN_ARCH_FLAGS} -O2 -ffast-math -funroll-loops -fomit-frame-pointer -I../misc -I../tslib"
-if [[ $ENABLE_OPENMP -eq 1 ]]; then
-    OALIB_FFLAGS="$OALIB_FFLAGS -fopenmp"
-    OALIB_CFLAGS="-g -fopenmp"
-else
-    OALIB_CFLAGS="-g"
-fi
+# AT has no OpenMP directives and no C in our build path
+# (misc/tslib/Bellhop/Kraken/KrakenField/Scooter are pure Fortran; the .c
+# files under Matlab/ aren't built). FFLAGS-only injection; the AT root
+# Makefile's `export CC=gcc CFLAGS=-g` covers the C side.
+# -O1 is required: KRAKENC's root finder fails at higher optimisation on
+# at/tests/Noise/Sduct (documented in the AT root Makefile).
+OALIB_FFLAGS="${FORTRAN_ARCH_FLAGS} -O1 -ffast-math -funroll-loops -fomit-frame-pointer -I../misc -I../tslib"
 
 # Default rebuild is incremental — make tracks dependencies. --force wipes
 # everything for a from-scratch build (slower but bypasses any stale .mod /
@@ -739,8 +734,6 @@ set +e
 make -k all \
     FC=gfortran \
     FFLAGS="$OALIB_FFLAGS" \
-    CC=gcc \
-    CFLAGS="$OALIB_CFLAGS" \
     MAKEFLAGS= \
     2>&1 | tee /tmp/oalib_build.log
 OALIB_STATUS=${PIPESTATUS[0]:-1}
@@ -800,9 +793,17 @@ if [ ! -d "$OASES_DIR" ]; then
         # Optional supply-chain pin: if a known-good digest is set, refuse to
         # extract a tarball that doesn't match. We never enforce on an empty
         # pin (first-install / dev workflow) but we do warn.
+        # macOS ships `shasum -a 256` instead of `sha256sum`; pick whichever
+        # is available so the pin enforces on either platform.
         OASES_SHA_OK=1
-        if [ -n "$OASES_EXPECTED_SHA256" ] && command_exists sha256sum; then
-            OASES_ACTUAL_SHA=$(sha256sum "$OASES_TARBALL" | awk '{print $1}')
+        SHA256_CMD=""
+        if command_exists sha256sum; then
+            SHA256_CMD="sha256sum"
+        elif command_exists shasum; then
+            SHA256_CMD="shasum -a 256"
+        fi
+        if [ -n "$OASES_EXPECTED_SHA256" ] && [ -n "$SHA256_CMD" ]; then
+            OASES_ACTUAL_SHA=$($SHA256_CMD "$OASES_TARBALL" | awk '{print $1}')
             if [ "$OASES_ACTUAL_SHA" != "$OASES_EXPECTED_SHA256" ]; then
                 echo -e "${RED}✗ OASES tarball checksum mismatch — refusing to extract.${NC}"
                 echo -e "${RED}    expected: ${OASES_EXPECTED_SHA256}${NC}"
@@ -811,6 +812,8 @@ if [ ! -d "$OASES_DIR" ]; then
                 NOTE_OASES="sha256 mismatch (expected ${OASES_EXPECTED_SHA256}, got ${OASES_ACTUAL_SHA})"
                 OASES_SHA_OK=0
             fi
+        elif [ -n "$OASES_EXPECTED_SHA256" ] && [ -z "$SHA256_CMD" ]; then
+            echo -e "${YELLOW}Neither sha256sum nor shasum found; cannot verify OASES tarball checksum. Install coreutils or perl-shasum to enable verification.${NC}"
         elif [ -z "$OASES_EXPECTED_SHA256" ]; then
             if [ -n "${CI:-}" ]; then
                 echo -e "${RED}✗ OASES_EXPECTED_SHA256 is unset and \$CI is set — refusing to proceed.${NC}"
@@ -836,8 +839,13 @@ if [ ! -d "$OASES_DIR" ]; then
                 # Locate the extracted root by finding the Makefile rather
                 # than hard-coding "Oases_export/" — upstream has changed
                 # tarball layouts before and silent fallthrough to a "skipped"
-                # status row was masking real failures.
-                OASES_EXTRACTED_ROOT=$(find "$OASES_TMP" -maxdepth 2 -name Makefile -printf '%h\n' 2>/dev/null | head -n 1)
+                # status row was masking real failures. BSD find on macOS
+                # has no -printf, so derive the parent dir with dirname.
+                OASES_MAKEFILE=$(find "$OASES_TMP" -maxdepth 2 -name Makefile 2>/dev/null | head -n 1)
+                OASES_EXTRACTED_ROOT=""
+                if [ -n "$OASES_MAKEFILE" ]; then
+                    OASES_EXTRACTED_ROOT=$(dirname "$OASES_MAKEFILE")
+                fi
                 if [ -n "$OASES_EXTRACTED_ROOT" ] && [ -d "$OASES_EXTRACTED_ROOT" ]; then
                     mv "$OASES_EXTRACTED_ROOT" "$OASES_DIR"
                     echo -e "${GREEN}✓ OASES source downloaded and placed at $OASES_DIR${NC}"
@@ -904,6 +912,13 @@ if [ -d "$OASES_DIR" ]; then
     echo -e "  - HOSTTYPE=${OASES_HOSTTYPE}  OSTYPE=${OASES_OSTYPE}"
     echo -e "  - FC_STMNT='${OASES_FC}'  FFLAGS=${OASES_FFLAGS}"
 
+    # RANLB=ranlib: the OASES root Makefile only defines RANLIB.<host>-<os>
+    # for the platforms it shipped with (linux, sun4-solaris, alpha-osf1, …).
+    # There is no i386-darwin-darwin entry, so the lookup returns empty and
+    # src/makefile's `$(RANLIB) $@` rule becomes ` /…/oaslib.a` — make then
+    # tries to execute the archive as a command ("Permission denied"). Both
+    # GNU and BSD `ranlib` produce a Mach-O/ELF archive index, so passing
+    # it unconditionally is portable.
     set +e
     make \
         HOSTTYPE="$OASES_HOSTTYPE" \
@@ -914,6 +929,7 @@ if [ -d "$OASES_DIR" ]; then
         FFLAGS="$OASES_FFLAGS" \
         CFLAGS="$OASES_CFLAGS" \
         LFLAGS="" \
+        RANLB=ranlib \
         oases 2>&1 | tee /tmp/oases_build.log
     OASES_STATUS=${PIPESTATUS[0]:-1}
     set -e
@@ -974,15 +990,19 @@ if [ -d "$MPIRAMS_DIR" ]; then
     fi
 
     echo -e "${BLUE}Compiling mpiramS (single-processor version, double precision)...${NC}"
-    # mpiramS Makefile hardcodes -march=native in FFLAGS and LDFLAGS (lines
-    # 22-23). Override on the make command line so the same UACPY_FORTRAN_ARCH_FLAGS
-    # plumbing used for OALIB also controls mpiramS — keeps cached binaries
-    # portable when CI sets -march=x86-64-v3. Default keeps upstream's
-    # -march=native behaviour for local installs.
-    MPIRAMS_FFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -fopenmp -I mod -Wall -fuse-linker-plugin"
-    MPIRAMS_LDFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -fopenmp -flto"
+    # -O2 without -ffast-math: PE with complex Padé recursion accumulates
+    # phase over thousands of range steps, where reassociation, reciprocal
+    # approximations, and -ffinite-math-only would all be unsafe. -fopenmp
+    # is required for the !$OMP loop in peramx.f90; -flto links objects with
+    # link-time optimisation.
+    MPIRAMS_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -fopenmp -I mod -Wall -fuse-linker-plugin"
+    MPIRAMS_LDFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -fopenmp -flto"
+    # FC=gfortran is required: GNU make's built-in default is FC=f77, which
+    # is set before the Makefile's `FC ?= gfortran` runs (so ?= no-ops). On
+    # Ubuntu the f77 symlink resolves to gfortran; on macOS no such alias
+    # exists and the build fails with "f77: No such file or directory".
     set +e
-    make FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee /tmp/mpirams_build.log
+    make FC=gfortran FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee /tmp/mpirams_build.log
     MPIRAMS_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1017,13 +1037,15 @@ if [ -d "$RAMSURF_DIR" ]; then
     fi
 
     echo -e "${BLUE}Compiling rams0.5 (elastic) / ramsurf1.5 (rough surface)...${NC}"
-    # Same flag profile as mpiramS: -Ofast plus the shared FORTRAN_ARCH_FLAGS
-    # (host-optimised locally; CI passes UACPY_FORTRAN_ARCH_FLAGS=-march=x86-64-v3
-    # so the cached binaries are portable across GitHub-hosted runner CPUs).
-    # `-std=legacy -w` accepts the F77-era idioms in Calvo's sources.
-    RAMSURF_FFLAGS="-Ofast ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # -O2 without -ffast-math: long-range PE with complex Padé recursion is
+    # too sensitive to reassociation, reciprocal approximations, and
+    # -ffinite-math-only for unsafe-math to be acceptable. `-std=legacy -w`
+    # accepts the F77-era idioms in Calvo's sources.
+    RAMSURF_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # FC=gfortran: same reason as mpiramS — make's built-in FC=f77 wins
+    # over the Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS.
     set +e
-    make FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee /tmp/ramsurf_build.log
+    make FC=gfortran FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee /tmp/ramsurf_build.log
     RAMSURF_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1077,23 +1099,28 @@ if [[ "$BELLHOP_VERSION" == "cxx" || "$BELLHOP_VERSION" == "cuda" ]]; then
     SEARCH_NAMES=(bellhopcxx bellhopcxx2d bellhopcxx3d bellhopcxxnx2d \
                   bellhopcuda bellhopcuda2d bellhopcuda3d bellhopcudanx2d)
 
-    declare -A SEEN_BHC=()
+    # bash 3.2 (macOS default) has no associative arrays, so track seen
+    # basenames as a space-padded string and test membership with a case glob.
+    # find -perm -u+x replaces GNU find's -executable (absent from BSD find).
+    SEEN_BHC=" "
+    BHC_INSTALLED=0
     for search_root in "$BHC_OUT_DIR" "$BUILD_DIR"; do
         [ -d "$search_root" ] || continue
         for name in "${SEARCH_NAMES[@]}"; do
             while IFS= read -r -d $'\0' file; do
                 base=$(basename "$file")
-                [[ -n "${SEEN_BHC[$base]:-}" ]] && continue
-                SEEN_BHC[$base]=1
+                case "$SEEN_BHC" in *" $base "*) continue ;; esac
+                SEEN_BHC="$SEEN_BHC$base "
                 cp "$file" "$BIN_DIR_BELLHOP/$base"
                 chmod +x "$BIN_DIR_BELLHOP/$base"
                 echo -e "  ✓ Installed bellhop binary: ${GREEN}$base${NC}"
                 INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
-            done < <(find "$search_root" -type f -executable -name "$name" -print0 2>/dev/null || true)
+                BHC_INSTALLED=$((BHC_INSTALLED + 1))
+            done < <(find "$search_root" -type f -perm -u+x -name "$name" -print0 2>/dev/null || true)
         done
     done
 
-    if [[ ${#SEEN_BHC[@]} -eq 0 ]]; then
+    if [ "$BHC_INSTALLED" -eq 0 ]; then
         echo -e "${YELLOW}No bellhop (cxx/cuda) executables found in $BHC_OUT_DIR or $BUILD_DIR.${NC}"
     fi
 fi
