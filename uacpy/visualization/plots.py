@@ -1349,7 +1349,7 @@ def plot_environment(
             norm_cs = (layer.sound_speed - cs_min) / cs_range
             colour = cmap(0.25 + 0.6 * norm_cs)
             ax_bathy.fill_between(
-                r_km, z_top, z_bot, color=colour, alpha=0.95,
+                r_km, z_top, z_bot, color=colour, alpha=1.0,
                 edgecolor='black', linewidth=0.4,
                 zorder=ZORDER_SEDIMENT + 1,
             )
@@ -1432,7 +1432,7 @@ def plot_environment(
                 colour = cmap(0.25 + 0.6 * norm_cs)
                 ax_bathy.fill_between(
                     x_bin, z_top_arr, z_bot_arr,
-                    color=colour, alpha=0.95,
+                    color=colour, alpha=1.0,
                     edgecolor='black', linewidth=0.3,
                     zorder=ZORDER_SEDIMENT + 1,
                 )
@@ -1539,7 +1539,7 @@ def plot_environment(
             )
             colour = cmap(0.25 + 0.6 * (cs[i] - cs_min) / cs_range)
             ax_bathy.fill(
-                poly_r, poly_z, color=colour, alpha=0.95,
+                poly_r, poly_z, color=colour, alpha=1.0,
                 edgecolor='black', linewidth=0.3,
                 zorder=ZORDER_SEDIMENT + 1,
             )
