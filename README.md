@@ -298,7 +298,7 @@ pip install -e ".[test]"
 pip install -e ".[dev]"
 ```
 
-> With macOS you may need to use **pip install -e .\[xxx\]**.
+> NOte: With macOS you may need to use **pip install -e .\\[xxx\\]**.
 
 ### Run all tests
 
