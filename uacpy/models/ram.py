@@ -131,14 +131,14 @@ class RAM(PropagationModel):
     executable : Path, optional
         Path to s_mpiram binary. Auto-detected if None. **[mpiramS]**
     dr : float, optional
-        Range step in meters. Default: None (auto-select based on
-        frequency: dr = c0/freq, i.e. one wavelength, capped at 500m).
+        Range step in meters. Default: None (selected by the Lytaev
+        (2023) Padé-error optimizer; see ``accuracy`` / ``theta_max``).
         **[all backends]**
     dz : float, optional
-        Depth step in meters. Default: None (auto-select based on
-        frequency: dz = c_min/(16·freq) clipped to [0.05, 1.0] m and
-        snapped so env.depth/dz is an integer — puts the seafloor on a
-        depth grid point). **[all backends]**
+        Depth step in meters. Default: None (selected by the Lytaev
+        optimizer, then floored at c_min/(16·freq), clipped to
+        [0.05, 1.0] m, and snapped so env.depth/dz is an integer — puts
+        the seafloor on a depth grid point). **[all backends]**
     np_pade : int, optional
         Number of Pade coefficients (2-8). Default: 6. **[all backends]**
     ns_stability : int, optional

@@ -1238,12 +1238,12 @@ class Bellhop(PropagationModel):
         and imaginary delay tau_i (volume attenuation), the contribution to
         H(f) is:
 
-            H(f) += A * exp(-tau_i * 2*pi*f/fc) * exp(i*(phi_rad - 2*pi*f*tau))
+            H(f) += A * exp(tau_i * 2*pi*f) * exp(i*(phi_rad - 2*pi*f*tau))
 
         The phase from Bellhop already includes the geometric phase (number of
         caustics, boundary reflections). The exponential delay term shifts the
-        arrival in the frequency domain. The imaginary delay encodes
-        frequency-dependent volume attenuation scaled from the center frequency.
+        arrival in the frequency domain. The imaginary delay ``tau_i`` (<= 0)
+        encodes frequency-dependent volume attenuation, applied per frequency f.
 
         Parameters
         ----------

@@ -491,7 +491,7 @@ class OASN(PropagationModel):
         executable: Optional[Path] = None,
         # Output / option control
         options: Optional[str] = None,
-        # Noise field (Block VIII): broad-area sources expressed as
+        # Noise field (Block VI): broad-area sources expressed as
         # spectral levels (dB re 1 µPa²/Hz) at three depths.
         surface_noise_level: float = 0.0,
         white_noise_level: float = 0.0,
