@@ -418,12 +418,12 @@ def write_bellhop_env_file(
         # Box parameters (z in m, r in km as per Bellhop documentation)
         f.write(f"{z_box:.6f} {r_box/1000.0:.6f}\n")
 
-        # Cerveny / Simple Gaussian beam parameters
-        # Required by Bellhop Fortran when beam_type is 'C', 'R' or 'S'
-        # (ReadEnvironmentBell.f90:195-217).  Test case-insensitively
+        # Cerveny beam parameters.  ReadEnvironmentBell.f90 reads the two
+        # extra lines only for 'R'/'C'; 'S' (simple Gaussian) shares the
+        # no-extra-read case with 'G'/'g'/'^'/'B'/'b'.  Test case-insensitively
         # without destroying the original beam_type (lowercase 'b','g'
         # are distinct ray-centered variants).
-        if beam_type.upper() in ('C', 'R', 'S'):
+        if beam_type.upper() in ('C', 'R'):
             beam_width_type = kwargs.get('beam_width_type', 'F')
             beam_curvature = kwargs.get('beam_curvature', 'D')
             eps_multiplier = kwargs.get('eps_multiplier', 1.0)

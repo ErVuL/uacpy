@@ -230,11 +230,11 @@ class Bellhop(PropagationModel):
     arrivals_format : str, optional
         ``'ascii'`` (default). ``'binary'`` is rejected — uacpy can't parse it.
     beam_width_type : str, optional
-        Cerveny / simple-Gaussian only. ``'F'`` filling | ``'M'`` match | ``'W'`` waveguide.
+        Cerveny only. ``'F'`` filling | ``'M'`` match | ``'W'`` waveguide.
     beam_curvature : str, optional
-        Cerveny / simple-Gaussian only. ``'D'`` double | ``'S'`` single | ``'Z'`` zero.
+        Cerveny only. ``'D'`` double | ``'S'`` single | ``'Z'`` zero.
     eps_multiplier, r_loop, n_image, ib_win, component : optional
-        Cerveny / simple-Gaussian advanced beam knobs (used when ``beam_type ∈ {C, R, S}``).
+        Cerveny advanced beam knobs (used when ``beam_type ∈ {C, R}``).
         ``r_loop`` is in metres.
     auto_bounce : bool, optional
         Default ``True``. When the env carries layered / RDLB / elastic
@@ -374,9 +374,9 @@ class Bellhop(PropagationModel):
             to RunType 'A'; ``'binary'`` maps to 'a' (Fortran unformatted).
             The arrivals reader auto-detects format on read.
         beam_width_type : {'F', 'M', 'W'}, optional
-            Cerveny / simple-Gaussian beam width type. 'F' = filling
+            Cerveny beam width type. 'F' = filling
             (default), 'M' = match, 'W' = waveguide. Only used when
-            ``beam_type`` ∈ ('C', 'R', 'S').
+            ``beam_type`` ∈ ('C', 'R').
         beam_curvature : {'D', 'S', 'Z'}, optional
             Beam curvature: 'D' = double (default), 'S' = single,
             'Z' = zero.
