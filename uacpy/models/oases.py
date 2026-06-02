@@ -491,7 +491,7 @@ class OASN(PropagationModel):
         executable: Optional[Path] = None,
         # Output / option control
         options: Optional[str] = None,
-        # Noise field (Block VIII): broad-area sources expressed as
+        # Noise field (Block VI): broad-area sources expressed as
         # spectral levels (dB re 1 µPa²/Hz) at three depths.
         surface_noise_level: float = 0.0,
         white_noise_level: float = 0.0,
@@ -704,9 +704,10 @@ class OASN(PropagationModel):
         if run_mode == RunMode.COVARIANCE:
             opt_tokens.add('N')
         else:
-            # Replica generation reuses OASN's noise-integration kernel,
-            # so 'N' must accompany 'R' even when the user only wants
-            # the replica fields.
+            # The writer always emits the noise-source block (Block VI:
+            # SSLEV WNLEV DSLEV NDNS); OASN consumes it only when CALNSE
+            # is set by 'N'. Without 'N' the deck misaligns and OASN dies
+            # with "Bad integer in list input", so 'N' must accompany 'R'.
             opt_tokens.add('R')
             opt_tokens.add('N')
         options = ' '.join(sorted(opt_tokens))

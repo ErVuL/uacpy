@@ -477,9 +477,10 @@ def lfm_chirp(
     deltat = T / N
     time = np.linspace(0.0, T - deltat, N)
 
-    # Instantaneous frequency
-    f_inst = fmin + (fmax - fmin) * time / (2 * T)
-    s = np.sin(2.0 * np.pi * f_inst * time)
+    # Time-averaged frequency over [0, t]; 2*pi*f_avg*t is the chirp phase
+    # (instantaneous frequency is fmin + (fmax-fmin)*t/T, twice the slope).
+    f_avg = fmin + (fmax - fmin) * time / (2 * T)
+    s = np.sin(2.0 * np.pi * f_avg * time)
 
     return s, time
 

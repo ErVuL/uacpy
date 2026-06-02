@@ -95,13 +95,17 @@ kept verbatim.
 Calvo's original `outpt` writes only real TL to `tl.grid`, which discards
 the phase needed to assemble a broadband transfer function. Both
 `rams0.5.f` and `ramsurf1.5.f` are patched to also dump the complex PE
-envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
-`tl.grid`'s record geometry. The travelling-wave factor `exp(+i k0 r)`
-has been factored out by the PE march; the RAM Python wrapper bakes the
-engineering carrier `exp(-i k0 r)` back in (and conjugates ψ) before
-tagging the result `phase_reference='travelling_wave'`, so every
-broadband-capable model presents the IFFT pipeline the same shape of
-H(f).
+envelope to a parallel `pcomplex.bin`, mirroring `tl.grid`'s record
+geometry. The two binaries store *different* envelopes: `ramsurf1.5.f`
+writes `u·f3 / sqrt(r)`, while `rams0.5.f` writes `u / sqrt(r)` (its
+`outpt` takes no `f3` argument). They also differ in the travelling-wave
+carrier `exp(+i k0 r)` — baked into `u` in `rams0.5.f` (via the `g0`
+march step), factored out in `ramsurf1.5.f` — so the RAM Python wrapper
+applies a per-backend correction (conjugate ψ for both; an extra
+`exp(-i k0 r)` for ramsurf only) before tagging the result
+`phase_reference='travelling_wave'`, so every broadband-capable model
+presents the same shape of H(f) to the IFFT pipeline. See the per-binary
+discussion below for the full derivation.
 
 #### `ramsurf1.5.f` diff
 
