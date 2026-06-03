@@ -1225,13 +1225,26 @@ Examples 04 / 14 / 17 / 18 walk through the visualization surface.
 
 ## 8. Signal Processing
 
-Reachable as `uacpy.acoustic_signal`. Three sub-modules:
+Reachable as `uacpy.acoustic_signal`. Sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `uacpy.acoustic_signal.generation` | Waveforms (tone bursts, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
-| `uacpy.acoustic_signal.processing` | Beamforming, source/noise scaling, Fourier synthesis | `planewave_rep`, `beamform`, `add_noise`, `fourier_synthesis` |
-| `uacpy.acoustic_signal.analysis` | Class-based estimators | `PSD`, `PPSD`, `Spectrogram`, `SEL`, `FRF`, `FKTransform` |
+| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `fourier_synthesis` |
+| `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `taper` |
+| `…active` | Matched filter / pulse compression / ambiguity / alignment | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function`, `shift_to_max_correlation` |
+| `…transforms` | Gather transforms: f-k, tau-p, Radon (each with inverse + acoustic-cone overlay) | `FK`, `TauP`, `Radon`, `inverse_fk`, `taup_transform`/`inverse_taup`, `radon_transform`/`inverse_radon` |
+| `…timefreq` | Hilbert, spectrogram, wavelet (Morlet/Paul/DOG), Wigner–Ville, cepstrum (+ inverses) | `analytic_signal`, `envelope`, `instantaneous_frequency`, `Spectrogram`, `wigner_ville`, `cwt`/`inverse_cwt`, `cepstrum`/`complex_cepstrum`/`inverse_complex_cepstrum` |
+| `…analysis` | Spectral & level estimators (Welch density-scaled) | `PSD`, `PPSD`, `SEL` |
+| `…system_id` | Frequency-response-function estimation (Welch / ETFE / LS-FIR) | `FRF` |
+| `…channel` | Time-domain channel simulation from arrivals / `H(f)` | `impulse_response`, `simulate_reception`, `impulse_response_from_transfer_function` |
+| `…modal` | Modal / dispersion processing (waveguide warping) | `modal_group_velocity`, `warp_signal`, `unwarp_signal` |
+
+**Invertible transforms** (`FK` · `TauP` · `Radon` · `cwt` · `complex_cepstrum`)
+follow a filtering pattern: *forward → modify the coefficients → standalone
+inverse*. The inverse is a free function taking the (filtered) coefficients —
+e.g. `coeffs = taup_transform(g, fs, dx); coeffs[mask] = 0; out = inverse_taup(coeffs, …)`,
+or for f-k `fk = FK(); fk.compute(g, fs, dx); fk.FK[mask] = 0; out = inverse_fk(fk.FK)`.
+(There is no `obj.inverse()` — you invert coefficients, not the transform object.)
 
 Three canonical patterns:
 
@@ -1259,8 +1272,32 @@ PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
 For per-class kwargs / methods, read the docstrings
-(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10 walk through the
-common workflows.
+(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10, 27–29 walk
+through the common workflows (signal generation, matched filtering, arrays).
+
+### Sonar performance (`uacpy.sonar`)
+
+System-level layer that turns model TL fields + noise spectra into detection
+performance. Pure functions, all in decibels.
+
+| Module | Reach |
+|---|---|
+| `uacpy.sonar.scattering` | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength` |
+| `uacpy.sonar.reverberation` | `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| `uacpy.sonar.sonar_equation` | `echo_level`, `passive_signal_excess`, `active_signal_excess`, `figure_of_merit`, `detection_range` |
+| `uacpy.sonar.detection` | `deflection_coefficient`, `probability_of_detection`, `roc_curve`, `albersheim_snr`, `detection_threshold_energy` |
+
+```python
+import numpy as np, uacpy
+r = np.linspace(100, 30000, 600)
+tl = 20*np.log10(r)                       # or field.tl from a uacpy model
+dt = uacpy.sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100, integration_time_s=1)
+se = uacpy.sonar.passive_signal_excess(140, tl, noise_level=60, directivity_index=15, detection_threshold=dt)
+rng_m = uacpy.sonar.detection_range(r, se)   # range where signal excess hits 0
+```
+
+Equations follow Urick (*Principles of Underwater Sound*, Ch. 2/8/12);
+scattering laws from Chapman–Harris (1962) and Lambert/Mackenzie (1961).
 
 Scientific content in `uacpy.core.acoustics` is adapted from arlpy
 (BSD-3-Clause) — see `uacpy/third_party/arlpy/LICENSE` and `NOTICE`.
@@ -1423,6 +1460,10 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
 | 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / KrakenField / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
+| 27 | `example_27_sonar_equation.py` | `uacpy.sonar`: signal excess, reverberation vs noise, detection range | |
+| 28 | `example_28_matched_filter.py` | Pulse compression + range-Doppler ambiguity function | |
+| 29 | `example_29_array_processing.py` | Bartlett vs MVDR/Capon vs MUSIC direction-of-arrival | |
+| 30 | `example_30_time_frequency.py` | Transforms tour: f-k (+cone), tau-p, CWT, Wigner-Ville, cepstrum, hyperbolic Radon | |
 
 Smoke test:
 

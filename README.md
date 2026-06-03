@@ -64,10 +64,13 @@ processing, ambient noise, and visualization.
 | **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |
 
-**Beyond propagation** — signal processing (waveforms, matched filtering,
-beamforming, spectra), ambient noise (Wenz curves, wind, shipping,
-thermal), and visualization helpers for TL maps, rays, modes, fields,
-and cross‑model comparisons.
+**Beyond propagation** — signal processing (waveforms, matched filtering /
+pulse compression, conventional & adaptive beamforming, channel simulation,
+modal warping, spectra), invertible transforms (f‑k, tau‑p / Radon, wavelet,
+Wigner–Ville, cepstrum), sonar performance (`uacpy.sonar`: sonar equation,
+reverberation, detection range), ambient noise (Wenz curves, wind, shipping,
+thermal), and visualization helpers for TL maps, rays, modes, fields, and
+cross‑model comparisons.
 
 ## 📦 Installation
 

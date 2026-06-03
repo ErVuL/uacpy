@@ -272,12 +272,12 @@ class TestPublicReexports:
 
     def test_signal_analysis_classes_reachable(self):
         sig = uacpy.acoustic_signal
-        for name in ('PPSD', 'PSD', 'FRF', 'SEL', 'FKTransform', 'Spectrogram'):
+        for name in ('PPSD', 'PSD', 'FRF', 'SEL', 'FK', 'Spectrogram'):
             assert hasattr(sig, name), f"uacpy.acoustic_signal.{name} not reachable"
         assert 'PSD' in sig.__all__
         assert 'FRF' in sig.__all__
         assert 'SEL' in sig.__all__
-        assert 'FKTransform' in sig.__all__
+        assert 'FK' in sig.__all__
 
     def test_metrics_is_importable_submodule(self):
         import uacpy.metrics as m

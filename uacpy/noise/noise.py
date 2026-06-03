@@ -28,6 +28,8 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Wind noise (free function, used inside WenzNoise too)
@@ -305,7 +307,7 @@ class WenzNoise:
              self.rain, self.thermal, self.turbulence)
         )
 
-    def as_psd(self, ref=1e-6):
+    def as_psd(self, ref=REFERENCE_PRESSURE_WATER):
         """Linear total PSD in **Pa²/Hz**.
 
         ``self.total`` is in dB re ``ref²/Hz`` — by default

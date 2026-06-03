@@ -9,7 +9,7 @@ import numpy as np
 from uacpy.acoustic_signal.generation import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
-from uacpy.acoustic_signal.processing import (
+from uacpy.acoustic_signal.generation import (
     add_noise, make_bandlimited_noise,
 )
 
