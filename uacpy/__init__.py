@@ -58,6 +58,8 @@ from uacpy.visualization import plots as plot
 from uacpy import io
 from uacpy import acoustic_signal
 from uacpy import noise
+from uacpy import sonar
+from uacpy import comms
 from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
@@ -97,6 +99,8 @@ __all__ = [
     'io',
     'acoustic_signal',
     'noise',
+    'sonar',
+    'comms',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
     'metrics',

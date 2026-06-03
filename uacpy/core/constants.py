@@ -32,6 +32,11 @@ DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 # Floor applied whenever we take 20*log10(|p|).
 PRESSURE_FLOOR = 1e-30
 
+# SPL reference pressures for dB conversion (levels are dB re ref²).
+# Underwater acoustics references 1 µPa; in-air references 20 µPa.
+REFERENCE_PRESSURE_WATER = 1e-6  # Pa (1 µPa)
+REFERENCE_PRESSURE_AIR = 2e-5    # Pa (20 µPa)
+
 # Broadband-mode auto-generated frequency grid: when the user runs a
 # broadband-capable wrapper (Bellhop, Scooter, KrakenField, RAM, OASP)
 # without an explicit ``frequencies=`` override, the wrapper picks

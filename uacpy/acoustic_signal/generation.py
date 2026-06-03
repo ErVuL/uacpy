@@ -9,7 +9,7 @@ commonly used in underwater acoustic applications including:
 """
 
 import numpy as np
-from typing import Tuple, Literal
+from typing import Tuple, Literal, Optional
 import warnings
 import math
 
@@ -1047,3 +1047,283 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     print("All waveform tests completed successfully!")
+
+
+def add_noise(
+    timeseries: np.ndarray,
+    sample_rate: float,
+    source_level_db: float,
+    noise_level_db: float,
+    fc: float,
+    bandwidth: float
+) -> np.ndarray:
+    """
+    Incorporate source level and noise into existing time series.
+
+    The receiver timeseries is assumed to be based on a 0 dB source.
+    This function scales it by the source level and adds band-limited noise.
+
+    Parameters
+    ----------
+    timeseries : ndarray
+        Clean receiver time series (normalized to 0 dB source)
+        Shape: (n_samples,) or (n_samples, n_receivers)
+    sample_rate : float
+        Sample rate in Hz
+    source_level_db : float
+        Source level in dB (total power)
+    noise_level_db : float
+        Noise amplitude in dB (power spectral density, not total power)
+    fc : float
+        Center frequency for band-limited noise in Hz
+    bandwidth : float
+        Bandwidth for band-limited noise in Hz
+
+    Returns
+    -------
+    ndarray
+        Time series with source level and noise incorporated
+        Same shape as input timeseries
+
+    Notes
+    -----
+    The noise is generated as filtered Gaussian random noise with:
+    - Center frequency fc
+    - Bandwidth BW
+    - Power spectral density specified by noise_level_db
+
+    Total noise power = PSD + 10*log10(BW)
+
+    Examples
+    --------
+    >>> # Clean signal (0 dB reference)
+    >>> clean_signal = np.random.randn(48000)
+    >>> clean_signal = clean_signal / np.max(np.abs(clean_signal))
+    >>>
+    >>> # Add 185 dB source level and 40 dB noise
+    >>> noisy = add_noise(clean_signal, 48000, 185.0, 40.0, 10000.0, 10000.0)
+
+    References
+    ----------
+    Original MATLAB code by mbp, 4/09
+    """
+    SL = 10.0 ** (source_level_db / 20.0)
+
+    # Target noise RMS for a one-sided PSD level ``noise_level_db`` (dB
+    # re Pa²/Hz) over bandwidth ``bandwidth``:
+    #     P_total = S_target · BW = 10^(L/10) · BW   (Pa²)
+    #     RMS     = √P_total                          (Pa)
+    # ``make_bandlimited_noise`` returns unit-RMS noise, so multiplying
+    # by ``A = RMS`` gives a realisation with the requested PSD level.
+    flow = fc - bandwidth / 2
+    fhigh = fc + bandwidth / 2
+    bw = fhigh - flow
+    A = np.sqrt(bw * 10.0 ** (noise_level_db / 10.0))
+
+    # Generate band-limited noise — independent realisation per receiver
+    # so cross-channel correlation is zero (required for beamforming and
+    # array-gain assertions).
+    T = len(timeseries) / sample_rate
+
+    if timeseries.ndim == 1:
+        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate) * A
+        rts = timeseries * SL + noise_ts
+    else:
+        n_rcv = timeseries.shape[1]
+        noise_block = np.column_stack([
+            make_bandlimited_noise(fc, bandwidth, T, sample_rate)
+            for _ in range(n_rcv)
+        ]) * A
+        rts = timeseries * SL + noise_block
+
+    return rts
+
+
+def make_bandlimited_noise(
+    fc: float,
+    bandwidth: float,
+    duration: float,
+    sample_rate: float
+) -> np.ndarray:
+    """
+    Generate band-limited Gaussian noise.
+
+    Creates filtered Gaussian random noise centered at fc with specified bandwidth.
+
+    Parameters
+    ----------
+    fc : float
+        Center frequency in Hz
+    bandwidth : float
+        Bandwidth in Hz
+    duration : float
+        Duration in seconds
+    sample_rate : float
+        Sample rate in Hz
+
+    Returns
+    -------
+    ndarray
+        Band-limited noise time series
+
+    Notes
+    -----
+    The noise is generated in the frequency domain and transformed to time domain.
+    This ensures precise control over the frequency content.
+
+    Examples
+    --------
+    >>> noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
+    >>> print(f"Generated {len(noise)} samples")
+    """
+    from scipy.signal import butter, filtfilt
+    n_samples = int(duration * sample_rate)
+    noise = np.random.randn(n_samples)
+
+    # Design bandpass filter
+    flow = fc - bandwidth / 2
+    fhigh = fc + bandwidth / 2
+
+    # Ensure frequencies are valid
+    flow = max(flow, 1.0)  # At least 1 Hz
+    fhigh = min(fhigh, sample_rate / 2 - 1)  # Below Nyquist
+
+    # Normalize frequencies to Nyquist
+    nyquist = sample_rate / 2
+    low = flow / nyquist
+    high = fhigh / nyquist
+
+    # Ensure normalized frequencies are in valid range (0, 1)
+    low = max(min(low, 0.99), 0.01)
+    high = max(min(high, 0.99), 0.02)
+    b, a = butter(4, [low, high], btype='band')
+    filtered_noise = filtfilt(b, a, noise)
+
+    # Normalise to unit RMS so callers can scale by the target RMS
+    # directly (e.g. RMS = √(BW · 10^(PSD_dB/10)) for a target one-sided
+    # PSD level). Filtfilt's double-pass + Butterworth rolloff make the
+    # post-filter variance filter-shape-dependent; unit-RMS removes that.
+    rms = float(np.std(filtered_noise))
+    if rms > 0:
+        filtered_noise = filtered_noise / rms
+
+    return filtered_noise
+
+
+def fourier_synthesis(
+    pressure_freq: np.ndarray,
+    freq_vec: np.ndarray,
+    source_spectrum: Optional[np.ndarray] = None,
+    Tstart: float = 0.0
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Fourier synthesis to make time series from frequency-domain transfer function.
+
+    Converts frequency-domain pressure field to time domain using inverse FFT,
+    optionally weighted by a source spectrum.
+
+    Parameters
+    ----------
+    pressure_freq : ndarray
+        Frequency-domain pressure field
+        Shape: (n_freq, n_depths, n_ranges) or (n_freq, n_receivers)
+    freq_vec : ndarray
+        Frequency vector in Hz
+    source_spectrum : ndarray, optional
+        Source spectrum (complex) at frequencies in freq_vec
+        If None, assumes unit spectrum (impulse response)
+    Tstart : float, optional
+        Starting time offset in seconds (default: 0.0)
+
+    Returns
+    -------
+    rmod : ndarray
+        Time-domain received signal
+        Shape matches input pressure_freq with frequency dim converted to time
+    time : ndarray
+        Time vector in seconds
+
+    Notes
+    -----
+    The process:
+    1. Apply time-shift via phase rotation: exp(i * 2*pi * Tstart * f)
+    2. Weight by source spectrum if provided
+    3. Inverse FFT to convert to time domain
+    4. Scale by 2 and take real part (conjugate symmetry)
+
+    The time sampling is determined by the frequency spacing:
+    - deltaf = freq_vec[1] - freq_vec[0]
+    - Tmax = 1 / deltaf
+    - deltat = Tmax / Nfreq
+
+    Examples
+    --------
+    >>> # Generate frequency-domain transfer function
+    >>> freqs = np.linspace(10, 1000, 100)
+    >>> H_freq = np.random.randn(100, 50, 20) + 1j*np.random.randn(100, 50, 20)
+    >>>
+    >>> # Convert to time domain (impulse response)
+    >>> h_time, t = fourier_synthesis(H_freq, freqs)
+    >>>
+    >>> # With source spectrum
+    >>> s_hat = np.exp(-(freqs - 500)**2 / (2*100**2))  # Gaussian spectrum
+    >>> r_time, t = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
+
+    References
+    ----------
+    Original MATLAB code: stack.m by mbp, 9/96
+    Updated 2014 for compatibility with current file formats
+    """
+    Nfreq = len(freq_vec)
+    original_shape = pressure_freq.shape
+
+    # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
+    # multiplications below do not mutate the caller's input through the
+    # reshape view.
+    if pressure_freq.ndim == 1:
+        pressure_work = pressure_freq.reshape(-1, 1).copy()
+    else:
+        n_receivers = np.prod(original_shape[1:])
+        pressure_work = pressure_freq.reshape(Nfreq, n_receivers).copy()
+    if Tstart != 0.0:
+        for irec in range(pressure_work.shape[1]):
+            pressure_work[:, irec] = (pressure_work[:, irec] *
+                                      np.exp(1j * 2 * np.pi * Tstart * freq_vec))
+    elif len(freq_vec) > 0 and freq_vec[0] > 0:
+        warnings.warn(
+            f"fourier_synthesis: freq_vec[0]={freq_vec[0]:.3g} Hz > 0 with "
+            "Tstart=0. The IFFT treats input as starting from DC, which "
+            "introduces a phase ramp in the synthesised time series. Pass "
+            "Tstart matching the physical arrival time (e.g. r/c0) to align "
+            "the trace with travel time.",
+            UserWarning, stacklevel=2,
+        )
+
+    # Weight by source spectrum if provided
+    if source_spectrum is not None:
+        for irec in range(pressure_work.shape[1]):
+            pressure_work[:, irec] = pressure_work[:, irec] * source_spectrum
+
+    # Inverse FFT to get time series
+    rmod_work = np.fft.ifft(pressure_work, n=Nfreq, axis=0)
+
+    # Since spectrum is conjugate symmetric, result should be real
+    # Factor of 2 accounts for negative frequencies being zeroed
+    rmod_work = 2 * np.real(rmod_work)
+
+    # Reshape back to original shape (with freq dim → time dim)
+    if pressure_freq.ndim == 1:
+        rmod = rmod_work.flatten()
+    else:
+        new_shape = (Nfreq,) + original_shape[1:]
+        rmod = rmod_work.reshape(new_shape)
+    deltaf = freq_vec[1] - freq_vec[0] if len(freq_vec) > 1 else 1.0
+    Tmax = 1 / deltaf
+    deltat = Tmax / Nfreq
+    # Anchor the output time axis at ``Tstart`` so the IFFT trace lines
+    # up with absolute travel time when the caller passes r/c0 (or any
+    # other origin). Tstart=0.0 (default) reproduces the original
+    # source-local axis.
+    time = Tstart + np.linspace(0.0, Tmax - deltat, Nfreq)
+
+    return rmod, time

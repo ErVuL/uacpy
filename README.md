@@ -2,7 +2,7 @@
   <img src="./logo.png" alt="UACPY logo" width="350">
 </p>
 
-# 🌊 Underwater Acoustic Propagation for Python 🌊
+# 🌊 Underwater Acoustics for Python 🌊
 
 <p align="center">
   <a href="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml"><img src="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -47,10 +47,9 @@ community-driven.
 
 ## 🔍 What's in UACPY?
 
-A unified Python API over classical underwater‑acoustic propagation
-models, plus the supporting pieces needed to actually use them:
-high‑level `Environment` / `Source` / `Receiver` construction, signal
-processing, ambient noise, and visualization.
+A unified Python API over the classical underwater‑acoustic propagation
+models — consistent `Environment` / `Source` / `Receiver` construction and
+`Result` objects — plus first‑class toolkits for everything around them.
 
 **Propagation models**
 
@@ -64,10 +63,14 @@ processing, ambient noise, and visualization.
 | **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |
 
-**Beyond propagation** — signal processing (waveforms, matched filtering,
-beamforming, spectra), ambient noise (Wenz curves, wind, shipping,
-thermal), and visualization helpers for TL maps, rays, modes, fields,
-and cross‑model comparisons.
+**Toolkits** — first‑class modules, not just glue around the models:
+
+- **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering / pulse compression, conventional & adaptive beamforming, time‑frequency & invertible transforms (f‑k, τ‑p/Radon, wavelet, Wigner–Ville, cepstrum), channel simulation, modal warping, spectra.
+- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering laws, reverberation, detection theory & range.
+- **Communications** (`uacpy.comms`) — PSK/QAM/DPSK/FSK, adaptive DFE/LMS/RLS + carrier PLL, Doppler, OFDM, Viterbi FEC, DSSS, end‑to‑end real‑data `.wav` modems, and the open **NATO JANUS** standard (STANAG 4748).
+- **Ambient noise** (`uacpy.noise`) — Wenz curves (wind / shipping / rain / thermal).
+- **Standards & metrics** — UNESCO/Del Grosso sound speed, ISO 18405 decidecade bands, ISO 17208 ship source level, Southall 2019 marine‑mammal weighting.
+- **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
 
 ## 📦 Installation
 
@@ -276,9 +279,10 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 26 example scripts numbered
-sequentially (`example_01_*.py` through `example_26_*.py`); the full
-suite runs in a few minutes on a laptop. See the
+Inside `uacpy/uacpy/examples/` you will find 36 example scripts numbered
+sequentially (`example_01_*.py` through `example_36_*.py`) — from a first
+TL field to communications modems and a standards-based noise-impact
+assessment. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 

@@ -370,6 +370,38 @@ class TestInterpolationAccuracy:
                 f"Interpolated speed {c} at depth {d} outside bounds [{min(speeds)}, {max(speeds)}]"
 
 
+class TestSoundSpeedEquations:
+    """Standard sound-speed equations (UNESCO Chen-Millero, Del Grosso)."""
+
+    def test_unesco_reference_check_value(self):
+        from uacpy.core.acoustics import soundspeed_unesco
+        # UNESCO 1983 check value: c(S=35, T=0 ITS-90, P=0) ≈ 1449.14 m/s
+        assert soundspeed_unesco(0.0, 35.0, 0.0) == pytest.approx(1449.14, abs=0.02)
+
+    def test_unesco_agrees_with_mackenzie_at_surface(self):
+        from uacpy.core.acoustics import soundspeed_unesco, soundspeed
+        # the two independent surface formulas agree to < 0.2 m/s
+        for t, s in [(5, 35), (15, 35), (25, 36)]:
+            assert soundspeed_unesco(t, s, 0.0) == pytest.approx(soundspeed(t, s, 0.0), abs=0.2)
+
+    def test_delgrosso_matches_unesco_within_documented_difference(self):
+        from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+        # Del Grosso and UNESCO agree to < 1 m/s over realistic profiles; the
+        # small residual grows with depth (UNESCO overpredicts, Dushaw 1993).
+        for t, s, p in [(25, 35, 0), (15, 35.5, 600), (4, 34.8, 3000), (1.5, 34.7, 8000)]:
+            assert soundspeed_delgrosso(t, s, p) == pytest.approx(
+                soundspeed_unesco(t, s, p), abs=1.0)
+        # near-identical at the surface
+        assert soundspeed_delgrosso(15, 35, 0) == pytest.approx(
+            soundspeed_unesco(15, 35, 0), abs=0.05)
+
+    def test_monotonic_increase_with_each_variable(self):
+        from uacpy.core.acoustics import soundspeed_unesco as c
+        assert c(20, 35, 0) > c(10, 35, 0)        # temperature
+        assert c(15, 38, 0) > c(15, 32, 0)        # salinity
+        assert c(15, 35, 5000) > c(15, 35, 0)     # pressure
+
+
 class TestNumericalStability:
     """
     Test numerical stability and edge cases

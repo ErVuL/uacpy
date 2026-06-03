@@ -20,8 +20,8 @@ selection, and cross-cutting behaviour**.
 5. [Propagation Models](#5-propagation-models)
 6. [Results — typed hierarchy](#6-results--typed-hierarchy)
 7. [Visualization](#7-visualization)
-8. [Signal Processing](#8-signal-processing)
-9. [Ambient Noise](#9-ambient-noise)
+8. [Signal Processing, Sonar & Communications](#8-signal-processing)
+9. [Ambient Noise & Standards Metrics](#9-ambient-noise)
 10. [Units & Conventions](#10-units--conventions)
 11. [Troubleshooting](#11-troubleshooting)
 12. [Examples Index](#12-examples-index)
@@ -60,8 +60,9 @@ plt.show()
 
 The full public surface lives on `uacpy.*` — `dir(uacpy)` is the index.
 Models are in `uacpy.models`, visualization in `uacpy.visualization`,
-signal processing in `uacpy.acoustic_signal`, cross-model TL metrics
-in `uacpy.metrics`.
+signal processing in `uacpy.acoustic_signal`, sonar in `uacpy.sonar`,
+communications in `uacpy.comms`, ambient noise + standards metrics in
+`uacpy.noise`, cross-model TL metrics in `uacpy.metrics`.
 
 ---
 
@@ -1225,13 +1226,26 @@ Examples 04 / 14 / 17 / 18 walk through the visualization surface.
 
 ## 8. Signal Processing
 
-Reachable as `uacpy.acoustic_signal`. Three sub-modules:
+Reachable as `uacpy.acoustic_signal`. Sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `uacpy.acoustic_signal.generation` | Waveforms (tone bursts, chirps, Ricker, BPSK, bandlimited noise, SSRP) | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `make_bandlimited_noise`, `ssrp` |
-| `uacpy.acoustic_signal.processing` | Beamforming, source/noise scaling, Fourier synthesis | `planewave_rep`, `beamform`, `add_noise`, `fourier_synthesis` |
-| `uacpy.acoustic_signal.analysis` | Class-based estimators | `PSD`, `PPSD`, `Spectrogram`, `SEL`, `FRF`, `FKTransform` |
+| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `fourier_synthesis` |
+| `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `taper` |
+| `…active` | Matched filter / pulse compression / ambiguity / alignment | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function`, `shift_to_max_correlation` |
+| `…transforms` | Gather transforms: f-k, tau-p, Radon (each with inverse + acoustic-cone overlay) | `FK`, `TauP`, `Radon`, `inverse_fk`, `taup_transform`/`inverse_taup`, `radon_transform`/`inverse_radon` |
+| `…timefreq` | Hilbert, spectrogram, wavelet (Morlet/Paul/DOG), Wigner–Ville, cepstrum (+ inverses) | `analytic_signal`, `envelope`, `instantaneous_frequency`, `Spectrogram`, `wigner_ville`, `cwt`/`inverse_cwt`, `cepstrum`/`complex_cepstrum`/`inverse_complex_cepstrum` |
+| `…analysis` | Spectral & level estimators (Welch density-scaled) | `PSD`, `PPSD`, `SEL` |
+| `…system_id` | Frequency-response-function estimation (Welch / ETFE / LS-FIR) | `FRF` |
+| `…channel` | Time-domain channel simulation from arrivals / `H(f)` | `impulse_response`, `simulate_reception`, `impulse_response_from_transfer_function` |
+| `…modal` | Modal / dispersion processing (waveguide warping) | `modal_group_velocity`, `warp_signal`, `unwarp_signal` |
+
+**Invertible transforms** (`FK` · `TauP` · `Radon` · `cwt` · `complex_cepstrum`)
+follow a filtering pattern: *forward → modify the coefficients → standalone
+inverse*. The inverse is a free function taking the (filtered) coefficients —
+e.g. `coeffs = taup_transform(g, fs, dx); coeffs[mask] = 0; out = inverse_taup(coeffs, …)`,
+or for f-k `fk = FK(); fk.compute(g, fs, dx); fk.FK[mask] = 0; out = inverse_fk(fk.FK)`.
+(There is no `obj.inverse()` — you invert coefficients, not the transform object.)
 
 Three canonical patterns:
 
@@ -1259,11 +1273,159 @@ PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
 For per-class kwargs / methods, read the docstrings
-(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10 walk through the
-common workflows.
+(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10, 27–29 walk
+through the common workflows (signal generation, matched filtering, arrays).
+
+### Sonar performance (`uacpy.sonar`)
+
+System-level layer that turns model TL fields + noise spectra into detection
+performance. Pure functions, all in decibels.
+
+| Module | Reach |
+|---|---|
+| `uacpy.sonar.scattering` | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength` |
+| `uacpy.sonar.reverberation` | `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| `uacpy.sonar.sonar_equation` | `echo_level`, `passive_signal_excess`, `active_signal_excess`, `figure_of_merit`, `detection_range` |
+| `uacpy.sonar.detection` | `deflection_coefficient`, `probability_of_detection`, `roc_curve`, `albersheim_snr`, `detection_threshold_energy` |
+
+```python
+import numpy as np, uacpy
+r = np.linspace(100, 30000, 600)
+tl = 20*np.log10(r)                       # or field.tl from a uacpy model
+dt = uacpy.sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100, integration_time_s=1)
+se = uacpy.sonar.passive_signal_excess(140, tl, noise_level=60, directivity_index=15, detection_threshold=dt)
+rng_m = uacpy.sonar.detection_range(r, se)   # range where signal excess hits 0
+```
+
+Equations follow Urick (*Principles of Underwater Sound*, Ch. 2/8/12);
+scattering laws from Chapman–Harris (1962) and Lambert/Mackenzie (1961).
 
 Scientific content in `uacpy.core.acoustics` is adapted from arlpy
 (BSD-3-Clause) — see `uacpy/third_party/arlpy/LICENSE` and `NOTICE`.
+
+### Digital communications (`uacpy.comms`)
+
+A communications toolbox tuned to the underwater channel (severe time-varying
+multipath, fast carrier-phase variation, motion-induced Doppler scaling).
+Everything works in the complex symbol domain so the pieces compose.
+
+| Module | Reach |
+|---|---|
+| `uacpy.comms.modulation` | `Modulator` (PSK/QAM, Gray-mapped) + `.plot_constellation`/`.scatter`; `dpsk_*`, `fsk_*` |
+| `uacpy.comms.metrics` | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory`; plots `scatter`, `eye_diagram`, `ber_curve` |
+| `uacpy.comms.channel_models` | `awgn`, `multipath_channel`, `fading_taps`/`apply_fading_channel` (Rayleigh/Rician), `plot_channel` |
+| `uacpy.comms.equalization` | `DFE` (LMS/RLS + carrier PLL), `lms_equalizer`, `rls_equalizer`, `mmse_equalizer`, `plot_convergence` |
+| `uacpy.comms.doppler` | `estimate_doppler_scale`, `compensate_doppler` (resampling), `plot_doppler_ambiguity` |
+| `uacpy.comms.sync` | `detect_preamble`, `detect_frames`, `plot_sync_metric` |
+| `uacpy.comms.channel_est` | `ls_estimate`, `omp_estimate` (sparse) |
+| `uacpy.comms.ofdm` | `ofdm_modulate`, `ofdm_demodulate` (CP + per-subcarrier ZF/MMSE), `plot_subcarriers` |
+| `uacpy.comms.coding` | `ConvCode` codec, `conv_encode`/`viterbi_decode`, `interleave`/`deinterleave` |
+| `uacpy.comms.spread` | `m_sequence`, `spread`/`despread`, `processing_gain_db` |
+| `uacpy.comms.link` | `simulate_link`, `ber_sweep` — end-to-end BER harness |
+| `uacpy.comms.framing` | `pack_frame`/`unpack_frame` (length header + CRC-32), `bytes_to_bits` |
+| `uacpy.comms.phy` | `rrc_filter`, `pulse_shape`, `rrc_matched_filter`, `upconvert`/`downconvert`, `symbol_sync` (Gardner timing recovery) |
+| `uacpy.comms.transceiver` | `Transmitter`/`Receiver` (single-carrier), `OFDMTransmitter`/`OFDMReceiver` (multicarrier) — symbol-domain *and* real passband |
+| `uacpy.comms.janus` | `JanusPacket`, `janus_modulate`/`janus_demodulate`, `janus_encode`/`janus_decode`, `janus_detect` — NATO STANAG 4748 |
+
+Typical workflow — configure once, compose, visualize:
+
+```python
+import numpy as np, uacpy.comms as comms
+
+mod  = comms.Modulator("16qam")               # modulation
+code = comms.ConvCode(interleave_depth=16)    # FEC (rate, K, interleave bundled)
+
+# transmit:  bits -> FEC -> symbols
+bits = np.random.default_rng(0).integers(0, 2, 2000)
+tx = mod.modulate(code.encode(bits))
+
+# channel:  multipath + noise
+h  = comms.multipath_channel([0, 1/12000, 2/12000], [1.0, 0.5, 0.25], 12000)
+rx = comms.awgn(comms.apply_channel(tx, h), snr_db=22)
+
+# receive:  adaptive DFE -> demod -> FEC decode
+dfe = comms.DFE(n_ff=14, n_fb=6, forget=0.997)   # RLS + optional pll_bandwidth=
+# ... train + equalize ...  then  bits_out = code.decode(mod.demodulate(eq))
+
+# one-call BER vs theory (handles alignment + coding internally):
+ebn0 = np.arange(0, 11, 2.0)
+comms.ber_curve(ebn0, comms.ber_sweep("qpsk", ebn0), scheme="qpsk")
+```
+
+**Real data (payload <-> real samples).** The toolbox above is complex-baseband
+(symbol domain). To send/receive *real* data — a file or a recorded `.wav` — the
+passband layer adds RRC pulse shaping, carrier up/down-conversion, and **Gardner
+symbol-timing recovery**, wrapped by `Transmitter`/`Receiver`. The preamble is
+both the sync probe and the equalizer training sequence (the underwater frame =
+probe + training + data). A full text-message round-trip:
+
+```python
+import uacpy.comms as comms
+
+fs, fc, sps = 96_000, 24_000, 8
+code = comms.ConvCode(interleave_depth=16)
+
+# transmit a real payload to a real passband waveform (write to .wav, play it)
+tx  = comms.Transmitter("qpsk", code=code, preamble=256)
+wav = tx.transmit_passband(comms.pack_frame(b"hello ocean"), fs, fc, sps=sps)
+
+# ... wav goes through the water (or a uacpy propagation channel) ...
+
+# recover the bytes: downconvert -> matched filter -> timing recovery ->
+# frame-sync -> DFE (+carrier PLL) -> Viterbi -> unframe + CRC
+dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
+rx  = comms.Receiver("qpsk", code=code, equalizer=dfe, preamble=256)
+payload, crc_ok = comms.unpack_frame(rx.receive_passband(recording, fs, fc, sps=sps))
+```
+
+`Transmitter`/`Receiver` cover the **single-carrier coherent** link.
+`OFDMTransmitter`/`OFDMReceiver` are the parallel **multicarrier** pair, using
+the practical underwater receiver — estimate and **resample** the common Doppler,
+**Schmidl–Cox** timing + residual-CFO correction, FFT, **pilot** channel
+estimation, one-tap-per-subcarrier equalization + per-symbol common-phase
+tracking:
+
+```python
+tx = comms.OFDMTransmitter("qpsk", n_subcarriers=256, cp_len=32, code=code)
+wav = tx.transmit_passband(comms.pack_frame(b"hello ocean"), fs, fc, oversample=4)
+rx = comms.OFDMReceiver("qpsk", 256, 32, code=code)
+payload, crc_ok = comms.unpack_frame(rx.receive_passband(recording, fs, fc, oversample=4))
+```
+
+OFDM trades robustness to long delay spread (cyclic prefix + 1-tap equalizer) for
+sensitivity to Doppler (hence the resampling front end); the single-carrier DFE
+is the opposite trade. The non-coherent schemes (FSK, DPSK) keep their
+standalone functional API.
+
+**JANUS — the NATO STANAG 4748 standard (`uacpy.comms.janus`).** The one
+*interoperable* path: an open, published protocol, so uacpy can produce and
+decode a standards-compliant waveform (not just talk to itself). It implements
+the **baseline 64-bit packet** (field layout + CCITT CRC-8), rate-1/2 **K=9**
+convolutional coding (`g1=0o657, g2=0o435`) with depth-13 interleaving (144
+symbols), and the **FH-BFSK** physical layer (frequency-hopped binary FSK, the
+Table III tone set, the 32-chip detection preamble, Tukey chip windowing, optional
+wake-up tones) in the initial band (Fc=11520 Hz, Bw=4160 Hz, Cd=6.25 ms):
+
+```python
+import uacpy.comms as comms
+pkt = comms.JanusPacket(class_id=16, app_type=0)        # NATO ref impl, Emergency
+wav = comms.janus_modulate(pkt.to_bits(), sample_rate=48000)   # FH-BFSK waveform
+# ... over the water ...
+out, crc_ok = comms.janus_demodulate(recording, sample_rate=48000)
+```
+
+This is **verified interoperable** with the CMRE `janus-c` 3.0.5 reference
+implementation: uacpy's encoder is bit-exact to `janus-tx` coded-symbol vectors
+(packet, CRC, convolutional code, interleaver, hop sequence and 32-chip preamble
+all match), and uacpy decodes the reference implementation's emitted `.wav` back
+to the original packet. A golden reference vector is locked into the test suite.
+
+Grounded in Istepanian & Stojanovic (*Underwater Acoustic DSP & Communication
+Systems*) and Proakis & Salehi (*Digital Communications*). The DFE+PLL receiver
+follows Stojanovic, Catipovic & Proakis (1994, IEEE JOE); timing recovery uses
+the Gardner (1986) detector. Examples 31 (algorithm tour) and 32 (real-data
+modem, text -> .wav -> text) are full walk-throughs. Every visualizable module
+ships an `ax=`-accepting `plot_*` helper that returns `(fig, ax)`.
 
 ---
 
@@ -1309,6 +1471,24 @@ noise*, DRDC-RDDC-2022-D051; Wenz (1962); Mellen (1952); Piggott (1964);
 Merklinger (1979); Torres & Costa (2019); Nichols & Bradley (2016).
 
 Example: 09.
+
+### Standards-based metrics
+
+Internationally-standardised quantities, each implemented to the exact published
+formulas (and verified against reference values / check points):
+
+| Quantity | API | Standard / reference |
+|---|---|---|
+| Sound speed (UNESCO) | `uacpy.acoustics.soundspeed_unesco(T, S, P_dbar)` | Chen & Millero 1977 / UNESCO 1983 |
+| Sound speed (Del Grosso) | `uacpy.acoustics.soundspeed_delgrosso(T, S, P_dbar)` | Del Grosso 1974 (NRL II) |
+| Decidecade bands + levels | `uacpy.acoustic_signal.decidecade_bands`, `decidecade_band_levels`, `plot_band_levels` | ISO 18405 / IEC 61260-1 (base-10) |
+| Ship radiated noise (RNL/MSL) | `uacpy.noise.radiated_noise_level`, `monopole_source_level`, `lloyd_mirror_correction`, `plot_source_level` | ISO 17208-1/-2 (Lloyd's-mirror correction) |
+| Marine-mammal weighting | `uacpy.noise.auditory_weighting(f, group)`, `apply_weighting`, `weighted_level`, `plot_weighting` | Southall et al. 2019, Table 5 (8 hearing groups) |
+
+These compose into a noise-impact workflow — UNESCO sound speed for the
+environment, ISO 17208 to turn a ship measurement into a monopole source level,
+a propagation model (or simple spreading + Thorp) to a receiver, then Southall
+weighting for a marine-mammal hearing group — walked through in **example 35**.
 
 ---
 
@@ -1423,6 +1603,16 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
 | 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / KrakenField / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
+| 27 | `example_27_sonar_equation.py` | `uacpy.sonar`: signal excess, reverberation vs noise, detection range | |
+| 28 | `example_28_matched_filter.py` | Pulse compression + range-Doppler ambiguity function | |
+| 29 | `example_29_array_processing.py` | Bartlett vs MVDR/Capon vs MUSIC direction-of-arrival | |
+| 30 | `example_30_time_frequency.py` | Transforms tour: f-k (+cone), tau-p, CWT, Wigner-Ville, cepstrum, hyperbolic Radon | |
+| 31 | `example_31_underwater_comms.py` | Comms tour: BER vs theory, DFE equalization, sync, Doppler, OFDM, FEC, DSSS | |
+| 32 | `example_32_realdata_modem.py` | Real-data modem: text -> framed bytes -> passband .wav -> channel -> timing recovery + DFE/PLL -> text | |
+| 33 | `example_33_ofdm_modem.py` | OFDM modem: text -> .wav -> channel (multipath + Doppler) -> resample + Schmidl-Cox + per-subcarrier equalize -> text | |
+| 34 | `example_34_janus_beacon.py` | JANUS (STANAG 4748) beacon: 64-bit packet -> FH-BFSK .wav -> delay + echo + AWGN -> preamble detect + decode + CRC | |
+| 35 | `example_35_noise_impact.py` | Standards chain: UNESCO sound speed -> decidecade bands -> ISO 17208 ship MSL -> propagation -> Southall 2019 marine-mammal weighting | |
+| 36 | `example_36_noise_impact_modeled.py` | Modeled impact: ship ISO 17208 MSL through a real Bellhop TL field (UNESCO SSP) -> Southall weighting at a marine mammal | requires_binary |
 
 Smoke test:
 

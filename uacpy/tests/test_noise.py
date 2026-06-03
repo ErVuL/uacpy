@@ -201,3 +201,69 @@ def test_wenznoise_zero_wind_drops_wind_from_total(freqs):
     )
     expected = 10.0 * np.log10(lin_no_wind)
     np.testing.assert_allclose(wenz.total, expected, rtol=1e-10, atol=1e-10)
+
+
+class TestShipRadiatedNoise:
+    """ISO 17208 radiated noise level + monopole source level."""
+
+    def test_rnl_spherical_spreading(self):
+        from uacpy.noise import radiated_noise_level
+        # RNL = received SPL + 20 log10(r)
+        assert radiated_noise_level(120.0, 100.0) == pytest.approx(120.0 + 40.0)
+        assert radiated_noise_level(120.0, 1.0) == pytest.approx(120.0)
+
+    def test_nominal_source_depth(self):
+        from uacpy.noise import nominal_source_depth
+        assert nominal_source_depth(10.0) == pytest.approx(7.0)   # 0.7 * draught
+
+    def test_lloyd_mirror_high_frequency_asymptote(self):
+        from uacpy.noise import lloyd_mirror_correction
+        # high f -> incoherent source+image -> -10 log10(2) = -3.01 dB
+        assert lloyd_mirror_correction(1e5, 7.0) == pytest.approx(-3.0103, abs=1e-3)
+
+    def test_lloyd_mirror_low_frequency_positive(self):
+        from uacpy.noise import lloyd_mirror_correction
+        # surface dipole suppresses low-f radiation -> MSL >> RNL -> large +ve
+        assert lloyd_mirror_correction(10.0, 7.0) > 5.0
+
+    def test_monopole_source_level_is_rnl_plus_correction(self):
+        from uacpy.noise import (monopole_source_level, radiated_noise_level,
+                                 lloyd_mirror_correction)
+        rnl = radiated_noise_level(120.0, 150.0)
+        ds, f = 7.0, 125.0
+        assert monopole_source_level(rnl, f, ds) == pytest.approx(
+            rnl + lloyd_mirror_correction(f, ds))
+
+
+class TestMarineMammalWeighting:
+    """Southall et al. 2019 auditory weighting functions (Table 5)."""
+
+    def test_peak_is_zero_db(self):
+        from uacpy.noise import auditory_weighting
+        import numpy as np
+        f = np.logspace(1, 5.5, 5000)
+        for g in ("LF", "HF", "VHF", "SI", "PCW", "OCW"):
+            assert auditory_weighting(f, g).max() == pytest.approx(0.0, abs=0.02)
+
+    def test_low_frequency_slope_is_20a(self):
+        from uacpy.noise import auditory_weighting, WEIGHTING_PARAMS
+        for g in ("LF", "HF", "OCW"):
+            a = WEIGHTING_PARAMS[g]["a"]
+            f1 = WEIGHTING_PARAMS[g]["f1"] * 1000.0
+            slope = auditory_weighting(0.1 * f1, g) - auditory_weighting(0.01 * f1, g)
+            assert slope == pytest.approx(20.0 * a, abs=0.3)   # +20a dB/decade
+
+    def test_unknown_group_raises(self):
+        from uacpy.noise import auditory_weighting
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            auditory_weighting(1000.0, "MF")
+
+    def test_apply_and_weighted_level(self):
+        from uacpy.noise import apply_weighting, weighted_level, auditory_weighting
+        import numpy as np
+        f = np.array([100.0, 1000.0, 10000.0])
+        lvl = np.array([120.0, 120.0, 120.0])
+        assert np.allclose(apply_weighting(lvl, f, "LF"),
+                           lvl + auditory_weighting(f, "LF"))
+        assert np.isfinite(weighted_level(lvl, f, "LF"))
