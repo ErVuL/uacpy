@@ -73,10 +73,13 @@ from .timefreq import (
     wigner_ville,
 )
 
+from .bands import decidecade_bands, decidecade_band_levels, plot_band_levels
+
 from . import (
     active,
     analysis,
     arrays,
+    bands,
     channel,
     generation,
     modal,
@@ -112,7 +115,9 @@ __all__ = [
     "Spectrogram", "analytic_signal", "envelope", "instantaneous_frequency",
     "wigner_ville", "cwt", "inverse_cwt", "cepstrum", "complex_cepstrum",
     "inverse_complex_cepstrum",
+    # decidecade bands (ISO 18405 / IEC 61260-1)
+    "decidecade_bands", "decidecade_band_levels", "plot_band_levels",
     # sub-modules
     "generation", "arrays", "active", "transforms", "timefreq", "analysis",
-    "system_id", "channel", "modal",
+    "system_id", "channel", "modal", "bands",
 ]

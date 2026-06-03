@@ -106,6 +106,109 @@ def soundspeed(
     return c
 
 
+def soundspeed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
+    """Speed of sound in seawater — UNESCO (Chen & Millero 1977 / UNESCO 1983).
+
+    The international standard algorithm. ``pressure`` is in **decibars** (the
+    form the equation is defined in; ≈ 1 dbar per metre of depth). Temperature is
+    ITS-90 (converted to the IPTS-68 scale the polynomial expects internally).
+    Valid for ``T ∈ [0, 40] °C``, ``S ∈ [0, 40] PSU``, ``P ∈ [0, 1000] bar``.
+
+    Parameters
+    ----------
+    temperature : float
+        Temperature [°C, ITS-90].
+    salinity : float
+        Practical salinity [PSU, PSS-78].
+    pressure : float
+        Pressure [dbar].
+
+    Returns
+    -------
+    float
+        Sound speed [m/s].
+
+    References
+    ----------
+    Chen, C.-T. & Millero, F. J. (1977). "Speed of sound in seawater at high
+    pressures." JASA 62(5), 1129-1135. UNESCO (1983) Technical Papers in Marine
+    Science 44, Eqns 33-37.
+    """
+    t = np.asarray(temperature, dtype=float)
+    s = np.asarray(salinity, dtype=float)
+    p = np.asarray(pressure, dtype=float) / 10.0       # dbar -> bar
+    t68 = t * 1.00024                                  # ITS-90 -> IPTS-68
+
+    # Eqn 34: pure-water term Cw(T, P)
+    c00, c01, c02, c03, c04, c05 = (1402.388, 5.03711, -5.80852e-2,
+                                    3.3420e-4, -1.47800e-6, 3.1464e-9)
+    c10, c11, c12, c13, c14 = (0.153563, 6.8982e-4, -8.1788e-6,
+                               1.3621e-7, -6.1185e-10)
+    c20, c21, c22, c23, c24 = (3.1260e-5, -1.7107e-6, 2.5974e-8,
+                               -2.5335e-10, 1.0405e-12)
+    c30, c31, c32 = (-9.7729e-9, 3.8504e-10, -2.3643e-12)
+    cw = ((((c32 * t68 + c31) * t68 + c30) * p
+           + ((((c24 * t68 + c23) * t68 + c22) * t68 + c21) * t68 + c20)) * p
+          + ((((c14 * t68 + c13) * t68 + c12) * t68 + c11) * t68 + c10)) * p \
+        + ((((c05 * t68 + c04) * t68 + c03) * t68 + c02) * t68 + c01) * t68 + c00
+
+    # Eqn 35: A(T, P)
+    a00, a01, a02, a03, a04 = (1.389, -1.262e-2, 7.164e-5, 2.006e-6, -3.21e-8)
+    a10, a11, a12, a13, a14 = (9.4742e-5, -1.2580e-5, -6.4885e-8,
+                               1.0507e-8, -2.0122e-10)
+    a20, a21, a22, a23 = (-3.9064e-7, 9.1041e-9, -1.6002e-10, 7.988e-12)
+    a30, a31, a32 = (1.100e-10, 6.649e-12, -3.389e-13)
+    a = ((((a32 * t68 + a31) * t68 + a30) * p
+          + (((a23 * t68 + a22) * t68 + a21) * t68 + a20)) * p
+         + ((((a14 * t68 + a13) * t68 + a12) * t68 + a11) * t68 + a10)) * p \
+        + (((a04 * t68 + a03) * t68 + a02) * t68 + a01) * t68 + a00
+
+    # Eqn 36/37: B(T, P), D(P)
+    b = -1.922e-2 - 4.42e-5 * t68 + (7.3637e-5 + 1.7945e-7 * t68) * p
+    d = 1.727e-3 - 7.9836e-6 * p
+
+    c = cw + a * s + b * s ** 1.5 + d * s ** 2
+    return float(c) if np.ndim(c) == 0 else c
+
+
+def soundspeed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
+    """Speed of sound in seawater — Del Grosso (1974) "NRL II" equation.
+
+    An alternative to UNESCO, often preferred at high pressure / in deep water.
+    ``pressure`` is accepted in **decibars** and converted to the kg/cm² the
+    original equation uses (``1 kg/cm² = 9.80665 dbar``). Temperature in °C,
+    salinity in PSU. Standard deviation 0.05 m/s; valid for realistic ``(S, T,
+    P)`` combinations (``T`` to 35 °C, ``S`` 29-41 PSU).
+
+    References
+    ----------
+    Del Grosso, V. A. (1974). "New equation for the speed of sound in natural
+    waters (with comparisons to other equations)." JASA 56(4), 1084-1091.
+    """
+    t = np.asarray(temperature, dtype=float)
+    s = np.asarray(salinity, dtype=float)
+    p = np.asarray(pressure, dtype=float) / 9.80665     # dbar -> kg/cm²
+
+    c000 = 1402.392
+    dct = (0.501109398873e1 * t - 0.550946843172e-1 * t ** 2
+           + 0.221535969240e-3 * t ** 3)
+    dcs = 0.132952290781e1 * s + 0.128955756844e-3 * s ** 2
+    dcp = (0.156059257041e0 * p + 0.244998688441e-4 * p ** 2
+           - 0.883392332513e-8 * p ** 3)
+    dcstp = (-0.127562783426e-1 * t * s
+             + 0.635191613389e-2 * t * p
+             + 0.265484716608e-7 * t ** 2 * p ** 2
+             - 0.159349479045e-5 * t * p ** 2
+             + 0.522116437235e-9 * t * p ** 3
+             - 0.438031096213e-6 * t ** 3 * p
+             - 0.161674495909e-8 * s ** 2 * p ** 2
+             + 0.968403158610e-4 * t ** 2 * s
+             + 0.485639620015e-5 * t * s ** 2 * p
+             - 0.340597039004e-3 * s * t * p)
+    c = c000 + dct + dcs + dcp + dcstp
+    return float(c) if np.ndim(c) == 0 else c
+
+
 def density(temperature: float = 27, salinity: float = 35) -> float:
     """
     Calculate density of sea water near the surface.
