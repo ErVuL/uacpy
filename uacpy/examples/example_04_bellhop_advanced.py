@@ -129,12 +129,12 @@ def main():
         n_beams=500, alpha=(-85, 85),
         beam_width_type='M', beam_curvature='Z',
         eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
+        beam_shift=True,
     )
 
     try:
         result_cerveny = bellhop_cerveny.run(
             env, source, receiver, run_mode=RunMode.COHERENT_TL,
-            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -202,12 +202,12 @@ def main():
         verbose=False,
         beam_type='g', source_type='R', grid_type='R',
         n_beams=50, alpha=(-80, 80),
+        beam_shift=True,
     )
 
     try:
         result_rays = bellhop_rays.run(
             env, source, receiver, run_mode=RunMode.RAYS,
-            beam_shift=True,
         )
         print("  ✓ Success")
     except Exception as e:

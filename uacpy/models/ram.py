@@ -33,7 +33,7 @@ import os
 import time
 import warnings
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Dict, Optional, List, Union
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from uacpy.models.base import PropagationModel, RunMode
@@ -250,6 +250,8 @@ class RAM(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         """
@@ -324,7 +326,7 @@ class RAM(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            timeout=timeout, **kwargs
+            timeout=timeout, cleanup=cleanup, collapse=collapse, **kwargs
         )
 
         self._supported_modes = [
@@ -948,6 +950,7 @@ class RAM(PropagationModel):
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        self._warn_on_dropped_absorption(env)
 
         backend = self.select_backend(env)
         elastic = self._env_has_elastic_bottom(env)
@@ -1391,8 +1394,12 @@ class RAM(PropagationModel):
                         + (proc_result.stderr or "")
                     )
                 )
+            # rams0.5 writes its output grid from index 1+ndz, ramsurf1.5
+            # from ndz (third_party/ramsurf/{rams0.5,ramsurf1.5}.f outpt).
+            depth_index_offset = 1 if kind == 'rams' else 0
             ranges, depths, tl = read_tl_grid(
-                tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz
+                tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+                depth_index_offset=depth_index_offset
             )
 
             # The patched outpt (third_party/ramsurf/{rams0.5,ramsurf1.5}.f
@@ -1411,7 +1418,8 @@ class RAM(PropagationModel):
                     )
                 )
             _, _, pcomplex = read_pcomplex_grid(
-                pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz
+                pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+                depth_index_offset=depth_index_offset
             )
 
             return {
@@ -1657,6 +1665,23 @@ class RAM(PropagationModel):
                 f"for the per-backend applicability.",
                 UserWarning, stacklevel=4
             )
+
+    def _warn_on_dropped_absorption(self, env: Environment) -> None:
+        """No RAM backend consumes water-column volume attenuation; warn
+        loudly rather than silently producing a lossless water column."""
+        absorption = getattr(env, 'absorption', None)
+        if absorption is None:
+            return
+        from uacpy.core.absorption import ConstantAbsorption
+        if (isinstance(absorption, ConstantAbsorption)
+                and absorption.value_db_per_wavelength == 0.0):
+            return
+        warnings.warn(
+            f"RAM ignores env.absorption ({type(absorption).__name__}): no "
+            f"RAM backend models water-column volume attenuation. Use Bellhop "
+            f"or Kraken for volume-attenuation-sensitive runs.",
+            UserWarning, stacklevel=3,
+        )
 
     def _compute_grid_lytaev(
         self, env: 'Environment', freq: float,

@@ -17,7 +17,7 @@ import shutil
 import warnings
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
@@ -220,7 +220,12 @@ class Bellhop(PropagationModel):
     step : float, optional
         Ray step size (m); ``0`` = auto. Default ``0.0``.
     z_box, r_box : float, optional
-        Trace bounding box (m). ``None`` ⇒ ``1.2 ×`` receiver extent.
+        Ray-trace bounding box (m); rays are dropped once they leave it.
+        ``None`` ⇒ ``1.2 ×`` the receiver extent (``z_box = 1.2 × env.depth``,
+        ``r_box = 1.2 × range_max``, or 10 km when the receiver range is 0).
+        Box%r is a horizontal-range cut-off, so the 1.2× pad already
+        captures arrivals at the outer receivers; do not enlarge it past a
+        range-dependent SSP's defined extent.
     source_type : str, optional
         ``'R'`` point/cylindrical (default) | ``'X'`` line/Cartesian.
     grid_type : str, optional
@@ -277,6 +282,21 @@ class Bellhop(PropagationModel):
     overrides — RD bathymetry / RD bottom / RD-SSP (when the model's
     ``interp_ssp='quad'``) are honoured natively.
 
+    **Broadband amplitude approximation (BROADBAND / TIME_SERIES).** The
+    arrival set is computed by a *single* ray trace at the band centre
+    ``fc`` and reused across the synthesised band
+    ``[fc(1-bw/2), fc(1+bw/2)]`` (``bw = bandwidth_factor``). The travel
+    time ``τ`` and volume-attenuation ``Im(τ)`` are applied exactly per
+    frequency (``exp(-i2πf·τ)``), so the *timing* and spreading of every
+    arrival are correct at all frequencies. What is held frequency-flat is
+    the geometric beam **amplitude and caustic phase**: a Gaussian beam's
+    half-width scales as ``√(c/f)``, so the amplitude is only first-order
+    correct near ``fc`` and the error grows toward the band edges, largest
+    at caustics and in tight ducts. Keep ``bandwidth_factor`` ≲ 1 (±50 %
+    of ``fc``) for amplitude-faithful results; for wider bands run several
+    sub-bands at different ``fc`` and stitch them (Bellhop User Guide §9).
+    A ``UserWarning`` fires when ``bandwidth_factor > 1``.
+
     Examples
     --------
     >>> bellhop = Bellhop()
@@ -321,6 +341,9 @@ class Bellhop(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -406,7 +429,8 @@ class Bellhop(PropagationModel):
             ``run_with_bounce(...)`` always uses BOUNCE regardless.
         """
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
 
         # Declare supported modes for Bellhop
@@ -456,8 +480,18 @@ class Bellhop(PropagationModel):
         self.ib_win = int(ib_win)
         self.component = component
         self.beam_shift = bool(beam_shift)
+        self._warn_on_ignored_cerveny_knobs()
         self.n_freqs = int(n_freqs)
         self.bandwidth_factor = float(bandwidth_factor)
+        if self.bandwidth_factor > 1.0:
+            warnings.warn(
+                f"Bellhop: bandwidth_factor={self.bandwidth_factor} spans "
+                f">±50% of fc; arrival amplitudes are computed at fc and held "
+                f"frequency-flat, so broadband amplitudes degrade toward the "
+                f"band edges (worst at caustics/ducts). Run sub-bands at "
+                f"different fc for wide bandwidths (Bellhop User Guide §9).",
+                UserWarning, stacklevel=2,
+            )
         # Broadband synthesis window. ``None`` lets ``_run_broadband``
         # auto-derive from the latest arrival + source waveform duration.
         self.time_window = (
@@ -482,6 +516,28 @@ class Bellhop(PropagationModel):
 
         if verbose and self.version != "custom":
             self._log(f"Using Bellhop {self.version}: {self.executable}")
+
+    def _warn_on_ignored_cerveny_knobs(self) -> None:
+        """The Cerveny beam knobs are written only for ``beam_type`` in
+        {'C', 'R'} (ReadEnvironmentBell.f90). Warn if any is set to a
+        non-default value while a non-Cerveny beam is selected, since it
+        would otherwise be silently ignored."""
+        if self.beam_type.upper() in ('C', 'R'):
+            return
+        defaults = {
+            'beam_width_type': 'F', 'beam_curvature': 'D',
+            'eps_multiplier': 1.0, 'r_loop': 1000.0,
+            'n_image': 1, 'ib_win': 4, 'component': 'P',
+        }
+        ignored = [name for name, default in defaults.items()
+                   if getattr(self, name) != default]
+        if ignored:
+            warnings.warn(
+                f"Bellhop: Cerveny beam knobs {', '.join(ignored)} are "
+                f"ignored for beam_type={self.beam_type!r} (they apply only "
+                f"to Cerveny beams, beam_type 'C' or 'R').",
+                UserWarning, stacklevel=3,
+            )
 
     def _find_bellhop_executable(self) -> Path:
         """Locate the Bellhop binary using the base class helper.

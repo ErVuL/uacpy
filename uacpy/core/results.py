@@ -493,7 +493,7 @@ class Result:
         expected type (if uacpy knows about it), and a one-line
         description. ``Bounce``'s ``'c_low'`` lookup, for example::
 
-            >>> ref = bounce.run(env, src, rcv, output_dir=tmp)
+            >>> ref = Bounce(work_dir=tmp).run(env, src, rcv)
             >>> ref.list_metadata()['c_low']
             {'value_type': 'float',
              'documented_type': 'float',
@@ -642,6 +642,46 @@ class Field(Result):
         if self.is_complex:
             return 'pressure'
         return 'tl'
+
+    # ── persistence ───────────────────────────────────────────────────
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise this field to a plain dict for caching / round-trip.
+
+        Values are numpy arrays and Python scalars (data preserves its
+        real/complex dtype), so the result is directly picklable and
+        ``np.savez``-able; convert the arrays to lists yourself for JSON.
+        ``coords`` insertion order matches the data axes. ``kind`` is
+        included for inspection but is recomputed by :meth:`from_dict`.
+        Reconstruct with ``Field.from_dict(d)``.
+        """
+        return {
+            'kind': self.kind,
+            'data': self.data,
+            'coords': {k: v for k, v in self.coords.items()},
+            'pinned': dict(self.pinned),
+            'model': self.model,
+            'backend': self.backend,
+            'source_depths': self.source_depths,
+            'frequencies': self.frequencies,
+            'phase_reference': self.phase_reference,
+            'metadata': dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'Field':
+        """Reconstruct a :class:`Field` from :meth:`to_dict` output."""
+        return cls(
+            data=np.asarray(d['data']),
+            coords={k: np.asarray(v) for k, v in d['coords'].items()},
+            pinned=d.get('pinned') or None,
+            model=d.get('model', ''),
+            backend=d.get('backend'),
+            source_depths=d.get('source_depths'),
+            frequencies=d.get('frequencies'),
+            phase_reference=d.get('phase_reference'),
+            metadata=d.get('metadata'),
+        )
 
     def __repr__(self) -> str:
         bits = [f"kind={self.kind!r}"]

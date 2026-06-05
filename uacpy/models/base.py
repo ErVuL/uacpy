@@ -355,10 +355,10 @@ class PropagationModel(ABC):
         grid is tight enough (``Δf = 1/output_duration``), and Bellhop
         maps it to ``time_window`` for delay-and-sum synthesis. Models
         with a broadband path consume ``frequencies`` as an explicit
-        override for ``source.frequencies``. KrakenField additionally
-        takes ``n_modes`` for the field reconstruction limit. No
-        other kwargs are accepted — passing one raises
-        :class:`TypeError`.
+        override for ``source.frequencies``. The Kraken family
+        (Kraken / KrakenC / KrakenField) additionally takes ``n_modes``
+        to cap the modal set used. No other kwargs are accepted —
+        passing one raises :class:`TypeError`.
 
         Parameters
         ----------
@@ -1467,20 +1467,43 @@ class PropagationModel(ABC):
             kw['phase_reference'] = phase_reference
         return kw
 
+    def _total_media_depth(self, env: 'Environment') -> float:
+        """
+        Deepest modelled interface (m): the water column plus all sediment
+        layer thicknesses. Below this lies the semi-infinite halfspace.
+
+        Full-waveguide spectral solvers (Scooter, SPARC) resolve the field
+        through the water and every fluid/elastic sediment layer, so the
+        valid receiver range extends to this depth — not merely to
+        ``env.depth`` (the seafloor).
+        """
+        from uacpy.core.environment import (
+            LayeredBottom, RangeDependentLayeredBottom,
+        )
+        depth = float(env.depth)
+        bottom = env.bottom
+        if isinstance(bottom, LayeredBottom):
+            depth += bottom.total_thickness()
+        elif isinstance(bottom, RangeDependentLayeredBottom):
+            depth += bottom.max_total_thickness()
+        return depth
+
     def _clip_receiver_depths(
-        self, receiver: 'Receiver', env_depth: float, margin: float = 3.0
+        self, receiver: 'Receiver', media_depth: float, margin: float = 3.0
     ) -> 'Receiver':
         """
-        Clip receiver depths to stay within the environment, with a safety margin.
+        Clip receiver depths to the modelled media, with a safety margin.
 
         Parameters
         ----------
         receiver : Receiver
             Input receiver array
-        env_depth : float
-            Maximum environment depth (m)
+        media_depth : float
+            Deepest modelled interface (m); see :meth:`_total_media_depth`.
+            Receivers below the semi-infinite halfspace boundary cannot be
+            resolved and are pulled up to ``media_depth - margin``.
         margin : float
-            Safety margin below the seafloor (m). Default 3.0.
+            Safety margin above the halfspace boundary (m). Default 3.0.
 
         Returns
         -------
@@ -1488,9 +1511,9 @@ class PropagationModel(ABC):
             Receiver with clipped depths (unchanged if all depths are valid)
         """
         max_receiver_depth = receiver.depths.max()
-        if max_receiver_depth > env_depth - margin:
+        if max_receiver_depth > media_depth - margin:
             clipped = np.clip(
-                receiver.depths, receiver.depths.min(), env_depth - margin,
+                receiver.depths, receiver.depths.min(), media_depth - margin,
             )
             unique = np.unique(clipped)
             if receiver.receiver_type == 'grid':
@@ -1502,11 +1525,16 @@ class PropagationModel(ABC):
                 ranges=receiver.ranges,
                 receiver_type=receiver.receiver_type,
             )
-            if self.verbose:
-                self._log(
-                    f"Clipped receiver depths to {env_depth - margin:.1f}m "
-                    f"(environment depth: {env_depth:.1f}m)"
-                )
+            warnings.warn(
+                f"{self.model_name}: receiver depths below "
+                f"{media_depth - margin:.1f} m clipped to that depth "
+                f"(deepest modelled interface {media_depth:.1f} m; the "
+                f"field is not resolved inside the semi-infinite halfspace). "
+                f"Add sediment layers (LayeredBottom) to place receivers "
+                f"below the seafloor.",
+                UserWarning,
+                stacklevel=2,
+            )
         return receiver
 
     def __repr__(self) -> str:

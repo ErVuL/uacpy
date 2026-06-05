@@ -8,6 +8,7 @@ bathymetry/altimetry, surface/bottom boundary conditions, source/receiver
 specifications, and run-type / beam-parameter configuration.
 """
 
+import warnings
 import numpy as np
 from pathlib import Path
 from typing import Union
@@ -146,6 +147,11 @@ def write_bellhop_env_file(
     if z_box is None:
         z_box = 1.2 * env.depth
 
+    # Box%r is the horizontal-range cut-off for ray integration. A ray
+    # reaching a receiver at range_max has horizontal range == range_max, so
+    # the 1.2× pad already captures every arrival at the outer receivers;
+    # enlarging it further only risks rays leaving the range window where a
+    # range-dependent .ssp defines the sound speed (BHC_ERR_OUTSIDE_SSP).
     if r_box is None:
         r_box = 1.2 * receiver.range_max if receiver.range_max > 0 else 10000
 
@@ -239,8 +245,27 @@ def write_bellhop_env_file(
         if interp_char == 'Q' and env.has_range_dependent_ssp():
             from uacpy.io.oalib_writer import write_ssp
             ssp_file = filepath.with_suffix('.ssp')
+            ssp_ranges = np.asarray(env.ssp.ranges, dtype=float)
+            ssp_data = np.asarray(env.ssp.data, dtype=float)
+            # Bellhop drops a ray once it passes Box%r, and a ray landing on
+            # the last SSP range is still flagged "outside the soundspeed box",
+            # so the .ssp must extend *strictly past* r_box. When the profile
+            # grid stops at or before the box, hold the last profile constant
+            # out to 1.1·r_box (range-independent beyond the last profile) and
+            # warn.
+            if ssp_ranges.size and ssp_ranges.max() <= r_box:
+                warnings.warn(
+                    f"Bellhop: range-dependent SSP spans to "
+                    f"{ssp_ranges.max():.0f} m but the ray box reaches "
+                    f"{r_box:.0f} m; holding the last profile constant beyond "
+                    f"{ssp_ranges.max():.0f} m. Define SSP profiles out to the "
+                    f"receiver range to control the far-range sound speed.",
+                    UserWarning, stacklevel=2,
+                )
+                ssp_ranges = np.append(ssp_ranges, 1.1 * r_box)
+                ssp_data = np.column_stack([ssp_data, ssp_data[:, -1]])
             # write_ssp (.ssp file format) expects ranges in km.
-            write_ssp(ssp_file, m_to_km(env.ssp.ranges), env.ssp.data)
+            write_ssp(ssp_file, m_to_km(ssp_ranges), ssp_data)
             log_message('bellhop_writer',
                         f"wrote range-dependent SSP file: {ssp_file}",
                         verbose=verbose)

@@ -57,8 +57,8 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 |-------------------|--------------------------------------------------------------------|
 | **Bellhop**       | Ray / beam tracing                                                 |
 | **Kraken**        | Normal modes                                                       |
-| **Scooter**       | Finite elements for range independant env                          |
-| **SPARC**         | Experimental time-marched FFP for pulses in range independant env  |
+| **Scooter**       | Finite elements for range independent env                          |
+| **SPARC**         | Experimental time-marched FFP for pulses in range independent env  |
 | **RAM**           | Parabolic equation                                                 |
 | **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
 | **Bounce**        | Reflection coefficients                                            |

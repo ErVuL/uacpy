@@ -131,10 +131,14 @@ class _KrakenBase(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.interp_ssp = interp_ssp
         # Modal solver default for c_low — KRAKEN manual recommends 0
@@ -1051,15 +1055,6 @@ class KrakenField(_KrakenBase):
         pos3 = '*' if self.source_beam_pattern_file is not None else ' '
         pos4 = 'C' if self.coherent else 'I'
         return f"{pos1}{pos2}{pos3}{pos4}"
-
-    @staticmethod
-    def _total_media_depth(env):
-        """Return total depth through ocean + sediment layers."""
-        depth = env.depth
-        if env.has_layered_bottom():
-            for layer in env.bottom.layers:
-                depth += layer.thickness
-        return depth
 
     def _select_kraken_exe(self, env):
         """Return 'kraken.exe' or 'krakenc.exe' based on environment."""

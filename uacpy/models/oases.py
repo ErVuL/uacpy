@@ -39,7 +39,7 @@ import warnings
 
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
@@ -249,10 +249,14 @@ class OAST(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
             **kwargs,
         )
         self.compute_contour = bool(compute_contour)
@@ -409,6 +413,13 @@ class OAST(PropagationModel):
             if ranges_match:
                 result = native
             else:
+                # OAST writes only real TL (dB) to .plt — there is no complex
+                # pressure on disk — so off-grid receiver ranges are obtained
+                # by linear interpolation IN dB. That over-fills sharp
+                # interference minima (a true −80 dB null between −40 dB
+                # neighbours reads back ≈ −50 dB). Align receiver.ranges to the
+                # OAST native FFT grid (ranges_match) to avoid the smoothing,
+                # or use OASP (.trf complex pressure) when null depth matters.
                 result = native.resample_to(receiver_ranges, receiver_depths)
                 result.metadata['oast_native_ranges'] = native_ranges
                 result.metadata['interpolated'] = True
@@ -531,10 +542,14 @@ class OASN(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.options = options
         self.surface_noise_level = float(surface_noise_level)
@@ -896,6 +911,9 @@ class OASR(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -925,7 +943,8 @@ class OASR(PropagationModel):
             interface, ordered top → bottom).
         """
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.angles = (
             np.asarray(angles, dtype=float) if angles is not None else None
@@ -1179,6 +1198,9 @@ class OASP(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -1212,6 +1234,7 @@ class OASP(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
             **kwargs,
         )
         self.n_time_samples = int(n_time_samples)
@@ -1322,7 +1345,8 @@ class OASP(PropagationModel):
         # first slot. Refuse option letters that would produce
         # multi-axis output rather than silently discard data.
         if self.options:
-            multi_axis = {'V', 'H', 'R', 'U', 'F'} & set(str(self.options).split())
+            opt_tokens = set(str(self.options).split())
+            multi_axis = {'V', 'H', 'R', 'U', 'F'} & opt_tokens
             if multi_axis:
                 raise ConfigurationError(
                     f"OASP.run: options {sorted(multi_axis)} request "
@@ -1330,6 +1354,18 @@ class OASP(PropagationModel):
                     "reader currently flattens. Pass options without "
                     "these letters (default 'N J' returns scalar pressure) "
                     "or read the .trf directly."
+                )
+            if 'O' in opt_tokens:
+                # 'O' moves the frequency integration onto a complex
+                # contour (Im(omega) = -ln(50)·Δf, unoassp30.f). The .trf
+                # reader discards that offset and synthesize_time_series
+                # does not re-apply exp(-Im(omega)·t), so the time series
+                # would be silently wrong. Reject rather than mis-synthesise.
+                raise ConfigurationError(
+                    "OASP.run: option 'O' (complex frequency integration) "
+                    "bakes an exp(-ln(50)·Δf·t) contour into the spectrum "
+                    "that uacpy's time-series synthesis does not undo. "
+                    "Drop 'O' (the default 'N J' uses a real frequency axis)."
                 )
 
         if frequencies is not None:

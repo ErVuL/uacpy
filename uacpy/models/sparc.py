@@ -8,7 +8,7 @@ as Scooter but with support for elastic media.
 
 import warnings
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 import numpy as np
 
 from uacpy.core.environment import Environment
@@ -228,6 +228,8 @@ class SPARC(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -275,7 +277,7 @@ class SPARC(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            timeout=timeout, **kwargs,
+            timeout=timeout, cleanup=cleanup, collapse=collapse, **kwargs,
         )
 
         self.c_low = c_low
@@ -398,7 +400,9 @@ class SPARC(PropagationModel):
             )
         env = self._project_environment(env)
         env = self._sparc_rigidify_halfspace(env)
-        receiver = self._clip_receiver_depths(receiver, env.depth)
+        receiver = self._clip_receiver_depths(
+            receiver, self._total_media_depth(env)
+        )
 
         # SPARC limitation: horizontal array mode requires one run per depth
         # For large depth grids, this becomes computationally expensive
