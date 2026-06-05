@@ -96,11 +96,8 @@ def demo_bellhop_bounce():
 
     bellhop = Bellhop(verbose=True)
 
-    # Method 1: fluid half-space (shear ignored). The bottom carries a
-    # shear_speed, so the default Bellhop(auto_bounce=True) would itself
-    # auto-route through BOUNCE — identical to Method 2, making the
-    # difference panel empty. auto_bounce=False collapses the elastic
-    # bottom to fluid and runs the plain ray tracer: the no-shear baseline.
+    # No-shear baseline: auto_bounce=False, else the elastic bottom
+    # auto-routes through BOUNCE and matches Method 2 exactly.
     print("\n--- Standard Bellhop (half-space, no shear) ---")
     bellhop_fluid = Bellhop(verbose=True, auto_bounce=False)
     result_hs = bellhop_fluid.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
