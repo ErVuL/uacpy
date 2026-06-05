@@ -96,9 +96,11 @@ def demo_bellhop_bounce():
 
     bellhop = Bellhop(verbose=True)
 
-    # Method 1: Standard half-space (ignores shear)
+    # No-shear baseline: auto_bounce=False, else the elastic bottom
+    # auto-routes through BOUNCE and matches Method 2 exactly.
     print("\n--- Standard Bellhop (half-space, no shear) ---")
-    result_hs = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+    bellhop_fluid = Bellhop(verbose=True, auto_bounce=False)
+    result_hs = bellhop_fluid.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
     # Method 2: With BOUNCE (accounts for shear)
     print("\n--- Bellhop with BOUNCE reflection coefficients ---")
