@@ -185,11 +185,10 @@ class BoundaryProperties:
     --------
     Using pre-computed reflection coefficients from BOUNCE:
 
-    >>> # First, compute reflection coefficients (output_dir is required)
+    >>> # First, compute reflection coefficients
     >>> from uacpy.models import Bounce
-    >>> from pathlib import Path
-    >>> bounce = Bounce()
-    >>> result = bounce.run(env, source, receiver, output_dir=Path('./bounce_out'))
+    >>> bounce = Bounce(work_dir='./bounce_out')
+    >>> result = bounce.run(env, source, receiver)
     >>> brc_file = result.metadata['brc_file']
     >>>
     >>> # Then use in Bellhop/Kraken/Scooter
@@ -262,6 +261,8 @@ class BoundaryProperties:
                 self.acoustic_type = 'vacuum'
 
         _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
+        from uacpy.core.constants import BoundaryType
+        self.acoustic_type = BoundaryType.from_string(self.acoustic_type).value
 
         # Explicit-conflict guard: vacuum/rigid ignore half-space params,
         # so explicitly setting one alongside non-default cp/ρ/α/cs is a
@@ -1443,8 +1444,6 @@ class Environment:
 
     Parameters
     ----------
-    name : str
-        Environment identifier.
     bathymetry : float or array-like
         Either a scalar water depth in metres (flat bottom), or a
         range-dependent bathymetry as ``[(range, depth), …]``.
@@ -1476,6 +1475,8 @@ class Environment:
         :class:`uacpy.core.absorption.ConstantAbsorption`. Default ``None``
         (no volume absorption). Models inspect this field to set
         ``TopOpt`` position 4 and write the supporting per-formula lines.
+    name : str, keyword-only
+        Environment identifier. Default ``'unnamed'``.
 
     Examples
     --------

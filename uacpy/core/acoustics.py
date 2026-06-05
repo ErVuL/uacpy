@@ -34,6 +34,22 @@ in this file.
 import numpy as np
 from typing import Union, Optional, Tuple
 
+__all__ = [
+    'soundspeed',
+    'soundspeed_unesco',
+    'soundspeed_delgrosso',
+    'density',
+    'doppler',
+    'reflection_coeff',
+    'bottom_loss_curve',
+    'bubble_resonance',
+    'bubble_surface_loss',
+    'bubble_soundspeed',
+    'pressure',
+    'spl',
+    'pekeris_root',
+]
+
 
 def soundspeed(
     temperature: float = 27, salinity: float = 35, depth: float = 10

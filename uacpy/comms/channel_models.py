@@ -2,12 +2,13 @@
 
 uacpy's propagation models give the *deterministic* channel impulse response;
 this module adds the *stochastic / time-varying* channel needed to stress-test a
-receiver — Rayleigh/Rician fading tap-delay lines with a Doppler spectrum, the
-single dominant impairment of mobile underwater links (Istepanian & Stojanovic).
+receiver — band-limited (flat Doppler PSD) Rayleigh/Rician fading tap-delay
+lines, the single dominant impairment of mobile underwater links
+(Istepanian & Stojanovic).
 
 References
 ----------
-Proakis & Salehi. *Digital Communications* (fading channels, Jakes spectrum).
+Proakis & Salehi. *Digital Communications* (fading channels).
 Stojanovic, in Istepanian & Stojanovic. *Underwater Acoustic DSP & Comms*
     (time-varying multipath, doubly-spread channels).
 """

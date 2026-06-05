@@ -412,8 +412,9 @@ def read_arr_file(filepath: Union[str, Path]):
 
         Per-arrival fields, with units (ArrMod.f90:WriteArrivalsASCII):
 
-        - ``amplitudes`` : complex (linear pressure, dimensionless).
-        - ``phases`` : radians.
+        - ``amplitudes`` : real linear pressure magnitude (dimensionless);
+          combine with ``phases`` for the complex amplitude.
+        - ``phases`` : degrees.
         - ``delays`` : real part of travel time in **seconds**.
         - ``delays_imag`` : imaginary part of travel time in **seconds**;
           carries volume-attenuation loss so that

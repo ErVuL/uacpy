@@ -83,8 +83,8 @@ Every model inherits from `PropagationModel` (`uacpy.models.base`):
 
 | Method | Purpose |
 |---|---|
-| `run(env, src, rcv, run_mode=…, **kw)` | Full-control entry point. |
-| `compute_tl / rays / eigenrays / modes / arrivals(...)` | Convenience wrappers — forward `**kw` to `run()`. |
+| `run(env, src, rcv, run_mode=…, *, frequencies=…, source_waveform=…, sample_rate=…)` | Full-control entry point. Fixed keyword-only signature; no `**kwargs`. |
+| `compute_tl / rays / eigenrays / modes / arrivals(...)` | Convenience wrappers over `run()`. Each takes `(env, source, receiver)`; `compute_tl` adds keyword-only `run_mode=`, `compute_time_series` forwards `source_waveform=`/`sample_rate=`, `compute_transfer_function` forwards `frequencies=`. |
 | `supports_mode(RunMode.X)` / `supported_modes` | Capability check. |
 
 Convenience wrappers raise `UnsupportedFeatureError` when the underlying
@@ -552,8 +552,10 @@ consuming model — e.g. `Bellhop(alpha=(-80, 80))`, `Kraken(c_low=…)`.
 - A single hydrophone is just `Receiver(depths=[d], ranges=[r])` — there
   is no `'point'` receiver type.
 - Time-series / broadband models always populate the full grid; extract
-  a trace via `Field.to_time_trace(depth=, range=)` or
-  `synthesize_time_series(depth=, range=)` on the returned typed result.
+  a single trace via `Field.to_time_trace(depth=, range=)`, or convolve
+  the whole grid with a source waveform via
+  `Field.synthesize_time_series(source_waveform, sample_rate=)` on the
+  returned typed result.
 
 `Source(frequencies=[…])` with more than one frequency on a
 single-frequency `RunMode` raises `ConfigurationError`. Multi-depth
@@ -891,11 +893,10 @@ oast = OAST(compute_contour=False,         # add 'C' (range-depth contour)
 field = oast.run(env, source, receiver)
 
 # Spatial covariance + matched-field replicas — RunMode.COVARIANCE / RunMode.REPLICA
-oasn = OASN()
+oasn = OASN(zmin=10, zmax=90, nz=20,       # replica grid is constructor-only
+            xmin=500, xmax=10000, nx=40)
 cov = oasn.compute_covariance(env, source, receiver)
-rep = oasn.compute_replicas(env, source, receiver,
-                            replica_zmin=10, replica_zmax=90, replica_nz=20,
-                            replica_xmin=500, replica_xmax=10000, replica_nx=40)
+rep = oasn.compute_replicas(env, source, receiver)
 
 # Reflection coefficients — RunMode.REFLECTION
 oasr = OASR(angles=None,                   # default linspace(0, 90, 181)
@@ -1090,9 +1091,11 @@ tf = Bellhop().run(env, source, receiver, run_mode=RunMode.BROADBAND)
 assert tf.phase_reference == 'travelling_wave'                # set by Bellhop
 assert tf.coords['frequency'].size == 128                     # default grid
 
-# 2a) Easiest path: ask the Field to synthesise p(t) at one (depth, range).
-#     Honours phase_reference internally; no manual IFFT.
-ts = tf.synthesize_time_series(depth=50.0, range=2000.0)
+# 2a) Easiest path: ask the Field for a single-trace IFFT at one (depth, range).
+#     Honours phase_reference internally; no manual IFFT. To instead convolve
+#     the whole grid with a source pulse, use
+#     tf.synthesize_time_series(source_waveform, sample_rate=fs).
+ts = tf.to_time_trace(depth=50.0, range=2000.0)
 plt.plot(ts.coords['time'], ts.data)                          # ts is a Field
                                                               # of shape (n_t,)
 
@@ -1132,7 +1135,8 @@ truncation lives on `Rays` itself so the convenience method stays
 small:
 
 ```python
-rays = bellhop.compute_eigenrays(env, source, range=2000, depth=30)
+rcv = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
+rays = bellhop.compute_eigenrays(env, source, rcv)
 close = rays.top_n_by_miss(8).truncate_at_receiver()
 within = rays.filter_by_miss_distance(max_miss=15.0)
 direct = rays.filter_by_bounces(kind='direct')
@@ -1146,7 +1150,7 @@ For multi-receiver eigenray runs, pass a `Receiver` instead of
 
 ## 7. Visualization
 
-`uacpy.visualization` ships a **canonical 13-function surface**. Slice
+`uacpy.visualization` ships a **canonical 16-function surface**. Slice
 the `Field` first (`.at()` / `.isel()`) and the auto-shape plotters do
 the rest. Every result type has a `.plot(env=env)` method that
 dispatches to the right helper.
@@ -1521,9 +1525,14 @@ failed for one of the binaries. `uacpy/bin/` should contain `oalib/`,
 `mpirams/`, `bellhopcuda/`, and (after fetch) `oases/`. Rerun
 `./install.sh` and read its stderr.
 
-**"Source/Receiver depth exceeds environment depth".** The model's
-`validate_inputs()` checks against `env.depth`. Trim your receiver grid
-or deepen the env.
+**Source/receiver depth below the seafloor.** A **source** below the
+model's resolvable depth is a hard `InvalidDepthError` — it must sit in
+the modelled medium. A **receiver** there is *accepted* with a
+`UserWarning`: the model returns its below-domain value (Bellhop
+transmitted field, Kraken evanescent tail, RAM `NaN` in the PE absorbing
+layer). Full-waveguide solvers (Scooter, SPARC, the Kraken family) mesh
+through sediment, so their resolvable depth is the water column plus all
+`LayeredBottom` sediment thicknesses, not just `env.depth`.
 
 **Kraken says "does not support range-dependent environments".** Use
 `KrakenField` (adiabatic / coupled modes) or switch to Bellhop / RAM.

@@ -360,6 +360,32 @@ class TestBellhopRangeDependentSSP:
         assert real.min() > 0
         assert real.max() < 200
 
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('prefer_cuda', [False, True])
+    def test_rd_ssp_extended_past_box(self, rd_ssp_env, prefer_cuda):
+        """A receiver past the RD-SSP range grid must not crash: the writer
+        holds the last profile constant out beyond the ray box (with a
+        UserWarning) instead of letting rays exit the soundspeed box."""
+        src = Source(depths=20.0, frequencies=200.0)
+        # rd_ssp_env defines SSP only to 12 km; receiver at 14 km → box 16.8 km.
+        rcv = Receiver(
+            depths=np.linspace(5.0, 95.0, 19),
+            ranges=np.linspace(100.0, 14000.0, 30),
+        )
+        bh = Bellhop(verbose=False, interp_ssp='quad', prefer_cuda=prefer_cuda)
+        # Two warnings fire for this geometry: the writer holds the last SSP
+        # profile constant past the box, and validate_inputs flags the same
+        # range shortfall. Capture both so neither leaks to the summary.
+        with pytest.warns(UserWarning) as record:
+            res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        msgs = [str(w.message) for w in record]
+        assert any('range-dependent SSP spans' in m for m in msgs)
+        assert any('constant-extrapolated' in m for m in msgs)
+        tl = np.asarray(res.tl)
+        real = tl[(tl > 0) & (tl < 500)]
+        assert real.size > tl.size * 0.5
+        assert real.max() < 200
+
 
 # ---------------------------------------------------------------------
 # Bellhop multi-source-depth: result-type dispatch and stack semantics.

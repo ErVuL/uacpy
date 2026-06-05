@@ -330,7 +330,9 @@ class BiologicalLayer:
     Q : float
         Quality factor (dimensionless).
     a0 : float
-        Peak absorption coefficient at resonance (dB/m).
+        Acoustics-Toolbox resonance coefficient (dB/km): the absorption is
+        ``a0 / ((1 - f0²/f²)² + 1/Q²)``, so the peak at ``f = f0`` is
+        ``a0·Q²`` (see AttenMod.f90).
     """
     z_top_m: float
     z_bottom_m: float
@@ -398,6 +400,22 @@ class Biological(Absorption):
             (layer.z_top_m, layer.z_bottom_m, layer.f0_hz, layer.Q, layer.a0)
             for layer in self.layers
         ]
+
+    def alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        # Sum each layer's Lorentzian resonance over the depths it spans.
+        # Matches AttenMod.f90: a = a0 / ((1 - f0²/f²)² + 1/Q²) in dB/km.
+        f = float(frequency)
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        a_km = np.zeros(z.shape, dtype=float)
+        for layer in self.layers:
+            in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
+            denom = (1.0 - layer.f0_hz ** 2 / f ** 2) ** 2 + 1.0 / layer.Q ** 2
+            a_km[in_layer] += layer.a0 / denom
+        return a_km / 1000.0
 
 
 @dataclass

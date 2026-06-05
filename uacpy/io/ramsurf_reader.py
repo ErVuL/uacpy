@@ -122,6 +122,7 @@ def read_tl_grid(
     ndr: int,
     dz: float,
     ndz: int,
+    depth_index_offset: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Read a Collins ``tl.grid`` (unformatted Fortran binary).
@@ -135,7 +136,13 @@ def read_tl_grid(
         are at ``r = k * dr * ndr`` for ``k = 1, 2, ...``.
     dz, ndz : float, int
         Depth step (m) and output stride from ``ram.in``. Output depths
-        are at ``z = k * dz * ndz`` for ``k = 1, 2, ..., lz``.
+        are at ``z = (depth_index_offset + k * ndz) * dz`` for
+        ``k = 1, 2, ..., lz``.
+    depth_index_offset : int
+        Grid-index of the first stored depth sample. ``ramsurf1.5`` writes
+        from grid index ``ndz`` (offset 0); ``rams0.5`` writes from
+        ``1 + ndz`` (offset 1). See ``third_party/ramsurf/{rams0.5,
+        ramsurf1.5}.f`` ``outpt`` loops.
 
     Returns
     -------
@@ -147,7 +154,7 @@ def read_tl_grid(
     tl = tl.astype(float)
     n_ranges = tl.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = np.arange(1, lz + 1, dtype=float) * dz * ndz
+    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz) * dz
     return ranges, depths, tl
 
 
@@ -158,6 +165,7 @@ def read_pcomplex_grid(
     ndr: int,
     dz: float,
     ndz: int,
+    depth_index_offset: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Read a uacpy-patched ``pcomplex.bin`` (unformatted Fortran binary).
@@ -175,7 +183,7 @@ def read_pcomplex_grid(
     ----------
     filepath : str or Path
         Path to ``pcomplex.bin``.
-    dr, ndr, dz, ndz : as in :func:`read_tl_grid`.
+    dr, ndr, dz, ndz, depth_index_offset : as in :func:`read_tl_grid`.
 
     Returns
     -------
@@ -187,5 +195,5 @@ def read_pcomplex_grid(
     p = p.astype(complex)
     n_ranges = p.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = np.arange(1, lz + 1, dtype=float) * dz * ndz
+    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz) * dz
     return ranges, depths, p

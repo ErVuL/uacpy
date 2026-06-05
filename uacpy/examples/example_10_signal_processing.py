@@ -35,10 +35,10 @@ def main():
     # LFM chirp
     fs = 10000
     duration = 0.5
-    t_lfm, lfm_sig = lfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
+    lfm_sig, t_lfm = lfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
 
     # HFM chirp
-    t_hfm, hfm_sig = hfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
+    hfm_sig, t_hfm = hfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
 
     # Ricker wavelet
     t_ricker = np.linspace(0, duration, int(fs * duration))

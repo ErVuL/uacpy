@@ -2,6 +2,8 @@
 Receiver class for defining hydrophones and receiver arrays
 """
 
+import warnings
+
 import numpy as np
 from typing import Union, List, Optional
 
@@ -24,7 +26,12 @@ class Receiver:
     ranges : float or array-like, optional
         Receiver range(s) in meters. Default is single point at 0m.
     receiver_type : str, optional
-        Type of receiver array: 'grid' or 'line'. Default is 'grid'.
+        Receiver *sampling layout*: 'grid' (default — field on the full
+        depth×range cross-product) or 'line' (depths and ranges paired
+        point-by-point, requiring ``len(depths) == len(ranges)``, e.g. a
+        glider track or tilted array). Note: 'line' here is a coordinate-
+        pairing rule and is unrelated to :class:`~uacpy.Source`'s
+        ``source_type='line'`` (a physical line-source geometry).
 
     Attributes
     ----------
@@ -71,6 +78,13 @@ class Receiver:
             )
         self.receiver_type = receiver_type
         if ranges is None:
+            warnings.warn(
+                "Receiver: ranges not given, defaulting to a single point at "
+                "0 m (the source location), which is singular for TL/pressure "
+                "runs; pass explicit ranges= to avoid this.",
+                UserWarning,
+                stacklevel=2,
+            )
             ranges = 0.0
 
         self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))

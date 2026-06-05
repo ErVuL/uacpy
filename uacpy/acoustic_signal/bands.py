@@ -22,7 +22,6 @@ import numpy as np
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
 
-_G = 10.0 ** 0.3        # base-10 octave ratio (IEC 61260-1)
 _REF_FREQ = 1000.0      # reference frequency [Hz]
 
 

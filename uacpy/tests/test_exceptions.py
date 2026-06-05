@@ -85,6 +85,7 @@ class TestInputValidation:
 class TestUnsupportedOperations:
     """Asking a model for something it can't do raises UnsupportedFeatureError."""
 
+    @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
     def test_kraken_does_not_support_rays(self):
         kraken = Kraken(verbose=False)
         env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
@@ -140,7 +141,11 @@ class TestValidationHelpers:
         with pytest.raises(InvalidDepthError):
             m.validate_inputs(simple_env, source_deep, receiver)
 
-    def test_receiver_deeper_than_env_raises_typed(self, simple_env):
+    def test_receiver_deeper_than_env_warns_not_raises(self, simple_env):
+        """Receivers below the model's resolvable depth are accepted with a
+        warning (the model returns its below-domain value there), not
+        rejected — unlike the source, which is a hard error."""
+        import warnings
         from uacpy.models.base import PropagationModel
 
         Model = type('M', (PropagationModel,), {
@@ -149,5 +154,8 @@ class TestValidationHelpers:
         m = Model()
         source = uacpy.Source(depths=50, frequencies=100)
         receiver_deep = uacpy.Receiver(depths=[150], ranges=[1000])
-        with pytest.raises(InvalidDepthError):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             m.validate_inputs(simple_env, source, receiver_deep)
+        assert any("below the model's resolvable depth" in str(w.message)
+                   for w in caught)

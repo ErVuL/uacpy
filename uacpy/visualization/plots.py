@@ -1948,4 +1948,7 @@ __all__ = [
     'plot_reflection_coefficient',
     'plot_covariance',
     'plot_replicas',
+    'animate_field',
+    'save_animation',
+    'plot_time_snapshots',
 ]

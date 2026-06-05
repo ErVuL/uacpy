@@ -9,7 +9,7 @@ and broadband time-series output.
 """
 
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 
@@ -117,6 +117,9 @@ class Scooter(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -129,7 +132,11 @@ class Scooter(PropagationModel):
         c_high : float, optional
             Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and bottom speed).
         n_mesh : int, optional
-            Mesh points per wavelength. 0 = auto. Default: 0.
+            Total number of mesh points PER MEDIUM used by the finite-element
+            spectral solver (AT's ``NG`` column on the SSP mesh line). 0 = let
+            Scooter pick automatically from frequency / wavelength. Default: 0.
+            Note: this is NOT a "points per wavelength" density — it is a total
+            point count per medium.
         roughness : float, optional
             Bottom roughness (m). Default: 0.0.
         rmax_multiplier : float, optional
@@ -158,6 +165,7 @@ class Scooter(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
             **kwargs,
         )
 
@@ -296,8 +304,12 @@ class Scooter(PropagationModel):
 
         env = self._project_environment(env)
 
-        # Clip receiver depths to environment depth (with safety margin)
-        receiver = self._clip_receiver_depths(receiver, env.depth)
+        # Clip receiver depths to the modelled media (water + sediment
+        # layers); the field is resolved through the sediment, not only
+        # the water column.
+        receiver = self._clip_receiver_depths(
+            receiver, self._total_media_depth(env)
+        )
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
@@ -401,6 +413,9 @@ class Scooter(PropagationModel):
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
+
+    def _max_receiver_depth(self, env) -> float:
+        return self._total_media_depth(env)
 
     def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
         """Pick the effective ``rmax_multiplier`` for this run.

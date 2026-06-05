@@ -15,7 +15,7 @@ Note: SPARC does not support reflection coefficient files.
 
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.core.environment import Environment
@@ -175,6 +175,9 @@ class Bounce(PropagationModel):
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         """
@@ -203,7 +206,8 @@ class Bounce(PropagationModel):
             ``n_angles`` samples.
         """
         super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir, **kwargs,
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.interp_ssp = interp_ssp
 
@@ -529,6 +533,15 @@ class Bounce(PropagationModel):
         exceeds the previous kept row, and rewrites it in the original
         3-column BOUNCE format (angle_deg, |R|, phase_deg). The IRC file
         has the same layout so the same routine works for both.
+
+        Precision caveat: when two physically distinct phase velocities map
+        to grazing angles that round equal at the file's print precision,
+        only the first (lowest-c, i.e. shallowest-angle) row of that
+        collision group is kept and the rest are dropped — no averaging or
+        re-gridding. This is loss-free for true duplicates (the dominant
+        case near 0°) but discards one R(θ) sample per genuine collision,
+        a slight under-resolution of the reflection table near grazing.
+        Raising the BOUNCE angle/print resolution avoids the collisions.
         """
         filepath = Path(filepath)
         with open(filepath, 'r') as fh:

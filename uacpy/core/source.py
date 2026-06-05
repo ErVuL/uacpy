@@ -22,8 +22,12 @@ class Source:
     frequencies : float or array-like
         Source frequency or frequencies in Hz
     source_type : str, optional
-        Type of source: 'point' (default) or 'line'. Used by Bellhop/Scooter
-        to select point (cylindrical) vs. line (Cartesian) geometry.
+        Source *geometry*: 'point' (default, cylindrical / 3-D spreading) or
+        'line' (an infinite coherent line source → 2-D Cartesian spreading),
+        used by Bellhop/Scooter. Note: this 'line' is a physical source shape
+        and is unrelated to :class:`~uacpy.Receiver`'s ``receiver_type='line'``,
+        which is a *sampling* rule (depths/ranges paired point-by-point rather
+        than gridded). The shared word names two different concepts.
 
     Attributes
     ----------

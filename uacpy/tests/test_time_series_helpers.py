@@ -63,6 +63,7 @@ def _make_env():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.requires_binary  # constructs a model to reach its helper method
 class TestPadWaveformToDuration:
     """Zero-padding helper used by every IFFT-based wrapper."""
 
@@ -103,6 +104,7 @@ class TestPadWaveformToDuration:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.requires_binary  # constructs a model to reach its helper method
 class TestResolveTimeSeriesFrequencies:
     """Auto-derivation of the broadband freq grid from the waveform."""
 
@@ -157,6 +159,7 @@ class TestResolveTimeSeriesFrequencies:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.requires_binary  # constructs a model to reach its helper method
 class TestResolveBroadbandGrid:
     """RAM's (fc, Q, T) derivation from source.frequencies."""
 

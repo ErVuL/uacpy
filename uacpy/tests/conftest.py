@@ -14,6 +14,18 @@ import pytest  # noqa: E402
 import uacpy  # noqa: E402
 
 
+def pytest_collection_modifyitems(items):
+    """OASES ships as a native binary, so every ``requires_oases`` test also
+    needs a binary. Auto-attach ``requires_binary`` to anything marked
+    ``requires_oases`` so ``pytest -m 'not requires_binary'`` (the pure-Python
+    subset) excludes OASES tests too, without each OASES file having to carry
+    both markers."""
+    for item in items:
+        if (item.get_closest_marker('requires_oases')
+                and not item.get_closest_marker('requires_binary')):
+            item.add_marker(pytest.mark.requires_binary)
+
+
 @pytest.fixture(autouse=True)
 def _seed_numpy():
     """Seed numpy.random before every test to keep fixture data reproducible."""
