@@ -271,12 +271,15 @@ def _registered_keys_for(model_name: str) -> set:
 # (model_cls, run_kwargs) — keep small fast runs; covers the path that
 # actually attaches metadata keys. ``work_dir`` is pinned so the
 # ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
+
+
 def _drift_cases():
     from uacpy.models import (
         Bellhop, Bounce, Kraken, KrakenField, RAM, Scooter, SPARC,
         OAST, OASR, OASP,
     )
-    return [
+    raw = [
         ('Bellhop', Bellhop, {}, {}),
         ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax=10000.0), {}),
         ('Kraken',  Kraken,  {}, dict(run_mode=uacpy.RunMode.MODES)),
@@ -288,6 +291,15 @@ def _drift_cases():
         ('OASR',    OASR,    {}, dict(run_mode=uacpy.RunMode.REFLECTION)),
         ('OASP',    OASP,    {}, dict(run_mode=uacpy.RunMode.BROADBAND)),
     ]
+    # OASES models need their separately-licensed binaries; tag those params
+    # so ``pytest -m 'not requires_oases'`` deselects them at collection.
+    return [
+        pytest.param(
+            name, cls, ce, re, id=name,
+            marks=([pytest.mark.requires_oases] if name in _OASES_MODELS else []),
+        )
+        for name, cls, ce, re in raw
+    ]
 
 
 @pytest.mark.requires_binary
@@ -295,7 +307,6 @@ def _drift_cases():
 @pytest.mark.parametrize(
     "name,model_cls,ctor_extras,run_extras",
     _drift_cases(),
-    ids=[c[0] for c in _drift_cases()],
 )
 def test_metadata_keys_are_all_documented(
     name, model_cls, ctor_extras, run_extras, tmp_path,

@@ -728,6 +728,9 @@ class SPARC(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _max_receiver_depth(self, env: Environment) -> float:
+        return self._total_media_depth(env)
+
     def _sparc_rigidify_halfspace(self, env: Environment) -> Environment:
         """Rewrite an env's halfspace bottom to 'rigid' so SPARC's
         ``Vacuum`` / ``Rigid``-only writer accepts it. Emits one

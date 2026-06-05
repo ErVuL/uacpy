@@ -141,13 +141,17 @@ _OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
 
 
 def _model_param(name):
-    """Wrap parametrize values so OASES models carry the requires_oases marker.
+    """Wrap parametrize values with the binary markers each model needs.
 
-    This lets ``pytest -m 'not requires_oases'`` deselect at collection
-    time when the OASES binaries are absent, instead of relying on the
-    in-test ``FileNotFoundError`` fallback.
+    Every model resolves (and existence-checks) its binary in ``__init__``,
+    so this test — which constructs the model to read its capability flags —
+    needs ``requires_binary`` for all, plus ``requires_oases`` for the
+    separately-licensed OASES family. Lets ``pytest -m 'not requires_binary'``
+    / ``'not requires_oases'`` deselect at collection time.
     """
-    marks = [pytest.mark.requires_oases] if name in _OASES_MODELS else []
+    marks = [pytest.mark.requires_binary]
+    if name in _OASES_MODELS:
+        marks.append(pytest.mark.requires_oases)
     return pytest.param(name, marks=marks, id=name)
 
 

@@ -40,11 +40,16 @@ from uacpy.models import (
 # Detect availability of compiled RAM-family binaries — env-dependent so
 # the rough-surface scenario can be skipped cleanly when ramsurf isn't built.
 def _has_ramsurf() -> bool:
+    # Runs at import (module-level SCENARIOS guard), before pytest markers
+    # apply — so it must survive a fully binary-less machine. RAM.__init__
+    # raises ExecutableNotFoundError (not a FileNotFoundError) when even its
+    # primary backend is absent; treat any missing binary as "no ramsurf".
+    from uacpy.core.exceptions import ExecutableNotFoundError
     try:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         ram._collins_binary('ramsurf')
         return True
-    except FileNotFoundError:
+    except (FileNotFoundError, ExecutableNotFoundError):
         return False
 
 

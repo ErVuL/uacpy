@@ -126,6 +126,7 @@ def test_rd_bottom_acoustic_type_validated():
 
 # --- G4 per-range receiver depth check -------------------------------------
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
 def test_per_range_receiver_below_shoaling_seafloor():
     bellhop = Bellhop()
     env = Environment(
@@ -144,6 +145,7 @@ def test_per_range_receiver_below_shoaling_seafloor():
     assert any("below the local seafloor" in m for m in msgs)
 
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
 def test_per_range_receiver_check_passes_when_under_seafloor():
     bellhop = Bellhop()
     env = Environment(
@@ -160,6 +162,7 @@ def test_per_range_receiver_check_passes_when_under_seafloor():
 
 # --- G3 range coverage warning ---------------------------------------------
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
 def test_warn_when_receiver_overruns_bathymetry():
     bellhop = Bellhop()
     env = Environment(
@@ -176,6 +179,7 @@ def test_warn_when_receiver_overruns_bathymetry():
     assert any("env.bathymetry" in m and "constant-extrapolated" in m for m in msgs)
 
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
 def test_warn_when_receiver_overruns_ssp_ranges():
     bellhop = Bellhop()
     ssp = SoundSpeedProfile.from_2d(
@@ -196,6 +200,7 @@ def test_warn_when_receiver_overruns_ssp_ranges():
 
 # --- G2 RAM Collins RD-bottom warning --------------------------------------
 
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 def test_ram_collins_warns_on_rd_bottom():
     bp = BoundaryProperties(acoustic_type='half-space',
                             sound_speed=1700, density=1.7,
@@ -358,6 +363,61 @@ def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):
     assert rows[2][2] == pytest.approx(1800.0)
 
 
+@pytest.mark.requires_binary  # constructs Scooter/KrakenField/Bellhop (resolves their binaries)
+def test_receiver_depth_accepted_across_models_harmonized():
+    """A below-seafloor receiver never raises — it is accepted on every
+    model, returning that model's below-domain value. Within its resolvable
+    depth a model is silent; below it, one harmonized warning fires. Only
+    the source (an input that must sit in the medium) is a hard error."""
+    from uacpy.models.scooter import Scooter
+    from uacpy.core.exceptions import InvalidDepthError
+
+    ssp = SoundSpeedProfile.from_isovelocity(100.0, 1500.0)
+    bottom = LayeredBottom(
+        layers=[SedimentLayer(thickness=50.0, sound_speed=1600.0,
+                              density=1.5, attenuation=0.5)],
+        halfspace=BoundaryProperties(acoustic_type='half-space',
+                                     sound_speed=1800.0, density=2.0,
+                                     attenuation=0.8),
+    )
+    env = Environment(bathymetry=100.0, ssp=ssp, bottom=bottom)
+    src = uacpy.Source(depths=20.0, frequencies=50.0)
+
+    # Solvers that mesh through the sediment (Scooter, the Kraken family)
+    # resolve a 130 m receiver in the sediment (env.depth=100, media=150)
+    # → accepted, no warning.
+    from uacpy.models.kraken import KrakenField
+    for model in (Scooter(), KrakenField()):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.validate_inputs(
+                env, src,
+                uacpy.Receiver(depths=np.array([50.0, 130.0]),
+                               ranges=np.array([500.0, 1000.0])),
+                run_mode=uacpy.RunMode.COHERENT_TL,
+            )
+        assert not any("resolvable depth" in str(w.message) for w in caught)
+
+    # A ray model stops at the seafloor: the same 130 m receiver is still
+    # accepted, but warns that the result reflects below-domain behaviour.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Bellhop().validate_inputs(
+            env, src,
+            uacpy.Receiver(depths=np.array([130.0]), ranges=np.array([500.0])),
+        )
+    assert any("below the model's resolvable depth" in str(w.message)
+               for w in caught)
+
+    # The source, by contrast, must lie within the resolvable medium.
+    with pytest.raises(InvalidDepthError):
+        Bellhop().validate_inputs(
+            env, uacpy.Source(depths=130.0, frequencies=50.0),
+            uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([500.0])),
+        )
+
+
+@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
 def test_kraken_collapses_rd_env_with_warning(simple_env):
     """A model without RD support should collapse the env and emit one
     warning per dropped axis — the env returned by _project_environment
@@ -383,6 +443,7 @@ def test_kraken_collapses_rd_env_with_warning(simple_env):
     assert simple_env.depth > 0
 
 
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 def test_per_range_receiver_below_seafloor_emits_warning_not_error():
     """RAM accepts receivers below the local seafloor; G4 should warn,
     not raise."""
@@ -467,7 +528,10 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _all_concrete_models():
+_OASES_MODEL_NAMES = {'OAST', 'OASN', 'OASR', 'OASP'}
+
+
+def _all_concrete_model_params():
     from uacpy.models.bellhop import Bellhop, BellhopCUDA
     from uacpy.models.bounce import Bounce
     from uacpy.models.kraken import Kraken, KrakenC, KrakenField
@@ -475,24 +539,30 @@ def _all_concrete_models():
     from uacpy.models.ram import RAM
     from uacpy.models.scooter import Scooter
     from uacpy.models.sparc import SPARC
-    return [
+    classes = [
         Bellhop, BellhopCUDA, Bounce,
         Kraken, KrakenC, KrakenField,
         OAST, OASN, OASR, OASP,
         RAM, Scooter, SPARC,
     ]
+    # Every model resolves (and existence-checks) its binary in __init__, so
+    # constructing one needs that binary — requires_binary for all, plus
+    # requires_oases for the separately-licensed OASES family.
+    params = []
+    for cls in classes:
+        marks = [pytest.mark.requires_binary]
+        if cls.__name__ in _OASES_MODEL_NAMES:
+            marks.append(pytest.mark.requires_oases)
+        params.append(pytest.param(cls, id=cls.__name__, marks=marks))
+    return params
 
 
-@pytest.mark.parametrize(
-    "model_cls",
-    _all_concrete_models(),
-    ids=[cls.__name__ for cls in _all_concrete_models()],
-)
+@pytest.mark.parametrize("model_cls", _all_concrete_model_params())
 def test_run_rejects_unknown_kwarg(model_cls):
     """Every concrete ``run()`` declares its full keyword set; unknown
-    names raise :class:`TypeError` at the call site.
-
-    Pre-binary failure path — pure-Python, no ``requires_binary`` marker.
+    names raise :class:`TypeError` at the call site. Constructing the model
+    resolves its binary, so this carries ``requires_binary`` (and
+    ``requires_oases`` for the OASES models).
     """
     env = uacpy.Environment(name='unknown-kwarg', bathymetry=100.0, ssp=1500.0)
     src = uacpy.Source(depths=50.0, frequencies=100.0)

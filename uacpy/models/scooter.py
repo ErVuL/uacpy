@@ -414,6 +414,9 @@ class Scooter(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _max_receiver_depth(self, env) -> float:
+        return self._total_media_depth(env)
+
     def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
         """Pick the effective ``rmax_multiplier`` for this run.
 

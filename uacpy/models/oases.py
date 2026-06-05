@@ -1344,9 +1344,13 @@ class OASP(PropagationModel):
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce
         # multi-axis output rather than silently discard data.
+        # OASES GETOPT (unoassp30.f) parses the option line character by
+        # character (CHARACTER*1 OPT(40)), so whitespace is irrelevant and
+        # 'NJO' enables 'O' exactly like 'N J O'. Match on the character
+        # set, not whitespace-split tokens.
         if self.options:
-            opt_tokens = set(str(self.options).split())
-            multi_axis = {'V', 'H', 'R', 'U', 'F'} & opt_tokens
+            opt_chars = set(str(self.options)) - set(' \t\n')
+            multi_axis = {'V', 'H', 'R', 'U', 'F'} & opt_chars
             if multi_axis:
                 raise ConfigurationError(
                     f"OASP.run: options {sorted(multi_axis)} request "
@@ -1355,7 +1359,7 @@ class OASP(PropagationModel):
                     "these letters (default 'N J' returns scalar pressure) "
                     "or read the .trf directly."
                 )
-            if 'O' in opt_tokens:
+            if 'O' in opt_chars:
                 # 'O' moves the frequency integration onto a complex
                 # contour (Im(omega) = -ln(50)·Δf, unoassp30.f). The .trf
                 # reader discards that offset and synthesize_time_series

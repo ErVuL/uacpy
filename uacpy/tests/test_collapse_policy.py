@@ -41,8 +41,22 @@ _PER_MODEL_DEFAULTS = [
     ('RAM',         {}),
 ]
 
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
 
-@pytest.mark.parametrize('cls_name,overrides', _PER_MODEL_DEFAULTS)
+# Each model resolves (and existence-checks) its binary in __init__, so the
+# construction below needs that binary — requires_binary for all, plus
+# requires_oases for the separately-licensed OASES family.
+_PER_MODEL_PARAMS = [
+    pytest.param(
+        name, overrides, id=name,
+        marks=([pytest.mark.requires_binary]
+               + ([pytest.mark.requires_oases] if name in _OASES_MODELS else [])),
+    )
+    for name, overrides in _PER_MODEL_DEFAULTS
+]
+
+
+@pytest.mark.parametrize('cls_name,overrides', _PER_MODEL_PARAMS)
 def test_per_model_collapse_defaults(cls_name, overrides):
     """Each model installs its physics-aware overrides via
     ``_set_collapse_defaults`` and inherits the rest from
@@ -58,6 +72,7 @@ def test_per_model_collapse_defaults(cls_name, overrides):
         )
 
 
+@pytest.mark.requires_binary  # constructs a concrete model
 def test_user_collapse_overrides_per_model_defaults():
     """User ``collapse={...}`` always wins over model defaults."""
     from uacpy.models import Bounce
@@ -177,6 +192,7 @@ def test_rd_layered_invalid_value_raises(bad_key, bad_val):
 # Bellhop non-quad RD-SSP path now honours ``collapse['ssp']``
 # ---------------------------------------------------------------------
 
+@pytest.mark.requires_binary  # constructs Bellhop
 def test_bellhop_rd_ssp_uses_collapse_policy():
     """When ``ssp.interp != 'quad'`` Bellhop drops the range axis using
     the user's ``collapse['ssp']`` value rather than hardcoded r=0."""
@@ -211,6 +227,7 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
 # Bellhop auto-route detects elastic-RangeDependentBottom
 # ---------------------------------------------------------------------
 
+@pytest.mark.requires_binary  # constructs Bellhop
 def test_bellhop_auto_route_detects_elastic_rd_halfspace():
     """A ``RangeDependentBottom`` with non-zero ``shear_speed`` anywhere
     along range triggers the BOUNCE auto-route."""

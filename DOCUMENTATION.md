@@ -1525,9 +1525,14 @@ failed for one of the binaries. `uacpy/bin/` should contain `oalib/`,
 `mpirams/`, `bellhopcuda/`, and (after fetch) `oases/`. Rerun
 `./install.sh` and read its stderr.
 
-**"Source/Receiver depth exceeds environment depth".** The model's
-`validate_inputs()` checks against `env.depth`. Trim your receiver grid
-or deepen the env.
+**Source/receiver depth below the seafloor.** A **source** below the
+model's resolvable depth is a hard `InvalidDepthError` — it must sit in
+the modelled medium. A **receiver** there is *accepted* with a
+`UserWarning`: the model returns its below-domain value (Bellhop
+transmitted field, Kraken evanescent tail, RAM `NaN` in the PE absorbing
+layer). Full-waveguide solvers (Scooter, SPARC, the Kraken family) mesh
+through sediment, so their resolvable depth is the water column plus all
+`LayeredBottom` sediment thicknesses, not just `env.depth`.
 
 **Kraken says "does not support range-dependent environments".** Use
 `KrakenField` (adiabatic / coupled modes) or switch to Bellhop / RAM.

@@ -178,6 +178,12 @@ class _KrakenBase(PropagationModel):
         # CLOW/CHIGH validation (Kraken doc: 0 <= cLow < cHigh)
         self._validate_phase_speed_limits()
 
+    def _max_receiver_depth(self, env) -> float:
+        # The Kraken family meshes through fluid sediment layers, so it
+        # resolves receivers down to the deepest interface, not just the
+        # seafloor. Equals env.depth when there are no sediment layers.
+        return self._total_media_depth(env)
+
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
         cl = self.c_low

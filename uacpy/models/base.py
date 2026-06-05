@@ -600,16 +600,17 @@ class PropagationModel(ABC):
                 f"got {len(source.depths)}: {list(source.depths)}. Loop "
                 f"over Sources externally for multi-depth runs."
             )
-        max_depth = env.depth
+        resolvable_depth = self._max_receiver_depth(env)
 
-        if np.any(source.depths > max_depth):
+        # The source injects energy into the medium, so it must sit within
+        # what the model resolves — placing it below is a hard error.
+        # Receivers are outputs: ones below the resolvable depth are
+        # accepted and return the model's below-domain value (transmitted /
+        # evanescent field, or NaN inside a PE absorbing layer); the
+        # warning helpers below surface that rather than rejecting it.
+        if np.any(source.depths > resolvable_depth):
             raise InvalidDepthError(
-                float(source.depths.max()), max_depth, "Source",
-            )
-
-        if receiver.depth_max > max_depth:
-            raise InvalidDepthError(
-                float(receiver.depth_max), max_depth, "Receiver",
+                float(source.depths.max()), resolvable_depth, "Source",
             )
 
         if np.any(source.depths < 0):
@@ -618,18 +619,45 @@ class PropagationModel(ABC):
         if receiver.depth_min < 0:
             raise ConfigurationError("Receiver depths must be positive")
 
+        self._warn_receiver_below_resolvable(env, receiver, resolvable_depth)
         self._check_per_range_receiver_depth(env, receiver)
         self._warn_on_range_coverage(env, receiver)
+
+    def _warn_receiver_below_resolvable(
+        self, env: 'Environment', receiver: 'Receiver',
+        resolvable_depth: float,
+    ) -> None:
+        """Flat-bathymetry counterpart to
+        :meth:`_check_per_range_receiver_depth`: warn — never raise — when a
+        receiver lies below the depth this model resolves the field at.
+        Such receivers are accepted; every model degrades gracefully there
+        (Bellhop transmitted field, Kraken evanescent tail, RAM NaN in the
+        absorbing layer, Scooter/SPARC clipped to the sediment). The
+        range-dependent case is handled per-range by
+        :meth:`_check_per_range_receiver_depth`.
+        """
+        if env.has_range_dependent_bathymetry():
+            return
+        if receiver.depth_max > resolvable_depth:
+            warnings.warn(
+                f"{self.model_name}: receiver depth "
+                f"{float(receiver.depth_max):.1f} m is below the model's "
+                f"resolvable depth ({resolvable_depth:.1f} m). It is "
+                f"accepted; the result there reflects the model's "
+                f"below-domain behaviour (transmitted / evanescent field, "
+                f"or NaN inside a PE absorbing layer).",
+                UserWarning, stacklevel=3,
+            )
 
     def _check_per_range_receiver_depth(
         self, env: 'Environment', receiver: 'Receiver',
     ) -> None:
         """Emit a ``UserWarning`` if any receiver sits below the local
-        seafloor in a range-dependent bathymetry. The flat-bathy case is
-        already a hard ``InvalidDepthError`` via the global
-        ``receiver.depth_max <= env.depth`` check above. We only warn
-        here because several models (Bellhop, RAM) accept below-seafloor
-        receivers natively (infinite TL, PE absorbing region).
+        seafloor in a range-dependent bathymetry. Below-seafloor receivers
+        are accepted, not rejected: several models (Bellhop, RAM) resolve
+        them natively (transmitted field, PE absorbing region). The
+        flat-bathy case is handled by
+        :meth:`_warn_receiver_below_resolvable`.
 
         ``receiver_type='line'`` pairs depths[i] with ranges[i] (1-D
         compare); ``'grid'`` evaluates the depth × range cross-product.
@@ -1466,6 +1494,15 @@ class PropagationModel(ABC):
         if phase_reference is not None:
             kw['phase_reference'] = phase_reference
         return kw
+
+    def _max_receiver_depth(self, env: 'Environment') -> float:
+        """Deepest receiver depth this model can resolve the field at.
+
+        Ray/mode models stop at the seafloor; full-waveguide spectral
+        solvers override this to include the sediment layers they mesh
+        through (see :meth:`_total_media_depth`).
+        """
+        return float(env.depth)
 
     def _total_media_depth(self, env: 'Environment') -> float:
         """

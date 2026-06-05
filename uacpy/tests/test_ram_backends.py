@@ -59,6 +59,7 @@ def _env(*, bottom, altimetry=None):
 # ─── Backend selection (no binary needed) ─────────────────────────────────
 
 
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary) to probe select_backend
 class TestBackendSelection:
     """Pure-Python dispatch logic — no native binaries required."""
 
