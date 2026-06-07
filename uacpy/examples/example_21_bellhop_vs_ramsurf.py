@@ -59,7 +59,7 @@ def main():
         ranges=np.linspace(500.0, 6000.0, 200),
     )
 
-    print(f"Env: {env.depth:.0f} m Pekeris, isovelocity {float(env.ssp.data[0, 0]):.0f}, "
+    print(f"Env: {env.depth:.0f} m Pekeris, isovelocity {env.ssp.value:.0f}, "
           f"fluid bottom (c=1700, ρ=1.7, α=0.5)")
     print(f"Surface: {len(surface)} altimetry breakpoints, two -1.5 m depressions")
     print(f"Source: depth={src.depths[0]:.0f} m, frequencies={src.frequencies[0]:.0f} Hz")

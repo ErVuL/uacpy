@@ -66,12 +66,15 @@ def _validate_tl_pair_and_window(
     ranges_b = field_b.coords['range']
     if depths.shape != depths_b.shape or ranges.shape != ranges_b.shape:
         raise ValueError(f"{fname}: depth/range axes must have matching shapes")
-    if not np.allclose(depths, depths_b, rtol=1e-6, atol=1e-6):
+    # Tolerance is ~1 mm: models interpolate onto the requested receiver grid,
+    # so two runs of the same grid agree to sub-millimetre (unit-conversion
+    # rounding). Genuinely different grids differ by metres and still raise.
+    if not np.allclose(depths, depths_b, rtol=1e-5, atol=1e-3):
         raise ValueError(
             f"{fname}: depth axes differ — sample-cells are not aligned. "
             "Resample one field onto the other's grid before comparing."
         )
-    if not np.allclose(ranges, ranges_b, rtol=1e-6, atol=1e-6):
+    if not np.allclose(ranges, ranges_b, rtol=1e-5, atol=1e-3):
         raise ValueError(
             f"{fname}: range axes differ — sample-cells are not aligned. "
             "Resample one field onto the other's grid before comparing."
@@ -100,8 +103,10 @@ def tl_rmse(
     """Root-mean-square TL difference between two TL fields.
 
     Both fields must be sampled on the same ``depths`` and ``ranges``
-    grid; the helper verifies this with :func:`numpy.allclose` and raises
-    on mismatched coordinates.
+    grid. Agreement is checked to ~1 mm (models interpolate onto the
+    requested receiver grid, so two runs of the same grid match to
+    sub-millimetre); grids differing by more raise — resample one onto
+    the other first.
 
     Parameters
     ----------

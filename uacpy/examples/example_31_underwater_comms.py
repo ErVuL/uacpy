@@ -99,7 +99,8 @@ def main():
     jbits = comms.JanusPacket(class_id=16, app_type=0).to_bits()
     jwav = comms.janus_modulate(jbits, 48000.0)
     jrx = comms.awgn(jwav, 12.0, rng=rng).real
-    jpkt, jok = comms.janus_demodulate(jrx, 48000.0)
+    jbits_out, jok = comms.janus_demodulate(jrx, 48000.0)
+    jpkt, _ = comms.JanusPacket.from_bits(jbits_out)
     print(f"  JANUS 4748      : 64-bit packet -> {jwav.size/48000:.2f} s FH-BFSK "
           f"@12 dB -> CRC {'OK' if jok else 'FAIL'} (class {jpkt.class_id})")
 

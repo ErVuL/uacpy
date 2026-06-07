@@ -152,20 +152,14 @@ def example_preset_layered_bottom():
     :mod:`uacpy.materials` presets — class-typical clay/silt/sand
     over a limestone halfspace, with no hand-typed property numbers.
 
-    Shears are zeroed via ``overrides`` so RAM dispatches to the fluid
-    mpiramS backend; the rams0.5 elastic PE backend is conservative on
-    its dz cap and would degrade accuracy at 200 Hz / 100 m water.
+    Presets are fluid by default (``elastic=False``), so RAM dispatches to
+    the fluid mpiramS backend; the rams0.5 elastic PE backend is conservative
+    on its dz cap and would degrade accuracy at 200 Hz / 100 m water.
     """
     source, receiver = make_source_receiver()
-    fluid = {'shear_speed': 0.0, 'shear_attenuation': 0.0}
     lb = LayeredBottom.from_presets(
-        layers=[
-            ('clay', 5.0, fluid),
-            ('silt', 15.0, fluid),
-            ('sand', 30.0, fluid),
-        ],
+        layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
         halfspace='limestone',
-        halfspace_overrides=fluid,
     )
     env = uacpy.Environment(
         name='preset_layered_bottom', bathymetry=100,

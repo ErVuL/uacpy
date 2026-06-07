@@ -77,7 +77,8 @@ def main():
 
     # --- detect + decode ---
     start, metric = janus.janus_detect(rx, fs)
-    out_pkt, crc_ok = janus.janus_demodulate(rx, fs, start=start)
+    out_bits, crc_ok = janus.janus_demodulate(rx, fs, start=start)
+    out_pkt, _ = janus.JanusPacket.from_bits(out_bits)
     print(f"\n  preamble   : detected at sample {start} (metric {metric.max():.2f})")
     print(f"  CRC        : {'OK' if crc_ok else 'FAIL'}")
     print(f"  decoded    : class {out_pkt.class_id}, app type {out_pkt.app_type}, "

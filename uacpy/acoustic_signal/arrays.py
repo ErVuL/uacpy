@@ -69,36 +69,41 @@ def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     return r
 
 
-def bartlett_spectrum(R, positions_m, angles_deg, freq: float,
-                      c: float = DEFAULT_SOUND_SPEED):
-    """Conventional (Bartlett) beamformer power vs angle: ``e^H R e``."""
-    e = steering_vectors(positions_m, angles_deg, freq, c)
+def bartlett_spectrum(R, steering):
+    """Conventional (Bartlett) beamformer power vs angle: ``e^H R e``.
+
+    ``steering`` is the ``(n_angles, n_elements)`` matrix from
+    :func:`steering_vectors` — one steering vector per scan angle.
+    """
+    e = np.asarray(steering, dtype=complex)
     return np.real(np.einsum("ai,ij,aj->a", e.conj(), R, e))
 
 
-def mvdr_spectrum(R, positions_m, angles_deg, freq: float,
-                  c: float = DEFAULT_SOUND_SPEED, diagonal_loading: float = 1e-6):
+def mvdr_spectrum(R, steering, *, diagonal_loading: float = 1e-6):
     """MVDR / Capon power vs angle: ``1 / (e^H R^-1 e)``.
 
-    ``diagonal_loading`` (fraction of ``trace(R)/N``) stabilises the inverse for
-    rank-deficient or snapshot-starved covariances.
+    ``steering`` is the ``(n_angles, n_elements)`` matrix from
+    :func:`steering_vectors`. ``diagonal_loading`` (fraction of
+    ``trace(R)/N``) stabilises the inverse for rank-deficient or
+    snapshot-starved covariances.
     """
     R = np.asarray(R, dtype=complex)
     n = R.shape[0]
     if diagonal_loading > 0.0:
         R = R + diagonal_loading * (np.trace(R).real / n) * np.eye(n)
     Rinv = np.linalg.inv(R)
-    e = steering_vectors(positions_m, angles_deg, freq, c)
+    e = np.asarray(steering, dtype=complex)
     denom = np.real(np.einsum("ai,ij,aj->a", e.conj(), Rinv, e))
     return 1.0 / denom
 
 
-def music_spectrum(R, positions_m, angles_deg, freq: float, n_sources: int,
-                   c: float = DEFAULT_SOUND_SPEED):
+def music_spectrum(R, steering, n_sources: int):
     """MUSIC pseudospectrum vs angle.
 
     ``P(theta) = 1 / (e^H E_n E_n^H e)`` where ``E_n`` spans the noise subspace
     (eigenvectors of ``R`` beyond the ``n_sources`` largest eigenvalues).
+    ``steering`` is the ``(n_angles, n_elements)`` matrix from
+    :func:`steering_vectors`.
     """
     R = np.asarray(R, dtype=complex)
     n = R.shape[0]
@@ -108,7 +113,7 @@ def music_spectrum(R, positions_m, angles_deg, freq: float, n_sources: int,
         )
     evals, evecs = np.linalg.eigh(R)
     noise = evecs[:, : n - n_sources]
-    e = steering_vectors(positions_m, angles_deg, freq, c)
+    e = np.asarray(steering, dtype=complex)
     proj = e.conj() @ noise
     denom = np.sum(np.abs(proj) ** 2, axis=1)
     return 1.0 / denom

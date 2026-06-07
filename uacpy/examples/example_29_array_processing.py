@@ -55,9 +55,10 @@ def main():
 
     R = sample_covariance(x)
     angles = np.linspace(-40, 40, 801)
-    bart = bartlett_spectrum(R, positions, angles, freq, c)
-    capon = mvdr_spectrum(R, positions, angles, freq, c)
-    music = music_spectrum(R, positions, angles, freq, n_sources=2, c=c)
+    steering = steering_vectors(positions, angles, freq, c)
+    bart = bartlett_spectrum(R, steering)
+    capon = mvdr_spectrum(R, steering)
+    music = music_spectrum(R, steering, n_sources=2)
 
     def norm_db(p):
         return 10 * np.log10(p / p.max())
