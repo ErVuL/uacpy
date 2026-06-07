@@ -335,10 +335,13 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
 
 def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
                      cd=None, fh_seq=None, start=None):
-    """Demodulate a JANUS waveform -> ``(JanusPacket, crc_ok)``.
+    """Demodulate a JANUS waveform -> ``(bits64, crc_ok)``.
 
-    Detects the preamble (unless ``start`` is given), then non-coherently detects
-    each of the 144 data chips (energy at the two candidate tones) and decodes.
+    The inverse of :func:`janus_modulate` (bits in, bits out). Detects the
+    preamble (unless ``start`` is given), then non-coherently detects each of
+    the 144 data chips (energy at the two candidate tones) and decodes. Parse
+    the 64 bits into a structured packet with :meth:`JanusPacket.from_bits`,
+    or use :func:`receive` for the packet directly.
     """
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)
@@ -360,7 +363,9 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
         f0 = _tone_freq(fh[_PREAMBLE_CHIPS + i], 0, f_low, fsw)
         f1 = _tone_freq(fh[_PREAMBLE_CHIPS + i], 1, f_low, fsw)
         sym[i] = 1 if _chip_energy(seg, f1, fs) > _chip_energy(seg, f0, fs) else 0
-    return JanusPacket.from_bits(janus_decode(sym))
+    bits64 = janus_decode(sym)
+    _, crc_ok = JanusPacket.from_bits(bits64)
+    return bits64, crc_ok
 
 
 def transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
@@ -370,4 +375,6 @@ def transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
 
 def receive(waveform, sample_rate=48000.0, **kwargs):
     """Convenience: a JANUS waveform -> ``(JanusPacket, crc_ok)``."""
-    return janus_demodulate(waveform, sample_rate, **kwargs)
+    bits64, crc_ok = janus_demodulate(waveform, sample_rate, **kwargs)
+    pkt, _ = JanusPacket.from_bits(bits64)
+    return pkt, crc_ok

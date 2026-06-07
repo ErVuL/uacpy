@@ -341,6 +341,8 @@ value collapses the SSP to 1-D via the model's ``collapse['ssp']``
 policy with one tailored warning.
 
 Useful methods:
+- `value` — the scalar sound speed when unambiguous (isovelocity profile,
+  or one sliced to a single cell via `eval(...)`); raises if it varies.
 - `eval(range=…, depth=…, interp='linear'|'nearest')` — label-based
   interpolated read.
 - `collapse(method)` — `r0`/`rmax`/`mean`/`median` → 1-D profile (used by
@@ -382,7 +384,8 @@ import uacpy
 uacpy.materials.list_materials()
 # ['basalt','chalk','clay','granite','gravel','limestone','moraine','sand','silt']
 
-bottom = uacpy.BoundaryProperties.from_preset('sand')
+bottom = uacpy.BoundaryProperties.from_preset('sand')                   # fluid (shear dropped)
+bottom = uacpy.BoundaryProperties.from_preset('sand', elastic=True)     # keep preset shear
 bottom = uacpy.BoundaryProperties.from_preset('sand', attenuation=0.5)  # tweak
 layer  = uacpy.SedimentLayer.from_preset('silt', thickness=10.0)
 column = uacpy.LayeredBottom.from_presets(
@@ -391,6 +394,11 @@ column = uacpy.LayeredBottom.from_presets(
     halfspace_overrides={'attenuation': 0.05},
 )
 ```
+
+Presets are **fluid by default** (shear dropped) so the boundary works with
+every model — pass `elastic=True` (uniform across `from_preset` /
+`from_presets`) to keep the catalog's shear speed for the elastic-capable
+solvers (OASES, Scooter, KrakenC). Explicit `shear_*` overrides always win.
 
 | Material | c_p (m/s) | c_s (m/s) | ρ (g/cm³) | α_p (dB/λ) | α_s (dB/λ) |
 |---|---|---|---|---|---|
@@ -1415,7 +1423,8 @@ import uacpy.comms as comms
 pkt = comms.JanusPacket(class_id=16, app_type=0)        # NATO ref impl, Emergency
 wav = comms.janus_modulate(pkt.to_bits(), sample_rate=48000)   # FH-BFSK waveform
 # ... over the water ...
-out, crc_ok = comms.janus_demodulate(recording, sample_rate=48000)
+bits64, crc_ok = comms.janus_demodulate(recording, sample_rate=48000)   # bits in, bits out
+out = comms.JanusPacket.from_bits(bits64)[0]                            # or comms.receive(...) for the packet
 ```
 
 This is **verified interoperable** with the CMRE `janus-c` 3.0.5 reference

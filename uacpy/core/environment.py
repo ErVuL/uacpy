@@ -120,14 +120,16 @@ class SedimentLayer:
         return f"SedimentLayer({', '.join(bits)})"
 
     @classmethod
-    def from_preset(cls, name: str, *, thickness: float, **overrides) -> "SedimentLayer":
+    def from_preset(cls, name: str, *, thickness: float, elastic: bool = False,
+                    **overrides) -> "SedimentLayer":
         """Build a :class:`SedimentLayer` from a :mod:`uacpy.core.materials`
         preset (``'sand'``, ``'silt'``, ``'clay'``, …).
 
         ``thickness`` is required (presets only encode acoustic
-        properties, not layer geometry). Any additional kwargs override
-        the preset's ``sound_speed`` / ``density`` / ``attenuation`` /
-        ``shear_speed`` / ``shear_attenuation`` for site-specific tuning.
+        properties, not layer geometry). The layer is **fluid by default**;
+        pass ``elastic=True`` to keep the preset's shear properties. Any
+        additional kwargs override the preset's ``sound_speed`` /
+        ``density`` / ``attenuation`` / ``shear_*`` for site-specific tuning.
         """
         from uacpy.core.materials import get_material
         m = get_material(name)
@@ -136,8 +138,8 @@ class SedimentLayer:
             sound_speed=m['sound_speed'],
             density=m['density'],
             attenuation=m['attenuation'],
-            shear_speed=m['shear_speed'],
-            shear_attenuation=m['shear_attenuation'],
+            shear_speed=m['shear_speed'] if elastic else 0.0,
+            shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
         )
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -298,7 +300,7 @@ class BoundaryProperties:
         return f"BoundaryProperties({', '.join(bits)})"
 
     @classmethod
-    def from_preset(cls, name: str, **overrides) -> "BoundaryProperties":
+    def from_preset(cls, name: str, *, elastic: bool = False, **overrides) -> "BoundaryProperties":
         """Build a :class:`BoundaryProperties` from a
         :mod:`uacpy.core.materials` preset.
 
@@ -306,6 +308,12 @@ class BoundaryProperties:
         preset field that maps onto :class:`BoundaryProperties` (sound
         speeds, density, attenuations, ``grain_size_phi`` if defined,
         ``roughness``), and applies any ``**overrides`` last.
+
+        The boundary is **fluid by default** (shear dropped) so it works
+        with every model. Pass ``elastic=True`` to keep the preset's shear
+        speed / attenuation — needed only for the elastic-capable solvers
+        (OASES, Scooter, KrakenC). ``shear_*`` in ``**overrides`` wins
+        regardless.
         """
         from uacpy.core.materials import get_material
         m = get_material(name)
@@ -314,8 +322,8 @@ class BoundaryProperties:
             sound_speed=m['sound_speed'],
             density=m['density'],
             attenuation=m['attenuation'],
-            shear_speed=m['shear_speed'],
-            shear_attenuation=m['shear_attenuation'],
+            shear_speed=m['shear_speed'] if elastic else 0.0,
+            shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
             roughness=m['roughness'],
         )
         if m['grain_size_phi'] is not None:
@@ -740,6 +748,7 @@ class LayeredBottom:
         *,
         halfspace: str,
         halfspace_overrides: Optional[Dict] = None,
+        elastic: bool = False,
     ) -> 'LayeredBottom':
         """Build a stratigraphic stack from :mod:`uacpy.core.materials`
         preset names.
@@ -754,6 +763,9 @@ class LayeredBottom:
             Preset name for the substrate half-space.
         halfspace_overrides : dict, optional
             Field overrides applied to the half-space.
+        elastic : bool, optional
+            Keep the presets' shear properties (default ``False`` ⇒ fluid).
+            Per-layer / half-space ``shear_*`` overrides win regardless.
 
         Examples
         --------
@@ -776,10 +788,11 @@ class LayeredBottom:
                     f"got {entry!r}"
                 )
             sediment_layers.append(
-                SedimentLayer.from_preset(name, thickness=thickness, **overrides)
+                SedimentLayer.from_preset(name, thickness=thickness,
+                                          elastic=elastic, **overrides)
             )
         hs = BoundaryProperties.from_preset(
-            halfspace, **(halfspace_overrides or {}),
+            halfspace, elastic=elastic, **(halfspace_overrides or {}),
         )
         return cls(layers=sediment_layers, halfspace=hs)
 
@@ -1142,13 +1155,15 @@ class SoundSpeedProfile:
 
     @property
     def value(self) -> float:
-        """Scalar sound speed when this profile has been collapsed to a
-        single ``(depth, range)`` cell via ``at(depth=, range=)``.
-        Raises if the profile carries more than one sample."""
-        if self.data.size != 1:
+        """The single sound speed this profile represents, when unambiguous.
+
+        Valid for an isovelocity profile (every sample equal) or one
+        collapsed to a single ``(depth, range)`` cell via
+        ``at(depth=, range=)``. Raises if the profile actually varies."""
+        if self.data.size > 1 and np.ptp(self.data) > 0:
             raise ConfigurationError(
-                f"SoundSpeedProfile.value: only valid on a 1×1 slice; "
-                f"got shape {self.data.shape}"
+                f"SoundSpeedProfile.value: profile varies (shape "
+                f"{self.data.shape}); slice with at(depth=, range=) first"
             )
         return float(self.data.flat[0])
 

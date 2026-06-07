@@ -57,6 +57,29 @@ class TestTLRmseBasic:
             uacpy.metrics.tl_rmse(a, object())
 
 
+class TestGridAlignment:
+    """Grids agreeing to ~1 mm compare directly (models interpolate onto the
+    requested receiver grid, leaving sub-mm rounding); genuinely different
+    grids raise."""
+
+    def test_submillimetre_offset_compares(self):
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 20_000, 30)
+        data = np.zeros((10, 30))
+        a = _tl_field(data, d, r)
+        b = _tl_field(data.copy(), d, r + 4e-4)        # 0.4 mm shift
+        assert tl_rmse(a, b) == pytest.approx(0.0)
+
+    def test_metre_scale_offset_raises(self):
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 20_000, 30)
+        data = np.zeros((10, 30))
+        a = _tl_field(data, d, r)
+        b = _tl_field(data.copy(), d, r + 1.0)         # 1 m shift
+        with pytest.raises(ValueError, match="range axes differ"):
+            tl_rmse(a, b)
+
+
 class TestTLMetricsUnits:
     """Metrics pull TL via :attr:`Field.tl`, so a complex-pressure field
     and an equivalent real-dB field round-trip."""

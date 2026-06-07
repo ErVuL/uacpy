@@ -61,23 +61,23 @@ class TestBeamformers:
 
     def test_bartlett_recovers_doa(self):
         R = sample_covariance(_snapshots(_array(), 15.0))
-        p = bartlett_spectrum(R, _array(), self.angles, FREQ, C)
+        p = bartlett_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C))
         assert self.angles[np.argmax(p)] == pytest.approx(15.0, abs=1.0)
 
     def test_mvdr_recovers_doa(self):
         R = sample_covariance(_snapshots(_array(), -20.0))
-        p = mvdr_spectrum(R, _array(), self.angles, FREQ, C)
+        p = mvdr_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C))
         assert self.angles[np.argmax(p)] == pytest.approx(-20.0, abs=1.0)
 
     def test_music_recovers_doa(self):
         R = sample_covariance(_snapshots(_array(), 5.0))
-        p = music_spectrum(R, _array(), self.angles, FREQ, 1, C)
+        p = music_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C), 1)
         assert self.angles[np.argmax(p)] == pytest.approx(5.0, abs=1.0)
 
     def test_music_rejects_bad_source_count(self):
         R = sample_covariance(_snapshots(_array(), 5.0))
         with pytest.raises(ConfigurationError):
-            music_spectrum(R, _array(), self.angles, FREQ, 16, C)
+            music_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C), 16)
 
 
 class TestTaper:

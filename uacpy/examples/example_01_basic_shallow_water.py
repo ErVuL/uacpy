@@ -68,7 +68,7 @@ def main():
 
     print("  ✓ Created Pekeris waveguide:")
     print(f"    - Water depth: {env.depth}m")
-    print(f"    - Sound speed: {float(env.ssp.data[0, 0])} m/s")
+    print(f"    - Sound speed: {env.ssp.value} m/s")
     print("    - Bottom type: Fluid half-space")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -203,7 +203,7 @@ def main():
     # Add text box with simulation parameters
     textstr = (f'Simulation Parameters:\n'
                f'  Water depth: {env.depth}m\n'
-               f'  Sound speed: {float(env.ssp.data[0, 0])} m/s\n'
+               f'  Sound speed: {env.ssp.value} m/s\n'
                f'  Frequency: {source.frequencies[0]} Hz\n'
                f'  Source depth: {source.depths[0]}m\n'
                f'  Model: Bellhop (Gaussian beams)\n'

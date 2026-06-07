@@ -16,6 +16,15 @@ class TestIsovelocity:
         ssp = SoundSpeedProfile.from_isovelocity(depth_max=5000.0)
         assert np.allclose(ssp.data, 1500.0)
 
+    def test_value_returns_scalar_for_isovelocity(self):
+        ssp = SoundSpeedProfile.from_isovelocity(depth_max=2000.0, sound_speed=1480.0)
+        assert ssp.value == 1480.0
+
+    def test_value_raises_when_profile_varies(self):
+        ssp = SoundSpeedProfile.from_pairs([(0, 1500.0), (100, 1480.0)])
+        with pytest.raises(ConfigurationError, match="varies"):
+            _ = ssp.value
+
 
 class TestMackenzie:
     def test_pure_water_surface_value(self):

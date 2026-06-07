@@ -408,8 +408,8 @@ class TestJanus:
         assert np.isrealobj(wav)
         start, metric = comms.janus_detect(wav, fs)
         assert start is not None and metric.max() > 0.9
-        pkt, ok = comms.janus_demodulate(wav, fs)
-        assert ok and np.array_equal(pkt.app_data, self._packet().app_data)
+        bits_out, ok = comms.janus_demodulate(wav, fs)
+        assert ok and np.array_equal(bits_out, bits)
 
     def test_fh_bfsk_through_noisy_delayed_channel(self):
         rng = np.random.default_rng(1)
@@ -418,7 +418,8 @@ class TestJanus:
         wav = comms.janus_modulate(bits, fs)
         rx = np.concatenate([np.zeros(523), wav])
         rx = rx + np.sqrt(np.mean(wav ** 2) / 10 ** (10 / 10)) * rng.standard_normal(rx.size)
-        pkt, ok = comms.janus_demodulate(rx, fs)
+        bits_out, ok = comms.janus_demodulate(rx, fs)
+        pkt, _ = comms.JanusPacket.from_bits(bits_out)
         assert ok and pkt.class_id == 16
 
 

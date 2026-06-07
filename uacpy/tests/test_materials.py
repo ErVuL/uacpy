@@ -57,14 +57,24 @@ class TestMaterialsCatalog:
 
 
 class TestBoundaryPropertiesFromPreset:
-    def test_sand_halfspace(self):
+    def test_sand_halfspace_fluid_by_default(self):
         bp = BoundaryProperties.from_preset('sand')
         assert bp.acoustic_type == 'half-space'
         assert bp.sound_speed == 1650.0
         assert bp.density == 1.9
         assert bp.attenuation == 0.8
-        assert bp.shear_speed == 110.0
+        assert bp.shear_speed == 0.0
+        assert bp.shear_attenuation == 0.0
         assert bp.grain_size_phi == 2.0
+
+    def test_elastic_keeps_shear(self):
+        bp = BoundaryProperties.from_preset('sand', elastic=True)
+        assert bp.shear_speed == 110.0
+        assert bp.shear_attenuation == 2.5
+
+    def test_shear_override_wins_over_fluid_default(self):
+        bp = BoundaryProperties.from_preset('sand', shear_speed=300.0)
+        assert bp.shear_speed == 300.0
 
     def test_overrides_apply_last(self):
         bp = BoundaryProperties.from_preset('sand', sound_speed=1700.0, roughness=0.05)
