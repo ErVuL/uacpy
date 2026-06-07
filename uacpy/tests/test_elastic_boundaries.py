@@ -17,8 +17,10 @@ import numpy as np
 from pathlib import Path
 
 from uacpy.core import Environment, Receiver, BoundaryProperties
+from uacpy.core.environment import LayeredBottom, SedimentLayer
+from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy import Field
-from uacpy.models import KrakenField, Bounce, Scooter
+from uacpy.models import Kraken, KrakenC, KrakenField, Bounce, Scooter
 
 # Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
 pytestmark = pytest.mark.requires_binary
@@ -44,6 +46,74 @@ def elastic_env():
         ssp=1500.0,
         bottom=bottom,
     )
+
+
+class TestElasticOverFluidHalfspaceGuard:
+    """`krakenc.exe` spins forever in setup on a solid-over-liquid bottom
+    interface (an elastic ``LayeredBottom`` layer over a fluid halfspace).
+    `_KrakenBase` rejects it up front so all three Kraken-family models fail
+    fast with a typed error instead of hanging for ``timeout`` seconds."""
+
+    @staticmethod
+    def _src_rcv():
+        from uacpy.core import Source
+        return (Source(depths=25.0, frequencies=75.0),
+                Receiver(depths=np.linspace(2, 48, 20),
+                         ranges=np.linspace(100, 4000, 20)))
+
+    @staticmethod
+    def _elastic_over_fluid():
+        return Environment(
+            name='elastic-over-fluid', bathymetry=50.0, ssp=1500.0,
+            bottom=LayeredBottom(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
+                                      density=1.8, attenuation=0.3, shear_speed=300.0)],
+                halfspace=BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=2000.0, density=2.0,
+                                             attenuation=0.4)),  # cs=0 ⇒ fluid
+        )
+
+    @pytest.mark.parametrize('model_cls', [Kraken, KrakenC, KrakenField])
+    def test_rejects_fast_with_alternatives(self, model_cls):
+        src, rcv = self._src_rcv()
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            model_cls().run(self._elastic_over_fluid(), src, rcv)
+        assert 'Scooter' in str(exc.value)
+
+    @staticmethod
+    def _elastic_over_elastic():
+        return Environment(
+            name='elastic-over-elastic', bathymetry=50.0, ssp=1500.0,
+            bottom=LayeredBottom(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
+                                      density=1.8, attenuation=0.3, shear_speed=300.0)],
+                halfspace=BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=2200.0, density=2.2,
+                                             attenuation=0.4, shear_speed=600.0)))
+
+    def test_elastic_over_elastic_is_allowed(self):
+        """Guard is specific: an elastic layer over an *elastic* halfspace is
+        not rejected (krakenc handles solid-solid)."""
+        src, _ = self._src_rcv()
+        rcv = Receiver(depths=np.linspace(2, 48, 20), ranges=np.linspace(100, 3000, 20))
+        modes = KrakenC().run(self._elastic_over_elastic(), src, rcv)
+        assert modes.k.shape[0] > 0
+
+    def test_receiver_in_elastic_subbottom_returns_nan(self):
+        """KrakenField: where the modes solve succeeds (elastic-over-elastic),
+        receivers below the water column — which field.exe cannot evaluate in
+        elastic media — are returned as NaN, the water-column receivers as
+        finite values. No raise (the harmonized below-domain policy)."""
+        src, _ = self._src_rcv()
+        # 20 m water, 55 m in the elastic layer, 70 m in the elastic halfspace
+        rcv = Receiver(depths=np.array([20.0, 55.0, 70.0]),
+                       ranges=np.linspace(100, 3000, 20))
+        with pytest.warns(UserWarning, match='sub-bottom'):
+            field = KrakenField().run(self._elastic_over_elastic(), src, rcv)
+        tl = field.tl
+        assert np.isfinite(tl[0]).any()          # water column: real values
+        assert not np.isfinite(tl[1]).any()      # in elastic layer: all NaN
+        assert not np.isfinite(tl[2]).any()      # in elastic halfspace: all NaN
 
 
 class TestElasticBoundaryAutoDetection:

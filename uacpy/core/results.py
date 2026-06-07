@@ -154,7 +154,8 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('Kraken', 'leaky_modes'): (
         bool, 'True when the run was configured to include leaky modes '
-        '(c_high pushed to ~1e9, normally auto-routed to KrakenC).'
+        '(c_high pushed to ~1e9). Real Kraken raises on leaky modes — '
+        'they require KrakenC.'
     ),
     ('KrakenC', 'mod_file'): (str, 'KrakenC modes file (.mod, complex k).'),
     ('KrakenC', 'n_modes_requested'): (

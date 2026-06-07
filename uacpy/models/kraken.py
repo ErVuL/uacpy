@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Optional, Dict, Union
 
 from uacpy.models.base import PropagationModel, RunMode
-from uacpy.core.environment import Environment
+from uacpy.core.environment import Environment, LayeredBottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Modes, Field
@@ -66,6 +66,7 @@ from uacpy.core.constants import (
 import shutil
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.oalib_writer import (
     write_absorption_block, write_bottom_section, write_broadband_freqs,
@@ -382,6 +383,28 @@ class _KrakenBase(PropagationModel):
             if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
                 write_broadband_freqs(f, np.asarray(frequencies))
 
+    def _reject_elastic_over_fluid_halfspace(self, env: Environment) -> None:
+        """krakenc.exe spins forever in setup on a solid-over-liquid bottom
+        interface: a ``LayeredBottom`` with an elastic layer (shear_speed > 0)
+        terminated by a fluid halfspace (shear_speed == 0). Reject it up front
+        so the caller gets a fast typed error instead of a ``timeout``-long
+        hang. Elastic half-spaces and elastic-over-elastic stacks are fine."""
+        bottom = env.bottom
+        if not isinstance(bottom, LayeredBottom):
+            return
+        has_elastic_layer = any(
+            (getattr(layer, 'shear_speed', 0) or 0) > 0 for layer in bottom.layers
+        )
+        halfspace_fluid = (getattr(bottom.halfspace, 'shear_speed', 0) or 0) == 0
+        if has_elastic_layer and halfspace_fluid:
+            raise UnsupportedFeatureError(
+                self.model_name,
+                "an elastic sediment layer over a fluid halfspace "
+                "(solid-over-liquid bottom interface) — krakenc.exe does not "
+                "converge on it",
+                alternatives=['Scooter', 'OAST'],
+            )
+
     def _run_kraken_executable(self, base_name: str, work_dir: Path):
         """Execute Kraken/KrakenC via base-class subprocess runner."""
         try:
@@ -573,14 +596,18 @@ class Kraken(_KrakenBase):
 
     Notes
     -----
-    **No auto-route to KrakenC.** If the env carries elastic media
-    (``shear_speed > 0``) or ``leaky_modes=True`` is set, ``kraken.exe``
-    will likely fail to find modes; the wrapper inspects the ``.prt``
-    log and raises ``ModelExecutionError`` with a message suggesting
-    KrakenC. Instantiate ``KrakenC`` directly for elastic / leaky-mode
-    environments. (``KrakenField`` *does* auto-route internally because
-    it owns the modes-solve step; ``Kraken`` is the stand-alone modes
-    solver and leaves the choice to the user.)
+    **No auto-route to KrakenC.** Real-arithmetic ``kraken.exe`` finds
+    only real eigenvalues for fluid bottoms. If the env carries elastic
+    media (``shear_speed > 0``) or ``leaky_modes=True`` is set, ``run()``
+    raises :class:`UnsupportedFeatureError` up front pointing at KrakenC
+    — instantiate ``KrakenC`` directly for elastic / leaky-mode
+    environments (its complex eigenvalues are a strict superset, so it
+    also handles fluid cases). Other numerical mode-finding failures on
+    fluid envs still surface as a PRT-aware ``ModelExecutionError`` that
+    likewise suggests KrakenC. (``KrakenField`` *does* auto-route its
+    modes-solve step internally because it owns it; ``Kraken`` is the
+    stand-alone modes solver and leaves the real-vs-complex choice to
+    the user.)
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     Modes solve an eigenproblem of the whole water column — no
@@ -603,21 +630,14 @@ class Kraken(_KrakenBase):
         super().__init__(**kwargs)
         self.mode_points_per_meter = float(mode_points_per_meter)
         self._supported_modes = [RunMode.MODES]
-        # Elastic media are flagged supported because KrakenC handles
-        # them; the stand-alone ``Kraken`` (real-arithmetic) class will
-        # fail at runtime on elastic envs and the wrapper's PRT-aware
-        # error message tells the user to switch to KrakenC. (Auto-route
-        # lives inside KrakenField only — see KrakenField._select_kraken_exe.)
         self._supports_altimetry = False
         self._supports_range_dependent_bathymetry = False
         self._supports_range_dependent_ssp = False
         self._supports_range_dependent_bottom = False
         self._supports_layered_bottom = True
         self._supports_range_dependent_layered_bottom = False
-        # Kraken (real-arith) cannot handle elastic media; the wrapper
-        # auto-routes to KrakenC at run() time. The capability flag
-        # stays True so the projection layer does not collapse shear
-        # away before the route fires.
+        # True keeps the projection layer from collapsing shear; run()
+        # raises UnsupportedFeatureError (-> KrakenC) on elastic/leaky envs.
         self._supports_elastic_media = True
         self._supports_multi_source_depth = False
         # Modes solve an eigenproblem over the whole water column —
@@ -639,10 +659,10 @@ class Kraken(_KrakenBase):
         if not self.executable.exists():
             raise ExecutableNotFoundError(self.model_name, str(self.executable))
 
-    def _route_to_krakenc(self, env: Environment) -> bool:
-        """Real-arith ``kraken.exe`` does not converge on elastic media
-        or when ``leaky_modes=True``. Either case triggers an auto-route
-        to ``KrakenC``."""
+    def _requires_krakenc(self, env: Environment) -> bool:
+        """Real-arith ``kraken.exe`` finds only real eigenvalues for fluid
+        bottoms; elastic media (``shear_speed > 0``) and leaky modes both
+        need the complex eigenvalues that only ``KrakenC`` computes."""
         return bool(self.leaky_modes) or env.has_elastic_bottom() or (
             env.surface is not None and env.has_elastic_surface()
         )
@@ -682,27 +702,14 @@ class Kraken(_KrakenBase):
         """
         run_mode = self._resolve_run_mode(run_mode)
 
-        if self._route_to_krakenc(env):
-            warnings.warn(
-                f"{self.model_name}: env carries elastic media or "
-                "leaky_modes=True; auto-routing to KrakenC "
-                "(real-arithmetic kraken.exe cannot converge).",
-                UserWarning, stacklevel=2,
-            )
-            krakenc = KrakenC(
-                c_low=self.c_low, c_high=self.c_high,
-                n_mesh=self.n_mesh, roughness=self.roughness,
-                interp_ssp=self.interp_ssp,
-                leaky_modes=self.leaky_modes,
-                top_reflection_file=self.top_reflection_file,
-                use_tmpfs=self.use_tmpfs, verbose=self.verbose,
-                work_dir=self.work_dir, cleanup=self.cleanup,
-                timeout=self.timeout,
-                mode_points_per_meter=self.mode_points_per_meter,
-            )
-            return krakenc.run(
-                env, source, receiver, run_mode=run_mode,
-                n_modes=n_modes,
+        self._reject_elastic_over_fluid_halfspace(env)
+        if self._requires_krakenc(env):
+            raise UnsupportedFeatureError(
+                self.model_name,
+                "elastic media (shear_speed > 0) or leaky modes — "
+                "real-arithmetic kraken.exe computes only real eigenvalues "
+                "for fluid bottoms",
+                alternatives=['KrakenC'],
             )
 
         env = self._project_environment(env)
@@ -830,6 +837,7 @@ class KrakenC(_KrakenBase):
         """
         run_mode = self._resolve_run_mode(run_mode)
 
+        self._reject_elastic_over_fluid_halfspace(env)
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
@@ -1063,21 +1071,14 @@ class KrakenField(_KrakenBase):
         return f"{pos1}{pos2}{pos3}{pos4}"
 
     def _select_kraken_exe(self, env):
-        """Return 'kraken.exe' or 'krakenc.exe' based on environment."""
+        """The modes binary for this env: ``krakenc.exe`` for elastic media
+        or leaky modes (complex eigenvalues), ``kraken.exe`` otherwise."""
         needs_krakenc = (
             env.has_elastic_bottom()
             or env.has_elastic_surface()
-            # leaky_modes requires complex arithmetic for convergence.
             or getattr(self, 'leaky_modes', False)
         )
         if needs_krakenc:
-            if self.model_name == 'Kraken':
-                warnings.warn(
-                    f"{self.model_name}: env contains elastic media or "
-                    f"leaky_modes=True; auto-routing to krakenc.exe "
-                    f"(complex-arithmetic Kraken) for the modes solve.",
-                    UserWarning, stacklevel=3,
-                )
             return self._find_executable_in_paths(
                 'krakenc.exe',
                 bin_subdirs='oalib',
@@ -1131,6 +1132,8 @@ class KrakenField(_KrakenBase):
             1/output_duration``). Defaults to
             ``len(source_waveform)/sample_rate``.
         """
+        self._reject_elastic_over_fluid_halfspace(env)
+
         # Early gate: coupled-mode field calculations cannot be
         # combined with incoherent mode addition. AT's field.f90
         # (KrakenField/field.f90 around line 123-127) calls ERROUT
@@ -1148,29 +1151,21 @@ class KrakenField(_KrakenBase):
                 "mode_coupling='coupled' with coherent=True."
             )
 
-        # field.f90's Comp selector at line 169 calls Extract(...) per
-        # ReadModes.f90:315-324, which has no default branch for
-        # ELASTIC media when Comp ∈ {'*', 'O', ' '} (the wrapper's
-        # only options). Receivers in elastic layers therefore see
-        # uninitialised Phi(j). Refuse loudly.
-        if (
+        # field.exe cannot evaluate the field inside an elastic medium: its
+        # Comp selector (field.f90:169 -> ReadModes.f90:315-324) has no
+        # elastic component. With an elastic layer present, receivers below
+        # the water column are computed in the water column only and returned
+        # as NaN below it. (The modes solve itself is fine here — the
+        # elastic-over-fluid-halfspace case that hangs krakenc.exe was already
+        # rejected by _reject_elastic_over_fluid_halfspace above.)
+        elastic_subbottom = (
             env.has_layered_bottom()
             and any(
                 (getattr(layer, 'shear_speed', 0) or 0) > 0
                 for layer in env.bottom.layers
             )
-        ):
-            rcv_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
-            if rcv_depths.max() > env.depth:
-                raise ConfigurationError(
-                    "KrakenField: receiver depth exceeds water depth and "
-                    "an elastic layer is present in the bottom. AT's "
-                    "field.f90 elastic-component selector (Comp) only "
-                    "supports {'*','O',' '} which fall through "
-                    "uninitialised in elastic media (ReadModes.f90:315-324). "
-                    "Constrain receiver to the water column or use a "
-                    "fluid bottom."
-                )
+        )
+        rcv, keep = self._partition_elastic_subbottom(env, receiver, elastic_subbottom)
 
         # Default run mode: BROADBAND if a freq vector is provided,
         # else single-frequency coherent TL.
@@ -1190,9 +1185,10 @@ class KrakenField(_KrakenBase):
                 run_mode, source, frequencies, source_waveform, sample_rate,
             )
             tf = self._compute_broadband_field(
-                env, source, receiver,
+                env, source, rcv,
                 frequencies=frequencies, n_modes=n_modes,
             )
+            tf = self._reinsert_nan_depths(tf, receiver, keep)
             if run_mode == RunMode.TIME_SERIES:
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
@@ -1201,10 +1197,51 @@ class KrakenField(_KrakenBase):
             return tf
 
         env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver, run_mode=run_mode)
-        return self._compute_field_via_exe(
-            env, source, receiver, n_modes=n_modes,
+        self.validate_inputs(env, source, rcv, run_mode=run_mode)
+        field = self._compute_field_via_exe(
+            env, source, rcv, n_modes=n_modes,
         )
+        return self._reinsert_nan_depths(field, receiver, keep)
+
+    def _partition_elastic_subbottom(self, env, receiver, elastic_subbottom):
+        """Split receivers into the water column (field.exe can evaluate) and
+        the elastic sub-bottom (it cannot). Returns ``(compute_receiver,
+        keep_mask)`` with ``keep_mask`` marking water-column depths in the
+        original ordering, or ``(receiver, None)`` when no split is needed."""
+        if not elastic_subbottom:
+            return receiver, None
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        keep = depths <= env.depth
+        if keep.all():
+            return receiver, None
+        warnings.warn(
+            f"{self.model_name}: {int((~keep).sum())} receiver depth(s) lie in "
+            "the elastic sub-bottom, where field.exe cannot evaluate the "
+            "field; returning NaN there.",
+            UserWarning, stacklevel=2,
+        )
+        compute_depths = depths[keep] if keep.any() else np.array([0.5 * env.depth])
+        compute_receiver = Receiver(
+            depths=compute_depths, ranges=receiver.ranges,
+            receiver_type=receiver.receiver_type,
+        )
+        return compute_receiver, keep
+
+    def _reinsert_nan_depths(self, field, receiver, keep):
+        """Map ``field`` (computed on the water-column receivers) back onto the
+        original receiver depth axis, NaN at the dropped sub-bottom depths.
+        No-op when ``keep`` is None."""
+        if keep is None:
+            return field
+        full_depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        d = field.to_dict()
+        data = np.asarray(d['data'])
+        full = np.full((full_depths.size,) + data.shape[1:], np.nan, dtype=data.dtype)
+        if keep.any():
+            full[keep, ...] = data
+        d['data'] = full
+        d['coords'] = {**d['coords'], 'depth': full_depths}
+        return Field.from_dict(d)
 
 # ── field.exe pipeline ──────────────────────────────────────────────
 
