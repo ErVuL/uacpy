@@ -696,13 +696,17 @@ Examples: 01, 04, 11, 16, 24.
 ### 5.4 Kraken / KrakenC — normal modes
 
 Real (Kraken) and complex (KrakenC) normal-modes solvers. Both share
-`_KrakenBase`; KrakenC handles elastic / leaky cases via complex
-arithmetic. **No auto-route at the class level** — instantiate
-``KrakenC`` directly for envs that carry ``shear_speed > 0`` or that
-need leaky modes. ``Kraken`` on those envs will fail at runtime and
-the wrapper's PRT-aware :class:`ModelExecutionError` points the user
-to ``KrakenC``. (``KrakenField`` *does* auto-route its internal
-modes solve to ``krakenc.exe`` — that's a separate code path.)
+`_KrakenBase`; KrakenC finds eigenvalues in the complex plane and so
+handles elastic / lossy / leaky cases (a strict superset — it also
+solves fluid envs). **No auto-route at the class level** — `Kraken`
+on an env with ``shear_speed > 0`` or ``leaky_modes=True`` raises
+:class:`UnsupportedFeatureError` up front pointing at ``KrakenC``;
+instantiate ``KrakenC`` directly for those. (Other numerical
+mode-finding failures on fluid envs still surface as a PRT-aware
+:class:`ModelExecutionError` that likewise suggests KrakenC.)
+``KrakenField`` *does* pick ``krakenc.exe`` for its internal modes
+solve automatically — choosing the modes binary is its job, so it
+does so silently.
 
 ```python
 from uacpy.models import Kraken, KrakenC
@@ -719,8 +723,13 @@ modes.phi        # (n_z, M) eigenfunctions
   source-side. Per-model defaults: `'ssp': 'mean'`, `'bottom': 'median'`
   (RD inputs collapse to representative samples).
 - KrakenField — not Kraken — handles range-dependent envs (segments).
-- Real Kraken raises on elastic media; you'll be auto-routed to
-  KrakenC.
+- Real Kraken raises `UnsupportedFeatureError` on elastic / leaky envs
+  pointing at KrakenC (no auto-route).
+- An elastic `LayeredBottom` layer over a **fluid** halfspace (a
+  solid-over-liquid bottom interface) is rejected up front by all three
+  Kraken-family models — `krakenc.exe` hangs in setup on it. Use
+  Scooter / OASES. (Elastic half-spaces and elastic-over-elastic stacks
+  are fine.)
 
 Example: 06.
 
@@ -744,6 +753,11 @@ field = kf.run(env, source, receiver)            # default RunMode.COHERENT_TL
   `'bottom': 'median'`, `'rd_layered_layers': 'preserve'`.
 - Rejects `'Q'` SSP interp (Bellhop-only).
 - No altimetry support.
+- With an elastic `LayeredBottom` layer present, receivers below the
+  water column are returned as **NaN** (`field.exe`'s `Comp` selector
+  cannot evaluate the field inside elastic media); the water-column
+  receivers are computed normally. One `UserWarning` is emitted. (The
+  elastic-over-fluid-halfspace geometry is rejected earlier — see §5.4.)
 
 Examples: 18, 19.
 
