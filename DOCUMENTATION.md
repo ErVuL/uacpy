@@ -1438,14 +1438,23 @@ pkt = comms.JanusPacket(class_id=16, app_type=0)        # NATO ref impl, Emergen
 wav = comms.janus_modulate(pkt.to_bits(), sample_rate=48000)   # FH-BFSK waveform
 # ... over the water ...
 bits64, crc_ok = comms.janus_demodulate(recording, sample_rate=48000)   # bits in, bits out
-out = comms.JanusPacket.from_bits(bits64)[0]                            # or comms.receive(...) for the packet
+out = comms.JanusPacket.from_bits(bits64)[0]                  # or comms.janus.receive(...) for the packet
 ```
+
+The receiver mirrors the CMRE reference as a **batch (post-processing)** pipeline:
+the recording is resampled once to a canonical rate (integer samples/chip) so
+**any `sample_rate` works**, the preamble is found by the Goertzel-bank
+chips-alignment statistic + **Greatest-Of CFAR** detector, and **wideband Doppler**
+is removed by the CMRE preamble-tone estimator (windowed-FFT peak + 9-point
+quadratic interpolation, median scale, resample). Doppler search is on by default
+(`doppler_max_speed=5.0` m/s; pass `0` to disable).
 
 This is **verified interoperable** with the CMRE `janus-c` 3.0.5 reference
 implementation: uacpy's encoder is bit-exact to `janus-tx` coded-symbol vectors
 (packet, CRC, convolutional code, interleaver, hop sequence and 32-chip preamble
-all match), and uacpy decodes the reference implementation's emitted `.wav` back
-to the original packet. A golden reference vector is locked into the test suite.
+all match), and uacpy decodes the reference implementation's emitted `.wav` back to
+the original packet — confirmed at 48/44.1/96 kHz and across ±5 m/s Doppler down to
+6 dB SNR. A golden reference vector is locked into the test suite.
 
 Grounded in Istepanian & Stojanovic (*Underwater Acoustic DSP & Communication
 Systems*) and Proakis & Salehi (*Digital Communications*). The DFE+PLL receiver

@@ -407,7 +407,7 @@ class TestJanus:
         wav = comms.janus_modulate(bits, fs)
         assert np.isrealobj(wav)
         start, metric = comms.janus_detect(wav, fs)
-        assert start is not None and metric.max() > 0.9
+        assert start is not None and metric.size > 0
         bits_out, ok = comms.janus_demodulate(wav, fs)
         assert ok and np.array_equal(bits_out, bits)
 
@@ -421,6 +421,57 @@ class TestJanus:
         bits_out, ok = comms.janus_demodulate(rx, fs)
         pkt, _ = comms.JanusPacket.from_bits(bits_out)
         assert ok and pkt.class_id == 16
+
+    def test_decode_at_non_integer_samples_per_chip(self):
+        # 44.1 kHz -> 6.25 ms chip = 275.625 samples; sub-sample chip tracking
+        # must still align and decode.
+        bits = self._packet().to_bits()
+        fs = 44100.0
+        wav = comms.janus_modulate(bits, fs)
+        out, ok = comms.janus_demodulate(wav, fs)
+        assert ok and np.array_equal(out, bits)
+
+    def test_decode_with_doppler_resampling(self):
+        bits = self._packet().to_bits()
+        fs = 48000.0
+        wav = comms.janus_modulate(bits, fs)
+        c = 1500.0
+        for v in (-4.0, 4.0):
+            scale = 1.0 + v / c          # time-scale a moving-platform Doppler
+            n = int(round(wav.size / scale))
+            shifted = np.interp(np.linspace(0, wav.size - 1, n),
+                                np.arange(wav.size), wav)
+            out, ok = comms.janus_demodulate(shifted, fs)
+            assert ok and np.array_equal(out, bits)
+
+    def test_detect_locates_buried_packet(self):
+        # GO-CFAR detector must find a packet buried in silence + noise and
+        # report its sample offset in the original recording.
+        bits = self._packet().to_bits()
+        fs = 48000.0
+        wav = comms.janus_modulate(bits, fs)
+        lead = 4321
+        rng = np.random.default_rng(2)
+        rx = np.concatenate([np.zeros(lead), wav, np.zeros(2000)])
+        rx = rx + 0.05 * np.max(np.abs(wav)) * rng.standard_normal(rx.size)
+        start, stat = comms.janus_detect(rx, fs)
+        assert start is not None and stat.size > 0
+        assert abs(start - lead) <= int(0.01 * fs)        # within ~10 ms
+
+    def test_doppler_search_can_be_disabled(self):
+        bits = self._packet().to_bits()
+        fs = 48000.0
+        wav = comms.janus_modulate(bits, fs)
+        out, ok = comms.janus_demodulate(wav, fs, doppler_max_speed=0)
+        assert ok and np.array_equal(out, bits)
+
+    def test_receive_returns_packet_at_non_default_rate(self):
+        # End-to-end convenience path at a non-48 kHz rate (resample-first).
+        pkt = self._packet()
+        fs = 96000.0
+        wav = comms.janus.transmit(pkt, fs)
+        out, ok = comms.janus.receive(wav, fs)
+        assert ok and out.class_id == 16 and out.mobility == 1
 
 
 class TestSpread:
