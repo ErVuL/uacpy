@@ -77,9 +77,9 @@ def main():
 
     # --- detect + decode ---
     start, metric = janus.janus_detect(rx, fs)
-    out_bits, crc_ok = janus.janus_demodulate(rx, fs, start=start)
+    out_bits, crc_ok = janus.janus_demodulate(rx, fs)
     out_pkt, _ = janus.JanusPacket.from_bits(out_bits)
-    print(f"\n  preamble   : detected at sample {start} (metric {metric.max():.2f})")
+    print(f"\n  preamble   : detected at sample {start} (GO-CFAR)")
     print(f"  CRC        : {'OK' if crc_ok else 'FAIL'}")
     print(f"  decoded    : class {out_pkt.class_id}, app type {out_pkt.app_type}, "
           f"mobility {out_pkt.mobility}")
@@ -98,10 +98,9 @@ def main():
 
     ax = axes[1]
     ax.plot(metric)
-    ax.axhline(0.5, color='r', ls='--', lw=1, label='detection threshold')
-    ax.axvline(start, color='g', ls=':', lw=1, label=f'preamble @ {start}')
-    ax.set_title('[janus] 32-chip preamble detection metric', loc='left')
-    ax.set_xlabel('Sample index'); ax.set_ylabel('Norm. correlation')
+    ax.axvline(int(np.argmax(metric)), color='g', ls=':', lw=1, label='detected preamble')
+    ax.set_title('[janus] GO-CFAR preamble detection statistic', loc='left')
+    ax.set_xlabel('Alignment column (¼-chip)'); ax.set_ylabel('CFAR statistic')
     ax.grid(alpha=0.3); ax.legend()
 
     out_path = OUTPUT_DIR / "example_34_janus_beacon.png"
