@@ -629,7 +629,7 @@ def write_receiver_ranges(f: TextIO, receiver: Receiver) -> None:
     """Write the receiver-range section (ranges converted from m to km)."""
     n_rr = len(receiver.ranges)
     f.write(f"{n_rr}\n")
-    ranges_str = " ".join([f"{r/1000.0:.6f}" for r in receiver.ranges])
+    ranges_str = " ".join([f"{float(m_to_km(r)):.6f}" for r in receiver.ranges])
     f.write(f"{ranges_str} /\n")
 
 

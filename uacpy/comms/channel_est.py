@@ -21,6 +21,12 @@ from uacpy.core.exceptions import ConfigurationError
 
 def _conv_matrix(tx, n_taps, n_rows):
     """Tall convolution matrix ``A`` with ``A[k, l] = tx[k - l]`` (causal)."""
+    if n_taps > n_rows:
+        raise ConfigurationError(
+            f"channel estimate: n_taps ({n_taps}) exceeds the number of "
+            f"available pilot/received samples ({n_rows}); reduce n_taps or "
+            "provide more pilots."
+        )
     p = np.asarray(tx, dtype=complex)
     A = np.zeros((n_rows, n_taps), dtype=complex)
     for l in range(n_taps):

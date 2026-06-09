@@ -120,12 +120,14 @@ def detection_range(ranges_m, signal_excess_db):
         return np.inf
     if not positive.any():
         return np.nan
-    # Outermost index that is positive while the next sample is negative.
-    sign_change = np.where(positive[:-1] & ~positive[1:])[0]
-    if sign_change.size == 0:
-        # Positive only at ranges beyond the last crossing-down; return last +.
-        return float(r[np.where(positive)[0][-1]])
-    i = sign_change[-1]
-    se0, se1 = se[i], se[i + 1]
+    # Largest range with SE >= 0 is the outermost positive sample. Anchoring on
+    # it (not the last down-crossing) keeps a far-edge recovery — e.g. a
+    # convergence zone giving +,-,+ — from being missed.
+    last_pos = int(np.where(positive)[0][-1])
+    if last_pos == r.size - 1:
+        # SE stays/recovers positive at the far edge; detectable out to the
+        # last sampled range, with no crossing-down beyond it to interpolate.
+        return float(r[last_pos])
+    se0, se1 = se[last_pos], se[last_pos + 1]
     frac = se0 / (se0 - se1)
-    return float(r[i] + frac * (r[i + 1] - r[i]))
+    return float(r[last_pos] + frac * (r[last_pos + 1] - r[last_pos]))

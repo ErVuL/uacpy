@@ -932,6 +932,7 @@ class RAM(PropagationModel):
             for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
         source_waveform = self._pad_waveform_to_duration(
             source_waveform, sample_rate, output_duration,
         )
@@ -966,7 +967,6 @@ class RAM(PropagationModel):
             if run_mode == RunMode.BROADBAND:
                 return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
-                self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
                 tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
@@ -986,7 +986,6 @@ class RAM(PropagationModel):
                 env, source, receiver, kind=backend
             )
         if run_mode == RunMode.TIME_SERIES:
-            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             tf = self._run_collins_broadband(
                 env, source, receiver, kind=backend
             )

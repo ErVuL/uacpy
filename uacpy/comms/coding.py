@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
-
 # Standard rate-1/2, constraint length K=7 generator polynomials (octal 171, 133).
 DEFAULT_POLYS = (0o171, 0o133)
 DEFAULT_K = 7

@@ -772,6 +772,24 @@ class Field(Result):
         return int(t.size) if t is not None else 0
 
     @property
+    def n_frequencies(self) -> int:
+        if self.frequencies is not None:
+            return int(len(self.frequencies))
+        f = self.coords.get('frequency')
+        return int(f.size) if f is not None else 0
+
+    @property
+    def f0(self) -> Optional[float]:
+        """First / centre frequency (Hz), from the identity list or the
+        ``'frequency'`` coord; ``None`` for time-domain results."""
+        if self.frequencies is not None and len(self.frequencies):
+            return float(self.frequencies[0])
+        f = self.coords.get('frequency')
+        if f is not None and f.size:
+            return float(f[0])
+        return None
+
+    @property
     def dt(self) -> float:
         t = self.coords.get('time')
         if t is None or t.size < 2:
@@ -809,7 +827,7 @@ class Field(Result):
         empty :attr:`coords`, 0-D :attr:`data`, and every original axis
         recorded in :attr:`pinned`."""
         if self.data.size == 0:
-            raise ValueError("Field.max: data is empty")
+            raise ConfigurationError("Field.max: data is empty")
         flat = int(np.argmax(np.abs(self.data)))
         idx = np.unravel_index(flat, self.data.shape)
         idx_map = {name: int(i) for name, i in zip(self.coords, idx)}
@@ -818,7 +836,7 @@ class Field(Result):
     def _check_axes(self, kwargs: Dict[str, Any]) -> None:
         for name in kwargs:
             if name not in self.coords:
-                raise ValueError(
+                raise ConfigurationError(
                     f"Field: unknown axis {name!r}; available: "
                     f"{list(self.coords)}"
                 )
@@ -903,7 +921,7 @@ class Field(Result):
         Requires exactly the canonical 2-D layout
         ``coords == {'depth': ..., 'range': ...}``."""
         if list(self.coords) != ['depth', 'range']:
-            raise ValueError(
+            raise ConfigurationError(
                 "Field.mask_below_seafloor: requires canonical "
                 f"['depth', 'range'] coords; got {list(self.coords)}"
             )
@@ -912,7 +930,7 @@ class Field(Result):
             bathymetry = bathymetry.bathymetry
         bathy = np.asarray(bathymetry, dtype=float)
         if bathy.ndim != 2 or bathy.shape[1] != 2:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Field.mask_below_seafloor: bathymetry must be shape "
                 f"(N, 2) or an Environment; got array shape {bathy.shape}"
             )
@@ -945,7 +963,7 @@ class Field(Result):
         Complex data is interpolated component-wise. Out-of-bound queries
         return NaN."""
         if list(self.coords) != ['depth', 'range']:
-            raise ValueError(
+            raise ConfigurationError(
                 "Field.resample_to: requires canonical ['depth', 'range'] "
                 f"coords; got {list(self.coords)}"
             )
@@ -995,7 +1013,7 @@ class Field(Result):
         Requires ``coords == {'depth', 'range', 'frequency'}``. Returns
         a single-point ``Field`` with ``coords={'time': ...}``."""
         if list(self.coords) != ['depth', 'range', 'frequency']:
-            raise ValueError(
+            raise ConfigurationError(
                 "Field.to_time_trace: requires canonical "
                 "['depth', 'range', 'frequency'] coords; got "
                 f"{list(self.coords)}"
@@ -1020,7 +1038,7 @@ class Field(Result):
 
         Requires ``coords == {'depth', 'range', 'frequency'}``."""
         if list(self.coords) != ['depth', 'range', 'frequency']:
-            raise ValueError(
+            raise ConfigurationError(
                 "Field.synthesize_time_series: requires canonical "
                 "['depth', 'range', 'frequency'] coords; got "
                 f"{list(self.coords)}"
@@ -1039,7 +1057,7 @@ class Field(Result):
 
         Requires a ``'time'`` axis."""
         if 'time' not in self.coords:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Field.get_spectrum: requires a 'time' axis; "
                 f"got {list(self.coords)}"
             )
@@ -1057,7 +1075,7 @@ class Field(Result):
         """Extract steady-state complex pressure at one frequency from a
         time-domain Field. Requires ``coords == {'depth', 'range', 'time'}``."""
         if list(self.coords) != ['depth', 'range', 'time']:
-            raise ValueError(
+            raise ConfigurationError(
                 "Field.extract_tone: requires canonical "
                 "['depth', 'range', 'time'] coords; got "
                 f"{list(self.coords)}"
@@ -1071,7 +1089,7 @@ class Field(Result):
         elif window == 'none':
             win = np.ones(self.n_times)
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Field.extract_tone: unknown window={window!r}"
             )
         windowed = self.data * win
@@ -1136,16 +1154,16 @@ class ResultStack:
         coordinate_name: str = 'source_depth',
     ):
         if len(slabs) == 0:
-            raise ValueError("ResultStack: requires at least one slab")
+            raise ConfigurationError("ResultStack: requires at least one slab")
         coord = np.atleast_1d(np.asarray(coordinate, dtype=float))
         if coord.size != len(slabs):
-            raise ValueError(
+            raise ConfigurationError(
                 f"ResultStack: coordinate length ({coord.size}) does not "
                 f"match number of slabs ({len(slabs)})"
             )
         types = {type(s) for s in slabs}
         if len(types) != 1:
-            raise TypeError(
+            raise ConfigurationError(
                 f"ResultStack: every slab must have the same concrete "
                 f"type; got {sorted(t.__name__ for t in types)}"
             )
@@ -1173,7 +1191,7 @@ class ResultStack:
             for i, s in enumerate(slabs[1:], start=1):
                 val = getattr(s, attr, None)
                 if not eq(ref, val):
-                    raise ValueError(
+                    raise ConfigurationError(
                         f"ResultStack: slabs[0].{attr}={ref!r} but "
                         f"slabs[{i}].{attr}={val!r} — every slab must "
                         f"share the same {attr} (stacking axis is "
@@ -1216,7 +1234,7 @@ class ResultStack:
 
     def at(self, **kwargs) -> Result:
         if len(kwargs) != 1 or self.coordinate_name not in kwargs:
-            raise TypeError(
+            raise ConfigurationError(
                 f"ResultStack.at(): pass exactly the stacking-axis "
                 f"keyword ({self.coordinate_name}=<value>); got "
                 f"{list(kwargs)}"
@@ -1274,7 +1292,7 @@ def _bounce_predicate(kind, top, bot):
     int / (lo, hi) / None specs matching :func:`_bounce_in_bounds`.
     """
     if kind is not None and kind not in _BOUNCE_KINDS:
-        raise ValueError(
+        raise ConfigurationError(
             f"bounce filter: kind={kind!r} not in {_BOUNCE_KINDS}"
         )
 
@@ -1606,7 +1624,7 @@ class Rays(Result):
         from a single-point eigenray query."""
         if target_range_m is None:
             if self.receiver_ranges is None or len(self.receiver_ranges) != 1:
-                raise ValueError(
+                raise ConfigurationError(
                     "Rays.miss-distance helpers: target_range_m must be "
                     "supplied unless this Rays carries a single-point "
                     "receiver context."
@@ -1614,7 +1632,7 @@ class Rays(Result):
             target_range_m = float(self.receiver_ranges[0])
         if target_depth_m is None:
             if self.receiver_depths is None or len(self.receiver_depths) != 1:
-                raise ValueError(
+                raise ConfigurationError(
                     "Rays.miss-distance helpers: target_depth_m must be "
                     "supplied unless this Rays carries a single-point "
                     "receiver context."
@@ -1747,7 +1765,7 @@ class Modes(Result):
         self.phi = np.asarray(phi)
         self.depths = np.atleast_1d(np.asarray(depths, dtype=float))
         if self.phi.shape != (len(self.depths), len(self.k)):
-            raise ValueError(
+            raise ConfigurationError(
                 f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
@@ -1794,7 +1812,7 @@ class Modes(Result):
             built this object, or set it on the instance, before calling.
         """
         if self.f0 is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "Modes.compute_phase_speeds requires frequencies; got None"
             )
         omega = 2.0 * np.pi * self.f0
@@ -1818,12 +1836,12 @@ class Modes(Result):
         """
         f0_self, f0_other = self.f0, other.f0
         if f0_self is None or f0_other is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "Modes.compute_group_velocity: both Modes instances must "
                 "have a frequency"
             )
         if f0_self == f0_other:
-            raise ValueError(
+            raise ConfigurationError(
                 "Modes.compute_group_velocity: requires Modes at two distinct "
                 "frequencies"
             )
@@ -1889,14 +1907,14 @@ class Modes(Result):
         """
         omega = 2.0 * np.pi * float(self.f0 or 0.0)
         if omega == 0.0:
-            raise ValueError(
+            raise ConfigurationError(
                 "Modes.with_attenuation: requires Modes.f0 to be set."
             )
         a = np.asarray(alpha_db_per_m, dtype=float).ravel()
         if a.size == 1:
             a = np.full_like(self.depths, float(a.item()))
         elif a.shape != self.depths.shape:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Modes.with_attenuation: alpha shape {a.shape} "
                 f"must match depths {self.depths.shape} (or scalar)."
             )
@@ -1904,7 +1922,7 @@ class Modes(Result):
         if c_arr.size == 1:
             c_arr = np.full_like(self.depths, float(c_arr.item()))
         elif c_arr.shape != self.depths.shape:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Modes.with_attenuation: sound_speed_z shape "
                 f"{c_arr.shape} must match depths {self.depths.shape}"
             )
@@ -1912,7 +1930,7 @@ class Modes(Result):
         if rho_g.size == 1:
             rho_g = np.full_like(self.depths, float(rho_g.item()))
         elif rho_g.shape != self.depths.shape:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Modes.with_attenuation: density_z shape "
                 f"{rho_g.shape} must match depths {self.depths.shape}"
             )
@@ -1929,7 +1947,7 @@ class Modes(Result):
         if bottom is not None:
             from uacpy.core.environment import BoundaryProperties as _BP
             if not isinstance(bottom, _BP):
-                raise TypeError(
+                raise ConfigurationError(
                     "Modes.with_attenuation: bottom must be a "
                     f"BoundaryProperties; got {type(bottom).__name__}"
                 )
@@ -2074,7 +2092,7 @@ class Covariance(Result):
         super().__init__(**kwargs)
         cov = np.asarray(covariance)
         if cov.ndim != 3 or cov.shape[1] != cov.shape[2]:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Covariance.covariance: must be 3-D (n_freq, n_rcv, n_rcv); "
                 f"got shape {cov.shape}"
             )
@@ -2082,7 +2100,7 @@ class Covariance(Result):
         if receiver_positions is not None:
             rp = np.asarray(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != cov.shape[1]:
-                raise ValueError(
+                raise ConfigurationError(
                     f"Covariance.receiver_positions: must have shape "
                     f"(n_receivers={cov.shape[1]}, 3); got {rp.shape}"
                 )
@@ -2104,13 +2122,13 @@ class Covariance(Result):
     def _replica_grid(self, replicas: "Replicas") -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """Validate and reshape the replica field to ``(n_f, n_pts, n_rcv)``."""
         if replicas.replicas.shape[0] != self.n_frequencies:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Covariance MFP: frequency mismatch — "
                 f"covariance has {self.n_frequencies} freq, "
                 f"replicas has {replicas.replicas.shape[0]}."
             )
         if replicas.replicas.shape[-1] != self.n_receivers:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Covariance MFP: receiver-count mismatch — "
                 f"covariance has {self.n_receivers}, "
                 f"replicas has {replicas.replicas.shape[-1]}."
@@ -2213,7 +2231,7 @@ class Replicas(Result):
         super().__init__(**kwargs)
         rep = np.asarray(replicas)
         if rep.ndim != 5:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Replicas.replicas: must be 5-D "
                 f"(n_freq, n_zr, n_xr, n_yr, n_rcv); got shape {rep.shape}"
             )
@@ -2225,14 +2243,14 @@ class Replicas(Result):
             len(self.replica_z), len(self.replica_x), len(self.replica_y),
         )
         if rep.shape[1:4] != expected:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Replicas.replicas: axes 1-3 {rep.shape[1:4]} must match "
                 f"(n_zr, n_xr, n_yr) = {expected}"
             )
         if receiver_positions is not None:
             rp = np.asarray(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != rep.shape[4]:
-                raise ValueError(
+                raise ConfigurationError(
                     f"Replicas.receiver_positions: must have shape "
                     f"(n_receivers={rep.shape[4]}, 3); got {rp.shape}"
                 )
@@ -2291,32 +2309,32 @@ class ReflectionCoefficient(Result):
             self.R = self.R.reshape(-1)
             self.phi = self.phi.reshape(-1)
             if not (len(self.theta) == len(self.R) == len(self.phi)):
-                raise ValueError(
+                raise ConfigurationError(
                     f"ReflectionCoefficient: theta/R/phi length mismatch "
                     f"({len(self.theta)}, {len(self.R)}, {len(self.phi)})"
                 )
         elif self.R.ndim == 2:
             if self.R.shape != self.phi.shape:
-                raise ValueError(
+                raise ConfigurationError(
                     f"ReflectionCoefficient: R.shape {self.R.shape} != "
                     f"phi.shape {self.phi.shape}"
                 )
             if self.R.shape[0] != len(self.theta):
-                raise ValueError(
+                raise ConfigurationError(
                     f"ReflectionCoefficient.R: axis 0 ({self.R.shape[0]}) "
                     f"must equal len(theta) ({len(self.theta)})"
                 )
             if self.frequencies is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "ReflectionCoefficient: 2-D R requires frequencies="
                 )
             if self.R.shape[1] != len(self.frequencies):
-                raise ValueError(
+                raise ConfigurationError(
                     f"ReflectionCoefficient.R: axis 1 ({self.R.shape[1]}) "
                     f"must equal len(frequencies) ({len(self.frequencies)})"
                 )
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"ReflectionCoefficient.R: must be 1-D or 2-D; "
                 f"got shape {self.R.shape}"
             )
@@ -2346,7 +2364,7 @@ class ReflectionCoefficient(Result):
         it on a narrowband instance raises ``ValueError``.
         """
         if frequency is not None and not self.is_broadband:
-            raise ValueError(
+            raise ConfigurationError(
                 "ReflectionCoefficient.at: frequency= requires a broadband "
                 "(2-D) reflection coefficient"
             )
@@ -2417,12 +2435,12 @@ def _ifft_to_trace(
     n_d, n_r, n_freq = data.shape
 
     if n_freq < 2:
-        raise ValueError(
+        raise ConfigurationError(
             f"_ifft_to_trace: need at least 2 frequencies for IFFT; got {n_freq}"
         )
 
     if tf.phase_reference == 'time_domain_native':
-        raise ValueError(
+        raise ConfigurationError(
             "_ifft_to_trace: phase_reference='time_domain_native' is not a "
             "frequency-domain transfer function; the producing model "
             "(SPARC) returned p(t) directly — read the time-domain Field "
@@ -2470,7 +2488,7 @@ def _ifft_to_trace(
     elif window == 'none':
         win = np.ones(n_freq)
     else:
-        raise ValueError(
+        raise ConfigurationError(
             f"_ifft_to_trace: unknown window={window!r}; "
             "valid: 'hann', 'hamming', 'blackman', 'tukey', 'none'"
         )
@@ -2481,7 +2499,7 @@ def _ifft_to_trace(
         T_window = nfft * dt
         lead = min(0.5 * T_window, 0.25)
         anchor_speed = float(tf.metadata.get(
-            'cmin',
+            'c_min',
             tf.metadata.get('c0', DEFAULT_SOUND_SPEED),
         ))
         t_start = max(0.0, actual_range / anchor_speed - lead)
@@ -2550,12 +2568,12 @@ def _synthesize_time_series(
     wf = np.asarray(source_waveform, dtype=float).ravel()
     n_src = len(wf)
     if n_src < 2:
-        raise ValueError(
+        raise ConfigurationError(
             f"_synthesize_time_series: source_waveform must have at least "
             f"2 samples; got {n_src}"
         )
     if sample_rate <= 0:
-        raise ValueError(
+        raise ConfigurationError(
             f"_synthesize_time_series: sample_rate must be positive; "
             f"got {sample_rate}"
         )

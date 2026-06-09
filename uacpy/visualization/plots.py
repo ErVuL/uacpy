@@ -44,7 +44,6 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE,
     BOTTOM_LINE_STYLE,
     BOTTOM_LINE_STYLE_FLAT,
-    BOTTOM_HALFSPACE_COLOR,
     RECEIVER_MARKER_STYLE,
     SOURCE_MARKER_STYLE,
 )
@@ -1311,8 +1310,6 @@ def plot_environment(
             return bottom_cmap_full, bot_cs_min, bot_cs_max, bottom_sm
         cs_min, cs_max, sm = _make_sm(cs_values, bottom_cmap_truncated)
         return bottom_cmap_full, cs_min, cs_max, sm
-
-    _v_lo, _v_hi = water_cs_min, water_cs_max
 
     # Water column on the bathy panel — water cmap (Blues), normalized
     # to its own cs range. The bottom rendering below covers anything

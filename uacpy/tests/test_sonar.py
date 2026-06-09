@@ -99,6 +99,18 @@ class TestSonarEquation:
         r = np.linspace(1, 10, 10)
         assert np.isnan(sonar.detection_range(r, -np.ones_like(r)))
 
+    def test_detection_range_far_edge_recovery(self):
+        # Convergence-zone shape (+, -, +): the outermost positive range wins,
+        # not the inner down-crossing.
+        r = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+        se = np.array([5.0, -1.0, 2.0, 3.0, 4.0])  # ends positive at r=4
+        assert sonar.detection_range(r, se) == pytest.approx(4.0)
+
+    def test_detection_range_outermost_of_multiple_crossings(self):
+        r = np.array([0.0, 1.0, 2.0, 3.0])
+        se = np.array([5.0, -1.0, 1.0, -1.0])  # down-crossing between r=2 and r=3
+        assert sonar.detection_range(r, se) == pytest.approx(2.5)
+
 
 class TestDetection:
     def test_deflection_matches_normal_quantiles(self):

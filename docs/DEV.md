@@ -32,7 +32,7 @@ uacpy/
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_rays / plot_modes / …
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
-    ├── examples/            25 numbered example scripts
+    ├── examples/            36 numbered example scripts
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── _log.py              Single log channel + warning formatter

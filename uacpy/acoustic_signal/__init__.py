@@ -17,11 +17,16 @@ Named ``acoustic_signal`` so it does not collide with Python's stdlib
 from .generation import (
     add_noise,
     bpsk_modulate,
+    cans,
     fourier_synthesis,
     gaussian_pulse,
     hfm_chirp,
     lfm_chirp,
     make_bandlimited_noise,
+    make_mseq_probe,
+    make_noise_waveform,
+    mseq,
+    nwave,
     ricker_wavelet,
     ssrp,
     tone_burst,
@@ -92,7 +97,8 @@ __all__ = [
     # generation
     "ssrp", "lfm_chirp", "hfm_chirp", "tone_burst", "gaussian_pulse",
     "ricker_wavelet", "bpsk_modulate", "add_noise", "make_bandlimited_noise",
-    "fourier_synthesis",
+    "fourier_synthesis", "cans", "nwave", "mseq", "make_mseq_probe",
+    "make_noise_waveform",
     # spectral / level estimators
     "PSD", "PPSD", "SEL",
     # system identification

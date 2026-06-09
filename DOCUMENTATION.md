@@ -808,8 +808,8 @@ ram = RAM(dr=None, dz=None, zmax=None,        # None ⇒ Lytaev (2023) Padé opt
 field = ram.run(env, source, receiver)
 ```
 
-Every constructor knob also accepts a per-call override on `run()`
-(e.g. `ram.run(env, src, rcv, accuracy=5e-4)`). `rams_theta=` may be a
+Configuration is constructor-only; to sweep a knob, build a new model or
+use `ram.copy(accuracy=5e-4)`. The constructor's `rams_theta=` may be a
 callable `theta_fn(freq_hz) -> float` to vary the elastic stability
 angle across a band.
 
@@ -926,7 +926,7 @@ oasr = OASR(angles=None,                   # default linspace(0, 90, 181)
             reflection_type='P-P')          # 'P-P' | 'P-SV' | 'P-Slow' | 'transmission'
 refl = oasr.run(env, source, receiver)
 broad = oasr.run(env, source, receiver,
-                 freq_min=50, freq_max=200, n_frequencies=16)
+                 frequencies=np.linspace(50, 200, 16))   # multi-freq sweep
 
 # Broadband / pulse synthesis — RunMode.BROADBAND / RunMode.TIME_SERIES
 oasp = OASP(n_time_samples=4096, freq_max=250.0)

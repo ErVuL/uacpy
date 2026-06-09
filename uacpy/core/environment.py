@@ -1658,7 +1658,9 @@ class Environment:
         ndarray, so this helper carries the interpolation logic."""
         range = np.atleast_1d(range)
         if len(self.bathymetry) == 1:
-            return np.full_like(range, self.bathymetry[0, 1])
+            # dtype=float so an int range query doesn't truncate a
+            # fractional seafloor depth (the interp branch returns float).
+            return np.full_like(range, self.bathymetry[0, 1], dtype=float)
         return np.interp(range, self.bathymetry[:, 0], self.bathymetry[:, 1])
 
     def halfspace_at_range(self, range: float) -> 'BoundaryProperties':

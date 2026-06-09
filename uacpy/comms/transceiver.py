@@ -35,7 +35,6 @@ from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (
     _ofdm_symbol,
     apply_cfo,
-    estimate_channel,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )

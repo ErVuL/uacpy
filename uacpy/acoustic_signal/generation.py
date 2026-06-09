@@ -474,6 +474,8 @@ def lfm_chirp(
     Original MATLAB code: lfm.m
     """
     N = int(T * sample_rate)
+    if N <= 0:
+        return np.array([]), np.array([])
     deltat = T / N
     time = np.linspace(0.0, T - deltat, N)
 
@@ -581,6 +583,8 @@ def hfm_chirp(
     Original MATLAB: hfm.m
     """
     N = int(T * sample_rate)
+    if N <= 0:
+        return np.array([]), np.array([])
     deltat = T / N
     time = np.linspace(0.0, T - deltat, N)
 

@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 
 from uacpy.core.exceptions import ModelExecutionError
+from uacpy.io._fortran_helpers import detect_endian
 
 
 def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
@@ -397,15 +398,24 @@ def read_modes_bin(
         filename = filename + ".mod"
 
     with open(filename, "rb") as fid:
-        lrecl = 4 * np.fromfile(fid, dtype=np.int32, count=1)[0]
+        head = fid.read(4)
+        if len(head) < 4:
+            raise ValueError(f"Invalid mode file (truncated header): {filename}")
+        endian = detect_endian(
+            head, source=f'read_modes_bin:{os.path.basename(filename)}')
+        i4 = np.dtype(endian + 'i4')
+        f4 = np.dtype(endian + 'f4')
+        f8 = np.dtype(endian + 'f8')
+        fid.seek(0, 0)
+        lrecl = 4 * np.fromfile(fid, dtype=i4, count=1)[0]
         fid.seek(4, 0)  # Skip 4 bytes
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
 
-        Nfreq = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Nmedia = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        Ntot = np.fromfile(fid, dtype=np.int32, count=1)[0]
-        NMat = np.fromfile(fid, dtype=np.int32, count=1)[0]
+        Nfreq = np.fromfile(fid, dtype=i4, count=1)[0]
+        Nmedia = np.fromfile(fid, dtype=i4, count=1)[0]
+        Ntot = np.fromfile(fid, dtype=i4, count=1)[0]
+        NMat = np.fromfile(fid, dtype=i4, count=1)[0]
 
         if Ntot < 0:
             raise ValueError("Invalid mode file: Ntot < 0")
@@ -413,20 +423,20 @@ def read_modes_bin(
         N = []
         Mater = []
         for medium in range(Nmedia):
-            n_val = np.fromfile(fid, dtype=np.int32, count=1)[0]
+            n_val = np.fromfile(fid, dtype=i4, count=1)[0]
             N.append(n_val)
             mater_bytes = fid.read(8)
             Mater.append(mater_bytes.decode("ascii", errors="ignore").strip())
         fid.seek(2 * lrecl, 0)
-        bulk = np.fromfile(fid, dtype=np.float32, count=2 * Nmedia).reshape(
+        bulk = np.fromfile(fid, dtype=f4, count=2 * Nmedia).reshape(
             (2, Nmedia), order="F"
         )
         depth = bulk[0, :]
         rho = bulk[1, :]
         fid.seek(3 * lrecl, 0)
-        freqVec = np.fromfile(fid, dtype=np.float64, count=Nfreq)
+        freqVec = np.fromfile(fid, dtype=f8, count=Nfreq)
         fid.seek(4 * lrecl, 0)
-        z = np.fromfile(fid, dtype=np.float32, count=Ntot)
+        z = np.fromfile(fid, dtype=f4, count=Ntot)
         freq_diff = np.abs(freqVec - freq)
         freq_index = np.argmin(freq_diff)
         # Initialize iRecProfile to 5 (matches MATLAB after iRecProfile += 4)
@@ -436,7 +446,7 @@ def read_modes_bin(
         iRecProfile = 5
         for ifreq in range(freq_index + 1):
             fid.seek(iRecProfile * lrecl, 0)
-            M = np.fromfile(fid, dtype=np.int32, count=1)[0]
+            M = np.fromfile(fid, dtype=i4, count=1)[0]
 
             if ifreq < freq_index:
                 # Advance to next frequency
@@ -454,20 +464,20 @@ def read_modes_bin(
         fid.seek((iRecProfile + 1) * lrecl, 0)
         Top = {}
         Top["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
-        cp_data = np.fromfile(fid, dtype=np.float32, count=2)
+        cp_data = np.fromfile(fid, dtype=f4, count=2)
         Top["cp"] = complex(cp_data[0], cp_data[1])
-        cs_data = np.fromfile(fid, dtype=np.float32, count=2)
+        cs_data = np.fromfile(fid, dtype=f4, count=2)
         Top["cs"] = complex(cs_data[0], cs_data[1])
-        Top["rho"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
-        Top["depth"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
+        Top["rho"] = np.fromfile(fid, dtype=f4, count=1)[0]
+        Top["depth"] = np.fromfile(fid, dtype=f4, count=1)[0]
         Bot = {}
         Bot["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
-        cp_data = np.fromfile(fid, dtype=np.float32, count=2)
+        cp_data = np.fromfile(fid, dtype=f4, count=2)
         Bot["cp"] = complex(cp_data[0], cp_data[1])
-        cs_data = np.fromfile(fid, dtype=np.float32, count=2)
+        cs_data = np.fromfile(fid, dtype=f4, count=2)
         Bot["cs"] = complex(cs_data[0], cs_data[1])
-        Bot["rho"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
-        Bot["depth"] = np.fromfile(fid, dtype=np.float32, count=1)[0]
+        Bot["rho"] = np.fromfile(fid, dtype=f4, count=1)[0]
+        Bot["depth"] = np.fromfile(fid, dtype=f4, count=1)[0]
         if M == 0:
             phi = np.array([])
             k = np.array([])
@@ -477,13 +487,13 @@ def read_modes_bin(
             for ii, mode_idx in enumerate(modes):
                 rec = iRecProfile + 1 + mode_idx
                 fid.seek(rec * lrecl, 0)
-                phi_data = np.fromfile(fid, dtype=np.float32, count=2 * NMat).reshape(
+                phi_data = np.fromfile(fid, dtype=f4, count=2 * NMat).reshape(
                     (2, NMat), order="F"
                 )
                 phi[:, ii] = phi_data[0, :] + 1j * phi_data[1, :]
             rec = iRecProfile + 2 + M
             fid.seek(rec * lrecl, 0)
-            k_data = np.fromfile(fid, dtype=np.float32, count=2 * M).reshape(
+            k_data = np.fromfile(fid, dtype=f4, count=2 * M).reshape(
                 (2, M), order="F"
             )
             k = k_data[0, :] + 1j * k_data[1, :]

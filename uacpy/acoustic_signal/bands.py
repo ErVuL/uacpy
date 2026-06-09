@@ -69,8 +69,7 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         m = (freqs >= lo) & (freqs < hi)
         if np.count_nonzero(m) >= 1:
-            power = np.trapezoid(psd[m], freqs[m]) if hasattr(np, "trapezoid") \
-                else np.trapz(psd[m], freqs[m])
+            power = np.trapezoid(psd[m], freqs[m])
             if power > 0:
                 levels[i] = 10.0 * np.log10(power / ref ** 2)
     return centers, levels

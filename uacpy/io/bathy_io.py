@@ -197,6 +197,8 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
         else:
             bty_type = line.strip()
 
+        # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
+        bty_type = bty_type[:1].upper()
         if bty_type not in ["L", "C"]:
             raise ValueError(
                 f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
@@ -298,6 +300,8 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
         else:
             ati_type = line.strip()
 
+        # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
+        ati_type = ati_type[:1].upper()
         if ati_type not in ["L", "C"]:
             raise ValueError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
 

@@ -88,6 +88,12 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     else:
         n2 = f.size
         if band_integrate:
+            if n2 < 2:
+                raise ValueError(
+                    "compute_windnoise(band_integrate=True) needs at least two "
+                    "frequencies to define band edges; got one. Use "
+                    "band_integrate=False for a scalar spectral level."
+                )
             f2 = np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
             df = (f2[2:] - f2[:-2]) / 2
         else:

@@ -440,3 +440,17 @@ class ConstantAbsorption(Absorption):
 
     def topopt_code(self) -> str:
         return ' '
+
+    def alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        depths = np.atleast_1d(np.asarray(depths, dtype=float))
+        # dB/wavelength → dB/m at this frequency (flat in depth). No SSP is
+        # carried here, so the conversion uses the reference sound speed.
+        alpha = float(convert_attenuation_units(
+            self.value_db_per_wavelength, frequency,
+            'dB/wavelength', 'dB/m',
+        ))
+        return np.full(depths.shape, alpha)

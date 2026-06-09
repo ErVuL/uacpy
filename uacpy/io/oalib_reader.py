@@ -738,14 +738,20 @@ def _read_ray_file_binary(filepath: Path) -> list:
     """
     rays = []
 
+    from uacpy.io._fortran_helpers import detect_endian
+
     with open(filepath, "rb") as f:
-        recl = struct.unpack("i", f.read(4))[0]
+        head = f.read(4)
+        if len(head) < 4:
+            return rays
+        endian = detect_endian(head, source=f'read_ray_bin:{Path(filepath).name}')
+        recl = struct.unpack(endian + "i", head)[0]
         f.seek(recl * 4)
 
         truncated_after = None
         try:
             while True:
-                n_points = struct.unpack("i", f.read(4))[0]
+                n_points = struct.unpack(endian + "i", f.read(4))[0]
                 if n_points <= 0:
                     break
 
@@ -755,8 +761,8 @@ def _read_ray_file_binary(filepath: Path) -> list:
                 for _ in range(n_points):
                     # WriteRay2D writes ray2D%x directly in meters
                     # (WriteRay.f90:45); no km conversion needed.
-                    r = struct.unpack("f", f.read(4))[0]
-                    z = struct.unpack("f", f.read(4))[0]
+                    r = struct.unpack(endian + "f", f.read(4))[0]
+                    z = struct.unpack(endian + "f", f.read(4))[0]
                     ray_r.append(r)
                     ray_z.append(z)
 

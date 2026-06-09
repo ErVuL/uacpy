@@ -312,7 +312,7 @@ class TestModesComputePhaseSpeeds:
 
     def test_phase_speeds_raises_without_frequency(self):
         modes = self._build_modes(frequencies=None)
-        with pytest.raises(ValueError, match='requires frequencies'):
+        with pytest.raises(ConfigurationError, match='requires frequencies'):
             modes.compute_phase_speeds()
 
     def test_phase_speeds_with_frequency_is_omega_over_k(self):
@@ -557,7 +557,7 @@ class TestReflectionCoefficientChainAccessors:
             phi=np.zeros(5),
             model='Test', frequencies=100.0,
         )
-        with pytest.raises(ValueError, match="broadband"):
+        with pytest.raises(ConfigurationError, match="broadband"):
             rc.at(frequency=100.0)
 
 
@@ -758,12 +758,12 @@ class TestResultStackInvariants:
 
     def test_requires_at_least_one_slab(self):
         from uacpy.core.results import ResultStack
-        with pytest.raises(ValueError, match="at least one slab"):
+        with pytest.raises(ConfigurationError, match="at least one slab"):
             ResultStack(slabs=[], coordinate=[])
 
     def test_rejects_length_mismatch(self):
         from uacpy.core.results import ResultStack
-        with pytest.raises(ValueError, match="coordinate length"):
+        with pytest.raises(ConfigurationError, match="coordinate length"):
             ResultStack(slabs=[self._slab(source_depth=10.0)],
                         coordinate=[10.0, 20.0])
 
@@ -771,21 +771,21 @@ class TestResultStackInvariants:
         from uacpy.core.results import Rays, ResultStack
         pf = self._slab(source_depth=10.0)
         ry = Rays(rays=[], model='Test', backend='')
-        with pytest.raises(TypeError, match="same concrete type"):
+        with pytest.raises(ConfigurationError, match="same concrete type"):
             ResultStack(slabs=[pf, ry], coordinate=[10.0, 20.0])
 
     def test_rejects_disagreeing_frequencies(self):
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, frequencies=100.0)
         b = self._slab(source_depth=20.0, frequencies=200.0)
-        with pytest.raises(ValueError, match="frequencies"):
+        with pytest.raises(ConfigurationError, match="frequencies"):
             ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
 
     def test_rejects_disagreeing_model(self):
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, model='Bellhop')
         b = self._slab(source_depth=20.0, model='Kraken')
-        with pytest.raises(ValueError, match="model"):
+        with pytest.raises(ConfigurationError, match="model"):
             ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
 
     def test_accepts_uniform_slabs(self):
@@ -828,7 +828,7 @@ class TestResultStackInvariants:
         assert stack.coordinate_name == 'frequency'
         assert stack.at(frequency=200.0) is b
         # Mis-keyed kwarg → clear TypeError.
-        with pytest.raises(TypeError, match="frequency"):
+        with pytest.raises(ConfigurationError, match="frequency"):
             stack.at(source_depth=200.0)
 
     def test_frequency_axis_rejects_disagreeing_source_depths(self):
@@ -837,7 +837,7 @@ class TestResultStackInvariants:
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, frequencies=100.0)
         b = self._slab(source_depth=99.0, frequencies=200.0)
-        with pytest.raises(ValueError, match="source_depths"):
+        with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, b], coordinate=[100.0, 200.0],
                         coordinate_name='frequency')
 
@@ -855,6 +855,6 @@ class TestResultStackInvariants:
         # Disagreeing source_depth is now rejected (external coord
         # requires both internal axes to agree).
         c = self._slab(source_depth=99.0, frequencies=100.0)
-        with pytest.raises(ValueError, match="source_depths"):
+        with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
                         coordinate_name='wind_speed')

@@ -596,8 +596,14 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
     Default TRF files use single-precision complex (COMPLEX*8). Little-endian
     on x86 by default.
     """
-    endian = '<'
     with open(filepath, 'rb') as f:
+        probe = f.read(4)
+        if len(probe) < 4:
+            raise OSError(
+                f"Cannot open {filepath} as Fortran-unformatted TRF: too short"
+            )
+        endian = detect_endian(probe, source=f'read_oasp_trf:{filepath}')
+        f.seek(0)
         try:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:

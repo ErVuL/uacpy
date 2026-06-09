@@ -158,6 +158,8 @@ def dpsk_modulate(bits, M: int = 2):
 def dpsk_demodulate(symbols, M: int = 2):
     """Inverse of :func:`dpsk_modulate` (differential phase detection)."""
     s = np.asarray(symbols, dtype=complex).ravel()
+    if s.size < 2:
+        return np.zeros(0, dtype=int)
     dphi = np.angle(s[1:] * np.conj(s[:-1])) % (2 * np.pi)
     sym = np.round(dphi / (2 * np.pi / M)).astype(int) % M
     bps = int(np.log2(M))
@@ -182,6 +184,8 @@ def fsk_modulate(bits, freqs_hz, symbol_dur_s: float, sample_rate: float):
     if b.size % bps:
         b = np.concatenate([b, np.zeros(bps - b.size % bps, dtype=int)])
     sym = b.reshape(-1, bps) @ (1 << np.arange(bps - 1, -1, -1))
+    if sym.size == 0:
+        return np.zeros(0, dtype=float)
     n = int(round(symbol_dur_s * sample_rate))
     t = np.arange(n) / float(sample_rate)
     return np.concatenate([np.cos(2 * np.pi * f[int(s)] * t) for s in sym])
