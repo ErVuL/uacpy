@@ -94,7 +94,9 @@ class FRF:
         fs : float
             Sampling frequency (Hz).
         m : int or str, optional
-            Impulse response length (for TF methods).
+            Impulse response length (for TF methods), or an automatic
+            order-selection criterion for ``'ls_fir'``: ``'AIC'``,
+            ``'BIC'``, ``'FPE'``, or ``'CP'``.
         method : str, optional
             Method to use ('welch', 'ls_fir', 'etfe', 'p_etfe').
         estimator : str, optional
@@ -379,18 +381,29 @@ class FRF:
             count = 0
 
             if m == "CP":
-                # Estimation of noise variance (for Cp)
-                full_model_m = min(m_max, N - 1)
+                # Mallows' Cp: σ̂² is the residual variance of a low-bias
+                # reference fit (order well above any plausible true order,
+                # well below N), not the raw output variance.
+                full_model_m = min(m_max, max(2, N // 4))
                 u_temp = u[:N].copy()
                 phiuu_full = np.zeros(full_model_m)
                 phiuy_full = np.zeros(full_model_m)
-
                 for i in range(full_model_m):
                     phiuu_full[i] = np.dot(u[:N], u_temp)
                     phiuy_full[i] = np.dot(y[:N], u_temp)
                     u_temp = np.concatenate(([u_temp[-1]], u_temp[:-1]))
-
-                sigma2 = np.sum((y[:N] - np.mean(y[:N])) ** 2) / (N - full_model_m)
+                A_full = toeplitz(phiuu_full)
+                u_flipped = np.flip(u[:N]).copy()
+                W_full = np.zeros((full_model_m - 1, full_model_m))
+                for i in range(full_model_m - 1):
+                    u_flipped = np.concatenate(([u_flipped[-1]], u_flipped[:-1]))
+                    W_full[i, :] = u_flipped[:full_model_m]
+                g_full = np.linalg.solve(
+                    A_full - np.dot(W_full.T, W_full),
+                    phiuy_full - np.dot(W_full.T, y[: full_model_m - 1]),
+                )
+                y_hat_full = np.convolve(u[:N], g_full, mode="full")[:N]
+                sigma2 = np.sum((y[:N] - y_hat_full) ** 2) / (N - full_model_m)
 
             for m_candidate in range(1, m_max + 1):
                 try:

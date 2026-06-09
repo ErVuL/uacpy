@@ -173,5 +173,5 @@ class TestFRF:
         frf = FRF()
         _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m=criterion)
         assert np.isfinite(tf).all()
-        # early-stop selects a low order, well under the m_max=4096 cap
-        assert 1 <= frf.m <= 30
+        # every criterion recovers the true order-3 FIR at this SNR
+        assert frf.m == 3

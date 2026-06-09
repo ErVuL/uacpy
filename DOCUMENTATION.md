@@ -142,11 +142,14 @@ Model(
    into `run()`.
 3. **Per-call request** — `run_mode` plus the signal kwargs
    `frequencies=`, `source_waveform=`, `sample_rate=`, `output_duration=`
-   are the **only** kwargs `run()` accepts. Every model has the same
-   fixed signature: `run(env, source, receiver, run_mode=None, *,
-   frequencies=None, source_waveform=None, sample_rate=None,
-   output_duration=None)`. KrakenField additionally takes `n_modes=`
-   for the field reconstruction limit.
+   are the **only** kwargs `run()` accepts. Every model shares the fixed
+   spine `run(env, source, receiver, run_mode=None, *, …)`; the signal
+   kwargs appear per capability — the broadband synthesizers (Bellhop,
+   BellhopCUDA, RAM, Scooter, KrakenField, OASP) take all four, SPARC
+   takes `source_waveform=`/`sample_rate=` only, OASR takes
+   `frequencies=` only, and Kraken/Bounce/OAST/OASN take none.
+   KrakenField additionally takes `n_modes=` for the field
+   reconstruction limit.
 
 **Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
 so `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) raises at
@@ -289,8 +292,7 @@ worker (or use `ProcessPoolExecutor`).
 ```python
 uacpy.Environment(
     bathymetry,                 # float (flat) or (N,2) ndarray (range_m, depth_m)
-    ssp = None,                 # SoundSpeedProfile or scalar (None ⇒ isovelocity)
-    sound_speed = 1500.0,       # default speed when ssp=None
+    ssp = None,                 # SoundSpeedProfile or scalar (None ⇒ isovelocity 1500 m/s)
     altimetry = None,           # (N,2) sea-surface (range_m, height_m, +up)
     bottom = None,              # BoundaryProperties / RD / Layered / RDL
                                 #   (default: fluid half-space c=1600, ρ=1.5, α=0.5)
