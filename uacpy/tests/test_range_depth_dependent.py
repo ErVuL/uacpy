@@ -292,7 +292,10 @@ class TestModelWithRangeDependence:
             ranges=np.array([1000.0, 3000.0]),
         )
         ram = RAM(verbose=False)   # dz unpinned → _compute_dz path
-        result = ram.run(env, source, receiver)
+        # The auto-dz on this env hits the depth-grid and λ_p/16 floors,
+        # which warn by design.
+        with pytest.warns(UserWarning, match="raised dz"):
+            result = ram.run(env, source, receiver)
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.tl))
 
