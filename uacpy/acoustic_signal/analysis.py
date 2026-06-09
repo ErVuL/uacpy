@@ -81,20 +81,28 @@ class PPSD:
         chunk_size = int(self.seg_duration * fs)
         overlap_samples = int(chunk_size * self.overlap_pct / 100)
         step = chunk_size - overlap_samples
+        if step <= 0:
+            raise ValueError(
+                f"PPSD.compute: overlap_pct ({self.overlap_pct}) too high — "
+                "chunks never advance; require overlap_pct < 100."
+            )
 
         levels = np.arange(self.lvlmin, self.lvlmax + self.ddB, self.ddB)
         psd_list = []
 
         # --- Loop over signals ---
         for sig in signals:
-            nperseg = self.welch_params.get("nperseg", 8192)
+            # Local per-signal Welch params: a short signal shrinks nperseg for
+            # itself only, without lowering resolution for later signals.
+            welch_params = dict(self.welch_params)
+            nperseg = welch_params.get("nperseg", 8192)
             if chunk_size < nperseg:
-                self.welch_params["nperseg"] = chunk_size
-                self.welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
+                welch_params["nperseg"] = chunk_size
+                welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
 
             for i in range(0, len(sig) - chunk_size + 1, step):
                 chunk = sig[i: i + chunk_size]
-                freqs, psd = _sig.welch(chunk, fs, **self.welch_params)
+                freqs, psd = _sig.welch(chunk, fs, **welch_params)
                 psd_list.append(psd)
 
         if len(psd_list) == 0:

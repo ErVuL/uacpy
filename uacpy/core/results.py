@@ -862,14 +862,24 @@ class Field(Result):
                 slicers.append(slice(None))
                 new_coords[name] = self.coords[name]
         new_data = self.data[tuple(slicers)]
-        return Field(
-            data=new_data,
-            coords=new_coords if new_coords else {},
-            pinned=new_pinned,
-            **self._id_kwargs(),
-        ) if new_coords else self._spawn_scalar(new_data, new_pinned)
+        # Pinning the frequency axis narrows the identity to that single
+        # frequency, so f0 / n_frequencies / repr reflect the slice.
+        new_frequencies = (
+            np.array([new_pinned['frequency']], dtype=float)
+            if 'frequency' in idx_map else self.frequencies
+        )
+        if new_coords:
+            id_kwargs = self._id_kwargs()
+            id_kwargs['frequencies'] = new_frequencies
+            return Field(
+                data=new_data,
+                coords=new_coords,
+                pinned=new_pinned,
+                **id_kwargs,
+            )
+        return self._spawn_scalar(new_data, new_pinned, new_frequencies)
 
-    def _spawn_scalar(self, new_data, new_pinned) -> "Field":
+    def _spawn_scalar(self, new_data, new_pinned, frequencies=None) -> "Field":
         # Scalar Field: data is 0-D, coords empty. Re-enter via __init__
         # by re-adding a phantom singleton coord, then immediately
         # dropping it — simpler: bypass the dict size check by allowing
@@ -881,7 +891,7 @@ class Field(Result):
             model=self.model,
             backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=self.frequencies,
+            frequencies=frequencies,
             phase_reference=self.phase_reference,
             metadata=dict(self.metadata),
         )

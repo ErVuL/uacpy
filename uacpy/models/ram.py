@@ -1933,8 +1933,15 @@ class RAM(PropagationModel):
         speeds = [float(c0)]
 
         def _add(cp_attr):
-            if cp_attr:
-                speeds.append(float(cp_attr))
+            # cp_attr may be a scalar (BoundaryProperties / LayeredBottom layer)
+            # or a per-range ndarray (RangeDependentBottom). Take the smallest
+            # positive speed — the finest λ/16 requirement drives dz.
+            if cp_attr is None:
+                return
+            arr = np.atleast_1d(np.asarray(cp_attr, dtype=float))
+            arr = arr[arr > 0]
+            if arr.size:
+                speeds.append(float(arr.min()))
 
         b = env.bottom
         if isinstance(b, LayeredBottom):

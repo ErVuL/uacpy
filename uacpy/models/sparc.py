@@ -542,11 +542,14 @@ class SPARC(PropagationModel):
                         )
                         time = time_grid['time']
                         dt = time_grid['dt']
+                        # The range axis is SPARC's actual output grid (identical
+                        # across depths), matching the single-depth path. Field
+                        # validates this length against the data shape.
                         result = Field(
                             data=pressure_stack,
                             coords={
                                 'depth': receiver.depths,
-                                'range': receiver.ranges,
+                                'range': rts_data['ranges'],
                                 'time': time,
                             },
                             **self._result_kwargs(

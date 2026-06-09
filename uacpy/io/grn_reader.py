@@ -123,7 +123,11 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
                     f.seek(irec * 4 * recl, 0)
                     raw = f.read(nk * 8)
                     if len(raw) < nk * 8:
-                        break
+                        raise ValueError(
+                            f"read_grn_file: truncated Green's-function record "
+                            f"at ifreq={ifreq}, isd={isd}, ird={ird} "
+                            f"(expected {nk * 8} bytes, got {len(raw)})"
+                        )
                     data = np.frombuffer(raw, dtype=f4)
                     G[ifreq, isd, ird, :] = data[0::2] + 1j * data[1::2]
 

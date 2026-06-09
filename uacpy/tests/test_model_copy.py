@@ -51,6 +51,22 @@ def test_every_init_param_is_stored(cls):
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize("cls", _MODEL_CLASSES, ids=lambda c: c.__name__)
+def test_copy_round_trips_param_values(cls):
+    """``copy`` must reproduce each stored constructor *value*, not just the
+    attribute name — a model storing a transformed value under the ctor-arg
+    name would double-transform on copy and silently corrupt sweeps."""
+    from uacpy.models.base import _values_equal
+    model = _construct(cls)
+    twin = model.copy()
+    for name, _ in _collect_init_params(cls):
+        if hasattr(model, name):
+            assert _values_equal(getattr(model, name), getattr(twin, name)), (
+                f"{cls.__name__}.copy() changed {name!r}"
+            )
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize("cls", _MODEL_CLASSES, ids=lambda c: c.__name__)
 def test_copy_preserves_collapse(cls):
     """A user ``collapse`` override survives ``copy`` on every model."""
     try:

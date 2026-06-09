@@ -270,6 +270,32 @@ class TestModelWithRangeDependence:
 
         assert isinstance(result, Field)
 
+    @pytest.mark.requires_binary
+    def test_ram_range_dependent_bottom_default_dz(self):
+        """RAM auto-computes dz on a RangeDependentBottom (per-range ndarray
+        sound_speed) without crashing — regression for the 'truth value of an
+        array is ambiguous' error when dz is unpinned (every other RD test
+        pins dz=2.0, which masked it)."""
+        bottom_rd = RangeDependentBottom(
+            ranges=np.array([0.0, 2500.0, 5000.0]),
+            sound_speed=np.array([1600.0, 1700.0, 1800.0]),
+            density=np.array([1.5, 1.6, 1.7]),
+            attenuation=np.array([0.5, 0.5, 0.5]),
+        )
+        env = uacpy.Environment(
+            name="RD Bottom default dz", bathymetry=200.0, ssp=1500.0,
+            bottom=bottom_rd,
+        )
+        source = uacpy.Source(depths=25.0, frequencies=150.0)
+        receiver = uacpy.Receiver(
+            depths=np.array([50.0, 100.0]),
+            ranges=np.array([1000.0, 3000.0]),
+        )
+        ram = RAM(verbose=False)   # dz unpinned → _compute_dz path
+        result = ram.run(env, source, receiver)
+        assert isinstance(result, Field)
+        assert np.all(np.isfinite(result.tl))
+
 
 class TestRangeDependentConsistency:
     """Test consistency of range-dependent handling."""

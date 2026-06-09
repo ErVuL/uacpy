@@ -133,7 +133,9 @@ class FRF:
         if m is not None:
             self.m = m
         if stop_count is None:
-            self.stop_count = m_max
+            # early-stop after 50 consecutive orders with no score improvement
+            # (compute_lsfir's documented default); m_max is the hard order cap.
+            stop_count = 50
 
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)

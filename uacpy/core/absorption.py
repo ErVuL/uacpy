@@ -409,6 +409,10 @@ class Biological(Absorption):
         # Sum each layer's Lorentzian resonance over the depths it spans.
         # Matches AttenMod.f90: a = a0 / ((1 - f0²/f²)² + 1/Q²) in dB/km.
         f = float(frequency)
+        if f <= 0:
+            raise ConfigurationError(
+                f"alpha_db_per_m: frequency must be > 0 Hz; got {frequency}"
+            )
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         a_km = np.zeros(z.shape, dtype=float)
         for layer in self.layers:
@@ -446,6 +450,10 @@ class ConstantAbsorption(Absorption):
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
+        if frequency <= 0:
+            raise ConfigurationError(
+                f"alpha_db_per_m: frequency must be > 0 Hz; got {frequency}"
+            )
         depths = np.atleast_1d(np.asarray(depths, dtype=float))
         # dB/wavelength → dB/m at this frequency (flat in depth). No SSP is
         # carried here, so the conversion uses the reference sound speed.

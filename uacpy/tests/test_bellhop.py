@@ -205,6 +205,21 @@ class TestBellhopRunModes:
         assert isinstance(result, Arrivals)
         assert result.by_receiver is not None
 
+    @pytest.mark.requires_binary
+    def test_broadband_multi_frequency_source(self, setup_env, setup_receiver):
+        """Bellhop BROADBAND with a multi-frequency Source traces rays at the
+        band centre and synthesizes H(f) over the band (the arrivals sub-run
+        uses a single-frequency source)."""
+        bellhop = Bellhop(verbose=False)
+        source = Source(depths=50.0, frequencies=np.array([100.0, 200.0, 300.0]))
+        result = bellhop.run(
+            env=setup_env, source=source, receiver=setup_receiver,
+            run_mode=RunMode.BROADBAND,
+        )
+        assert isinstance(result, Field)
+        assert 'frequency' in result.coords
+        assert np.iscomplexobj(result.data)
+
 
 class TestAdvancedBeamTypes:
     """Tests for advanced Bellhop beam types (Priority 1 gap)."""

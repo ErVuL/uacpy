@@ -157,3 +157,21 @@ class TestSEL:
                      num_bands=240).compute(imp, fs, nfft=fs)
         # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
         assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
+
+
+class TestFRF:
+    """FRF automatic FIR-order selection (m='AIC'|'BIC'|'FPE'|'CP') must run,
+    not crash with 'count >= None' from an un-defaulted stop_count."""
+
+    @pytest.mark.parametrize("criterion", ['AIC', 'BIC', 'FPE', 'CP'])
+    def test_auto_order_runs_and_recovers_order(self, criterion):
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(1)
+        u = rng.standard_normal(2000)
+        g = np.array([1.0, -0.5, 0.25])                  # order-3 FIR
+        y = np.convolve(u, g)[:u.size] + 0.01 * rng.standard_normal(2000)
+        frf = FRF()
+        _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m=criterion)
+        assert np.isfinite(tf).all()
+        # early-stop selects a low order, well under the m_max=4096 cap
+        assert 1 <= frf.m <= 30

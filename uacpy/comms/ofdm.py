@@ -30,6 +30,10 @@ def ofdm_modulate(symbols, n_subcarriers, cp_len):
     """
     s = np.asarray(symbols, dtype=complex).ravel()
     nsc = int(n_subcarriers)
+    if int(cp_len) > nsc:
+        raise ConfigurationError(
+            f"ofdm_modulate: cp_len ({cp_len}) must be <= n_subcarriers ({nsc})"
+        )
     if s.size % nsc:
         s = np.concatenate([s, np.zeros(nsc - s.size % nsc, dtype=complex)])
     blocks = s.reshape(-1, nsc)

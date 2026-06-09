@@ -409,6 +409,19 @@ class PropagationModel(ABC):
                 f"source_waveform and sample_rate. For the broadband "
                 f"transfer function H(f), use run_mode=RunMode.BROADBAND."
             )
+        if run_mode == RunMode.TIME_SERIES and source_waveform is not None:
+            wf = np.asarray(source_waveform)
+            if not np.all(np.isfinite(wf)):
+                raise ConfigurationError(
+                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                    "source_waveform contains non-finite values (NaN/inf)."
+                )
+            if np.iscomplexobj(wf) and not np.allclose(wf.imag, 0.0):
+                raise ConfigurationError(
+                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                    "source_waveform must be a real pressure pulse; got a "
+                    "complex array with a non-zero imaginary part."
+                )
 
     def _pad_waveform_to_duration(
         self, source_waveform, sample_rate, output_duration,

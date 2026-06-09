@@ -120,9 +120,8 @@ def detection_range(ranges_m, signal_excess_db):
         return np.inf
     if not positive.any():
         return np.nan
-    # Largest range with SE >= 0 is the outermost positive sample. Anchoring on
-    # it (not the last down-crossing) keeps a far-edge recovery — e.g. a
-    # convergence zone giving +,-,+ — from being missed.
+    # Largest range with SE >= 0 is the outermost positive sample — this
+    # captures a far-edge recovery (e.g. a convergence zone giving +,-,+).
     last_pos = int(np.where(positive)[0][-1])
     if last_pos == r.size - 1:
         # SE stays/recovers positive at the far edge; detectable out to the

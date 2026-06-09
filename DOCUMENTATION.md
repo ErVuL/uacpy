@@ -1256,7 +1256,7 @@ Reachable as `uacpy.acoustic_signal`. Sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `fourier_synthesis` |
+| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `cans`, `nwave`, `mseq`, `make_mseq_probe`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `make_noise_waveform`, `fourier_synthesis` |
 | `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `taper` |
 | `…active` | Matched filter / pulse compression / ambiguity / alignment | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function`, `shift_to_max_correlation` |
 | `…transforms` | Gather transforms: f-k, tau-p, Radon (each with inverse + acoustic-cone overlay) | `FK`, `TauP`, `Radon`, `inverse_fk`, `taup_transform`/`inverse_taup`, `radon_transform`/`inverse_radon` |

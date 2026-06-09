@@ -727,6 +727,27 @@ class TestFieldSlicing:
         assert spec.pinned['depth'] == 10.0
         assert spec.pinned['range'] == 200.0
 
+    def test_tf_at_frequency_narrows_identity(self):
+        from uacpy.core.results import Field
+        # A broadband field carries both a frequency coord and a frequencies
+        # identity (as a wrapper emits). Pinning one frequency narrows the
+        # identity so f0 / n_frequencies / repr reflect the pinned value.
+        freqs = np.array([100., 200., 300., 400.])
+        tf = Field(
+            data=(np.arange(24).reshape(2, 3, 4) + 1j).astype(complex),
+            coords={'depth': np.array([10., 20.]),
+                    'range': np.array([100., 200., 300.]),
+                    'frequency': freqs},
+            model='Test', frequencies=freqs,
+        )
+        assert tf.n_frequencies == 4 and tf.f0 == 100.0
+        narrow = tf.at(frequency=300.0)
+        assert narrow.n_frequencies == 1
+        assert narrow.f0 == 300.0
+        assert 'f=300 Hz' in repr(narrow)
+        # a non-frequency slice keeps the full identity
+        assert tf.at(depth=10.0).n_frequencies == 4
+
     def test_tf_to_tl_returns_real_field(self):
         tf = self._tf()
         tl = tf.to_tl()

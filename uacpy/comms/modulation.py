@@ -177,8 +177,10 @@ def fsk_modulate(bits, freqs_hz, symbol_dur_s: float, sample_rate: float):
     """
     f = np.atleast_1d(np.asarray(freqs_hz, dtype=float))
     M = f.size
-    if M & (M - 1):
-        raise ConfigurationError("fsk_modulate: number of freqs must be a power of two")
+    if M < 2 or (M & (M - 1)):
+        raise ConfigurationError(
+            "fsk_modulate: number of freqs must be a power of two >= 2"
+        )
     bps = int(np.log2(M))
     b = np.asarray(bits, dtype=int).ravel()
     if b.size % bps:
@@ -195,6 +197,10 @@ def fsk_demodulate(signal, freqs_hz, symbol_dur_s: float, sample_rate: float):
     """Non-coherent M-FSK detection (per-symbol max tone energy) -> bit array."""
     f = np.atleast_1d(np.asarray(freqs_hz, dtype=float))
     M = f.size
+    if M < 2 or (M & (M - 1)):
+        raise ConfigurationError(
+            "fsk_demodulate: number of freqs must be a power of two >= 2"
+        )
     bps = int(np.log2(M))
     n = int(round(symbol_dur_s * sample_rate))
     x = np.asarray(signal, dtype=float)

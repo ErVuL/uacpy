@@ -1070,8 +1070,10 @@ class OASR(PropagationModel):
             # option in the OASR options string), so .trc wins; the user
             # can pass options='p ...' to switch to slowness sampling, in
             # which case we prefer .rco.
-            requested_opts = (self.options or '').split()
-            wants_slowness = 'p' in requested_opts
+            # OASES parses the option line character by character, so 'p' can
+            # be glued to other letters ('Np'); match on the character set.
+            opt_chars = set(str(self.options or '')) - set(' \t\n')
+            wants_slowness = 'p' in opt_chars
             search = ['.rco', '.trc'] if wants_slowness else ['.trc', '.rco']
             search += ['.023', 'fort.023']
 

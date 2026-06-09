@@ -1171,9 +1171,16 @@ class Bellhop(PropagationModel):
             else (0.0 if output_duration is not None else None)
         )
 
-        # Step 1: Run Bellhop in arrivals mode
+        # Step 1: Run Bellhop in arrivals mode. Bellhop traces rays at the
+        # single carrier fc, so the arrivals run uses a single-frequency source
+        # (ARRIVALS does not accept a multi-frequency band).
         self._log("Running in arrivals mode (broadband path)...")
-        arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
+        arr_source = Source(
+            depths=source.depths,
+            frequencies=fc,
+            source_type=source.source_type,
+        )
+        arr_field = self.run(env, arr_source, receiver, run_mode=RunMode.ARRIVALS)
 
         arrivals_by_rcv = arr_field.by_receiver
         rz = arr_field.receiver_depths

@@ -1550,7 +1550,7 @@ class Environment:
         self.absorption = absorption
         self.name = _sanitize_title(name)
 
-        if np.isscalar(bathymetry):
+        if np.ndim(bathymetry) == 0:   # scalar or 0-D ndarray
             water_depth = float(bathymetry)
             if water_depth <= 0:
                 raise ConfigurationError(
