@@ -8,6 +8,7 @@ from uacpy import Field
 from uacpy.core.results import Rays, Arrivals
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.requires_binary
 
@@ -183,8 +184,7 @@ class TestBellhopRunModes:
         few_top = rays.filter_by_bounces(top=(0, 1))
         assert all(0 <= r.get('n_top_bounces', 0) <= 1 for r in few_top.rays)
 
-        import pytest as _pytest
-        with _pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             rays.filter_by_bounces(kind='bogus')
 
     @pytest.mark.requires_binary
