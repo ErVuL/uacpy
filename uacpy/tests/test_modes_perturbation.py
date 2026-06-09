@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.results import Modes, Field
+from uacpy.core.exceptions import ConfigurationError
 
 
 def _pekeris_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
@@ -70,7 +71,7 @@ class TestWithAttenuation:
 
     def test_shape_mismatch_raises(self):
         modes = _pekeris_modes()
-        with pytest.raises(ValueError, match="must match depths"):
+        with pytest.raises(ConfigurationError, match="must match depths"):
             modes.with_attenuation(np.array([0.001, 0.002]))
 
 

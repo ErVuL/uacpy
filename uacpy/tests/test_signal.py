@@ -132,3 +132,28 @@ def test_signal_symbols_resolve():
                  'PPSD', 'Spectrogram'):
         assert hasattr(uacpy.acoustic_signal, name), \
             f"uacpy.acoustic_signal.{name} missing"
+
+
+class TestSEL:
+    """SEL must integrate power (Parseval-exact), not over-read the way a
+    coherent-normalization Hann taper would (+1.76 dB on stationary signals,
+    and an impulse at a segment boundary annihilated)."""
+
+    def test_tone_exposure_is_parseval_exact(self):
+        from uacpy.acoustic_signal.analysis import SEL
+        fs = 48000
+        t = np.arange(fs) / fs
+        x = 2.0 * np.sin(2 * np.pi * 1000.0 * t)   # exposure = A^2/2 * T = 2.0
+        sel, _ = SEL(band_type='third_octave', fmin=10, fmax=20000).compute(
+            x, fs, nfft=fs)
+        assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
+
+    def test_impulse_not_annihilated(self):
+        from uacpy.acoustic_signal.analysis import SEL
+        fs = 48000
+        imp = np.zeros(fs)
+        imp[0] = 10.0   # a Hann-windowed single segment would zero this out
+        sel, _ = SEL(band_type='linear', fmin=1.0, fmax=fs / 2,
+                     num_bands=240).compute(imp, fs, nfft=fs)
+        # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
+        assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
