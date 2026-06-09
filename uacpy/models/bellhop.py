@@ -620,6 +620,7 @@ class Bellhop(PropagationModel):
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
             # source_waveform → Field; with it → Field (1×1 grid).
+            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             return self._run_broadband(
                 env, source, receiver,
                 frequencies=frequencies,
@@ -1407,6 +1408,10 @@ class BellhopCUDA(Bellhop):
         # discovery.
         self.use_gpu = use_gpu
         self.dimensionality = dimensionality
+        # prefer_cuda is meaningless here (CUDA/CXX only, never Fortran); drop
+        # any inherited value so model.copy() can round-trip it without clashing
+        # with the forced True below.
+        kwargs.pop('prefer_cuda', None)
         super().__init__(
             executable=executable,
             prefer_cuda=True,  # always prefer GPU/CXX before Fortran

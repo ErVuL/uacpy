@@ -1007,17 +1007,17 @@ class KrakenField(_KrakenBase):
             raise ExecutableNotFoundError(self.model_name, str(self.executable))
 
         if field_executable is None:
-            self._field_exe = self._find_executable_in_paths(
+            self.field_executable = self._find_executable_in_paths(
                 'field.exe',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
         else:
-            self._field_exe = Path(field_executable)
+            self.field_executable = Path(field_executable)
 
-        if not self._field_exe.exists():
+        if not self.field_executable.exists():
             raise ExecutableNotFoundError(
-                f"{self.model_name} (field.exe)", str(self._field_exe),
+                f"{self.model_name} (field.exe)", str(self.field_executable),
             )
 
         self.mode_points_per_meter = mode_points_per_meter
@@ -1417,7 +1417,7 @@ class KrakenField(_KrakenBase):
             self._log(f"Running field.exe (option='{option}')...")
             try:
                 self._run_subprocess(
-                    [str(self._field_exe), base_name],
+                    [str(self.field_executable), base_name],
                     cwd=fm.work_dir,
                 )
             except ModelExecutionError as exc:

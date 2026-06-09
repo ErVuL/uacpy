@@ -166,6 +166,7 @@ class PropagationModel(ABC):
         # 'elastic'           : 'fluid' (zero shear) | 'vacuum'
         self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
         self._user_collapse: Dict[str, str] = {}
+        self.collapse = dict(collapse) if collapse else None
         if collapse:
             unknown = set(collapse) - set(DEFAULT_COLLAPSE)
             if unknown:
@@ -277,11 +278,12 @@ class PropagationModel(ABC):
             for dr in (1.0, 2.0, 4.0):
                 run_one(base.copy(dr=dr), env, source, receiver)
 
-        Implementation: walks ``inspect.signature(type(self).__init__)``,
-        pulls each parameter's current value off the instance (uacpy
-        models store every constructor arg as ``self.<name>``), merges
-        ``overrides``, and instantiates. ``**kwargs``-only sinks on the
-        constructor are ignored.
+        Implementation: walks ``__init__`` along the MRO (so parameters
+        defined on a parent constructor are included, since subclasses
+        forward via ``super().__init__(**kwargs)``), pulls each parameter's
+        current value off the instance (uacpy models store every
+        constructor arg as ``self.<name>``), merges ``overrides``, and
+        instantiates. ``**kwargs``-only sinks on the constructor are ignored.
 
         Parameters
         ----------
@@ -299,16 +301,9 @@ class PropagationModel(ABC):
             If ``overrides`` includes a key that isn't a parameter of
             the constructor.
         """
-        import inspect
-
-        sig = inspect.signature(type(self).__init__)
         kwargs: Dict[str, object] = {}
         valid_names = set()
-        for name, param in sig.parameters.items():
-            if name == 'self':
-                continue
-            if param.kind == inspect.Parameter.VAR_KEYWORD:
-                continue
+        for name, _default in _collect_init_params(type(self)):
             valid_names.add(name)
             if hasattr(self, name):
                 kwargs[name] = getattr(self, name)
