@@ -318,15 +318,14 @@ class SEL:
 
         Notes
         -----
-        Each chunk is split into Hann-windowed segments of length
-        ``nfft`` with ``noverlap=0``; ``scipy.signal.spectrogram`` with
-        ``scaling="spectrum"`` normalises by ``Σ w^2`` so each segment's
-        power spectrum is in Pa². No further window-correction factor is
-        applied: with no overlap the Hann taper attenuates samples near
-        segment boundaries, biasing the integral low by ≲0.5 dB on
-        stationary signals long compared to ``nfft``. For impulsive
-        signals shorter than one segment, pass ``nfft`` equal to the
-        signal length to avoid the bias entirely.
+        Each chunk is split into rectangular (boxcar) segments of length
+        ``nfft`` with ``noverlap=0`` and no detrending.
+        ``scipy.signal.spectrogram`` with ``scaling="density"`` returns the
+        PSD in Pa²/Hz; summing it over a band's bins gives that segment's
+        mean-square pressure (Parseval), and ``Δf·(nfft/fs)=1`` so the
+        summed PSD is directly the band exposure in Pa²·s. The total over
+        all bands equals the discrete ``∫p²dt`` to within FFT band-edge
+        leakage.
         """
         # Determine how much data to process based on integration_time
         if self.integration_time is not None:
@@ -344,7 +343,7 @@ class SEL:
             nfft = fs
         nfft = int(nfft)
 
-        window = _sig.windows.hann(nfft)
+        window = _sig.windows.boxcar(nfft)
         f = np.fft.rfftfreq(nfft, d=1 / fs)
         band_indices = []
         for low, center, high in self.bands:
@@ -356,10 +355,14 @@ class SEL:
         for i in range(0, len(data), chunk_size):
             chunk = data[i: min(i + chunk_size, len(data))]
 
-            if len(chunk) < nfft:
-                chunk = np.pad(chunk, (0, nfft - len(chunk)))
+            # Pad to a whole number of segments so spectrogram keeps the remainder.
+            n_seg = max(1, -(-len(chunk) // nfft))
+            pad = n_seg * nfft - len(chunk)
+            if pad:
+                chunk = np.pad(chunk, (0, pad))
             f, t, Sxx = _sig.spectrogram(
-                chunk, fs, window=window, noverlap=0, nfft=nfft, scaling="spectrum"
+                chunk, fs, window=window, noverlap=0, nfft=nfft,
+                detrend=False, scaling="density",
             )
             Sxx_sum = np.sum(Sxx, axis=1)
 

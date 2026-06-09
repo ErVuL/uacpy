@@ -1371,6 +1371,20 @@ class OASP(PropagationModel):
                     "that uacpy's time-series synthesis does not undo. "
                     "Drop 'O' (the default 'N J' uses a real frequency axis)."
                 )
+            if 'J' not in opt_chars and self.nw_samples < 1:
+                # Under automatic wavenumber sampling (nw_samples < 1 →
+                # AUSAMP), OASES forces the complex frequency contour
+                # OMEGIM = -ln(50)·Δf unless 'J' keeps ICNTIN > 0
+                # (unoassp30.f:281-289,382-385). Without 'J' the .trf then
+                # carries the same offset 'O' would, which the time-series
+                # synthesis cannot undo.
+                raise ConfigurationError(
+                    "OASP.run: a custom options string without 'J' enables the "
+                    "complex frequency contour (OMEGIM≠0) under automatic "
+                    "wavenumber sampling, which uacpy's time-series synthesis "
+                    "cannot undo. Add 'J' (the default 'N J' keeps a real "
+                    "frequency axis) or pin nw_samples≥1."
+                )
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
