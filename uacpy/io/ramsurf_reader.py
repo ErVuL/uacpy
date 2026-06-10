@@ -17,13 +17,12 @@ without special cases.
 
 from __future__ import annotations
 
-import struct
 from pathlib import Path
 from typing import Tuple, Union
 
 import numpy as np
 
-from uacpy.io._fortran_helpers import detect_endian
+from uacpy.io._fortran_helpers import detect_endian, read_fortran_record
 
 
 def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
@@ -58,56 +57,38 @@ def _read_lz_records(
     one-shot warning fires the first time a big-endian file is decoded.
     """
     path = Path(filepath)
-    raw = path.read_bytes()
-    pos = 0
+    with path.open('rb') as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(0)
+        if file_size < 12:
+            raise ValueError(f"{path}: too short to contain the header record")
 
-    if len(raw) < 12:
-        raise ValueError(f"{path}: too short to contain the header record")
+        probe = f.read(4)
+        f.seek(0)
+        endian = detect_endian(probe, source=f'ramsurf_reader:{path.name}')
+        # Re-anchor the caller-supplied dtype on the detected byte order so
+        # the file decodes correctly regardless of host endianness.
+        base_dtype = dtype.lstrip('<>=|')
+        item_dtype = np.dtype(endian + base_dtype)
 
-    endian = detect_endian(raw[:4], source=f'ramsurf_reader:{path.name}')
-    # Re-anchor the caller-supplied dtype on the detected byte order so
-    # the file decodes correctly regardless of host endianness.
-    base_dtype = dtype.lstrip('<>=|')
-    item_dtype = np.dtype(endian + base_dtype)
-    item_size = item_dtype.itemsize
+        (lz,) = read_fortran_record(f, 'i', endian=endian)
+        expected = lz * item_dtype.itemsize
 
-    rec_len = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
-    pos += 4
-    if rec_len != 4:
-        raise ValueError(
-            f"{path}: expected 4-byte header record, got {rec_len}"
-        )
-    lz = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
-    pos += 4
-    rec_len_close = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
-    pos += 4
-    if rec_len_close != 4:
-        raise ValueError(
-            f"{path}: malformed header record marker {rec_len_close}"
-        )
-
-    columns = []
-    expected = lz * item_size
-    while pos < len(raw):
-        if len(raw) - pos < 8 + expected:
-            break
-        rec_len = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
-        pos += 4
-        if rec_len != expected:
-            raise ValueError(
-                f"{path}: expected {expected}-byte data record, got {rec_len}"
+        columns = []
+        # Stop before a partial trailing record: each data record is its
+        # ``lz``-sample payload framed by a leading and trailing 4-byte marker.
+        while file_size - f.tell() >= 8 + expected:
+            payload = read_fortran_record(f, raw=True, endian=endian)
+            if len(payload) != expected:
+                raise ValueError(
+                    f"{path}: expected {expected}-byte data record, "
+                    f"got {len(payload)}"
+                )
+            col = np.frombuffer(payload, dtype=item_dtype).astype(
+                base_dtype, copy=True
             )
-        col = np.frombuffer(
-            raw[pos:pos + expected], dtype=item_dtype,
-        ).astype(base_dtype, copy=True)
-        pos += expected
-        rec_len_close = struct.unpack(endian + 'i', raw[pos:pos + 4])[0]
-        pos += 4
-        if rec_len_close != expected:
-            raise ValueError(
-                f"{path}: malformed data-record closing marker {rec_len_close}"
-            )
-        columns.append(col)
+            columns.append(col)
 
     if not columns:
         raise ValueError(f"{path}: no data records found")
