@@ -16,7 +16,6 @@ Provides:
 """
 
 import numpy as np
-import struct
 import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
@@ -722,6 +721,36 @@ def read_ray_file(filepath: Union[str, Path]):
     )
 
 
+def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) -> Optional[str]:
+    """Read an Acoustics-Toolbox ``.prt`` log.
+
+    AT binaries (Kraken/Scooter/Sparc/Bounce) dump fatal-error detail and
+    run diagnostics to ``<base>.prt`` instead of stderr. Returns the log
+    text, or ``None`` when the file is absent or unreadable.
+
+    Parameters
+    ----------
+    prt_path : str or Path
+        Path to the ``.prt`` file.
+    tail_bytes : int, optional
+        When given, return only the trailing ``tail_bytes`` of the file —
+        used to append a short failure excerpt to error messages.
+    """
+    path = Path(prt_path)
+    if not path.exists():
+        return None
+    try:
+        if tail_bytes is not None:
+            size = path.stat().st_size
+            with path.open('rb') as fh:
+                if size > tail_bytes:
+                    fh.seek(size - tail_bytes)
+                return fh.read().decode('utf-8', errors='replace')
+        return path.read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return None
+
+
 def _read_ray_file_binary(filepath: Path) -> list:
     """
     Read binary ray file format
@@ -745,36 +774,35 @@ def _read_ray_file_binary(filepath: Path) -> list:
         if len(head) < 4:
             return rays
         endian = detect_endian(head, source=f'read_ray_bin:{Path(filepath).name}')
-        recl = struct.unpack(endian + "i", head)[0]
+        i4 = np.dtype(endian + 'i4')
+        f4 = np.dtype(endian + 'f4')
+        recl = int(np.frombuffer(head, dtype=i4, count=1)[0])
         f.seek(recl * 4)
 
         truncated_after = None
-        try:
-            while True:
-                n_points = struct.unpack(endian + "i", f.read(4))[0]
-                if n_points <= 0:
-                    break
+        while True:
+            count_buf = f.read(4)
+            if len(count_buf) < 4:
+                # EOF where a ray-length record was expected.
+                truncated_after = len(rays)
+                break
+            n_points = int(np.frombuffer(count_buf, dtype=i4, count=1)[0])
+            if n_points <= 0:
+                break
 
-                ray_r = []
-                ray_z = []
+            # WriteRay2D writes ray2D%x (r, z interleaved) directly in metres
+            # (WriteRay.f90:45); no km conversion needed.
+            coords = np.fromfile(f, dtype=f4, count=2 * n_points)
+            if coords.size < 2 * n_points:
+                truncated_after = len(rays)
+                break
 
-                for _ in range(n_points):
-                    # WriteRay2D writes ray2D%x directly in meters
-                    # (WriteRay.f90:45); no km conversion needed.
-                    r = struct.unpack(endian + "f", f.read(4))[0]
-                    z = struct.unpack(endian + "f", f.read(4))[0]
-                    ray_r.append(r)
-                    ray_z.append(z)
-
-                rays.append(
-                    {
-                        "r": np.array(ray_r),
-                        "z": np.array(ray_z),
-                    }
-                )
-
-        except struct.error:
-            truncated_after = len(rays)
+            rays.append(
+                {
+                    "r": coords[0::2].astype(float),
+                    "z": coords[1::2].astype(float),
+                }
+            )
 
     if truncated_after is not None:
         warnings.warn(

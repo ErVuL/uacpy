@@ -26,6 +26,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.source import Source
 from uacpy.io.file_manager import FileManager
+from uacpy.io.oalib_reader import read_prt
 
 
 class RunMode(Enum):
@@ -1459,16 +1460,8 @@ class PropagationModel(ABC):
         message.
         """
         from pathlib import Path as _Path
-        prt = _Path(work_dir) / f"{base_name}.prt"
-        if not prt.exists():
-            return
-        try:
-            size = prt.stat().st_size
-            with prt.open('rb') as fh:
-                if size > n_chars:
-                    fh.seek(size - n_chars)
-                tail = fh.read().decode('utf-8', errors='replace')
-        except OSError:
+        tail = read_prt(_Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
+        if tail is None:
             return
         exc.args = (
             f"{exc.args[0] if exc.args else exc}\n\n.prt tail:\n{tail}",

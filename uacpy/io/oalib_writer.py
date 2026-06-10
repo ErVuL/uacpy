@@ -1203,3 +1203,237 @@ def write_field3dflp(
                 f.write(f"{inode + 1:5d} {inode + nx:5d} {inode + nx + 1:5d}\n")
                 inode += 1
             inode += 1
+
+
+def write_kraken_env_file(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver,
+    *,
+    ssp_topopt: str,
+    surface_type: BoundaryType,
+    bottom_type: BoundaryType,
+    frequencies: Optional[np.ndarray],
+    n_mesh: int,
+    roughness: float,
+    rmax_m: float,
+    c_low: float,
+    c_high: float,
+) -> None:
+    """Write a Kraken / KrakenC environment file (.env).
+
+    Kraken extends the KRAKEN ENV format with phase-speed limits (cLow,
+    cHigh), a maximum range (RMax), and an optional broadband frequency
+    vector (``TopOpt(6)='B'``, read after the source/receiver depth blocks).
+    All policy (rmax, cLow/cHigh, broadband detection) is resolved by the
+    caller; this function only formats. ``receiver`` is whatever carries the
+    receiver depths (a ``Receiver`` or a depth array).
+    """
+    with open(filepath, 'w') as f:
+        write_header(
+            f, env, source,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            frequencies=frequencies,
+        )
+        write_absorption_block(f, env)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_layer_sections(f, env, env.depth)
+        write_bottom_section(
+            f, env,
+            bottom_type=bottom_type,
+            emit_reflection_table_block=False,
+        )
+        write_phase_speed_and_rmax(f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high)
+        write_source_depths(f, source)
+        write_receiver_depths(f, receiver)
+        if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
+            write_broadband_freqs(f, np.asarray(frequencies))
+
+
+def write_scooter_env_file(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver: Receiver,
+    *,
+    ssp_topopt: str,
+    surface_type: BoundaryType,
+    bottom_type: BoundaryType,
+    frequencies: Optional[np.ndarray],
+    topopt_extra: str,
+    n_mesh: int,
+    roughness: float,
+    rmax_m: float,
+    c_low: float,
+    c_high: float,
+) -> None:
+    """Write a Scooter environment file (.env).
+
+    Scooter uses the KRAKEN ENV format plus cLow/cHigh, RMax, a receiver-range
+    block, and shear support on the bottom halfspace 'A' line. Policy (rmax,
+    cLow/cHigh) is resolved by the caller; this only formats.
+    """
+    with open(filepath, 'w') as f:
+        write_header(
+            f, env, source,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            frequencies=frequencies,
+            topopt_extra=topopt_extra,
+        )
+        write_absorption_block(f, env)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_layer_sections(f, env, env.depth)
+        # Scooter honours real shear attenuation on the 'A' halfspace line and
+        # writes cLow/cHigh/RMax via write_phase_speed_and_rmax, so the F-type
+        # reflection-table bounds line is suppressed here.
+        write_bottom_section(
+            f, env,
+            bottom_type=bottom_type,
+            filepath=Path(filepath),
+            halfspace_alpha_s_source='env',
+            emit_reflection_table_block=False,
+        )
+        write_phase_speed_and_rmax(
+            f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
+            rmax_format="{:.6f}",
+        )
+        write_source_depths(f, source)
+        write_receiver_depths(f, receiver)
+        if frequencies is not None and len(frequencies) > 1:
+            write_broadband_freqs(f, frequencies)
+
+
+def write_sparc_env_file(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver: Receiver,
+    *,
+    ssp_code: str,
+    surface_type: BoundaryType,
+    bottom_type: BoundaryType,
+    output_mode: str,
+    n_mesh: int,
+    roughness: float,
+    rmax_m: float,
+    c_low: float,
+    c_high: float,
+    pulse_type: str,
+    f_min: float,
+    f_max: float,
+    n_t_out: int,
+    t_max: float,
+    t_start: float,
+    t_mult: float,
+) -> None:
+    """Write a SPARC environment file (.env).
+
+    SPARC extends the KRAKEN ENV format with an output-mode TopOpt char
+    (R/D/S), a restricted bottom (vacuum or rigid only), time-domain pulse
+    parameters, and time-output/integration blocks. Pulse band, RMax and the
+    time window are resolved by the caller; this only formats.
+    """
+    with open(filepath, 'w') as f:
+        # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
+        f.write(f"'{env.name}'\n")
+        f.write(f"{source.frequencies[0]:.6f}\n")
+        # NMedia = water column + one medium per sediment layer.
+        n_media = 1
+        if env.has_layered_bottom():
+            n_media += len(env.bottom.layers)
+        f.write(f"{n_media}\n")
+
+        surface_code = surface_type.to_acoustics_toolbox_code()
+        atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
+        vol_atten_code = (
+            env.absorption.topopt_code() if env.absorption is not None else ' '
+        )
+        topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code}{output_mode}".ljust(6)
+        f.write(f"'{topopt}'\n")
+
+        write_absorption_block(f, env)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_layer_sections(f, env, env.depth)
+
+        # Bottom section (SPARC only supports V and R — no halfspace params).
+        bottom_code = bottom_type.to_acoustics_toolbox_code()
+        sigma = getattr(env.halfspace_at_range(0.0), 'roughness', 0.0)
+        f.write(f"'{bottom_code}' {sigma:.1f}\n")
+
+        write_phase_speed_and_rmax(
+            f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
+            rmax_format="{:.6f}",
+        )
+
+        write_source_depths(f, source)
+        if len(receiver.depths) == 1:
+            # Single depth — SPARC interpolates a depth vector from
+            # (first, last); repeat the value so it stays constant.
+            f.write("1\n")
+            f.write(f"{receiver.depths[0]:.6f} {receiver.depths[0]:.6f} /\n")
+        else:
+            write_receiver_depths(f, receiver)
+
+        # Time-domain pulse parameters (SPARC-specific, come BEFORE ranges).
+        f.write(f"'{pulse_type}'\n")
+        f.write(f"{f_min:.6f} {f_max:.6f}\n")
+
+        # Receiver ranges (come AFTER pulse info in SPARC). SubTab expands
+        # "rmin rmax /" into a uniform vector, silently discarding non-uniform
+        # ranges — emit the full list so an N-entry list is read verbatim.
+        ranges_km = receiver.ranges / 1000.0
+        f.write(f"{len(ranges_km)}\n")
+        ranges_str = ' '.join([f"{r:.6f}" for r in ranges_km])
+        f.write(f"{ranges_str} /\n")
+
+        # Time output parameters.
+        f.write(f"{n_t_out}\n")
+        f.write(f"0.0 {t_max:.6f} /\n")
+        # Integration parameters: TSTART, TMULT, ALPHA, BETA, V.
+        f.write(f"{t_start:.6f} {t_mult:.6f} 0.0 0.0 0.0\n")
+
+
+def write_bounce_input_file(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    *,
+    ssp_topopt: str,
+    surface_type: BoundaryType,
+    bottom_type: BoundaryType,
+    n_mesh: int,
+    c_low: float,
+    c_high: float,
+    rmax: float,
+    verbose: bool = False,
+) -> None:
+    """Write a BOUNCE input file (.env).
+
+    BOUNCE uses the KRAKEN ENV format plus cLow/cHigh and RMax (km), and does
+    NOT read source/receiver depth blocks — its Fortran driver stops after
+    RMax (bounce.f90).
+    """
+    filepath = Path(filepath)
+    with open(filepath, 'w') as f:
+        write_header(
+            f, env, source,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+        )
+        write_absorption_block(f, env)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=0.0)
+        # Layered sediments (no-op when env.bottom is a plain halfspace).
+        write_layer_sections(f, env, env.depth)
+        write_bottom_section(
+            f, env,
+            bottom_type=bottom_type,
+            filepath=filepath,
+            verbose=verbose,
+        )
+        # Phase velocity bounds (define angular coverage).
+        f.write(f"{c_low:.2f} {c_high:.2f}\n")
+        # Maximum range in km (for angular sampling resolution).
+        f.write(f"{rmax / 1000.0:.2f}\n")

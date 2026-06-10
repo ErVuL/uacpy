@@ -29,11 +29,8 @@ from uacpy.core.constants import (
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
-from uacpy.io.refl_io import read_reflection_coefficient
-from uacpy.io.oalib_writer import (
-    write_absorption_block, write_bottom_section,
-    write_header, write_layer_sections, write_ssp_section,
-)
+from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
+from uacpy.io.oalib_writer import write_bounce_input_file
 
 
 class Bounce(PropagationModel):
@@ -398,9 +395,9 @@ class Bounce(PropagationModel):
             # the duplicate near-zero angles bounce.f90 emits when many
             # high-c samples round to the same kx — rewrite both files
             # with a strictly-increasing angle axis.
-            self._dedupe_reflection_file(brc_file)
+            dedupe_reflection_file(brc_file)
             if irc_file.exists():
-                self._dedupe_reflection_file(irc_file)
+                dedupe_reflection_file(irc_file)
 
             self._log(f"Reading output: {brc_file}")
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
@@ -468,40 +465,17 @@ class Bounce(PropagationModel):
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
 
-        with open(filepath, 'w') as f:
-            write_header(
-                f, env, source,
-                ssp_topopt=ssp_topopt,
-                surface_type=surface_type,
-            )
-            write_absorption_block(f, env)
-
-            write_ssp_section(
-                f, env, env.depth,
-                n_mesh=n_mesh,
-                roughness=0.0
-            )
-
-            # Layered sediments (no-op when env.bottom is a plain halfspace).
-            write_layer_sections(f, env, env.depth)
-
-            write_bottom_section(
-                f, env,
-                bottom_type=bottom_type,
-                filepath=filepath,
-                verbose=self.verbose
-            )
-
-            # BOUNCE-SPECIFIC SECTIONS
-
-            # Phase velocity bounds (define angular coverage)
-            f.write(f"{c_low:.2f} {c_high:.2f}\n")
-
-            # Maximum range in km (for angular sampling resolution)
-            f.write(f"{rmax / 1000.0:.2f}\n")
-
-            # BOUNCE does NOT read source/receiver depths — do NOT emit
-            # them. AT's bounce.f90 stops after RMax.
+        write_bounce_input_file(
+            filepath, env, source,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            bottom_type=bottom_type,
+            n_mesh=n_mesh,
+            c_low=c_low,
+            c_high=c_high,
+            rmax=rmax,
+            verbose=self.verbose,
+        )
 
     def _execute(self, input_file: Path, work_dir: Path):
         """Execute BOUNCE binary via base-class subprocess helper."""
@@ -517,66 +491,3 @@ class Bounce(PropagationModel):
         if self.verbose and result.stdout:
             self._log(f"Bounce output:\n{result.stdout}", level='debug')
 
-    @staticmethod
-    def _dedupe_reflection_file(filepath: Path) -> None:
-        """Rewrite a .brc/.irc file with a strictly-increasing angle axis.
-
-        BOUNCE's Fortran driver tabulates reflection coefficients by
-        sweeping phase velocity (kx = omega/c), which — for the c_low/c_high
-        defaults — produces many samples that round to the same grazing
-        angle (hundreds of duplicate 0-degree rows are typical). Bellhop
-        tolerates non-decreasing angles but bellhopcuda enforces strict
-        monotonicity in ``bhc::setup()`` and aborts with "Bottom
-        reflection coefficients must be monotonically increasing".
-
-        This helper loads the file, keeps only rows whose angle strictly
-        exceeds the previous kept row, and rewrites it in the original
-        3-column BOUNCE format (angle_deg, |R|, phase_deg). The IRC file
-        has the same layout so the same routine works for both.
-
-        Precision caveat: when two physically distinct phase velocities map
-        to grazing angles that round equal at the file's print precision,
-        only the first (lowest-c, i.e. shallowest-angle) row of that
-        collision group is kept and the rest are dropped — no averaging or
-        re-gridding. This is loss-free for true duplicates (the dominant
-        case near 0°) but discards one R(θ) sample per genuine collision,
-        a slight under-resolution of the reflection table near grazing.
-        Raising the BOUNCE angle/print resolution avoids the collisions.
-        """
-        filepath = Path(filepath)
-        with open(filepath, 'r') as fh:
-            lines = fh.readlines()
-
-        if not lines:
-            return
-
-        kept_rows = []  # list of (angle, mag, phase_deg) as strings
-        last_angle = -np.inf
-        for line in lines[1:]:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            parts = stripped.split()
-            if len(parts) < 3:
-                continue
-            try:
-                angle = float(parts[0])
-            except ValueError:
-                continue
-            if angle > last_angle:
-                kept_rows.append((parts[0], parts[1], parts[2]))
-                last_angle = angle
-
-        # If nothing survived dedup (degenerate case), leave the file
-        # alone — downstream reader will surface the real error.
-        if not kept_rows:
-            return
-
-        # Preserve the original numeric-format header style by simply
-        # rewriting the count with the same trailing newline.
-        with open(filepath, 'w') as fh:
-            # BOUNCE pads the count with leading whitespace; match that
-            # so any downstream tool expecting free-format reads happily.
-            fh.write(f"{len(kept_rows):12d}\n")
-            for a, r, p in kept_rows:
-                fh.write(f"   {a}        {r}        {p}\n")

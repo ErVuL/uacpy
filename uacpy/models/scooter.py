@@ -27,12 +27,7 @@ from uacpy.core.constants import (
     DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
-from uacpy.io.oalib_writer import (
-    write_absorption_block, write_bottom_section, write_broadband_freqs,
-    write_header, write_layer_sections,
-    write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
-    write_ssp_section,
-)
+from uacpy.io.oalib_writer import write_scooter_env_file
 
 
 class Scooter(PropagationModel):
@@ -461,61 +456,27 @@ class Scooter(PropagationModel):
         # reader keeps Atten=Deltak (the default stabiliser).
         topopt_extra = '0' if self.stabilizing_attenuation_off else ''
 
-        with open(filepath, 'w') as f:
-            write_header(
-                f, env, source,
-                ssp_topopt=ssp_topopt,
-                surface_type=surface_type,
-                frequencies=frequencies,
-                topopt_extra=topopt_extra,
-            )
-            write_absorption_block(f, env)
-
-            write_ssp_section(
-                f, env, env.depth,
-                n_mesh=self.n_mesh,
-                roughness=self.roughness
+        rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+        if self.c_low is None or self.c_high is None:
+            self._log(
+                f"c_low / c_high auto-derived = "
+                f"{cl:.1f} / {ch:.1f} m/s"
             )
 
-            # Write sediment layers if layered bottom
-            write_layer_sections(f, env, env.depth)
-
-            # Scooter honours real shear attenuation on the 'A' halfspace
-            # line and writes cLow/cHigh/RMax via write_phase_speed_and_rmax,
-            # so the F-type reflection-table bounds line is suppressed here.
-            write_bottom_section(
-                f, env,
-                bottom_type=bottom_type,
-                filepath=Path(filepath),
-                halfspace_alpha_s_source='env',
-                emit_reflection_table_block=False,
-            )
-
-            rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)
-            from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
-            if self.c_low is None or self.c_high is None:
-                self._log(
-                    f"c_low / c_high auto-derived = "
-                    f"{cl:.1f} / {ch:.1f} m/s"
-                )
-            write_phase_speed_and_rmax(
-                f, env,
-                rmax_m=rmax_m,
-                c_low=cl, c_high=ch,
-                rmax_format="{:.6f}",
-            )
-
-            # Source and receiver depths. Use the shared ATEnvWriter so
-            # arbitrary-length depth arrays are written verbatim rather than
-            # collapsed to "min max /" (which the Fortran reader expands to a
-            # uniformly-spaced vector — losing user-specified samples).
-            write_source_depths(f, source)
-            write_receiver_depths(f, receiver)
-
-            # Broadband frequency vector (ReadfreqVec reads after source/receiver depths)
-            if frequencies is not None and len(frequencies) > 1:
-                write_broadband_freqs(f, frequencies)
+        write_scooter_env_file(
+            filepath, env, source, receiver,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            bottom_type=bottom_type,
+            frequencies=frequencies,
+            topopt_extra=topopt_extra,
+            n_mesh=self.n_mesh,
+            roughness=self.roughness,
+            rmax_m=rmax_m,
+            c_low=cl, c_high=ch,
+        )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared ``_run_subprocess`` helper."""

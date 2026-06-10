@@ -16,7 +16,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
 from uacpy.core.constants import (
-    BoundaryType, AttenuationUnits,
+    BoundaryType,
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
 )
@@ -27,11 +27,7 @@ from uacpy.core.exceptions import (
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
 from uacpy.models.base import PropagationModel, RunMode
 from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
-from uacpy.io.oalib_writer import (
-    write_absorption_block, write_layer_sections,
-    write_phase_speed_and_rmax, write_receiver_depths, write_source_depths,
-    write_ssp_section,
-)
+from uacpy.io.oalib_writer import write_sparc_env_file
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
@@ -811,112 +807,42 @@ class SPARC(PropagationModel):
                 f"Only 'vacuum' and 'rigid' are supported."
             )
 
-        with open(filepath, 'w') as f:
-            # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
-            f.write(f"'{env.name}'\n")
-            f.write(f"{source.frequencies[0]:.6f}\n")
-            # NMedia = water column + one medium per sediment layer.
-            n_media = 1
-            if env.has_layered_bottom():
-                n_media += len(env.bottom.layers)
-            f.write(f"{n_media}\n")
+        # RMax is the period of SPARC's inverse Hankel FFT — too tight leaks
+        # the source's r=RMax image into the receiver area. Margin policy in
+        # ``_resolve_rmax_safety_margin``.
+        margin = self._resolve_rmax_safety_margin(run_mode)
+        rmax_m = float(receiver.ranges.max()) * margin
 
-            surface_code = surface_type.to_acoustics_toolbox_code()
-            atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
-            vol_atten_code = (
-                env.absorption.topopt_code() if env.absorption is not None else ' '
-            )
-            topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code}{self.output_mode}".ljust(6)
-            f.write(f"'{topopt}'\n")
+        # Pulse frequency band [f_min, f_max] (Hz). SPARC's work scales with
+        # Nk ≈ 1000 * Rmax_km * (k_max-k_min)/(2π); a near-CW band makes the
+        # FFT at the analysis frequency pick up almost nothing, while a 10×
+        # band blows Nk up and times out. One octave (freq/2 .. freq*2) is the
+        # sweet spot. Callers override via constructor kwargs.
+        freq = source.frequencies[0]
+        f_min = self.f_min if self.f_min is not None else max(freq / 2.0, 0.1)
+        f_max = self.f_max if self.f_max is not None else freq * 2.0
 
-            write_absorption_block(f, env)
+        # Time output window (s).
+        c_water = self.sound_speed if self.sound_speed is not None else DEFAULT_SOUND_SPEED
+        travel_time = rmax_m / c_water
+        t_max = self.t_max if self.t_max is not None else travel_time * 2.5
 
-            # Write SSP section
-            write_ssp_section(
-                f, env, env.depth,
-                n_mesh=self.n_mesh,
-                roughness=self.roughness
-            )
-
-            # Write sediment layers if layered bottom
-            write_layer_sections(f, env, env.depth)
-
-            # Write bottom section (SPARC only supports V and R)
-            bottom_code = bottom_type.to_acoustics_toolbox_code()
-            sigma = getattr(env.halfspace_at_range(0.0), 'roughness', 0.0)
-            f.write(f"'{bottom_code}' {sigma:.1f}\n")
-            # Note: No halfspace parameters since SPARC doesn't support them
-
-            # SPARC-SPECIFIC SECTIONS
-
-            # RMax is the period of SPARC's inverse Hankel FFT — too tight
-            # leaks the source's r=RMax image into the receiver area.
-            # Margin policy in ``_resolve_rmax_safety_margin``.
-            margin = self._resolve_rmax_safety_margin(run_mode)
-            rmax_m = float(receiver.ranges.max()) * margin
-            write_phase_speed_and_rmax(
-                f, env,
-                rmax_m=rmax_m,
-                c_low=self.c_low, c_high=self.c_high,
-                rmax_format="{:.6f}",
-            )
-
-            # Source and receiver depths. Use the shared ATEnvWriter so
-            # non-uniform arrays are written verbatim rather than collapsed
-            # to "min max /" (which the Fortran reader expands to a
-            # uniformly-spaced vector).
-            write_source_depths(f, source)
-            if len(receiver.depths) == 1:
-                # Single depth — SPARC interpolates a depth vector from
-                # (first, last); repeat the value so it stays constant.
-                f.write("1\n")
-                f.write(f"{receiver.depths[0]:.6f} {receiver.depths[0]:.6f} /\n")
-            else:
-                write_receiver_depths(f, receiver)
-
-            # Time-domain pulse parameters (SPARC-specific, come BEFORE ranges!)
-            f.write(f"'{self.pulse_type}'\n")
-
-            # Pulse frequency band [f_min, f_max] (Hz).
-            #
-            # SPARC's work scales with Nk ≈ 1000 * Rmax_km * (k_max-k_min) /
-            # (2π). A ±2% band makes the pulse near-CW and the FFT at the
-            # analysis frequency picks up almost nothing. A 10× band
-            # (100-10000 Hz for a 1 kHz source) is tractable for small Rmax
-            # but blows Nk up to many-thousands for 10-20 km ranges, which
-            # routinely times out.
-            #
-            # One-octave (freq/2 to freq*2) is the sweet spot: enough
-            # bandwidth that the pulse retains structure, yet bounded Nk.
-            # Callers can override via kwargs for special analyses.
-            freq = source.frequencies[0]
-            f_min = self.f_min if self.f_min is not None else max(freq / 2.0, 0.1)
-            f_max = self.f_max if self.f_max is not None else freq * 2.0
-            f.write(f"{f_min:.6f} {f_max:.6f}\n")
-
-            # Receiver ranges (come AFTER pulse info in SPARC).
-            #
-            # SubTab (Scooter/subtabulate.f90) expands "rmin rmax /" into a
-            # uniformly-spaced vector, which silently discards a caller's
-            # non-uniform ranges. Always emit the full list — SubTab accepts
-            # an N-entry list verbatim when the trailing '/' comes after
-            # more than two values.
-            ranges_km = receiver.ranges / 1000.0
-            f.write(f"{len(ranges_km)}\n")
-            ranges_str = ' '.join([f"{r:.6f}" for r in ranges_km])
-            f.write(f"{ranges_str} /\n")
-
-            # Time output parameters
-            f.write(f"{self.n_t_out}\n")
-
-            # Time output range (s)
-            c_water = self.sound_speed if self.sound_speed is not None else DEFAULT_SOUND_SPEED
-            travel_time = rmax_m / c_water
-            t_max = self.t_max if self.t_max is not None else travel_time * 2.5
-            f.write(f"0.0 {t_max:.6f} /\n")
-
-            # Integration parameters: TSTART, TMULT, ALPHA, BETA, V
-            f.write(f"{self.t_start:.6f} {self.t_mult:.6f} 0.0 0.0 0.0\n")
+        write_sparc_env_file(
+            filepath, env, source, receiver,
+            ssp_code=ssp_code,
+            surface_type=surface_type,
+            bottom_type=bottom_type,
+            output_mode=self.output_mode,
+            n_mesh=self.n_mesh,
+            roughness=self.roughness,
+            rmax_m=rmax_m,
+            c_low=self.c_low, c_high=self.c_high,
+            pulse_type=self.pulse_type,
+            f_min=f_min, f_max=f_max,
+            n_t_out=self.n_t_out,
+            t_max=t_max,
+            t_start=self.t_start, t_mult=self.t_mult,
+        )
 
     def _run_sparc(self, base_name: str, work_dir: Path):
         """

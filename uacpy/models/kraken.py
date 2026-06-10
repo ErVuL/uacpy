@@ -69,13 +69,9 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.oalib_writer import (
-    write_absorption_block, write_bottom_section, write_broadband_freqs,
-    write_header, write_layer_sections,
-    write_multi_profile_env, write_phase_speed_and_rmax,
-    write_receiver_depths, write_source_depths, write_ssp_section,
-    write_fieldflp,
+    write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
-from uacpy.io.oalib_reader import read_shd_file, read_shd_bin
+from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
 from uacpy.models.coupled_modes import segment_environment_by_range
 
 
@@ -329,59 +325,26 @@ class _KrakenBase(PropagationModel):
             )
         )
 
-        with open(filepath, 'w') as f:
-            write_header(
-                f, env, source,
-                ssp_topopt=ssp_topopt,
-                surface_type=surface_type,
-                frequencies=frequencies,
-            )
-            write_absorption_block(f, env)
-
-            write_ssp_section(
-                f, env, env.depth,
-                n_mesh=self.n_mesh,
-                roughness=self.roughness
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+        if self.c_low is None or self.c_high is None:
+            self._log(
+                f"c_low / c_high auto-derived from env.ssp + bottom = "
+                f"{cl:.1f} / {ch:.1f} m/s"
             )
 
-            # Write sediment layers if layered bottom
-            write_layer_sections(
-                f, env, env.depth
-            )
-
-            write_bottom_section(
-                f, env,
-                bottom_type=bottom_type,
-                emit_reflection_table_block=False,
-            )
-
-            # KRAKEN-SPECIFIC SECTIONS
-
-            from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
-            if self.c_low is None or self.c_high is None:
-                self._log(
-                    f"c_low / c_high auto-derived from env.ssp + bottom = "
-                    f"{cl:.1f} / {ch:.1f} m/s"
-                )
-            write_phase_speed_and_rmax(
-                f, env,
-                rmax_m=rmax_m,
-                c_low=cl, c_high=ch,
-            )
-
-            # Source depths (use ATEnvWriter helper for full non-uniform support)
-            write_source_depths(f, source)
-
-            # Receiver depths: receiver_obj (if present) preserves a non-
-            # uniform array verbatim; otherwise fall back to the depths array.
-            write_receiver_depths(
-                f, receiver_obj if receiver_obj is not None else receiver_depths,
-            )
-
-            # Broadband frequency vector (read by ReadfreqVec AFTER SD/RD)
-            if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
-                write_broadband_freqs(f, np.asarray(frequencies))
+        write_kraken_env_file(
+            filepath, env, source,
+            receiver_obj if receiver_obj is not None else receiver_depths,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            bottom_type=bottom_type,
+            frequencies=frequencies,
+            n_mesh=self.n_mesh,
+            roughness=self.roughness,
+            rmax_m=rmax_m,
+            c_low=cl, c_high=ch,
+        )
 
     def _reject_elastic_over_fluid_halfspace(self, env: Environment) -> None:
         """krakenc.exe spins forever in setup on a solid-over-liquid bottom
@@ -508,10 +471,8 @@ class _KrakenBase(PropagationModel):
         """
         prt_file = basename + '.prt'
         error_msg = "Kraken did not produce valid modes. "
-        if os.path.exists(prt_file):
-            with open(prt_file, 'r') as f:
-                prt_content = f.read()
-
+        prt_content = read_prt(prt_file)
+        if prt_content is not None:
             # 1. True "acousto-elastic" mention (used in AT PRT for elastic HS)
             has_acousto_elastic = bool(
                 re.search(r'acousto[-\s]*elastic', prt_content, re.IGNORECASE)
