@@ -67,7 +67,8 @@ def main():
     tt = np.arange(4000) / fs
     probe = np.exp(1j * 2 * np.pi * (1500 * tt + 0.5 * 2e5 * tt ** 2))
     a_true = 1.5e-3
-    received = comms.compensate_doppler(probe, a_true)
+    # closing geometry (v/c = a_true) compresses the received probe
+    received = comms.compensate_doppler(probe, -a_true)
     a_hat, scales, peak = comms.estimate_doppler_scale(
         received, probe, np.linspace(0, 3e-3, 61))
     print(f"  Doppler scale   : est {a_hat*1e3:.2f}e-3 (true {a_true*1e3:.2f}e-3)")

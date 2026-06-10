@@ -1,7 +1,5 @@
 """Frequency Response Function (FRF) estimation: Welch / ETFE / LS-FIR."""
 
-import math
-
 import numpy as np
 import scipy.signal as _sig
 import matplotlib.pyplot as plt

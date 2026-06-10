@@ -1384,7 +1384,7 @@ def write_sparc_env_file(
         # Receiver ranges (come AFTER pulse info in SPARC). SubTab expands
         # "rmin rmax /" into a uniform vector, silently discarding non-uniform
         # ranges — emit the full list so an N-entry list is read verbatim.
-        ranges_km = receiver.ranges / 1000.0
+        ranges_km = m_to_km(receiver.ranges)
         f.write(f"{len(ranges_km)}\n")
         ranges_str = ' '.join([f"{r:.6f}" for r in ranges_km])
         f.write(f"{ranges_str} /\n")
@@ -1436,4 +1436,4 @@ def write_bounce_input_file(
         # Phase velocity bounds (define angular coverage).
         f.write(f"{c_low:.2f} {c_high:.2f}\n")
         # Maximum range in km (for angular sampling resolution).
-        f.write(f"{rmax / 1000.0:.2f}\n")
+        f.write(f"{float(m_to_km(rmax)):.2f}\n")

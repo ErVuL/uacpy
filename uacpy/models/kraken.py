@@ -82,9 +82,12 @@ class _KrakenBase(PropagationModel):
     ----------
     c_low : float, optional
         Lower phase speed limit (m/s). None ⇒ 0.0 (``C_LOW_FACTOR_KRAKEN``),
-        which admits interfacial/Scholte modes — the modal-solver default. (The
-        0.95·min-SSP rule is the Scooter/SPARC wavenumber-integration default,
-        not Kraken's.) Must be non-negative and strictly less than ``c_high``.
+        which makes KRAKEN compute cLow automatically — the modal-solver
+        default. A positive c_low skips slower modes and excludes interfacial
+        (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
+        fails to converge on those. (The 0.95·min-SSP rule is the Scooter/SPARC
+        wavenumber-integration default, not Kraken's.) Must be non-negative and
+        strictly less than ``c_high``.
     c_high : float, optional
         Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and bottom speed).
         Must be strictly greater than ``c_low``.
@@ -107,7 +110,7 @@ class _KrakenBase(PropagationModel):
     -----
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
-    - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; admits interfacial modes)
+    - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; KRAKEN computes cLow automatically)
     - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
     - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
@@ -140,10 +143,11 @@ class _KrakenBase(PropagationModel):
             cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.interp_ssp = interp_ssp
-        # Modal solver default for c_low — KRAKEN manual recommends 0
-        # to capture slow Scholte / interfacial modes; Scooter's
-        # wavenumber-integration default (positive floor) lives at
-        # core/constants.C_LOW_FACTOR.
+        # Modal-solver c_low default. C_LOW_FACTOR_KRAKEN = 0.0 → KRAKEN
+        # computes cLow automatically (kraken.htm, Phase Speed Limits). A
+        # positive c_low skips slower modes and excludes interfacial
+        # (Scholte / Stoneley) ones. Scooter's wavenumber-integration
+        # positive floor lives at core/constants.C_LOW_FACTOR.
         self.c_low = (
             C_LOW_FACTOR_KRAKEN * 1500.0 if c_low is None else float(c_low)
         )
@@ -328,10 +332,10 @@ class _KrakenBase(PropagationModel):
 
         from uacpy.io.oalib_writer import resolve_phase_speed_bounds
         cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
-        if self.c_low is None or self.c_high is None:
+        if self.c_high is None:
             self._log(
-                f"c_low / c_high auto-derived from env.ssp + bottom = "
-                f"{cl:.1f} / {ch:.1f} m/s"
+                f"c_high auto-derived from env.ssp + bottom = {ch:.1f} m/s "
+                f"(c_low = {cl:.1f} m/s)"
             )
 
         write_kraken_env_file(
@@ -498,7 +502,22 @@ class _KrakenBase(PropagationModel):
             # 3. Kraken-specific failure string
             modes_not_found = 'modes not found at cLow' in prt_content
 
-            if has_acousto_elastic or has_nonzero_shear or modes_not_found:
+            # 4. Slow/failed root-finding on interfacial (Scholte/Stoneley)
+            #    modes. kraken.htm's remedy is to raise cLow to the minimum
+            #    p-wave speed so those modes are skipped.
+            secant_failure = bool(
+                re.search(r'CONVERGE\s+IN\s+SECANT', prt_content, re.IGNORECASE)
+            )
+
+            if secant_failure:
+                error_msg += (
+                    "Kraken reported 'FAILURE TO CONVERGE IN SECANT': the root "
+                    "finder is converging slowly to interfacial (Scholte / "
+                    "Stoneley) modes. Set c_low to the minimum p-wave speed in "
+                    "the problem to exclude those modes (kraken.htm, Phase "
+                    "Speed Limits), or use KrakenC."
+                )
+            elif has_acousto_elastic or has_nonzero_shear or modes_not_found:
                 error_msg += (
                     "Kraken (real arithmetic) failed. This is typical when "
                     "the environment has an acousto-elastic bottom "
@@ -535,8 +554,9 @@ class Kraken(_KrakenBase):
     mode_points_per_meter : float, optional
         Mode-grid sampling density. Default ``1.5``.
     c_low, c_high : float, optional
-        Phase-speed bounds (m/s). ``c_low=None`` ⇒ ``0.0`` (admits
-        interfacial/Scholte modes; the modal-solver default, not 0.95·min SSP);
+        Phase-speed bounds (m/s). ``c_low=None`` ⇒ ``0.0`` (KRAKEN computes
+        cLow automatically; the modal-solver default, not 0.95·min SSP). A
+        positive c_low excludes interfacial (Scholte / Stoneley) modes.
         ``c_high=None`` ⇒ ``1.05 × max(SSP, bottom)``.
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ Kraken auto-picks. Default ``0``.

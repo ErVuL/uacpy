@@ -1,11 +1,13 @@
 """Unit tests for ``models/_pe_phase.py``.
 
-Each test computes the engineering travelling-wave conversion *both*
-via the helper and via the pre-refactor inline math, then checks they
-match to machine precision. Adding a new PE backend convention means
-adding a new branch in ``_pe_phase.py`` and a corresponding test row
-here — the helper is then guaranteed numerically identical to the
-expected closed-form for every convention.
+Each test computes the engineering travelling-wave conversion via the helper
+and via an independent closed-form, then checks they match to machine
+precision — guarding the helper against accidental algebra changes for each
+convention. These do NOT establish which convention is physically correct;
+the mpiramS convention is anchored to the exact Scooter field in
+``test_cross_model_broadband.py::test_mpirams_phase_matches_scooter``. Adding a
+new PE backend convention means adding a branch in ``_pe_phase.py`` and a row
+here.
 """
 
 import numpy as np
@@ -22,7 +24,7 @@ def _rng(seed):
     return g
 
 
-def test_mpirams_narrowband_matches_inline_math():
+def test_mpirams_narrowband_matches_closed_form():
     """``_run_tl`` site: shape (n_z, n_r), no freq axis."""
     g = _rng(0xACED)
     psi = g.standard_normal((5, 4)) + 1j * g.standard_normal((5, 4))
@@ -41,7 +43,7 @@ def test_mpirams_narrowband_matches_inline_math():
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 
 
-def test_mpirams_broadband_matches_inline_math():
+def test_mpirams_broadband_matches_closed_form():
     """``_run_broadband`` site: psif shape (n_z, n_f, n_r); range on axis 2."""
     g = _rng(1)
     psif = g.standard_normal((3, 2, 4)) + 1j * g.standard_normal((3, 2, 4))

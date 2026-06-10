@@ -298,9 +298,8 @@ class OFDMReceiver:
             probe = upconvert(resample_poly(self.preamble, os, 1), fs, fc)
             doppler_scale, _, _ = estimate_doppler_scale(pb, probe, scales)
         if abs(doppler_scale) > 1e-9:
-            # estimate returns the scale that dilates the probe onto pb; undo it
-            # by resampling pb the other way.
-            pb = np.real(compensate_doppler(pb, -doppler_scale))
+            # doppler_scale is a = v/c; compensate_doppler(pb, a) removes it.
+            pb = np.real(compensate_doppler(pb, doppler_scale))
         bb = downconvert(pb, fs, fc)
         return resample_poly(bb, 1, os)          # LPF + decimate removes 2*fc image
 

@@ -283,8 +283,6 @@ def read_oasn_covariance(
             f.seek(4 * recl)
             probe = f.read(4)
             endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
-            ifmt = endian + 'i'
-            ffmt = endian + 'f'
 
             # Read header (first 10 records)
             # Record 1-4: Title (4 x 8 bytes = 32 characters)
@@ -338,8 +336,6 @@ def read_oasn_covariance(
             vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
             # Stored (ifreq, jrcv, ircv); the matrix wants (ifreq, ircv, jrcv).
             covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
-            # Silence flake8 for unused locals defined above for clarity.
-            _ = (ifmt, ffmt)
 
         return {
             'title': title,

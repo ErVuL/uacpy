@@ -222,9 +222,13 @@ def read_shd_bin(
             pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = Nrz
         # Select ONE frequency slice. The returned 'pressure' cube is always
-        # single-frequency (the slice 'pressure_freq', defaulting to freqVec[0]);
-        # a broadband caller must pass freq= per frequency or iterate freqVec,
-        # never treat 'pressure' as a multi-frequency cube.
+        # single-frequency (the slice 'pressure_freq'); a broadband caller must
+        # pass freq= per frequency or iterate freqVec, never treat 'pressure' as
+        # a multi-frequency cube. NB: only the standard 2D path (xs is None)
+        # carries a frequency axis in the record stream (field.f90 stacks freq
+        # outermost). The 3D / irregular multi-source path (xs given) is written
+        # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
+        # so there is no frequency to select there.
         ifreq = 0
         if freq is not None:
             ifreq = int(np.argmin(np.abs(freqVec - freq)))
@@ -252,10 +256,20 @@ def read_shd_bin(
                         fid.seek(recnum * 4 * recl, 0)
                         temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
+            freq_label = float(freqVec[ifreq]) if len(freqVec) else None
 
         else:
             if ys is None:
                 raise ValueError("ys must be provided if xs is specified")
+            # 3D / irregular multi-source files are single-frequency (no freq
+            # stride in the record index), so freq= cannot select a slice here.
+            if freq is not None and len(freqVec) > 1:
+                warnings.warn(
+                    "read_shd_bin: frequency selection (freq=) is not supported "
+                    "for multi-source-position (3D/irregular) shade files, which "
+                    "carry a single frequency; returning freqVec[0].",
+                    UserWarning, stacklevel=2,
+                )
             x_diff = np.abs(s_x - km_to_m(xs))
             idxX = np.argmin(x_diff)
             y_diff = np.abs(s_y - km_to_m(ys))
@@ -275,6 +289,7 @@ def read_shd_bin(
                         fid.seek(recnum * 4 * recl, 0)
                         temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
+            freq_label = float(freqVec[0]) if len(freqVec) else None
 
     return {
         "title": title,
@@ -288,7 +303,7 @@ def read_shd_bin(
             "r": {"z": r_z, "r": r_r},
         },
         "pressure": pressure,
-        "pressure_freq": float(freqVec[ifreq]) if len(freqVec) else None,
+        "pressure_freq": freq_label,
     }
 
 

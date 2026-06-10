@@ -93,12 +93,20 @@ def detection_threshold_energy(
     """Detection threshold (dB) for an incoherent energy detector.
 
     ``DT = 5*log10(d / (w * t))`` where ``d`` is the detection index and ``w*t``
-    is the time-bandwidth product (Urick 1983, Ch. 12, large-``wt`` energy /
-    square-law detector). Use as the ``DT`` term of the active/passive sonar
-    equation when the receiver integrates signal energy over ``t`` seconds in a
-    ``w``-Hz band. The threshold *decreases* by 5 dB per decade of increase in
-    the time-bandwidth product ``w*t`` (Abraham §9.2: SNR_d falls 5 dB/decade in
-    ``M = T*W``) — more incoherent integration lowers the required SNR.
+    is the processing time-bandwidth product ``M``. This is the **noise-PSD-
+    normalized** energy-detector form (Abraham, *Underwater Acoustic Signal
+    Processing*, §9.2.11): ``DT`` is the required ratio of signal PSD to noise
+    PSD ``S0/N0``, so pair it with a noise level given as a **spectral level**
+    (dB re 1 µPa²/Hz) in the sonar equation. The required SNR *decreases* by
+    5 dB per decade of increase in ``M = w*t`` (Abraham §9.2.3.1: SNR_d falls
+    asymptotically at 5 dB/decade of the time-bandwidth product) — more
+    incoherent integration relaxes the required per-Hz SNR.
+
+    The bandwidth is in the *denominator* here because this is the PSD-ratio
+    convention — not Urick's band-power form ``DT = 5*log10(d*w/t)`` (``w`` in
+    the numerator, referenced to total in-band noise power). The two differ by
+    ``10*log10(w)``, the spectral-vs-band-power noise reference; use this one
+    with spectral-level noise.
     """
     if bandwidth_hz <= 0.0 or integration_time_s <= 0.0:
         raise ConfigurationError(

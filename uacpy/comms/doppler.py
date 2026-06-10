@@ -42,15 +42,19 @@ def compensate_doppler(signal, scale):
 
 
 def estimate_doppler_scale(rx, template, scales=None):
-    """Estimate the Doppler scale that ``compensate_doppler(rx, -a)`` should undo.
+    """Estimate the Doppler scale ``a = v/c`` that distorts ``rx``.
 
-    For each candidate ``a`` the receive signal is compensated by ``-a`` (undoing
-    a hypothesised dilation of ``1+a``) and scored against ``template`` with the
+    For each candidate ``a`` the receive signal is compensated by that same ``a``
+    (i.e. ``compensate_doppler(rx, a)``) and scored against ``template`` with the
     energy-normalized matched-filter metric (:func:`sync.matched_filter_metric`,
     a value in ``[0, 1]``); the best-scoring scale wins. Returns ``(best_scale,
-    scales, peak_metric)`` — the last two for plotting the ambiguity curve. The
-    returned ``a`` matches the convention ``rx ≈ compensate_doppler(template,
-    a)``, so undo it on ``rx`` with ``compensate_doppler(rx, -a)``.
+    scales, peak_metric)`` — the last two for plotting the ambiguity curve.
+
+    The returned ``a`` follows the package convention (``doppler_from_speed`` /
+    ``compensate_doppler``): ``a = v/c``, positive for a closing geometry. It is
+    the value to feed straight back: ``compensate_doppler(rx, a)`` removes the
+    Doppler. (A closing geometry compresses ``rx``; the best compensation
+    stretches it back, so the estimate is ``+v/c``.)
 
     Compensating ``rx`` (rather than dilating the template) and using the doubly
     normalized metric keeps the score comparable across candidates — a raw,
@@ -67,7 +71,7 @@ def estimate_doppler_scale(rx, template, scales=None):
     peak = np.zeros(scales.size)
     for i, a in enumerate(scales):
         try:
-            comp = compensate_doppler(r, -a)
+            comp = compensate_doppler(r, a)
         except ConfigurationError:
             continue
         if t.size > comp.size:

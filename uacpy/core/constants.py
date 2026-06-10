@@ -20,8 +20,9 @@ TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 # choice.
 #
 # ``C_LOW_FACTOR_KRAKEN`` is the modal-solver default. KRAKEN's c_low is
-# the slowest phase speed in the mode search; setting it to 0 captures
-# Scholte / interfacial modes per the KRAKEN manual.
+# the slowest phase speed in the mode search; 0 makes KRAKEN compute it
+# automatically (kraken.htm, Phase Speed Limits). A positive c_low excludes
+# slow interfacial (Scholte / Stoneley) modes.
 C_LOW_FACTOR = 0.95
 C_LOW_FACTOR_KRAKEN = 0.0
 C_HIGH_FACTOR = 1.05

@@ -175,3 +175,22 @@ class TestFRF:
         assert np.isfinite(tf).all()
         # every criterion recovers the true order-3 FIR at this SNR
         assert frf.m == 3
+
+    def test_cp_recovers_order_six_fir(self):
+        """Mallows' Cp recovers the true order-6 FIR at moderate SNR. Cp scales
+        the residual sum of squares by σ̂², the residual variance of a low-bias
+        reference fit; this higher-order case exercises that estimate (order 3
+        at high SNR above is too easy to constrain it).
+        """
+        from uacpy.acoustic_signal.system_id import FRF
+        r = np.random.default_rng(2)
+        N, order = 3000, 6
+        u = r.standard_normal(N)
+        g = r.standard_normal(order)
+        g = g / np.linalg.norm(g)
+        clean = np.convolve(u, g)[:N]
+        y = clean + 0.1 * np.std(clean) * r.standard_normal(N)
+        frf = FRF()
+        _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m='CP')
+        assert np.isfinite(tf).all()
+        assert frf.m == order

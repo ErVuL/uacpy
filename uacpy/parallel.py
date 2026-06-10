@@ -24,7 +24,6 @@ import multiprocessing as mp
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -160,7 +159,8 @@ def run_parallel(
     n_workers : int, optional
         Pool size. Defaults to ``min(len(jobs), os.cpu_count())``.
     raise_on_error : bool, default True
-        If True, the first failing job re-raises (remaining work is cancelled).
+        If True, the first failing job re-raises; jobs not yet started are
+        cancelled, but jobs already running finish before the pool shuts down.
         If False, failures are collected in ``ParallelResult.errors`` and the
         other jobs still return.
     start_method : str, default 'spawn'
@@ -179,6 +179,24 @@ def run_parallel(
     jobs = list(jobs)
     if not jobs:
         raise ConfigurationError("run_parallel: jobs is empty.")
+
+    # A pinned (cleanup=False) work_dir must be unique per job: concurrent
+    # workers sharing one dir collide on the models' fixed scratch filenames.
+    # work_dir=None lets each worker allocate its own fresh tempdir.
+    seen_dirs = set()
+    for job in jobs:
+        wd = getattr(job.model, 'work_dir', None)
+        if wd is None:
+            continue
+        key = str(wd)
+        if key in seen_dirs:
+            raise ConfigurationError(
+                f"run_parallel: work_dir {wd!r} is pinned on more than one "
+                "job; concurrent jobs would collide in the same scratch "
+                "directory. Give each job its own work_dir, or leave "
+                "work_dir=None to allocate a fresh tempdir per job."
+            )
+        seen_dirs.add(key)
 
     if n_workers is None:
         n_workers = min(len(jobs), os.cpu_count() or 1)
