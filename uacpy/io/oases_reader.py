@@ -317,18 +317,27 @@ def read_oasn_covariance(
             # Record 10: ZERO, ZERO (reserved)
             # Skip
 
-            # Read covariance matrices
-            # Data starts at record 11 (offset 10 * recl)
-            # Format: for each frequency, for each column, for each row
-            covariance = np.zeros((n_freq, n_rcv, n_rcv), dtype=np.complex64)
-
-            for ifreq in range(n_freq):
-                for jrcv in range(n_rcv):
-                    for ircv in range(n_rcv):
-                        irec = 10 + ircv + jrcv * n_rcv + ifreq * n_rcv * n_rcv
-                        f.seek(irec * recl)
-                        real, imag = struct.unpack(endian + 'ff', f.read(8))
-                        covariance[ifreq, ircv, jrcv] = complex(real, imag)
+            # Read covariance matrices. Data starts at record 11 (offset
+            # 10 * recl); one complex value (re, im float32) sits at the head
+            # of each ``recl``-byte record, ordered (ifreq, jrcv, ircv) with
+            # ircv innermost. A structured dtype with ``itemsize=recl`` strides
+            # over the records in a single read.
+            n_total = n_freq * n_rcv * n_rcv
+            f.seek(10 * recl)
+            rec_dt = np.dtype({
+                'names': ['re', 'im'],
+                'formats': [endian + 'f4', endian + 'f4'],
+                'itemsize': recl,
+            })
+            flat = np.fromfile(f, dtype=rec_dt, count=n_total)
+            if flat.size < n_total:
+                raise OSError(
+                    f"{filepath}: truncated covariance data — expected "
+                    f"{n_total} records, got {flat.size}"
+                )
+            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+            # Stored (ifreq, jrcv, ircv); the matrix wants (ifreq, ircv, jrcv).
+            covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
             # Silence flake8 for unused locals defined above for clarity.
             _ = (ifmt, ffmt)
 
@@ -454,19 +463,25 @@ def read_oasn_replicas(
                 (n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64,
             )
 
-            for ifreq in range(n_freq):
-                for iz in range(n_z):
-                    for ix in range(n_x):
-                        for iy in range(n_y):
-                            for ircv in range(n_rcv):
-                                _read_fortran_record_marker(f, endian=endian)
-                                real, imag = struct.unpack(
-                                    endian + 'ff', f.read(8),
-                                )
-                                _read_fortran_record_marker(f, endian=endian)
-                                replicas[ifreq, iz, ix, iy, ircv] = complex(
-                                    real, imag,
-                                )
+            # Each replica is a Fortran sequential record
+            # ``[marker][re im][marker]`` (16 bytes), written contiguously in
+            # (ifreq, iz, ix, iy, ircv) order with ircv innermost. Read the
+            # whole block in one strided pass.
+            n_total = n_freq * n_z * n_x * n_y * n_rcv
+            rep_dt = np.dtype([
+                ('m1', endian + 'i4'),
+                ('re', endian + 'f4'),
+                ('im', endian + 'f4'),
+                ('m2', endian + 'i4'),
+            ])
+            flat = np.fromfile(f, dtype=rep_dt, count=n_total)
+            if flat.size < n_total:
+                raise OSError(
+                    f"{filepath}: truncated replica data — expected "
+                    f"{n_total} records, got {flat.size}"
+                )
+            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+            replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)
 
         return {
             'title': title,

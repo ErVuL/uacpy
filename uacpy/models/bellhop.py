@@ -152,12 +152,13 @@ def delayandsum(
         delay_samples = (delays[ia] - t_start) / deltat
         i_start = int(np.round(delay_samples))
 
-        for k in range(nsts):
-            idx = i_start + k
-            if 0 <= idx < nrts:
-                rts[idx] += scaled_amp * np.real(
-                    sts_analytic[k] * phase_factor
-                )
+        # Add this arrival's shifted, scaled copy of the source signal as a
+        # single clipped slice-add (vectorised over the source samples).
+        contrib = scaled_amp * np.real(sts_analytic * phase_factor)
+        lo = max(0, i_start)
+        hi = min(nrts, i_start + nsts)
+        if lo < hi:
+            rts[lo:hi] += contrib[lo - i_start:hi - i_start]
 
     time_vector = t_start + np.arange(nrts) * deltat
     return rts, time_vector
@@ -1336,18 +1337,14 @@ class Bellhop(PropagationModel):
         phases_rad = np.deg2rad(phases_deg)
         omega = 2.0 * np.pi * frequencies  # (n_freq,)
 
-        H = np.zeros(len(frequencies), dtype=complex)
-
-        for ia in range(n_arr):
-            A_complex = amps[ia] * np.exp(1j * phases_rad[ia])
-            # exp(-i*omega*tau) with tau = Re(tau) + i*Im(tau) gives a
-            # phase-shift and an exp(omega*Im(tau)) attenuation. Im(tau)
-            # is in seconds; omega is the per-frequency carrier.
-            phase_shift = np.exp(-1j * omega * delays[ia])
-            atten = np.exp(omega * delays_imag[ia])
-            H += A_complex * atten * phase_shift
-
-        return H
+        # Vectorised over arrivals. For each arrival, tau = Re(tau)+i*Im(tau)
+        # gives a phase-shift exp(-i*omega*Re(tau)) and an attenuation
+        # exp(omega*Im(tau)); omega is the per-frequency carrier.
+        A_complex = np.asarray(amps) * np.exp(1j * phases_rad)        # (n_arr,)
+        omega_tau = np.outer(delays, omega)                          # (n_arr, n_freq)
+        omega_taui = np.outer(delays_imag, omega)                    # (n_arr, n_freq)
+        contrib = A_complex[:, None] * np.exp(omega_taui - 1j * omega_tau)
+        return contrib.sum(axis=0)
 
     def _build_command(self, base_name: str) -> list:
         """Build the argv used to launch the binary.
