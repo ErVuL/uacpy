@@ -138,6 +138,24 @@ def _auto_tl_limits(arr: np.ndarray, span: float = 50.0) -> Tuple[float, float]:
     return (float(vmax - span), float(vmax))
 
 
+def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
+    """Edge-aligned ``imshow`` extent for center-sampled (range, depth) data.
+
+    ``imshow`` stretches the array onto the OUTER edges of ``extent``, but
+    model ranges/depths are cell CENTERS. Pad by half a cell on each side so
+    every pixel centers on its coordinate — i.e. no half-cell shift versus the
+    model grid, the ``pcolormesh`` field views, or the seafloor overlay.
+    Returns ``(left_km, right_km, bottom, top)`` for ``origin='upper'`` (depth
+    increasing downward). Assumes a uniform grid, which is ``imshow``'s own
+    assumption anyway.
+    """
+    r_km = np.asarray(ranges_m, dtype=float) / 1000.0
+    z = np.asarray(depths, dtype=float)
+    dr = (r_km[1] - r_km[0]) / 2.0 if r_km.size > 1 else 0.5
+    dz = (z[1] - z[0]) / 2.0 if z.size > 1 else 0.5
+    return (r_km[0] - dr, r_km[-1] + dr, z[-1] + dz, z[0] - dz)
+
+
 def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     """Draw the seafloor on top of a (depth, range) heatmap.
 
@@ -328,15 +346,23 @@ def _plot_field_1d(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
-    x = field.coords[axis_name]
-    y = np.asarray(arr).ravel()
-    line, = ax.plot(x, y, label=label, **mpl_kw)
-    ax.set_xlabel(_coord_label(axis_name))
-    ax.set_ylabel(value_label)
-    if value_label == 'TL (dB)' and 'depth' not in axis_name:
-        ax.invert_yaxis()
+    coord = field.coords[axis_name]
+    vals = np.asarray(arr).ravel()
     if axis_name == 'depth':
+        # Depth cut: depth on the Y axis increasing downward (oceanographic
+        # convention, consistent with the 2-D views), value on X.
+        line, = ax.plot(vals, coord, label=label, **mpl_kw)
+        ax.set_xlabel(value_label)
+        ax.set_ylabel(_coord_label('depth'))
         ax.invert_yaxis()
+    else:
+        # Range / frequency cut: coordinate on X, value on Y. For TL, put the
+        # louder (smaller-dB) end at the top.
+        line, = ax.plot(coord, vals, label=label, **mpl_kw)
+        ax.set_xlabel(_coord_label(axis_name))
+        ax.set_ylabel(value_label)
+        if value_label == 'TL (dB)':
+            ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -412,7 +438,10 @@ def _plot_field_2d(
 
     im = ax.pcolormesh(
         x_plot, y_coord, Z, vmin=vmin, vmax=vmax, cmap=cmap,
-        shading='auto', **mpl_kw,
+        # 'nearest' (not 'auto') centers each cell on its coordinate and errors
+        # loudly if coords are ever the wrong length — 'auto' would silently
+        # switch to edge ('flat') mode and half-cell-shift the field.
+        shading='nearest', **mpl_kw,
     )
     ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label(y_name))
@@ -572,12 +601,11 @@ def animate_field(
     else:
         fig = ax.figure
 
-    ranges_km = ranges / 1000.0
     # ``imshow`` is dramatically faster than ``pcolormesh`` for animation —
     # one set_array per frame vs full mesh re-tesselation.
     im = ax.imshow(
         data[:, :, frame_idx[0]],
-        extent=(ranges_km[0], ranges_km[-1], depths[-1], depths[0]),
+        extent=_imshow_extent(ranges, depths),
         aspect=aspect,
         cmap=cmap,
         vmin=-p_max, vmax=p_max,
@@ -802,8 +830,7 @@ def plot_time_snapshots(
             ax = axes[i, j]
             ax.imshow(
                 slab,
-                extent=(ranges[0] / 1000, ranges[-1] / 1000,
-                        depths[-1], depths[0]),
+                extent=_imshow_extent(ranges, depths),
                 aspect=row_aspect, cmap=cmap,
                 vmin=-pm, vmax=pm, origin='upper',
             )
@@ -1837,7 +1864,7 @@ def plot_reflection_coefficient(
             fig = ax.figure
         im = ax.pcolormesh(
             rc.frequencies / 1000.0, rc.theta, rc.R,
-            shading='auto', cmap='viridis',
+            shading='nearest', cmap='viridis',
         )
         fig.colorbar(im, ax=ax, label='|R|')
         ax.set_xlabel('Frequency (kHz)')
@@ -1920,7 +1947,7 @@ def plot_replicas(
     R = np.abs(rep.replicas[freq_idx, :, :, 0, sensor_idx])
     im = ax.pcolormesh(
         rep.replica_x, rep.replica_z, R,
-        shading='auto', cmap='magma',
+        shading='nearest', cmap='magma',
     )
     fig.colorbar(im, ax=ax, label='|R|')
     ax.set_xlabel('x (m)')

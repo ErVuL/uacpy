@@ -14,6 +14,7 @@ from uacpy.models.sparc import SPARC
 from uacpy.models.bounce import Bounce
 from uacpy.models.oases import OAST, OASN, OASR, OASP
 from uacpy.models.ram import RAM
+from uacpy.core.exceptions import ExecutableNotFoundError
 
 
 _FEATURES = (
@@ -164,7 +165,7 @@ def test_capability_flag(model_name, feature):
     factory, expected = _EXPECTED[model_name]
     try:
         m = factory()
-    except FileNotFoundError:
+    except ExecutableNotFoundError:
         pytest.skip(f"{model_name} binary not available")
     flag = getattr(m, f'_supports_{feature}')
     assert flag is expected[feature], (

@@ -269,11 +269,18 @@ class WenzNoise:
         else:
             shipping = np.full_like(f, -np.inf)
 
-        # Turbulence (Nichols & Bradley 2016 — same coefficients as the
-        # MATLAB ``calc_noise_level.m`` appendix in WenzCurves.pdf p.12).
-        # NB: the prose in WenzCurves.pdf §2.1 quotes 107 − 33.2·log10(f)
-        # instead; the appendix code uses the values below.
+        # Turbulence (Nichols & Bradley 2016). Coefficients are taken verbatim
+        # from the authoritative DRDC reference *implementation* — calc_noise_
+        # level.m (WenzCurves / DRDC-RDDC-2022-D051, Annex A.1):
+        #     noise_turb = 108.5 - 32.5*log10(f)
+        # The DRDC *prose* (§2.1) instead quotes NL_t=107, m_t=-33.2 dB/decade;
+        # we follow the shipped code, which is the runnable authority.
         turbulence = 108.5 - 32.5 * np.log10(f)
+        # Inactive-band convention: uacpy carries a component as -inf dB where
+        # its empirical fit falls below 0 dB (so the incoherent dB sum drops it
+        # cleanly), matching compute_windnoise's u=0 → -inf. The DRDC code floors
+        # the same 0-dB crossing at 1 dB instead; both leave the total NL
+        # unchanged (the floored band is negligible vs the dominant sources).
         turbulence[turbulence <= 0] = -np.inf
 
         # Rain (Torres & Costa 2019, valid up to ~7 kHz; melded above).

@@ -14,6 +14,9 @@ Pipeline:
   4. Round-trip the realisation through :class:`uacpy.acoustic_signal.PPSD` to
      verify the synthesis recovers the input spectrum and to visualise
      the level distribution across time segments.
+  5. Integrate the realisation into a per-band Sound Exposure Level (SEL)
+     with :class:`uacpy.acoustic_signal.SEL` (ISO 18405) — the cumulative
+     energy dose of the synthesised dataset, third-octave band by band.
 
 Outputs
 -------
@@ -21,6 +24,7 @@ output/example_09_wenz_components.png  — Wenz components (per-source).
 output/example_09_ssrp_timeseries.png  — synthesised noise waveform snapshot.
 output/example_09_ssrp_spectrogram.png — time–frequency content of the noise.
 output/example_09_ppsd.png             — PPSD with analytic Wenz overlay.
+output/example_09_sel.png              — per-band SEL of the realisation.
 """
 
 from pathlib import Path
@@ -138,6 +142,28 @@ def main():
                 dpi=150, bbox_inches='tight')
     # plt.close(fig)
     print("  ✓ Saved: output/example_09_ppsd.png")
+
+    # ── 5. Sound Exposure Level (SEL) of the synthesised realisation ─────
+    # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy
+    # dose of the record. Computed here per third-octave band over the whole
+    # 30 s realisation; each bar is dB re 1 µPa²·s. The broadband total is the
+    # incoherent (energy) sum across bands.
+    sel = uacpy.acoustic_signal.SEL(
+        fmin=10.0, fmax=fs / 2.0, band_type='third_octave', ref=UPA,
+    )
+    sel_vals, sel_bands = sel.compute(x, fs)
+    total_sel_db = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
+    print(f"  SEL: broadband {total_sel_db:.1f} dB re 1 µPa²·s over "
+          f"{sel.duration:.0f} s across {len(sel_bands)} third-octave bands")
+    fig, ax = sel.plot(
+        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+               f'{wenz_ssrp.shipping_level} shipping / '
+               f'{wenz_ssrp.rain_rate} rain'),
+    )
+    fig.savefig(OUTPUT_DIR / 'example_09_sel.png',
+                dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print("  ✓ Saved: output/example_09_sel.png")
 
     print("\n✓ Example 09 complete\n")
     return 0

@@ -349,3 +349,44 @@ class TestFieldFlpWriter:
         assert '/' in data_part
         nums = data_part.replace('/', ' ').split()
         assert nums == ['0.0'], f"expected single zero + slash, got {nums!r}"
+
+
+class TestRamsurfReaderDepthAxis:
+    """The Collins PE grid maps stored index i to depth (i-1)*dz.
+
+    Regression for the depth off-by-one: ramsurf1.5 writes from grid index
+    ``ndz`` (its first stored sample is the z=0 surface node), rams0.5 from
+    ``1+ndz`` (it skips z=0, first sample at z=ndz*dz). Both must land on the
+    true (i-1)*dz grid.
+    """
+
+    @staticmethod
+    def _write_grid(path, lz, n_records):
+        """Write a synthetic Collins tl.grid (little-endian Fortran records)."""
+        import struct
+        with open(path, 'wb') as f:
+            f.write(struct.pack('<i', 4) + struct.pack('<i', lz) + struct.pack('<i', 4))
+            for r in range(n_records):
+                payload = np.arange(lz, dtype='<f4').tobytes()
+                f.write(struct.pack('<i', len(payload)) + payload
+                        + struct.pack('<i', len(payload)))
+
+    def test_ramsurf_first_sample_is_surface_node(self, tmp_path):
+        from uacpy.io.ramsurf_reader import read_tl_grid
+        p = tmp_path / "tl.grid"
+        self._write_grid(p, lz=5, n_records=3)
+        _, depths, _ = read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1,
+                                    depth_index_offset=0)
+        # ramsurf: i = k*ndz, depth = (i-1)*dz -> first sample at z=0.
+        assert depths[0] == 0.0
+        assert np.allclose(depths, np.array([0.0, 2.0, 4.0, 6.0, 8.0]))
+
+    def test_rams_skips_surface_node(self, tmp_path):
+        from uacpy.io.ramsurf_reader import read_tl_grid
+        p = tmp_path / "tl.grid"
+        self._write_grid(p, lz=5, n_records=3)
+        _, depths, _ = read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1,
+                                    depth_index_offset=1)
+        # rams: i = 1 + k*ndz, depth = (i-1)*dz -> first sample at z=dz.
+        assert depths[0] == 2.0
+        assert np.allclose(depths, np.array([2.0, 4.0, 6.0, 8.0, 10.0]))

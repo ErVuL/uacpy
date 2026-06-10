@@ -32,6 +32,9 @@ from uacpy.core.exceptions import (
 from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
 from uacpy.io.oalib_writer import write_bounce_input_file
 
+# bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
+_KMIN_CUTOFF_CHIGH = 1.0e6
+
 
 class Bounce(PropagationModel):
     """
@@ -342,7 +345,7 @@ class Bounce(PropagationModel):
             f_hz = float(np.atleast_1d(source.frequencies)[0])
             omega = 2.0 * np.pi * f_hz
             inv_c_diff = 1.0 / float(self.c_low)
-            if self.c_high is not None and self.c_high < 1e8:
+            if self.c_high is not None and self.c_high <= _KMIN_CUTOFF_CHIGH:
                 inv_c_diff -= 1.0 / float(self.c_high)
             if omega * inv_c_diff <= 0:
                 raise ConfigurationError(

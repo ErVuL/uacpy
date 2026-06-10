@@ -92,11 +92,13 @@ def detection_threshold_energy(
 ) -> float:
     """Detection threshold (dB) for an incoherent energy detector.
 
-    ``DT = 5*log10(d * w / t)`` where ``d`` is the detection index and ``w*t``
+    ``DT = 5*log10(d / (w * t))`` where ``d`` is the detection index and ``w*t``
     is the time-bandwidth product (Urick 1983, Ch. 12, large-``wt`` energy /
     square-law detector). Use as the ``DT`` term of the active/passive sonar
     equation when the receiver integrates signal energy over ``t`` seconds in a
-    ``w``-Hz band.
+    ``w``-Hz band. The threshold *decreases* by 5 dB per decade of increase in
+    the time-bandwidth product ``w*t`` (Abraham §9.2: SNR_d falls 5 dB/decade in
+    ``M = T*W``) — more incoherent integration lowers the required SNR.
     """
     if bandwidth_hz <= 0.0 or integration_time_s <= 0.0:
         raise ConfigurationError(
@@ -104,4 +106,4 @@ def detection_threshold_energy(
             " must be > 0"
         )
     d = detection_index(pd, pf)
-    return float(5.0 * np.log10(d * bandwidth_hz / integration_time_s))
+    return float(5.0 * np.log10(d / (bandwidth_hz * integration_time_s)))

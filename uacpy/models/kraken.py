@@ -81,8 +81,10 @@ class _KrakenBase(PropagationModel):
     Parameters
     ----------
     c_low : float, optional
-        Lower phase speed limit (m/s). None = auto (0.95 * min SSP speed).
-        Must be non-negative and strictly less than ``c_high``.
+        Lower phase speed limit (m/s). None ⇒ 0.0 (``C_LOW_FACTOR_KRAKEN``),
+        which admits interfacial/Scholte modes — the modal-solver default. (The
+        0.95·min-SSP rule is the Scooter/SPARC wavenumber-integration default,
+        not Kraken's.) Must be non-negative and strictly less than ``c_high``.
     c_high : float, optional
         Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and bottom speed).
         Must be strictly greater than ``c_low``.
@@ -105,7 +107,7 @@ class _KrakenBase(PropagationModel):
     -----
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
-    - ``c_low=None`` → ``min(env.ssp) × 0.95``
+    - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; admits interfacial modes)
     - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
     - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
@@ -230,7 +232,6 @@ class _KrakenBase(PropagationModel):
             k=k_arr,
             phi=phi_arr,
             depths=z_arr,
-            n_modes=len(k_arr),
             **self._result_kwargs(
                 source,
                 backend=Path(self.executable).name if self.executable else self.model_name.lower(),
@@ -534,8 +535,9 @@ class Kraken(_KrakenBase):
     mode_points_per_meter : float, optional
         Mode-grid sampling density. Default ``1.5``.
     c_low, c_high : float, optional
-        Phase-speed bounds (m/s). ``None`` ⇒ ``0.95 × min SSP`` /
-        ``1.05 × max SSP+bottom``.
+        Phase-speed bounds (m/s). ``c_low=None`` ⇒ ``0.0`` (admits
+        interfacial/Scholte modes; the modal-solver default, not 0.95·min SSP);
+        ``c_high=None`` ⇒ ``1.05 × max(SSP, bottom)``.
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ Kraken auto-picks. Default ``0``.
     roughness : float, optional
@@ -1455,6 +1457,14 @@ class KrakenField(_KrakenBase):
                 )
             else:
                 field = read_shd_file(shd_file)
+                # field.exe emits the modal sum with a prefactor that differs
+                # from Scooter's Hankel path by an overall -1 (see the broadband
+                # branch above). Negate here too and tag travelling_wave so the
+                # COHERENT_TL complex pressure carries the SAME phase convention
+                # as the broadband / return_pressure branches and as Scooter
+                # (|TL| is unchanged; this only fixes the complex phase).
+                field.data = -field.data
+                field.phase_reference = 'travelling_wave'
                 field.model = self.model_name
                 field.backend = 'field.exe'
                 field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))

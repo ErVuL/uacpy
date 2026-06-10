@@ -682,14 +682,36 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
             [(k / (dt * nx)) for k in range(lx, mx + 1)], dtype=np.float64
         ) if nf >= 1 else np.array([freqs], dtype=np.float64)
 
-        transfer_function = np.zeros((nf, nplots, nrd), dtype=np.complex64)
+        # Detect the data-record precision from the first record's length
+        # marker so both OASES output modes are supported: default COMPLEX*8
+        # (2*nout float32 = 2*nout*4 bytes) and the double-precision '8' option
+        # COMPLEX*16 (2*nout float64 = 2*nout*8 bytes).
+        pos = f.tell()
+        marker = f.read(4)
+        data_fmt = f'{2 * nout}f'
+        out_dtype = np.complex64
+        if len(marker) == 4:
+            (rec_bytes,) = struct.unpack(endian + 'i', marker)
+            if rec_bytes == 2 * nout * 8:
+                data_fmt = f'{2 * nout}d'      # double-precision COMPLEX*16
+                out_dtype = np.complex128
+            elif rec_bytes != 2 * nout * 4:
+                raise OSError(
+                    f"OASP .trf data record is {rec_bytes} bytes; expected "
+                    f"{2 * nout * 4} (COMPLEX*8) or {2 * nout * 8} "
+                    f"(COMPLEX*16) for nout={nout} (wrong endianness or "
+                    f"corrupt file)."
+                )
+        f.seek(pos)
+
+        transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
         for j in range(nf):
             for _is in range(max(1, isrow)):
                 for _m in range(max(1, msuft)):
                     for jrh in range(nplots):
                         for jrv in range(nrd):
                             rec = _read_fortran_record(
-                                f, f'{2 * nout}f', endian=endian)
+                                f, data_fmt, endian=endian)
                             transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
     return {

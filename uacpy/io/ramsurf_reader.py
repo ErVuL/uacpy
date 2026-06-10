@@ -116,14 +116,16 @@ def read_tl_grid(
         Range step (m) and output stride from ``ram.in``. Output ranges
         are at ``r = k * dr * ndr`` for ``k = 1, 2, ...``.
     dz, ndz : float, int
-        Depth step (m) and output stride from ``ram.in``. Output depths
-        are at ``z = (depth_index_offset + k * ndz) * dz`` for
-        ``k = 1, 2, ..., lz``.
+        Depth step (m) and output stride from ``ram.in``. The PE grid maps
+        grid index ``i`` to depth ``(i - 1) * dz`` (from ``ri = 1 + zr/dz``
+        in the Collins binaries), so the ``k``-th stored sample sits at
+        ``z = (depth_index_offset + k * ndz - 1) * dz`` for ``k = 1..lz``.
     depth_index_offset : int
-        Grid-index of the first stored depth sample. ``ramsurf1.5`` writes
-        from grid index ``ndz`` (offset 0); ``rams0.5`` writes from
-        ``1 + ndz`` (offset 1). See ``third_party/ramsurf/{rams0.5,
-        ramsurf1.5}.f`` ``outpt`` loops.
+        Grid-index marker of the first stored depth sample. ``ramsurf1.5``
+        writes from grid index ``ndz`` (offset 0, so its first sample is the
+        ``z = 0`` surface node); ``rams0.5`` writes from ``1 + ndz`` (offset
+        1, first sample at ``z = ndz * dz`` — it skips ``z = 0``). See
+        ``third_party/ramsurf/{rams0.5,ramsurf1.5}.f`` ``outpt`` loops.
 
     Returns
     -------
@@ -135,7 +137,7 @@ def read_tl_grid(
     tl = tl.astype(float)
     n_ranges = tl.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz) * dz
+    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
     return ranges, depths, tl
 
 
@@ -176,5 +178,5 @@ def read_pcomplex_grid(
     p = p.astype(complex)
     n_ranges = p.shape[1]
     ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz) * dz
+    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
     return ranges, depths, p

@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import uacpy
 from uacpy import Field
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
@@ -599,7 +599,7 @@ class TestWarnings:
                 pass
 
     def test_ram_accepts_layered_bottom(self):
-        """RAM should accept layered bottom without warnings."""
+        """RAM consumes a layered bottom natively — no collapse warning."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -609,10 +609,17 @@ class TestWarnings:
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
-        try:
-            ram.run(env, source, receiver)
-        except (FileNotFoundError, RuntimeError):
-            pass  # Binary may not be available
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                ram.run(env, source, receiver)
+            except ExecutableNotFoundError:
+                pytest.skip("RAM binary not available")
+        collapse = [w for w in caught if 'collaps' in str(w.message).lower()]
+        assert not collapse, (
+            "RAM emitted a collapse warning for a layered bottom it should "
+            f"accept natively: {[str(w.message) for w in collapse]}"
+        )
 
 
 class TestIntegrationLayeredBottom:

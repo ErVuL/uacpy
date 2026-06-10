@@ -32,9 +32,11 @@ def test_mpirams_narrowband_matches_inline_math():
         psi, convention=MPIRAMS, ranges_m=ranges, range_axis=1,
     )
 
-    # pre-refactor inline:
-    #   p = conj(psif) · 4π · exp(-iπ/4) / √r
-    scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(ranges)
+    # peramx already bakes the Hankel 3-D scaling exp(+i(k0 r+π/4))/(4π) into
+    # psif, so recovering the physical pressure is conj(psif)·4π/√r with NO
+    # extra exp(±iπ/4). Verified against the exact Scooter field (~1° over
+    # 1–7 km); an extra rotation sits ~45° off.
+    scale = 4.0 * np.pi / np.sqrt(ranges)
     expected = np.conj(psi) * scale[np.newaxis, :]
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 
@@ -49,7 +51,9 @@ def test_mpirams_broadband_matches_inline_math():
         psif, convention=MPIRAMS, ranges_m=ranges, range_axis=2,
     )
 
-    scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(ranges)
+    # conj(psif)·4π/√r — peramx's exp(+iπ/4)/(4π) already supplies the Hankel
+    # phase, so the wrapper adds no rotation (matches Scooter; see narrowband test).
+    scale = 4.0 * np.pi / np.sqrt(ranges)
     expected = np.conj(psif) * scale[np.newaxis, np.newaxis, :]
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 

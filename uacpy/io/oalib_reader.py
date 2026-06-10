@@ -129,9 +129,16 @@ def read_shd_bin(
                 - 'r' : ndarray - Ranges in meters (Acoustics-Toolbox
                   converts km → m before WriteHeader; see
                   SourceReceiverPositions.f90:277)
-        - 'pressure' : ndarray - Complex pressure field
+        - 'pressure' : ndarray - Complex pressure field for a SINGLE
+            frequency (``pressure_freq``), never a multi-frequency cube.
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
+            For a broadband file, pass ``freq=`` per frequency (or iterate
+            ``freqVec`` calling this once per entry) — do not treat
+            ``pressure`` as spanning ``freqVec``.
+        - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
+            cube was sliced at (``freq`` snapped to the nearest ``freqVec``
+            entry, or ``freqVec[0]`` when ``freq`` is None).
 
     Notes
     -----
@@ -214,6 +221,13 @@ def read_shd_bin(
         else:
             pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = Nrz
+        # Select ONE frequency slice. The returned 'pressure' cube is always
+        # single-frequency (the slice 'pressure_freq', defaulting to freqVec[0]);
+        # a broadband caller must pass freq= per frequency or iterate freqVec,
+        # never treat 'pressure' as a multi-frequency cube.
+        ifreq = 0
+        if freq is not None:
+            ifreq = int(np.argmin(np.abs(freqVec - freq)))
         if xs is None:
             if Nsx > 1 or Nsy > 1:
                 warnings.warn(
@@ -224,10 +238,6 @@ def read_shd_bin(
                 )
             idxX = 0
             idxY = 0
-            ifreq = 0
-            if freq is not None:
-                freq_diff = np.abs(freqVec - freq)
-                ifreq = np.argmin(freq_diff)
 
             for itheta in range(Ntheta):
                 for isz in range(Nsz):
@@ -278,6 +288,7 @@ def read_shd_bin(
             "r": {"z": r_z, "r": r_r},
         },
         "pressure": pressure,
+        "pressure_freq": float(freqVec[ifreq]) if len(freqVec) else None,
     }
 
 

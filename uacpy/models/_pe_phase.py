@@ -123,9 +123,16 @@ def psi_to_travelling_wave(
     )[0]
 
     if convention == MPIRAMS:
-        # psif = ψ · exp(+i(k₀ r + π/4)) / (4π)
-        #   ⇒ p̄ = conj(psif) · 4π · exp(-iπ/4)
-        out = psi_bar * (4.0 * np.pi * np.exp(-1j * np.pi / 4.0))
+        # peramx already applies the full 3-D / Hankel-asymptotic output scaling
+        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:412); the Collins PE
+        # self-starter is itself a far-field Hankel approximation (Collins 1993;
+        # JKPS), so the π/4 is the cylindrical-spreading phase, already baked in.
+        # The wrapper must therefore ONLY conjugate (peramx marches the conjugate
+        # time convention) and restore the 4π — applying any extra exp(±iπ/4)
+        # double-counts that phase. Verified: conj(psif)·4π matches the exact
+        # wavenumber-integration field (Scooter) to ~1° over 1–7 km, whereas an
+        # extra exp(-iπ/4) (or +iπ/4) sits ~45° off. |TL| is unaffected.
+        out = psi_bar * (4.0 * np.pi)
     elif convention == RAMS:
         # rams0.5 already multiplies by g₀ = exp(+i k₀ r); conj suffices.
         out = psi_bar

@@ -119,6 +119,7 @@ class ConvCode:
         self.polys = tuple(polys)
         self.K = int(K)
         self.interleave_depth = interleave_depth
+        self._info_len = None   # last encoded payload length, for exact decode
 
     @property
     def rate(self):
@@ -127,24 +128,39 @@ class ConvCode:
 
     def encode(self, bits):
         """Encode information bits (convolutional + optional interleave)."""
-        coded = conv_encode(bits, self.polys, self.K)
+        b = np.asarray(bits, dtype=int).ravel()
+        self._info_len = b.size
+        coded = conv_encode(b, self.polys, self.K)
         if self.interleave_depth:
             coded = interleave(coded, self.interleave_depth)
         return coded
 
     def decode(self, coded):
-        """Decode (optional deinterleave + Viterbi) back to information bits."""
+        """Decode (optional deinterleave + Viterbi) back to information bits.
+
+        When the same codec encoded the payload, the decoded stream is truncated
+        to that length — the interleaver's block padding (and any whole-block
+        zeros an outer framing layer appended) is dropped so ``decode(encode(x))``
+        returns exactly ``x``. Across separate transmit/receive codecs the length
+        is unknown, so the full Viterbi output is returned and the caller slices.
+        """
         if self.interleave_depth:
             coded = deinterleave(coded, self.interleave_depth)
-        return viterbi_decode(coded, self.polys, self.K)
+        bits = viterbi_decode(coded, self.polys, self.K)
+        if self._info_len is not None:
+            bits = bits[: self._info_len]
+        return bits
 
 
 def interleave(bits, depth):
     """Block-local ``depth x depth`` interleaver (transpose per square block).
 
     Operating in independent ``depth*depth`` blocks (zero-padded to a whole
-    number of blocks) makes deinterleaving robust to trailing garbage: a partial
-    final block is simply dropped, leaving the leading data blocks intact.
+    number of blocks) keeps the block boundaries aligned regardless of payload
+    length, so an outer framing layer that pads to whole symbols (e.g. OFDM) only
+    ever appends complete zero blocks. The interleaver therefore grows the stream
+    to a multiple of ``depth*depth``; :class:`ConvCode` records the information
+    length so :meth:`ConvCode.decode` can strip the resulting tail exactly.
     """
     b = np.asarray(bits, dtype=int).ravel()
     d = int(depth)

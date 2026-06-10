@@ -624,6 +624,7 @@ class Bellhop(PropagationModel):
             self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             return self._run_broadband(
                 env, source, receiver,
+                run_mode=run_mode,
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
@@ -711,17 +712,29 @@ class Bellhop(PropagationModel):
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            # auto_bounce=False: fall through. ``_project_environment``
-            # below will collapse the bottom via the user's
-            # ``collapse={...}`` policy (default ``layered='halfspace'``,
-            # ``rd_layered_layers='halfspace'``, ``elastic='fluid'``).
+            # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
+            # a halfspace by ``_project_environment`` (collapse policy). A pure
+            # ELASTIC halfspace is NOT collapsed — Bellhop sets
+            # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
+            # the ray tracer fluid-approximates the elastic reflection internally.
+            if is_layered:
+                detail = (
+                    "collapsing the layered bottom to a halfspace via the "
+                    "model's collapse policy and running with fluid ray-tracer "
+                    "physics"
+                )
+            else:
+                detail = (
+                    "writing the elastic halfspace directly (no collapse — "
+                    "Bellhop supports elastic media); its reflection coefficient "
+                    "is fluid-approximated by the ray tracer"
+                )
             warnings.warn(
-                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False "
-                f"→ collapsing via the model's collapse policy and running "
-                f"with fluid ray-tracer physics. Reflection-coefficient "
-                f"accuracy near elastic / layered bottoms will be degraded. "
-                f"Set auto_bounce=True (default) or call run_with_bounce() "
-                f"for the elastic-correct path.",
+                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
+                f"{detail}. Reflection-coefficient accuracy near elastic / "
+                f"layered bottoms will be degraded. Set auto_bounce=True "
+                f"(default) or call run_with_bounce() for the elastic-correct "
+                f"path.",
                 UserWarning, stacklevel=2,
             )
 
@@ -1069,6 +1082,7 @@ class Bellhop(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: 'RunMode' = None,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
@@ -1191,7 +1205,17 @@ class Bellhop(PropagationModel):
         nrr = len(rr)
 
         # ── Path A: time-domain delay-and-sum with source waveform ──
-        if source_waveform is not None:
+        # Branch on the contracted mode, not on the presence of a waveform:
+        # BROADBAND must return H(f) even if a waveform is supplied (the
+        # waveform is meaningful only for the p(t) synthesis of TIME_SERIES).
+        if run_mode == RunMode.BROADBAND and source_waveform is not None:
+            warnings.warn(
+                "Bellhop.run(run_mode=BROADBAND) returns the complex transfer "
+                "function H(f); the supplied source_waveform is ignored. Use "
+                "run_mode=TIME_SERIES to synthesise p(t).",
+                UserWarning, stacklevel=2,
+            )
+        if run_mode == RunMode.TIME_SERIES:
 
             if sample_rate is None:
                 raise ConfigurationError(

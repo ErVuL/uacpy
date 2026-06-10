@@ -456,6 +456,11 @@ def _comparison_pairs():
 
 # ─── The agreement check ──────────────────────────────────────────────────
 
+# Peak-error gate as a multiple of the per-scenario RMSE tolerance. Calibrated
+# above legitimate deep-modal-null misalignment (~4.3x observed at 50 Hz) so it
+# only trips on gross divergence, not physics.
+MAX_ERR_TOLERANCE_FACTOR = 6.0
+
 
 def _rmse_in_window(tl_a: np.ndarray, tl_b: np.ndarray, ranges: np.ndarray,
                     window: Tuple[float, float]) -> Tuple[float, float]:
@@ -495,4 +500,18 @@ def test_cross_model_agreement(scenario: Scenario, label: str, callable_,
         f"{scenario.name} :: {label} disagrees with "
         f"{scenario.reference_label}: RMSE={rmse:.2f} dB > {tolerance} dB "
         f"(max|err|={mxe:.2f} dB) in window {scenario.range_window_m}"
+    )
+    # Max-error tripwire: RMSE averages over the window and so dilutes a single
+    # catastrophic local discrepancy (a near-field spike, a sentinel-filled
+    # cell, a gross divergence). Gate the peak too. The factor is calibrated
+    # ABOVE legitimate deep-modal-null misalignment, which reaches ~4.3x the
+    # RMSE tolerance at low frequency (e.g. 50 Hz Pekeris); 6x stays a true
+    # catastrophe catch (a sign flip or sentinel is tens of dB) without
+    # flagging physics.
+    max_err_limit = MAX_ERR_TOLERANCE_FACTOR * tolerance
+    assert mxe <= max_err_limit, (
+        f"{scenario.name} :: {label} has a local outlier vs "
+        f"{scenario.reference_label}: max|err|={mxe:.2f} dB > "
+        f"{max_err_limit:.1f} dB ({MAX_ERR_TOLERANCE_FACTOR}x tol={tolerance}) "
+        f"in window {scenario.range_window_m} (RMSE={rmse:.2f} dB passed)"
     )

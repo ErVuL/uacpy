@@ -42,23 +42,37 @@ def compensate_doppler(signal, scale):
 
 
 def estimate_doppler_scale(rx, template, scales=None):
-    """Estimate the Doppler scale by resampling ``template`` over candidate scales.
+    """Estimate the Doppler scale that ``compensate_doppler(rx, -a)`` should undo.
 
-    For each candidate ``a`` the template is dilated by ``1+a`` and matched
-    against ``rx``; the peak-correlation scale wins. Returns ``(best_scale,
-    scales, peak_metric)`` — the last two for plotting the ambiguity curve.
+    For each candidate ``a`` the receive signal is compensated by ``-a`` (undoing
+    a hypothesised dilation of ``1+a``) and scored against ``template`` with the
+    energy-normalized matched-filter metric (:func:`sync.matched_filter_metric`,
+    a value in ``[0, 1]``); the best-scoring scale wins. Returns ``(best_scale,
+    scales, peak_metric)`` — the last two for plotting the ambiguity curve. The
+    returned ``a`` matches the convention ``rx ≈ compensate_doppler(template,
+    a)``, so undo it on ``rx`` with ``compensate_doppler(rx, -a)``.
+
+    Compensating ``rx`` (rather than dilating the template) and using the doubly
+    normalized metric keeps the score comparable across candidates — a raw,
+    template-length-dependent inner product otherwise rails to a scan edge on a
+    Doppler-free, periodic, or multipath-smeared probe.
     """
+    from uacpy.comms.sync import matched_filter_metric
+
     r = np.asarray(rx)
     t = np.asarray(template)
     if scales is None:
         scales = np.linspace(-5e-3, 5e-3, 51)
     scales = np.asarray(scales, dtype=float)
-    peak = np.empty(scales.size)
+    peak = np.zeros(scales.size)
     for i, a in enumerate(scales):
-        n = max(2, int(round(t.size * (1.0 + a))))
-        tt = resample(t, n)
-        corr = np.abs(np.correlate(r, tt, mode="valid"))
-        peak[i] = corr.max() if corr.size else 0.0
+        try:
+            comp = compensate_doppler(r, -a)
+        except ConfigurationError:
+            continue
+        if t.size > comp.size:
+            continue
+        peak[i] = float(matched_filter_metric(comp, t).max())
     best = float(scales[int(np.argmax(peak))])
     return best, scales, peak
 

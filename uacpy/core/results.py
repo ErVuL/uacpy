@@ -1767,7 +1767,6 @@ class Modes(Result):
         k: np.ndarray,
         phi: np.ndarray,
         depths: np.ndarray,
-        n_modes: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1779,7 +1778,16 @@ class Modes(Result):
                 f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
-        self.n_modes = int(n_modes if n_modes is not None else len(self.k))
+
+    @property
+    def n_modes(self) -> int:
+        """Number of modes — always ``len(k)`` (single source of truth).
+
+        Derived rather than stored so it can never desync from ``k``/``phi``;
+        to use fewer modes, slice via :meth:`first_n` (which trims ``k`` and
+        ``phi`` together).
+        """
+        return len(self.k)
 
     def _repr_extra(self) -> str:
         return f"n_modes={self.n_modes}, n_z={self.depths.size}"
@@ -1803,7 +1811,6 @@ class Modes(Result):
             k=new_k,
             phi=new_phi,
             depths=self.depths,
-            n_modes=len(new_k),
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
@@ -1979,7 +1986,6 @@ class Modes(Result):
         new_k = kr + 1j * alpha_m
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
-            n_modes=self.n_modes,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
@@ -2046,6 +2052,12 @@ class Modes(Result):
                 for m in range(self.n_modes)
             ])
         k = np.asarray(self.k)
+        # Normalize the attenuation sign so modes always decay with range under
+        # the exp(+i k r) convention used below. Raw Kraken/KrakenC eigenvalues
+        # encode decay as k.imag < 0 (see modes_reader), whereas with_attenuation
+        # builds k.imag > 0; a passive medium can only attenuate, so force
+        # Im(k) >= 0 and the result is convention-agnostic either way.
+        k = k.real + 1j * np.abs(k.imag)
         # Complex sqrt — preserves the -arg(k)/2 phase contribution that
         # matters for phase-sensitive consumers (MFP, coherent integration).
         # Numpy's sqrt picks the principal branch (positive real part).

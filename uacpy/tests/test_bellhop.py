@@ -280,6 +280,21 @@ class TestAdvancedBeamTypes:
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
+    @pytest.mark.requires_binary
+    def test_beam_type_changes_tl(self, env, source, receiver):
+        """beam_type must actually reach the solver: different beam models
+        give measurably different TL. (Guards against the wrapper silently
+        ignoring beam_type — the per-beam smoke tests above would all still
+        pass in that case.)"""
+        tl_b = Bellhop(verbose=False, beam_type='B').run(
+            env=env, source=source, receiver=receiver).tl
+        tl_s = Bellhop(verbose=False, beam_type='S').run(
+            env=env, source=source, receiver=receiver).tl
+        assert not np.allclose(tl_b, tl_s, atol=1e-2), (
+            "Gaussian ('B') and simple-Gaussian ('S') beams produced identical "
+            "TL — beam_type may not be reaching the Bellhop input."
+        )
+
 
 class TestRunWithBounceConstructorPlumbing:
     """Verify Bellhop.run_with_bounce passes through volume-attenuation /
