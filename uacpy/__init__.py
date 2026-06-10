@@ -54,6 +54,7 @@ from uacpy.core.exceptions import (
 
 from uacpy import models
 from uacpy.models.base import PropagationModel, RunMode
+from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
 from uacpy import io
 from uacpy import acoustic_signal
@@ -94,6 +95,9 @@ __all__ = [
     'ConfigurationError',
     'RunMode',
     'PropagationModel',
+    'run_parallel',
+    'Job',
+    'ParallelResult',
     'models',
     'plot',
     'io',

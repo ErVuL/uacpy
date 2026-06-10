@@ -279,11 +279,12 @@ machinery.
 | `ExecutableNotFoundError` | binary missing at construction time |
 | `ModelExecutionError` | binary ran but failed (non-zero exit, empty output). The captured `.prt` log tail is appended for AT models. |
 
-### Thread safety
+### Thread safety & parallel runs
 
 Model instances mutate `self.file_manager` per `run()` and are **not
-safe to share across threads**. For sweeps, instantiate one model per
-worker (or use `ProcessPoolExecutor`).
+safe to share across threads**. To run many models concurrently, use
+`uacpy.run_parallel` — a process pool with one model instance per worker
+(see §5.8, *Running in parallel*).
 
 ---
 
@@ -946,6 +947,67 @@ also default `'ssp': 'mean'`; OASR keeps `'ssp': 'r0'` (the SSP
 boundary speed is essentially irrelevant to the reflection coefficient).
 
 Examples: 13, 19.
+
+### 5.8 Running in parallel — `run_parallel`
+
+Every model run is an independent, subprocess-bound computation, so a
+batch of runs is embarrassingly parallel. `uacpy.run_parallel` runs a
+list of `Job`s across a process pool and returns a `ParallelResult`:
+
+```python
+from uacpy import Job, run_parallel, RunMode
+
+jobs = [
+    Job(uacpy.models.Bellhop(n_beams=800), env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='bellhop'),
+    Job(uacpy.models.KrakenField(),        env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='kraken'),
+    Job(uacpy.models.RAM(),                env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='ram'),
+]
+batch = run_parallel(jobs, n_workers=3)        # blocks until all finish
+```
+
+Each `Job(model, env, source, receiver, run_mode=None, run_kwargs={},
+label=None)` fully describes one `model.run(...)` call, so heterogeneous
+batches — different models, scenarios, or run modes per job — need no
+special handling. To run several models on the **same** scenario, pass
+the same `env` / `source` / `receiver` to each `Job`. A knob sweep is
+just jobs built with `model.copy(**overrides)`:
+
+```python
+base = uacpy.models.Bellhop()
+jobs = [Job(base.copy(n_beams=n), env, src, rcv,
+            run_mode=RunMode.COHERENT_TL, label=n)
+        for n in (200, 400, 800)]
+```
+
+`run_parallel(jobs, *, n_workers=None, raise_on_error=True,
+start_method='spawn', coordinate_name='case')` returns a `ParallelResult`
+aligned one-to-one with `jobs`:
+
+| Access | Meaning |
+|---|---|
+| `batch[i]` / `batch.results[i]` | result for job `i` (`None` if it failed) |
+| `for res in batch:` | iterate results in job order |
+| `batch.labels` | per-job labels (default: job index) |
+| `batch.ok` | `True` if every job succeeded |
+| `batch.errors` | `{i: exception}` for failed jobs (when `raise_on_error=False`) |
+| `batch.stack()` | bundle a single-model batch into a `ResultStack` |
+
+`run_parallel` is synchronous from the caller's side: it blocks until
+every job finishes, then hands back all results at once — there are no
+futures to await. Results carry their full numerical content in memory
+(ray paths, eigenrays, mode shapes, TL arrays), so nothing is lost
+shipping them back from a worker. A worker owns its scratch dir and
+wipes it (`cleanup=True`); to keep the on-disk files and valid
+`result.metadata` paths, build each job's model with a pinned
+`work_dir` and `cleanup=False`. `start_method` defaults to `'spawn'` —
+`'fork'` is unsafe because uacpy is multi-threaded (numpy/BLAS).
+
+`.stack()` needs homogeneous slabs (same concrete type, `model`, and
+`backend`), so it is for single-model batches; for a cross-model batch,
+iterate `batch.results` instead.
 
 ---
 

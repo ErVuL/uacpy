@@ -35,6 +35,7 @@ uacpy/
     ├── examples/            36 numbered example scripts
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
+    ├── parallel.py          run_parallel / Job — parallel batch runner
     ├── _log.py              Single log channel + warning formatter
     └── _stack.py            One-shot RLIMIT_STACK bump on import
 ```
@@ -61,7 +62,9 @@ The first four positional parameters are **fixed** and **shared** by
 every model. Model configuration is **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter
-set; `model.copy(**overrides)` short-circuits the boilerplate.
+set; `model.copy(**overrides)` short-circuits the boilerplate. Run a
+batch of independent runs in parallel with `uacpy.run_parallel` over
+self-contained `Job`s (a process pool; `uacpy/parallel.py`).
 
 `run()` returns one `core.results.Result` subclass — `Field`,
 `Arrivals`, `Rays`, `Modes`, `Covariance`, `Replicas`, or
