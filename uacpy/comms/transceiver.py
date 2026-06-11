@@ -128,7 +128,10 @@ class Receiver:
         """Symbols ``[preamble | payload]`` -> information bits.
 
         Detects the preamble (frame sync), trains the equalizer on it, then
-        equalizes/demodulates/decodes the payload.
+        equalizes/demodulates/decodes the payload. Without an equalizer the
+        payload is assumed to start exactly ``len(preamble)`` symbols after
+        the detected start — residual channel delay spread leaks preamble
+        ISI into the first payload symbols.
         """
         sym = np.asarray(symbols, dtype=complex).ravel()
         start = 0

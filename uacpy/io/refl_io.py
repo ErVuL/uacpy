@@ -71,9 +71,9 @@ def read_reflection_coefficient(
 
             if n_pts == 0:
                 return {
-                    "theta": np.array([0.0]),
-                    "R": np.array([0.0]),
-                    "phi": np.array([0.0]),
+                    "theta": np.array([]),
+                    "R": np.array([]),
+                    "phi": np.array([]),
                     "n_pts": 0,
                 }
 
@@ -191,7 +191,6 @@ def write_reflection_coefficient(
     filepath: Union[str, Path],
     angles: np.ndarray,
     coefficients: np.ndarray,
-    file_type: str = "brc",
 ) -> None:
     """
     Write reflection coefficient file for Bellhop bottom/top boundary.
@@ -208,9 +207,6 @@ def write_reflection_coefficient(
         - Real (N, 2): ``[amplitude, phase_radians]``. Phase column is
           converted to degrees on output.
         - Real (N,): amplitudes only; phase is zero.
-    file_type : str, optional
-        File type: 'brc' (bottom) or 'trc' (top). Default is 'brc'.
-
     Notes
     -----
     File format (.brc/.trc), per AT ReflectionCoefficientFile.htm:

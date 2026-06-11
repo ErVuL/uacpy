@@ -613,7 +613,7 @@ def animate_field(
         zorder=1,
     )
     cbar = fig.colorbar(im, ax=ax, pad=0.02)
-    cbar.set_label('Pressure (Pa)')
+    cbar.set_label('Pressure (source-normalised)')
 
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
@@ -835,14 +835,8 @@ def plot_time_snapshots(
                 vmin=-pm, vmax=pm, origin='upper',
             )
             if env is not None:
-                env_depth = float(env.depth)
-                ax.axhline(env_depth, color='#4a3322', linewidth=1.0, zorder=4)
-                ax.fill_between(
-                    [ranges[0] / 1000, ranges[-1] / 1000],
-                    env_depth, env_depth * 1.15,
-                    color='#bfa685', alpha=0.6, zorder=3,
-                )
-                ax.set_ylim(env_depth * 1.05, 0)
+                _overlay_seafloor(ax, env, ranges)
+                ax.set_ylim(float(env.depth) * 1.05, 0)
             else:
                 ax.set_ylim(depths[-1], depths[0])
             if field.source_depths is not None and len(field.source_depths):
@@ -912,12 +906,23 @@ def compare(
                 f"{lbl!r} on {axes[0]!r}"
             )
         arr, vlabel = _value_array(f, value)
-        ax.plot(f.coords[common_axis], np.asarray(arr).ravel(),
-                label=lbl, **mpl_kw)
-    ax.set_xlabel(_coord_label(common_axis))
-    ax.set_ylabel(vlabel)
-    if value == 'tl':
+        if common_axis == 'depth':
+            # Depth-cut overlays follow plot_field's convention:
+            # depth on Y, increasing downward.
+            ax.plot(np.asarray(arr).ravel(), f.coords[common_axis],
+                    label=lbl, **mpl_kw)
+        else:
+            ax.plot(f.coords[common_axis], np.asarray(arr).ravel(),
+                    label=lbl, **mpl_kw)
+    if common_axis == 'depth':
+        ax.set_ylabel(_coord_label(common_axis))
+        ax.set_xlabel(vlabel)
         ax.invert_yaxis()
+    else:
+        ax.set_xlabel(_coord_label(common_axis))
+        ax.set_ylabel(vlabel)
+        if value == 'tl':
+            ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
     ax.legend()
     if title:

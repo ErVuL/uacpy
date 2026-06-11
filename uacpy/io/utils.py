@@ -45,13 +45,8 @@ def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
     >>> equally_spaced(x)
     False
 
-    >>> # Nearly equally spaced (within tolerance)
-    >>> x = np.linspace(0, 10, 11) + 1e-12
-    >>> equally_spaced(x)
-    True
-
-    >>> # Beyond tolerance
-    >>> x = np.linspace(0, 10, 11) + 1e-6
+    >>> # Jitter on one interior sample beyond tolerance
+    >>> x = np.linspace(0, 10, 11); x[5] += 1e-6
     >>> equally_spaced(x)
     False
     """

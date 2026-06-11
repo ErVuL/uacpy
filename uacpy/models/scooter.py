@@ -21,11 +21,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
-from uacpy.core.constants import (
-    parse_boundary_type,
-    DEFAULT_BROADBAND_N_FREQS,
-    DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
-)
+from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import write_scooter_env_file
 
@@ -269,7 +265,9 @@ class Scooter(PropagationModel):
             ``source_waveform`` + ``sample_rate``.
         frequencies : ndarray, optional
             Frequency vector for BROADBAND/TIME_SERIES. If not provided,
-            a default vector spanning fc/2 to 2*fc is generated.
+            a default 128-bin vector spanning fc*(1 +/- 0.25) is
+            generated; a multi-element ``source.frequencies`` is used
+            as the band directly.
         source_waveform : ndarray, optional
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
@@ -315,16 +313,9 @@ class Scooter(PropagationModel):
         broadband_freqs = None
         broadband_mode = run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES)
         if broadband_mode:
-            if frequencies is not None:
-                broadband_freqs = np.asarray(frequencies, dtype=float)
-            else:
-                fc = float(source.frequencies[0])
-                half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
-                broadband_freqs = np.linspace(
-                    max(1.0, fc * (1.0 - half_bw)),
-                    fc * (1.0 + half_bw),
-                    DEFAULT_BROADBAND_N_FREQS,
-                )
+            broadband_freqs = self._resolve_broadband_frequencies(
+                source, frequencies,
+            )
             self._log(f"Broadband: {len(broadband_freqs)} frequencies, "
                       f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
 

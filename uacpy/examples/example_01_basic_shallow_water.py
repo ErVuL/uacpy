@@ -49,7 +49,7 @@ def main():
     # STEP 1: Create Environment
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 1/4] Creating environment...")
+    print("\n[Step 1/5] Creating environment...")
 
     # Create bottom boundary properties
     bottom = BoundaryProperties(
@@ -75,7 +75,7 @@ def main():
     # STEP 2: Define Source
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 2/4] Defining acoustic source...")
+    print("\n[Step 2/5] Defining acoustic source...")
 
     source = uacpy.Source(
         depths=50.0,       # Mid-water column
@@ -90,7 +90,7 @@ def main():
     # STEP 3: Define Receiver Grid
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 3/4] Defining receiver grid...")
+    print("\n[Step 3/5] Defining receiver grid...")
 
     receiver = uacpy.Receiver(
         depths=np.linspace(5, 95, 50),      # 50 depths from 5m to 95m
@@ -108,7 +108,7 @@ def main():
     # STEP 4: Run Propagation Model
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Step 4/4] Running Bellhop propagation model...")
+    print("\n[Step 4/5] Running Bellhop propagation model...")
 
     bellhop = Bellhop(verbose=False, beam_type='B', n_beams=300, alpha=(-80, 80))
 
@@ -235,7 +235,7 @@ def main():
     print("  ✓ How to run Bellhop propagation model")
     print("  ✓ How to visualize transmission loss")
 
-    print("\nNEW Plotting features used:")
+    print("\nPlotting features used:")
     print("  ✓ plot_field() with auto TL limits")
     print("  ✓ jet_r colormap (blue=good, red=poor) - Acoustic Toolbox standard")
     print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")

@@ -13,7 +13,7 @@ Note
 This module is a **user helper**.  The uacpy model wrappers do not
 import from ``uacpy.core.acoustics``; it is provided for downstream
 notebooks/examples that need direct access to sound-speed / absorption
-formulas (e.g. example_17_attenuation_models.py).
+formulas (e.g. example_12_attenuation_models.py).
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
@@ -30,6 +30,8 @@ See uacpy/third_party/arlpy/NOTICE for the list of arlpy-adapted functions
 in this file.
 -------------------------------------------------------------------------------
 """
+
+import warnings as _warnings
 
 import numpy as np
 from typing import Union, Optional, Tuple
@@ -92,7 +94,6 @@ def soundspeed(
     Mackenzie, K. V. (1981). "Nine-term equation for sound speed in the oceans".
     The Journal of the Acoustical Society of America, 70(3), 807-812.
     """
-    import warnings as _warnings
     if np.any(np.asarray(temperature) < -2) or np.any(np.asarray(temperature) > 30):
         _warnings.warn(
             "Mackenzie soundspeed: temperature outside validated range "
@@ -218,7 +219,7 @@ def soundspeed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
              + 0.522116437235e-9 * t * p ** 3
              - 0.438031096213e-6 * t ** 3 * p
              - 0.161674495909e-8 * s ** 2 * p ** 2
-             + 0.968403158610e-4 * t ** 2 * s
+             + 0.968403156410e-4 * t ** 2 * s
              + 0.485639620015e-5 * t * s ** 2 * p
              - 0.340597039004e-3 * s * t * p)
     c = c000 + dct + dcs + dcp + dcstp

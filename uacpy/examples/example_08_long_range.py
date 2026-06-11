@@ -23,10 +23,8 @@ SOURCE:
 
 MODELS TESTED:
     ✓ Bellhop      (ray tracing - efficient for long range)
-    ✓ RAM          (parabolic equation - may be memory intensive)
     ✓ KrakenField  (normal modes - very efficient for ducted long range)
     ✓ Scooter      (wavenumber integration)
-    ✓ SPARC        (spectral PE)
     ✓ OAST         (wavenumber integration)
 
 FEATURES DEMONSTRATED:
@@ -44,7 +42,6 @@ EXPECTED BEHAVIOR:
     - Strong energy trapping with minimal bottom interaction
     - Clear modal structure in channel
     - KrakenField likely most efficient
-    - RAM may require significant memory/time
 
 COMPUTATIONAL NOTES:
     - Long range requires fine grid spacing

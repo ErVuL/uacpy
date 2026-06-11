@@ -89,7 +89,7 @@ class TestSonarEquation:
         assert se == pytest.approx(10.0, abs=0.01)
 
     def test_active_requires_a_background(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             sonar.active_signal_excess(220, 60, 10)
 
     def test_figure_of_merit(self):

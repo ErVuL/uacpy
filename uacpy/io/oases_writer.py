@@ -28,6 +28,18 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.units import m_to_km
 
 
+def _oases_option_chars(options: str) -> set:
+    """Significant option characters of an OASES option string.
+
+    OASES's GETOPT reads the option line character by character
+    (``CHARACTER*1 OPT(40)``) — whitespace is insignificant and
+    ``'NJd'`` enables ``d`` exactly like ``'N J d'``. Every gate in
+    this writer must therefore test character membership, never
+    whitespace-split tokens or raw substrings.
+    """
+    return set(str(options)) - set(' \t\n')
+
+
 def _write_oases_header(
     f: TextIO, env: Environment, options: str, fallback_title: str,
 ) -> None:
@@ -104,7 +116,7 @@ def _emit_bottom_layers(
         lb = env.bottom
         current_depth = water_depth
         for layer in lb.layers:
-            layer_as = getattr(layer, 'shear_attenuation', 0.0) or 0.0
+            layer_as = getattr(layer, 'shear_attenuation', 0.0)
             f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
                     f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
                     f"{layer_as:.3f} {layer.density:.2f}{suffix_fn(iface)}\n")
@@ -113,11 +125,13 @@ def _emit_bottom_layers(
         # Deepest halfspace below all sediment layers.
         hs = getattr(lb, 'halfspace', None)
         if hs is not None:
-            c_p = getattr(hs, 'sound_speed', fallback_c_p) or fallback_c_p
-            c_s = getattr(hs, 'shear_speed', fallback_c_s) or fallback_c_s
-            alpha_p = getattr(hs, 'attenuation', fallback_alpha_p) or fallback_alpha_p
-            alpha_s = getattr(hs, 'shear_attenuation', fallback_alpha_s) or fallback_alpha_s
-            rho = getattr(hs, 'density', fallback_rho) or fallback_rho
+            # Plain getattr defaults only — ``or fallback`` would turn a
+            # legitimate 0.0 (e.g. fluid halfspace shear) into the fallback.
+            c_p = getattr(hs, 'sound_speed', fallback_c_p)
+            c_s = getattr(hs, 'shear_speed', fallback_c_s)
+            alpha_p = getattr(hs, 'attenuation', fallback_alpha_p)
+            alpha_s = getattr(hs, 'shear_attenuation', fallback_alpha_s)
+            rho = getattr(hs, 'density', fallback_rho)
         else:
             c_p, c_s, alpha_p, alpha_s, rho = (
                 fallback_c_p, fallback_c_s,
@@ -423,7 +437,7 @@ def write_oast_input(
         # unoast31.f:125-133: lowercase 'd' enables Doppler and demands the
         # 5th VREC token. Uppercase 'D' is depth-averaged-TL and stays in
         # the 4-token form.
-        doppler_on = 'd' in options.split()
+        doppler_on = 'd' in _oases_option_chars(options)
         _emit_oases_freq_line(
             f, freq_min, freq_max, nfreq,
             integration_offset=integration_offset,
@@ -527,10 +541,10 @@ def write_oast_input(
         #   X  (depth axes):    options C, D
         #   XI (contour levels):options C, f
         #   XII (SVP axes):     option Z
-        opt_tokens = options.split()
+        opt_chars = _oases_option_chars(options)
 
         def has(*codes):
-            return any(tok in opt_tokens for tok in codes)
+            return any(code in opt_chars for code in codes)
 
         if has('A', 'D', 'T'):
             # Block IX — TMIN TMAX TLEN TINC
@@ -755,7 +769,7 @@ def write_oasn_input(
             f.write("-1 1 2000\n")
 
         # Block X: Replica parameters (if option 'R' is present)
-        if 'R' in options or 'r' in options:
+        if _oases_option_chars(options) & {'R', 'r'}:
             # Replica grid: depths, x-ranges, y-ranges
             replica_zmin = kwargs.get('replica_zmin', 10.0)
             replica_zmax = kwargs.get('replica_zmax', depth - 10.0)
@@ -790,10 +804,11 @@ def write_oasp_input(
     **kwargs
 ) -> None:
     """
-    Write OASP (OASES Parabolic Equation) input file
+    Write OASP (OASES pulse) input file.
 
-    OASP uses split-step Padé PE for broadband/time-domain propagation.
-    Generates transfer functions for postprocessing with PP module.
+    OASP computes broadband transfer functions via wavenumber
+    integration (range-independent), for postprocessing with the PP
+    module or uacpy's time-series synthesis.
 
     Parameters
     ----------
@@ -1245,7 +1260,7 @@ def write_oasr_input(
             f.write("0 30 12 5\n")  # Reflection loss 0-30 dB
 
         # Block VIII: Loss contour plots (if option C)
-        if 'C' in options or 'c' in options:
+        if _oases_option_chars(options) & {'C', 'c'}:
             # ALEF ARIG ALEN AINC
             # FRLO FRUP OCLN NTKM
             # ZMIN ZMAX ZINC
@@ -1255,7 +1270,7 @@ def write_oasr_input(
             f.write("0 20 2\n")  # Contour levels 0-20 dB in 2 dB increments
 
         # Block IX: SVP axes (if option Z)
-        if 'Z' in options or 'z' in options:
+        if _oases_option_chars(options) & {'Z', 'z'}:
             # VLEF VRIG VLEN VINC
             # DVUP DVLO DVLN DVIN
             c_min = min(c_water, c_p) * 0.95

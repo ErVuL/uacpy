@@ -59,8 +59,6 @@ from uacpy.core.results import Result, Modes, Field
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
-    DEFAULT_BROADBAND_N_FREQS,
-    DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
     C_LOW_FACTOR_KRAKEN,
 )
 import shutil
@@ -1204,8 +1202,17 @@ class KrakenField(_KrakenBase):
             UserWarning, stacklevel=2,
         )
         compute_depths = depths[keep] if keep.any() else np.array([0.5 * env.depth])
+        # 'line' receivers pair depths[i] with ranges[i]; dropping a depth
+        # must drop its paired range or the Receiver ctor rejects the
+        # length mismatch.
+        if receiver.receiver_type == 'line' and keep.any():
+            compute_ranges = np.atleast_1d(
+                np.asarray(receiver.ranges, dtype=float)
+            )[keep]
+        else:
+            compute_ranges = receiver.ranges
         compute_receiver = Receiver(
-            depths=compute_depths, ranges=receiver.ranges,
+            depths=compute_depths, ranges=compute_ranges,
             receiver_type=receiver.receiver_type,
         )
         return compute_receiver, keep
@@ -1531,15 +1538,7 @@ class KrakenField(_KrakenBase):
             pressure. Trailing-frequency convention matches
             Bellhop/RAM/Scooter broadband outputs.
         """
-        fc = float(source.frequencies[0])
-        if frequencies is None:
-            half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
-            frequencies = np.linspace(
-                max(1.0, fc * (1.0 - half_bw)),
-                fc * (1.0 + half_bw),
-                DEFAULT_BROADBAND_N_FREQS,
-            )
-        frequencies = np.asarray(frequencies, dtype=float)
+        frequencies = self._resolve_broadband_frequencies(source, frequencies)
 
         self._log(f"Broadband: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")

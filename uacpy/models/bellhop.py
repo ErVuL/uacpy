@@ -997,6 +997,7 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run Bellhop using BOUNCE-generated reflection coefficients.
@@ -1064,6 +1065,7 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
+                output_duration=output_duration,
             )
 
             # Strip the about-to-be-invalid file paths (work dir is wiped
@@ -1224,10 +1226,20 @@ class Bellhop(PropagationModel):
 
             self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
-            # Lock the time window using the first cell so all traces share
-            # a clock; reuse it for every subsequent cell via ``t_start``.
-            rts0, t_vec = delayandsum(
-                rcv_arrivals=arrivals_by_rcv[0][0][0],
+            # Lock the time window from the first cell *with* arrivals so
+            # all traces share a clock; an arrival-less cell would let
+            # delayandsum fall back to its 0.1 s stub and truncate every
+            # trace in the grid.
+            lock_arrivals = arrivals_by_rcv[0][0][0]
+            for cell in (
+                arrivals_by_rcv[0][ird][irr]
+                for ird in range(nrd) for irr in range(nrr)
+            ):
+                if int(cell.get('n_arrivals', 0)) > 0:
+                    lock_arrivals = cell
+                    break
+            _, t_vec = delayandsum(
+                rcv_arrivals=lock_arrivals,
                 source_timeseries=source_waveform,
                 sample_rate=sample_rate,
                 fc=fc,
@@ -1236,14 +1248,11 @@ class Bellhop(PropagationModel):
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
-            n_t = len(rts0)
+            n_t = len(t_vec)
 
             data = np.zeros((nrd, nrr, n_t), dtype=float)
-            data[0, 0, :] = rts0
             for ird in range(nrd):
                 for irr in range(nrr):
-                    if ird == 0 and irr == 0:
-                        continue
                     rts, _ = delayandsum(
                         rcv_arrivals=arrivals_by_rcv[0][ird][irr],
                         source_timeseries=source_waveform,
@@ -1272,13 +1281,10 @@ class Bellhop(PropagationModel):
             )
 
         # ── Path B: frequency-domain transfer function ──
-        if frequencies is None:
-            half_bw = 0.5 * self.bandwidth_factor
-            f_min = max(1.0, fc * (1.0 - half_bw))
-            f_max = fc * (1.0 + half_bw)
-            frequencies = np.linspace(f_min, f_max, self.n_freqs)
-
-        frequencies = np.asarray(frequencies, dtype=float)
+        frequencies = self._resolve_broadband_frequencies(
+            source, frequencies,
+            n_freqs=self.n_freqs, bandwidth_factor=self.bandwidth_factor,
+        )
         n_freq = len(frequencies)
 
         # Build H(d, r, f) for each (receiver_depth, receiver_range).
@@ -1287,9 +1293,7 @@ class Bellhop(PropagationModel):
         for ird in range(nrd):
             for irr in range(nrr):
                 rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, irr, :] = self._arrivals_to_tf(
-                    rcv_arr, frequencies, fc
-                )
+                H[ird, irr, :] = self._arrivals_to_tf(rcv_arr, frequencies)
 
         self._log(f"Built transfer function "
                   f"({nrd} depths x {n_freq} freqs x {nrr} ranges)")
@@ -1318,7 +1322,6 @@ class Bellhop(PropagationModel):
     def _arrivals_to_tf(
         rcv_arrivals: dict,
         frequencies: np.ndarray,
-        fc: float,
     ) -> np.ndarray:
         """
         Build frequency-domain transfer function from per-receiver arrivals.
@@ -1341,8 +1344,6 @@ class Bellhop(PropagationModel):
             delays_imag, n_arrivals.
         frequencies : ndarray
             Frequency vector in Hz.
-        fc : float
-            Center frequency in Hz (used for attenuation scaling).
 
         Returns
         -------

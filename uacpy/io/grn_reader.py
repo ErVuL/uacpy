@@ -415,7 +415,11 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    G_freq = np.fft.fft(G, axis=0) * dt              # scale to spectral density
+    # Steady-tone amplitude estimator 2·X_k/Σwin — the same one
+    # rts_to_pressure applies to the 'R'/'D' output modes, so both
+    # SPARC output paths agree on absolute |p|.
+    win = np.hanning(nt)
+    G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
     if frequency > nyquist:
@@ -425,11 +429,7 @@ def sparc_snapshot_to_field(
             "shortening t_max."
         )
     f_idx = int(np.argmin(np.abs(fft_freqs - frequency)))
-    # One-sided spectrum from a real time series — multiply by 2 to
-    # recover full amplitude (matches rts_to_pressure at
-    # oalib_reader.py:1331). The DC bin is the only one that should
-    # not be doubled, but f_idx > 0 for any physical source frequency.
-    G_at_f0 = 2.0 * G_freq[f_idx, :, :]              # (nrd, nk)
+    G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk)
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)
@@ -443,6 +443,11 @@ def sparc_snapshot_to_field(
         G_at_f0, k, ranges,
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
+    # Align with sparc.exe's native 'R'-mode range synthesis
+    # (sparc.f90 EXTRACT: √2·Δk·√k·e^{i(−kr+π/4)}/√r) — the
+    # fieldsco-style Hankel above carries 1/√(2πr) and the Scooter −1
+    # prefactor instead, a constant factor −√(4π) between the two.
+    p_out = p_out * (-np.sqrt(4.0 * np.pi))
 
     return Field(
         data=p_out,
@@ -485,7 +490,7 @@ def grn_to_transfer_function(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex64)
+    pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex128)
     for ifreq in range(nfreq):
         pressure[:, :, ifreq] = _grn_pressure_slice(
             grn_data, ranges, ifreq=ifreq, isd=source_depth_idx,

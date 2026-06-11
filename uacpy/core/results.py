@@ -862,24 +862,33 @@ class Field(Result):
                 slicers.append(slice(None))
                 new_coords[name] = self.coords[name]
         new_data = self.data[tuple(slicers)]
-        # Pinning the frequency axis narrows the identity to that single
-        # frequency, so f0 / n_frequencies / repr reflect the slice.
+        # Pinning an identity-bearing axis narrows the identity to the
+        # pinned value, so f0 / n_frequencies / repr reflect the slice.
         new_frequencies = (
             np.array([new_pinned['frequency']], dtype=float)
             if 'frequency' in idx_map else self.frequencies
         )
+        new_source_depths = (
+            np.array([new_pinned['source_depth']], dtype=float)
+            if 'source_depth' in idx_map else self.source_depths
+        )
         if new_coords:
             id_kwargs = self._id_kwargs()
             id_kwargs['frequencies'] = new_frequencies
+            id_kwargs['source_depths'] = new_source_depths
             return Field(
                 data=new_data,
                 coords=new_coords,
                 pinned=new_pinned,
                 **id_kwargs,
             )
-        return self._spawn_scalar(new_data, new_pinned, new_frequencies)
+        return self._spawn_scalar(
+            new_data, new_pinned, new_frequencies, new_source_depths,
+        )
 
-    def _spawn_scalar(self, new_data, new_pinned, frequencies=None) -> "Field":
+    def _spawn_scalar(
+        self, new_data, new_pinned, frequencies=None, source_depths=None,
+    ) -> "Field":
         # Scalar Field: data is 0-D, coords empty. Re-enter via __init__
         # by re-adding a phantom singleton coord, then immediately
         # dropping it — simpler: bypass the dict size check by allowing
@@ -890,7 +899,10 @@ class Field(Result):
             f,
             model=self.model,
             backend=self.backend,
-            source_depths=self.source_depths,
+            source_depths=(
+                source_depths if source_depths is not None
+                else self.source_depths
+            ),
             frequencies=frequencies,
             phase_reference=self.phase_reference,
             metadata=dict(self.metadata),
@@ -1083,7 +1095,12 @@ class Field(Result):
         window: str = 'hann',
     ) -> "Field":
         """Extract steady-state complex pressure at one frequency from a
-        time-domain Field. Requires ``coords == {'depth', 'range', 'time'}``."""
+        time-domain Field. Requires ``coords == {'depth', 'range', 'time'}``.
+
+        The ``2·X/Σwin`` tone estimator assumes a non-DC, non-Nyquist
+        bin; at exactly 0 Hz or the Nyquist frequency the doubling
+        overestimates the amplitude by 2×.
+        """
         if list(self.coords) != ['depth', 'range', 'time']:
             raise ConfigurationError(
                 "Field.extract_tone: requires canonical "
@@ -1575,6 +1592,17 @@ class Rays(Result):
                            at least one bottom bounce; ``top=(0, 1)``
                            keeps 0–1 surface bounces.
         """
+        if self.rays and not any(
+            'n_top_bounces' in r or 'n_bot_bounces' in r for r in self.rays
+        ):
+            import warnings
+            warnings.warn(
+                "Rays.filter_by_bounces: rays carry no bounce counts "
+                "(binary .ray files don't store them) — every ray "
+                "classifies as 'direct'. Re-run with the ASCII ray "
+                "format to filter by bounces.",
+                UserWarning, stacklevel=2,
+            )
         pred = _bounce_predicate(kind, top, bot)
         return self.filter(
             lambda r: pred(
@@ -1589,6 +1617,15 @@ class Rays(Result):
         max_deg: Optional[float] = None,
     ) -> 'Rays':
         """Keep rays whose launch angle ``alpha`` is within ``[min_deg, max_deg]``."""
+        if self.rays and not any('alpha' in r for r in self.rays):
+            import warnings
+            warnings.warn(
+                "Rays.filter_by_launch_angle: rays carry no launch "
+                "angles (binary .ray files don't store them) — the "
+                "filter drops every ray. Re-run with the ASCII ray "
+                "format to filter by angle.",
+                UserWarning, stacklevel=2,
+            )
         def pred(ray):
             a = ray.get('alpha')
             if a is None:
@@ -2383,7 +2420,7 @@ class ReflectionCoefficient(Result):
 
         Either kwarg picks the nearest grid sample. ``frequency=`` is
         valid only for broadband (2-D) reflection coefficients; passing
-        it on a narrowband instance raises ``ValueError``.
+        it on a narrowband instance raises ``ConfigurationError``.
         """
         if frequency is not None and not self.is_broadband:
             raise ConfigurationError(
@@ -2442,6 +2479,14 @@ def _ifft_to_trace(
     sample_rate: Optional[float] = None,
 ) -> "Field":
     """IFFT one (depth, range) cell of a broadband Field → time-domain trace Field.
+
+    Evaluates the Fourier synthesis ``p(t) = 2·Re Σ H(f_k)·S(f_k)·
+    e^{2πi f_k t}·df`` — a Riemann sum of the continuous inverse
+    transform, so the amplitude is independent of ``nfft`` and of the
+    bin grid. ``source_spectrum`` must therefore be the *continuous*
+    source spectrum sampled at the Field frequencies (a raw DFT times
+    the source sampling interval); ``None`` synthesizes the
+    band-limited impulse response.
 
     Places each model frequency at bin ``round(f/df)`` (with df capped at
     1 Hz for a ≥ 1-second window); when ``df`` is finer than the data
@@ -2555,7 +2600,8 @@ def _ifft_to_trace(
         valid = (bin_indices >= 0) & (bin_indices < nfft)
         padded[bin_indices[valid]] = spectrum[valid]
 
-    result = 2.0 * np.real(np.fft.ifft(padded))
+    # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
+    result = 2.0 * np.real(np.fft.ifft(padded)) * (nfft * df)
     time = t_start + np.arange(nfft) * dt
 
     return Field(
@@ -2583,9 +2629,11 @@ def _synthesize_time_series(
     """Convolve every grid cell of a broadband Field with a source waveform.
 
     Output: a time-domain Field with ``coords={'depth', 'range', 'time'}``.
-    ``nfft`` is sized so the IFFT sample rate equals ``sample_rate``
-    (rounded up to a power of two), so the returned trace is on the same
-    sampling grid as the source pulse.
+    ``nfft`` is sized so the output sample rate ``1/dt = nfft·df`` is at
+    least ``sample_rate`` (rounded up to a power of two, so up to 2×
+    finer); read the actual grid from ``coords['time']``. Amplitude is
+    grid-independent: a flat ``H ≡ 1`` reproduces the (band-limited)
+    source waveform.
     """
     wf = np.asarray(source_waveform, dtype=float).ravel()
     n_src = len(wf)
@@ -2619,7 +2667,8 @@ def _synthesize_time_series(
                 UserWarning, stacklevel=3,
             )
 
-    src_fft = np.fft.rfft(wf)
+    # ×dt_src: raw DFT → continuous spectrum S(f), the unit _ifft_to_trace expects
+    src_fft = np.fft.rfft(wf) / float(sample_rate)
     src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)
 
     from scipy.interpolate import interp1d

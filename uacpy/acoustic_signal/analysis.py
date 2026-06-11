@@ -59,7 +59,14 @@ class PPSD:
         self.welch_params.update(kwargs)
 
     def compute(self, data, fs):
-        """Compute PSD PDF from 1D, list, or 2D signals."""
+        """Compute PSD PDF from 1D, list, or 2D signals.
+
+        2-D input is interpreted with the *longer* axis as time: an
+        ``(n_signals, n_samples)`` array with more samples than signals
+        iterates rows, otherwise columns. For arrays where that
+        heuristic is wrong (more channels than samples), pass an
+        explicit list of 1-D signals instead.
+        """
         # Normalize input
         if isinstance(data, list):
             signals = data
@@ -128,7 +135,7 @@ class PPSD:
 
         self.binwidth_dB = self.ddB
         self.frequencies = freqs
-        self.levels = 10 ** (levels/10) * self.ref**2
+        self.levels = levels          # dB bin edges, same unit compute() returns
         self.pdf = pdf_matrix
 
         return freqs, levels, pdf_matrix
@@ -143,7 +150,7 @@ class PPSD:
 
         pcm = ax.pcolormesh(
             self.frequencies,
-            10 * np.log10(self.levels[:-1]/self.ref**2) + align_ybins,
+            self.levels[:-1] + align_ybins,
             self.pdf,
             cmap="jet",
             shading="auto",
@@ -212,24 +219,25 @@ class SEL:
 
     def _adjust_fmin_fmax(self, fs):
         """
-        Adjust minimum and maximum frequencies to match band boundaries.
+        Snap the configured band edges to band boundaries for this ``fs``.
 
-        Parameters
-        ----------
-        fs : float
-            Sampling frequency in Hz.
+        Returns the adjusted ``(fmin, fmax)`` without mutating the
+        configured ``self.fmin`` / ``self.fmax``, so ``compute()`` calls
+        with different sampling rates don't drift the configured band.
         """
+        fmin, fmax = self.fmin, self.fmax
         if self.band_type == "octave":
-            self.fmin = 2 ** np.floor(math.log2(self.fmin))
-            self.fmax = 2 ** np.ceil(math.log2(self.fmax))
-            if self.fmax > fs / 2:
-                self.fmax = 2 ** np.floor(math.log2(self.fmax))
+            fmin = 2 ** np.floor(math.log2(fmin))
+            fmax = 2 ** np.ceil(math.log2(fmax))
+            if fmax > fs / 2:
+                fmax = 2 ** np.floor(math.log2(fmax))
         elif self.band_type == "third_octave":
             base = math.pow(2, 1 / 6)
-            self.fmin = base ** np.floor(math.log(self.fmin, base))
-            self.fmax = base ** np.ceil(math.log(self.fmax, base))
-            if self.fmax > fs / 2:
-                self.fmax = base ** np.floor(math.log(self.fmax, base))
+            fmin = base ** np.floor(math.log(fmin, base))
+            fmax = base ** np.ceil(math.log(fmax, base))
+            if fmax > fs / 2:
+                fmax = base ** np.floor(math.log(fmax, base))
+        return fmin, fmax
 
     def _generate_frequency_bands(self, fs):
         """
@@ -251,32 +259,33 @@ class SEL:
                 f"got fmin={self.fmin}, fmax={self.fmax}"
             )
 
+        fmin, fmax = self.fmin, self.fmax
         if self.band_type in ["octave", "third_octave"]:
-            self._adjust_fmin_fmax(fs)
+            fmin, fmax = self._adjust_fmin_fmax(fs)
 
         bands = []
 
         if self.band_type == "octave":
             base = math.sqrt(2)
-            f_center = self.fmin
-            while f_center < self.fmax:
+            f_center = fmin
+            while f_center < fmax:
                 f_low = f_center / base
                 f_high = f_center * base
                 bands.append((f_low, f_center, f_high))
                 f_center *= 2
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         elif self.band_type == "third_octave":
             base = math.pow(2, 1 / 6)
-            f_center = self.fmin
-            while f_center < self.fmax:
+            f_center = fmin
+            while f_center < fmax:
                 f_low = f_center / base
                 f_high = f_center * base
                 bands.append((f_low, f_center, f_high))
                 f_center *= math.pow(2, 1 / 3)
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         elif self.band_type == "linear":
             if self.num_bands <= 0:
@@ -284,15 +293,15 @@ class SEL:
                     f"SEL._generate_frequency_bands: num_bands must be a "
                     f"positive integer for linear bands; got {self.num_bands}"
                 )
-            band_width = (self.fmax - self.fmin) / self.num_bands
-            f_low = self.fmin
+            band_width = (fmax - fmin) / self.num_bands
+            f_low = fmin
             for _ in range(self.num_bands):
                 f_high = f_low + band_width
                 f_center = (f_low + f_high) / 2
                 bands.append((f_low, f_center, f_high))
                 f_low = f_high
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         else:
             raise ValueError(

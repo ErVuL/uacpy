@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def _entry(
     *,
@@ -95,12 +97,12 @@ def list_materials() -> List[str]:
 def get_material(name: str) -> Dict:
     """Return a copy of the preset dict for ``name`` (case-insensitive).
 
-    Raises :class:`KeyError` listing the available names if ``name`` is
-    not in the catalog.
+    Raises :class:`ConfigurationError` listing the available names if
+    ``name`` is not in the catalog.
     """
     key = name.strip().lower()
     if key not in MATERIALS:
-        raise KeyError(
+        raise ConfigurationError(
             f"Unknown material preset {name!r}. "
             f"Available: {list_materials()}"
         )

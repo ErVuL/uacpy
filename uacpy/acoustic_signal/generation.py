@@ -355,7 +355,10 @@ def ricker_wavelet(time: np.ndarray, F: float) -> np.ndarray:
     Generate a Ricker wavelet (Mexican hat wavelet).
 
     The Ricker wavelet is the second derivative of a Gaussian and is
-    commonly used in seismic and acoustic applications.
+    commonly used in seismic and acoustic applications. Uses the AT
+    ``Ricker.m`` centring ``u = 2πFt − 8``; SPARC's internal Ricker
+    (``cans.f90``, documented in ``models/sparc.py``) centres at
+    ``ωT − 5`` — the two "Ricker" pulses are offset in time.
 
     Parameters
     ----------
@@ -917,142 +920,6 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     return nts
 
 
-if __name__ == "__main__":
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    print("Testing waveform generation functions")
-    print("=" * 70)
-
-    # Test 1: CANS pulses
-    print("\n1. Testing cans() - various pulse types")
-    print("-" * 70)
-
-    t = np.linspace(-0.05, 0.15, 2000)
-    f0 = 100.0  # Hz
-    omega = 2 * np.pi * f0
-
-    pulse_types = ["P", "R", "G", "S", "N"]
-    for ptype in pulse_types:
-        s, title = cans(t, omega, ptype)
-        peak_val = np.max(np.abs(s))
-        peak_idx = np.argmax(np.abs(s))
-        peak_time = t[peak_idx]
-        print(f"  {ptype}: {title:30s} - peak {peak_val:.3f} at t={peak_time:.4f}s")
-
-    # Test 2: Ricker wavelet
-    print("\n2. Testing ricker_wavelet()")
-    print("-" * 70)
-
-    time = np.linspace(0, 0.1, 1000)
-    f_ricker = 50.0
-    s_ricker = ricker_wavelet(time, f_ricker)
-
-    print(f"  Frequency: {f_ricker} Hz")
-    print(f"  Duration: {time[-1]} s")
-    print(f"  Peak amplitude: {np.max(np.abs(s_ricker)):.4f}")
-    print(f"  Peak time: {time[np.argmax(np.abs(s_ricker))]:.4f} s")
-
-    # Test 3: Gaussian pulse
-    print("\n3. Testing gaussian_pulse()")
-    print("-" * 70)
-
-    time_gauss = np.linspace(0, 1, 1000)
-    delay = 0.5
-    duration = 0.05
-    s_gauss = gaussian_pulse(time_gauss, delay, duration)
-
-    print(f"  Delay: {delay} s")
-    print(f"  Duration: {duration} s")
-    print(f"  Peak amplitude: {np.max(s_gauss):.4f}")
-    print(f"  Peak location: {time_gauss[np.argmax(s_gauss)]:.4f} s")
-
-    # Test 4: LFM chirp
-    print("\n4. Testing lfm_chirp()")
-    print("-" * 70)
-
-    fmin, fmax = 100.0, 1000.0
-    T_chirp = 0.5
-    fs = 10000
-    s_lfm, t_lfm = lfm_chirp(fmin, fmax, T_chirp, fs)
-
-    print(f"  Frequency sweep: {fmin} to {fmax} Hz")
-    print(f"  Duration: {T_chirp} s")
-    print(f"  Sample rate: {fs} Hz")
-    print(f"  Samples generated: {len(s_lfm)}")
-
-    # Test 5: Tone burst
-    print("\n5. Testing tone_burst()")
-    print("-" * 70)
-
-    freq_tone = 1000.0
-    n_cycles = 10
-    s_tone, t_tone = tone_burst(freq_tone, n_cycles, 48000, window=True)
-
-    print(f"  Frequency: {freq_tone} Hz")
-    print(f"  Cycles: {n_cycles}")
-    print(f"  Duration: {t_tone[-1]:.4f} s")
-    print(f"  Peak amplitude: {np.max(np.abs(s_tone)):.4f}")
-    print("\n" + "=" * 70)
-    print("Creating visualization...")
-
-    fig, axes = plt.subplots(3, 2, figsize=(12, 10))
-    fig.suptitle("Waveform Generation Examples", fontsize=14, fontweight="bold")
-
-    # Plot 1: Ricker wavelet
-    axes[0, 0].plot(time, s_ricker, "b-", linewidth=1.5)
-    axes[0, 0].set_title("Ricker Wavelet (50 Hz)")
-    axes[0, 0].set_xlabel("Time (s)")
-    axes[0, 0].set_ylabel("Amplitude")
-    axes[0, 0].grid(True, alpha=0.3)
-
-    # Plot 2: Gaussian pulse
-    axes[0, 1].plot(time_gauss, s_gauss, "r-", linewidth=1.5)
-    axes[0, 1].set_title("Gaussian Pulse")
-    axes[0, 1].set_xlabel("Time (s)")
-    axes[0, 1].set_ylabel("Amplitude")
-    axes[0, 1].grid(True, alpha=0.3)
-
-    # Plot 3: Pseudo-Gaussian from cans
-    s_pg, _ = cans(t, omega, "P")
-    axes[1, 0].plot(t, s_pg, "g-", linewidth=1.5)
-    axes[1, 0].set_title("Pseudo-Gaussian (100 Hz)")
-    axes[1, 0].set_xlabel("Time (s)")
-    axes[1, 0].set_ylabel("Amplitude")
-    axes[1, 0].grid(True, alpha=0.3)
-
-    # Plot 4: N-wave
-    s_nwave, _ = cans(t, omega, "N")
-    axes[1, 1].plot(t, s_nwave, "m-", linewidth=1.5)
-    axes[1, 1].set_title("N-Wave (100 Hz)")
-    axes[1, 1].set_xlabel("Time (s)")
-    axes[1, 1].set_ylabel("Amplitude")
-    axes[1, 1].grid(True, alpha=0.3)
-
-    # Plot 5: LFM Chirp
-    axes[2, 0].plot(t_lfm[:1000], s_lfm[:1000], "c-", linewidth=1)
-    axes[2, 0].set_title(f"LFM Chirp ({fmin}-{fmax} Hz)")
-    axes[2, 0].set_xlabel("Time (s)")
-    axes[2, 0].set_ylabel("Amplitude")
-    axes[2, 0].grid(True, alpha=0.3)
-
-    # Plot 6: Tone burst
-    axes[2, 1].plot(t_tone, s_tone, "orange", linewidth=1.5)
-    axes[2, 1].set_title(f"Tone Burst ({freq_tone} Hz, {n_cycles} cycles)")
-    axes[2, 1].set_xlabel("Time (s)")
-    axes[2, 1].set_ylabel("Amplitude")
-    axes[2, 1].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("waveforms_test.png", dpi=100, bbox_inches="tight")
-    print("Saved figure: waveforms_test.png")
-
-    print("\n" + "=" * 70)
-    print("All waveform tests completed successfully!")
-
-
 def add_noise(
     timeseries: np.ndarray,
     sample_rate: float,
@@ -1224,7 +1091,11 @@ def fourier_synthesis(
     Fourier synthesis to make time series from frequency-domain transfer function.
 
     Converts frequency-domain pressure field to time domain using inverse FFT,
-    optionally weighted by a source spectrum.
+    optionally weighted by a source spectrum. Direct translation of AT's
+    ``stack.m`` (raw-DFT scaling, output grid = the input frequency grid)
+    for working with externally produced spectra; model results should use
+    ``Field.synthesize_time_series`` / ``Field.to_time_trace``, which
+    handle bin placement, windowing and grid-independent amplitude.
 
     Parameters
     ----------

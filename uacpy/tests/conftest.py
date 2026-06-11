@@ -62,11 +62,10 @@ def simple_env():
 def parabolic_ssp_env():
     """100-m shallow-water env with a parabolic SSP centred at 50 m.
 
-    Despite its previous name, this is *not* the canonical Munk profile
-    (which carries an exponential ``η - 1 + exp(-η)`` term and channels
-    at ~1300 m in deep water). Used for SSP-shape smoke checks where
-    the only requirement is "a non-flat profile with a minimum
-    somewhere".
+    Not the canonical Munk profile (which carries an exponential
+    ``η - 1 + exp(-η)`` term and channels at ~1300 m in deep water).
+    Used for SSP-shape smoke checks where the only requirement is "a
+    non-flat profile with a minimum somewhere".
     """
     from uacpy.core.environment import SoundSpeedProfile
     depths = np.linspace(0, 100, 21)

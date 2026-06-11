@@ -82,8 +82,10 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
                     nbit[nxt] = bit
                     back[k, nxt] = st
         pm = npm
-    # traceback from the zero state (tail-flushed)
-    state = int(np.argmin(pm))
+    # The K-1 zero flush bits force the encoder to end in state 0, so the
+    # traceback starts there; argmin(pm) could pick a different state on
+    # noisy input and lose the tail constraint.
+    state = 0
     bits = np.zeros(nsteps, dtype=int)
     for k in range(nsteps - 1, -1, -1):
         prev = back[k, state]
@@ -135,20 +137,29 @@ class ConvCode:
             coded = interleave(coded, self.interleave_depth)
         return coded
 
-    def decode(self, coded):
+    def decode(self, coded, info_len=None):
         """Decode (optional deinterleave + Viterbi) back to information bits.
 
-        When the same codec encoded the payload, the decoded stream is truncated
-        to that length — the interleaver's block padding (and any whole-block
-        zeros an outer framing layer appended) is dropped so ``decode(encode(x))``
-        returns exactly ``x``. Across separate transmit/receive codecs the length
-        is unknown, so the full Viterbi output is returned and the caller slices.
+        Parameters
+        ----------
+        info_len : int, optional
+            Number of information bits to return — strips the
+            interleaver's block padding (and any whole-block zeros an
+            outer framing layer appended) so the payload comes back
+            exactly. ``None`` falls back to the length recorded by this
+            codec's most recent :meth:`encode` call (loopback use); a
+            codec that decodes messages it did not just encode must pass
+            ``info_len`` explicitly, otherwise the full Viterbi output
+            is returned (or, worse, the *previous* message's length is
+            applied). Across separate transmit/receive codecs no length
+            is recorded and the caller slices.
         """
         if self.interleave_depth:
             coded = deinterleave(coded, self.interleave_depth)
         bits = viterbi_decode(coded, self.polys, self.K)
-        if self._info_len is not None:
-            bits = bits[: self._info_len]
+        n_keep = info_len if info_len is not None else self._info_len
+        if n_keep is not None:
+            bits = bits[: int(n_keep)]
         return bits
 
 

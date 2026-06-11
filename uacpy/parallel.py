@@ -121,6 +121,13 @@ class ParallelResult:
         try:
             coord = np.array([float(self.labels[i]) for i in keep], dtype=float)
         except (TypeError, ValueError):
+            import warnings
+            warnings.warn(
+                "ParallelResult.stack: job labels are non-numeric; using "
+                "the successful-job indices as the stack coordinate "
+                "instead of the labels.",
+                UserWarning, stacklevel=2,
+            )
             coord = np.array(keep, dtype=float)
         return ResultStack(
             [self.results[i] for i in keep],

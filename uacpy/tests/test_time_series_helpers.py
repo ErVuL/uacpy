@@ -281,3 +281,45 @@ class TestDFTWraparoundWarning:
         wf[: int(0.005 * FS)] = 1.0  # short non-zero burst
         with pytest.warns(UserWarning, match=r"wraps back"):
             tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+
+
+class TestSynthesisAbsoluteAmplitude:
+    """A flat ``H ≡ 1`` must reproduce the source waveform's amplitude,
+    independent of ``nfft`` (Fourier synthesis is a Riemann sum of the
+    continuous inverse transform, not a raw bin-count-scaled IFFT)."""
+
+    @staticmethod
+    def _flat_tf():
+        from uacpy.core.results import Field, PhaseReference
+
+        freqs = np.arange(1.0, 301.0, 1.0)
+        H = np.ones((1, 1, freqs.size), dtype=complex)
+        return Field(
+            data=H,
+            coords={'depth': np.array([50.0]), 'range': np.array([1000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'c0': C_WATER},
+        )
+
+    @pytest.mark.parametrize('nfft', [None, 2048, 4096, 8192])
+    def test_flat_h_reproduces_unit_peak(self, nfft):
+        fs = 2000.0
+        t = np.arange(2000) / fs
+        src = (np.exp(-0.5 * ((t - 0.5) / 0.05) ** 2)
+               * np.cos(2 * np.pi * 100.0 * (t - 0.5)))
+        ts = self._flat_tf().synthesize_time_series(
+            src, fs, window='none', nfft=nfft, t_start=0.0,
+        )
+        peak = float(np.abs(ts.data).max())
+        assert peak == pytest.approx(1.0, rel=0.02)
+
+    def test_impulse_response_grid_independent(self):
+        tf = self._flat_tf()
+        a = tf.to_time_trace(window='none', nfft=4096, t_start=0.0)
+        b = tf.to_time_trace(window='none', nfft=8192, t_start=0.0)
+        assert float(np.abs(a.data).max()) == pytest.approx(
+            float(np.abs(b.data).max()), rel=1e-6,
+        )

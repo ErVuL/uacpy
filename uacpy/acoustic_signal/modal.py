@@ -19,9 +19,6 @@ import numpy as np
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
-# Ideal/Pekeris waveguide value; striation slope dr/dw at fixed phase.
-DEFAULT_WAVEGUIDE_INVARIANT = 1.0
-
 
 def modal_group_velocity(freqs_hz, k_horizontal):
     """Group velocity ``v_g = d(omega)/d(k_r)`` per mode from the dispersion.

@@ -36,6 +36,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
 
+from uacpy.core.constants import NEPER_TO_DB
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -173,15 +174,15 @@ def convert_attenuation_units(
         wavelength = sound_speed / frequency
         alpha_db_m = alpha / wavelength
     elif from_unit == 'Nepers/m':
-        alpha_db_m = alpha * 8.686
+        alpha_db_m = alpha * NEPER_TO_DB
     elif from_unit == 'Q':
         # alphaT = omega / (2 * c * Q)
         alpha_nepers_m = np.pi * frequency / (alpha * sound_speed)
-        alpha_db_m = alpha_nepers_m * 8.686
+        alpha_db_m = alpha_nepers_m * NEPER_TO_DB
     elif from_unit == 'L':
         # alphaT = L * omega / c
         alpha_nepers_m = alpha * 2.0 * np.pi * frequency / sound_speed
-        alpha_db_m = alpha_nepers_m * 8.686
+        alpha_db_m = alpha_nepers_m * NEPER_TO_DB
     else:
         raise ConfigurationError(f"Unknown unit: {from_unit}")
 
@@ -193,12 +194,12 @@ def convert_attenuation_units(
         wavelength = sound_speed / frequency
         result = alpha_db_m * wavelength
     elif to_unit == 'Nepers/m':
-        result = alpha_db_m / 8.686
+        result = alpha_db_m / NEPER_TO_DB
     elif to_unit == 'Q':
-        alpha_nepers_m = alpha_db_m / 8.686
+        alpha_nepers_m = alpha_db_m / NEPER_TO_DB
         result = np.pi * frequency / (alpha_nepers_m * sound_speed)
     elif to_unit == 'L':
-        alpha_nepers_m = alpha_db_m / 8.686
+        alpha_nepers_m = alpha_db_m / NEPER_TO_DB
         result = alpha_nepers_m * sound_speed / (2.0 * np.pi * frequency)
     else:
         raise ConfigurationError(f"Unknown unit: {to_unit}")
@@ -357,7 +358,7 @@ class BiologicalLayer:
             )
         if self.a0 <= 0:
             raise ConfigurationError(
-                f"BiologicalLayer: a0 must be positive (dB/m); got {self.a0}"
+                f"BiologicalLayer: a0 must be positive (dB/km); got {self.a0}"
             )
 
 

@@ -1,10 +1,11 @@
 """
 Professional matplotlib styling for UACPY visualizations.
 
-Styles are applied automatically when ``uacpy.visualization`` is imported
-(see ``visualization/__init__.py``). Callers can re-apply them with
-``apply_professional_style()`` after tweaking their own rcParams, or
-revert to matplotlib defaults with ``matplotlib.rcdefaults()``.
+Styling is opt-in: call ``apply_professional_style()`` explicitly
+(importing ``uacpy.visualization`` does not change rcParams). Note the
+call starts from ``matplotlib.rcdefaults()``, wiping any rcParams you
+set beforehand — apply your own tweaks after, not before. Revert with
+``matplotlib.rcdefaults()``.
 """
 import matplotlib as mpl
 

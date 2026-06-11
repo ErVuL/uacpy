@@ -8,6 +8,7 @@ Covers ``compute_windnoise`` and the ``WenzNoise`` class
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.noise import compute_windnoise, WenzNoise
 
 
@@ -37,8 +38,8 @@ def test_compute_windnoise_scalar_frequency():
 
 
 def test_compute_windnoise_negative_wind_raises():
-    """Negative wind speed raises :class:`ValueError`."""
-    with pytest.raises(ValueError, match="non-negative"):
+    """Negative wind speed raises :class:`ConfigurationError`."""
+    with pytest.raises(ConfigurationError, match="non-negative"):
         compute_windnoise(np.array([100.0]), u=-5, water_depth='deep')
 
 
@@ -144,11 +145,11 @@ def test_wenznoise_repr_contains_params(freqs):
 
 
 def test_wenznoise_rejects_invalid_kwargs(freqs):
-    with pytest.raises(ValueError, match='water_depth'):
+    with pytest.raises(ConfigurationError, match='water_depth'):
         WenzNoise(freqs, wind_speed=10, water_depth='abyssal')
-    with pytest.raises(ValueError, match='shipping_level'):
+    with pytest.raises(ConfigurationError, match='shipping_level'):
         WenzNoise(freqs, wind_speed=10, shipping_level='extreme')
-    with pytest.raises(ValueError, match='rain_rate'):
+    with pytest.raises(ConfigurationError, match='rain_rate'):
         WenzNoise(freqs, wind_speed=10, rain_rate='monsoon')
 
 

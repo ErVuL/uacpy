@@ -271,10 +271,11 @@ class Bounce(PropagationModel):
         Run BOUNCE reflection coefficient computation.
 
         ``.brc`` / ``.irc`` files are written into the model's
-        ``work_dir`` (constructor kwarg). Bounce defaults
-        ``cleanup=False`` so they outlive the call and can be consumed
-        by Bellhop / Scooter / Kraken / KrakenC. Pass
-        ``Bounce(work_dir='./bounce_out')`` to pin the location.
+        ``work_dir`` (constructor kwarg). Pin the location with
+        ``Bounce(work_dir='./bounce_out')`` — a pinned work dir defaults
+        ``cleanup=False`` so the files outlive the call and can be
+        consumed by Bellhop / Scooter / Kraken / KrakenC; an unpinned
+        temp work dir is wiped after ``run()``.
 
         Parameters
         ----------

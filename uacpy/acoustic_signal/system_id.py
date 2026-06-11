@@ -73,8 +73,6 @@ class FRF:
         estimator=None,
         nperseg=None,
         noverlap=None,
-        wavelet=None,
-        scales=None,
         m_max=4096,
         stop_count=None,
     ):
@@ -103,10 +101,6 @@ class FRF:
             Segment length for Welch.
         noverlap : int, optional
             Overlap for Welch.
-        wavelet : optional
-            Wavelet parameter (reserved).
-        scales : optional
-            Scales parameter (reserved).
         m_max : int
             Maximum impulse response length.
         stop_count : int, optional
@@ -128,8 +122,6 @@ class FRF:
             self.params["noverlap"] = noverlap
         if estimator is not None:
             self.estimator = estimator
-        if scales is not None:
-            self.scales = scales
         if m is not None:
             self.m = m
         if stop_count is None:
@@ -192,8 +184,9 @@ class FRF:
             )
         if self.method == "ls_fir":
             self.g = g_i  # For 2D inputs, uses last channel's impulse response
-            self.m = int(
-                np.mean(m_list) if all(mi is not None for mi in m_list) else None
+            self.m = (
+                int(np.mean(m_list))
+                if all(mi is not None for mi in m_list) else None
             )
 
         return freqs, tf
@@ -436,13 +429,16 @@ class FRF:
                         continue  # Avoid log issues
 
                     if m == "AIC":  # AICF
-                        # AIC: score = np.log(sse) + 2*m_candidate/N
+                        # Finite-sample AIC variant: log(sse) scaled by
+                        # (1 + m/(N-m))/(1 - m/(N-m)), not the textbook
+                        # log(sse) + 2m/N (they agree as N >> m).
                         score = np.log(sse) + (1 + m_candidate / (N - m_candidate)) / (
                             1 - m_candidate / (N - m_candidate)
                         )
 
                     elif m == "FPE":  # FPEF
-                        # FPE: score = sse * (1 + m_candidate/N) / (1 - m_candidate/N)
+                        # Finite-sample FPE: sse·(1 + m/(N-m))/(1 - m/(N-m))
+                        # (textbook uses m/N; same N >> m limit).
                         score = (
                             sse
                             * (1 + m_candidate / (N - m_candidate))
@@ -664,7 +660,7 @@ class FRF:
 
         if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
             raise RuntimeError(
-                "FRF.plot_impulse_info: compute() must be called before plotting"
+                "FRF.plot: compute() must be called before plotting"
             )
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)

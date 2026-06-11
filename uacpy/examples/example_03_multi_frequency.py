@@ -4,10 +4,10 @@ EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
-    Comprehensive multi-frequency propagation analysis across octave bands.
-    Test models across wide frequency range to understand spectral behavior.
-
-COMPLEXITY LEVEL: ⭐⭐⭐⭐ (4/5) - Advanced (Comprehensive)
+    Run five propagation models on one thermocline environment at a single
+    100 Hz reference frequency and compare their TL fields side by side.
+    The closing notes explain how to extend the script into a true
+    multi-frequency sweep (25 / 50 / 100 / 200 Hz).
 
 ENVIRONMENT:
     - Medium depth water (200m)
@@ -19,35 +19,21 @@ ENVIRONMENT:
     - Flat bathymetry
 
 SOURCE:
-    - Shallow depth (15m, above thermocline)
-    - Multiple frequencies: 25, 50, 100, 200 Hz
-    - Point source
+    - Shallow depth (15m, above thermocline → surface-duct trapping)
+    - 100 Hz reference frequency
 
 MODELS TESTED:
     ✓ Bellhop      (ray tracing)
     ✓ RAM          (parabolic equation)
     ✓ KrakenField  (normal modes)
-    ✓ Scooter      (wavenumber integration)    ✓ OAST         (wavenumber integration)
+    ✓ Scooter      (wavenumber integration)
+    ✓ OAST         (wavenumber integration)
 
-FEATURES DEMONSTRATED:
-    - Broadband propagation characteristics
-    - Frequency-dependent thermocline interaction
-    - Modal cutoff frequencies
-    - Frequency-dependent bottom loss
-    - Wavelength effects on interference
-    - Model performance across frequency bands
-    - Surface duct trapping vs frequency
-
-EXPECTED BEHAVIOR:
+WHAT TO EXPECT IF YOU RERUN AT OTHER FREQUENCIES:
     - Low freq (25 Hz): Deep penetration, minimal duct trapping
     - Mid freq (50-100 Hz): Moderate ducting, clear interference
     - High freq (200 Hz): Strong surface duct, fine interference
-    - Bottom loss increases with frequency
-    - More modes at higher frequencies
-
-NOTE:
-    This example runs at a single reference frequency. For true multi-frequency
-    analysis, run separately at each frequency and compare results.
+    - Bottom loss increases with frequency; more modes at higher frequency
 
 ═══════════════════════════════════════════════════════════════════════════════
 """

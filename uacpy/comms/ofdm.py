@@ -102,11 +102,14 @@ def schmidl_cox_sync(rx, n_subcarriers, cp_len):
     n = r.size - 2 * L
     if n <= 0:
         return None, 0.0
-    # P(d) = sum conj(r[d+m]) r[d+m+L];  R(d) = sum |r[d+m+L]|^2
+    # P(d) = sum conj(r[d+m]) r[d+m+L];  R(d) = sum |r[d+m+L]|^2 —
+    # both are length-L sliding sums, O(n) via cumulative sums.
     a = np.conj(r[:-L]) * r[L:]
-    p = np.array([a[d:d + L].sum() for d in range(n)])
+    ca = np.concatenate(([0.0 + 0.0j], np.cumsum(a)))
+    p = ca[L:L + n] - ca[:n]
     energy = np.abs(r[L:]) ** 2
-    rr = np.array([energy[d:d + L].sum() for d in range(n)])
+    ce = np.concatenate(([0.0], np.cumsum(energy)))
+    rr = ce[L:L + n] - ce[:n]
     metric = np.abs(p) ** 2 / (rr ** 2 + 1e-12)
     metric[rr < 0.25 * rr.max()] = 0.0      # energy gate: ignore silent regions
     peak = int(np.argmax(metric))

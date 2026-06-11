@@ -5,6 +5,7 @@ Centralizes magic numbers, boundary/SSP codes, and the string/enum
 conversions used by writers and model wrappers.
 """
 
+import math
 from enum import Enum
 
 
@@ -47,6 +48,9 @@ REFERENCE_PRESSURE_AIR = 2e-5    # Pa (20 µPa)
 # wide bandwidths because arrivals are computed at a single fc.
 DEFAULT_BROADBAND_N_FREQS = 128
 DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 0.5
+
+# Exact nepers → dB conversion (20/ln10 ≈ 8.6858896).
+NEPER_TO_DB = 20.0 / math.log(10.0)
 
 
 class BoundaryType(Enum):

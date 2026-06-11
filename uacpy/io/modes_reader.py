@@ -535,7 +535,6 @@ def read_modes(
         Mode file path, with or without extension. Supported extensions:
         - '.mod': Binary format (default if no extension)
         - '.moa': ASCII format
-        - '.mod.mat': MATLAB format (loads directly)
     freq : float, optional
         Frequency in Hz to select from multi-frequency files (default: 0)
     modes : int, list, or ndarray, optional
@@ -580,12 +579,6 @@ def read_modes(
 
     if not ext:
         ext = ".mod"  # Default extension
-    elif ext == ".mat":
-        # Handle .mod.mat files
-        fileroot2, ext2 = os.path.splitext(fileroot)
-        if ext2 == ".mod":
-            fileroot = fileroot2
-            ext = ".mod.mat"
 
     filename = fileroot + ext
     if ext == ".mod":
@@ -593,18 +586,6 @@ def read_modes(
             Modes = read_modes_bin(filename, freq)
         else:
             Modes = read_modes_bin(filename, freq, modes)
-
-    elif ext == ".mod.mat":
-        # MATLAB format - load directly
-        import scipy.io
-
-        mat_data = scipy.io.loadmat(filename)
-        Modes = {}
-        # Extract variables from MATLAB struct
-        # (This is a simplified version; actual implementation may need adjustment)
-        for key in mat_data.keys():
-            if not key.startswith("__"):
-                Modes[key] = mat_data[key]
 
     elif ext == ".moa":
         if modes is None:

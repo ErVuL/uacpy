@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def echo_level(source_level, tl, target_strength):
     """Active echo level at the receiver: ``SL - 2*TL + TS`` (dB)."""
@@ -66,7 +68,7 @@ def active_signal_excess(
         reverb-limited: ``SE = SL - 2*TL + TS - RL - DT``
     """
     if noise_level is None and reverberation_level is None:
-        raise ValueError(
+        raise ConfigurationError(
             "active_signal_excess: provide noise_level and/or reverberation_level"
         )
     el = echo_level(source_level, tl, target_strength)
@@ -114,7 +116,7 @@ def detection_range(ranges_m, signal_excess_db):
     r = np.asarray(ranges_m, dtype=float)
     se = np.asarray(signal_excess_db, dtype=float)
     if r.shape != se.shape:
-        raise ValueError("detection_range: ranges and signal_excess shape mismatch")
+        raise ConfigurationError("detection_range: ranges and signal_excess shape mismatch")
     positive = se >= 0.0
     if positive.all():
         return np.inf

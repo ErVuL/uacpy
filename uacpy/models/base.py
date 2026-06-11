@@ -451,6 +451,42 @@ class PropagationModel(ABC):
         pad = np.zeros(n_needed - wf.size, dtype=wf.dtype)
         return np.concatenate([wf, pad])
 
+    def _resolve_broadband_frequencies(
+        self,
+        source: 'Source',
+        frequencies,
+        *,
+        n_freqs: Optional[int] = None,
+        bandwidth_factor: Optional[float] = None,
+    ) -> np.ndarray:
+        """Resolve the BROADBAND frequency grid.
+
+        Explicit ``frequencies=`` wins. Otherwise a multi-element
+        ``source.frequencies`` *is* the band and is used as-is. A single
+        centre frequency expands to ``n_freqs`` bins spanning
+        ``fc·(1 ± bandwidth_factor/2)``.
+        """
+        from uacpy.core.constants import (
+            DEFAULT_BROADBAND_N_FREQS,
+            DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+        )
+        if frequencies is not None:
+            return np.asarray(frequencies, dtype=float)
+        src_f = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if src_f.size > 1:
+            return src_f
+        if n_freqs is None:
+            n_freqs = DEFAULT_BROADBAND_N_FREQS
+        if bandwidth_factor is None:
+            bandwidth_factor = DEFAULT_BROADBAND_BANDWIDTH_FACTOR
+        fc = float(src_f[0])
+        half_bw = 0.5 * float(bandwidth_factor)
+        return np.linspace(
+            max(1.0, fc * (1.0 - half_bw)),
+            fc * (1.0 + half_bw),
+            int(n_freqs),
+        )
+
     def _resolve_time_series_frequencies(
         self,
         run_mode: 'RunMode',
@@ -623,10 +659,10 @@ class PropagationModel(ABC):
             )
 
         if np.any(source.depths < 0):
-            raise ConfigurationError("Source depths must be positive")
+            raise ConfigurationError("Source depths must be non-negative")
 
         if receiver.depth_min < 0:
-            raise ConfigurationError("Receiver depths must be positive")
+            raise ConfigurationError("Receiver depths must be non-negative")
 
         self._warn_receiver_below_resolvable(env, receiver, resolvable_depth)
         self._check_per_range_receiver_depth(env, receiver)
@@ -1550,6 +1586,9 @@ class PropagationModel(ABC):
         """
         max_receiver_depth = receiver.depths.max()
         if max_receiver_depth > media_depth - margin:
+            # When every depth exceeds the ceiling, np.clip(lo > hi)
+            # collapses the whole axis onto media_depth - margin (one
+            # unique value for grid receivers) — intended.
             clipped = np.clip(
                 receiver.depths, receiver.depths.min(), media_depth - margin,
             )

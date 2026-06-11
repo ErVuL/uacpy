@@ -180,6 +180,15 @@ class JanusPacket:
         b = np.asarray(bits64, dtype=int).ravel()
         if b.size != 64:
             raise ConfigurationError("JanusPacket.from_bits: need exactly 64 bits")
+        version = _bits_int(b[0:4])
+        if version != 3:
+            import warnings
+            warnings.warn(
+                f"JanusPacket.from_bits: packet version {version} != 3 "
+                f"(the only version this codec implements); field layout "
+                f"may not match.",
+                UserWarning, stacklevel=2,
+            )
         crc_ok = np.array_equal(_crc8(b[:56]), b[56:64])
         pkt = cls(
             class_id=_bits_int(b[8:16]),
@@ -516,7 +525,9 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
     ``sample_rate`` works. The preamble is then located by the CMRE Goertzel-bank
     + GO-CFAR detector (unless ``start`` is given), wideband Doppler is removed by
     resampling to the scale estimated from the preamble tones (disable with
-    ``doppler_max_speed=0``), and the 144 data chips are detected non-coherently
+    ``doppler_max_speed=0``). Passing ``start=`` skips the detector *and*
+    the Doppler compensation — use it only for clean, Doppler-free
+    recordings. The 144 data chips are detected non-coherently
     and decoded. Parse the 64 bits with :meth:`JanusPacket.from_bits`, or use
     :func:`receive`.
     """

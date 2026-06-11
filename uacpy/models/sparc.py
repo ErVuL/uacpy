@@ -141,7 +141,7 @@ class SPARC(PropagationModel):
         arrivals downstream, treat the Ricker peak as offset by
         ``+5/(2π·F)`` from the source pulse origin.
     n_t_out : int, optional
-        Number of output time samples. Default ``501``.
+        Number of output time samples. Default ``512``.
     t_max : float, optional
         Maximum simulated time (s). ``None`` ⇒ ``2.5 ×`` travel time.
     t_start : float, optional
@@ -251,7 +251,7 @@ class SPARC(PropagationModel):
         pulse_type : str, optional
             Pulse type string. Default: 'PN+B'.
         n_t_out : int, optional
-            Number of time samples. Default: 501.
+            Number of time samples. Default: 512.
         t_max : float, optional
             Maximum time (s). None = auto (2.5x travel time). Default: None.
         t_start : float, optional
@@ -604,7 +604,10 @@ class SPARC(PropagationModel):
                     # In vertical mode, 'ranges' in RTS file actually contains depths
                     depths_out = rts_data['ranges']  # These are actually depths
                     p_at_freq, _ = rts_to_pressure(rts_data, freq, method='fft')
-                    p_field = p_at_freq.reshape(-1, 1)  # shape: (n_depths, 1)
+                    # sparc.f90's 'D' branch writes Scale=1/√(π·r) where the
+                    # 'R' branch carries 1/√r — ×√π puts both modes on the
+                    # same ('R'-native) pressure convention.
+                    p_field = np.sqrt(np.pi) * p_at_freq.reshape(-1, 1)  # shape: (n_depths, 1)
 
                 else:
                     p_list = []
@@ -633,7 +636,7 @@ class SPARC(PropagationModel):
 
                         rts_data = read_rts_file(rts_file)
                         p_single, _ = rts_to_pressure(rts_data, freq, method='fft')
-                        p_list.append(p_single)
+                        p_list.append(np.sqrt(np.pi) * p_single)
 
                     p_field = np.column_stack(p_list)  # shape: (n_depths, n_ranges)
 

@@ -1144,6 +1144,13 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
+        # Mask sub-seafloor samples with NaN — same below-seafloor
+        # semantics as the mpiramS paths.
+        bathy = np.asarray(env.bathymetry, dtype=float)
+        seafloor = np.interp(rcv_r, bathy[:, 0], bathy[:, 1])
+        for j, bd in enumerate(seafloor):
+            tl_out[rcv_d > bd, j] = np.nan
+
         field = Field(
             data=tl_out,
             coords={'depth': rcv_d, 'range': rcv_r},
@@ -1265,7 +1272,7 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=3
             )
 
-        target_depth = float(np.atleast_1d(receiver.depths)[0])
+        target_depth = float(np.max(rcv_d))
         zmplt = max(target_depth + dz, env.depth + dz)
         zmplt = min(zmplt, zmax)
 
@@ -1577,6 +1584,13 @@ class RAM(PropagationModel):
             freq_axis=2,
             apply_radial=False,
         )
+
+        # Mask sub-seafloor samples with NaN — same below-seafloor
+        # semantics as the mpiramS paths.
+        bathy = np.asarray(env.bathymetry, dtype=float)
+        seafloor = np.interp(rcv_r, bathy[:, 0], bathy[:, 1])
+        for j, bd in enumerate(seafloor):
+            H[rcv_d > bd, j, :] = np.nan
 
         field = Field(
             data=H,

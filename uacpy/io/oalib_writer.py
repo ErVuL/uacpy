@@ -1239,7 +1239,7 @@ def write_kraken_env_file(
         )
         write_absorption_block(f, env)
         write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
-        write_layer_sections(f, env, env.depth)
+        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         write_bottom_section(
             f, env,
             bottom_type=bottom_type,
@@ -1285,7 +1285,7 @@ def write_scooter_env_file(
         )
         write_absorption_block(f, env)
         write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
-        write_layer_sections(f, env, env.depth)
+        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         # Scooter honours real shear attenuation on the 'A' halfspace line and
         # writes cLow/cHigh/RMax via write_phase_speed_and_rmax, so the F-type
         # reflection-table bounds line is suppressed here.
@@ -1356,7 +1356,7 @@ def write_sparc_env_file(
 
         write_absorption_block(f, env)
         write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
-        write_layer_sections(f, env, env.depth)
+        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
 
         # Bottom section (SPARC only supports V and R — no halfspace params).
         bottom_code = bottom_type.to_acoustics_toolbox_code()
@@ -1426,7 +1426,7 @@ def write_bounce_input_file(
         write_absorption_block(f, env)
         write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=0.0)
         # Layered sediments (no-op when env.bottom is a plain halfspace).
-        write_layer_sections(f, env, env.depth)
+        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         write_bottom_section(
             f, env,
             bottom_type=bottom_type,
