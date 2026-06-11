@@ -7,24 +7,34 @@ code shipped with uacpy, with exact diffs.
 
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
+Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
+`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). One source
+patch is applied:
+
 ### `KrakenField/field.f90` -- out-of-bounds sentinel fix
 
 `EvaluateADMod` and `EvaluateCMMod` both declare their `rProf` argument as
-`rProf(NProf + 1)` and use the extra element as a sentinel value.  However,
-`ReadVector` (in `misc/SourceReceiverPositions.f90`) only allocates
-`MAX(3, NProf)` elements.  When `NProf >= 3` the access to `rProf(NProf + 1)`
-reads past the end of the array.
+`rProf(NProf + 1)` and use the extra element as a sentinel value
+(`EvaluateAD` writes it; `EvaluateCM` reads it in loop guards — Fortran
+`.AND.` does not short-circuit).  However, `ReadVector` (in
+`misc/SourceReceiverPositions.f90`) only allocates `MAX(3, NProf)` elements,
+so for `NProf >= 3` the access to `rProf(NProf + 1)` goes past the end of
+the array.  Every range-dependent KrakenField run (coupled or adiabatic,
+`n_segments >= 3`) hits this.  Submitted upstream from the ErVuL fork as
+branch `fix-field-rprof-out-of-bounds`.
 
 **Fix:** after `ReadVector` returns, reallocate `rProf` with `NProf + 1`
 elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
 
 ```diff
-@@ -106,6 +106,16 @@
+@@ -106,6 +106,18 @@
    CALL ReadVector( NProf, RProf, 'Profile ranges, RProf', 'km' )
    RProf = RProf / 1000.0   ! convert m back to km (undoing what ReadVector did)
  
-+  ! EvaluateAD/EvaluateCM access rProf( NProf + 1 ) as a sentinel.
-+  ! ReadVector only allocates MAX(3, NProf) elements, so extend by one.
++  ! EvaluateAD and EvaluateCM declare their rProf dummy as rProf( NProf + 1 )
++  ! and use the extra element as a range sentinel (EvaluateAD writes it).
++  ! ReadVector only allocates MAX( 3, NProf ) elements, so for NProf >= 3 the
++  ! actual argument is one element too small; extend it and set the sentinel.
 +  BLOCK
 +    REAL (KIND=8), ALLOCATABLE :: rProfTmp( : )
 +    ALLOCATE( rProfTmp( NProf + 1 ) )
@@ -38,37 +48,14 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
-### Root `Makefile` -- strip baked `-march=native` and add vendoring header
+### Root `Makefile` -- intentionally unpatched
 
-The upstream root `Makefile` hard-codes `-march=native -mtune=native` in the
-default `FFLAGS` line. Baked architecture flags break wheel/sdist consumers
-(produced CPU-specific binaries) and macOS/ARM cross-compiles. uacpy's
-`install.sh` injects architecture flags via `FORTRAN_ARCH_FLAGS` on the
-make command line. The original Makefile is preserved as `Makefile.orig`
-alongside the modified one.
-
-```diff
-@@ -1,3 +1,7 @@
-+# This Makefile is vendored by uacpy. Compiler flags here are intentionally
-+# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
-+# FORTRAN_ARCH_FLAGS on the make command line. To build outside uacpy, pass
-+# your own flags (e.g. `make FFLAGS="-O3 -march=native ..."`).
- #
- # To install the Acoustics Toolbox:
- #
-@@ -114,7 +118,13 @@
- # export FFLAGS= -march=corei7 -Bstatic -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation        -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer
- # export FFLAGS= -march=native          -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wa,-q -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
- # Had a problem with -O2 in the KRAKENC root finder for at/tests/Noise/Sduct. Switching to O1 (4//25/2023)
--export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
-+# -march=native / -mtune=native baked-in flags commented out by uacpy: they
-+# produce CPU-specific binaries that break wheel/sdist consumers and macOS/ARM
-+# cross-compiles. install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS= on the
-+# command line; users invoking `make` directly should pass FFLAGS= explicitly
-+# if they want CPU tuning.
-+# export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
-+export FFLAGS= -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
-```
+The upstream root `Makefile` bakes a CPU-specific flag into its default
+`FFLAGS` (`-mcpu=apple-m2`), which does not compile on x86.  No source patch
+is needed: `install.sh` passes `FFLAGS=` as a *make command-line variable*
+(`make all FC=gfortran FFLAGS="..."`), which takes precedence over any
+Makefile-level `export FFLAGS=` assignment, including in the sub-makes.
+Building this tree outside uacpy requires passing `FFLAGS=` explicitly.
 
 ---
 

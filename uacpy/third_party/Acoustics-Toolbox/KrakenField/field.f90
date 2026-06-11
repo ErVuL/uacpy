@@ -106,8 +106,10 @@ PROGRAM FIELD
   CALL ReadVector( NProf, RProf, 'Profile ranges, RProf', 'km' )
   RProf = RProf / 1000.0   ! convert m back to km (undoing what ReadVector did)
 
-  ! EvaluateAD/EvaluateCM access rProf( NProf + 1 ) as a sentinel.
-  ! ReadVector only allocates MAX(3, NProf) elements, so extend by one.
+  ! EvaluateAD and EvaluateCM declare their rProf dummy as rProf( NProf + 1 )
+  ! and use the extra element as a range sentinel (EvaluateAD writes it).
+  ! ReadVector only allocates MAX( 3, NProf ) elements, so for NProf >= 3 the
+  ! actual argument is one element too small; extend it and set the sentinel.
   BLOCK
     REAL (KIND=8), ALLOCATABLE :: rProfTmp( : )
     ALLOCATE( rProfTmp( NProf + 1 ) )
