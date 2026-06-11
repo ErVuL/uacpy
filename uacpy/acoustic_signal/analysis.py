@@ -59,7 +59,14 @@ class PPSD:
         self.welch_params.update(kwargs)
 
     def compute(self, data, fs):
-        """Compute PSD PDF from 1D, list, or 2D signals."""
+        """Compute PSD PDF from 1D, list, or 2D signals.
+
+        2-D input is interpreted with the *longer* axis as time: an
+        ``(n_signals, n_samples)`` array with more samples than signals
+        iterates rows, otherwise columns. For arrays where that
+        heuristic is wrong (more channels than samples), pass an
+        explicit list of 1-D signals instead.
+        """
         # Normalize input
         if isinstance(data, list):
             signals = data
@@ -81,20 +88,28 @@ class PPSD:
         chunk_size = int(self.seg_duration * fs)
         overlap_samples = int(chunk_size * self.overlap_pct / 100)
         step = chunk_size - overlap_samples
+        if step <= 0:
+            raise ValueError(
+                f"PPSD.compute: overlap_pct ({self.overlap_pct}) too high — "
+                "chunks never advance; require overlap_pct < 100."
+            )
 
         levels = np.arange(self.lvlmin, self.lvlmax + self.ddB, self.ddB)
         psd_list = []
 
         # --- Loop over signals ---
         for sig in signals:
-            nperseg = self.welch_params.get("nperseg", 8192)
+            # Local per-signal Welch params: a short signal shrinks nperseg for
+            # itself only, without lowering resolution for later signals.
+            welch_params = dict(self.welch_params)
+            nperseg = welch_params.get("nperseg", 8192)
             if chunk_size < nperseg:
-                self.welch_params["nperseg"] = chunk_size
-                self.welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
+                welch_params["nperseg"] = chunk_size
+                welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
 
             for i in range(0, len(sig) - chunk_size + 1, step):
                 chunk = sig[i: i + chunk_size]
-                freqs, psd = _sig.welch(chunk, fs, **self.welch_params)
+                freqs, psd = _sig.welch(chunk, fs, **welch_params)
                 psd_list.append(psd)
 
         if len(psd_list) == 0:
@@ -120,7 +135,7 @@ class PPSD:
 
         self.binwidth_dB = self.ddB
         self.frequencies = freqs
-        self.levels = 10 ** (levels/10) * self.ref**2
+        self.levels = levels          # dB bin edges, same unit compute() returns
         self.pdf = pdf_matrix
 
         return freqs, levels, pdf_matrix
@@ -135,7 +150,7 @@ class PPSD:
 
         pcm = ax.pcolormesh(
             self.frequencies,
-            10 * np.log10(self.levels[:-1]/self.ref**2) + align_ybins,
+            self.levels[:-1] + align_ybins,
             self.pdf,
             cmap="jet",
             shading="auto",
@@ -204,24 +219,25 @@ class SEL:
 
     def _adjust_fmin_fmax(self, fs):
         """
-        Adjust minimum and maximum frequencies to match band boundaries.
+        Snap the configured band edges to band boundaries for this ``fs``.
 
-        Parameters
-        ----------
-        fs : float
-            Sampling frequency in Hz.
+        Returns the adjusted ``(fmin, fmax)`` without mutating the
+        configured ``self.fmin`` / ``self.fmax``, so ``compute()`` calls
+        with different sampling rates don't drift the configured band.
         """
+        fmin, fmax = self.fmin, self.fmax
         if self.band_type == "octave":
-            self.fmin = 2 ** np.floor(math.log2(self.fmin))
-            self.fmax = 2 ** np.ceil(math.log2(self.fmax))
-            if self.fmax > fs / 2:
-                self.fmax = 2 ** np.floor(math.log2(self.fmax))
+            fmin = 2 ** np.floor(math.log2(fmin))
+            fmax = 2 ** np.ceil(math.log2(fmax))
+            if fmax > fs / 2:
+                fmax = 2 ** np.floor(math.log2(fmax))
         elif self.band_type == "third_octave":
             base = math.pow(2, 1 / 6)
-            self.fmin = base ** np.floor(math.log(self.fmin, base))
-            self.fmax = base ** np.ceil(math.log(self.fmax, base))
-            if self.fmax > fs / 2:
-                self.fmax = base ** np.floor(math.log(self.fmax, base))
+            fmin = base ** np.floor(math.log(fmin, base))
+            fmax = base ** np.ceil(math.log(fmax, base))
+            if fmax > fs / 2:
+                fmax = base ** np.floor(math.log(fmax, base))
+        return fmin, fmax
 
     def _generate_frequency_bands(self, fs):
         """
@@ -243,32 +259,33 @@ class SEL:
                 f"got fmin={self.fmin}, fmax={self.fmax}"
             )
 
+        fmin, fmax = self.fmin, self.fmax
         if self.band_type in ["octave", "third_octave"]:
-            self._adjust_fmin_fmax(fs)
+            fmin, fmax = self._adjust_fmin_fmax(fs)
 
         bands = []
 
         if self.band_type == "octave":
             base = math.sqrt(2)
-            f_center = self.fmin
-            while f_center < self.fmax:
+            f_center = fmin
+            while f_center < fmax:
                 f_low = f_center / base
                 f_high = f_center * base
                 bands.append((f_low, f_center, f_high))
                 f_center *= 2
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         elif self.band_type == "third_octave":
             base = math.pow(2, 1 / 6)
-            f_center = self.fmin
-            while f_center < self.fmax:
+            f_center = fmin
+            while f_center < fmax:
                 f_low = f_center / base
                 f_high = f_center * base
                 bands.append((f_low, f_center, f_high))
                 f_center *= math.pow(2, 1 / 3)
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         elif self.band_type == "linear":
             if self.num_bands <= 0:
@@ -276,15 +293,15 @@ class SEL:
                     f"SEL._generate_frequency_bands: num_bands must be a "
                     f"positive integer for linear bands; got {self.num_bands}"
                 )
-            band_width = (self.fmax - self.fmin) / self.num_bands
-            f_low = self.fmin
+            band_width = (fmax - fmin) / self.num_bands
+            f_low = fmin
             for _ in range(self.num_bands):
                 f_high = f_low + band_width
                 f_center = (f_low + f_high) / 2
                 bands.append((f_low, f_center, f_high))
                 f_low = f_high
-            if bands and bands[-1][2] > self.fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], self.fmax)
+            if bands and bands[-1][2] > fmax:
+                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         else:
             raise ValueError(
@@ -318,15 +335,14 @@ class SEL:
 
         Notes
         -----
-        Each chunk is split into Hann-windowed segments of length
-        ``nfft`` with ``noverlap=0``; ``scipy.signal.spectrogram`` with
-        ``scaling="spectrum"`` normalises by ``Σ w^2`` so each segment's
-        power spectrum is in Pa². No further window-correction factor is
-        applied: with no overlap the Hann taper attenuates samples near
-        segment boundaries, biasing the integral low by ≲0.5 dB on
-        stationary signals long compared to ``nfft``. For impulsive
-        signals shorter than one segment, pass ``nfft`` equal to the
-        signal length to avoid the bias entirely.
+        Each chunk is split into rectangular (boxcar) segments of length
+        ``nfft`` with ``noverlap=0`` and no detrending.
+        ``scipy.signal.spectrogram`` with ``scaling="density"`` returns the
+        PSD in Pa²/Hz; summing it over a band's bins gives that segment's
+        mean-square pressure (Parseval), and ``Δf·(nfft/fs)=1`` so the
+        summed PSD is directly the band exposure in Pa²·s. The total over
+        all bands equals the discrete ``∫p²dt`` to within FFT band-edge
+        leakage.
         """
         # Determine how much data to process based on integration_time
         if self.integration_time is not None:
@@ -344,7 +360,7 @@ class SEL:
             nfft = fs
         nfft = int(nfft)
 
-        window = _sig.windows.hann(nfft)
+        window = _sig.windows.boxcar(nfft)
         f = np.fft.rfftfreq(nfft, d=1 / fs)
         band_indices = []
         for low, center, high in self.bands:
@@ -356,10 +372,14 @@ class SEL:
         for i in range(0, len(data), chunk_size):
             chunk = data[i: min(i + chunk_size, len(data))]
 
-            if len(chunk) < nfft:
-                chunk = np.pad(chunk, (0, nfft - len(chunk)))
+            # Pad to a whole number of segments so spectrogram keeps the remainder.
+            n_seg = max(1, -(-len(chunk) // nfft))
+            pad = n_seg * nfft - len(chunk)
+            if pad:
+                chunk = np.pad(chunk, (0, pad))
             f, t, Sxx = _sig.spectrogram(
-                chunk, fs, window=window, noverlap=0, nfft=nfft, scaling="spectrum"
+                chunk, fs, window=window, noverlap=0, nfft=nfft,
+                detrend=False, scaling="density",
             )
             Sxx_sum = np.sum(Sxx, axis=1)
 

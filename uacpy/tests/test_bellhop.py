@@ -8,6 +8,7 @@ from uacpy import Field
 from uacpy.core.results import Rays, Arrivals
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
+from uacpy.core.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.requires_binary
 
@@ -183,8 +184,7 @@ class TestBellhopRunModes:
         few_top = rays.filter_by_bounces(top=(0, 1))
         assert all(0 <= r.get('n_top_bounces', 0) <= 1 for r in few_top.rays)
 
-        import pytest as _pytest
-        with _pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             rays.filter_by_bounces(kind='bogus')
 
     @pytest.mark.requires_binary
@@ -204,6 +204,21 @@ class TestBellhopRunModes:
 
         assert isinstance(result, Arrivals)
         assert result.by_receiver is not None
+
+    @pytest.mark.requires_binary
+    def test_broadband_multi_frequency_source(self, setup_env, setup_receiver):
+        """Bellhop BROADBAND with a multi-frequency Source traces rays at the
+        band centre and synthesizes H(f) over the band (the arrivals sub-run
+        uses a single-frequency source)."""
+        bellhop = Bellhop(verbose=False)
+        source = Source(depths=50.0, frequencies=np.array([100.0, 200.0, 300.0]))
+        result = bellhop.run(
+            env=setup_env, source=source, receiver=setup_receiver,
+            run_mode=RunMode.BROADBAND,
+        )
+        assert isinstance(result, Field)
+        assert 'frequency' in result.coords
+        assert np.iscomplexobj(result.data)
 
 
 class TestAdvancedBeamTypes:
@@ -264,6 +279,21 @@ class TestAdvancedBeamTypes:
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
+
+    @pytest.mark.requires_binary
+    def test_beam_type_changes_tl(self, env, source, receiver):
+        """beam_type must actually reach the solver: different beam models
+        give measurably different TL. (Guards against the wrapper silently
+        ignoring beam_type — the per-beam smoke tests above would all still
+        pass in that case.)"""
+        tl_b = Bellhop(verbose=False, beam_type='B').run(
+            env=env, source=source, receiver=receiver).tl
+        tl_s = Bellhop(verbose=False, beam_type='S').run(
+            env=env, source=source, receiver=receiver).tl
+        assert not np.allclose(tl_b, tl_s, atol=1e-2), (
+            "Gaussian ('B') and simple-Gaussian ('S') beams produced identical "
+            "TL — beam_type may not be reaching the Bellhop input."
+        )
 
 
 class TestRunWithBounceConstructorPlumbing:

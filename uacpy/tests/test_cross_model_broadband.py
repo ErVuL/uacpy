@@ -107,6 +107,41 @@ _RUNNERS = {
 }
 
 
+def test_mpirams_phase_matches_scooter():
+    """Anchor the mpiramS phase convention to the exact field.
+
+    ``_pe_phase.py`` converts mpiramS output as ``conj(psif)·4π`` (no
+    ``exp(±iπ/4)``): peramx already bakes the Hankel phase into ``psif``. The
+    closed-form unit tests in ``test_pe_phase.py`` only prove the helper matches
+    that formula — they cannot tell a right convention from a 45°-rotated one.
+    This test pins it to ground truth: the narrowband COHERENT_TL complex
+    pressure from RAM (mpiramS) agrees in phase with Scooter (wavenumber
+    integration) across range. An extra ``exp(±iπ/4)`` would appear as a
+    constant ~45° offset and fail the gate; ``|TL|`` is blind to it.
+    """
+    env = _pekeris_env()
+    depth = 36.0
+    ranges = np.linspace(2000.0, 6000.0, 9)
+    src = Source(depths=depth, frequencies=50.0)
+    rcv = Receiver(depths=np.array([depth]), ranges=ranges)
+
+    p_ram = np.asarray(
+        RAM(verbose=False, dr=2.0, dz=0.25).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL).data
+    ).ravel()
+    p_sco = np.asarray(
+        Scooter(verbose=False).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL).data
+    ).ravel()
+
+    ratio = p_ram / p_sco
+    ratio = ratio[np.isfinite(ratio)]
+    # circular mean of the per-range phase difference: a convention error is a
+    # constant offset; per-range modal / numerical jitter averages out.
+    mean_phase_deg = np.degrees(np.angle(np.mean(ratio / np.abs(ratio))))
+    assert abs(mean_phase_deg) < 20.0
+
+
 def _envelope_peak_time(ts_data: np.ndarray, time_axis: np.ndarray,
                         window: tuple) -> float:
     """Return the time of the analytic-envelope maximum inside ``window``.

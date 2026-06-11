@@ -1,11 +1,13 @@
 """Unit tests for ``models/_pe_phase.py``.
 
-Each test computes the engineering travelling-wave conversion *both*
-via the helper and via the pre-refactor inline math, then checks they
-match to machine precision. Adding a new PE backend convention means
-adding a new branch in ``_pe_phase.py`` and a corresponding test row
-here — the helper is then guaranteed numerically identical to the
-expected closed-form for every convention.
+Each test computes the engineering travelling-wave conversion via the helper
+and via an independent closed-form, then checks they match to machine
+precision — guarding the helper against accidental algebra changes for each
+convention. These do NOT establish which convention is physically correct;
+the mpiramS convention is anchored to the exact Scooter field in
+``test_cross_model_broadband.py::test_mpirams_phase_matches_scooter``. Adding a
+new PE backend convention means adding a branch in ``_pe_phase.py`` and a row
+here.
 """
 
 import numpy as np
@@ -22,7 +24,7 @@ def _rng(seed):
     return g
 
 
-def test_mpirams_narrowband_matches_inline_math():
+def test_mpirams_narrowband_matches_closed_form():
     """``_run_tl`` site: shape (n_z, n_r), no freq axis."""
     g = _rng(0xACED)
     psi = g.standard_normal((5, 4)) + 1j * g.standard_normal((5, 4))
@@ -32,14 +34,16 @@ def test_mpirams_narrowband_matches_inline_math():
         psi, convention=MPIRAMS, ranges_m=ranges, range_axis=1,
     )
 
-    # pre-refactor inline:
-    #   p = conj(psif) · 4π · exp(-iπ/4) / √r
-    scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(ranges)
+    # peramx already bakes the Hankel 3-D scaling exp(+i(k0 r+π/4))/(4π) into
+    # psif, so recovering the physical pressure is conj(psif)·4π/√r with NO
+    # extra exp(±iπ/4). Verified against the exact Scooter field (~1° over
+    # 1–7 km); an extra rotation sits ~45° off.
+    scale = 4.0 * np.pi / np.sqrt(ranges)
     expected = np.conj(psi) * scale[np.newaxis, :]
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 
 
-def test_mpirams_broadband_matches_inline_math():
+def test_mpirams_broadband_matches_closed_form():
     """``_run_broadband`` site: psif shape (n_z, n_f, n_r); range on axis 2."""
     g = _rng(1)
     psif = g.standard_normal((3, 2, 4)) + 1j * g.standard_normal((3, 2, 4))
@@ -49,7 +53,9 @@ def test_mpirams_broadband_matches_inline_math():
         psif, convention=MPIRAMS, ranges_m=ranges, range_axis=2,
     )
 
-    scale = 4.0 * np.pi * np.exp(-1j * np.pi / 4.0) / np.sqrt(ranges)
+    # conj(psif)·4π/√r — peramx's exp(+iπ/4)/(4π) already supplies the Hankel
+    # phase, so the wrapper adds no rotation (matches Scooter; see narrowband test).
+    scale = 4.0 * np.pi / np.sqrt(ranges)
     expected = np.conj(psif) * scale[np.newaxis, np.newaxis, :]
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 

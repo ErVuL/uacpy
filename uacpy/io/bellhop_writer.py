@@ -441,7 +441,7 @@ def write_bellhop_env_file(
         f.write(f"{step:.6f}\n")
 
         # Box parameters (z in m, r in km as per Bellhop documentation)
-        f.write(f"{z_box:.6f} {r_box/1000.0:.6f}\n")
+        f.write(f"{z_box:.6f} {float(m_to_km(r_box)):.6f}\n")
 
         # Cerveny beam parameters.  ReadEnvironmentBell.f90 reads the two
         # extra lines only for 'R'/'C'; 'S' (simple Gaussian) shares the

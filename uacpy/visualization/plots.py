@@ -44,7 +44,6 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE,
     BOTTOM_LINE_STYLE,
     BOTTOM_LINE_STYLE_FLAT,
-    BOTTOM_HALFSPACE_COLOR,
     RECEIVER_MARKER_STYLE,
     SOURCE_MARKER_STYLE,
 )
@@ -137,6 +136,24 @@ def _auto_tl_limits(arr: np.ndarray, span: float = 50.0) -> Tuple[float, float]:
         return (30.0, 80.0)
     vmax = 10.0 * np.round((np.median(finite) + 0.75 * np.std(finite)) / 10.0)
     return (float(vmax - span), float(vmax))
+
+
+def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
+    """Edge-aligned ``imshow`` extent for center-sampled (range, depth) data.
+
+    ``imshow`` stretches the array onto the OUTER edges of ``extent``, but
+    model ranges/depths are cell CENTERS. Pad by half a cell on each side so
+    every pixel centers on its coordinate — i.e. no half-cell shift versus the
+    model grid, the ``pcolormesh`` field views, or the seafloor overlay.
+    Returns ``(left_km, right_km, bottom, top)`` for ``origin='upper'`` (depth
+    increasing downward). Assumes a uniform grid, which is ``imshow``'s own
+    assumption anyway.
+    """
+    r_km = np.asarray(ranges_m, dtype=float) / 1000.0
+    z = np.asarray(depths, dtype=float)
+    dr = (r_km[1] - r_km[0]) / 2.0 if r_km.size > 1 else 0.5
+    dz = (z[1] - z[0]) / 2.0 if z.size > 1 else 0.5
+    return (r_km[0] - dr, r_km[-1] + dr, z[-1] + dz, z[0] - dz)
 
 
 def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
@@ -329,15 +346,23 @@ def _plot_field_1d(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
-    x = field.coords[axis_name]
-    y = np.asarray(arr).ravel()
-    line, = ax.plot(x, y, label=label, **mpl_kw)
-    ax.set_xlabel(_coord_label(axis_name))
-    ax.set_ylabel(value_label)
-    if value_label == 'TL (dB)' and 'depth' not in axis_name:
-        ax.invert_yaxis()
+    coord = field.coords[axis_name]
+    vals = np.asarray(arr).ravel()
     if axis_name == 'depth':
+        # Depth cut: depth on the Y axis increasing downward (oceanographic
+        # convention, consistent with the 2-D views), value on X.
+        line, = ax.plot(vals, coord, label=label, **mpl_kw)
+        ax.set_xlabel(value_label)
+        ax.set_ylabel(_coord_label('depth'))
         ax.invert_yaxis()
+    else:
+        # Range / frequency cut: coordinate on X, value on Y. For TL, put the
+        # louder (smaller-dB) end at the top.
+        line, = ax.plot(coord, vals, label=label, **mpl_kw)
+        ax.set_xlabel(_coord_label(axis_name))
+        ax.set_ylabel(value_label)
+        if value_label == 'TL (dB)':
+            ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -413,7 +438,10 @@ def _plot_field_2d(
 
     im = ax.pcolormesh(
         x_plot, y_coord, Z, vmin=vmin, vmax=vmax, cmap=cmap,
-        shading='auto', **mpl_kw,
+        # 'nearest' (not 'auto') centers each cell on its coordinate and errors
+        # loudly if coords are ever the wrong length — 'auto' would silently
+        # switch to edge ('flat') mode and half-cell-shift the field.
+        shading='nearest', **mpl_kw,
     )
     ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label(y_name))
@@ -573,12 +601,11 @@ def animate_field(
     else:
         fig = ax.figure
 
-    ranges_km = ranges / 1000.0
     # ``imshow`` is dramatically faster than ``pcolormesh`` for animation —
     # one set_array per frame vs full mesh re-tesselation.
     im = ax.imshow(
         data[:, :, frame_idx[0]],
-        extent=(ranges_km[0], ranges_km[-1], depths[-1], depths[0]),
+        extent=_imshow_extent(ranges, depths),
         aspect=aspect,
         cmap=cmap,
         vmin=-p_max, vmax=p_max,
@@ -586,7 +613,7 @@ def animate_field(
         zorder=1,
     )
     cbar = fig.colorbar(im, ax=ax, pad=0.02)
-    cbar.set_label('Pressure (Pa)')
+    cbar.set_label('Pressure (source-normalised)')
 
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
@@ -803,20 +830,13 @@ def plot_time_snapshots(
             ax = axes[i, j]
             ax.imshow(
                 slab,
-                extent=(ranges[0] / 1000, ranges[-1] / 1000,
-                        depths[-1], depths[0]),
+                extent=_imshow_extent(ranges, depths),
                 aspect=row_aspect, cmap=cmap,
                 vmin=-pm, vmax=pm, origin='upper',
             )
             if env is not None:
-                env_depth = float(env.depth)
-                ax.axhline(env_depth, color='#4a3322', linewidth=1.0, zorder=4)
-                ax.fill_between(
-                    [ranges[0] / 1000, ranges[-1] / 1000],
-                    env_depth, env_depth * 1.15,
-                    color='#bfa685', alpha=0.6, zorder=3,
-                )
-                ax.set_ylim(env_depth * 1.05, 0)
+                _overlay_seafloor(ax, env, ranges)
+                ax.set_ylim(float(env.depth) * 1.05, 0)
             else:
                 ax.set_ylim(depths[-1], depths[0])
             if field.source_depths is not None and len(field.source_depths):
@@ -886,12 +906,23 @@ def compare(
                 f"{lbl!r} on {axes[0]!r}"
             )
         arr, vlabel = _value_array(f, value)
-        ax.plot(f.coords[common_axis], np.asarray(arr).ravel(),
-                label=lbl, **mpl_kw)
-    ax.set_xlabel(_coord_label(common_axis))
-    ax.set_ylabel(vlabel)
-    if value == 'tl':
+        if common_axis == 'depth':
+            # Depth-cut overlays follow plot_field's convention:
+            # depth on Y, increasing downward.
+            ax.plot(np.asarray(arr).ravel(), f.coords[common_axis],
+                    label=lbl, **mpl_kw)
+        else:
+            ax.plot(f.coords[common_axis], np.asarray(arr).ravel(),
+                    label=lbl, **mpl_kw)
+    if common_axis == 'depth':
+        ax.set_ylabel(_coord_label(common_axis))
+        ax.set_xlabel(vlabel)
         ax.invert_yaxis()
+    else:
+        ax.set_xlabel(_coord_label(common_axis))
+        ax.set_ylabel(vlabel)
+        if value == 'tl':
+            ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
     ax.legend()
     if title:
@@ -1311,8 +1342,6 @@ def plot_environment(
             return bottom_cmap_full, bot_cs_min, bot_cs_max, bottom_sm
         cs_min, cs_max, sm = _make_sm(cs_values, bottom_cmap_truncated)
         return bottom_cmap_full, cs_min, cs_max, sm
-
-    _v_lo, _v_hi = water_cs_min, water_cs_max
 
     # Water column on the bathy panel — water cmap (Blues), normalized
     # to its own cs range. The bottom rendering below covers anything
@@ -1840,7 +1869,7 @@ def plot_reflection_coefficient(
             fig = ax.figure
         im = ax.pcolormesh(
             rc.frequencies / 1000.0, rc.theta, rc.R,
-            shading='auto', cmap='viridis',
+            shading='nearest', cmap='viridis',
         )
         fig.colorbar(im, ax=ax, label='|R|')
         ax.set_xlabel('Frequency (kHz)')
@@ -1923,7 +1952,7 @@ def plot_replicas(
     R = np.abs(rep.replicas[freq_idx, :, :, 0, sensor_idx])
     im = ax.pcolormesh(
         rep.replica_x, rep.replica_z, R,
-        shading='auto', cmap='magma',
+        shading='nearest', cmap='magma',
     )
     fig.colorbar(im, ax=ax, label='|R|')
     ax.set_xlabel('x (m)')

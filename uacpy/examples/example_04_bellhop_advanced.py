@@ -245,7 +245,7 @@ def main():
         import matplotlib as mpl
         cbar_ax = fig2.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = mpl.cm.get_cmap('jet_r')
+        cmap = plt.get_cmap('jet_r')
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
@@ -271,7 +271,7 @@ def main():
         import matplotlib as mpl
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = mpl.cm.get_cmap('jet_r')
+        cmap = plt.get_cmap('jet_r')
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
@@ -308,7 +308,7 @@ def main():
         import matplotlib as mpl
         cbar_ax = fig5.add_axes([0.92, 0.15, 0.015, 0.7])
         norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = mpl.cm.get_cmap('jet_r')
+        cmap = plt.get_cmap('jet_r')
         cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap,
                                        norm=norm, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')

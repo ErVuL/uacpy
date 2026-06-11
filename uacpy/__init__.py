@@ -21,8 +21,6 @@ __author__ = 'ErVuL'
 
 from uacpy._log import install_warning_formatter as _install_warning_formatter
 
-import sys as _sys
-
 from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
@@ -54,6 +52,7 @@ from uacpy.core.exceptions import (
 
 from uacpy import models
 from uacpy.models.base import PropagationModel, RunMode
+from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
 from uacpy import io
 from uacpy import acoustic_signal
@@ -64,10 +63,8 @@ from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 
-# Cross-model comparison metrics — exposed as a submodule namespace
-# (``import uacpy.metrics`` works) and as the ``uacpy.metrics`` attribute.
-from uacpy.core import metrics
-_sys.modules['uacpy.metrics'] = metrics
+# Cross-model comparison metrics (re-export module of uacpy.core.metrics).
+from uacpy import metrics
 
 __all__ = [
     'Source',
@@ -94,6 +91,9 @@ __all__ = [
     'ConfigurationError',
     'RunMode',
     'PropagationModel',
+    'run_parallel',
+    'Job',
+    'ParallelResult',
     'models',
     'plot',
     'io',

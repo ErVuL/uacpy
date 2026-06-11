@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.results import Modes, Field
+from uacpy.core.exceptions import ConfigurationError
 
 
 def _pekeris_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
@@ -70,7 +71,7 @@ class TestWithAttenuation:
 
     def test_shape_mismatch_raises(self):
         modes = _pekeris_modes()
-        with pytest.raises(ValueError, match="must match depths"):
+        with pytest.raises(ConfigurationError, match="must match depths"):
             modes.with_attenuation(np.array([0.001, 0.002]))
 
 
@@ -117,3 +118,23 @@ class TestModalPropagationLoss:
             ranges_m=np.array([10000.0]),
         )
         assert abs(pf_at.data[0, 0]) < abs(pf_loss.data[0, 0])
+
+    def test_decays_under_raw_kraken_imag_sign(self):
+        # Raw Kraken/KrakenC eigenvalues encode decay as k.imag < 0, while
+        # with_attenuation builds k.imag > 0. modal_propagation_loss must be
+        # convention-agnostic: a passive medium can only attenuate, so the
+        # field must DECAY with range under either sign (regression for the
+        # latent grow-with-range bug).
+        base = _pekeris_modes()
+        ranges = np.array([500.0, 8000.0])
+        for sign in (+1.0, -1.0):
+            k = base.k.real + sign * 1j * 3e-4   # ±imag, same |attenuation|
+            modes = Modes(k=k, phi=base.phi, depths=base.depths,
+                          model='Test', frequencies=base.f0)
+            pf = modes.modal_propagation_loss(
+                source_depth=50.0, receiver_depths=np.array([50.0]),
+                ranges_m=ranges,
+            )
+            envelope = np.abs(pf.data[0]) * np.sqrt(ranges)  # remove geometric 1/√r
+            assert envelope[-1] < envelope[0], (
+                f"field grew with range for k.imag sign {sign:+.0f}")

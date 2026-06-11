@@ -110,7 +110,6 @@ from . import (
     modulation,
     ofdm,
     phy,
-    spread,
     sync,
     transceiver,
 )
@@ -155,6 +154,6 @@ __all__ = [
     "m_sequence", "spread", "despread", "processing_gain_db",
     # submodules
     "modulation", "metrics", "channel_models", "equalization", "doppler",
-    "sync", "link", "channel_est", "ofdm", "coding", "spread",
+    "sync", "link", "channel_est", "ofdm", "coding",
     "framing", "phy", "transceiver", "janus",
 ]

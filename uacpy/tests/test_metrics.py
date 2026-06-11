@@ -7,6 +7,7 @@ binary is involved.
 
 import numpy as np
 import pytest
+from uacpy.core.exceptions import ConfigurationError
 
 import uacpy
 from uacpy.core.metrics import tl_bias, tl_max_error, tl_rmse
@@ -53,7 +54,7 @@ class TestTLRmseBasic:
 
     def test_type_error_on_non_field(self):
         a = _tl_field(np.zeros((4, 4)), np.arange(4), np.arange(4))
-        with pytest.raises(TypeError):
+        with pytest.raises(ConfigurationError):
             uacpy.metrics.tl_rmse(a, object())
 
 
@@ -76,7 +77,7 @@ class TestGridAlignment:
         data = np.zeros((10, 30))
         a = _tl_field(data, d, r)
         b = _tl_field(data.copy(), d, r + 1.0)         # 1 m shift
-        with pytest.raises(ValueError, match="range axes differ"):
+        with pytest.raises(ConfigurationError, match="range axes differ"):
             tl_rmse(a, b)
 
 

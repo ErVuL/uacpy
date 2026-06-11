@@ -348,7 +348,6 @@ class Spectrogram:
         ax.set_title(f"[Spectrogram] {title}", loc="left")
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Frequency [Hz]")
-        # ax.set_yscale("log")
 
         if ymax is None:
             ymax = self.frequencies[-1]

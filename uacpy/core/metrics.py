@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from uacpy.core.results import Field
+from uacpy.core.exceptions import ConfigurationError
 
 
 def _resolve_window(
@@ -44,11 +45,11 @@ def _validate_tl_pair_and_window(
     """
     for label, f in (('field_a', field_a), ('field_b', field_b)):
         if not isinstance(f, Field):
-            raise TypeError(
+            raise ConfigurationError(
                 f"{fname}: {label} must be a Field; got {type(f).__name__}"
             )
         if list(f.coords) != ['depth', 'range']:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{fname}: {label} must be a 2-D (depth, range) Field; "
                 f"got coords {list(f.coords)}"
             )
@@ -56,7 +57,7 @@ def _validate_tl_pair_and_window(
     da = np.asarray(field_a.tl)
     db = np.asarray(field_b.tl)
     if da.shape != db.shape:
-        raise ValueError(
+        raise ConfigurationError(
             f"{fname}: shape mismatch — field_a {da.shape} vs field_b {db.shape}"
         )
 
@@ -65,17 +66,17 @@ def _validate_tl_pair_and_window(
     depths_b = field_b.coords['depth']
     ranges_b = field_b.coords['range']
     if depths.shape != depths_b.shape or ranges.shape != ranges_b.shape:
-        raise ValueError(f"{fname}: depth/range axes must have matching shapes")
+        raise ConfigurationError(f"{fname}: depth/range axes must have matching shapes")
     # Tolerance is ~1 mm: models interpolate onto the requested receiver grid,
     # so two runs of the same grid agree to sub-millimetre (unit-conversion
     # rounding). Genuinely different grids differ by metres and still raise.
     if not np.allclose(depths, depths_b, rtol=1e-5, atol=1e-3):
-        raise ValueError(
+        raise ConfigurationError(
             f"{fname}: depth axes differ — sample-cells are not aligned. "
             "Resample one field onto the other's grid before comparing."
         )
     if not np.allclose(ranges, ranges_b, rtol=1e-5, atol=1e-3):
-        raise ValueError(
+        raise ConfigurationError(
             f"{fname}: range axes differ — sample-cells are not aligned. "
             "Resample one field onto the other's grid before comparing."
         )
@@ -87,7 +88,7 @@ def _validate_tl_pair_and_window(
     diff = da - db
     finite = np.isfinite(diff) & region_mask
     if not np.any(finite):
-        raise ValueError(
+        raise ConfigurationError(
             f"{fname}: window contains no finite cells "
             f"(range_window={range_window}, depth_window={depth_window})"
         )

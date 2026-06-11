@@ -132,3 +132,65 @@ def test_signal_symbols_resolve():
                  'PPSD', 'Spectrogram'):
         assert hasattr(uacpy.acoustic_signal, name), \
             f"uacpy.acoustic_signal.{name} missing"
+
+
+class TestSEL:
+    """SEL must integrate power (Parseval-exact), not over-read the way a
+    coherent-normalization Hann taper would (+1.76 dB on stationary signals,
+    and an impulse at a segment boundary annihilated)."""
+
+    def test_tone_exposure_is_parseval_exact(self):
+        from uacpy.acoustic_signal.analysis import SEL
+        fs = 48000
+        t = np.arange(fs) / fs
+        x = 2.0 * np.sin(2 * np.pi * 1000.0 * t)   # exposure = A^2/2 * T = 2.0
+        sel, _ = SEL(band_type='third_octave', fmin=10, fmax=20000).compute(
+            x, fs, nfft=fs)
+        assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
+
+    def test_impulse_not_annihilated(self):
+        from uacpy.acoustic_signal.analysis import SEL
+        fs = 48000
+        imp = np.zeros(fs)
+        imp[0] = 10.0   # a Hann-windowed single segment would zero this out
+        sel, _ = SEL(band_type='linear', fmin=1.0, fmax=fs / 2,
+                     num_bands=240).compute(imp, fs, nfft=fs)
+        # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
+        assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
+
+
+class TestFRF:
+    """FRF automatic FIR-order selection (m='AIC'|'BIC'|'FPE'|'CP') must run,
+    not crash with 'count >= None' from an un-defaulted stop_count."""
+
+    @pytest.mark.parametrize("criterion", ['AIC', 'BIC', 'FPE', 'CP'])
+    def test_auto_order_runs_and_recovers_order(self, criterion):
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(1)
+        u = rng.standard_normal(2000)
+        g = np.array([1.0, -0.5, 0.25])                  # order-3 FIR
+        y = np.convolve(u, g)[:u.size] + 0.01 * rng.standard_normal(2000)
+        frf = FRF()
+        _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m=criterion)
+        assert np.isfinite(tf).all()
+        # every criterion recovers the true order-3 FIR at this SNR
+        assert frf.m == 3
+
+    def test_cp_recovers_order_six_fir(self):
+        """Mallows' Cp recovers the true order-6 FIR at moderate SNR. Cp scales
+        the residual sum of squares by σ̂², the residual variance of a low-bias
+        reference fit; this higher-order case exercises that estimate (order 3
+        at high SNR above is too easy to constrain it).
+        """
+        from uacpy.acoustic_signal.system_id import FRF
+        r = np.random.default_rng(2)
+        N, order = 3000, 6
+        u = r.standard_normal(N)
+        g = r.standard_normal(order)
+        g = g / np.linalg.norm(g)
+        clean = np.convolve(u, g)[:N]
+        y = clean + 0.1 * np.std(clean) * r.standard_normal(N)
+        frf = FRF()
+        _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m='CP')
+        assert np.isfinite(tf).all()
+        assert frf.m == order

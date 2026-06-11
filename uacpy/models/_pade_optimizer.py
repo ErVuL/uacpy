@@ -280,10 +280,9 @@ def optimize_grid(
     x_max : float
         Maximum range (m) the PE will march to.
     c0 : float
-        Reference sound speed (m/s). User input — defaults at the call
-        site to 1500 m/s (water). To get the performance-optimal
-        ``c₀`` from Lytaev Eq. (15), call :func:`optimal_c0` and pass
-        the result in here.
+        Reference sound speed (m/s). The RAM wrapper resolves its
+        default via :func:`optimal_c0` (Lytaev Eq. 15) before calling
+        in here; pass any pinned user value through unchanged.
     theta_max : float
         Maximum propagation angle in **degrees**. Default 30°.
     eps : float

@@ -5,6 +5,7 @@ Centralizes magic numbers, boundary/SSP codes, and the string/enum
 conversions used by writers and model wrappers.
 """
 
+import math
 from enum import Enum
 
 
@@ -20,8 +21,9 @@ TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 # choice.
 #
 # ``C_LOW_FACTOR_KRAKEN`` is the modal-solver default. KRAKEN's c_low is
-# the slowest phase speed in the mode search; setting it to 0 captures
-# Scholte / interfacial modes per the KRAKEN manual.
+# the slowest phase speed in the mode search; 0 makes KRAKEN compute it
+# automatically (kraken.htm, Phase Speed Limits). A positive c_low excludes
+# slow interfacial (Scholte / Stoneley) modes.
 C_LOW_FACTOR = 0.95
 C_LOW_FACTOR_KRAKEN = 0.0
 C_HIGH_FACTOR = 1.05
@@ -46,6 +48,9 @@ REFERENCE_PRESSURE_AIR = 2e-5    # Pa (20 µPa)
 # wide bandwidths because arrivals are computed at a single fc.
 DEFAULT_BROADBAND_N_FREQS = 128
 DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 0.5
+
+# Exact nepers → dB conversion (20/ln10 ≈ 8.6858896).
+NEPER_TO_DB = 20.0 / math.log(10.0)
 
 
 class BoundaryType(Enum):

@@ -21,17 +21,17 @@ from uacpy.models import OAST, OASN, OASR, OASP
 oast = OAST()
 result = oast.run(env, source, receiver)
 
-# Normal modes using OASN
+# Noise covariance / replicas using OASN
 oasn = OASN()
-modes = oasn.run(env, source, receiver)
+cov = oasn.run(env, source, receiver, run_mode=RunMode.COVARIANCE)
 
 # Reflection coefficients using OASR
 oasr = OASR()
-refl = oasr.run(env, source, receiver, angles=np.linspace(0, 90, 100))
+refl = oasr.run(env, source, receiver, run_mode=RunMode.REFLECTION)
 
-# Parabolic equation using OASP
+# Broadband pulse synthesis using OASP (wavenumber integration)
 oasp = OASP()
-result = oasp.run(env, source, receiver)
+result = oasp.run(env, source, receiver, run_mode=RunMode.BROADBAND)
 ```
 """
 
@@ -218,6 +218,17 @@ class OAST(PropagationModel):
         Add ``'A'`` option (depth-averaged TL). Default ``False``.
     complex_contour : bool, optional
         ``'J'`` option (complex integration contour). Default ``True``.
+    options : str, optional
+        Raw OASES options string (e.g. ``'N J T C'``); ``None`` derives
+        it from ``compute_contour`` / ``compute_depth_average`` /
+        ``complex_contour``.
+    integration_offset : float
+        Wavenumber-integration contour offset (dB/wavelength). Default 0.
+    nw_samples : int
+        Number of wavenumber samples; ``-1`` lets OASES choose.
+    plot_rmin, plot_rmax : float, optional
+        TL plot range axis bounds (m); ``None`` → 0 /
+        ``receiver.range_max``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -474,6 +485,53 @@ class OASN(PropagationModel):
     ----------
     executable : Path, optional
         Path to OASN binary. Auto-detected if ``None``.
+    options : str, optional
+        Custom OASES options string; ``None`` derives it from the run
+        mode (``N`` for COVARIANCE, ``R`` for REPLICA).
+    surface_noise_level : float
+        Surface-generated noise spectral level (dB re 1 µPa²/Hz),
+        Block VI. 0 disables.
+    white_noise_level : float
+        Uncorrelated (white) noise spectral level per hydrophone
+        (dB re 1 µPa²/Hz). 0 disables.
+    deep_noise_level : float
+        Deep broad-area source spectral level (dB re 1 µPa²/Hz). 0
+        disables.
+    deep_source_depth : float, optional
+        Depth (m) of the deep broad-area noise source sheet; ``None``
+        → half the water depth. Only written when ``deep_noise_level``
+        is non-zero.
+    discrete_sources : list of dict, optional
+        Point sources; each dict may carry ``'depth'`` (m), ``'x'``
+        (m), ``'y'`` (m), ``'level'`` (dB), ``'phase'`` (rad).
+    xmin, xmax : float, optional
+        Replica candidate-grid x bounds (m); ``None`` → OASES defaults
+        (100 / 10000).
+    nx : int
+        Number of replica grid points in x. Default 50.
+    ymin, ymax : float, optional
+        Replica candidate-grid y bounds (m); ``None`` → 0 / 0.
+    ny : int
+        Number of replica grid points in y. Default 1.
+    zmin, zmax : float, optional
+        Replica candidate-grid depth bounds (m); ``None`` → 10 /
+        ``env.depth - 10``.
+    nz : int
+        Number of replica grid points in depth. Default 20.
+    cmin, cmax : float, optional
+        Phase-speed bounds (m/s) for the wavenumber integrations,
+        applied to both the noise and replica blocks; ``None`` →
+        ``0.95 · min(c_water)`` and ``1e8``.
+    integration_offset : float
+        Wavenumber-integration contour offset (dB/wavelength). Default 0.
+    nw_samples : int
+        Number of wavenumber samples; ``-1`` lets OASES choose.
+    plot_rmin, plot_rmax : float, optional
+        TL plot range axis bounds (m).
+    vrec : float
+        Vertical receiver velocity (m/s) for Doppler. Default 0.
+    offdb : float, optional
+        Single-mode horizontal offset (dB).
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -704,6 +762,17 @@ class OASN(PropagationModel):
         source_freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
         if source_freqs.size > 1:
             _oases_resample_frequencies(source_freqs, self.model_name)
+
+        # The OASN writer places a vertical array at x = y = 0;
+        # receiver.ranges never reaches the deck.
+        rcv_ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+        if rcv_ranges.size > 1 or (rcv_ranges.size == 1 and rcv_ranges[0] > 0.0):
+            warnings.warn(
+                "OASN: receiver.ranges is ignored — OASN models a vertical "
+                "array at x = y = 0 (depths only). Use the replica grid "
+                "(xmin/xmax/...) for horizontal apertures.",
+                UserWarning, stacklevel=2,
+            )
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -1070,8 +1139,10 @@ class OASR(PropagationModel):
             # option in the OASR options string), so .trc wins; the user
             # can pass options='p ...' to switch to slowness sampling, in
             # which case we prefer .rco.
-            requested_opts = (self.options or '').split()
-            wants_slowness = 'p' in requested_opts
+            # OASES parses the option line character by character, so 'p' can
+            # be glued to other letters ('Np'); match on the character set.
+            opt_chars = set(str(self.options or '')) - set(' \t\n')
+            wants_slowness = 'p' in opt_chars
             search = ['.rco', '.trc'] if wants_slowness else ['.trc', '.rco']
             search += ['.023', 'fort.023']
 
@@ -1159,7 +1230,8 @@ class OASP(PropagationModel):
     n_time_samples : int, optional
         Number of FFT time samples. Default ``4096``.
     freq_max : float, optional
-        Maximum FFT frequency (Hz). Default ``250.0``.
+        Maximum FFT frequency (Hz). ``None`` (default) derives
+        ``2.5 × `` the centre frequency at ``run()`` time.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -1187,7 +1259,7 @@ class OASP(PropagationModel):
         self,
         executable: Optional[Path] = None,
         n_time_samples: int = 4096,
-        freq_max: float = 250.0,
+        freq_max: Optional[float] = None,
         freq_min: float = 0.0,
         center_frequency: Optional[float] = None,
         freq_output_increment: Optional[int] = None,
@@ -1212,7 +1284,10 @@ class OASP(PropagationModel):
             Power-of-two FFT length (samples per receiver trace).
             Default 4096.
         freq_max : float, optional
-            Upper edge of the OASP broadband sweep (Hz). Default 250.
+            Upper edge of the OASP broadband sweep (Hz). ``None``
+            (default) derives ``2.5 ×`` the centre frequency at
+            ``run()`` time; a pinned value below the centre frequency
+            raises at ``run()``.
         freq_min : float, optional
             Lower edge of the OASP broadband sweep (Hz). Default 0.0.
         center_frequency : float, optional
@@ -1238,7 +1313,7 @@ class OASP(PropagationModel):
             **kwargs,
         )
         self.n_time_samples = int(n_time_samples)
-        self.freq_max = float(freq_max)
+        self.freq_max = float(freq_max) if freq_max is not None else None
         self.freq_min = float(freq_min)
         self.center_frequency = (
             float(center_frequency) if center_frequency is not None else None
@@ -1297,12 +1372,13 @@ class OASP(PropagationModel):
         output_duration: Optional[float] = None,
     ) -> Result:
         """
-        Run OASP parabolic equation computation
+        Run OASP broadband wavenumber-integration computation.
 
         Parameters
         ----------
         env : Environment
-            Ocean environment (supports range-dependent)
+            Ocean environment (range-independent; range-dependent
+            features are collapsed with a warning)
         source : Source
             Acoustic source
         receiver : Receiver
@@ -1371,6 +1447,20 @@ class OASP(PropagationModel):
                     "that uacpy's time-series synthesis does not undo. "
                     "Drop 'O' (the default 'N J' uses a real frequency axis)."
                 )
+            if 'J' not in opt_chars and self.nw_samples < 1:
+                # Under automatic wavenumber sampling (nw_samples < 1 →
+                # AUSAMP), OASES forces the complex frequency contour
+                # OMEGIM = -ln(50)·Δf unless 'J' keeps ICNTIN > 0
+                # (unoassp30.f:281-289,382-385). Without 'J' the .trf then
+                # carries the same offset 'O' would, which the time-series
+                # synthesis cannot undo.
+                raise ConfigurationError(
+                    "OASP.run: a custom options string without 'J' enables the "
+                    "complex frequency contour (OMEGIM≠0) under automatic "
+                    "wavenumber sampling, which uacpy's time-series synthesis "
+                    "cannot undo. Add 'J' (the default 'N J' keeps a real "
+                    "frequency axis) or pin nw_samples≥1."
+                )
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -1403,6 +1493,22 @@ class OASP(PropagationModel):
                     n_time_samples = 1 << (target - 1).bit_length()
                 else:
                     n_time_samples = 2
+        else:
+            fc_run = (
+                self.center_frequency
+                if self.center_frequency is not None
+                else float(np.atleast_1d(source.frequencies)[0])
+            )
+            if freq_max is None:
+                freq_max = 2.5 * fc_run
+            elif fc_run > freq_max:
+                raise ConfigurationError(
+                    f"OASP: centre frequency {fc_run:.1f} Hz exceeds the "
+                    f"pinned sweep edge freq_max={freq_max:.1f} Hz — the "
+                    f"sweep would never reach the requested frequency. "
+                    f"Raise freq_max (or leave it None to derive "
+                    f"2.5×fc), or pass frequencies= explicitly."
+                )
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
@@ -1451,9 +1557,8 @@ class OASP(PropagationModel):
                 exc = ModelExecutionError(
                     self.model_name, return_code=0, stdout=None,
                     stderr=(
-                        f"OASP did not produce {trf_file} or {plt_file}. "
-                        "Consider using RAM for parabolic equation modeling: "
-                        "RAM().run(env, source, receiver)."
+                        f"OASP did not produce {trf_file} or {plt_file}; "
+                        "check the .prt log tail for the OASES error."
                     ),
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
@@ -1570,8 +1675,9 @@ def OASES(
         ``BROADBAND`` / ``TIME_SERIES`` → ``OASP``.
     broadband : bool, optional
         When True with ``COHERENT_TL``, route to ``OASP`` (broadband
-        transfer function) instead of ``OAST``. Needed for range-dependent
-        envs where OAST's range-independent kernel is inappropriate.
+        transfer function) instead of ``OAST``. Both kernels are
+        range-independent; use RAM for genuinely range-dependent
+        problems.
     **kwargs
         Forwarded verbatim to the sub-class constructor.
 

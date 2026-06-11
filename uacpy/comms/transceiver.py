@@ -35,7 +35,6 @@ from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (
     _ofdm_symbol,
     apply_cfo,
-    estimate_channel,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )
@@ -129,7 +128,10 @@ class Receiver:
         """Symbols ``[preamble | payload]`` -> information bits.
 
         Detects the preamble (frame sync), trains the equalizer on it, then
-        equalizes/demodulates/decodes the payload.
+        equalizes/demodulates/decodes the payload. Without an equalizer the
+        payload is assumed to start exactly ``len(preamble)`` symbols after
+        the detected start — residual channel delay spread leaks preamble
+        ISI into the first payload symbols.
         """
         sym = np.asarray(symbols, dtype=complex).ravel()
         start = 0
@@ -299,6 +301,7 @@ class OFDMReceiver:
             probe = upconvert(resample_poly(self.preamble, os, 1), fs, fc)
             doppler_scale, _, _ = estimate_doppler_scale(pb, probe, scales)
         if abs(doppler_scale) > 1e-9:
+            # doppler_scale is a = v/c; compensate_doppler(pb, a) removes it.
             pb = np.real(compensate_doppler(pb, doppler_scale))
         bb = downconvert(pb, fs, fc)
         return resample_poly(bb, 1, os)          # LPF + decimate removes 2*fc image

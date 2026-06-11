@@ -16,8 +16,10 @@ from uacpy.core.environment import (
     RangeDependentBottom, RangeDependentLayeredBottom, SedimentLayer,
     SoundSpeedProfile,
 )
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.models.base import DEFAULT_COLLAPSE
+from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
+from uacpy.core.source import Source
+from uacpy.core.receiver import Receiver
+from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
 
 
 # ---------------------------------------------------------------------
@@ -210,16 +212,26 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
                                   attenuation=0.3),
     )
 
-    bh = Bellhop(verbose=False, collapse={'ssp': 'rmax'})
-    # Drive the same code path Bellhop.run hits (without spawning a binary)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        env_collapsed = env.copy()
-        env_collapsed.ssp = env.ssp.collapse(bh._collapse['ssp'])
+    src = Source(frequencies=200.0, depths=25.0)
+    rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1500.0]))
 
-    sample_c = float(env_collapsed.ssp.data[0, 0])
-    assert sample_c == pytest.approx(1520.0), (
-        f"Expected rmax-collapsed c ~ 1520, got {sample_c}"
+    # interp_ssp='c-linear' (≠ 'quad') forces Bellhop's run-path to collapse the
+    # 2-D SSP. Drive the actual run (not a hand-rolled collapse) and assert the
+    # collapse fired with the user's method — this catches a regression where
+    # run() stops honouring collapse['ssp'].
+    bh = Bellhop(verbose=False, interp_ssp='c-linear', collapse={'ssp': 'rmax'})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            bh.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        except ExecutableNotFoundError:
+            pytest.skip("Bellhop binary not available")
+    collapse_w = [w for w in caught
+                  if 'collapsed to 1-D' in str(w.message)
+                  and "'rmax'" in str(w.message)]
+    assert collapse_w, (
+        "Bellhop.run did not collapse the 2-D SSP via collapse['ssp']='rmax' "
+        f"(warnings seen: {[str(w.message) for w in caught]})"
     )
 
 

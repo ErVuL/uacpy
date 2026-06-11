@@ -59,8 +59,6 @@ from uacpy.core.results import Result, Modes, Field
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
-    DEFAULT_BROADBAND_N_FREQS,
-    DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
     C_LOW_FACTOR_KRAKEN,
 )
 import shutil
@@ -69,13 +67,9 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.oalib_writer import (
-    write_absorption_block, write_bottom_section, write_broadband_freqs,
-    write_header, write_layer_sections,
-    write_multi_profile_env, write_phase_speed_and_rmax,
-    write_receiver_depths, write_source_depths, write_ssp_section,
-    write_fieldflp,
+    write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
-from uacpy.io.oalib_reader import read_shd_file, read_shd_bin
+from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
 from uacpy.models.coupled_modes import segment_environment_by_range
 
 
@@ -85,8 +79,13 @@ class _KrakenBase(PropagationModel):
     Parameters
     ----------
     c_low : float, optional
-        Lower phase speed limit (m/s). None = auto (0.95 * min SSP speed).
-        Must be non-negative and strictly less than ``c_high``.
+        Lower phase speed limit (m/s). None ⇒ 0.0 (``C_LOW_FACTOR_KRAKEN``),
+        which makes KRAKEN compute cLow automatically — the modal-solver
+        default. A positive c_low skips slower modes and excludes interfacial
+        (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
+        fails to converge on those. (The 0.95·min-SSP rule is the Scooter/SPARC
+        wavenumber-integration default, not Kraken's.) Must be non-negative and
+        strictly less than ``c_high``.
     c_high : float, optional
         Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and bottom speed).
         Must be strictly greater than ``c_low``.
@@ -109,7 +108,7 @@ class _KrakenBase(PropagationModel):
     -----
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
-    - ``c_low=None`` → ``min(env.ssp) × 0.95``
+    - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; KRAKEN computes cLow automatically)
     - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
     - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
@@ -142,10 +141,11 @@ class _KrakenBase(PropagationModel):
             cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
         )
         self.interp_ssp = interp_ssp
-        # Modal solver default for c_low — KRAKEN manual recommends 0
-        # to capture slow Scholte / interfacial modes; Scooter's
-        # wavenumber-integration default (positive floor) lives at
-        # core/constants.C_LOW_FACTOR.
+        # Modal-solver c_low default. C_LOW_FACTOR_KRAKEN = 0.0 → KRAKEN
+        # computes cLow automatically (kraken.htm, Phase Speed Limits). A
+        # positive c_low skips slower modes and excludes interfacial
+        # (Scholte / Stoneley) ones. Scooter's wavenumber-integration
+        # positive floor lives at core/constants.C_LOW_FACTOR.
         self.c_low = (
             C_LOW_FACTOR_KRAKEN * 1500.0 if c_low is None else float(c_low)
         )
@@ -234,7 +234,6 @@ class _KrakenBase(PropagationModel):
             k=k_arr,
             phi=phi_arr,
             depths=z_arr,
-            n_modes=len(k_arr),
             **self._result_kwargs(
                 source,
                 backend=Path(self.executable).name if self.executable else self.model_name.lower(),
@@ -329,59 +328,26 @@ class _KrakenBase(PropagationModel):
             )
         )
 
-        with open(filepath, 'w') as f:
-            write_header(
-                f, env, source,
-                ssp_topopt=ssp_topopt,
-                surface_type=surface_type,
-                frequencies=frequencies,
-            )
-            write_absorption_block(f, env)
-
-            write_ssp_section(
-                f, env, env.depth,
-                n_mesh=self.n_mesh,
-                roughness=self.roughness
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+        if self.c_high is None:
+            self._log(
+                f"c_high auto-derived from env.ssp + bottom = {ch:.1f} m/s "
+                f"(c_low = {cl:.1f} m/s)"
             )
 
-            # Write sediment layers if layered bottom
-            write_layer_sections(
-                f, env, env.depth
-            )
-
-            write_bottom_section(
-                f, env,
-                bottom_type=bottom_type,
-                emit_reflection_table_block=False,
-            )
-
-            # KRAKEN-SPECIFIC SECTIONS
-
-            from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-            cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
-            if self.c_low is None or self.c_high is None:
-                self._log(
-                    f"c_low / c_high auto-derived from env.ssp + bottom = "
-                    f"{cl:.1f} / {ch:.1f} m/s"
-                )
-            write_phase_speed_and_rmax(
-                f, env,
-                rmax_m=rmax_m,
-                c_low=cl, c_high=ch,
-            )
-
-            # Source depths (use ATEnvWriter helper for full non-uniform support)
-            write_source_depths(f, source)
-
-            # Receiver depths: receiver_obj (if present) preserves a non-
-            # uniform array verbatim; otherwise fall back to the depths array.
-            write_receiver_depths(
-                f, receiver_obj if receiver_obj is not None else receiver_depths,
-            )
-
-            # Broadband frequency vector (read by ReadfreqVec AFTER SD/RD)
-            if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
-                write_broadband_freqs(f, np.asarray(frequencies))
+        write_kraken_env_file(
+            filepath, env, source,
+            receiver_obj if receiver_obj is not None else receiver_depths,
+            ssp_topopt=ssp_topopt,
+            surface_type=surface_type,
+            bottom_type=bottom_type,
+            frequencies=frequencies,
+            n_mesh=self.n_mesh,
+            roughness=self.roughness,
+            rmax_m=rmax_m,
+            c_low=cl, c_high=ch,
+        )
 
     def _reject_elastic_over_fluid_halfspace(self, env: Environment) -> None:
         """krakenc.exe spins forever in setup on a solid-over-liquid bottom
@@ -508,10 +474,8 @@ class _KrakenBase(PropagationModel):
         """
         prt_file = basename + '.prt'
         error_msg = "Kraken did not produce valid modes. "
-        if os.path.exists(prt_file):
-            with open(prt_file, 'r') as f:
-                prt_content = f.read()
-
+        prt_content = read_prt(prt_file)
+        if prt_content is not None:
             # 1. True "acousto-elastic" mention (used in AT PRT for elastic HS)
             has_acousto_elastic = bool(
                 re.search(r'acousto[-\s]*elastic', prt_content, re.IGNORECASE)
@@ -536,7 +500,22 @@ class _KrakenBase(PropagationModel):
             # 3. Kraken-specific failure string
             modes_not_found = 'modes not found at cLow' in prt_content
 
-            if has_acousto_elastic or has_nonzero_shear or modes_not_found:
+            # 4. Slow/failed root-finding on interfacial (Scholte/Stoneley)
+            #    modes. kraken.htm's remedy is to raise cLow to the minimum
+            #    p-wave speed so those modes are skipped.
+            secant_failure = bool(
+                re.search(r'CONVERGE\s+IN\s+SECANT', prt_content, re.IGNORECASE)
+            )
+
+            if secant_failure:
+                error_msg += (
+                    "Kraken reported 'FAILURE TO CONVERGE IN SECANT': the root "
+                    "finder is converging slowly to interfacial (Scholte / "
+                    "Stoneley) modes. Set c_low to the minimum p-wave speed in "
+                    "the problem to exclude those modes (kraken.htm, Phase "
+                    "Speed Limits), or use KrakenC."
+                )
+            elif has_acousto_elastic or has_nonzero_shear or modes_not_found:
                 error_msg += (
                     "Kraken (real arithmetic) failed. This is typical when "
                     "the environment has an acousto-elastic bottom "
@@ -573,8 +552,10 @@ class Kraken(_KrakenBase):
     mode_points_per_meter : float, optional
         Mode-grid sampling density. Default ``1.5``.
     c_low, c_high : float, optional
-        Phase-speed bounds (m/s). ``None`` ⇒ ``0.95 × min SSP`` /
-        ``1.05 × max SSP+bottom``.
+        Phase-speed bounds (m/s). ``c_low=None`` ⇒ ``0.0`` (KRAKEN computes
+        cLow automatically; the modal-solver default, not 0.95·min SSP). A
+        positive c_low excludes interfacial (Scholte / Stoneley) modes.
+        ``c_high=None`` ⇒ ``1.05 × max(SSP, bottom)``.
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ Kraken auto-picks. Default ``0``.
     roughness : float, optional
@@ -1007,17 +988,17 @@ class KrakenField(_KrakenBase):
             raise ExecutableNotFoundError(self.model_name, str(self.executable))
 
         if field_executable is None:
-            self._field_exe = self._find_executable_in_paths(
+            self.field_executable = self._find_executable_in_paths(
                 'field.exe',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
         else:
-            self._field_exe = Path(field_executable)
+            self.field_executable = Path(field_executable)
 
-        if not self._field_exe.exists():
+        if not self.field_executable.exists():
             raise ExecutableNotFoundError(
-                f"{self.model_name} (field.exe)", str(self._field_exe),
+                f"{self.model_name} (field.exe)", str(self.field_executable),
             )
 
         self.mode_points_per_meter = mode_points_per_meter
@@ -1221,8 +1202,17 @@ class KrakenField(_KrakenBase):
             UserWarning, stacklevel=2,
         )
         compute_depths = depths[keep] if keep.any() else np.array([0.5 * env.depth])
+        # 'line' receivers pair depths[i] with ranges[i]; dropping a depth
+        # must drop its paired range or the Receiver ctor rejects the
+        # length mismatch.
+        if receiver.receiver_type == 'line' and keep.any():
+            compute_ranges = np.atleast_1d(
+                np.asarray(receiver.ranges, dtype=float)
+            )[keep]
+        else:
+            compute_ranges = receiver.ranges
         compute_receiver = Receiver(
-            depths=compute_depths, ranges=receiver.ranges,
+            depths=compute_depths, ranges=compute_ranges,
             receiver_type=receiver.receiver_type,
         )
         return compute_receiver, keep
@@ -1417,7 +1407,7 @@ class KrakenField(_KrakenBase):
             self._log(f"Running field.exe (option='{option}')...")
             try:
                 self._run_subprocess(
-                    [str(self._field_exe), base_name],
+                    [str(self.field_executable), base_name],
                     cwd=fm.work_dir,
                 )
             except ModelExecutionError as exc:
@@ -1494,6 +1484,14 @@ class KrakenField(_KrakenBase):
                 )
             else:
                 field = read_shd_file(shd_file)
+                # field.exe emits the modal sum with a prefactor that differs
+                # from Scooter's Hankel path by an overall -1 (see the broadband
+                # branch above). Negate here too and tag travelling_wave so the
+                # COHERENT_TL complex pressure carries the SAME phase convention
+                # as the broadband / return_pressure branches and as Scooter
+                # (|TL| is unchanged; this only fixes the complex phase).
+                field.data = -field.data
+                field.phase_reference = 'travelling_wave'
                 field.model = self.model_name
                 field.backend = 'field.exe'
                 field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
@@ -1540,15 +1538,7 @@ class KrakenField(_KrakenBase):
             pressure. Trailing-frequency convention matches
             Bellhop/RAM/Scooter broadband outputs.
         """
-        fc = float(source.frequencies[0])
-        if frequencies is None:
-            half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
-            frequencies = np.linspace(
-                max(1.0, fc * (1.0 - half_bw)),
-                fc * (1.0 + half_bw),
-                DEFAULT_BROADBAND_N_FREQS,
-            )
-        frequencies = np.asarray(frequencies, dtype=float)
+        frequencies = self._resolve_broadband_frequencies(source, frequencies)
 
         self._log(f"Broadband: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")

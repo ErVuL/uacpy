@@ -22,7 +22,10 @@ def m_sequence(n_register, taps):
     """Maximal-length PN sequence (``+/-1``) of length ``2**n_register - 1``.
 
     ``taps`` are the 1-based feedback-tap positions of the LFSR (e.g. ``[5, 2]``
-    for a length-31 sequence).
+    for a length-31 sequence). Sibling of
+    :func:`uacpy.acoustic_signal.generation.mseq`, which generates m-sequences
+    from preset polynomials keyed by register length — this variant takes the
+    taps explicitly for spreading-code experiments.
     """
     n = int(n_register)
     reg = [1] * n

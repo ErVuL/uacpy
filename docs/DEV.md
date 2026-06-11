@@ -7,8 +7,6 @@ extending or modifying any of them. It is a complement to:
 - `README.md` — user-facing intro + quick start.
 - `DOCUMENTATION.md` — public API reference (signatures, kwargs, units).
 - `CLAUDE.md` — high-density architectural notes for AI assistants.
-- `AUDIT.md` / `AUDIT_SCIENCE.md` — historical findings from the
-  code/science audits.
 
 If you want to add a model, hook a new I/O format, or change shared
 plumbing, start here.
@@ -23,7 +21,6 @@ uacpy/
 ├── install.sh               Native-binary build script (Fortran/C/CUDA)
 ├── pyproject.toml           Package + pytest config (default `-n logical`)
 ├── DOCUMENTATION.md         Public API reference
-├── AUDIT.md, AUDIT_SCIENCE.md  Audit logs
 └── uacpy/
     ├── core/                Physics-agnostic dataclasses + invariants
     ├── models/              One PropagationModel subclass per engine
@@ -32,9 +29,10 @@ uacpy/
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_rays / plot_modes / …
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
-    ├── examples/            25 numbered example scripts
+    ├── examples/            36 numbered example scripts
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
+    ├── parallel.py          run_parallel / Job — parallel batch runner
     ├── _log.py              Single log channel + warning formatter
     └── _stack.py            One-shot RLIMIT_STACK bump on import
 ```
@@ -54,14 +52,22 @@ class enforces a tight API contract; bend it only when you must.
 ### 2.1 Run signature
 
 ```python
-result = Model(...).run(env, source, receiver, run_mode=None, **kwargs)
+result = Model(...).run(env, source, receiver, run_mode=None, *,
+                        frequencies=None, source_waveform=None,
+                        sample_rate=None)
 ```
 
-The first four positional parameters are **fixed** and **shared** by
-every model. Model configuration is **constructor-only** —
+The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
+unknown keyword raises Python's standard `TypeError` at the call site.
+The only sanctioned extensions are `n_modes=` on the Kraken family
+(Kraken, KrakenC, KrakenField) and `output_duration=` on the broadband
+synthesizers (Bellhop, BellhopCUDA, RAM, Scooter, KrakenField, OASP). Model configuration is
+**constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter
-set; `model.copy(**overrides)` short-circuits the boilerplate.
+set; `model.copy(**overrides)` short-circuits the boilerplate. Run a
+batch of independent runs in parallel with `uacpy.run_parallel` over
+self-contained `Job`s (a process pool; `uacpy/parallel.py`).
 
 `run()` returns one `core.results.Result` subclass — `Field`,
 `Arrivals`, `Rays`, `Modes`, `Covariance`, `Replicas`, or
@@ -168,7 +174,9 @@ are direct attributes on `Result`, **not** metadata.
      `self._set_collapse_defaults({...})`;
    - store every constructor argument as `self.<name>` so
      `model.copy()` can introspect them.
-2. Implement `run(self, env, source, receiver, run_mode=None, **kwargs)`:
+2. Implement `run(self, env, source, receiver, run_mode=None, *,
+   frequencies=None, source_waveform=None, sample_rate=None)` — the
+   fixed signature, no `**kwargs`:
    - call `self._resolve_run_mode(run_mode)` first;
    - call `env = self._project_environment(env)` to apply the collapse
      policy;

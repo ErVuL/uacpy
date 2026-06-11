@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def echo_level(source_level, tl, target_strength):
     """Active echo level at the receiver: ``SL - 2*TL + TS`` (dB)."""
@@ -66,7 +68,7 @@ def active_signal_excess(
         reverb-limited: ``SE = SL - 2*TL + TS - RL - DT``
     """
     if noise_level is None and reverberation_level is None:
-        raise ValueError(
+        raise ConfigurationError(
             "active_signal_excess: provide noise_level and/or reverberation_level"
         )
     el = echo_level(source_level, tl, target_strength)
@@ -114,18 +116,19 @@ def detection_range(ranges_m, signal_excess_db):
     r = np.asarray(ranges_m, dtype=float)
     se = np.asarray(signal_excess_db, dtype=float)
     if r.shape != se.shape:
-        raise ValueError("detection_range: ranges and signal_excess shape mismatch")
+        raise ConfigurationError("detection_range: ranges and signal_excess shape mismatch")
     positive = se >= 0.0
     if positive.all():
         return np.inf
     if not positive.any():
         return np.nan
-    # Outermost index that is positive while the next sample is negative.
-    sign_change = np.where(positive[:-1] & ~positive[1:])[0]
-    if sign_change.size == 0:
-        # Positive only at ranges beyond the last crossing-down; return last +.
-        return float(r[np.where(positive)[0][-1]])
-    i = sign_change[-1]
-    se0, se1 = se[i], se[i + 1]
+    # Largest range with SE >= 0 is the outermost positive sample — this
+    # captures a far-edge recovery (e.g. a convergence zone giving +,-,+).
+    last_pos = int(np.where(positive)[0][-1])
+    if last_pos == r.size - 1:
+        # SE stays/recovers positive at the far edge; detectable out to the
+        # last sampled range, with no crossing-down beyond it to interpolate.
+        return float(r[last_pos])
+    se0, se1 = se[last_pos], se[last_pos + 1]
     frac = se0 / (se0 - se1)
-    return float(r[i] + frac * (r[i + 1] - r[i]))
+    return float(r[last_pos] + frac * (r[last_pos + 1] - r[last_pos]))

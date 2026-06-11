@@ -5,7 +5,6 @@ import tempfile
 import shutil
 from pathlib import Path
 from typing import Optional, Union
-from contextlib import contextmanager
 
 
 class FileManager:
@@ -142,49 +141,6 @@ class FileManager:
             self.work_dir = None
             self._temp_dir = None
 
-    def list_files(self, pattern: str = '*') -> list:
-        """
-        List files in the working directory.
-
-        Parameters
-        ----------
-        pattern : str, optional
-            Glob pattern for filtering. Default is ``'*'`` (all files).
-
-        Returns
-        -------
-        files : list of Path
-            List of matching file paths.
-        """
-        if self.work_dir is None or not self.work_dir.exists():
-            return []
-
-        return list(self.work_dir.glob(pattern))
-
-    def copy_file(self, src: Union[str, Path], dst_name: Optional[str] = None) -> Path:
-        """
-        Copy a file into the working directory.
-
-        Parameters
-        ----------
-        src : str or Path
-            Source file path.
-        dst_name : str, optional
-            Destination filename. If ``None``, uses the source filename.
-
-        Returns
-        -------
-        dst_path : Path
-            Path to the copied file in the working directory.
-        """
-        src = Path(src)
-        if dst_name is None:
-            dst_name = src.name
-
-        dst = self.get_path(dst_name)
-        shutil.copy2(src, dst)
-        return dst
-
     def __enter__(self):
         self.create_work_dir()
         return self
@@ -197,33 +153,3 @@ class FileManager:
         tmpfs_str = "tmpfs" if self.use_tmpfs else "disk"
         work_str = str(self.work_dir) if self.work_dir else "not created"
         return f"FileManager({tmpfs_str}, work_dir={work_str})"
-
-
-@contextmanager
-def temporary_directory(use_tmpfs: bool = False, prefix: str = 'uacpy_'):
-    """
-    Yield a temporary directory that is cleaned up on exit.
-
-    Parameters
-    ----------
-    use_tmpfs : bool, optional
-        Use RAM-based filesystem. Default is False.
-    prefix : str, optional
-        Directory name prefix.
-
-    Yields
-    ------
-    path : Path
-        Path to the temporary directory.
-
-    Examples
-    --------
-    >>> with temporary_directory(use_tmpfs=True) as tmpdir:
-    ...     file_path = tmpdir / 'test.txt'
-    ...     file_path.write_text('data')
-    """
-    fm = FileManager(use_tmpfs=use_tmpfs, prefix=prefix, cleanup=True)
-    try:
-        yield fm.create_work_dir()
-    finally:
-        fm.cleanup_work_dir()

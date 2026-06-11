@@ -142,11 +142,14 @@ Model(
    into `run()`.
 3. **Per-call request** — `run_mode` plus the signal kwargs
    `frequencies=`, `source_waveform=`, `sample_rate=`, `output_duration=`
-   are the **only** kwargs `run()` accepts. Every model has the same
-   fixed signature: `run(env, source, receiver, run_mode=None, *,
-   frequencies=None, source_waveform=None, sample_rate=None,
-   output_duration=None)`. KrakenField additionally takes `n_modes=`
-   for the field reconstruction limit.
+   are the **only** kwargs `run()` accepts. Every model shares the fixed
+   spine `run(env, source, receiver, run_mode=None, *, …)`; the signal
+   kwargs appear per capability — the broadband synthesizers (Bellhop,
+   BellhopCUDA, RAM, Scooter, KrakenField, OASP) take all four, SPARC
+   takes `source_waveform=`/`sample_rate=` only, OASR takes
+   `frequencies=` only, and Bounce/OAST/OASN take none.
+   The Kraken family (Kraken, KrakenC, KrakenField) additionally takes
+   `n_modes=` for the mode-count / field-reconstruction limit.
 
 **Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
 so `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) raises at
@@ -276,11 +279,12 @@ machinery.
 | `ExecutableNotFoundError` | binary missing at construction time |
 | `ModelExecutionError` | binary ran but failed (non-zero exit, empty output). The captured `.prt` log tail is appended for AT models. |
 
-### Thread safety
+### Thread safety & parallel runs
 
 Model instances mutate `self.file_manager` per `run()` and are **not
-safe to share across threads**. For sweeps, instantiate one model per
-worker (or use `ProcessPoolExecutor`).
+safe to share across threads**. To run many models concurrently, use
+`uacpy.run_parallel` — a process pool with one model instance per worker
+(see §5.11, *Running in parallel*).
 
 ---
 
@@ -289,8 +293,7 @@ worker (or use `ProcessPoolExecutor`).
 ```python
 uacpy.Environment(
     bathymetry,                 # float (flat) or (N,2) ndarray (range_m, depth_m)
-    ssp = None,                 # SoundSpeedProfile or scalar (None ⇒ isovelocity)
-    sound_speed = 1500.0,       # default speed when ssp=None
+    ssp = None,                 # SoundSpeedProfile or scalar (None ⇒ isovelocity 1500 m/s)
     altimetry = None,           # (N,2) sea-surface (range_m, height_m, +up)
     bottom = None,              # BoundaryProperties / RD / Layered / RDL
                                 #   (default: fluid half-space c=1600, ρ=1.5, α=0.5)
@@ -808,8 +811,8 @@ ram = RAM(dr=None, dz=None, zmax=None,        # None ⇒ Lytaev (2023) Padé opt
 field = ram.run(env, source, receiver)
 ```
 
-Every constructor knob also accepts a per-call override on `run()`
-(e.g. `ram.run(env, src, rcv, accuracy=5e-4)`). `rams_theta=` may be a
+Configuration is constructor-only; to sweep a knob, build a new model or
+use `ram.copy(accuracy=5e-4)`. The constructor's `rams_theta=` may be a
 callable `theta_fn(freq_hz) -> float` to vary the elastic stability
 angle across a band.
 
@@ -915,6 +918,8 @@ oast = OAST(compute_contour=False,         # add 'C' (range-depth contour)
 field = oast.run(env, source, receiver)
 
 # Spatial covariance + matched-field replicas — RunMode.COVARIANCE / RunMode.REPLICA
+# Noise-field knobs (surface_noise_level, white_noise_level, deep_noise_level,
+# discrete_sources, …) are constructor-only too — see help(OASN).
 oasn = OASN(zmin=10, zmax=90, nz=20,       # replica grid is constructor-only
             xmin=500, xmax=10000, nx=40)
 cov = oasn.compute_covariance(env, source, receiver)
@@ -926,7 +931,7 @@ oasr = OASR(angles=None,                   # default linspace(0, 90, 181)
             reflection_type='P-P')          # 'P-P' | 'P-SV' | 'P-Slow' | 'transmission'
 refl = oasr.run(env, source, receiver)
 broad = oasr.run(env, source, receiver,
-                 freq_min=50, freq_max=200, n_frequencies=16)
+                 frequencies=np.linspace(50, 200, 16))   # multi-freq sweep
 
 # Broadband / pulse synthesis — RunMode.BROADBAND / RunMode.TIME_SERIES
 oasp = OASP(n_time_samples=4096, freq_max=250.0)
@@ -944,6 +949,67 @@ also default `'ssp': 'mean'`; OASR keeps `'ssp': 'r0'` (the SSP
 boundary speed is essentially irrelevant to the reflection coefficient).
 
 Examples: 13, 19.
+
+### 5.11 Running in parallel — `run_parallel`
+
+Every model run is an independent, subprocess-bound computation, so a
+batch of runs is embarrassingly parallel. `uacpy.run_parallel` runs a
+list of `Job`s across a process pool and returns a `ParallelResult`:
+
+```python
+from uacpy import Job, run_parallel, RunMode
+
+jobs = [
+    Job(uacpy.models.Bellhop(n_beams=800), env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='bellhop'),
+    Job(uacpy.models.KrakenField(),        env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='kraken'),
+    Job(uacpy.models.RAM(),                env, src, rcv,
+        run_mode=RunMode.COHERENT_TL, label='ram'),
+]
+batch = run_parallel(jobs, n_workers=3)        # blocks until all finish
+```
+
+Each `Job(model, env, source, receiver, run_mode=None, run_kwargs={},
+label=None)` fully describes one `model.run(...)` call, so heterogeneous
+batches — different models, scenarios, or run modes per job — need no
+special handling. To run several models on the **same** scenario, pass
+the same `env` / `source` / `receiver` to each `Job`. A knob sweep is
+just jobs built with `model.copy(**overrides)`:
+
+```python
+base = uacpy.models.Bellhop()
+jobs = [Job(base.copy(n_beams=n), env, src, rcv,
+            run_mode=RunMode.COHERENT_TL, label=n)
+        for n in (200, 400, 800)]
+```
+
+`run_parallel(jobs, *, n_workers=None, raise_on_error=True,
+start_method='spawn', coordinate_name='case')` returns a `ParallelResult`
+aligned one-to-one with `jobs`:
+
+| Access | Meaning |
+|---|---|
+| `batch[i]` / `batch.results[i]` | result for job `i` (`None` if it failed) |
+| `for res in batch:` | iterate results in job order |
+| `batch.labels` | per-job labels (default: job index) |
+| `batch.ok` | `True` if every job succeeded |
+| `batch.errors` | `{i: exception}` for failed jobs (when `raise_on_error=False`) |
+| `batch.stack()` | bundle a single-model batch into a `ResultStack` |
+
+`run_parallel` is synchronous from the caller's side: it blocks until
+every job finishes, then hands back all results at once — there are no
+futures to await. Results carry their full numerical content in memory
+(ray paths, eigenrays, mode shapes, TL arrays), so nothing is lost
+shipping them back from a worker. A worker owns its scratch dir and
+wipes it (`cleanup=True`); to keep the on-disk files and valid
+`result.metadata` paths, build each job's model with a pinned
+`work_dir` and `cleanup=False`. `start_method` defaults to `'spawn'` —
+`'fork'` is unsafe because uacpy is multi-threaded (numpy/BLAS).
+
+`.stack()` needs homogeneous slabs (same concrete type, `model`, and
+`backend`), so it is for single-model batches; for a cross-model batch,
+iterate `batch.results` instead.
 
 ---
 
@@ -1256,7 +1322,7 @@ Reachable as `uacpy.acoustic_signal`. Sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `fourier_synthesis` |
+| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `cans`, `nwave`, `mseq`, `make_mseq_probe`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `make_noise_waveform`, `fourier_synthesis` |
 | `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `taper` |
 | `…active` | Matched filter / pulse compression / ambiguity / alignment | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function`, `shift_to_max_correlation` |
 | `…transforms` | Gather transforms: f-k, tau-p, Radon (each with inverse + acoustic-cone overlay) | `FK`, `TauP`, `Radon`, `inverse_fk`, `taup_transform`/`inverse_taup`, `radon_transform`/`inverse_radon` |
@@ -1299,7 +1365,7 @@ PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
 For per-class kwargs / methods, read the docstrings
-(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10, 27–29 walk
+(`help(uacpy.acoustic_signal.system_id.FRF)`). Examples 09, 10, 27–29 walk
 through the common workflows (signal generation, matched filtering, arrays).
 
 ### Sonar performance (`uacpy.sonar`)

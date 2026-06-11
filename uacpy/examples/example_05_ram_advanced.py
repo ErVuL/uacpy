@@ -231,7 +231,7 @@ def main():
         from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
             {'RAM': result, 'Bellhop': result_bellhop, 'KrakenField': result_krakenfield},
-            env, vmin=40, vmax=100,
+            env=env, vmin=40, vmax=100,
             suptitle='Three-Model Comparison — Sediment Transition + Sloping Shelf',
         )
         fig5.savefig(OUTPUT_DIR / 'example_05_comparison.png', dpi=150)

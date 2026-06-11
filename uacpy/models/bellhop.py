@@ -152,12 +152,13 @@ def delayandsum(
         delay_samples = (delays[ia] - t_start) / deltat
         i_start = int(np.round(delay_samples))
 
-        for k in range(nsts):
-            idx = i_start + k
-            if 0 <= idx < nrts:
-                rts[idx] += scaled_amp * np.real(
-                    sts_analytic[k] * phase_factor
-                )
+        # Add this arrival's shifted, scaled copy of the source signal as a
+        # single clipped slice-add (vectorised over the source samples).
+        contrib = scaled_amp * np.real(sts_analytic * phase_factor)
+        lo = max(0, i_start)
+        hi = min(nrts, i_start + nsts)
+        if lo < hi:
+            rts[lo:hi] += contrib[lo - i_start:hi - i_start]
 
     time_vector = t_start + np.arange(nrts) * deltat
     return rts, time_vector
@@ -414,6 +415,26 @@ class Bellhop(PropagationModel):
         component : {'P', 'D'}, optional
             Output component for displacement-receiver fields: 'P'
             pressure (default), 'D' displacement.
+        beam_shift : bool, optional
+            When True, sets RunType position 7 to 'S' enabling beam-shift
+            on boundary reflections. Default: False.
+        n_freqs : int, optional
+            Number of frequency bins for BROADBAND / TIME_SERIES
+            synthesis when the band is expanded from a single centre
+            frequency. Default: :data:`DEFAULT_BROADBAND_N_FREQS`.
+        bandwidth_factor : float, optional
+            Fractional bandwidth of the synthesised band
+            ``[fc·(1-bw/2), fc·(1+bw/2)]`` around a single centre
+            frequency. Default:
+            :data:`DEFAULT_BROADBAND_BANDWIDTH_FACTOR`.
+        time_window : float, optional
+            TIME_SERIES output window length (s). ``None``
+            auto-derives from the latest arrival plus the source
+            waveform duration; ``run(output_duration=…)`` overrides
+            per call.
+        t_start : float, optional
+            TIME_SERIES output start time (s). ``None`` auto-derives
+            from the earliest arrival.
         auto_bounce : bool, optional
             Default ``True``. When ``env`` carries a ``LayeredBottom`` /
             ``RangeDependentLayeredBottom`` / elastic halfspace /
@@ -620,8 +641,10 @@ class Bellhop(PropagationModel):
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
             # source_waveform → Field; with it → Field (1×1 grid).
+            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             return self._run_broadband(
                 env, source, receiver,
+                run_mode=run_mode,
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
@@ -709,17 +732,29 @@ class Bellhop(PropagationModel):
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            # auto_bounce=False: fall through. ``_project_environment``
-            # below will collapse the bottom via the user's
-            # ``collapse={...}`` policy (default ``layered='halfspace'``,
-            # ``rd_layered_layers='halfspace'``, ``elastic='fluid'``).
+            # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
+            # a halfspace by ``_project_environment`` (collapse policy). A pure
+            # ELASTIC halfspace is NOT collapsed — Bellhop sets
+            # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
+            # the ray tracer fluid-approximates the elastic reflection internally.
+            if is_layered:
+                detail = (
+                    "collapsing the layered bottom to a halfspace via the "
+                    "model's collapse policy and running with fluid ray-tracer "
+                    "physics"
+                )
+            else:
+                detail = (
+                    "writing the elastic halfspace directly (no collapse — "
+                    "Bellhop supports elastic media); its reflection coefficient "
+                    "is fluid-approximated by the ray tracer"
+                )
             warnings.warn(
-                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False "
-                f"→ collapsing via the model's collapse policy and running "
-                f"with fluid ray-tracer physics. Reflection-coefficient "
-                f"accuracy near elastic / layered bottoms will be degraded. "
-                f"Set auto_bounce=True (default) or call run_with_bounce() "
-                f"for the elastic-correct path.",
+                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
+                f"{detail}. Reflection-coefficient accuracy near elastic / "
+                f"layered bottoms will be degraded. Set auto_bounce=True "
+                f"(default) or call run_with_bounce() for the elastic-correct "
+                f"path.",
                 UserWarning, stacklevel=2,
             )
 
@@ -982,6 +1017,7 @@ class Bellhop(PropagationModel):
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run Bellhop using BOUNCE-generated reflection coefficients.
@@ -1049,6 +1085,7 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
+                output_duration=output_duration,
             )
 
             # Strip the about-to-be-invalid file paths (work dir is wiped
@@ -1067,6 +1104,7 @@ class Bellhop(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        run_mode: 'RunMode' = None,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
@@ -1170,9 +1208,16 @@ class Bellhop(PropagationModel):
             else (0.0 if output_duration is not None else None)
         )
 
-        # Step 1: Run Bellhop in arrivals mode
+        # Step 1: Run Bellhop in arrivals mode. Bellhop traces rays at the
+        # single carrier fc, so the arrivals run uses a single-frequency source
+        # (ARRIVALS does not accept a multi-frequency band).
         self._log("Running in arrivals mode (broadband path)...")
-        arr_field = self.run(env, source, receiver, run_mode=RunMode.ARRIVALS)
+        arr_source = Source(
+            depths=source.depths,
+            frequencies=fc,
+            source_type=source.source_type,
+        )
+        arr_field = self.run(env, arr_source, receiver, run_mode=RunMode.ARRIVALS)
 
         arrivals_by_rcv = arr_field.by_receiver
         rz = arr_field.receiver_depths
@@ -1182,7 +1227,17 @@ class Bellhop(PropagationModel):
         nrr = len(rr)
 
         # ── Path A: time-domain delay-and-sum with source waveform ──
-        if source_waveform is not None:
+        # Branch on the contracted mode, not on the presence of a waveform:
+        # BROADBAND must return H(f) even if a waveform is supplied (the
+        # waveform is meaningful only for the p(t) synthesis of TIME_SERIES).
+        if run_mode == RunMode.BROADBAND and source_waveform is not None:
+            warnings.warn(
+                "Bellhop.run(run_mode=BROADBAND) returns the complex transfer "
+                "function H(f); the supplied source_waveform is ignored. Use "
+                "run_mode=TIME_SERIES to synthesise p(t).",
+                UserWarning, stacklevel=2,
+            )
+        if run_mode == RunMode.TIME_SERIES:
 
             if sample_rate is None:
                 raise ConfigurationError(
@@ -1191,10 +1246,20 @@ class Bellhop(PropagationModel):
 
             self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
-            # Lock the time window using the first cell so all traces share
-            # a clock; reuse it for every subsequent cell via ``t_start``.
-            rts0, t_vec = delayandsum(
-                rcv_arrivals=arrivals_by_rcv[0][0][0],
+            # Lock the time window from the first cell *with* arrivals so
+            # all traces share a clock; an arrival-less cell would let
+            # delayandsum fall back to its 0.1 s stub and truncate every
+            # trace in the grid.
+            lock_arrivals = arrivals_by_rcv[0][0][0]
+            for cell in (
+                arrivals_by_rcv[0][ird][irr]
+                for ird in range(nrd) for irr in range(nrr)
+            ):
+                if int(cell.get('n_arrivals', 0)) > 0:
+                    lock_arrivals = cell
+                    break
+            _, t_vec = delayandsum(
+                rcv_arrivals=lock_arrivals,
                 source_timeseries=source_waveform,
                 sample_rate=sample_rate,
                 fc=fc,
@@ -1203,14 +1268,11 @@ class Bellhop(PropagationModel):
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
-            n_t = len(rts0)
+            n_t = len(t_vec)
 
             data = np.zeros((nrd, nrr, n_t), dtype=float)
-            data[0, 0, :] = rts0
             for ird in range(nrd):
                 for irr in range(nrr):
-                    if ird == 0 and irr == 0:
-                        continue
                     rts, _ = delayandsum(
                         rcv_arrivals=arrivals_by_rcv[0][ird][irr],
                         source_timeseries=source_waveform,
@@ -1239,13 +1301,10 @@ class Bellhop(PropagationModel):
             )
 
         # ── Path B: frequency-domain transfer function ──
-        if frequencies is None:
-            half_bw = 0.5 * self.bandwidth_factor
-            f_min = max(1.0, fc * (1.0 - half_bw))
-            f_max = fc * (1.0 + half_bw)
-            frequencies = np.linspace(f_min, f_max, self.n_freqs)
-
-        frequencies = np.asarray(frequencies, dtype=float)
+        frequencies = self._resolve_broadband_frequencies(
+            source, frequencies,
+            n_freqs=self.n_freqs, bandwidth_factor=self.bandwidth_factor,
+        )
         n_freq = len(frequencies)
 
         # Build H(d, r, f) for each (receiver_depth, receiver_range).
@@ -1254,9 +1313,7 @@ class Bellhop(PropagationModel):
         for ird in range(nrd):
             for irr in range(nrr):
                 rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, irr, :] = self._arrivals_to_tf(
-                    rcv_arr, frequencies, fc
-                )
+                H[ird, irr, :] = self._arrivals_to_tf(rcv_arr, frequencies)
 
         self._log(f"Built transfer function "
                   f"({nrd} depths x {n_freq} freqs x {nrr} ranges)")
@@ -1285,7 +1342,6 @@ class Bellhop(PropagationModel):
     def _arrivals_to_tf(
         rcv_arrivals: dict,
         frequencies: np.ndarray,
-        fc: float,
     ) -> np.ndarray:
         """
         Build frequency-domain transfer function from per-receiver arrivals.
@@ -1308,8 +1364,6 @@ class Bellhop(PropagationModel):
             delays_imag, n_arrivals.
         frequencies : ndarray
             Frequency vector in Hz.
-        fc : float
-            Center frequency in Hz (used for attenuation scaling).
 
         Returns
         -------
@@ -1328,18 +1382,14 @@ class Bellhop(PropagationModel):
         phases_rad = np.deg2rad(phases_deg)
         omega = 2.0 * np.pi * frequencies  # (n_freq,)
 
-        H = np.zeros(len(frequencies), dtype=complex)
-
-        for ia in range(n_arr):
-            A_complex = amps[ia] * np.exp(1j * phases_rad[ia])
-            # exp(-i*omega*tau) with tau = Re(tau) + i*Im(tau) gives a
-            # phase-shift and an exp(omega*Im(tau)) attenuation. Im(tau)
-            # is in seconds; omega is the per-frequency carrier.
-            phase_shift = np.exp(-1j * omega * delays[ia])
-            atten = np.exp(omega * delays_imag[ia])
-            H += A_complex * atten * phase_shift
-
-        return H
+        # Vectorised over arrivals. For each arrival, tau = Re(tau)+i*Im(tau)
+        # gives a phase-shift exp(-i*omega*Re(tau)) and an attenuation
+        # exp(omega*Im(tau)); omega is the per-frequency carrier.
+        A_complex = np.asarray(amps) * np.exp(1j * phases_rad)        # (n_arr,)
+        omega_tau = np.outer(delays, omega)                          # (n_arr, n_freq)
+        omega_taui = np.outer(delays_imag, omega)                    # (n_arr, n_freq)
+        contrib = A_complex[:, None] * np.exp(omega_taui - 1j * omega_tau)
+        return contrib.sum(axis=0)
 
     def _build_command(self, base_name: str) -> list:
         """Build the argv used to launch the binary.
@@ -1407,6 +1457,10 @@ class BellhopCUDA(Bellhop):
         # discovery.
         self.use_gpu = use_gpu
         self.dimensionality = dimensionality
+        # prefer_cuda is meaningless here (CUDA/CXX only, never Fortran); drop
+        # any inherited value so model.copy() can round-trip it without clashing
+        # with the forced True below.
+        kwargs.pop('prefer_cuda', None)
         super().__init__(
             executable=executable,
             prefer_cuda=True,  # always prefer GPU/CXX before Fortran

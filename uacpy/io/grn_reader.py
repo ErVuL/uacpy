@@ -21,7 +21,6 @@ We detect SPARC by the ``'SPARC'`` prefix in the title (set at
 """
 
 import numpy as np
-import struct
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
@@ -64,13 +63,12 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         head = f.read(4)
         f.seek(0)
         endian = detect_endian(head, source=f'read_grn_file:{filepath.name}')
-        i4 = endian + 'i'
-        d8 = endian + 'd'
-        f4 = endian + 'f4'
-        f8 = endian + 'f8'
+        i4 = np.dtype(endian + 'i4')
+        f4 = np.dtype(endian + 'f4')
+        f8 = np.dtype(endian + 'f8')
 
         # Record 1: recl (int32, in 4-byte words) + title (80 chars)
-        recl = struct.unpack(i4, f.read(4))[0]
+        recl = int(np.fromfile(f, dtype=i4, count=1)[0])
         title = f.read(80).decode("utf-8", errors="ignore").strip()
 
         f.seek(4 * recl, 0)
@@ -81,36 +79,34 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         f.seek(2 * 4 * recl, 0)
 
         # Record 3: 7 int32 + freq0 (float64) + atten (float64)
-        nfreq = struct.unpack(i4, f.read(4))[0]
-        struct.unpack(i4, f.read(4))[0]
-        struct.unpack(i4, f.read(4))[0]
-        struct.unpack(i4, f.read(4))[0]
-        nsd = struct.unpack(i4, f.read(4))[0]   # NSz
-        nrd = struct.unpack(i4, f.read(4))[0]   # NRz
-        nk = struct.unpack(i4, f.read(4))[0]    # NRr — number of k samples
-        freq0 = struct.unpack(d8, f.read(8))[0]
-        atten = struct.unpack(d8, f.read(8))[0]
+        nfreq = int(np.fromfile(f, dtype=i4, count=1)[0])
+        np.fromfile(f, dtype=i4, count=3)       # Ntheta, NSx, NSy — unused
+        nsd = int(np.fromfile(f, dtype=i4, count=1)[0])   # NSz
+        nrd = int(np.fromfile(f, dtype=i4, count=1)[0])   # NRz
+        nk = int(np.fromfile(f, dtype=i4, count=1)[0])    # NRr — number of k samples
+        freq0 = float(np.fromfile(f, dtype=f8, count=1)[0])
+        atten = float(np.fromfile(f, dtype=f8, count=1)[0])
 
         f.seek(3 * 4 * recl, 0)
 
         # Record 4: frequency vector (or time vector for SPARC snapshot)
-        freqVec = np.frombuffer(f.read(nfreq * 8), dtype=f8).copy()
+        freqVec = np.fromfile(f, dtype=f8, count=nfreq)
 
         # Records 5-7: theta / sx / sy — skipped
         f.seek(7 * 4 * recl, 0)
 
         # Record 8: Source depths (float32)
-        sd = np.frombuffer(f.read(nsd * 4), dtype=f4).copy()
+        sd = np.fromfile(f, dtype=f4, count=nsd)
 
         f.seek(8 * 4 * recl, 0)
 
         # Record 9: Receiver depths (float32)
-        rd = np.frombuffer(f.read(nrd * 4), dtype=f4).copy()
+        rd = np.fromfile(f, dtype=f4, count=nrd)
 
         f.seek(9 * 4 * recl, 0)
 
         # Record 10: phase-speed vector (float64), Nk entries.
-        cVec = np.frombuffer(f.read(nk * 8), dtype=f8).copy()
+        cVec = np.fromfile(f, dtype=f8, count=nk)
 
         # Records 11+: complex Green's function, one record per
         # (freq, source_depth, receiver_depth) tuple.
@@ -121,10 +117,13 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
                 for ird in range(nrd):
                     irec += 1
                     f.seek(irec * 4 * recl, 0)
-                    raw = f.read(nk * 8)
-                    if len(raw) < nk * 8:
-                        break
-                    data = np.frombuffer(raw, dtype=f4)
+                    data = np.fromfile(f, dtype=f4, count=2 * nk)
+                    if data.size < 2 * nk:
+                        raise ValueError(
+                            f"read_grn_file: truncated Green's-function record "
+                            f"at ifreq={ifreq}, isd={isd}, ird={ird} "
+                            f"(expected {2 * nk} float32 values, got {data.size})"
+                        )
                     G[ifreq, isd, ird, :] = data[0::2] + 1j * data[1::2]
 
     is_sparc = title.upper().startswith('SPARC')
@@ -416,7 +415,11 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    G_freq = np.fft.fft(G, axis=0) * dt              # scale to spectral density
+    # Steady-tone amplitude estimator 2·X_k/Σwin — the same one
+    # rts_to_pressure applies to the 'R'/'D' output modes, so both
+    # SPARC output paths agree on absolute |p|.
+    win = np.hanning(nt)
+    G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
     if frequency > nyquist:
@@ -426,11 +429,7 @@ def sparc_snapshot_to_field(
             "shortening t_max."
         )
     f_idx = int(np.argmin(np.abs(fft_freqs - frequency)))
-    # One-sided spectrum from a real time series — multiply by 2 to
-    # recover full amplitude (matches rts_to_pressure at
-    # oalib_reader.py:1331). The DC bin is the only one that should
-    # not be doubled, but f_idx > 0 for any physical source frequency.
-    G_at_f0 = 2.0 * G_freq[f_idx, :, :]              # (nrd, nk)
+    G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk)
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)
@@ -444,6 +443,11 @@ def sparc_snapshot_to_field(
         G_at_f0, k, ranges,
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
+    # Align with sparc.exe's native 'R'-mode range synthesis
+    # (sparc.f90 EXTRACT: √2·Δk·√k·e^{i(−kr+π/4)}/√r) — the
+    # fieldsco-style Hankel above carries 1/√(2πr) and the Scooter −1
+    # prefactor instead, a constant factor −√(4π) between the two.
+    p_out = p_out * (-np.sqrt(4.0 * np.pi))
 
     return Field(
         data=p_out,
@@ -486,7 +490,7 @@ def grn_to_transfer_function(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex64)
+    pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex128)
     for ifreq in range(nfreq):
         pressure[:, :, ifreq] = _grn_pressure_slice(
             grn_data, ranges, ifreq=ifreq, isd=source_depth_idx,

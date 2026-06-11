@@ -102,6 +102,30 @@ __all__ = [
     "read_psif",
     # ramsurf / rams (Collins) outputs
     "read_tl_line", "read_tl_grid", "read_pcomplex_grid",
+    # OALIB writers
+    "write_ssp",
+    "write_header", "write_absorption_block",
+    "write_fg_params", "write_bio_layers", "write_broadband_freqs",
+    "write_ssp_section", "write_layer_sections", "write_bottom_section",
+    "write_source_depths", "write_receiver_depths", "write_receiver_ranges",
+    "write_multi_profile_env",
+    "write_fieldflp", "write_field3dflp",
+    "write_phase_speed_and_rmax",
+    "resolve_ssp_interp", "resolve_ssp_topopt", "resolve_phase_speed_bounds",
+    # Boundary auxiliary writers
+    "write_bty_file", "write_bty_long_format", "write_bty_3d",
+    "write_ati_file",
+    "write_reflection_coefficient", "write_source_beam_pattern",
+    # Bellhop writer
+    "write_bellhop_env_file",
+    # OASES writers
+    "write_oast_input", "write_oasn_input", "write_oasp_input",
+    "write_oasr_input",
+    # mpiramS writers
+    "write_inpe", "write_ssp_file", "write_bth_file", "write_ranges_file",
+    "write_sediment_file",
+    # ramsurf writer
+    "write_ramin",
     # Utilities
     "equally_spaced",
 ]

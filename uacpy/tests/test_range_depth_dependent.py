@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import uacpy
 from uacpy import Field
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     RangeDependentBottom, SedimentLayer, LayeredBottom,
@@ -269,6 +269,35 @@ class TestModelWithRangeDependence:
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
 
         assert isinstance(result, Field)
+
+    @pytest.mark.requires_binary
+    def test_ram_range_dependent_bottom_default_dz(self):
+        """RAM auto-computes dz on a RangeDependentBottom (per-range ndarray
+        sound_speed) without crashing — regression for the 'truth value of an
+        array is ambiguous' error when dz is unpinned (every other RD test
+        pins dz=2.0, which masked it)."""
+        bottom_rd = RangeDependentBottom(
+            ranges=np.array([0.0, 2500.0, 5000.0]),
+            sound_speed=np.array([1600.0, 1700.0, 1800.0]),
+            density=np.array([1.5, 1.6, 1.7]),
+            attenuation=np.array([0.5, 0.5, 0.5]),
+        )
+        env = uacpy.Environment(
+            name="RD Bottom default dz", bathymetry=200.0, ssp=1500.0,
+            bottom=bottom_rd,
+        )
+        source = uacpy.Source(depths=25.0, frequencies=150.0)
+        receiver = uacpy.Receiver(
+            depths=np.array([50.0, 100.0]),
+            ranges=np.array([1000.0, 3000.0]),
+        )
+        ram = RAM(verbose=False)   # dz unpinned → _compute_dz path
+        # The auto-dz on this env hits the depth-grid and λ_p/16 floors,
+        # which warn by design.
+        with pytest.warns(UserWarning, match="raised dz"):
+            result = ram.run(env, source, receiver)
+        assert isinstance(result, Field)
+        assert np.all(np.isfinite(result.tl))
 
 
 class TestRangeDependentConsistency:
@@ -570,7 +599,7 @@ class TestWarnings:
                 pass
 
     def test_ram_accepts_layered_bottom(self):
-        """RAM should accept layered bottom without warnings."""
+        """RAM consumes a layered bottom natively — no collapse warning."""
         lb = LayeredBottom(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
@@ -580,10 +609,17 @@ class TestWarnings:
         receiver = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
-        try:
-            ram.run(env, source, receiver)
-        except (FileNotFoundError, RuntimeError):
-            pass  # Binary may not be available
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                ram.run(env, source, receiver)
+            except ExecutableNotFoundError:
+                pytest.skip("RAM binary not available")
+        collapse = [w for w in caught if 'collaps' in str(w.message).lower()]
+        assert not collapse, (
+            "RAM emitted a collapse warning for a layered bottom it should "
+            f"accept natively: {[str(w.message) for w in collapse]}"
+        )
 
 
 class TestIntegrationLayeredBottom:

@@ -932,6 +932,7 @@ class RAM(PropagationModel):
             for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
         source_waveform = self._pad_waveform_to_duration(
             source_waveform, sample_rate, output_duration,
         )
@@ -966,7 +967,6 @@ class RAM(PropagationModel):
             if run_mode == RunMode.BROADBAND:
                 return self._run_broadband(env, source, receiver)
             if run_mode == RunMode.TIME_SERIES:
-                self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
                 tf = self._run_broadband(env, source, receiver)
                 return tf.synthesize_time_series(
                     source_waveform=source_waveform,
@@ -986,7 +986,6 @@ class RAM(PropagationModel):
                 env, source, receiver, kind=backend
             )
         if run_mode == RunMode.TIME_SERIES:
-            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
             tf = self._run_collins_broadband(
                 env, source, receiver, kind=backend
             )
@@ -1145,6 +1144,13 @@ class RAM(PropagationModel):
         DD, RR = np.meshgrid(rcv_d, rcv_r, indexing='ij')
         tl_out = interp(np.stack([DD.ravel(), RR.ravel()], axis=-1)).reshape(DD.shape)
 
+        # Mask sub-seafloor samples with NaN — same below-seafloor
+        # semantics as the mpiramS paths.
+        bathy = np.asarray(env.bathymetry, dtype=float)
+        seafloor = np.interp(rcv_r, bathy[:, 0], bathy[:, 1])
+        for j, bd in enumerate(seafloor):
+            tl_out[rcv_d > bd, j] = np.nan
+
         field = Field(
             data=tl_out,
             coords={'depth': rcv_d, 'range': rcv_r},
@@ -1266,7 +1272,7 @@ class RAM(PropagationModel):
                 UserWarning, stacklevel=3
             )
 
-        target_depth = float(np.atleast_1d(receiver.depths)[0])
+        target_depth = float(np.max(rcv_d))
         zmplt = max(target_depth + dz, env.depth + dz)
         zmplt = min(zmplt, zmax)
 
@@ -1464,7 +1470,9 @@ class RAM(PropagationModel):
         # Match mpiramS bandwidth / df conventions: bw = fc/Q, df = 1/T.
         bw = fc / Q_used
         df = 1.0 / T_used
-        nf1 = max(1, int(np.floor((bw - df) / df)))
+        # Half-count of the symmetric band, matching mpiramS peramx.f90:353
+        # (nf1 = int((bw-df)/df) + 1); omitting the +1 drops both band edges.
+        nf1 = max(1, int((bw - df) / df) + 1)
         # Symmetric grid centred on fc, like mpiramS' peramx.f90.
         frequencies = np.array(
             [(ii - nf1) * df + fc for ii in range(2 * nf1 + 1)],
@@ -1473,22 +1481,24 @@ class RAM(PropagationModel):
         # Drop non-positive (fc - bw can dip below 0 for small Q).
         frequencies = frequencies[frequencies > 0.0]
 
-        # Pick numerics ONCE for the whole broadband loop. dr is sized to
-        # the lowest freq (largest λ → coarsest acceptable step); dz to
-        # the highest freq (smallest λ_min → finest required step). Both
-        # auto-paths honour explicit self.dr / self.dz / self.zmax. This
-        # mirrors mpiramS' approach (single dr,dz across the whole band)
-        # and avoids per-frequency grid changes that would force the
-        # binary to re-allocate depth grids of varying sizes.
+        # Pick numerics ONCE for the whole broadband loop. dr is sized at
+        # f_min (largest λ → coarsest acceptable step); dz at f_max (smallest
+        # λ → finest required step). Two independent Lytaev calls.
+        #
+        # dr is deliberately sized at f_min, NOT f_max: a finer dr means more
+        # range steps, and rams0.5's rotated-Padé elastic march is only
+        # marginally stable (|G|≈1 near the evanescent boundary), so per-step
+        # floating-point noise compounds. Sizing dr at f_max (~3x more steps
+        # here) injects a spurious acausal precursor into the rams0.5 broadband
+        # synthesis — verified against the fluid baseline and confirmed by a
+        # rotation-angle sweep (Milinazzo 1997). The coarser f_min dr keeps the
+        # step count low and was accuracy-validated by the cross-model tests.
         f_min = float(frequencies[0])
         f_max = float(frequencies[-1])
         rmax_band = float(np.max(np.atleast_1d(receiver.ranges)))
 
         dr_band = float(self.dr) if self.dr is not None else None
         dz_band = float(self.dz) if self.dz is not None else None
-        # dr is sized at f_min (largest λ → coarsest acceptable step),
-        # dz at f_max (smallest λ → finest required step) — two
-        # independent Lytaev calls.
         if dr_band is None:
             dr_band, _ = self._compute_grid_lytaev(
                 env, f_min, max_range=rmax_band, kind=kind
@@ -1574,6 +1584,13 @@ class RAM(PropagationModel):
             freq_axis=2,
             apply_radial=False,
         )
+
+        # Mask sub-seafloor samples with NaN — same below-seafloor
+        # semantics as the mpiramS paths.
+        bathy = np.asarray(env.bathymetry, dtype=float)
+        seafloor = np.interp(rcv_r, bathy[:, 0], bathy[:, 1])
+        for j, bd in enumerate(seafloor):
+            H[rcv_d > bd, j, :] = np.nan
 
         field = Field(
             data=H,
@@ -1934,8 +1951,15 @@ class RAM(PropagationModel):
         speeds = [float(c0)]
 
         def _add(cp_attr):
-            if cp_attr:
-                speeds.append(float(cp_attr))
+            # cp_attr may be a scalar (BoundaryProperties / LayeredBottom layer)
+            # or a per-range ndarray (RangeDependentBottom). Take the smallest
+            # positive speed — the finest λ/16 requirement drives dz.
+            if cp_attr is None:
+                return
+            arr = np.atleast_1d(np.asarray(cp_attr, dtype=float))
+            arr = arr[arr > 0]
+            if arr.size:
+                speeds.append(float(arr.min()))
 
         b = env.bottom
         if isinstance(b, LayeredBottom):

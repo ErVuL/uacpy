@@ -39,6 +39,10 @@ class TestReverberation:
         cell = 0.1 * 1000.0 * (1500.0 * 0.1 / 2)
         expected = 220.0 - 2 * tl - 40.0 + 10 * np.log10(cell)
         assert rl[0] == pytest.approx(expected)
+        # Independent hand value (TL=60, cell=7500 m², 10log10(7500)=38.751):
+        # 220 - 120 - 40 + 38.751 = 98.751 dB — anchors the formula, not just
+        # re-derives it.
+        assert rl[0] == pytest.approx(98.751, abs=0.01)
 
     def test_volume_grows_faster_than_boundary(self):
         r = np.array([500.0, 5000.0])
@@ -54,6 +58,8 @@ class TestReverberation:
         tot = sonar.total_reverberation(a, b)
         expected = 10 * np.log10(10 ** 8.0 + 10 ** 7.4)
         assert tot[0] == pytest.approx(expected)
+        # Independent hand value: 10log10(1e8 + 2.5119e7) = 80.973 dB.
+        assert tot[0] == pytest.approx(80.973, abs=0.01)
 
     def test_bad_pulse_raises(self):
         with pytest.raises(ConfigurationError):
@@ -78,9 +84,12 @@ class TestSonarEquation:
         )
         background = 10 * np.log10(10 ** 4.5 + 10 ** 9.0)
         assert se == pytest.approx(220 - 120 + 10 - background - 10)
+        # Independent hand value: reverb (90) swamps noise-DI (45), so
+        # background ≈ 90.0 dB → SE ≈ 220-120+10-90-10 = 10.0 dB.
+        assert se == pytest.approx(10.0, abs=0.01)
 
     def test_active_requires_a_background(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             sonar.active_signal_excess(220, 60, 10)
 
     def test_figure_of_merit(self):
@@ -98,6 +107,18 @@ class TestSonarEquation:
     def test_detection_range_all_negative_is_nan(self):
         r = np.linspace(1, 10, 10)
         assert np.isnan(sonar.detection_range(r, -np.ones_like(r)))
+
+    def test_detection_range_far_edge_recovery(self):
+        # Convergence-zone shape (+, -, +): the outermost positive range wins,
+        # not the inner down-crossing.
+        r = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+        se = np.array([5.0, -1.0, 2.0, 3.0, 4.0])  # ends positive at r=4
+        assert sonar.detection_range(r, se) == pytest.approx(4.0)
+
+    def test_detection_range_outermost_of_multiple_crossings(self):
+        r = np.array([0.0, 1.0, 2.0, 3.0])
+        se = np.array([5.0, -1.0, 1.0, -1.0])  # down-crossing between r=2 and r=3
+        assert sonar.detection_range(r, se) == pytest.approx(2.5)
 
 
 class TestDetection:
@@ -124,7 +145,18 @@ class TestDetection:
     def test_detection_threshold_energy_formula(self):
         dt = sonar.detection_threshold_energy(0.9, 0.01, 100.0, 1.0)
         d = sonar.detection_index(0.9, 0.01)
-        assert dt == pytest.approx(5 * np.log10(d * 100.0 / 1.0))
+        # DT = 5*log10(d / (w*t)) (Urick energy detector); anchor to the value.
+        assert dt == pytest.approx(5 * np.log10(d / (100.0 * 1.0)))
+
+    def test_detection_threshold_falls_with_time_bandwidth(self):
+        # Incoherent integration lowers the required SNR: 5 dB per decade of w*t
+        # (Abraham §9.2). DT must DECREASE as bandwidth or integration time grow.
+        base = sonar.detection_threshold_energy(0.9, 0.01, 100.0, 1.0)
+        more_bw = sonar.detection_threshold_energy(0.9, 0.01, 1000.0, 1.0)
+        more_t = sonar.detection_threshold_energy(0.9, 0.01, 100.0, 10.0)
+        assert more_bw < base and more_t < base
+        assert more_bw == pytest.approx(base - 5.0, abs=1e-9)  # one decade of w
+        assert more_t == pytest.approx(base - 5.0, abs=1e-9)   # one decade of t
 
     def test_bad_probability_raises(self):
         with pytest.raises(ConfigurationError):

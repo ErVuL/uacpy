@@ -35,7 +35,7 @@ class TestMaterialsCatalog:
         assert get_material('  GRAVEL  ')['sound_speed'] == 1800.0
 
     def test_get_material_unknown_lists_options(self):
-        with pytest.raises(KeyError, match="Available"):
+        with pytest.raises(ConfigurationError, match="Available"):
             get_material('not_a_real_material')
 
     def test_list_materials_sorted(self):

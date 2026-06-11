@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.results import Covariance, Replicas
 
@@ -99,7 +100,7 @@ class TestShapeChecks:
             replica_y=rep.replica_y, model='Test',
             frequencies=np.array([200.0, 400.0]),
         )
-        with pytest.raises(ValueError, match="frequency mismatch"):
+        with pytest.raises(ConfigurationError, match="frequency mismatch"):
             cov.bartlett(bad)
 
     def test_receiver_count_mismatch_raises(self):
@@ -110,5 +111,5 @@ class TestShapeChecks:
             replica_y=rep.replica_y, model='Test',
             frequencies=200.0,
         )
-        with pytest.raises(ValueError, match="receiver-count mismatch"):
+        with pytest.raises(ConfigurationError, match="receiver-count mismatch"):
             cov.mvdr(bad)

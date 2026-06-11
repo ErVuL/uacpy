@@ -126,10 +126,17 @@ class TestOASN:
 
     @pytest.mark.requires_binary
     def test_oasn_compute_covariance(self, oasn_env, source, receiver):
-        """OASN.compute_covariance returns a populated Covariance result."""
+        """OASN.compute_covariance returns a populated Covariance result.
+
+        ``receiver`` carries a non-zero range, which OASN ignores (it
+        models a vertical array at x = y = 0) — so the call must warn.
+        """
         from uacpy import Covariance
         oasn = OASN(verbose=False)
-        cov = oasn.compute_covariance(env=oasn_env, source=source, receiver=receiver)
+        with pytest.warns(UserWarning, match=r"receiver\.ranges is ignored"):
+            cov = oasn.compute_covariance(
+                env=oasn_env, source=source, receiver=receiver,
+            )
         assert isinstance(cov, Covariance)
         assert isinstance(cov, Covariance)
         assert cov.covariance.ndim == 3
@@ -149,9 +156,11 @@ class TestOASN:
             zmin=20.0, zmax=80.0, nz=4,
             xmin=500.0, xmax=2000.0, nx=4,  # metres
         )
-        rep = oasn.compute_replicas(
-            env=oasn_env, source=source, receiver=rcv_array,
-        )
+        # rcv_array carries a non-zero range, which OASN ignores → warns.
+        with pytest.warns(UserWarning, match=r"receiver\.ranges is ignored"):
+            rep = oasn.compute_replicas(
+                env=oasn_env, source=source, receiver=rcv_array,
+            )
         assert isinstance(rep, Replicas)
         assert isinstance(rep, Replicas)
         # replica_x axis must be in metres (uacpy public-API convention).
@@ -178,7 +187,10 @@ class TestOASN:
         )
 
         oasn = OASN(verbose=False)
-        cov = oasn.compute_covariance(env=env, source=source, receiver=receiver)
+        with pytest.warns(UserWarning, match=r"receiver\.ranges is ignored"):
+            cov = oasn.compute_covariance(
+                env=env, source=source, receiver=receiver,
+            )
         assert isinstance(cov, Covariance)
 
 

@@ -7,8 +7,10 @@ OBJECTIVE:
     Demonstrate broadband / time-series capability across all models that
     support it:
     - Bellhop: ray-tracing arrivals → transfer function or delay-and-sum
-    - RAM (mpiramS, ramsurf1.5, rams0.5): native broadband PE on each of
-      the three RAM backends — same physics, three independent codes
+    - RAM (mpiramS, ramsurf1.5): native broadband fluid PE — two independent
+      codes on the same fluid Pekeris (the elastic backend rams0.5 is excluded
+      here; its rotated-Padé march is marginally stable and unsuited to
+      wide-band time-series synthesis — see §3 below)
     - SPARC: time-marched FFP, returns time-domain pressure
     - Scooter: multi-frequency FFP, returns transfer function
     - KrakenField: multi-frequency normal modes, returns transfer function
@@ -17,17 +19,18 @@ SCENARIO:
     Pekeris waveguide (isovelocity, 100 m depth, 100 Hz center frequency).
     Compare transfer functions and synthesize time-domain impulse responses.
 
-NOTE ON PRE-ARRIVAL SIDELOBES:
-    Bellhop, Scooter and KrakenField use coarse frequency sampling here
-    (32 points across 50–200 Hz → df ≈ 4.8 Hz → 1/df ≈ 207 ms time-domain
-    period). When the IFFT window is wider than 1/df, periodic replicas
-    of the impulse response appear before the geometric arrival r/c₀ —
-    that's the "little bit of signal" visible upstream of 3333 ms.
-    `Field.to_time_trace` interpolates the spectrum onto a finer FFT
-    grid (df_fft ≤ 1 Hz) to suppress them, but residual ripple from the
-    coarse source data remains. The three RAM backends use much denser
-    frequency sampling (Q=2, T=5 → df = 0.2 Hz, ~250 freqs across the
-    band) so their pre-arrival traces are essentially clean.
+NOTE ON THE TIME TRACES:
+    All broadband models share one dense, matched frequency grid (50–150 Hz,
+    df = 1 Hz → 1/df = 1 s IFFT window). A fine df matters for two reasons:
+    (1) if the IFFT window exceeds 1/df, coarse sampling produces periodic
+    replicas of the impulse response before the geometric arrival r/c₀; the
+    dense grid pushes those replicas out to 1 s, well outside the display
+    window. (2) The Pekeris waveguide is dispersive — slower modal group
+    velocities (down to the Airy phase) arrive AFTER the first arrival, so a
+    broadband pulse develops a real modal coda; the fine df resolves it
+    identically across models. The RAM backends size their grid from
+    (Q, T) and the others from this ``frequencies`` array, both landing on
+    the same 50–150 Hz / df = 1 Hz sampling.
 
 FEATURES DEMONSTRATED:
     - RunMode.BROADBAND for H(f) transfer functions across all models
@@ -83,7 +86,13 @@ def main():
         ranges=np.array([5000.0])
     )
 
-    frequencies = np.linspace(50, 200, 16)
+    # All broadband models share one dense grid matching RAM's band
+    # (fc=100, Q=2 → 50–150 Hz) with df=1 Hz → a 1 s IFFT window. This is fine
+    # enough to (a) suppress the pre-arrival periodic replicas that coarse
+    # sampling produces when the IFFT window exceeds 1/df, and (b) resolve the
+    # Pekeris dispersive modal coda consistently across every model, so the
+    # time-series comparison is apples-to-apples.
+    frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
 
     # Target receiver for time-series extraction
     target_depth = 50.0  # m
@@ -118,17 +127,23 @@ def main():
         print(f"  SKIPPED: {e}")
 
     # =========================================================================
-    # 3. RAM BROADBAND — all three backends on the same physics
+    # 3. RAM BROADBAND — the two fluid PE backends
     # =========================================================================
-    # The dispatcher routes by env: Pekeris fluid + flat surface → mpiramS
-    # (Fortran broadband). To exercise ramsurf1.5 and rams0.5 on identical
-    # physics, we route with negligible env tweaks: a flat altimetry line
-    # (z = 0) forces ramsurf, a tiny-shear sediment layer (cs = 1 m/s)
-    # forces rams. Both perturb the field at the µ-scale; the comparison
-    # is what each binary's broadband path produces on the same Pekeris.
-    from uacpy.core.environment import (
-        BoundaryProperties, LayeredBottom, SedimentLayer,
-    )
+    # The dispatcher routes by env: Pekeris fluid + flat surface → mpiramS;
+    # fluid + a flat z=0 altimetry line → ramsurf1.5 (the altimetry merely
+    # forces the ramsurf code path on the SAME fluid Pekeris). So this is a
+    # clean fluid-PE-vs-fluid-PE algorithm comparison on identical physics.
+    #
+    # The elastic backend rams0.5 is deliberately NOT included in this
+    # broadband time-series comparison. Its rotated-Padé elastic march is only
+    # marginally stable (|G| ≈ 1 for the below-real-line elastic eigenvalues;
+    # Collins & Siegmann §3.3, Milinazzo 1997), so that marginal error
+    # compounds across a wide frequency sweep + IFFT and contaminates the
+    # synthesized pulse. rams0.5 is robust and validated in NARROWBAND TL —
+    # it matches KrakenC to ~0.1 dB on the elastic Pekeris (see
+    # tests/test_cross_model_agreement.py, the ``pekeris-elastic`` scenario) —
+    # which is its proper regime; wide-band time-series synthesis is not.
+    from uacpy.core.environment import BoundaryProperties
 
     fluid_bottom = BoundaryProperties(
         acoustic_type='half-space', sound_speed=1700.0,
@@ -143,34 +158,17 @@ def main():
         ssp=1500.0, bottom=fluid_bottom,
         altimetry=[(0.0, 0.0), (8000.0, 0.0)],
     )
-    elastic_tiny_shear = LayeredBottom(
-        layers=[SedimentLayer(
-            thickness=10.0, sound_speed=1700.0, density=1.7,
-            attenuation=0.5, shear_speed=1.0, shear_attenuation=0.0,
-        )],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1700.0, density=1.7, attenuation=0.5,
-            shear_speed=1.0, shear_attenuation=0.0,
-        ),
-    )
-    env_ra = uacpy.Environment(
-        name='Pekeris-elastic-tiny-shear', bathymetry=env.depth,
-        ssp=1500.0,
-        bottom=elastic_tiny_shear,
-    )
 
     # Only the broadband window (Q, T) is supplied. (dr, dz) are picked
     # by the Lytaev Padé-error optimizer from env + centre frequency;
     # zmax is sized to the seafloor plus an absorbing-layer wavelength
-    # buffer. All three backends share these defaults so the only
-    # visible difference between traces is the underlying PE algorithm.
-    common_numerics = dict(Q=2.0, T=2.0)
+    # buffer. Q=2, T=1 → fc±50 Hz at df=1 Hz (101 freqs), the SAME 50–150 Hz /
+    # df=1 Hz grid the ``frequencies`` array gives Scooter/Kraken/OASP, so all
+    # broadband models are compared on one matched grid.
+    common_numerics = dict(Q=2.0, T=1.0)
     ram_specs = [
         ('RAM (mpiramS)', env_mp, dict(**common_numerics)),
         ('RAM (ramsurf1.5)', env_rs, dict(**common_numerics)),
-        ('RAM (rams0.5)', env_ra,
-         dict(**common_numerics, rams_theta=45.0)),
     ]
 
     for label, env_ram, ram_kwargs in ram_specs:

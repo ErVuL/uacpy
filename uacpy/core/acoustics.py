@@ -13,7 +13,7 @@ Note
 This module is a **user helper**.  The uacpy model wrappers do not
 import from ``uacpy.core.acoustics``; it is provided for downstream
 notebooks/examples that need direct access to sound-speed / absorption
-formulas (e.g. example_17_attenuation_models.py).
+formulas (e.g. example_12_attenuation_models.py).
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
@@ -30,6 +30,8 @@ See uacpy/third_party/arlpy/NOTICE for the list of arlpy-adapted functions
 in this file.
 -------------------------------------------------------------------------------
 """
+
+import warnings as _warnings
 
 import numpy as np
 from typing import Union, Optional, Tuple
@@ -92,7 +94,6 @@ def soundspeed(
     Mackenzie, K. V. (1981). "Nine-term equation for sound speed in the oceans".
     The Journal of the Acoustical Society of America, 70(3), 807-812.
     """
-    import warnings as _warnings
     if np.any(np.asarray(temperature) < -2) or np.any(np.asarray(temperature) > 30):
         _warnings.warn(
             "Mackenzie soundspeed: temperature outside validated range "
@@ -218,7 +219,7 @@ def soundspeed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
              + 0.522116437235e-9 * t * p ** 3
              - 0.438031096213e-6 * t ** 3 * p
              - 0.161674495909e-8 * s ** 2 * p ** 2
-             + 0.968403158610e-4 * t ** 2 * s
+             + 0.968403156410e-4 * t ** 2 * s
              + 0.485639620015e-5 * t * s ** 2 * p
              - 0.340597039004e-3 * s * t * p)
     c = c000 + dct + dcs + dcp + dcstp
@@ -623,25 +624,25 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
     return 20 * np.log10(rmsx / ref)
 
 
-def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
+def pekeris_root(gamma2: np.ndarray) -> np.ndarray:
     """
     Return the Pekeris branch of the complex square root.
 
-    Selects the branch of sqrt(gamma2) that enforces the radiation
-    condition in a halfspace (outgoing waves for propagating modes,
-    exponential decay for evanescent modes).
+    ``sqrt(gamma2)`` for ``Re(gamma2) >= 0``, ``i*sqrt(-gamma2)``
+    otherwise — the branch with ``Re(gamma) >= 0`` on the right half
+    plane and continuous across the negative real axis, enforcing
+    exponential decay of the halfspace solution ``exp(-gamma*(z - D))``
+    for trapped modes.
 
     Parameters
     ----------
     gamma2 : ndarray, complex
         Squared vertical wavenumber, ``gamma^2 = k^2 - k_halfspace^2``.
-    tol : float, optional
-        Tolerance for branch-cut detection (default: 1e-10).
 
     Returns
     -------
     gamma : ndarray, complex
-        Vertical wavenumber on the correct branch.
+        Vertical wavenumber on the Pekeris branch.
 
     References
     ----------
@@ -653,23 +654,8 @@ def pekeris_root(gamma2: np.ndarray, tol: float = 1e-10) -> np.ndarray:
     ``third_party/arlpy/NOTICE`` for the arlpy-attributed list.
     """
     gamma2 = np.asarray(gamma2, dtype=complex)
-    gamma = np.sqrt(gamma2)
-
-    re_gamma2 = np.real(gamma2)
-    im_gamma2 = np.imag(gamma2)
-
-    needs_flip = np.zeros(gamma2.shape, dtype=bool)
-
-    mask_propagating = re_gamma2 > tol
-    needs_flip |= mask_propagating & (np.real(gamma) < 0)
-
-    mask_evanescent = re_gamma2 < -tol
-    needs_flip |= mask_evanescent & (np.imag(gamma) > 0)
-
-    mask_critical = np.abs(re_gamma2) <= tol
-    needs_flip |= mask_critical & (im_gamma2 >= 0) & (np.imag(gamma) > 0)
-    needs_flip |= mask_critical & (im_gamma2 < 0) & (np.imag(gamma) < 0)
-
-    gamma[needs_flip] = -gamma[needs_flip]
-
-    return gamma
+    return np.where(
+        np.real(gamma2) >= 0.0,
+        np.sqrt(gamma2),
+        1j * np.sqrt(-gamma2),
+    )

@@ -16,7 +16,6 @@ Provides:
 """
 
 import numpy as np
-import struct
 import warnings
 from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
@@ -130,9 +129,16 @@ def read_shd_bin(
                 - 'r' : ndarray - Ranges in meters (Acoustics-Toolbox
                   converts km → m before WriteHeader; see
                   SourceReceiverPositions.f90:277)
-        - 'pressure' : ndarray - Complex pressure field
+        - 'pressure' : ndarray - Complex pressure field for a SINGLE
+            frequency (``pressure_freq``), never a multi-frequency cube.
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
+            For a broadband file, pass ``freq=`` per frequency (or iterate
+            ``freqVec`` calling this once per entry) — do not treat
+            ``pressure`` as spanning ``freqVec``.
+        - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
+            cube was sliced at (``freq`` snapped to the nearest ``freqVec``
+            entry, or ``freqVec[0]`` when ``freq`` is None).
 
     Notes
     -----
@@ -152,7 +158,7 @@ def read_shd_bin(
     >>> shd = read_shd_bin('pekeris.shd')
     >>> print(f"Title: {shd['title']}")
     >>> print(f"Pressure shape: {shd['pressure'].shape}")
-    >>> print(f"Ranges: {shd['Pos']['r']['r']} km")
+    >>> print(f"Ranges: {shd['Pos']['r']['r']} m")
 
     >>> # Read specific source location
     >>> shd = read_shd_bin('field3d.shd', xs=5.0, ys=10.0)
@@ -215,6 +221,17 @@ def read_shd_bin(
         else:
             pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
             Nrcvrs_per_range = Nrz
+        # Select ONE frequency slice. The returned 'pressure' cube is always
+        # single-frequency (the slice 'pressure_freq'); a broadband caller must
+        # pass freq= per frequency or iterate freqVec, never treat 'pressure' as
+        # a multi-frequency cube. NB: only the standard 2D path (xs is None)
+        # carries a frequency axis in the record stream (field.f90 stacks freq
+        # outermost). The 3D / irregular multi-source path (xs given) is written
+        # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
+        # so there is no frequency to select there.
+        ifreq = 0
+        if freq is not None:
+            ifreq = int(np.argmin(np.abs(freqVec - freq)))
         if xs is None:
             if Nsx > 1 or Nsy > 1:
                 warnings.warn(
@@ -225,10 +242,6 @@ def read_shd_bin(
                 )
             idxX = 0
             idxY = 0
-            ifreq = 0
-            if freq is not None:
-                freq_diff = np.abs(freqVec - freq)
-                ifreq = np.argmin(freq_diff)
 
             for itheta in range(Ntheta):
                 for isz in range(Nsz):
@@ -243,10 +256,20 @@ def read_shd_bin(
                         fid.seek(recnum * 4 * recl, 0)
                         temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
+            freq_label = float(freqVec[ifreq]) if len(freqVec) else None
 
         else:
             if ys is None:
                 raise ValueError("ys must be provided if xs is specified")
+            # 3D / irregular multi-source files are single-frequency (no freq
+            # stride in the record index), so freq= cannot select a slice here.
+            if freq is not None and len(freqVec) > 1:
+                warnings.warn(
+                    "read_shd_bin: frequency selection (freq=) is not supported "
+                    "for multi-source-position (3D/irregular) shade files, which "
+                    "carry a single frequency; returning freqVec[0].",
+                    UserWarning, stacklevel=2,
+                )
             x_diff = np.abs(s_x - km_to_m(xs))
             idxX = np.argmin(x_diff)
             y_diff = np.abs(s_y - km_to_m(ys))
@@ -266,6 +289,7 @@ def read_shd_bin(
                         fid.seek(recnum * 4 * recl, 0)
                         temp = np.fromfile(fid, dtype=f4, count=2 * Nrr)
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
+            freq_label = float(freqVec[0]) if len(freqVec) else None
 
     return {
         "title": title,
@@ -279,6 +303,7 @@ def read_shd_bin(
             "r": {"z": r_z, "r": r_r},
         },
         "pressure": pressure,
+        "pressure_freq": freq_label,
     }
 
 
@@ -722,6 +747,36 @@ def read_ray_file(filepath: Union[str, Path]):
     )
 
 
+def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) -> Optional[str]:
+    """Read an Acoustics-Toolbox ``.prt`` log.
+
+    AT binaries (Kraken/Scooter/Sparc/Bounce) dump fatal-error detail and
+    run diagnostics to ``<base>.prt`` instead of stderr. Returns the log
+    text, or ``None`` when the file is absent or unreadable.
+
+    Parameters
+    ----------
+    prt_path : str or Path
+        Path to the ``.prt`` file.
+    tail_bytes : int, optional
+        When given, return only the trailing ``tail_bytes`` of the file —
+        used to append a short failure excerpt to error messages.
+    """
+    path = Path(prt_path)
+    if not path.exists():
+        return None
+    try:
+        if tail_bytes is not None:
+            size = path.stat().st_size
+            with path.open('rb') as fh:
+                if size > tail_bytes:
+                    fh.seek(size - tail_bytes)
+                return fh.read().decode('utf-8', errors='replace')
+        return path.read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return None
+
+
 def _read_ray_file_binary(filepath: Path) -> list:
     """
     Read binary ray file format
@@ -738,41 +793,46 @@ def _read_ray_file_binary(filepath: Path) -> list:
     """
     rays = []
 
+    from uacpy.io._fortran_helpers import detect_endian
+
     with open(filepath, "rb") as f:
-        recl = struct.unpack("i", f.read(4))[0]
+        head = f.read(4)
+        if len(head) < 4:
+            return rays
+        endian = detect_endian(head, source=f'read_ray_bin:{Path(filepath).name}')
+        i4 = np.dtype(endian + 'i4')
+        f4 = np.dtype(endian + 'f4')
+        recl = int(np.frombuffer(head, dtype=i4, count=1)[0])
         f.seek(recl * 4)
 
         truncated_after = None
-        try:
-            while True:
-                n_points = struct.unpack("i", f.read(4))[0]
-                if n_points <= 0:
-                    break
+        while True:
+            count_buf = f.read(4)
+            if len(count_buf) < 4:
+                # EOF where a ray-length record was expected.
+                truncated_after = len(rays)
+                break
+            n_points = int(np.frombuffer(count_buf, dtype=i4, count=1)[0])
+            if n_points <= 0:
+                break
 
-                ray_r = []
-                ray_z = []
+            # WriteRay2D writes ray2D%x (r, z interleaved) directly in metres
+            # (WriteRay.f90:45); no km conversion needed.
+            coords = np.fromfile(f, dtype=f4, count=2 * n_points)
+            if coords.size < 2 * n_points:
+                truncated_after = len(rays)
+                break
 
-                for _ in range(n_points):
-                    # WriteRay2D writes ray2D%x directly in meters
-                    # (WriteRay.f90:45); no km conversion needed.
-                    r = struct.unpack("f", f.read(4))[0]
-                    z = struct.unpack("f", f.read(4))[0]
-                    ray_r.append(r)
-                    ray_z.append(z)
-
-                rays.append(
-                    {
-                        "r": np.array(ray_r),
-                        "z": np.array(ray_z),
-                    }
-                )
-
-        except struct.error:
-            truncated_after = len(rays)
+            rays.append(
+                {
+                    "r": coords[0::2].astype(float),
+                    "z": coords[1::2].astype(float),
+                }
+            )
 
     if truncated_after is not None:
         warnings.warn(
-            f"Ray file {filepath} appears truncated; recovered "
+            f"read_ray_file: {filepath} appears truncated; recovered "
             f"{truncated_after} ray(s) before EOF. The producing model "
             "may have crashed mid-write — check its .prt log.",
             UserWarning,

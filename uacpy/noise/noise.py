@@ -26,7 +26,8 @@ Nichols, S. M. & Bradley, D. L. (2016). Global examination of the
 import warnings
 
 import numpy as np
-import matplotlib.pyplot as plt
+
+from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 
@@ -76,7 +77,7 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
 
     u = float(u)
     if u < 0:
-        raise ValueError(
+        raise ConfigurationError(
             f"compute_windnoise: wind speed u must be non-negative (knots), got {u}"
         )
 
@@ -88,6 +89,12 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     else:
         n2 = f.size
         if band_integrate:
+            if n2 < 2:
+                raise ConfigurationError(
+                    "compute_windnoise(band_integrate=True) needs at least two "
+                    "frequencies to define band edges; got one. Use "
+                    "band_integrate=False for a scalar spectral level."
+                )
             f2 = np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
             df = (f2[2:] - f2[:-2]) / 2
         else:
@@ -219,16 +226,16 @@ class WenzNoise:
         shipping_level='medium',
     ):
         if water_depth not in ('deep', 'shallow'):
-            raise ValueError(
+            raise ConfigurationError(
                 f"water_depth must be 'deep' or 'shallow', got {water_depth!r}"
             )
         if shipping_level not in _SHIPPING_C2:
-            raise ValueError(
+            raise ConfigurationError(
                 f"shipping_level must be one of {list(_SHIPPING_C2)}, "
                 f"got {shipping_level!r}"
             )
         if rain_rate not in _RAIN_INDEX:
-            raise ValueError(
+            raise ConfigurationError(
                 f"rain_rate must be one of {list(_RAIN_INDEX)}, "
                 f"got {rain_rate!r}"
             )
@@ -263,28 +270,42 @@ class WenzNoise:
         else:
             shipping = np.full_like(f, -np.inf)
 
-        # Turbulence (Nichols & Bradley 2016 — same coefficients as the
-        # MATLAB ``calc_noise_level.m`` appendix in WenzCurves.pdf p.12).
-        # NB: the prose in WenzCurves.pdf §2.1 quotes 107 − 33.2·log10(f)
-        # instead; the appendix code uses the values below.
+        # Turbulence (Nichols & Bradley 2016). Coefficients are taken verbatim
+        # from the authoritative DRDC reference *implementation* — calc_noise_
+        # level.m (WenzCurves / DRDC-RDDC-2022-D051, Annex A.1):
+        #     noise_turb = 108.5 - 32.5*log10(f)
+        # The DRDC *prose* (§2.1) instead quotes NL_t=107, m_t=-33.2 dB/decade;
+        # we follow the shipped code, which is the runnable authority.
         turbulence = 108.5 - 32.5 * np.log10(f)
+        # Inactive-band convention: uacpy carries a component as -inf dB where
+        # its empirical fit falls below 0 dB (so the incoherent dB sum drops it
+        # cleanly), matching compute_windnoise's u=0 → -inf. The DRDC code floors
+        # the same 0-dB crossing at 1 dB instead; both leave the total NL
+        # unchanged (the floored band is negligible vs the dominant sources).
         turbulence[turbulence <= 0] = -np.inf
 
         # Rain (Torres & Costa 2019, valid up to ~7 kHz; melded above).
-        ir = _RAIN_INDEX[rain_rate]
-        fk = f / 1000.0
-        rain = (
-            _RAIN_R0[ir]
-            + _RAIN_R1[ir] * fk
-            + _RAIN_R2[ir] * fk ** 2
-            + _RAIN_R3[ir] * fk ** 3
-        )
-        slope = -5.0 * (0.1 / np.log10(2))
-        idxs_below_7k = np.where(f < 7000)[0]
-        if idxs_below_7k.size and (f > 7000).any():
-            ind = int(idxs_below_7k[-1])
-            prop_const = 10 ** (rain[ind] / 10) / f[ind] ** slope
-            rain[f > 7000] = 10 * np.log10(prop_const * f[f > 7000] ** slope)
+        if rain_rate == 'no':
+            # No rain silences the source entirely — same -inf inactive-band
+            # convention as wind u=0 / shipping='no' (the all-zero R
+            # coefficients would otherwise draw a bogus 0 dB line).
+            rain = np.full_like(f, -np.inf)
+        else:
+            ir = _RAIN_INDEX[rain_rate]
+            fk = f / 1000.0
+            rain = (
+                _RAIN_R0[ir]
+                + _RAIN_R1[ir] * fk
+                + _RAIN_R2[ir] * fk ** 2
+                + _RAIN_R3[ir] * fk ** 3
+            )
+            slope = -5.0 * (0.1 / np.log10(2))
+            idxs_below_7k = np.where(f < 7000)[0]
+            if idxs_below_7k.size and (f > 7000).any():
+                ind = int(idxs_below_7k[-1])
+                prop_const = 10 ** (rain[ind] / 10) / f[ind] ** slope
+                rain[f > 7000] = 10 * np.log10(prop_const * f[f > 7000] ** slope)
+            rain[rain <= 0] = -np.inf
 
         self.thermal = thermal
         self.wind = wind
@@ -351,6 +372,7 @@ class WenzNoise:
         -------
         fig, ax : matplotlib Figure, Axes
         """
+        import matplotlib.pyplot as plt
         if ax is None:
             fig, ax = plt.subplots()
         else:
@@ -386,18 +408,3 @@ class WenzNoise:
         ax.legend()
         ax.grid(True)
         return fig, ax
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Demo
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-if __name__ == '__main__':
-    f = np.linspace(1.0, 1e5, int(1e5 - 1))
-    wenz = WenzNoise(
-        f, wind_speed=24,
-        water_depth='deep', shipping_level='high', rain_rate='heavy',
-    )
-    wenz.plot()
-    plt.show()

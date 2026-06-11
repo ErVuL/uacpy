@@ -26,6 +26,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.source import Source
 from uacpy.io.file_manager import FileManager
+from uacpy.io.oalib_reader import read_prt
 
 
 class RunMode(Enum):
@@ -166,6 +167,7 @@ class PropagationModel(ABC):
         # 'elastic'           : 'fluid' (zero shear) | 'vacuum'
         self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
         self._user_collapse: Dict[str, str] = {}
+        self.collapse = dict(collapse) if collapse else None
         if collapse:
             unknown = set(collapse) - set(DEFAULT_COLLAPSE)
             if unknown:
@@ -277,11 +279,12 @@ class PropagationModel(ABC):
             for dr in (1.0, 2.0, 4.0):
                 run_one(base.copy(dr=dr), env, source, receiver)
 
-        Implementation: walks ``inspect.signature(type(self).__init__)``,
-        pulls each parameter's current value off the instance (uacpy
-        models store every constructor arg as ``self.<name>``), merges
-        ``overrides``, and instantiates. ``**kwargs``-only sinks on the
-        constructor are ignored.
+        Implementation: walks ``__init__`` along the MRO (so parameters
+        defined on a parent constructor are included, since subclasses
+        forward via ``super().__init__(**kwargs)``), pulls each parameter's
+        current value off the instance (uacpy models store every
+        constructor arg as ``self.<name>``), merges ``overrides``, and
+        instantiates. ``**kwargs``-only sinks on the constructor are ignored.
 
         Parameters
         ----------
@@ -299,16 +302,9 @@ class PropagationModel(ABC):
             If ``overrides`` includes a key that isn't a parameter of
             the constructor.
         """
-        import inspect
-
-        sig = inspect.signature(type(self).__init__)
         kwargs: Dict[str, object] = {}
         valid_names = set()
-        for name, param in sig.parameters.items():
-            if name == 'self':
-                continue
-            if param.kind == inspect.Parameter.VAR_KEYWORD:
-                continue
+        for name, _default in _collect_init_params(type(self)):
             valid_names.add(name)
             if hasattr(self, name):
                 kwargs[name] = getattr(self, name)
@@ -377,7 +373,7 @@ class PropagationModel(ABC):
         -------
         result : Result
             One of the typed :mod:`uacpy.core.results` subclasses
-            (``Field``, ``Field``, ``Modes``, …) determined
+            (``Field``, ``Arrivals``, ``Modes``, …) determined
             by ``run_mode`` and the model.
         """
         pass
@@ -414,6 +410,19 @@ class PropagationModel(ABC):
                 f"source_waveform and sample_rate. For the broadband "
                 f"transfer function H(f), use run_mode=RunMode.BROADBAND."
             )
+        if run_mode == RunMode.TIME_SERIES and source_waveform is not None:
+            wf = np.asarray(source_waveform)
+            if not np.all(np.isfinite(wf)):
+                raise ConfigurationError(
+                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                    "source_waveform contains non-finite values (NaN/inf)."
+                )
+            if np.iscomplexobj(wf) and not np.allclose(wf.imag, 0.0):
+                raise ConfigurationError(
+                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                    "source_waveform must be a real pressure pulse; got a "
+                    "complex array with a non-zero imaginary part."
+                )
 
     def _pad_waveform_to_duration(
         self, source_waveform, sample_rate, output_duration,
@@ -441,6 +450,42 @@ class PropagationModel(ABC):
             return source_waveform
         pad = np.zeros(n_needed - wf.size, dtype=wf.dtype)
         return np.concatenate([wf, pad])
+
+    def _resolve_broadband_frequencies(
+        self,
+        source: 'Source',
+        frequencies,
+        *,
+        n_freqs: Optional[int] = None,
+        bandwidth_factor: Optional[float] = None,
+    ) -> np.ndarray:
+        """Resolve the BROADBAND frequency grid.
+
+        Explicit ``frequencies=`` wins. Otherwise a multi-element
+        ``source.frequencies`` *is* the band and is used as-is. A single
+        centre frequency expands to ``n_freqs`` bins spanning
+        ``fc·(1 ± bandwidth_factor/2)``.
+        """
+        from uacpy.core.constants import (
+            DEFAULT_BROADBAND_N_FREQS,
+            DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+        )
+        if frequencies is not None:
+            return np.asarray(frequencies, dtype=float)
+        src_f = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if src_f.size > 1:
+            return src_f
+        if n_freqs is None:
+            n_freqs = DEFAULT_BROADBAND_N_FREQS
+        if bandwidth_factor is None:
+            bandwidth_factor = DEFAULT_BROADBAND_BANDWIDTH_FACTOR
+        fc = float(src_f[0])
+        half_bw = 0.5 * float(bandwidth_factor)
+        return np.linspace(
+            max(1.0, fc * (1.0 - half_bw)),
+            fc * (1.0 + half_bw),
+            int(n_freqs),
+        )
 
     def _resolve_time_series_frequencies(
         self,
@@ -575,12 +620,11 @@ class PropagationModel(ABC):
         Raises
         ------
         InvalidDepthError
-            If source/receiver depths exceed the environment's maximum depth.
-        ValueError
-            If source/receiver depths are negative.
+            If source depths exceed the model's resolvable depth.
         ConfigurationError
-            If ``run_mode`` is a single-frequency mode and ``source`` carries
-            multiple frequencies.
+            If source/receiver depths are negative, or if ``run_mode`` is a
+            single-frequency mode and ``source`` carries multiple
+            frequencies.
         """
         if (run_mode is not None
                 and run_mode in self._SINGLE_FREQUENCY_MODES
@@ -614,10 +658,10 @@ class PropagationModel(ABC):
             )
 
         if np.any(source.depths < 0):
-            raise ConfigurationError("Source depths must be positive")
+            raise ConfigurationError("Source depths must be non-negative")
 
         if receiver.depth_min < 0:
-            raise ConfigurationError("Receiver depths must be positive")
+            raise ConfigurationError("Receiver depths must be non-negative")
 
         self._warn_receiver_below_resolvable(env, receiver, resolvable_depth)
         self._check_per_range_receiver_depth(env, receiver)
@@ -1451,16 +1495,8 @@ class PropagationModel(ABC):
         message.
         """
         from pathlib import Path as _Path
-        prt = _Path(work_dir) / f"{base_name}.prt"
-        if not prt.exists():
-            return
-        try:
-            size = prt.stat().st_size
-            with prt.open('rb') as fh:
-                if size > n_chars:
-                    fh.seek(size - n_chars)
-                tail = fh.read().decode('utf-8', errors='replace')
-        except OSError:
+        tail = read_prt(_Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
+        if tail is None:
             return
         exc.args = (
             f"{exc.args[0] if exc.args else exc}\n\n.prt tail:\n{tail}",
@@ -1549,6 +1585,9 @@ class PropagationModel(ABC):
         """
         max_receiver_depth = receiver.depths.max()
         if max_receiver_depth > media_depth - margin:
+            # When every depth exceeds the ceiling, np.clip(lo > hi)
+            # collapses the whole axis onto media_depth - margin (one
+            # unique value for grid receivers) — intended.
             clipped = np.clip(
                 receiver.depths, receiver.depths.min(), media_depth - margin,
             )

@@ -118,8 +118,10 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
     mse = np.empty(N)
     for k in range(N):
         uff = np.roll(uff, 1); uff[0] = rx[k]
-        u = np.concatenate([uff, ufb])
-        ur = u * np.exp(-1j * theta)         # carrier de-rotation folded into input
+        # Carrier de-rotation applies to the received (feedforward)
+        # section only — the feedback register holds decisions already in
+        # the de-rotated constellation domain (Stojanovic-Proakis 1994).
+        ur = np.concatenate([uff * np.exp(-1j * theta), ufb])
         d_hat = np.vdot(w, ur)               # w^H u
         d = train[k] if k < ntrain else _slicer(d_hat, c)[0]
         e = d - d_hat

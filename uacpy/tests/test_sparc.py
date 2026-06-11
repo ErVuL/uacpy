@@ -71,6 +71,8 @@ class TestSPARCTimeSeries:
         assert result.data.shape[0] == len(receiver.depths)
         assert result.data.shape[1] == len(receiver.ranges)
         assert result.data.shape[2] > 0
+        # range coord (SPARC's actual grid) length-matches the data columns
+        assert result.coords['range'].shape[0] == result.data.shape[1]
         assert np.isrealobj(result.data)
         assert np.all(np.isfinite(result.data))
         assert result.times is not None and result.times.size > 0

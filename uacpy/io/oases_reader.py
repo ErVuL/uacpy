@@ -283,8 +283,6 @@ def read_oasn_covariance(
             f.seek(4 * recl)
             probe = f.read(4)
             endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
-            ifmt = endian + 'i'
-            ffmt = endian + 'f'
 
             # Read header (first 10 records)
             # Record 1-4: Title (4 x 8 bytes = 32 characters)
@@ -317,20 +315,32 @@ def read_oasn_covariance(
             # Record 10: ZERO, ZERO (reserved)
             # Skip
 
-            # Read covariance matrices
-            # Data starts at record 11 (offset 10 * recl)
-            # Format: for each frequency, for each column, for each row
-            covariance = np.zeros((n_freq, n_rcv, n_rcv), dtype=np.complex64)
-
-            for ifreq in range(n_freq):
-                for jrcv in range(n_rcv):
-                    for ircv in range(n_rcv):
-                        irec = 10 + ircv + jrcv * n_rcv + ifreq * n_rcv * n_rcv
-                        f.seek(irec * recl)
-                        real, imag = struct.unpack(endian + 'ff', f.read(8))
-                        covariance[ifreq, ircv, jrcv] = complex(real, imag)
-            # Silence flake8 for unused locals defined above for clarity.
-            _ = (ifmt, ffmt)
+            # Read covariance matrices. Data starts at record 11 (offset
+            # 10 * recl); one complex value (re, im float32) sits at the head
+            # of each ``recl``-byte record, ordered (ifreq, jrcv, ircv) with
+            # ircv innermost. A structured dtype with ``itemsize=recl`` strides
+            # over the records in a single read.
+            n_total = n_freq * n_rcv * n_rcv
+            f.seek(10 * recl)
+            rec_dt = np.dtype({
+                'names': ['re', 'im'],
+                'formats': [endian + 'f4', endian + 'f4'],
+                'itemsize': recl,
+            })
+            # The final record may carry only its 8-byte payload (no
+            # padding to ``recl``); pad the buffer so the strided view
+            # still covers ``n_total`` records.
+            buf = f.read(n_total * recl)
+            if len(buf) < (n_total - 1) * recl + 8:
+                raise OSError(
+                    f"{filepath}: truncated covariance data — expected "
+                    f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
+                )
+            buf = buf.ljust(n_total * recl, b'\x00')
+            flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
+            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+            # Stored (ifreq, jrcv, ircv); the matrix wants (ifreq, ircv, jrcv).
+            covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
 
         return {
             'title': title,
@@ -454,19 +464,31 @@ def read_oasn_replicas(
                 (n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64,
             )
 
-            for ifreq in range(n_freq):
-                for iz in range(n_z):
-                    for ix in range(n_x):
-                        for iy in range(n_y):
-                            for ircv in range(n_rcv):
-                                _read_fortran_record_marker(f, endian=endian)
-                                real, imag = struct.unpack(
-                                    endian + 'ff', f.read(8),
-                                )
-                                _read_fortran_record_marker(f, endian=endian)
-                                replicas[ifreq, iz, ix, iy, ircv] = complex(
-                                    real, imag,
-                                )
+            # Each replica is a Fortran sequential record
+            # ``[marker][re im][marker]`` (16 bytes), written contiguously in
+            # (ifreq, iz, ix, iy, ircv) order with ircv innermost. Read the
+            # whole block in one strided pass.
+            n_total = n_freq * n_z * n_x * n_y * n_rcv
+            rep_dt = np.dtype([
+                ('m1', endian + 'i4'),
+                ('re', endian + 'f4'),
+                ('im', endian + 'f4'),
+                ('m2', endian + 'i4'),
+            ])
+            flat = np.fromfile(f, dtype=rep_dt, count=n_total)
+            if flat.size < n_total:
+                raise OSError(
+                    f"{filepath}: truncated replica data — expected "
+                    f"{n_total} records, got {flat.size}"
+                )
+            if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
+                raise OSError(
+                    f"{filepath}: unexpected replica record layout — "
+                    "Fortran record markers are not the expected 8-byte "
+                    "payload length"
+                )
+            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+            replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)
 
         return {
             'title': title,
@@ -596,8 +618,14 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
     Default TRF files use single-precision complex (COMPLEX*8). Little-endian
     on x86 by default.
     """
-    endian = '<'
     with open(filepath, 'rb') as f:
+        probe = f.read(4)
+        if len(probe) < 4:
+            raise OSError(
+                f"Cannot open {filepath} as Fortran-unformatted TRF: too short"
+            )
+        endian = detect_endian(probe, source=f'read_oasp_trf:{filepath}')
+        f.seek(0)
         try:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:
@@ -661,14 +689,36 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
             [(k / (dt * nx)) for k in range(lx, mx + 1)], dtype=np.float64
         ) if nf >= 1 else np.array([freqs], dtype=np.float64)
 
-        transfer_function = np.zeros((nf, nplots, nrd), dtype=np.complex64)
+        # Detect the data-record precision from the first record's length
+        # marker so both OASES output modes are supported: default COMPLEX*8
+        # (2*nout float32 = 2*nout*4 bytes) and the double-precision '8' option
+        # COMPLEX*16 (2*nout float64 = 2*nout*8 bytes).
+        pos = f.tell()
+        marker = f.read(4)
+        data_fmt = f'{2 * nout}f'
+        out_dtype = np.complex64
+        if len(marker) == 4:
+            (rec_bytes,) = struct.unpack(endian + 'i', marker)
+            if rec_bytes == 2 * nout * 8:
+                data_fmt = f'{2 * nout}d'      # double-precision COMPLEX*16
+                out_dtype = np.complex128
+            elif rec_bytes != 2 * nout * 4:
+                raise OSError(
+                    f"OASP .trf data record is {rec_bytes} bytes; expected "
+                    f"{2 * nout * 4} (COMPLEX*8) or {2 * nout * 8} "
+                    f"(COMPLEX*16) for nout={nout} (wrong endianness or "
+                    f"corrupt file)."
+                )
+        f.seek(pos)
+
+        transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
         for j in range(nf):
             for _is in range(max(1, isrow)):
                 for _m in range(max(1, msuft)):
                     for jrh in range(nplots):
                         for jrv in range(nrd):
                             rec = _read_fortran_record(
-                                f, f'{2 * nout}f', endian=endian)
+                                f, data_fmt, endian=endian)
                             transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
     return {

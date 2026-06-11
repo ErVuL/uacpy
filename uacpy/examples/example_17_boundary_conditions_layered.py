@@ -218,10 +218,7 @@ def main():
     import matplotlib.pyplot as plt
     from uacpy.models.ram import RAM
     from uacpy.models.bellhop import Bellhop
-    from uacpy.visualization.plots import (
-    plot_field,
-    plot_environment,
-)
+    from uacpy.visualization.plots import plot_field, plot_environment
 
     # (label, setup_fn, model_class)
     scenarios = [
@@ -273,10 +270,11 @@ def main():
         env = envs_out[idx]
         if field is not None:
             plot_field(field, env=env, ax=ax, show_colorbar=False,
-                                   vmin=vmin, vmax=vmax)
+                       vmin=vmin, vmax=vmax)
             if ax.collections:
                 tl_im = ax.collections[0]
-            if idx % 3 != 0:
+            # Keep the depth label on the left-most column only (4-wide grid).
+            if idx % 4 != 0:
                 ax.set_ylabel('')
         else:
             ax.text(0.5, 0.5, 'ERROR', ha='center', va='center',

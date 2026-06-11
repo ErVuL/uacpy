@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
-
 # Standard rate-1/2, constraint length K=7 generator polynomials (octal 171, 133).
 DEFAULT_POLYS = (0o171, 0o133)
 DEFAULT_K = 7
@@ -84,8 +82,10 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
                     nbit[nxt] = bit
                     back[k, nxt] = st
         pm = npm
-    # traceback from the zero state (tail-flushed)
-    state = int(np.argmin(pm))
+    # The K-1 zero flush bits force the encoder to end in state 0, so the
+    # traceback starts there; argmin(pm) could pick a different state on
+    # noisy input and lose the tail constraint.
+    state = 0
     bits = np.zeros(nsteps, dtype=int)
     for k in range(nsteps - 1, -1, -1):
         prev = back[k, state]
@@ -121,6 +121,7 @@ class ConvCode:
         self.polys = tuple(polys)
         self.K = int(K)
         self.interleave_depth = interleave_depth
+        self._info_len = None   # last encoded payload length, for exact decode
 
     @property
     def rate(self):
@@ -129,24 +130,48 @@ class ConvCode:
 
     def encode(self, bits):
         """Encode information bits (convolutional + optional interleave)."""
-        coded = conv_encode(bits, self.polys, self.K)
+        b = np.asarray(bits, dtype=int).ravel()
+        self._info_len = b.size
+        coded = conv_encode(b, self.polys, self.K)
         if self.interleave_depth:
             coded = interleave(coded, self.interleave_depth)
         return coded
 
-    def decode(self, coded):
-        """Decode (optional deinterleave + Viterbi) back to information bits."""
+    def decode(self, coded, info_len=None):
+        """Decode (optional deinterleave + Viterbi) back to information bits.
+
+        Parameters
+        ----------
+        info_len : int, optional
+            Number of information bits to return — strips the
+            interleaver's block padding (and any whole-block zeros an
+            outer framing layer appended) so the payload comes back
+            exactly. ``None`` falls back to the length recorded by this
+            codec's most recent :meth:`encode` call (loopback use); a
+            codec that decodes messages it did not just encode must pass
+            ``info_len`` explicitly, otherwise the full Viterbi output
+            is returned (or, worse, the *previous* message's length is
+            applied). Across separate transmit/receive codecs no length
+            is recorded and the caller slices.
+        """
         if self.interleave_depth:
             coded = deinterleave(coded, self.interleave_depth)
-        return viterbi_decode(coded, self.polys, self.K)
+        bits = viterbi_decode(coded, self.polys, self.K)
+        n_keep = info_len if info_len is not None else self._info_len
+        if n_keep is not None:
+            bits = bits[: int(n_keep)]
+        return bits
 
 
 def interleave(bits, depth):
     """Block-local ``depth x depth`` interleaver (transpose per square block).
 
     Operating in independent ``depth*depth`` blocks (zero-padded to a whole
-    number of blocks) makes deinterleaving robust to trailing garbage: a partial
-    final block is simply dropped, leaving the leading data blocks intact.
+    number of blocks) keeps the block boundaries aligned regardless of payload
+    length, so an outer framing layer that pads to whole symbols (e.g. OFDM) only
+    ever appends complete zero blocks. The interleaver therefore grows the stream
+    to a multiple of ``depth*depth``; :class:`ConvCode` records the information
+    length so :meth:`ConvCode.decode` can strip the resulting tail exactly.
     """
     b = np.asarray(bits, dtype=int).ravel()
     d = int(depth)

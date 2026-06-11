@@ -71,9 +71,9 @@ def read_reflection_coefficient(
 
             if n_pts == 0:
                 return {
-                    "theta": np.array([0.0]),
-                    "R": np.array([0.0]),
-                    "phi": np.array([0.0]),
+                    "theta": np.array([]),
+                    "R": np.array([]),
+                    "phi": np.array([]),
                     "n_pts": 0,
                 }
 
@@ -191,7 +191,6 @@ def write_reflection_coefficient(
     filepath: Union[str, Path],
     angles: np.ndarray,
     coefficients: np.ndarray,
-    file_type: str = "brc",
 ) -> None:
     """
     Write reflection coefficient file for Bellhop bottom/top boundary.
@@ -208,9 +207,6 @@ def write_reflection_coefficient(
         - Real (N, 2): ``[amplitude, phase_radians]``. Phase column is
           converted to degrees on output.
         - Real (N,): amplitudes only; phase is zero.
-    file_type : str, optional
-        File type: 'brc' (bottom) or 'trc' (top). Default is 'brc'.
-
     Notes
     -----
     File format (.brc/.trc), per AT ReflectionCoefficientFile.htm:
@@ -284,3 +280,65 @@ def write_source_beam_pattern(
         # Write angle, amplitude pairs
         for i in range(n_angles):
             f.write(f"{angles[i]:8.2f} {pattern[i]:12.6f}\n")
+
+
+def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
+    """Rewrite a .brc/.irc file with a strictly-increasing angle axis.
+
+    BOUNCE's Fortran driver tabulates reflection coefficients by sweeping
+    phase velocity (kx = omega/c), which — for the c_low/c_high defaults —
+    produces many samples that round to the same grazing angle (hundreds of
+    duplicate 0-degree rows are typical). Bellhop tolerates non-decreasing
+    angles but bellhopcuda enforces strict monotonicity in ``bhc::setup()``
+    and aborts with "Bottom reflection coefficients must be monotonically
+    increasing".
+
+    This loads the file, keeps only rows whose angle strictly exceeds the
+    previous kept row, and rewrites it in the original 3-column BOUNCE
+    format (angle_deg, |R|, phase_deg). The IRC file has the same layout so
+    the same routine works for both.
+
+    Precision caveat: when two physically distinct phase velocities map to
+    grazing angles that round equal at the file's print precision, only the
+    first (lowest-c, i.e. shallowest-angle) row of that collision group is
+    kept and the rest are dropped — no averaging or re-gridding. This is
+    loss-free for true duplicates (the dominant case near 0°) but discards
+    one R(θ) sample per genuine collision, a slight under-resolution of the
+    reflection table near grazing. Raising the BOUNCE angle/print resolution
+    avoids the collisions.
+    """
+    filepath = Path(filepath)
+    with open(filepath, 'r') as fh:
+        lines = fh.readlines()
+
+    if not lines:
+        return
+
+    kept_rows = []  # list of (angle, mag, phase_deg) as strings
+    last_angle = -np.inf
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < 3:
+            continue
+        try:
+            angle = float(parts[0])
+        except ValueError:
+            continue
+        if angle > last_angle:
+            kept_rows.append((parts[0], parts[1], parts[2]))
+            last_angle = angle
+
+    # If nothing survived dedup (degenerate case), leave the file alone —
+    # downstream reader will surface the real error.
+    if not kept_rows:
+        return
+
+    with open(filepath, 'w') as fh:
+        # BOUNCE pads the count with leading whitespace; match that so any
+        # downstream tool expecting free-format reads happily.
+        fh.write(f"{len(kept_rows):12d}\n")
+        for a, r, p in kept_rows:
+            fh.write(f"   {a}        {r}        {p}\n")

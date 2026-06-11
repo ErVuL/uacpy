@@ -1,7 +1,5 @@
 """Frequency Response Function (FRF) estimation: Welch / ETFE / LS-FIR."""
 
-import math
-
 import numpy as np
 import scipy.signal as _sig
 import matplotlib.pyplot as plt
@@ -75,8 +73,6 @@ class FRF:
         estimator=None,
         nperseg=None,
         noverlap=None,
-        wavelet=None,
-        scales=None,
         m_max=4096,
         stop_count=None,
     ):
@@ -94,7 +90,9 @@ class FRF:
         fs : float
             Sampling frequency (Hz).
         m : int or str, optional
-            Impulse response length (for TF methods).
+            Impulse response length (for TF methods), or an automatic
+            order-selection criterion for ``'ls_fir'``: ``'AIC'``,
+            ``'BIC'``, ``'FPE'``, or ``'CP'``.
         method : str, optional
             Method to use ('welch', 'ls_fir', 'etfe', 'p_etfe').
         estimator : str, optional
@@ -103,10 +101,6 @@ class FRF:
             Segment length for Welch.
         noverlap : int, optional
             Overlap for Welch.
-        wavelet : optional
-            Wavelet parameter (reserved).
-        scales : optional
-            Scales parameter (reserved).
         m_max : int
             Maximum impulse response length.
         stop_count : int, optional
@@ -128,12 +122,12 @@ class FRF:
             self.params["noverlap"] = noverlap
         if estimator is not None:
             self.estimator = estimator
-        if scales is not None:
-            self.scales = scales
         if m is not None:
             self.m = m
         if stop_count is None:
-            self.stop_count = m_max
+            # early-stop after 50 consecutive orders with no score improvement
+            # (compute_lsfir's documented default); m_max is the hard order cap.
+            stop_count = 50
 
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)
@@ -190,8 +184,9 @@ class FRF:
             )
         if self.method == "ls_fir":
             self.g = g_i  # For 2D inputs, uses last channel's impulse response
-            self.m = int(
-                np.mean(m_list) if all(mi is not None for mi in m_list) else None
+            self.m = (
+                int(np.mean(m_list))
+                if all(mi is not None for mi in m_list) else None
             )
 
         return freqs, tf
@@ -377,18 +372,29 @@ class FRF:
             count = 0
 
             if m == "CP":
-                # Estimation of noise variance (for Cp)
-                full_model_m = min(m_max, N - 1)
+                # Mallows' Cp: σ̂² is the residual variance of a low-bias
+                # reference fit (order well above any plausible true order,
+                # well below N), not the raw output variance.
+                full_model_m = min(m_max, max(2, N // 4))
                 u_temp = u[:N].copy()
                 phiuu_full = np.zeros(full_model_m)
                 phiuy_full = np.zeros(full_model_m)
-
                 for i in range(full_model_m):
                     phiuu_full[i] = np.dot(u[:N], u_temp)
                     phiuy_full[i] = np.dot(y[:N], u_temp)
                     u_temp = np.concatenate(([u_temp[-1]], u_temp[:-1]))
-
-                sigma2 = np.sum((y[:N] - np.mean(y[:N])) ** 2) / (N - full_model_m)
+                A_full = toeplitz(phiuu_full)
+                u_flipped = np.flip(u[:N]).copy()
+                W_full = np.zeros((full_model_m - 1, full_model_m))
+                for i in range(full_model_m - 1):
+                    u_flipped = np.concatenate(([u_flipped[-1]], u_flipped[:-1]))
+                    W_full[i, :] = u_flipped[:full_model_m]
+                g_full = np.linalg.solve(
+                    A_full - np.dot(W_full.T, W_full),
+                    phiuy_full - np.dot(W_full.T, y[: full_model_m - 1]),
+                )
+                y_hat_full = np.convolve(u[:N], g_full, mode="full")[:N]
+                sigma2 = np.sum((y[:N] - y_hat_full) ** 2) / (N - full_model_m)
 
             for m_candidate in range(1, m_max + 1):
                 try:
@@ -423,13 +429,16 @@ class FRF:
                         continue  # Avoid log issues
 
                     if m == "AIC":  # AICF
-                        # AIC: score = np.log(sse) + 2*m_candidate/N
+                        # Finite-sample AIC variant: log(sse) scaled by
+                        # (1 + m/(N-m))/(1 - m/(N-m)), not the textbook
+                        # log(sse) + 2m/N (they agree as N >> m).
                         score = np.log(sse) + (1 + m_candidate / (N - m_candidate)) / (
                             1 - m_candidate / (N - m_candidate)
                         )
 
                     elif m == "FPE":  # FPEF
-                        # FPE: score = sse * (1 + m_candidate/N) / (1 - m_candidate/N)
+                        # Finite-sample FPE: sse·(1 + m/(N-m))/(1 - m/(N-m))
+                        # (textbook uses m/N; same N >> m limit).
                         score = (
                             sse
                             * (1 + m_candidate / (N - m_candidate))
@@ -651,7 +660,7 @@ class FRF:
 
         if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
             raise RuntimeError(
-                "FRF.plot_impulse_info: compute() must be called before plotting"
+                "FRF.plot: compute() must be called before plotting"
             )
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 
-from uacpy.core.constants import (DEFAULT_SOUND_SPEED, REFERENCE_PRESSURE_AIR,
+from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.exceptions import ConfigurationError
 

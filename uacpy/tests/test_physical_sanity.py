@@ -402,6 +402,30 @@ class TestSoundSpeedEquations:
         assert c(15, 35, 5000) > c(15, 35, 0)     # pressure
 
 
+class TestPekerisRoot:
+    """Branch selection matches Acoustics-Toolbox PekerisRoot.m."""
+
+    def test_matches_at_reference_branch(self):
+        from uacpy.core.acoustics import pekeris_root
+        z = np.array([4 + 0j, -4 + 0j, -4 + 1j, -4 - 1j, 1j, -1j,
+                      1e-12 + 1j, 4 + 1j, 4 - 1j, 0j])
+        expected = np.where(z.real >= 0, np.sqrt(z), 1j * np.sqrt(-z))
+        assert np.allclose(pekeris_root(z), expected)
+
+    def test_trapped_mode_branch_decays(self):
+        from uacpy.core.acoustics import pekeris_root
+        # gamma² > 0 (k > k_halfspace): real positive root so the
+        # halfspace solution exp(-gamma*(z-D)) decays
+        gamma = pekeris_root(np.array([9.0 + 0j]))
+        assert gamma[0] == pytest.approx(3.0)
+
+    def test_evanescent_branch_sign(self):
+        from uacpy.core.acoustics import pekeris_root
+        # gamma² < 0: AT picks +i*sqrt(|gamma²|)
+        gamma = pekeris_root(np.array([-9.0 + 0j]))
+        assert gamma[0] == pytest.approx(3j)
+
+
 class TestNumericalStability:
     """
     Test numerical stability and edge cases

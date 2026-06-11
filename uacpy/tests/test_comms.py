@@ -102,9 +102,11 @@ class TestDoppler:
         # wideband chirp probe — what a real Doppler estimator operates on
         template = np.exp(1j * 2 * np.pi * (6000 * t + 0.5 * 4e6 * t ** 2))
         a_true = 2e-3
-        dilated = comms.compensate_doppler(template, a_true)  # stretch by 1+a
+        # simulate a closing geometry (v/c = a_true): rx is compressed
+        received = comms.compensate_doppler(template, -a_true)
         best, scales, peak = comms.estimate_doppler_scale(
-            dilated, template, np.linspace(0, 4e-3, 41))
+            received, template, np.linspace(0, 4e-3, 41))
+        # estimate returns +v/c; compensate_doppler(received, best) recovers template
         assert best == pytest.approx(a_true, abs=2e-4)
 
 

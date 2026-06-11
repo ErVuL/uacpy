@@ -10,7 +10,7 @@ configurations.
 import copy as _copy
 import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional, Dict
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 
 from uacpy.core.exceptions import ConfigurationError
 
@@ -37,9 +37,10 @@ def _validate_acoustic_type(value, label: str) -> None:
 
 
 def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
-    """Raise ``ValueError`` if ``values`` is not strictly monotonically
-    increasing. Used to guard every range / depth axis that feeds into
-    ``np.interp``, which silently produces garbage on unsorted ``xp``.
+    """Raise ``ConfigurationError`` if ``values`` is not strictly
+    monotonically increasing. Used to guard every range / depth axis that
+    feeds into ``np.interp``, which silently produces garbage on unsorted
+    ``xp``.
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size <= 1:
@@ -234,22 +235,18 @@ class BoundaryProperties:
                 f"got {self.shear_attenuation}"
             )
 
-        # Detect which acoustic params differ from their dataclass defaults.
-        # We use this both for auto-inference (when acoustic_type is None) and
-        # for the explicit-conflict guard below.
-        half_space_offenders = []
-        if self.sound_speed != 1600.0:
-            half_space_offenders.append(f"sound_speed={self.sound_speed:g}")
-        if self.density != 1.5:
-            half_space_offenders.append(f"density={self.density:g}")
-        if self.attenuation != 0.5:
-            half_space_offenders.append(f"attenuation={self.attenuation:g}")
-        if self.shear_speed != 0.0:
-            half_space_offenders.append(f"shear_speed={self.shear_speed:g}")
-        if self.shear_attenuation != 0.0:
-            half_space_offenders.append(f"shear_attenuation={self.shear_attenuation:g}")
-        if self.roughness != 0.0:
-            half_space_offenders.append(f"roughness={self.roughness:g}")
+        # Detect which acoustic params differ from their dataclass defaults
+        # (read from the field definitions so a default change cannot
+        # silently break the inference). We use this both for
+        # auto-inference (when acoustic_type is None) and for the
+        # explicit-conflict guard below.
+        defaults = {f.name: f.default for f in dataclass_fields(self)}
+        half_space_offenders = [
+            f"{name}={getattr(self, name):g}"
+            for name in ('sound_speed', 'density', 'attenuation',
+                         'shear_speed', 'shear_attenuation', 'roughness')
+            if getattr(self, name) != defaults[name]
+        ]
 
         if self.acoustic_type is None:
             # Auto-infer from the supplied parameters. 'grain-size' and
@@ -599,7 +596,10 @@ class LayeredBottom:
         interpolation rules of Collins' ``zread`` routine. The half-space
         is appended as one final breakpoint at ``zmax`` (or at the deepest
         layer bottom if ``zmax`` is omitted) carrying the half-space
-        value.
+        value. When ``zmax`` does not exceed the deepest layer bottom the
+        final breakpoint is emitted 1 m below it instead — past the
+        physical grid but harmless, since Collins clamps to the last
+        breakpoint inside the absorbing layer.
 
         Parameters
         ----------
@@ -1361,11 +1361,13 @@ def generate_sea_surface(
     max_range : float
         Maximum range in meters.
     wind_speed_ms : float
-        Wind speed at 10 m height in m/s. Typical values:
-        - 5 m/s: calm (sea state 2-3, Hs ~ 0.3 m)
-        - 10 m/s: moderate (sea state 4, Hs ~ 1.2 m)
-        - 15 m/s: rough (sea state 5, Hs ~ 2.8 m)
-        - 20 m/s: very rough (sea state 6, Hs ~ 5.0 m)
+        Wind speed at 19.5 m height in m/s (Pierson-Moskowitz
+        convention). The fully developed significant wave height is
+        Hs = 4*sqrt(alpha/beta)*U^2/(2g) = 0.021*U^2:
+        - 5 m/s: Hs ~ 0.5 m
+        - 10 m/s: Hs ~ 2.1 m
+        - 15 m/s: Hs ~ 4.8 m
+        - 20 m/s: Hs ~ 8.5 m
     n_points : int
         Number of range points in the output altimetry array.
     seed : int, optional
@@ -1397,8 +1399,8 @@ def generate_sea_surface(
     S_omega = (alpha_pm * g**2 / omega**5) * np.exp(-beta_pm * (omega_p / omega)**4)
 
     # Convert to spatial spectrum S(k) via S(k) = S(omega) * domega/dk
-    # domega/dk = g / (2*omega) for deep water
-    domega_dk = g / (2 * omega)
+    # with k in cycles/m: omega = sqrt(2*pi*g*k) so domega/dk = pi*g/omega
+    domega_dk = np.pi * g / omega
     S_k = S_omega * domega_dk
 
     # Generate random amplitudes from spectrum
@@ -1550,7 +1552,7 @@ class Environment:
         self.absorption = absorption
         self.name = _sanitize_title(name)
 
-        if np.isscalar(bathymetry):
+        if np.ndim(bathymetry) == 0:   # scalar or 0-D ndarray
             water_depth = float(bathymetry)
             if water_depth <= 0:
                 raise ConfigurationError(
@@ -1658,7 +1660,9 @@ class Environment:
         ndarray, so this helper carries the interpolation logic."""
         range = np.atleast_1d(range)
         if len(self.bathymetry) == 1:
-            return np.full_like(range, self.bathymetry[0, 1])
+            # dtype=float so an int range query doesn't truncate a
+            # fractional seafloor depth (the interp branch returns float).
+            return np.full_like(range, self.bathymetry[0, 1], dtype=float)
         return np.interp(range, self.bathymetry[:, 0], self.bathymetry[:, 1])
 
     def halfspace_at_range(self, range: float) -> 'BoundaryProperties':

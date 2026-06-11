@@ -312,7 +312,7 @@ class TestModesComputePhaseSpeeds:
 
     def test_phase_speeds_raises_without_frequency(self):
         modes = self._build_modes(frequencies=None)
-        with pytest.raises(ValueError, match='requires frequencies'):
+        with pytest.raises(ConfigurationError, match='requires frequencies'):
             modes.compute_phase_speeds()
 
     def test_phase_speeds_with_frequency_is_omega_over_k(self):
@@ -557,7 +557,7 @@ class TestReflectionCoefficientChainAccessors:
             phi=np.zeros(5),
             model='Test', frequencies=100.0,
         )
-        with pytest.raises(ValueError, match="broadband"):
+        with pytest.raises(ConfigurationError, match="broadband"):
             rc.at(frequency=100.0)
 
 
@@ -727,6 +727,27 @@ class TestFieldSlicing:
         assert spec.pinned['depth'] == 10.0
         assert spec.pinned['range'] == 200.0
 
+    def test_tf_at_frequency_narrows_identity(self):
+        from uacpy.core.results import Field
+        # A broadband field carries both a frequency coord and a frequencies
+        # identity (as a wrapper emits). Pinning one frequency narrows the
+        # identity so f0 / n_frequencies / repr reflect the pinned value.
+        freqs = np.array([100., 200., 300., 400.])
+        tf = Field(
+            data=(np.arange(24).reshape(2, 3, 4) + 1j).astype(complex),
+            coords={'depth': np.array([10., 20.]),
+                    'range': np.array([100., 200., 300.]),
+                    'frequency': freqs},
+            model='Test', frequencies=freqs,
+        )
+        assert tf.n_frequencies == 4 and tf.f0 == 100.0
+        narrow = tf.at(frequency=300.0)
+        assert narrow.n_frequencies == 1
+        assert narrow.f0 == 300.0
+        assert 'f=300 Hz' in repr(narrow)
+        # a non-frequency slice keeps the full identity
+        assert tf.at(depth=10.0).n_frequencies == 4
+
     def test_tf_to_tl_returns_real_field(self):
         tf = self._tf()
         tl = tf.to_tl()
@@ -758,12 +779,12 @@ class TestResultStackInvariants:
 
     def test_requires_at_least_one_slab(self):
         from uacpy.core.results import ResultStack
-        with pytest.raises(ValueError, match="at least one slab"):
+        with pytest.raises(ConfigurationError, match="at least one slab"):
             ResultStack(slabs=[], coordinate=[])
 
     def test_rejects_length_mismatch(self):
         from uacpy.core.results import ResultStack
-        with pytest.raises(ValueError, match="coordinate length"):
+        with pytest.raises(ConfigurationError, match="coordinate length"):
             ResultStack(slabs=[self._slab(source_depth=10.0)],
                         coordinate=[10.0, 20.0])
 
@@ -771,21 +792,21 @@ class TestResultStackInvariants:
         from uacpy.core.results import Rays, ResultStack
         pf = self._slab(source_depth=10.0)
         ry = Rays(rays=[], model='Test', backend='')
-        with pytest.raises(TypeError, match="same concrete type"):
+        with pytest.raises(ConfigurationError, match="same concrete type"):
             ResultStack(slabs=[pf, ry], coordinate=[10.0, 20.0])
 
     def test_rejects_disagreeing_frequencies(self):
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, frequencies=100.0)
         b = self._slab(source_depth=20.0, frequencies=200.0)
-        with pytest.raises(ValueError, match="frequencies"):
+        with pytest.raises(ConfigurationError, match="frequencies"):
             ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
 
     def test_rejects_disagreeing_model(self):
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, model='Bellhop')
         b = self._slab(source_depth=20.0, model='Kraken')
-        with pytest.raises(ValueError, match="model"):
+        with pytest.raises(ConfigurationError, match="model"):
             ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
 
     def test_accepts_uniform_slabs(self):
@@ -828,7 +849,7 @@ class TestResultStackInvariants:
         assert stack.coordinate_name == 'frequency'
         assert stack.at(frequency=200.0) is b
         # Mis-keyed kwarg → clear TypeError.
-        with pytest.raises(TypeError, match="frequency"):
+        with pytest.raises(ConfigurationError, match="frequency"):
             stack.at(source_depth=200.0)
 
     def test_frequency_axis_rejects_disagreeing_source_depths(self):
@@ -837,7 +858,7 @@ class TestResultStackInvariants:
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, frequencies=100.0)
         b = self._slab(source_depth=99.0, frequencies=200.0)
-        with pytest.raises(ValueError, match="source_depths"):
+        with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, b], coordinate=[100.0, 200.0],
                         coordinate_name='frequency')
 
@@ -855,6 +876,6 @@ class TestResultStackInvariants:
         # Disagreeing source_depth is now rejected (external coord
         # requires both internal axes to agree).
         c = self._slab(source_depth=99.0, frequencies=100.0)
-        with pytest.raises(ValueError, match="source_depths"):
+        with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
                         coordinate_name='wind_speed')
