@@ -23,6 +23,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -195,7 +196,7 @@ def run_parallel(
         wd = getattr(job.model, 'work_dir', None)
         if wd is None:
             continue
-        key = str(wd)
+        key = str(Path(wd).resolve())
         if key in seen_dirs:
             raise ConfigurationError(
                 f"run_parallel: work_dir {wd!r} is pinned on more than one "

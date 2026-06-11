@@ -48,10 +48,7 @@ from __future__ import annotations
 
 from enum import Enum
 import numpy as np
-from typing import TYPE_CHECKING, Optional, Dict, Any, List, Tuple, Union
-
-if TYPE_CHECKING:
-    from uacpy.core.absorption import Absorption  # noqa: F401
+from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core.constants import PRESSURE_FLOOR, DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
@@ -1859,7 +1856,7 @@ class Modes(Result):
 
         Raises
         ------
-        ValueError
+        ConfigurationError
             If this :class:`Modes` instance has no frequency context
             (``self.f0 is None``); without a frequency the phase speed
             is undefined. Pass ``frequencies=…`` to the wrapper that

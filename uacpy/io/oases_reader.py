@@ -327,12 +327,17 @@ def read_oasn_covariance(
                 'formats': [endian + 'f4', endian + 'f4'],
                 'itemsize': recl,
             })
-            flat = np.fromfile(f, dtype=rec_dt, count=n_total)
-            if flat.size < n_total:
+            # The final record may carry only its 8-byte payload (no
+            # padding to ``recl``); pad the buffer so the strided view
+            # still covers ``n_total`` records.
+            buf = f.read(n_total * recl)
+            if len(buf) < (n_total - 1) * recl + 8:
                 raise OSError(
                     f"{filepath}: truncated covariance data — expected "
-                    f"{n_total} records, got {flat.size}"
+                    f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
                 )
+            buf = buf.ljust(n_total * recl, b'\x00')
+            flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
             vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
             # Stored (ifreq, jrcv, ircv); the matrix wants (ifreq, ircv, jrcv).
             covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
@@ -475,6 +480,12 @@ def read_oasn_replicas(
                 raise OSError(
                     f"{filepath}: truncated replica data — expected "
                     f"{n_total} records, got {flat.size}"
+                )
+            if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
+                raise OSError(
+                    f"{filepath}: unexpected replica record layout — "
+                    "Fortran record markers are not the expected 8-byte "
+                    "payload length"
                 )
             vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
             replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)

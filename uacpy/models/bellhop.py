@@ -415,6 +415,26 @@ class Bellhop(PropagationModel):
         component : {'P', 'D'}, optional
             Output component for displacement-receiver fields: 'P'
             pressure (default), 'D' displacement.
+        beam_shift : bool, optional
+            When True, sets RunType position 7 to 'S' enabling beam-shift
+            on boundary reflections. Default: False.
+        n_freqs : int, optional
+            Number of frequency bins for BROADBAND / TIME_SERIES
+            synthesis when the band is expanded from a single centre
+            frequency. Default: :data:`DEFAULT_BROADBAND_N_FREQS`.
+        bandwidth_factor : float, optional
+            Fractional bandwidth of the synthesised band
+            ``[fc·(1-bw/2), fc·(1+bw/2)]`` around a single centre
+            frequency. Default:
+            :data:`DEFAULT_BROADBAND_BANDWIDTH_FACTOR`.
+        time_window : float, optional
+            TIME_SERIES output window length (s). ``None``
+            auto-derives from the latest arrival plus the source
+            waveform duration; ``run(output_duration=…)`` overrides
+            per call.
+        t_start : float, optional
+            TIME_SERIES output start time (s). ``None`` auto-derives
+            from the earliest arrival.
         auto_bounce : bool, optional
             Default ``True``. When ``env`` carries a ``LayeredBottom`` /
             ``RangeDependentLayeredBottom`` / elastic halfspace /

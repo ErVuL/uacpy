@@ -147,9 +147,9 @@ Model(
    kwargs appear per capability — the broadband synthesizers (Bellhop,
    BellhopCUDA, RAM, Scooter, KrakenField, OASP) take all four, SPARC
    takes `source_waveform=`/`sample_rate=` only, OASR takes
-   `frequencies=` only, and Kraken/Bounce/OAST/OASN take none.
-   KrakenField additionally takes `n_modes=` for the field
-   reconstruction limit.
+   `frequencies=` only, and Bounce/OAST/OASN take none.
+   The Kraken family (Kraken, KrakenC, KrakenField) additionally takes
+   `n_modes=` for the mode-count / field-reconstruction limit.
 
 **Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
 so `Bellhop().run(env, src, rcv, n_beam=10)` (missing the `s`) raises at
@@ -284,7 +284,7 @@ machinery.
 Model instances mutate `self.file_manager` per `run()` and are **not
 safe to share across threads**. To run many models concurrently, use
 `uacpy.run_parallel` — a process pool with one model instance per worker
-(see §5.8, *Running in parallel*).
+(see §5.11, *Running in parallel*).
 
 ---
 
@@ -918,6 +918,8 @@ oast = OAST(compute_contour=False,         # add 'C' (range-depth contour)
 field = oast.run(env, source, receiver)
 
 # Spatial covariance + matched-field replicas — RunMode.COVARIANCE / RunMode.REPLICA
+# Noise-field knobs (surface_noise_level, white_noise_level, deep_noise_level,
+# discrete_sources, …) are constructor-only too — see help(OASN).
 oasn = OASN(zmin=10, zmax=90, nz=20,       # replica grid is constructor-only
             xmin=500, xmax=10000, nx=40)
 cov = oasn.compute_covariance(env, source, receiver)
@@ -948,7 +950,7 @@ boundary speed is essentially irrelevant to the reflection coefficient).
 
 Examples: 13, 19.
 
-### 5.8 Running in parallel — `run_parallel`
+### 5.11 Running in parallel — `run_parallel`
 
 Every model run is an independent, subprocess-bound computation, so a
 batch of runs is embarrassingly parallel. `uacpy.run_parallel` runs a
@@ -1363,7 +1365,7 @@ PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
 For per-class kwargs / methods, read the docstrings
-(`help(uacpy.acoustic_signal.analysis.FRF)`). Examples 09, 10, 27–29 walk
+(`help(uacpy.acoustic_signal.system_id.FRF)`). Examples 09, 10, 27–29 walk
 through the common workflows (signal generation, matched filtering, arrays).
 
 ### Sonar performance (`uacpy.sonar`)

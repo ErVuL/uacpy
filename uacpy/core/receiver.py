@@ -141,12 +141,12 @@ class Receiver:
 
     @property
     def n_depths(self) -> int:
-        """Number of unique depth levels."""
+        """Number of depth entries."""
         return len(self.depths)
 
     @property
     def n_ranges(self) -> int:
-        """Number of unique ranges."""
+        """Number of range entries."""
         return len(self.ranges)
 
     @property

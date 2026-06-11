@@ -356,9 +356,8 @@ choose_oases() {
         esac
     fi
 
-    # If the source is already present locally, default to yes (don't waste
-    # the existing checkout). Otherwise default to yes in -y mode as well,
-    # preserving the previous non-interactive behavior.
+    # Non-interactive mode defaults to yes; the build section below skips
+    # the download when the source tree is already present locally.
     if [[ $AUTO_YES -eq 1 ]]; then
         INSTALL_OASES="yes"
         return 0

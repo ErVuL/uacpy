@@ -158,7 +158,7 @@ def read_shd_bin(
     >>> shd = read_shd_bin('pekeris.shd')
     >>> print(f"Title: {shd['title']}")
     >>> print(f"Pressure shape: {shd['pressure'].shape}")
-    >>> print(f"Ranges: {shd['Pos']['r']['r']} km")
+    >>> print(f"Ranges: {shd['Pos']['r']['r']} m")
 
     >>> # Read specific source location
     >>> shd = read_shd_bin('field3d.shd', xs=5.0, ys=10.0)
@@ -832,7 +832,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
 
     if truncated_after is not None:
         warnings.warn(
-            f"Ray file {filepath} appears truncated; recovered "
+            f"read_ray_file: {filepath} appears truncated; recovered "
             f"{truncated_after} ray(s) before EOF. The producing model "
             "may have crashed mid-write — check its .prt log.",
             UserWarning,

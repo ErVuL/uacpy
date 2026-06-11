@@ -59,9 +59,9 @@ result = Model(...).run(env, source, receiver, run_mode=None, *,
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site.
-The only sanctioned extensions are `KrakenField.run(n_modes=)` and
-`output_duration=` on the broadband synthesizers (Bellhop, BellhopCUDA,
-RAM, Scooter, KrakenField, OASP). Model configuration is
+The only sanctioned extensions are `n_modes=` on the Kraken family
+(Kraken, KrakenC, KrakenField) and `output_duration=` on the broadband
+synthesizers (Bellhop, BellhopCUDA, RAM, Scooter, KrakenField, OASP). Model configuration is
 **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter

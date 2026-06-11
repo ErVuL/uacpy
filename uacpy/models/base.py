@@ -373,7 +373,7 @@ class PropagationModel(ABC):
         -------
         result : Result
             One of the typed :mod:`uacpy.core.results` subclasses
-            (``Field``, ``Field``, ``Modes``, …) determined
+            (``Field``, ``Arrivals``, ``Modes``, …) determined
             by ``run_mode`` and the model.
         """
         pass
@@ -620,12 +620,11 @@ class PropagationModel(ABC):
         Raises
         ------
         InvalidDepthError
-            If source/receiver depths exceed the environment's maximum depth.
-        ValueError
-            If source/receiver depths are negative.
+            If source depths exceed the model's resolvable depth.
         ConfigurationError
-            If ``run_mode`` is a single-frequency mode and ``source`` carries
-            multiple frequencies.
+            If source/receiver depths are negative, or if ``run_mode`` is a
+            single-frequency mode and ``source`` carries multiple
+            frequencies.
         """
         if (run_mode is not None
                 and run_mode in self._SINGLE_FREQUENCY_MODES

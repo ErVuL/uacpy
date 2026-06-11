@@ -135,6 +135,13 @@ class Scooter(PropagationModel):
             Default ``None`` → 2.0 for ``COHERENT_TL``, 3.0 for
             ``BROADBAND`` / ``TIME_SERIES`` (the FFT-Hankel alias is
             otherwise visible as a wave from the far range edge).
+        interp_ssp : str, optional
+            SSP connection scheme. ``None`` (default) auto-picks
+            ``'quad'`` for a range-dependent ``env.ssp`` and
+            ``'linear'`` otherwise. Explicit values: ``'linear'``,
+            ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
+            ``'analytic'``. ``env.ssp.shape='isovelocity'`` always
+            forces ``'C'`` regardless.
         source_type : {'R', 'X'}, optional
             FLP Option(1:1). 'R' = cylindrical (point source, default),
             'X' = Cartesian (line source). The in-tree Hankel transform

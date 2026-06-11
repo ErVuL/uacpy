@@ -64,7 +64,7 @@ def _validate_pulse_type(pulse_type: str) -> str:
 
     Raises
     ------
-    ValueError
+    ConfigurationError
         If any character falls outside the alphabets documented in
         ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
     """
@@ -241,6 +241,13 @@ class SPARC(PropagationModel):
             Mesh points per wavelength. 0 = auto. Default: 0.
         roughness : float, optional
             Bottom roughness (m). Default: 0.0.
+        interp_ssp : str, optional
+            SSP connection scheme. ``None`` (default) auto-picks
+            ``'quad'`` for a range-dependent ``env.ssp`` and
+            ``'linear'`` otherwise. Explicit values: ``'linear'``,
+            ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
+            ``'analytic'``. ``env.ssp.shape='isovelocity'`` always
+            forces ``'C'`` regardless.
         output_mode : str, optional
             'R' (horizontal array), 'D' (vertical array), 'S' (snapshot). Default: 'R'.
 
@@ -268,6 +275,16 @@ class SPARC(PropagationModel):
             RMax is pushed well past them. Default: ``None`` → 1.0001
             (0.01%, round-off only) for COHERENT_TL; 3.0 (alias at 3×
             receiver max) for TIME_SERIES.
+        f_min, f_max : float, optional
+            Pulse frequency band (Hz). ``None`` (default) resolves at
+            ``run()`` time to one octave around the source frequency
+            (``max(f/2, 0.1)`` .. ``2f``) — SPARC's work scales with
+            the band's wavenumber span, so a much wider band slows it
+            sharply.
+        sound_speed : float, optional
+            Water sound speed (m/s) used for the travel-time window
+            when ``t_max`` is auto. ``None`` (default) →
+            :data:`DEFAULT_SOUND_SPEED`.
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """

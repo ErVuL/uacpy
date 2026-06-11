@@ -218,6 +218,17 @@ class OAST(PropagationModel):
         Add ``'A'`` option (depth-averaged TL). Default ``False``.
     complex_contour : bool, optional
         ``'J'`` option (complex integration contour). Default ``True``.
+    options : str, optional
+        Raw OASES options string (e.g. ``'N J T C'``); ``None`` derives
+        it from ``compute_contour`` / ``compute_depth_average`` /
+        ``complex_contour``.
+    integration_offset : float
+        Wavenumber-integration contour offset (dB/wavelength). Default 0.
+    nw_samples : int
+        Number of wavenumber samples; ``-1`` lets OASES choose.
+    plot_rmin, plot_rmax : float, optional
+        TL plot range axis bounds (m); ``None`` → 0 /
+        ``receiver.range_max``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -474,6 +485,53 @@ class OASN(PropagationModel):
     ----------
     executable : Path, optional
         Path to OASN binary. Auto-detected if ``None``.
+    options : str, optional
+        Custom OASES options string; ``None`` derives it from the run
+        mode (``N`` for COVARIANCE, ``R`` for REPLICA).
+    surface_noise_level : float
+        Surface-generated noise spectral level (dB re 1 µPa²/Hz),
+        Block VI. 0 disables.
+    white_noise_level : float
+        Uncorrelated (white) noise spectral level per hydrophone
+        (dB re 1 µPa²/Hz). 0 disables.
+    deep_noise_level : float
+        Deep broad-area source spectral level (dB re 1 µPa²/Hz). 0
+        disables.
+    deep_source_depth : float, optional
+        Depth (m) of the deep broad-area noise source sheet; ``None``
+        → half the water depth. Only written when ``deep_noise_level``
+        is non-zero.
+    discrete_sources : list of dict, optional
+        Point sources; each dict may carry ``'depth'`` (m), ``'x'``
+        (m), ``'y'`` (m), ``'level'`` (dB), ``'phase'`` (rad).
+    xmin, xmax : float, optional
+        Replica candidate-grid x bounds (m); ``None`` → OASES defaults
+        (100 / 10000).
+    nx : int
+        Number of replica grid points in x. Default 50.
+    ymin, ymax : float, optional
+        Replica candidate-grid y bounds (m); ``None`` → 0 / 0.
+    ny : int
+        Number of replica grid points in y. Default 1.
+    zmin, zmax : float, optional
+        Replica candidate-grid depth bounds (m); ``None`` → 10 /
+        ``env.depth - 10``.
+    nz : int
+        Number of replica grid points in depth. Default 20.
+    cmin, cmax : float, optional
+        Phase-speed bounds (m/s) for the wavenumber integrations,
+        applied to both the noise and replica blocks; ``None`` →
+        ``0.95 · min(c_water)`` and ``1e8``.
+    integration_offset : float
+        Wavenumber-integration contour offset (dB/wavelength). Default 0.
+    nw_samples : int
+        Number of wavenumber samples; ``-1`` lets OASES choose.
+    plot_rmin, plot_rmax : float, optional
+        TL plot range axis bounds (m).
+    vrec : float
+        Vertical receiver velocity (m/s) for Doppler. Default 0.
+    offdb : float, optional
+        Single-mode horizontal offset (dB).
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 

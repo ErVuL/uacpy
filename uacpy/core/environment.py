@@ -37,9 +37,10 @@ def _validate_acoustic_type(value, label: str) -> None:
 
 
 def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
-    """Raise ``ValueError`` if ``values`` is not strictly monotonically
-    increasing. Used to guard every range / depth axis that feeds into
-    ``np.interp``, which silently produces garbage on unsorted ``xp``.
+    """Raise ``ConfigurationError`` if ``values`` is not strictly
+    monotonically increasing. Used to guard every range / depth axis that
+    feeds into ``np.interp``, which silently produces garbage on unsorted
+    ``xp``.
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size <= 1:
