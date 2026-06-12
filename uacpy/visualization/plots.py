@@ -8,6 +8,13 @@ Canonical surface
   slicing. 1 surviving axis → line; 2 surviving axes → heatmap.
 * :func:`compare` — overlay multiple 1-D sliced fields on one axes.
 * :func:`compare_models` — side-by-side heatmap grid of 2-D fields.
+* :func:`plot_signal_excess` — diverging SE heatmap with the SE = 0
+  detection-boundary contour (fields from
+  :func:`uacpy.sonar.passive_signal_excess_field` /
+  :func:`uacpy.sonar.active_signal_excess_field`).
+* :func:`plot_detection_probability` — ``P_D`` heatmap on [0, 1] with
+  labelled probability contours (fields from
+  :func:`uacpy.sonar.probability_of_detection_field`).
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans / arrival stems.
 * :func:`plot_environment` — SSP + bathymetry + bottom in one figure.
 * :func:`plot_mode_functions`, :func:`plot_mode_wavenumbers`,
@@ -466,6 +473,203 @@ def _plot_field_2d(
             ax.set_title(pin)
     if axes_present == ['depth', 'range'] and env is not None:
         _overlay_seafloor(ax, env, x_coord)
+    return fig, ax
+
+
+def plot_signal_excess(
+    field: Field,
+    ax=None,
+    *,
+    env: Optional[Environment] = None,
+    vmax: Optional[float] = None,
+    cmap: str = 'RdBu_r',
+    show_boundary: bool = True,
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10, 5),
+    **mpl_kw,
+):
+    """Heatmap of a signal-excess :class:`Field` over ``(depth, range)``.
+
+    Renders the output of
+    :func:`uacpy.sonar.passive_signal_excess_field` /
+    :func:`uacpy.sonar.active_signal_excess_field` with a diverging
+    colormap centred at SE = 0 dB (warm = detectable, cool = not) and
+    draws the SE = 0 contour — the detection boundary.
+
+    Parameters
+    ----------
+    field : Field
+        Real-valued signal excess in dB with canonical
+        ``coords == {'depth', 'range'}`` (slice broadband fields first).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    env : Environment, optional
+        Overlays the seafloor, as in :func:`plot_field`.
+    vmax : float, optional
+        Symmetric colour limit ``[-vmax, +vmax]``. ``None`` uses the
+        99th percentile of ``|SE|`` so outliers don't wash out the
+        boundary region.
+    cmap : str, optional
+        Diverging colormap. Default ``'RdBu_r'``.
+    show_boundary : bool, optional
+        Draw the SE = 0 dB detection-boundary contour. Default True.
+    """
+    if not isinstance(field, Field):
+        raise TypeError(
+            f"plot_signal_excess: expected Field, got {type(field).__name__}"
+        )
+    if field.is_complex:
+        raise ValueError(
+            "plot_signal_excess: field must carry real signal excess in "
+            "dB — build it with passive_signal_excess_field / "
+            "active_signal_excess_field."
+        )
+    if list(field.coords) != ['depth', 'range']:
+        raise ValueError(
+            "plot_signal_excess: requires canonical ['depth', 'range'] "
+            f"coords; got {list(field.coords)} — slice with .at(...) first."
+        )
+
+    Z = np.asarray(field.data, dtype=float)
+    if vmax is None:
+        finite = np.abs(Z[np.isfinite(Z)])
+        vmax = float(np.percentile(finite, 99.0)) if finite.size else 1.0
+        if vmax <= 0:
+            vmax = 1.0
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    r_km = field.coords['range'] / 1000.0
+    depths = field.coords['depth']
+    im = ax.pcolormesh(
+        r_km, depths, Z, vmin=-vmax, vmax=vmax, cmap=cmap,
+        shading='nearest', **mpl_kw,
+    )
+    if show_boundary and np.isfinite(Z).any():
+        finite_z = Z[np.isfinite(Z)]
+        if finite_z.min() < 0.0 < finite_z.max():
+            cs = ax.contour(
+                r_km, depths, Z, levels=[0.0],
+                colors='black', linewidths=1.5, linestyles='solid',
+            )
+            ax.clabel(cs, inline=True, fontsize=9,
+                      fmt=lambda _: 'SE = 0 dB')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='Signal excess (dB)',
+                     fraction=0.046, pad=0.02)
+    ax.set_xlabel('Range (km)')
+    ax.set_ylabel(_coord_label('depth'))
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3, zorder=0)
+    if title:
+        ax.set_title(title)
+    else:
+        budget = field.metadata.get('sonar_budget') or {}
+        mode = budget.get('mode')
+        pin = _pinned_subtitle(field)
+        auto = 'Signal excess' + (f' ({mode})' if mode else '')
+        ax.set_title(f"{auto} — {pin}" if pin else auto)
+    if env is not None:
+        _overlay_seafloor(ax, env, field.coords['range'])
+    return fig, ax
+
+
+def plot_detection_probability(
+    field: Field,
+    ax=None,
+    *,
+    env: Optional[Environment] = None,
+    cmap: str = 'RdYlGn',
+    contour_levels: Sequence[float] = (0.1, 0.5, 0.9),
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10, 5),
+    **mpl_kw,
+):
+    """Heatmap of a detection-probability :class:`Field` over ``(depth, range)``.
+
+    Renders the output of
+    :func:`uacpy.sonar.probability_of_detection_field` on a fixed
+    ``[0, 1]`` colour scale (green = detectable) with labelled ``P_D``
+    contours.
+
+    Parameters
+    ----------
+    field : Field
+        ``P_D`` values in [0, 1] with canonical
+        ``coords == {'depth', 'range'}``.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    env : Environment, optional
+        Overlays the seafloor, as in :func:`plot_field`.
+    cmap : str, optional
+        Colormap. Default ``'RdYlGn'`` (red = lost, green = detected).
+    contour_levels : sequence of float, optional
+        ``P_D`` contour lines to draw. Default ``(0.1, 0.5, 0.9)``.
+    """
+    if not isinstance(field, Field):
+        raise TypeError(
+            f"plot_detection_probability: expected Field, got "
+            f"{type(field).__name__}"
+        )
+    if field.is_complex:
+        raise ValueError(
+            "plot_detection_probability: field must carry real P_D in "
+            "[0, 1] — build it with probability_of_detection_field."
+        )
+    if list(field.coords) != ['depth', 'range']:
+        raise ValueError(
+            "plot_detection_probability: requires canonical "
+            f"['depth', 'range'] coords; got {list(field.coords)} — "
+            "slice with .at(...) first."
+        )
+
+    Z = np.asarray(field.data, dtype=float)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    r_km = field.coords['range'] / 1000.0
+    depths = field.coords['depth']
+    im = ax.pcolormesh(
+        r_km, depths, Z, vmin=0.0, vmax=1.0, cmap=cmap,
+        shading='nearest', **mpl_kw,
+    )
+    finite = Z[np.isfinite(Z)]
+    if contour_levels and finite.size:
+        levels = [
+            lv for lv in sorted(contour_levels)
+            if finite.min() < lv < finite.max()
+        ]
+        if levels:
+            cs = ax.contour(
+                r_km, depths, Z, levels=levels,
+                colors='black', linewidths=1.2, linestyles='solid',
+            )
+            ax.clabel(cs, inline=True, fontsize=9, fmt='%.1f')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='Probability of detection',
+                     fraction=0.046, pad=0.02)
+    ax.set_xlabel('Range (km)')
+    ax.set_ylabel(_coord_label('depth'))
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3, zorder=0)
+    if title:
+        ax.set_title(title)
+    else:
+        sigma = field.metadata.get('sigma_db')
+        pin = _pinned_subtitle(field)
+        auto = 'Detection probability'
+        if sigma is not None:
+            auto += f' (σ = {sigma:g} dB)'
+        ax.set_title(f"{auto} — {pin}" if pin else auto)
+    if env is not None:
+        _overlay_seafloor(ax, env, field.coords['range'])
     return fig, ax
 
 
@@ -1966,6 +2170,8 @@ def plot_replicas(
 __all__ = [
     'plot_result',
     'plot_field',
+    'plot_signal_excess',
+    'plot_detection_probability',
     'compare',
     'compare_models',
     'plot_rays',

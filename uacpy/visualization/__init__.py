@@ -14,6 +14,13 @@ Canonical surface
   ``p(d, r, t)``.
 * :func:`compare` — overlay 1-D sliced fields.
 * :func:`compare_models` — side-by-side heatmap grid.
+* :func:`plot_signal_excess` — diverging SE heatmap with the SE = 0
+  detection-boundary contour (fields from
+  :func:`uacpy.sonar.passive_signal_excess_field` /
+  :func:`uacpy.sonar.active_signal_excess_field`).
+* :func:`plot_detection_probability` — ``P_D`` heatmap on [0, 1] with
+  labelled probability contours (fields from
+  :func:`uacpy.sonar.probability_of_detection_field`).
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans, arrival stems.
 * :func:`plot_environment` — single-panel view of the env: water column
   (SSP, Blues cmap) + bottom (every flavour, YlOrBr cmap) + optional
@@ -33,6 +40,8 @@ from uacpy.visualization.style import apply_professional_style
 from uacpy.visualization.plots import (
     plot_result,
     plot_field,
+    plot_signal_excess,
+    plot_detection_probability,
     animate_field,
     save_animation,
     plot_time_snapshots,
@@ -52,6 +61,8 @@ from uacpy.visualization.plots import (
 __all__ = [
     'plot_result',
     'plot_field',
+    'plot_signal_excess',
+    'plot_detection_probability',
     'animate_field',
     'save_animation',
     'plot_time_snapshots',

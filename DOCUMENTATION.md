@@ -577,6 +577,49 @@ the full source-depth array).
 
 ## 5. Propagation Models
 
+### 5.0 Choosing a model
+
+Five solution families cover ocean acoustics — rays, normal modes,
+wavenumber integration (FFP), parabolic equation, and time-domain FFP
+(Jensen, Kuperman, Porter & Schmidt, *Computational Ocean Acoustics*,
+Fig. 1.31). Rule-of-thumb regime boundaries: **ray theory** is the
+practical choice at high frequency — water depth ≳ 100 acoustic
+wavelengths (D/λ ≳ 100, i.e. f·D ≳ 1.5×10⁵ Hz·m); **mode theory**
+takes over in the low-frequency/shallow regime (D/λ ≲ 30); in between,
+both work with care. Wavenumber integration is the *exact*
+range-independent reference at any frequency (cost grows with f), and
+the split-step Padé PE is the range-dependent workhorse below ~1 kHz —
+valid for very wide propagation angles, large depth variations, and
+(rams0.5) elastic bottoms (Collins 1993).
+
+| Model | Method | Frequency regime | Range dependence | Bottom physics | Output types | Reach for it when |
+|---|---|---|---|---|---|---|
+| **Bellhop** / **BellhopCUDA** | Gaussian-beam ray tracing | High f (D/λ ≳ 100); degrades as D/λ → 30 | Native (bathy, 2-D SSP, altimetry) | Fluid halfspace; layered/elastic via auto-routed Bounce `.brc` | TL, rays, eigenrays, arrivals, H(f), p(t) | HF sonar studies, eigenray/arrival structure, fast RD surveys, any deep-water work |
+| **Kraken** / **KrakenC** | Normal modes (real / complex k) | Low f, shallow (D/λ ≲ 30; mode count grows with f·D) | RI (collapses + warns) | Layered native; KrakenC adds elastic + leaky modes | Modes (k_m, ψ_m) | Modal physics: dispersion, group speeds, mode filtering, warping |
+| **KrakenField** | Modes + adiabatic/coupled coupling | Same as Kraken | Mild RD via profile segments | Layered native; elastic via krakenc | TL, H(f), p(t) | Low-f shallow TL when modal structure matters; gradual RD |
+| **Scooter** | Wavenumber integration (FFP) | Any f (cost ∝ f); exact | RI only | Full layered + elastic; receivers inside sediment | TL, H(f), p(t) | Range-independent **benchmark** truth; near-field; seismo-acoustics light |
+| **RAM** (mpiramS / rams0.5 / ramsurf1.5) | Split-step Padé PE (one-way) | Low–mid f (≲ 1 kHz practical; cost grows fast with f) | Native (bathy, 2-D SSP, RD sediment; rough surface via ramsurf1.5) | Layered fluid native; elastic via rams0.5 | TL, H(f), p(t) | The RD workhorse below ~1 kHz: slopes, ducts, shelf propagation |
+| **SPARC** | Time-marched FFP | Low f, pulse-band | RI only | Layered native | p(t), snapshots | RI pulse propagation / dispersion without Fourier synthesis |
+| **OAST** | Wavenumber integration | Any f (cost ∝ f); exact | RI only | Full elastic / porous layered stacks | TL | Benchmark TL over complex elastic seabeds |
+| **OASP** | Wavenumber integration, pulse | Any f; exact | RI only | Full elastic | H(f), p(t) | Broadband pulses over elastic seabeds |
+| **OASN** | Wavenumber integration, noise/array | Any f | RI only | Full elastic | Covariance, MFP replicas | Array design, ambient-noise response, matched-field processing |
+| **Bounce** / **OASR** | Reflection-coefficient solvers | Any f | n/a (boundary property) | Layered + elastic | R(θ[, f]) tables | Generating `.brc`/`.trc` inputs; seabed reflectivity studies |
+
+**Decision shortcuts**
+
+- Range-independent and you want truth: **Scooter** (or **OAST** for
+  heavy elastic stacks) — then use it to validate the faster model you
+  actually sweep with.
+- Range-dependent below ~1 kHz: **RAM**; above a few kHz: **Bellhop**
+  (incoherent TL for sonar-performance maps); in the 1–3 kHz gap both
+  are defensible — check D/λ and cross-validate on a slice.
+- Modal quantities themselves (dispersion, ψ_m(z), group speed):
+  **Kraken/KrakenC**, fields via **KrakenField**.
+- Pulses: RI exact → **OASP** / **SPARC**; RD or arrival-resolved →
+  **RAM** / **Bellhop** broadband synthesis.
+- Arrays / MFP / noise covariance: **OASN**. Seabed reflectivity:
+  **Bounce** (fluid/elastic) or **OASR** (full elastic, P-SV).
+
 ### 5.1 Capability matrix
 
 | Model | Coh TL | Incoh TL | Rays | Eigen | Arr. | Modes | Time series | Trans. fn | Refl. | Altim. |
@@ -1238,7 +1281,7 @@ For multi-receiver eigenray runs, pass a `Receiver` instead of
 
 ## 7. Visualization
 
-`uacpy.visualization` ships a **canonical 16-function surface**. Slice
+`uacpy.visualization` ships a **canonical 18-function surface**. Slice
 the `Field` first (`.at()` / `.isel()`) and the auto-shape plotters do
 the rest. Every result type has a `.plot(env=env)` method that
 dispatches to the right helper.
@@ -1272,6 +1315,8 @@ want it scoped.
 | `animate_field(field, *, env=None, fps=30, frame_stride=None, p_max=None, aspect='auto', ...)` | time-series `Field` | Returns a `matplotlib.animation.FuncAnimation` of `p(d, r, t)`. |
 | `save_animation(field, path, *, fps=20, **animate_kwargs)` | time-series `Field` | One-liner GIF/MP4 export wrapping `animate_field`; writer inferred from `path` suffix (`.gif` → Pillow, `.mp4` → ffmpeg). |
 | `plot_time_snapshots(fields, times_s, *, env=None, p_max=None, ...)` | dict/list of time-series `Field`s + times | Per-model rows × per-time columns of `p(d, r, t)`. Time-series analogue of `compare_models`; per-row colour scale by default. |
+| `plot_signal_excess(field, *, env=None, vmax=None, show_boundary=True, ...)` | SE `Field` from `uacpy.sonar.*_signal_excess_field` | Diverging heatmap centred at SE = 0 dB (warm = detectable) with the SE = 0 detection-boundary contour and optional seafloor overlay. |
+| `plot_detection_probability(field, *, env=None, contour_levels=(0.1, 0.5, 0.9), ...)` | `P_D` `Field` from `uacpy.sonar.probability_of_detection_field` | `P_D` heatmap on a fixed [0, 1] scale (green = detected) with labelled probability contours. |
 | `compare(fields, labels=None, *, value='tl')` | list of 1-D `Field`s | Overlay multiple sliced fields on one axes. |
 | `compare_models(fields, labels=None, *, env=None, ncols=None, contours=None, ...)` | list/dict of 2-D `Field`s | Side-by-side heatmap grid with one shared colourbar. |
 | `plot_rays(rays, *, env=None, color_by='bounces', ...)` | `Rays` | Direct/surface/bottom/both colour-coded; auto-overlays seafloor and source/receivers. |
@@ -1377,8 +1422,9 @@ performance. Pure functions, all in decibels.
 |---|---|
 | `uacpy.sonar.scattering` | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength` |
 | `uacpy.sonar.reverberation` | `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
-| `uacpy.sonar.sonar_equation` | `echo_level`, `passive_signal_excess`, `active_signal_excess`, `figure_of_merit`, `detection_range` |
+| `uacpy.sonar.sonar_equation` | `echo_level`, `passive_signal_excess`, `active_signal_excess`, `passive_signal_excess_field`, `active_signal_excess_field`, `probability_of_detection_field`, `figure_of_merit`, `detection_range`, `detection_range_by_depth` |
 | `uacpy.sonar.detection` | `deflection_coefficient`, `probability_of_detection`, `roc_curve`, `albersheim_snr`, `detection_threshold_energy` |
+| `uacpy.sonar.target_strength` | `ts_sphere`, `ts_convex`, `ts_ellipsoid`, `ts_cylinder`, `ts_plate` — geometric-regime TS of simple rigid shapes (Urick Table 9.1), with aspect patterns for cylinder/plate and `ka` validity warnings |
 
 ```python
 import numpy as np, uacpy
@@ -1388,6 +1434,37 @@ dt = uacpy.sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100, integra
 se = uacpy.sonar.passive_signal_excess(140, tl, noise_level=60, directivity_index=15, detection_threshold=dt)
 rng_m = uacpy.sonar.detection_range(r, se)   # range where signal excess hits 0
 ```
+
+The `*_field` variants evaluate the same budgets over a full model TL
+grid and return a :class:`Field`, so the detection region maps directly
+over `(depth, range)`:
+
+```python
+tl_field = Bellhop().run(env, src, rcv, run_mode=RunMode.INCOHERENT_TL)
+se = uacpy.sonar.passive_signal_excess_field(
+    tl_field, source_level=125, noise_level=75,
+    directivity_index=15, detection_threshold=dt)
+uacpy.plot.plot_signal_excess(se, env=env)   # SE heatmap + SE = 0 boundary
+```
+
+`active_signal_excess_field` additionally takes `target_strength` and a
+scalar or per-range `reverberation_level` (e.g. from
+`boundary_reverberation` evaluated on `rcv.ranges`). All signal-excess
+functions accept `array_gain=` (replaces `directivity_index` for
+non-isotropic noise; never applied against RL) and
+`processing_loss_db=` (implementation loss L_sp). Turn mean SE into a
+detection-probability map with Urick's transition curve
+(`P_D = Φ(SE/σ)`, log-normal fluctuation; Dyer's saturated-multipath
+σ ≈ 5.6 dB):
+
+```python
+pd = uacpy.sonar.probability_of_detection_field(se, sigma_db=5.6)
+uacpy.plot.plot_detection_probability(pd, env=env)
+depths, dr_m = uacpy.sonar.detection_range_by_depth(se)   # SE=0 range per depth
+ts = uacpy.sonar.ts_cylinder(1.5, 5.0, 2000, angle_deg=10)  # Urick Table 9.1 TS
+```
+
+See `example_27_sonar_equation.py` Part 2.
 
 Equations follow Urick (*Principles of Underwater Sound*, Ch. 2/8/12);
 scattering laws from Chapman–Harris (1962) and Lambert/Mackenzie (1961).
@@ -1710,7 +1787,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
 | 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / KrakenField / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
-| 27 | `example_27_sonar_equation.py` | `uacpy.sonar`: signal excess, reverberation vs noise, detection range | |
+| 27 | `example_27_sonar_equation.py` | `uacpy.sonar`: signal excess, reverberation vs noise, detection range; SE + detection-probability maps over a Bellhop TL grid (`*_signal_excess_field`, `probability_of_detection_field`, `detection_range_by_depth`) | |
 | 28 | `example_28_matched_filter.py` | Pulse compression + range-Doppler ambiguity function | |
 | 29 | `example_29_array_processing.py` | Bartlett vs MVDR/Capon vs MUSIC direction-of-arrival | |
 | 30 | `example_30_time_frequency.py` | Transforms tour: f-k (+cone), tau-p, CWT, Wigner-Ville, cepstrum, hyperbolic Radon | |
