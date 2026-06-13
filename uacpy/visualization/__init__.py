@@ -21,6 +21,11 @@ Canonical surface
 * :func:`plot_detection_probability` — ``P_D`` heatmap on [0, 1] with
   labelled probability contours (fields from
   :func:`uacpy.sonar.probability_of_detection_field`).
+* :func:`plot_intensity_vectors` — active acoustic-intensity quiver over a
+  ``|I|`` heatmap, from a complex pressure ``Field`` (shows energy flow).
+* :func:`plot_vector_sensor` — time-domain vector-sensor record at one point
+  (pressure waveform, particle-velocity components, instantaneous-flux DOA)
+  from a real transient ``p(d, r, t)`` ``Field``.
 * :func:`plot_rays`, :func:`plot_arrivals` — ray fans, arrival stems.
 * :func:`plot_environment` — single-panel view of the env: water column
   (SSP, Blues cmap) + bottom (every flavour, YlOrBr cmap) + optional
@@ -56,6 +61,8 @@ from uacpy.visualization.plots import (
     plot_reflection_coefficient,
     plot_covariance,
     plot_replicas,
+    plot_intensity_vectors,
+    plot_vector_sensor,
 )
 
 __all__ = [
@@ -77,6 +84,8 @@ __all__ = [
     'plot_reflection_coefficient',
     'plot_covariance',
     'plot_replicas',
+    'plot_intensity_vectors',
+    'plot_vector_sensor',
     'style',
     'apply_professional_style',
 ]

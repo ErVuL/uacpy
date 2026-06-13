@@ -673,6 +673,242 @@ def plot_detection_probability(
     return fig, ax
 
 
+def plot_intensity_vectors(
+    field: Field,
+    ax=None,
+    *,
+    env: Optional[Environment] = None,
+    density: Optional[float] = None,
+    stride: int = 8,
+    arrow_scale: str = 'magnitude',
+    cmap: str = 'viridis',
+    arrow_color: str = 'white',
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10, 5),
+    **mpl_kw,
+):
+    """Acoustic-intensity vector field over ``(depth, range)``.
+
+    Takes a **complex** pressure :class:`Field` (narrowband ``p(d, r)`` — slice
+    a broadband field with :meth:`Field.at` first), derives the active
+    intensity via :func:`uacpy.acoustic_signal.acoustic_intensity`, and draws
+    the energy-flux magnitude ``|I|`` (dB) as a heatmap with intensity-vector
+    arrows on top (length ∝ ``|I|`` by default; see ``arrow_scale``). The arrows
+    reveal where acoustic energy flows — around interference nulls, into shadow
+    zones, down-slope — which a scalar TL map cannot show.
+
+    Both axes are in metres so the arrow angles are physically faithful (energy
+    flow is not distorted by a km/m axis mismatch). Depth is positive down.
+
+    Parameters
+    ----------
+    field : Field
+        Complex pressure with canonical ``coords == {'depth', 'range'}``.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    env : Environment, optional
+        Overlays the seafloor, as in :func:`plot_field`.
+    density : float, optional
+        Seawater density (kg/m³); defaults to ``DENSITY_SEAWATER``.
+    stride : int or (depth_stride, range_stride), optional
+        Sub-sample factor for the arrow grid (every ``stride``-th point). Ocean
+        grids are typically far wider in range than depth, so a 2-tuple lets you
+        thin the two axes independently.
+    arrow_scale : {'magnitude', 'unit'}, optional
+        ``'magnitude'`` (default) scales each arrow's length by the energy-flux
+        magnitude ``|I|`` — the faithful intensity-vector field (arrows shrink to
+        nothing at nulls, where little energy flows). A perceptual ``sqrt``
+        compression is applied so the geometric-spreading falloff doesn't hide
+        the far field. ``'unit'`` draws every arrow the same length (direction
+        only), useful when you want to read the flux direction everywhere.
+    arrow_color : str, optional
+        Quiver colour. Default ``'white'`` (reads well on ``viridis``).
+
+    Notes
+    -----
+    With ``arrow_scale='magnitude'`` the interference nulls need no special
+    handling: ``|I|`` vanishes there, so the arrows shrink to nothing on their
+    own — no cell is hidden or removed.
+    """
+    from uacpy.acoustic_signal.vector import acoustic_intensity
+    from uacpy.core.constants import DENSITY_SEAWATER, PRESSURE_FLOOR
+
+    if not isinstance(field, Field):
+        raise TypeError(
+            f"plot_intensity_vectors: expected Field, got {type(field).__name__}"
+        )
+    if not field.is_complex:
+        raise ValueError(
+            "plot_intensity_vectors: requires a complex pressure Field "
+            "(particle velocity is undefined for a real / TL field)."
+        )
+    if list(field.coords) != ['depth', 'range']:
+        raise ValueError(
+            "plot_intensity_vectors: requires canonical ['depth', 'range'] "
+            f"coords; got {list(field.coords)} — slice with .at(...) first."
+        )
+    if arrow_scale not in ('magnitude', 'unit'):
+        raise ValueError(
+            "plot_intensity_vectors: arrow_scale must be 'magnitude' or "
+            f"'unit', got {arrow_scale!r}")
+
+    rho = DENSITY_SEAWATER if density is None else float(density)
+    intensity = acoustic_intensity(field, density=rho, kind='active')
+    Ir = np.asarray(intensity.range.data, dtype=float)   # (depth, range)
+    Iz = np.asarray(intensity.depth.data, dtype=float)
+    mag = np.hypot(Ir, Iz)
+    mag_db = 10.0 * np.log10(np.maximum(mag, PRESSURE_FLOOR))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    r = field.coords['range']
+    z = field.coords['depth']
+    im = ax.pcolormesh(r, z, mag_db, cmap=cmap, shading='nearest', **mpl_kw)
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='Active intensity |I| (dB re 1 W/m²)',
+                     fraction=0.046, pad=0.02)
+
+    if np.isscalar(stride):
+        sz = sr = max(int(stride), 1)
+    else:
+        sz, sr = max(int(stride[0]), 1), max(int(stride[1]), 1)
+    sl = (slice(None, None, sz), slice(None, None, sr))
+    R, Z = np.meshgrid(r, z)
+    safe = np.where(mag > 0.0, mag, 1.0)
+    dx, dy = Ir / safe, Iz / safe               # unit direction
+    if arrow_scale == 'magnitude':
+        ref = float(np.percentile(mag, 99.0))
+        length = (np.sqrt(np.clip(mag / ref, 0.0, 1.0))   # sqrt: tame 1/r falloff
+                  if ref > 0.0 else np.zeros_like(mag))
+        U, V = length * dx, length * dy
+    else:   # 'unit' — direction only (validated above)
+        U, V = dx, dy
+    ax.quiver(R[sl], Z[sl], U[sl], V[sl],
+              color=arrow_color, angles='xy', pivot='mid',
+              scale=22, width=0.003)
+
+    ax.set_xlabel('Range (m)')
+    ax.set_ylabel(_coord_label('depth'))
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
+    if title:
+        ax.set_title(title)
+    else:
+        pin = _pinned_subtitle(field)
+        auto = 'Acoustic intensity (energy flux)'
+        ax.set_title(f"{auto} — {pin}" if pin else auto)
+    # Seafloor overlay in metres (the shared km helper would mis-place it here).
+    if env is not None and getattr(env, 'bathymetry', None) is not None:
+        bathy = np.asarray(env.bathymetry, dtype=float)
+        if bathy.ndim == 2 and bathy.shape[0] >= 2:
+            ax.plot(bathy[:, 0], bathy[:, 1], color='saddlebrown',
+                    lw=1.5, zorder=6)
+            ax.fill_between(bathy[:, 0], bathy[:, 1], float(z.max()),
+                            color='peru', alpha=0.3, zorder=5)
+        elif bathy.size:
+            ax.axhline(float(bathy.flat[-1]), color='saddlebrown',
+                       lw=1.5, zorder=6)
+    return fig, ax
+
+
+def plot_vector_sensor(
+    field: Field,
+    *,
+    depth: float,
+    range: float,
+    density: Optional[float] = None,
+    doa_floor: float = 0.05,
+    figsize: Tuple[float, float] = (10, 9),
+    title: Optional[str] = None,
+):
+    """Time-domain vector-sensor record at one ``(depth, range)`` point.
+
+    From a **real transient** pressure :class:`Field` ``p(d, r, t)``, shows what a
+    co-located pressure + particle-velocity (vector) sensor measures there: the
+    pressure waveform, the two particle-velocity components, and the
+    instantaneous energy-flux direction (DOA). Separate arrivals — e.g. a direct
+    path and a surface reflection — show up at distinct times with distinct DOAs,
+    which is exactly how a single vector sensor resolves arrival direction.
+
+    Velocity and instantaneous intensity are derived internally via
+    :func:`uacpy.acoustic_signal.particle_velocity_timeseries` and
+    :func:`uacpy.acoustic_signal.instantaneous_intensity`.
+
+    Parameters
+    ----------
+    field : Field
+        Real ``p(d, r, t)`` with exactly ``{'depth', 'range', 'time'}`` axes.
+    depth, range : float
+        Receiver location (m); the nearest grid point is used.
+    density : float, optional
+        Seawater density (kg/m³); defaults to ``DENSITY_SEAWATER``.
+    doa_floor : float, optional
+        Hide the DOA where ``|I|`` is below this fraction of its peak (i.e.
+        between arrivals, where the flux direction is meaningless). Default 0.05.
+
+    Returns
+    -------
+    (fig, axes) : the figure and its three stacked Axes.
+    """
+    from uacpy.acoustic_signal.vector import (
+        instantaneous_intensity, particle_velocity_timeseries)
+    from uacpy.core.constants import DENSITY_SEAWATER
+
+    if not isinstance(field, Field):
+        raise TypeError(
+            f"plot_vector_sensor: expected Field, got {type(field).__name__}")
+    if field.is_complex or set(field.axes) != {'depth', 'range', 'time'}:
+        raise ValueError(
+            "plot_vector_sensor: requires a real time-domain p(d, r, t) Field "
+            f"with exactly {{'depth','range','time'}} axes; got {field.axes} "
+            f"(complex={field.is_complex}).")
+
+    rho = DENSITY_SEAWATER if density is None else float(density)
+    vel = particle_velocity_timeseries(field, density=rho)
+    intensity = instantaneous_intensity(field, density=rho)
+
+    iz = int(np.argmin(np.abs(field.coords['depth'] - depth)))
+    ir = int(np.argmin(np.abs(field.coords['range'] - range)))
+
+    def _at_point(arr: np.ndarray) -> np.ndarray:
+        idx = [slice(None)] * arr.ndim
+        idx[field.axes.index('depth')] = iz
+        idx[field.axes.index('range')] = ir
+        return np.asarray(arr)[tuple(idx)]
+
+    t_ms = field.coords['time'] * 1e3
+    p_t = _at_point(field.data)
+    u_r, u_z = _at_point(vel.range.data), _at_point(vel.depth.data)
+    i_r, i_z = _at_point(intensity.range.data), _at_point(intensity.depth.data)
+    mag = np.hypot(i_r, i_z)
+    doa = np.degrees(np.arctan2(i_z, i_r))
+    if mag.max() > 0:
+        doa = np.where(mag < doa_floor * mag.max(), np.nan, doa)
+
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=figsize,
+                             constrained_layout=True)
+    axes[0].plot(t_ms, p_t, color='black', lw=1.2)
+    axes[0].set_ylabel('Pressure p(t) (Pa)')
+    axes[1].plot(t_ms, u_r, color='C0', lw=1.2, label='$u_{range}$')
+    axes[1].plot(t_ms, u_z, color='C1', lw=1.2, label='$u_{depth}$ (+down)')
+    axes[1].set_ylabel('Particle velocity (m/s)')
+    axes[1].legend(loc='upper right')
+    axes[2].plot(t_ms, doa, color='C3', lw=1.6)
+    axes[2].axhline(0.0, color='gray', lw=0.8, ls=':')
+    axes[2].set_ylim(-90, 90)
+    axes[2].set_ylabel('Energy-flux DOA (deg, + down)')
+    axes[2].set_xlabel('Time (ms)')
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+    loc = f'z = {depth:g} m, r = {range:g} m'
+    fig.suptitle(title or f'Vector-sensor record ({loc})', fontweight='bold')
+    return fig, axes
+
+
 def _pinned_subtitle(field: Field) -> str:
     if not field.pinned:
         return ''

@@ -1376,6 +1376,7 @@ Reachable as `uacpy.acoustic_signal`. Sub-modules:
 | `…system_id` | Frequency-response-function estimation (Welch / ETFE / LS-FIR) | `FRF` |
 | `…channel` | Time-domain channel simulation from arrivals / `H(f)` | `impulse_response`, `simulate_reception`, `impulse_response_from_transfer_function` |
 | `…modal` | Modal / dispersion processing (waveguide warping) | `modal_group_velocity`, `warp_signal`, `unwarp_signal` |
+| `…vector` | Vector acoustics: particle velocity, intensity, single-sensor DOA (frequency- **and** time-domain) | `particle_velocity`, `acoustic_intensity`, `intensity_magnitude`, `intensity_doa`, `particle_velocity_timeseries`, `instantaneous_intensity` (plotting: `uacpy.visualization.plot_intensity_vectors`) |
 
 **Invertible transforms** (`FK` · `TauP` · `Radon` · `cwt` · `complex_cepstrum`)
 follow a filtering pattern: *forward → modify the coefficients → standalone
@@ -1447,6 +1448,55 @@ t, f, W = sig.wigner_ville(x, fs, freq_window=65, time_window=33, nfft=1024)
 # Echo cepstrum: long-pass lifter strips the smooth spectral envelope
 c = sig.cepstrum(rx, lifter=-30)
 ```
+
+#### Vector acoustics (particle velocity, intensity, DOA)
+
+`uacpy.acoustic_signal.vector` turns any **complex** `Field` (narrowband
+pressure `p(d, r)` or broadband `H(d, r, f)`) into the quantities a vector
+sensor measures — it consumes a `Field` and never touches model internals.
+
+| Function | Returns | Definition |
+|---|---|---|
+| `particle_velocity(field, *, density=)` | `VectorComponents(range, depth)` of complex Fields (m/s) | `u = −∇p/(iωρ)` (Euler), gradients over the Field's own axes — narrowband `p(d,r)` or broadband `H(d,r,f)` |
+| `acoustic_intensity(field, *, density=, kind=)` | `VectorComponents(range, depth)` of real Fields (W/m²) | active `½ Re(p·u*)` / reactive `½ Im(p·u*)` |
+| `particle_velocity_timeseries(field, *, density=)` | `VectorComponents(range, depth)` of real time-series Fields (m/s) | time-domain Euler `u(t) = −(1/ρ)∫∇p dt'` for a real transient `p(d,r,t)` (starts from rest) |
+| `instantaneous_intensity(field, *, density=)` | `VectorComponents(range, depth)` of real time-series Fields (W/m²) | `I(t) = p(t)·u(t)` (time average = active intensity; `∫I dt` = transient energy flux) |
+| `intensity_magnitude(field, …)` | real Field (W/m²) | `\|I\|` |
+| `intensity_doa(field, *, density=, degrees=)` | real Field (deg) | `atan2(I_depth, I_range)`, **+ = downward** |
+| `visualization.plot_intensity_vectors(field, *, arrow_scale=, stride=, env=, …)` | `(fig, ax)` | intensity-vector quiver over a `\|I\|` heatmap; `arrow_scale='magnitude'` (default) scales arrow length by `\|I\|` (faithful vector field — arrows vanish at nulls), `'unit'` shows direction only |
+| `visualization.plot_vector_sensor(field, *, depth=, range=)` | `(fig, axes)` | time-domain vector-sensor record at one point from a real `p(d,r,t)`: pressure waveform, velocity components, instantaneous-flux DOA (resolves arrivals by direction) |
+
+Conventions: the ½ factor is correct for uacpy's stored **peak** pressure phasor
+(the Helmholtz/TL solution, no RMS scaling). For a TL-normalised field (`|p|=1`
+at 1 m) the intensity is **relative to the 1 m source intensity** — exactly
+consistent with `TL = −20·log₁₀|p|` (verified to 0.07 dB); pass a field in
+absolute Pa for absolute W/m². Velocity is m/s, depth is +down. The sign follows uacpy's stored
+`exp(−ikr)` outgoing propagator, so an outgoing wave's energy flux points in
+**+range** and depth is positive **down**. `density` defaults to
+`DENSITY_SEAWATER` (1027 kg/m³). A field carrying the opposite (`exp(+ikr)`)
+convention should be conjugated first.
+
+**Resolve the wavelength.** The velocity is a finite-difference pressure
+gradient, so the grid must sample below Nyquist (step `< λ/2`); on a coarser
+grid the gradient aliases and the energy-flux direction can spuriously reverse —
+interference fringes are the classic trigger. `particle_velocity` emits a
+`UserWarning` when it detects a step `> λ/2` (using the nominal sound speed at
+the highest frequency present); aim for ≳4–8 points per wavelength.
+
+```python
+from uacpy.acoustic_signal import vector
+from uacpy.visualization import plot_intensity_vectors
+
+res = uacpy.Bellhop().run(env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+u_r, u_z = vector.particle_velocity(res.field)           # particle velocity (m/s)
+I_r, I_z = vector.acoustic_intensity(res.field)          # active energy flux
+doa      = vector.intensity_doa(res.field)               # grazing angle per (d, r)
+plot_intensity_vectors(res.field, env=env)               # energy-flow quiver
+```
+
+Example 37 (`example_37_vector_acoustics.py`) demonstrates the full chain on an
+ideal-waveguide modal field (scalar TL vs. intensity quiver vs. DOA) where the
+interference is the combined effect of surface and seabed reflections.
 
 For per-class kwargs / methods, read the docstrings
 (`help(uacpy.acoustic_signal.system_id.FRF)`). Examples 09, 10, 27–29 walk
@@ -1836,6 +1886,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 34 | `example_34_janus_beacon.py` | JANUS (STANAG 4748) beacon: 64-bit packet -> FH-BFSK .wav -> delay + echo + AWGN -> preamble detect + decode + CRC | |
 | 35 | `example_35_noise_impact.py` | Standards chain: UNESCO sound speed -> decidecade bands -> ISO 17208 ship MSL -> propagation -> Southall 2019 marine-mammal weighting | |
 | 36 | `example_36_noise_impact_modeled.py` | Modeled impact: ship ISO 17208 MSL through a real Bellhop TL field (UNESCO SSP) -> Southall weighting at a marine mammal | requires_binary |
+| 37 | `example_37_vector_acoustics.py` | Vector acoustics, two figures: (1) frequency-domain ideal waveguide — TL vs. magnitude-scaled energy-flux quiver vs. DOA; (2) time-domain transient — a vector sensor resolving direct (up) vs. surface-reflected (down) arrivals via `plot_vector_sensor` | |
 
 Smoke test:
 

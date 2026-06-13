@@ -279,10 +279,10 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 36 example scripts numbered
-sequentially (`example_01_*.py` through `example_36_*.py`) — from a first
-TL field to communications modems and a standards-based noise-impact
-assessment. See the
+Inside `uacpy/uacpy/examples/` you will find 37 example scripts numbered
+sequentially (`example_01_*.py` through `example_37_*.py`) — from a first
+TL field to communications modems, a standards-based noise-impact
+assessment, and vector-acoustic energy-flow analysis. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 

@@ -128,6 +128,36 @@ class TestTimeFrequency:
         with pytest.raises(ConfigurationError):
             wigner_ville(np.zeros(256), FS, nfft=128)
 
+    def test_wigner_ville_time_marginal_and_energy(self):
+        # Defining WVD property (convention-independent): sum_f W(t,f) is
+        # exactly proportional to the instantaneous power |z(t)|^2, and the
+        # total integrates to the signal energy — validates the normalisation.
+        n = 256
+        t = np.arange(n) / FS
+        x = np.cos(2 * np.pi * 0.1 * FS * t) * np.exp(-((t - t[n // 3]) / 0.04) ** 2)
+        power = np.abs(analytic_signal(x)) ** 2
+        _, _, W = wigner_ville(x, FS)
+        m = power > 1e-6 * power.max()
+        ratio = W.sum(axis=0)[m] / power[m]
+        assert np.allclose(ratio, n, rtol=1e-9)            # constant = N exactly
+        assert np.isclose(W.sum(), n * power.sum(), rtol=1e-9)   # energy
+
+    def test_spwvd_smoothing_preserves_invariants(self):
+        # Signal localised to the window centre so the time-smoothing window is
+        # never edge-clipped (its energy conservation is then exact).
+        n = 256
+        t = np.arange(n) / FS
+        x = np.cos(2 * np.pi * 0.12 * FS * t) * np.exp(-((t - t[n // 2]) / 0.0025) ** 2)
+        power = np.abs(analytic_signal(x)) ** 2
+        m = power > 1e-6 * power.max()
+        _, _, W = wigner_ville(x, FS)
+        # pseudo-WVD: the lag window has h(0)=1, so the time marginal is intact
+        _, _, Wp = wigner_ville(x, FS, freq_window=65)
+        assert np.allclose(Wp.sum(axis=0)[m] / power[m], n, rtol=1e-9)
+        # smoothed-pseudo-WVD: the (Σg-normalised) time window conserves energy
+        _, _, Ws = wigner_ville(x, FS, freq_window=65, time_window=33)
+        assert np.isclose(Ws.sum(), W.sum(), rtol=1e-9)
+
     def test_cepstrum_finite(self):
         rng = np.random.default_rng(0)
         x = rng.standard_normal(512)

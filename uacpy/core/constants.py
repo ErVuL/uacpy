@@ -12,6 +12,12 @@ from enum import Enum
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 
+# Seawater density for SI particle-velocity / acoustic-intensity physics
+# (Euler relation u = -grad(p)/(i*omega*rho); intensity in W/m²). In kg/m³,
+# NOT the g/cm³ used for material/sediment densities elsewhere — convert at
+# the boundary. Nominal ocean value (Abraham, UW Acoustic Signal Processing).
+DENSITY_SEAWATER = 1027.0  # kg/m³
+
 # Phase-speed search bounds used by AT-family writers when the user
 # doesn't pass an explicit (c_low, c_high).
 #
