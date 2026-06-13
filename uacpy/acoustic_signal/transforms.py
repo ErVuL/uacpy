@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import get_window
 
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
@@ -15,6 +16,53 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
+
+
+def _taper(spec, n):
+    """Length-``n`` taper for a ``scipy.signal.get_window`` spec.
+
+    ``spec`` is ``None`` (rectangular ``ones``) or any get_window argument —
+    a name (``'hann'``) or a ``(name, *params)`` tuple (``('kaiser', 8)``).
+    Periodic (``fftbins=True``) form, the correct convention for spectra.
+    """
+    if spec is None:
+        return np.ones(int(n))
+    return get_window(spec, int(n), fftbins=True).astype(float)
+
+
+def _fk_tapers(window, nt, nx):
+    """Separable (time, space) tapers for the 2-D f-k window.
+
+    ``window`` applies one spec to both axes; a 2-element ``list``
+    ``[time_spec, space_spec]`` tapers the axes independently.
+    """
+    if isinstance(window, list):
+        if len(window) != 2:
+            raise ConfigurationError(
+                "FK.compute: window list must be [time_window, space_window]")
+        t_spec, x_spec = window
+    else:
+        t_spec = x_spec = window
+    return _taper(t_spec, nt), _taper(x_spec, nx)
+
+
+def _fk_nfft(nfft, nt, nx):
+    """Resolve the zero-padded f-k transform shape ``(NT, NX) >= (nt, nx)``."""
+    if nfft is None:
+        return nt, nx
+    if np.isscalar(nfft):
+        NT = NX = int(nfft)
+    else:
+        nfft = tuple(nfft)
+        if len(nfft) != 2:
+            raise ConfigurationError(
+                "FK.compute: nfft must be an int or (n_time, n_space)")
+        NT, NX = int(nfft[0]), int(nfft[1])
+    if NT < nt or NX < nx:
+        raise ConfigurationError(
+            f"FK.compute: nfft {(NT, NX)} must be >= data shape {(nt, nx)} "
+            "(zero-pad only, no truncation)")
+    return NT, NX
 
 
 def _moveout_times(kind, taus, x, m):
@@ -102,31 +150,42 @@ def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
     return out
 
 
-def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None):
+def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None,
+                   *, window=None, nfft=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
     Returns ``(slownesses, taus, taup)``: slowness axis (s/m), intercept-time
-    axis (s), and the panel ``(n_slowness, nt)``. See :class:`TauP` for the
+    axis (s), and the panel ``(n_slowness, NT)``. See :class:`TauP` for the
     convention; this is the standalone functional form (no stored state).
+
+    ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
+    ``(name, *params)`` tuple) applied down each trace before the time FFT to
+    curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time FFT to
+    ``NT >= nt`` samples (finer ``tau`` spacing); ``None`` keeps ``nt``.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
         raise ConfigurationError("taup_transform: data must be 2-D (nt, nx)")
     nt, nx = d.shape
     fs = float(fs)
+    NT = nt if nfft is None else int(nfft)
+    if NT < nt:
+        raise ConfigurationError(
+            f"taup_transform: nfft ({NT}) must be >= nt ({nt}) (zero-pad only)")
+    d = d * _taper(window, nt)[:, None]
     x = np.arange(nx) * float(dx)
     if slownesses is None:
         if p_max is None:
             p_max = 1.0 / 1000.0
         slownesses = np.linspace(-p_max, p_max, int(n_slowness))
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
-    D = np.fft.rfft(d, axis=0)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / fs)
-    taup = np.empty((slownesses.size, nt))
+    D = np.fft.rfft(d, n=NT, axis=0)
+    omega = 2.0 * np.pi * np.fft.rfftfreq(NT, 1.0 / fs)
+    taup = np.empty((slownesses.size, NT))
     for i, p in enumerate(slownesses):
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
-        taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=nt)
-    return slownesses, np.arange(nt) / fs, taup
+        taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
+    return slownesses, np.arange(NT) / fs, taup
 
 
 def inverse_taup(taup, slownesses, fs, dx, nx):
@@ -218,7 +277,7 @@ class TauP:
         self.ref = float(ref)
 
     def compute(self, data, fs, dx, slownesses=None, n_slowness: int = 201,
-                p_max=None):
+                p_max=None, *, window=None, nfft=None):
         """Forward tau-p transform.
 
         Parameters
@@ -236,18 +295,25 @@ class TauP:
             Number of slownesses when ``slownesses`` is None.
         p_max : float, optional
             Half-width of the default slowness axis (s/m).
+        window : None, str, or tuple
+            Temporal :func:`scipy.signal.get_window` spec applied down each
+            trace before the time FFT (leakage control). ``None`` is
+            rectangular.
+        nfft : int, optional
+            Zero-pad the time FFT to ``nfft >= nt`` samples (finer ``tau``
+            spacing). ``None`` keeps ``nt``.
 
         Returns
         -------
         slownesses, taus, taup : ndarray
             Slowness axis (s/m), intercept-time axis (s), and panel
-            ``(n_slowness, nt)``.
+            ``(n_slowness, NT)``.
         """
         d = np.asarray(data, dtype=float)
         if d.ndim != 2:
             raise ConfigurationError("TauP.compute: data must be 2-D (nt, nx)")
         self.slownesses, self.taus, self.taup = taup_transform(
-            d, fs, dx, slownesses, n_slowness, p_max)
+            d, fs, dx, slownesses, n_slowness, p_max, window=window, nfft=nfft)
         self.fs, self.dx, self.nx = float(fs), float(dx), d.shape[1]
         return self.slownesses, self.taus, self.taup
 
@@ -347,7 +413,7 @@ class FK:
             ax.text(nu, f, f" {c:.0f} m/s", color=color, fontsize=8,
                     va="top", ha="right")
 
-    def compute(self, data, fs, dx, normalize=False):
+    def compute(self, data, fs, dx, normalize=False, *, window=None, nfft=None):
         """
         Compute the frequency-wavenumber (f-k) spectrum using a 2D FFT.
 
@@ -363,10 +429,22 @@ class FK:
             If ``False`` (default) ``fk`` is the raw ``|FFT2|^2`` — a *relative*
             power (plotted as relative dB). If ``True`` it is the calibrated
             two-sided 2-D power spectral density
-            ``|FFT2|^2 * dx / (fs * nt * nx)``, in ``input_unit^2 / (Hz·cyc/m)``
-            — Parseval-consistent (``sum(fk)*df*dk == mean(data^2)``). Assumes a
-            rectangular window; for a tapered ``data`` divide by ``mean(w^2)``
-            for absolute accuracy.
+            ``|FFT2|^2 * dx / (fs * S2)`` with ``S2 = sum(w_t^2) * sum(w_x^2)``,
+            in ``input_unit^2 / (Hz·cyc/m)`` — Parseval-consistent
+            (``sum(fk)*df*dk == mean(data^2)`` weighted by the window, and
+            pad-independent). For a rectangular window ``S2 = nt * nx``.
+        window : None, str, tuple, or [time_window, space_window]
+            Separable taper applied before the FFT to suppress spectral
+            leakage. ``None`` (default) is rectangular (no taper). A single
+            ``scipy.signal.get_window`` spec — a name (``'hann'``) or
+            ``(name, *params)`` (``('kaiser', 8)``) — tapers both axes; a
+            2-element list tapers time and space independently. ``normalize``
+            divides out the window power so the PSD stays calibrated.
+        nfft : None, int, or (n_time, n_space)
+            Zero-padded transform size. ``None`` (default) uses the native
+            ``(nt, nx)``. A larger size interpolates the f / wavenumber axes
+            (finer bin spacing, not more resolution); it must be ``>=`` the
+            data shape — truncation is rejected.
 
         Returns
         -------
@@ -381,22 +459,30 @@ class FK:
         fk : ndarray
             2-D power panel (relative ``|FK|^2`` or, with ``normalize``, the
             calibrated PSD). The complex spectrum is kept on ``.FK`` for
-            :func:`inverse_fk` and is unaffected by ``normalize``.
+            :func:`inverse_fk`; with a window or ``nfft`` the inverse returns
+            the tapered, zero-padded field, not the raw input.
         """
         data = np.asarray(data)
+        if data.ndim != 2:
+            raise ConfigurationError("FK.compute: data must be 2-D (nt, nx)")
         nt, nx = data.shape
+        wt, wx = _fk_tapers(window, nt, nx)
+        NT, NX = _fk_nfft(nfft, nt, nx)
 
-        # Forward 2D FFT (complex, kept raw for the inverse)
-        FK = np.fft.fftshift(np.fft.fft2(data), axes=(0, 1))
+        # Forward 2D FFT of the tapered gather, zero-padded to (NT, NX)
+        # (complex, kept raw for the inverse).
+        dataw = data * wt[:, None] * wx[None, :]
+        FK = np.fft.fftshift(np.fft.fft2(dataw, s=(NT, NX)), axes=(0, 1))
 
         FKp = np.abs(FK) ** 2
         if normalize:
-            # Two-sided 2-D PSD; Parseval: sum(FKp)*df*dk == mean(data**2).
-            FKp = FKp * (float(dx) / (float(fs) * nt * nx))
+            # Two-sided 2-D PSD; Parseval: sum(FKp)*df*dk == windowed mean power.
+            s2 = float(np.sum(wt ** 2) * np.sum(wx ** 2))
+            FKp = FKp * (float(dx) / (float(fs) * s2))
 
         # Axes
-        freqs = np.fft.fftshift(np.fft.fftfreq(nt, d=1 / fs))
-        wavenumbers = np.fft.fftshift(np.fft.fftfreq(nx, d=dx))
+        freqs = np.fft.fftshift(np.fft.fftfreq(NT, d=1 / fs))
+        wavenumbers = np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
 
         # Store results
         self.frequencies = freqs
@@ -404,6 +490,7 @@ class FK:
         self.FK = FK
         self.fk = FKp
         self.normalized = bool(normalize)
+        self.window = (wt, wx)
 
         return freqs, wavenumbers, FKp
 

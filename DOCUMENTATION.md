@@ -1409,6 +1409,45 @@ Conventions: reference pressure defaults to **1 µPa** (water; pass
 PSD-like quantities and dB re `ref²·s` for SEL. PSDs are stored linear
 (`Pa²/Hz`); conversion to dB happens in `.plot()`.
 
+#### Windowing, zero-padding & smoothing on the FFT transforms
+
+The FFT-based transforms take keyword-only conditioning options (all default to
+today's bare behaviour, so existing calls are unchanged):
+
+| Call | Option | Meaning |
+|---|---|---|
+| `FK.compute(data, fs, dx, *, window=, nfft=)` | `window` | Separable taper before the 2-D FFT. `None` = rectangular; one `scipy.signal.get_window` spec (`'hann'`, `('kaiser', 8)`) tapers both axes; a 2-element list `['hann', ('kaiser', 8)]` tapers **[time, space]** independently. The calibrated PSD (`normalize=True`) divides by the window power `S2 = Σwₜ²·Σwₓ²`, so it stays Parseval-consistent and pad-independent. |
+| | `nfft` | Zero-pad size — `int` (both axes) or `(n_time, n_space)`. Must be `≥` the data shape (truncation is rejected); larger = finer f / wavenumber spacing, not more resolution. |
+| `TauP.compute(…, *, window=, nfft=)` and `taup_transform(…, *, window=, nfft=)` | `window` | Temporal `get_window` spec applied down each trace before the time FFT (leakage control). |
+| | `nfft` | Zero-pad the time FFT to `≥ nt` samples (finer τ spacing). |
+| `wigner_ville(x, fs, *, analytic=, freq_window=, time_window=, nfft=)` | `freq_window` | Lag-domain smoothing window → the **pseudo-WVD** (smooths frequency, limits lag, suppresses cross-terms). `None` / int (Hann of that length) / 1-D array. |
+| | `time_window` | Time-domain smoothing window → the full **smoothed-pseudo-WVD** (averages the instantaneous autocorrelation over time). Shorter windows trade resolution for stronger cross-term suppression. |
+| | `nfft` | Zero-pad the lag FFT (finer frequency spacing). |
+| | `analytic` | Use the analytic signal for real input (default `True`); `False` runs the raw signal. Ignored for complex input. |
+| `cepstrum(x, *, window=, nfft=, lifter=)` | `window` | Pre-FFT `get_window` taper. |
+| | `nfft` | Zero-pad the FFT (`≥ len(x)`; finer quefrency spacing). |
+| | `lifter` | Quefrency liftering: a **positive** int short-passes (keeps low quefrencies → spectral envelope); a **negative** int long-passes (keeps high quefrencies → pitch / echo / excitation); or pass a 1-D weight array. |
+
+`Radon` / `radon_transform` take no `window`/`nfft` — they are interpolation-based
+slant stacks with no FFT, so zero-padding has no meaning. `cwt` is parameterized
+in wavelet-native terms instead (`wavelet`, `w0`, `order`, explicit `freqs`); the
+analysing wavelet is itself the window.
+
+```python
+sig = uacpy.acoustic_signal
+
+# f-k with a Hann time taper, Kaiser spatial taper, and 4×/2× zero-pad
+fk = sig.FK()
+fk.compute(gather, fs, dx, normalize=True,
+           window=['hann', ('kaiser', 8)], nfft=(4 * nt, 2 * nx))
+
+# Smoothed-pseudo Wigner–Ville (cross-term suppression) with finer freq grid
+t, f, W = sig.wigner_ville(x, fs, freq_window=65, time_window=33, nfft=1024)
+
+# Echo cepstrum: long-pass lifter strips the smooth spectral envelope
+c = sig.cepstrum(rx, lifter=-30)
+```
+
 For per-class kwargs / methods, read the docstrings
 (`help(uacpy.acoustic_signal.system_id.FRF)`). Examples 09, 10, 27–29 walk
 through the common workflows (signal generation, matched filtering, arrays).

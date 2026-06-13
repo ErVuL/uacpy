@@ -63,6 +63,20 @@ class TestTauP:
         with pytest.raises(ConfigurationError):
             TauP().compute(np.zeros(10), FS, DX)
 
+    def test_zero_pad_and_window_still_focus(self):
+        p0, tau0 = 1 / 1500.0, 0.05
+        p, tau, U = TauP().compute(_linear_gather(p0, tau0), FS, DX,
+                                   p_max=1 / 1000.0, n_slowness=241,
+                                   window="hann", nfft=1024)
+        assert U.shape[1] == 1024 and tau.size == 1024
+        i, j = np.unravel_index(np.argmax(np.abs(U)), U.shape)
+        assert p[i] == pytest.approx(p0, abs=p[1] - p[0])
+        assert tau[j] == pytest.approx(tau0, abs=2 / FS)
+
+    def test_nfft_truncation_raises(self):
+        with pytest.raises(ConfigurationError):
+            taup_transform(np.zeros((512, 8)), FS, DX, nfft=256)
+
 
 class TestRadon:
     def test_linear_peak_slowness(self):
@@ -122,6 +136,51 @@ class TestFKInverse:
         fk = FK()
         fk.compute(data, FS, DX)
         assert fk.normalized is False
+
+
+class TestFKWindowing:
+    def test_windowed_psd_parseval(self):
+        # Calibrated PSD with a Hann taper stays Parseval-consistent against the
+        # window-weighted mean power: sum(PSD)*df*dk == sum(x^2 w^2)/sum(w^2).
+        from scipy.signal import get_window
+        rng = np.random.default_rng(0)
+        data = rng.standard_normal((256, 64))
+        wt = get_window("hann", 256, fftbins=True)
+        wx = get_window("hann", 64, fftbins=True)
+        fk = FK()
+        f, k, psd = fk.compute(data, FS, DX, normalize=True, window="hann")
+        lhs = psd.sum() * (f[1] - f[0]) * (k[1] - k[0])
+        expected = (np.sum(data ** 2 * wt[:, None] ** 2 * wx[None, :] ** 2)
+                    / (np.sum(wt ** 2) * np.sum(wx ** 2)))
+        assert lhs == pytest.approx(expected, rel=1e-9)
+
+    def test_per_axis_window_list(self):
+        data = _linear_gather(1 / 1500.0, 0.05)
+        f, k, panel = FK().compute(data, FS, DX, window=["hann", ("kaiser", 8)])
+        assert panel.shape == data.shape
+
+    def test_bad_window_list_raises(self):
+        with pytest.raises(ConfigurationError):
+            FK().compute(np.zeros((32, 8)), FS, DX, window=["hann"])
+
+    def test_zero_pad_grows_axes_pad_independent(self):
+        rng = np.random.default_rng(1)
+        data = rng.standard_normal((256, 64))
+        fk = FK()
+        f, k, psd = fk.compute(data, FS, DX, normalize=True, nfft=(512, 128))
+        assert psd.shape == (512, 128)
+        assert f.size == 512 and k.size == 128
+        # Zeros add no power: Parseval still equals the true mean power.
+        lhs = psd.sum() * (f[1] - f[0]) * (k[1] - k[0])
+        assert lhs == pytest.approx(np.mean(data ** 2), rel=1e-9)
+
+    def test_nfft_truncation_raises(self):
+        with pytest.raises(ConfigurationError):
+            FK().compute(np.zeros((256, 64)), FS, DX, nfft=(128, 32))
+
+    def test_compute_requires_2d(self):
+        with pytest.raises(ConfigurationError):
+            FK().compute(np.zeros(10), FS, DX)
 
 
 class TestRadonClass:

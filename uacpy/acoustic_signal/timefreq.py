@@ -48,34 +48,108 @@ def instantaneous_frequency(x, sample_rate: float):
     return np.diff(phase) / (2.0 * np.pi) * float(sample_rate)
 
 
-def wigner_ville(x, sample_rate: float):
-    """Discrete Wigner-Ville distribution of a (real or complex) signal.
+def _smoothing_window(spec, name):
+    """Centered, odd-length smoothing window from a ``None`` / int / array spec.
 
-    Computes the WVD of the analytic signal so cross-terms with the negative
-    spectrum are suppressed. Returns ``(t, f, W)`` with ``W`` real, shape
-    ``(n, n)``; ``f`` spans ``[0, fs/2)``. The kernel ``z(t+tau)z*(t-tau)``
-    doubles the apparent frequency, so the physical frequency axis is
-    ``k*fs/(2N)``.
+    ``None`` -> no smoothing. An int ``L`` -> a length-``L`` Hann window. A 1-D
+    array is used verbatim. Returns ``(w, half)`` with ``w`` of length
+    ``2*half+1`` centered at index ``half`` (so ``w[half+k]`` weights offset
+    ``k``); ``(None, 0)`` for no smoothing.
+    """
+    if spec is None:
+        return None, 0
+    if np.isscalar(spec):
+        L = int(spec)
+        if L < 1:
+            raise ConfigurationError(f"wigner_ville: {name} length must be >= 1")
+        w = _sig.get_window("hann", L, fftbins=False).astype(float)
+    else:
+        w = np.asarray(spec, dtype=float)
+        if w.ndim != 1 or w.size < 1:
+            raise ConfigurationError(f"wigner_ville: {name} must be a 1-D window")
+    if w.size % 2 == 0:
+        w = w[:-1]
+    return w, w.size // 2
+
+
+def wigner_ville(x, sample_rate: float, *, analytic: bool = True,
+                 freq_window=None, time_window=None, nfft=None):
+    """Discrete (smoothed-pseudo-) Wigner-Ville distribution of a 1-D signal.
+
+    Returns ``(t, f, W)`` with ``W`` real, shape ``(NF, n)``; ``f`` spans
+    ``[0, fs/2)``. The kernel ``z(t+tau)z*(t-tau)`` doubles the apparent
+    frequency, so the physical frequency axis is ``k*fs/(2*NF)``.
 
     A quadratic energy distribution — there is no routine inverse (like a
     spectrogram, it maps a signal to a 2-D density, not reversibly).
+
+    Parameters
+    ----------
+    x : 1-D array
+        Real or complex signal.
+    sample_rate : float
+        Sample rate (Hz).
+    analytic : bool
+        Use the analytic signal for real input (default), suppressing
+        cross-terms with the negative spectrum. ``False`` runs the raw signal.
+        Ignored when ``x`` is already complex.
+    freq_window : None, int, or 1-D array
+        Lag-domain smoothing window ``h(tau)`` — the *pseudo*-WVD. Smooths
+        along frequency and limits the lag extent (shorter window -> more
+        cross-term suppression, coarser frequency resolution). ``None`` is the
+        full-lag WVD. An int gives a Hann window of that length.
+    time_window : None, int, or 1-D array
+        Time-domain smoothing window ``g`` — the *smoothed*-pseudo-WVD. Averages
+        the instantaneous autocorrelation over neighbouring times (more
+        cross-term suppression, coarser time resolution). ``None`` disables it.
+    nfft : int, optional
+        Zero-pad the lag FFT to ``nfft >= n`` bins (finer frequency spacing).
+        ``None`` uses ``n``.
+
+    Returns
+    -------
+    t, f, W : ndarray
+        Time axis (s), frequency axis (Hz), and the distribution ``(NF, n)``.
     """
     xc = np.asarray(x)
     if xc.ndim != 1:
         raise ConfigurationError("wigner_ville: x must be 1-D")
-    z = xc if np.iscomplexobj(xc) else analytic_signal(xc)
+    if np.iscomplexobj(xc):
+        z = xc
+    elif analytic:
+        z = analytic_signal(xc)
+    else:
+        z = xc.astype(complex)
     n = z.size
     fs = float(sample_rate)
-    w = np.zeros((n, n), dtype=complex)
+    NF = n if nfft is None else int(nfft)
+    if NF < n:
+        raise ConfigurationError(
+            f"wigner_ville: nfft ({NF}) must be >= n ({n}) (zero-pad only)")
+    hv, Lh = _smoothing_window(freq_window, "freq_window")
+    gv, Lg = _smoothing_window(time_window, "time_window")
+    lag_cap = n - 1 if hv is None else Lh
+    W = np.zeros((NF, n))
     for ti in range(n):
-        taumax = min(ti, n - 1 - ti)
+        taumax = min(ti, n - 1 - ti, lag_cap)
         taus = np.arange(-taumax, taumax + 1)
-        idx = (taus + n) % n
-        kernel = np.zeros(n, dtype=complex)
-        kernel[idx] = z[ti + taus] * np.conj(z[ti - taus])
-        w[:, ti] = np.fft.fft(kernel)
-    W = np.real(w)
-    f = np.arange(n) * fs / (2.0 * n)
+        if gv is None:
+            acc = z[ti + taus] * np.conj(z[ti - taus])
+        else:
+            acc = np.empty(taus.size, dtype=complex)
+            for a, tau in enumerate(taus):
+                mmax = min(Lg, ti + tau, n - 1 - ti - tau,
+                           ti - tau, n - 1 - ti + tau)
+                ms = np.arange(-mmax, mmax + 1)
+                gw = gv[Lg + ms]
+                acc[a] = (np.sum(gw * z[ti + tau + ms]
+                                 * np.conj(z[ti - tau + ms])) / np.sum(gw))
+        if hv is not None:
+            acc = acc * hv[Lh + taus]
+        kernel = np.zeros(NF, dtype=complex)
+        kernel[(taus + NF) % NF] = acc
+        W[:, ti] = np.real(np.fft.fft(kernel))
+    f = np.arange(NF) * fs / (2.0 * NF)
     t = np.arange(n) / fs
     return t, f, W
 
@@ -208,18 +282,69 @@ def inverse_cwt(W, freqs, sample_rate, wavelet="morlet", *, w0=6.0, order=None):
     return np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0) * dln / c_delta
 
 
-def cepstrum(x):
+def _apply_lifter(c, lifter):
+    """Quefrency-domain liftering of a real cepstrum ``c`` (length ``NF``).
+
+    ``lifter`` is an int cutoff or a 1-D weight array. A positive int ``L``
+    short-passes (keeps ``|quefrency| <= L`` -> spectral envelope); a negative
+    int long-passes (zeros ``|quefrency| <= |L|`` -> excitation / echo). An
+    array multiplies the cepstrum element-wise (symmetric weighting is on you).
+    """
+    nf = c.size
+    if np.isscalar(lifter):
+        L = int(lifter)
+        w = np.zeros(nf)
+        keep = abs(L)
+        w[:keep + 1] = 1.0
+        if keep:
+            w[max(1, nf - keep):] = 1.0
+        if L < 0:
+            w = 1.0 - w
+        return c * w
+    w = np.asarray(lifter, dtype=float)
+    if w.shape != c.shape:
+        raise ConfigurationError(
+            f"cepstrum: lifter array {w.shape} must match cepstrum {c.shape}")
+    return c * w
+
+
+def cepstrum(x, *, window=None, nfft=None, lifter=None):
     """Real cepstrum ``irfft(log|rfft(x)|)``.
 
     Not invertible: discards phase. Use :func:`complex_cepstrum` /
     :func:`inverse_complex_cepstrum` for a reversible homomorphic transform.
+
+    Parameters
+    ----------
+    x : 1-D array
+        Real signal.
+    window : None, str, or tuple
+        :func:`scipy.signal.get_window` spec applied before the FFT to curb
+        spectral leakage. ``None`` is rectangular.
+    nfft : int, optional
+        Zero-pad the FFT to ``nfft >= len(x)`` bins (finer quefrency spacing).
+        ``None`` uses ``len(x)``.
+    lifter : None, int, or 1-D array
+        Quefrency liftering — see :func:`_apply_lifter`. ``None`` returns the
+        raw cepstrum; a positive int keeps low quefrencies (spectral envelope),
+        a negative int keeps high quefrencies (pitch / echo structure).
     """
     xr = np.asarray(x, dtype=float)
     if xr.ndim != 1:
         raise ConfigurationError("cepstrum: x must be 1-D")
-    spectrum = np.abs(np.fft.rfft(xr))
+    n = xr.size
+    NF = n if nfft is None else int(nfft)
+    if NF < n:
+        raise ConfigurationError(
+            f"cepstrum: nfft ({NF}) must be >= len(x) ({n}) (zero-pad only)")
+    if window is not None:
+        xr = xr * _sig.get_window(window, n, fftbins=True).astype(float)
+    spectrum = np.abs(np.fft.rfft(xr, n=NF))
     spectrum = np.maximum(spectrum, np.finfo(float).tiny)
-    return np.fft.irfft(np.log(spectrum), n=xr.size)
+    c = np.fft.irfft(np.log(spectrum), n=NF)
+    if lifter is not None:
+        c = _apply_lifter(c, lifter)
+    return c
 
 
 def complex_cepstrum(x):
