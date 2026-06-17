@@ -602,19 +602,20 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
 | `download_crust1_db()` then `bottom='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
 | `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
 | `download_coastline()` → `plot_bathymetry_map` / `plot_overview` | Natural Earth coastline (public domain) | default install |
-| `fetch_environment(point, offline=True, bottom='auto')` | all of the above | default install |
+| `fetch_environment(point, prefer_cache=True, bottom='auto')` | all of the above | default install |
 
-- The cache lives at `./data_cache` (override with `$UACPY_DATA_CACHE`); a
-  missing dataset raises a `ConfigurationError` naming the `install.sh --data`
-  flag to run.
-- `offline=True` needs `ssp_source='woa23'`. Offline `bottom='auto'` tries the
-  local **EMODnet** polygons (European seas) then the global **grain-size** DB;
-  `bottom='emodnet'` / `'grainsize'` force one. All are commercial-use clean.
-- `prefer_cache=True` (with `offline=False`) is the middle ground: **use the
-  local cache where installed, fall back to the live service where not** — per
-  axis (bathymetry → local GEBCO grid then `bathymetry_source`; WOA23 → local
-  grid then OPeNDAP; bottom → local backend then online). Avoids redundant
-  downloads without erroring on an uncached dataset. `offline=True` overrides it.
+- The cache lives at `./data_cache` (override with `$UACPY_DATA_CACHE`); the
+  low-level `source='local'` fetchers raise a `ConfigurationError` naming the
+  `install.sh --data` flag when a dataset isn't cached (use these for a
+  guaranteed no-network run).
+- **`prefer_cache`** sets the per-axis access order with the *other* access as a
+  fallback if the first fails: `False` (default) → **live first, fall back to the
+  local cache**; `True` → **cache first, fall back to the live service**. Applies
+  to bathymetry (GEBCO local↔api), WOA23 SSP (local↔OPeNDAP) and the bottom
+  (local↔online). Sources with no local twin (GMRT, Copernicus, Argo) have no
+  fallback. `bottom='auto'` tries EMODnet → (grain-size, offline order) → Diesing
+  → pelagic; `bottom='emodnet'`/`'grainsize'`/`'crust1'`/`'diesing'`/`'pelagic'`
+  force one. All are commercial-use clean.
 - The local grain-size samples are **sparse points** (nearest-neighbour with a
   `max_distance_km` guard), gappier than EMODnet's continuous European-seas
   polygons — so EMODnet is preferred where it has coverage.

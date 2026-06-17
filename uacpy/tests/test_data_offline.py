@@ -1,8 +1,9 @@
 """Tests for the offline local-cache backend (uacpy.data._cache + readers).
 
 Builds a synthetic ``$UACPY_DATA_CACHE`` (tiny GEBCO/WOA23 NetCDF + sediment
-CSVs) so the GEBCO/WOA23/DECK41 readers and ``fetch_environment(offline=True)``
-run fully offline. Skipped where netCDF4 is unavailable (the grids need it).
+CSVs) so the GEBCO/WOA23/DECK41 readers (``source='local'``) and
+``fetch_environment(prefer_cache=True)`` run from the cache. Skipped where
+netCDF4 is unavailable (the grids need it).
 """
 
 import numpy as np
@@ -205,17 +206,13 @@ def test_sediment_transect(cache):
 
 # ── capstone offline ────────────────────────────────────────────────────────
 
-def test_fetch_environment_offline(cache):
-    env = data.fetch_environment((30.5, -40.5), offline=True, bottom='auto')
+def test_fetch_environment_prefer_cache(cache):
+    # prefer_cache=True resolves entirely from the installed cache (no network).
+    env = data.fetch_environment((30.5, -40.5), prefer_cache=True, bottom='auto')
     assert env.depth == 1500.0
     assert env.ssp.n_depths >= 5
     assert env.bottom.grain_size_phi == 3.0
     assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
-
-
-def test_offline_rejects_copernicus(cache):
-    with pytest.raises(ConfigurationError, match='woa23'):
-        data.fetch_environment((30.5, -40.5), offline=True, ssp_source='copernicus')
 
 
 def test_offline_emodnet_local_bottom(cache):

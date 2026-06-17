@@ -11,8 +11,8 @@
   NCEI grain-size DB, the Diesing 2020 deep-sea map, a pelagic depth/latitude
   fallback (all surficial), or GlobSed thickness + CRUST1.0 → a layered elastic
   bottom for low-frequency work.
-- **Capstone**: :func:`fetch_environment` assembles all three — online,
-  ``offline=True`` from the install-time cache, or ``prefer_cache=True``.
+- **Capstone**: :func:`fetch_environment` assembles all three; ``prefer_cache``
+  picks live-first (default) or cache-first, each falling back to the other.
 
 Examples
 --------

@@ -2042,16 +2042,18 @@ def plot_bathymetry_map(
     if transect is not None:
         (a_lat, a_lon), (b_lat, b_lon) = transect
         pa, pb = proj(a_lat, a_lon), proj(b_lat, b_lon)
+        # zorder 5/6 keep the transect line + A/B labels above the graticule
+        # (zorder 4, drawn on top of the map), so 'B' isn't crossed out by gridlines.
         ax.plot([pa[0], pb[0]], [pa[1], pb[1]], '-', color='crimson', lw=2.5,
-                marker='o', mec='k', zorder=3, label='transect')
+                marker='o', mec='k', zorder=5, label='transect')
         for lbl, (la, lo) in (('A', (a_lat, a_lon)), ('B', (b_lat, b_lon))):
             ax.annotate(lbl, proj(la, lo), color='crimson', fontweight='bold',
-                        xytext=(6, 6), textcoords='offset points', zorder=3)
+                        xytext=(6, 6), textcoords='offset points', zorder=6)
         ax.legend(loc='upper left')
     if source is not None:
         s_lat, s_lon = source
         sp = proj(s_lat, s_lon)
-        ax.plot(sp[0], sp[1], zorder=6, **SOURCE_MARKER_STYLE)
+        ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
     fig.colorbar(pc, ax=ax, label="Water depth [m]")
     ax.set_title(title or "Bathymetry", loc='left', fontsize=11, fontweight='bold')
@@ -2268,16 +2270,17 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
         pa = sea_ice_pixel((a_lat, a_lon), hemi=hemi)
         pb = sea_ice_pixel((b_lat, b_lon), hemi=hemi)
         if pa and pb:
+            # zorder 5/6 keep the transect + A/B labels above the graticule.
             ax.plot([pa[1], pb[1]], [pa[0], pb[0]], '-', color='crimson', lw=2.5,
-                    marker='o', mec='k', zorder=3, label='transect')
+                    marker='o', mec='k', zorder=5, label='transect')
             for lbl, p in (('A', pa), ('B', pb)):
                 ax.annotate(lbl, (p[1], p[0]), color='crimson', fontweight='bold',
-                            xytext=(6, 6), textcoords='offset points', zorder=3)
+                            xytext=(6, 6), textcoords='offset points', zorder=6)
             ax.legend(loc='upper left')
     if source is not None:
         ps = sea_ice_pixel(source, hemi=hemi)
         if ps:
-            ax.plot(ps[1], ps[0], zorder=6, **SOURCE_MARKER_STYLE)
+            ax.plot(ps[1], ps[0], zorder=7, **SOURCE_MARKER_STYLE)
 
     # Frame a regional window around the transect/source (square pixels kept, the
     # window widened to the panel) so the map fills the axis like the depth map,
