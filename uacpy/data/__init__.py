@@ -2,13 +2,17 @@
 
 - **Bathymetry** (GEBCO, static): a single water depth or a range-dependent
   transect for ``Environment(bathymetry=...)``.
-- **Sound speed** (WOA23 climatology, date/month-aware; or Copernicus Marine
-  operational): a depth-vs-c profile for ``Environment(ssp=...)``, plus the
-  raw T/S column and a Francois-Garrison absorption helper.
-- **Bottom**: a grain-size (ϕ) or sediment-class → ``BoundaryProperties``
-  conversion (no global sediment service exists, so the seafloor is
-  caller-specified).
-- **Capstone**: :func:`fetch_environment` assembles all three.
+- **Sound speed** (WOA23 climatology, date/month-aware; Copernicus Marine
+  operational; or the nearest Argo float profile): a depth-vs-c profile for
+  ``Environment(ssp=...)``, plus the raw T/S column and a Francois-Garrison
+  absorption helper.
+- **Bottom**: a grain-size (ϕ) / sediment-class → ``BoundaryProperties``
+  conversion, *or* a fetched seafloor — EMODnet substrate (European seas), the
+  NCEI grain-size DB, the Diesing 2020 deep-sea map, a pelagic depth/latitude
+  fallback (all surficial), or GlobSed thickness + CRUST1.0 → a layered elastic
+  bottom for low-frequency work.
+- **Capstone**: :func:`fetch_environment` assembles all three — online,
+  ``offline=True`` from the install-time cache, or ``prefer_cache=True``.
 
 Examples
 --------
@@ -18,7 +22,9 @@ Examples
 ...                                    bottom='sand')          # doctest: +SKIP
 """
 
-from uacpy.data.bathymetry import fetch_point_depth, fetch_transect, fetch_grid
+from uacpy.data.bathymetry import (
+    fetch_point_depth, fetch_transect, fetch_grid, transect_length,
+)
 from uacpy.data.sound_speed import (
     fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
 )
@@ -66,6 +72,7 @@ __all__ = [
     'fetch_point_depth',
     'fetch_transect',
     'fetch_grid',
+    'transect_length',
     # sound speed
     'fetch_ssp',
     'fetch_ssp_transect',

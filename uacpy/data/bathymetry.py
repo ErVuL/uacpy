@@ -29,7 +29,8 @@ from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 
-__all__ = ['fetch_point_depth', 'fetch_transect', 'fetch_grid']
+__all__ = ['fetch_point_depth', 'fetch_transect', 'fetch_grid',
+           'transect_length']
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
 DEFAULT_DATASET = 'gebco2020'
@@ -231,6 +232,31 @@ def fetch_grid(
     return lats, lons, depth
 
 
+def _central_angle(start: Coordinate, end: Coordinate) -> float:
+    """Great-circle central angle (radians) between two ``(lat, lon)`` points
+    (haversine; numerically stable for small separations)."""
+    lat1, lon1 = np.radians(as_coordinate(start))
+    lat2, lon2 = np.radians(as_coordinate(end))
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return float(2 * np.arcsin(np.sqrt(a)))
+
+
+def transect_length(start: Coordinate, end: Coordinate) -> float:
+    """Great-circle transect length (m) from ``start`` to ``end`` ``(lat, lon)``.
+
+    Uses the same spherical geodesic as the range-dependent fetchers, so it
+    equals the maximum range of the fetched bathymetry / SSP transect — size a
+    receiver grid directly::
+
+        L = uacpy.data.transect_length(A, B)
+        rcv = uacpy.Receiver(depths=..., ranges=np.linspace(0.0, L, n))
+
+    Returns ``0.0`` for coincident endpoints.
+    """
+    return _central_angle(start, end) * EARTH_RADIUS_M
+
+
 def _geodesic_waypoints(
     start: Coordinate, end: Coordinate, n_points: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -245,11 +271,7 @@ def _geodesic_waypoints(
     lat1, lon1 = np.radians(as_coordinate(start))
     lat2, lon2 = np.radians(as_coordinate(end))
 
-    # Central angle (haversine, numerically stable for small separations).
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    ang = 2 * np.arcsin(np.sqrt(a))
+    ang = _central_angle(start, end)              # shared geodesic (haversine)
     if ang == 0.0:
         raise ConfigurationError(
             "fetch_transect: start and end coordinates coincide.",

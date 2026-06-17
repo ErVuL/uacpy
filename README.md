@@ -92,10 +92,11 @@ env  = data.fetch_environment(A, transect_to=B, date='2026-01-15',
          range_dependent_ssp=True, range_dependent_bottom=True, bottom='auto')
 grid = data.fetch_grid((53, 61), (-33, -20))           # (lats, lons, depth)
 
-# 2. Model transmission loss with Bellhop at 800 Hz.
+# 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
 src = uacpy.Source(depths=100, frequencies=800)
+rng = data.transect_length(A, B)                       # great-circle length (m)
 rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
-                     ranges=np.linspace(100, 255_000, 350))
+                     ranges=np.linspace(100, rng, 350))
 tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 # 3. One call → the figure above: map · transmission loss · environment.
@@ -107,10 +108,6 @@ uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver
                          map_kwargs=dict(contours=True, aspect=1))
 plt.show()
 ```
-
-> Runs **offline** too — add `offline=True` to `fetch_environment` and `source='local'`
-> to `fetch_grid` after `./install.sh --data all`. Full script (offline auto-detect,
-> graceful fallbacks, provenance labels): `examples/example_37_realworld_environment.py`.
 
 ## 📦 Installation
 
