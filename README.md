@@ -430,10 +430,9 @@ The `uacpy.data` layer builds an `Environment` (and, for
 `uacpy.plot.plot_bathymetry_map`, a coastline map) from public databases.
 These datasets are **fetched on demand at runtime --- never bundled or
 redistributed** with UACPY, so their licences (CC-BY, CC-BY-NC, public domain,
-…) impose **no obligation on UACPY's own GPL-3.0 code**: whoever fetches the
-data is its licensee and is responsible for honouring the licence and citing
-the source. UACPY exposes a `base_url=` on each fetcher so heavy users can point
-at their own mirror.
+…) impose: whoever fetches the data is its licensee and is responsible for 
+honouring the licence and citing the source. UACPY exposes a `base_url=` on 
+each fetcher so heavy users can point at their own mirror.
 
 A fetched environment carries its provenance: `env.data_sources` lists the
 sources used, and `uacpy.data.citations(env)` prints the required attribution
@@ -455,51 +454,6 @@ the full catalogue below).
 | **CRUST1.0** global crustal model (`bottom='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
 | **NSIDC Sea Ice Index** (`fetch_sea_ice_concentration`) | sea-ice concentration (surface; monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
 | **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
-
-> ✅ **All sources permit commercial use except CRUST1.0**, which ships with no
-> formal licence — cite Laske et al. 2013 and verify terms before commercial
-> deployment (`uacpy.data.citations()` flags it). **`bottom='auto'` resolves
-> anywhere in the ocean** — measured/regional sources first (EMODnet, grain-size),
-> then the global CC-BY Diesing deep-sea map, then a first-principles pelagic
-> model as the never-fail fallback (all commercial-clean). Surficial
-> seafloor sediment comes from EMODnet (European seas, CC-BY) or the NCEI
-> grain-size database (worldwide, public domain); for **low-frequency** work the
-> seabed is better described by a layered model — GlobSed sediment thickness +
-> CRUST1.0 Vp/Vs/density (`bottom='crust1'` → a layered elastic bottom). All
-> datasets are provided "as is", without warranty.
-
-> 💾 **Offline / local-cache backend.** Ten datasets can be downloaded once for
-> offline, rate-limit-free use — fetched-not-bundled into `./data_cache`
-> (gitignored), exactly like OASES: **GEBCO** (bathymetry), **WOA23** (sound
-> speed), the **NCEI grain-size DB** (global surficial sediment), **EMODnet**
-> seabed substrate (European-seas sediment, CC-BY), **Diesing 2020** (global
-> deep-sea seafloor lithology, CC-BY), **GlobSed** (global sediment thickness),
-> **CRUST1.0** (global layered Vp/Vs/density — low-frequency seabed, no formal
-> licence), **NSIDC** sea-ice concentration (monthly climatology) and **Natural
-> Earth** coastline (map backdrop). Install with
-> `./install.sh --data all` (or a subset such as `--data sediment,emodnet,crust1`;
-> an interactive prompt is also offered; each also downloads from Python via
-> `uacpy.data.download_sediment_db()` / `download_emodnet_db()` /
-> `download_globsed_db()` / `download_crust1_db()` /
-> `uacpy.visualization.basemap.download_coastline()`). Then pass `source='local'`
-> to the bathymetry/SSP fetchers or `offline=True` to `fetch_environment`; maps
-> use the cached coastline automatically. Offline `bottom='auto'` tries the local
-> EMODnet polygons (European seas) then the global grain-size DB; `bottom='crust1'`
-> builds a **layered elastic** bottom (sediment over crystalline basement, with
-> shear) for low-frequency work. The offline readers (netCDF4, shapely, pyproj,
-> tifffile) ship with the default install — `pip install uacpy` enables them all.
->
-> 🛰️ **Higher-resolution live bathymetry.** Pass `source='gmrt'` to the
-> bathymetry fetchers (or `bathymetry_source='gmrt'` to `fetch_environment`) to
-> use the GMRT multibeam synthesis (CC-BY) — finer than GEBCO where surveyed,
-> never coarser elsewhere.
-
-> 📐 **Grain-size → geoacoustics conversion.** Turning a mean grain size into
-> ρ / c / α (`model='hamilton'` default, or `'apl-uw'`) uses published relations,
-> cited in the code: Hamilton & Bachman (1982) / Hamilton (1980), reproduced in
-> the open-access **CC-BY** supplement of Fonseca *et al.* (2025) (ESAB); and the
-> **APL-UW TR 9407 (1994)** *High-Frequency Ocean Environmental Acoustic Models
-> Handbook* (§IV.A.4). These are model coefficients, not redistributed datasets.
 
 
 ## 📬 Contact
