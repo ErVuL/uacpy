@@ -479,8 +479,12 @@ class Result:
         (``n_modes=N``, ``n_rays=N``, …) to :meth:`__repr__`."""
         return ''
 
-    # Stub plot() — concrete subclasses override.
     def plot(self, **kwargs):
+        """Plot this result via :func:`uacpy.visualization.plot_result`.
+
+        Dispatches on result type; concrete subclasses may override. ``kwargs``
+        are forwarded to the selected plotter.
+        """
         from uacpy.visualization import plots
         return plots.plot_result(self, **kwargs)
 
@@ -727,6 +731,7 @@ class Field(Result):
 
     @property
     def magnitude(self) -> np.ndarray:
+        """Element-wise amplitude ``|data|`` (complex fields only)."""
         if not self.is_complex:
             raise AttributeError(
                 "Field.magnitude: requires complex data"
@@ -735,6 +740,7 @@ class Field(Result):
 
     @property
     def phase(self) -> np.ndarray:
+        """Element-wise phase angle in radians, ``angle(data)`` (complex fields only)."""
         if not self.is_complex:
             raise AttributeError("Field.phase: requires complex data")
         return np.angle(self.data)
@@ -788,6 +794,7 @@ class Field(Result):
 
     @property
     def dt(self) -> float:
+        """Time-axis sample spacing in seconds (``0.0`` if not time-resolved)."""
         t = self.coords.get('time')
         if t is None or t.size < 2:
             return 0.0
@@ -795,6 +802,7 @@ class Field(Result):
 
     @property
     def fs(self) -> float:
+        """Sampling rate in Hz (``1/dt``; ``0.0`` if not time-resolved)."""
         dt = self.dt
         return 1.0 / dt if dt > 0 else 0.0
 
@@ -1257,6 +1265,11 @@ class ResultStack:
             yield float(c), slab
 
     def at(self, **kwargs) -> Result:
+        """Select the slab nearest a value on the stacking axis.
+
+        Pass exactly the stacking-axis keyword (``<coordinate_name>=<value>``);
+        returns the slab whose coordinate is closest to ``value``.
+        """
         if len(kwargs) != 1 or self.coordinate_name not in kwargs:
             raise ConfigurationError(
                 f"ResultStack.at(): pass exactly the stacking-axis "

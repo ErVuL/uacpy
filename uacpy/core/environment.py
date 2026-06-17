@@ -1244,6 +1244,7 @@ class SoundSpeedProfile:
     def from_isovelocity(
         cls, depth_max: float, sound_speed: float = 1500.0
     ) -> 'SoundSpeedProfile':
+        """Constant-``sound_speed`` (m/s) profile spanning 0 to ``depth_max`` (m)."""
         return cls(
             depths=np.array([0.0, float(depth_max)]),
             data=np.full((2, 1), float(sound_speed)),
@@ -1715,6 +1716,11 @@ class Environment:
         return self.bottom
 
     def has_range_dependent_bathymetry(self) -> bool:
+        """``True`` iff the seafloor depth actually varies with range.
+
+        A multi-point bathymetry whose depths are all equal (flat) counts as
+        range-independent.
+        """
         if len(self.bathymetry) <= 1:
             return False
         depths = self.bathymetry[:, 1]
