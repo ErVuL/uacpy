@@ -535,6 +535,89 @@ either `alpha_db_per_m=` (a scalar or `α(z)` array) or
 `absorption=Thorp()` / `absorption=FrancoisGarrison(...)`. Other
 Absorption subclasses are not supported by the modal kernel.
 
+### Real-world environments (`uacpy.data`)
+
+Build an `Environment` from GPS coordinates and a date by fetching every input
+from public ocean databases — nothing hand-typed. Data is **fetched on demand,
+never bundled or redistributed**; whoever fetches it is its licensee. Each
+source's licence and required attribution are listed in the README's *External
+data sources* table.
+
+```python
+import uacpy
+env = uacpy.data.fetch_environment((43.0, 7.5), date='2026-07-15', bottom='auto')
+print(uacpy.data.citations(env))      # required attribution for the sources used
+```
+
+| Function | Returns | Source |
+|----------|---------|--------|
+| `fetch_environment(point, *, date=None, ssp_source='woa23', bottom=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, with_absorption=False, …)` | `Environment` | one-call assembly |
+| `fetch_point_depth(point)` · `fetch_transect(start, end, n_points=)` · `fetch_grid(lat_range, lon_range, n_lat=50, n_lon=50)` | depth (m) · `(N,2)` · `(lats, lons, depth)` | GEBCO (`source='api'`) or GMRT multibeam (`source='gmrt'`, higher-res) bathymetry |
+| `fetch_ssp(point, *, date= \| month=, formula='unesco', resolution='1.00')` · `fetch_ssp_transect(…)` · `fetch_ts_profile(…)` | `SoundSpeedProfile` · 2-D RD profile · `(z, T, S)` | WOA23 climatology |
+| `fetch_ssp_operational(point, date, …)` *(needs `uacpy[data]` + login)* | `SoundSpeedProfile` | Copernicus Marine |
+| `fetch_ssp_argo(point, date, max_distance_km=, max_days=)` · `fetch_argo_profile(…)` | `SoundSpeedProfile` · dict | Argo float — nearest **real in-situ** profile (Ifremer ERDDAP, free) |
+| `fetch_seabed_substrate(point)` · `fetch_bottom(point)` | dict · `BoundaryProperties` | EMODnet (European seas, CC-BY) |
+| `fetch_sediment_sample(point)` · `fetch_bottom_local(point)` | dict · `BoundaryProperties` | NCEI grain-size DB (worldwide, public domain, offline) |
+| `grain_size_to_geoacoustics(phi)` · `bottom_from_grain_size(phi)` · `bottom_from_class(name)` | dict · `BoundaryProperties` | local conversion (no fetch) |
+| `build_francois_garrison(depths, T, S, *, pH=8.1)` | `FrancoisGarrison` | from a fetched T/S column |
+| `citations(obj=None)` · `SOURCES` | str · catalogue | provenance / attribution |
+
+- **`bottom=`** accepts a grain size (ϕ float), a `MATERIALS` class name, a
+  fetch keyword, a ready `BoundaryProperties`, or `None`. Keywords:
+  `'emodnet'` (European seas), `'grainsize'` (NCEI samples, worldwide),
+  `'diesing'` (global deep-sea seafloor lithology, CC-BY, >500 m),
+  `'pelagic'` (global depth/latitude model, never fails), `'crust1'` (CRUST1.0
+  **layered elastic** bottom for low-frequency work), and `'auto'`. **`'auto'`
+  resolves anywhere**: measured/regional → Diesing global deep-sea map → pelagic
+  model (online `emodnet→diesing→pelagic`; offline
+  `emodnet→grainsize→diesing→pelagic`). All sediment sources permit commercial
+  use **except CRUST1.0** (`citations()` flags it). Surficial grain-size/EMODnet
+  are high-frequency half-spaces; at a few tens of Hz prefer `'crust1'`
+  (sediment over crystalline basement, with shear), optionally rescaled by GlobSed.
+- A fetched `Environment` carries `env.data_sources`; `citations(env)` prints
+  the attribution/citation text for exactly those sources.
+- SSP levels are delivered at their **native** sampling (no resampling); the
+  profile is reconciled to the fetched bathymetry depth, and each model
+  interpolates it per its own `interp_ssp` scheme.
+- `uacpy.plot.plot_bathymetry_map(...)` renders a `fetch_grid` result on a
+  Natural Earth coastline map (see §7).
+
+**Offline / local-cache backend.** The same fetchers can read install-time
+public-domain grids instead of the live APIs — offline, with no rate limits.
+Download them like OASES (gitignored, never bundled), then opt in per call:
+
+```bash
+./install.sh --data all          # gebco,woa23,sediment,emodnet,coastline (interactive prompt too)
+# or a subset, e.g.: --data sediment,emodnet,coastline
+```
+
+| Backend selector | Reads from | Needs |
+|---|---|---|
+| `fetch_point_depth(point, source='local')` · `fetch_transect(…, source='local')` · `fetch_grid(…, source='local')` | GEBCO 2025 grid | default install (netCDF4) |
+| `fetch_ssp(point, source='local')` · `fetch_ts_profile(…, source='local')` | WOA23 grids | default install (netCDF4) |
+| `download_sediment_db()` then `fetch_bottom_local(point)` · `bottom='grainsize'` | NCEI grain-size DB (auto-downloaded + normalized; public domain) | default install (scipy) |
+| `download_emodnet_db()` then `bottom='emodnet'` (offline) | EMODnet seabed substrate polygons (CC-BY, European seas) | default install (shapely) |
+| `download_diesing_db()` then `bottom='diesing'` | Diesing 2020 global deep-sea seafloor lithology (CC-BY, >500 m) | default install (pyproj) |
+| `download_globsed_db()` then `fetch_sediment_thickness(point)` | GlobSed total sediment thickness (NOAA NCEI, public domain) | default install (netCDF4) |
+| `download_crust1_db()` then `bottom='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
+| `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
+| `download_coastline()` → `plot_bathymetry_map` / `plot_overview` | Natural Earth coastline (public domain) | default install |
+| `fetch_environment(point, offline=True, bottom='auto')` | all of the above | default install |
+
+- The cache lives at `./data_cache` (override with `$UACPY_DATA_CACHE`); a
+  missing dataset raises a `ConfigurationError` naming the `install.sh --data`
+  flag to run.
+- `offline=True` needs `ssp_source='woa23'`. Offline `bottom='auto'` tries the
+  local **EMODnet** polygons (European seas) then the global **grain-size** DB;
+  `bottom='emodnet'` / `'grainsize'` force one. All are commercial-use clean.
+- The local grain-size samples are **sparse points** (nearest-neighbour with a
+  `max_distance_km` guard), gappier than EMODnet's continuous European-seas
+  polygons — so EMODnet is preferred where it has coverage.
+- Maps draw the coastline from the cached Natural Earth polygons when installed
+  (offline), else fetch it live, else fall back to a sea-only map.
+- Bathymetry also has a higher-resolution live option: `source='gmrt'` (GMRT
+  multibeam, CC-BY) on the fetchers, or `fetch_environment(bathymetry_source='gmrt')`.
+
 ---
 
 ## 4. Source & Receiver
@@ -1307,7 +1390,7 @@ Note that this call mutates process-global `mpl.rcParams` and persists
 across subsequent plots — wrap in `matplotlib.rc_context()` if you
 want it scoped.
 
-### The 16 helpers
+### The 17 helpers
 
 | Helper | Takes | Notes |
 |---|---|---|
@@ -1329,6 +1412,10 @@ want it scoped.
 | `plot_covariance(cov, *, freq_idx=0)` | `Covariance` | OASN spatial covariance heatmap. |
 | `plot_replicas(rep, *, freq_idx=0, sensor_idx=0)` | `Replicas` | MFP replica magnitude over (z, x). |
 | `plot_result(result, env=None, **kw)` | any `Result` | Type-dispatch — used by `Result.plot()`. |
+| `plot_bathymetry_map(lats, lons, depth, *, transect=None, source=None, basemap=True, coastline_resolution='50m', graticule=1.0, graticule_minor=0.5, ...)` | a `uacpy.data.fetch_grid` result | Regional bathymetry map: depth grid (NaN = land) over a **Natural Earth** coastline (public domain) drawn on top, with a labelled lat/lon graticule and an optional `((lat0,lon0),(lat1,lon1))` A→B transect + `(lat,lon)` source star. `basemap=False` → plain lon/lat. |
+| `plot_sea_ice_map(grid, *, hemi='N', transect=None, source=None, graticule=5.0, zoom=True, ...)` | a `uacpy.data.sea_ice_grid(month)` result | Polar sea-ice concentration map (NSIDC grid) — the sibling of `plot_bathymetry_map`: ice → white, water → blue, land → neutral, with a reprojected lat/lon graticule and the *same* crimson A→B transect + source-star notation (given in lon/lat). `zoom` (default) frames a regional window around the transect/source so it fills the panel like the depth map. |
+| `plot_overview(env, map_args, *, map_fn=plot_bathymetry_map, transect=None, tl=None, source=None, receiver=None, sea_ice=None, ...)` | a fetched `Environment` + a map | One-call composite: **pluggable** left map (`map_fn` = `plot_bathymetry_map` *or* `plot_sea_ice_map`), TL field (top right) and the range-dependent environment (bottom right). `sea_ice=` (0–1 or `(ranges_km, conc)`) overlays the ice cover on the env + TL panels. |
+| `plot_environment(env, *, source=None, receiver=None, sea_ice=None, data_source=True, ...)` | a fetched/built `Environment` | Single water-column + bottom panel; `sea_ice=` (0–1 or `(ranges_km, conc)`) marks the cover as a bold surface line coloured dark → violet by local concentration (source/receiver drawn above it). |
 
 Every helper accepts `ax=None` (kw-only after the first positional —
 caller can pass a pre-built axes for multi-panel layouts) and returns
@@ -1376,7 +1463,6 @@ Reachable as `uacpy.acoustic_signal`. Sub-modules:
 | `…system_id` | Frequency-response-function estimation (Welch / ETFE / LS-FIR) | `FRF` |
 | `…channel` | Time-domain channel simulation from arrivals / `H(f)` | `impulse_response`, `simulate_reception`, `impulse_response_from_transfer_function` |
 | `…modal` | Modal / dispersion processing (waveguide warping) | `modal_group_velocity`, `warp_signal`, `unwarp_signal` |
-| `…vector` | Vector acoustics: particle velocity, intensity, single-sensor DOA (frequency- **and** time-domain) | `particle_velocity`, `acoustic_intensity`, `intensity_magnitude`, `intensity_doa`, `particle_velocity_timeseries`, `instantaneous_intensity` (plotting: `uacpy.visualization.plot_intensity_vectors`) |
 
 **Invertible transforms** (`FK` · `TauP` · `Radon` · `cwt` · `complex_cepstrum`)
 follow a filtering pattern: *forward → modify the coefficients → standalone
@@ -1448,55 +1534,6 @@ t, f, W = sig.wigner_ville(x, fs, freq_window=65, time_window=33, nfft=1024)
 # Echo cepstrum: long-pass lifter strips the smooth spectral envelope
 c = sig.cepstrum(rx, lifter=-30)
 ```
-
-#### Vector acoustics (particle velocity, intensity, DOA)
-
-`uacpy.acoustic_signal.vector` turns any **complex** `Field` (narrowband
-pressure `p(d, r)` or broadband `H(d, r, f)`) into the quantities a vector
-sensor measures — it consumes a `Field` and never touches model internals.
-
-| Function | Returns | Definition |
-|---|---|---|
-| `particle_velocity(field, *, density=)` | `VectorComponents(range, depth)` of complex Fields (m/s) | `u = −∇p/(iωρ)` (Euler), gradients over the Field's own axes — narrowband `p(d,r)` or broadband `H(d,r,f)` |
-| `acoustic_intensity(field, *, density=, kind=)` | `VectorComponents(range, depth)` of real Fields (W/m²) | active `½ Re(p·u*)` / reactive `½ Im(p·u*)` |
-| `particle_velocity_timeseries(field, *, density=)` | `VectorComponents(range, depth)` of real time-series Fields (m/s) | time-domain Euler `u(t) = −(1/ρ)∫∇p dt'` for a real transient `p(d,r,t)` (starts from rest) |
-| `instantaneous_intensity(field, *, density=)` | `VectorComponents(range, depth)` of real time-series Fields (W/m²) | `I(t) = p(t)·u(t)` (time average = active intensity; `∫I dt` = transient energy flux) |
-| `intensity_magnitude(field, …)` | real Field (W/m²) | `\|I\|` |
-| `intensity_doa(field, *, density=, degrees=)` | real Field (deg) | `atan2(I_depth, I_range)`, **+ = downward** |
-| `visualization.plot_intensity_vectors(field, *, arrow_scale=, stride=, env=, …)` | `(fig, ax)` | intensity-vector quiver over a `\|I\|` heatmap; `arrow_scale='magnitude'` (default) scales arrow length by `\|I\|` (faithful vector field — arrows vanish at nulls), `'unit'` shows direction only |
-| `visualization.plot_vector_sensor(field, *, depth=, range=)` | `(fig, axes)` | time-domain vector-sensor record at one point from a real `p(d,r,t)`: pressure waveform, velocity components, instantaneous-flux DOA (resolves arrivals by direction) |
-
-Conventions: the ½ factor is correct for uacpy's stored **peak** pressure phasor
-(the Helmholtz/TL solution, no RMS scaling). For a TL-normalised field (`|p|=1`
-at 1 m) the intensity is **relative to the 1 m source intensity** — exactly
-consistent with `TL = −20·log₁₀|p|` (verified to 0.07 dB); pass a field in
-absolute Pa for absolute W/m². Velocity is m/s, depth is +down. The sign follows uacpy's stored
-`exp(−ikr)` outgoing propagator, so an outgoing wave's energy flux points in
-**+range** and depth is positive **down**. `density` defaults to
-`DENSITY_SEAWATER` (1027 kg/m³). A field carrying the opposite (`exp(+ikr)`)
-convention should be conjugated first.
-
-**Resolve the wavelength.** The velocity is a finite-difference pressure
-gradient, so the grid must sample below Nyquist (step `< λ/2`); on a coarser
-grid the gradient aliases and the energy-flux direction can spuriously reverse —
-interference fringes are the classic trigger. `particle_velocity` emits a
-`UserWarning` when it detects a step `> λ/2` (using the nominal sound speed at
-the highest frequency present); aim for ≳4–8 points per wavelength.
-
-```python
-from uacpy.acoustic_signal import vector
-from uacpy.visualization import plot_intensity_vectors
-
-res = uacpy.Bellhop().run(env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
-u_r, u_z = vector.particle_velocity(res.field)           # particle velocity (m/s)
-I_r, I_z = vector.acoustic_intensity(res.field)          # active energy flux
-doa      = vector.intensity_doa(res.field)               # grazing angle per (d, r)
-plot_intensity_vectors(res.field, env=env)               # energy-flow quiver
-```
-
-Example 37 (`example_37_vector_acoustics.py`) demonstrates the full chain on an
-ideal-waveguide modal field (scalar TL vs. intensity quiver vs. DOA) where the
-interference is the combined effect of surface and seabed reflections.
 
 For per-class kwargs / methods, read the docstrings
 (`help(uacpy.acoustic_signal.system_id.FRF)`). Examples 09, 10, 27–29 walk
@@ -1886,7 +1923,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 34 | `example_34_janus_beacon.py` | JANUS (STANAG 4748) beacon: 64-bit packet -> FH-BFSK .wav -> delay + echo + AWGN -> preamble detect + decode + CRC | |
 | 35 | `example_35_noise_impact.py` | Standards chain: UNESCO sound speed -> decidecade bands -> ISO 17208 ship MSL -> propagation -> Southall 2019 marine-mammal weighting | |
 | 36 | `example_36_noise_impact_modeled.py` | Modeled impact: ship ISO 17208 MSL through a real Bellhop TL field (UNESCO SSP) -> Southall weighting at a marine mammal | requires_binary |
-| 37 | `example_37_vector_acoustics.py` | Vector acoustics, two figures: (1) frequency-domain ideal waveguide — TL vs. magnitude-scaled energy-flux quiver vs. DOA; (2) time-domain transient — a vector sensor resolving direct (up) vs. surface-reflected (down) arrivals via `plot_vector_sensor` | |
+| 37 | `example_37_realworld_environment.py` | Full real-world pipeline: GPS + date -> fetched range-dependent `Environment` (GEBCO bathymetry, WOA23 SSP, auto seabed) -> Bellhop TL -> one-call `plot_overview` (map · TL · environment); plus offline sea-ice and seabed-model comparisons | |
 
 Smoke test:
 

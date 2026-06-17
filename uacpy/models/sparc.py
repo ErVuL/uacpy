@@ -69,7 +69,7 @@ def _validate_pulse_type(pulse_type: str) -> str:
         ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
     """
     if not isinstance(pulse_type, str):
-        raise ConfigurationError(
+        raise TypeError(
             f"pulse_type must be a string, got {type(pulse_type).__name__}"
         )
     if len(pulse_type) > 4:

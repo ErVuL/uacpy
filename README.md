@@ -65,12 +65,52 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 **Toolkits** — first‑class modules, not just glue around the models:
 
-- **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering / pulse compression, conventional & adaptive beamforming, time‑frequency & invertible transforms (f‑k, τ‑p/Radon, wavelet, Wigner–Ville, cepstrum), channel simulation, modal warping, spectra.
-- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering laws, reverberation, detection theory & range.
-- **Communications** (`uacpy.comms`) — PSK/QAM/DPSK/FSK, adaptive DFE/LMS/RLS + carrier PLL, Doppler, OFDM, Viterbi FEC, DSSS, end‑to‑end real‑data `.wav` modems, and the open **NATO JANUS** standard (STANAG 4748).
-- **Ambient noise** (`uacpy.noise`) — Wenz curves (wind / shipping / rain / thermal).
-- **Standards & metrics** — UNESCO/Del Grosso sound speed, ISO 18405 decidecade bands, ISO 17208 ship source level, Southall 2019 marine‑mammal weighting.
+- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed and seafloor data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI sediment). Works **online** or **fully offline** from an install‑time local cache.
+- **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
+- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range.
+- **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
+- **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
+- **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
+
+<div align="center">
+  <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
+</div>
+
+**Simplest example — from GPS to a modelled field, the code that produces the figure above:**
+
+``` python
+import numpy as np, matplotlib.pyplot as plt
+import uacpy
+from uacpy import data
+from uacpy.models import Bellhop, RunMode
+
+# 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
+#    WOA23 sound speed and NCEI seabed — across the Reykjanes mid-ocean ridge.
+A, B = (56.94, -28.50), (59.16, -27.40)
+env  = data.fetch_environment(A, transect_to=B, date='2026-01-15',
+         range_dependent_ssp=True, range_dependent_bottom=True, bottom='auto')
+grid = data.fetch_grid((53, 61), (-33, -20))           # (lats, lons, depth)
+
+# 2. Model transmission loss with Bellhop at 800 Hz.
+src = uacpy.Source(depths=100, frequencies=800)
+rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
+                     ranges=np.linspace(100, 255_000, 350))
+tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+
+# 3. One call → the figure above: map · transmission loss · environment.
+#    The left map is pluggable (map_fn=); the default is the bathymetry map.
+uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver=rcv,
+                         map_title="Reykjanes Ridge",
+                         tl_title="Transmission loss (800 Hz)",
+                         env_title="Range-dependent environment",
+                         map_kwargs=dict(contours=True, aspect=1))
+plt.show()
+```
+
+> Runs **offline** too — add `offline=True` to `fetch_environment` and `source='local'`
+> to `fetch_grid` after `./install.sh --data all`. Full script (offline auto-detect,
+> graceful fallbacks, provenance labels): `examples/example_37_realworld_environment.py`.
 
 ## 📦 Installation
 
@@ -220,58 +260,6 @@ pip uninstall uacpy
 rm -rf uacpy
 ```
 
-## ▶ Simplest example
-
-A Pekeris waveguide — isovelocity water over a fluid half-space — at
-1 kHz, plotted as a transmission-loss field.
-
-``` python
-import numpy as np
-import matplotlib.pyplot as plt
-
-import uacpy
-from uacpy.models import Bellhop, RunMode
-from uacpy.visualization import plot_field
-
-# 1. Environment — isovelocity water over a fluid half-space bottom
-env = uacpy.Environment(
-    name="Pekeris Waveguide",
-    bathymetry=100.0,
-    ssp=1500.0,
-    bottom=uacpy.BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=1600.0,
-        density=1.5,
-        attenuation=0.5,
-    ),
-)
-
-# 2. Source — 1000 Hz, mid water column
-source = uacpy.Source(depths=50.0, frequencies=1000.0)
-
-# 3. Receiver grid — 200 depths × 500 ranges out to 5 km
-#    Start ranges at the step size; r=0 has no ray data (Bellhop sentinel).
-receiver = uacpy.Receiver(
-    depths=np.linspace(0, 100, 200),
-    ranges=np.linspace(10, 5000, 500),
-)
-
-# 4. Run Bellhop in coherent-TL mode
-result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
-    env, source, receiver, run_mode=RunMode.COHERENT_TL,
-)
-
-# 5. Plot the TL field
-fig, ax = plt.subplots(figsize=(8, 4))
-plot_field(result, env=env, ax=ax)
-plt.tight_layout()
-plt.show()
-```
-
-<p align="center">
-  <img src="./docs/readme_tl.png" alt="Pekeris waveguide TL field at 1 kHz" width="720">
-</p>
-
 ## 📚 Documentation & Examples
 
 The full API reference lives in a single file:
@@ -280,9 +268,9 @@ per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
 Inside `uacpy/uacpy/examples/` you will find 37 example scripts numbered
-sequentially (`example_01_*.py` through `example_37_*.py`) — from a first
-TL field to communications modems, a standards-based noise-impact
-assessment, and vector-acoustic energy-flow analysis. See the
+sequentially (`example_01_*.py` through `example_37_*.py`) — from a first TL
+field to communications modems, a standards-based noise-impact assessment, and a
+GPS-to-modelled-field real-world pipeline. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 
@@ -320,6 +308,8 @@ Tests use custom markers to allow selective execution:
 - `slow` -- Long-running tests (broadband, large grids, slow examples)
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
+- `requires_network` -- Tests that hit a live external service (the `uacpy.data`
+  fetchers); **auto-skipped when offline**
 
 ``` bash
 
@@ -331,6 +321,9 @@ pytest uacpy/tests/ -m "not requires_binary"
 
 # Skip OASES tests (if OASES is not installed)
 pytest uacpy/tests/ -m "not requires_oases"
+
+# Skip all internet-dependent tests (also auto-skipped offline)
+pytest uacpy/tests/ -m "not requires_network"
 
 ```
 
@@ -429,6 +422,84 @@ when redistributing or modifying UACPY or its outputs.
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+
+
+### External data sources (`uacpy.data`)
+
+The `uacpy.data` layer builds an `Environment` (and, for
+`uacpy.plot.plot_bathymetry_map`, a coastline map) from public databases.
+These datasets are **fetched on demand at runtime --- never bundled or
+redistributed** with UACPY, so their licences (CC-BY, CC-BY-NC, public domain,
+…) impose **no obligation on UACPY's own GPL-3.0 code**: whoever fetches the
+data is its licensee and is responsible for honouring the licence and citing
+the source. UACPY exposes a `base_url=` on each fetcher so heavy users can point
+at their own mirror.
+
+A fetched environment carries its provenance: `env.data_sources` lists the
+sources used, and `uacpy.data.citations(env)` prints the required attribution
+and citation text for exactly those sources (`uacpy.data.citations()` prints
+the full catalogue below).
+
+| Source | Used for | License | Required attribution / citation |
+|--------|----------|---------|---------------------------------|
+| **GEBCO** grid (served via [OpenTopoData](https://www.opentopodata.org/), MIT) | bathymetry | Public domain (attribution requested) | "GEBCO Compilation Group, *GEBCO Grid*" (see [GEBCO terms](https://www.gebco.net/data-products/gridded-bathymetry/terms-of-use) for the grid DOI). OpenTopoData public API is fair-use: **≤1000 req/day, ≤1 req/s** --- self-host for heavy use |
+| **GMRT** Global Multi-Resolution Topography (`source='gmrt'`) | bathymetry (multibeam, higher-res) | **CC-BY 4.0** | Ryan, W.B.F., *et al.* (2009). *Global Multi-Resolution Topography synthesis.* Geochem. Geophys. Geosyst. 10, Q03014. doi:[10.1029/2008GC002332](https://doi.org/10.1029/2008GC002332) |
+| **World Ocean Atlas 2023** (NOAA NCEI) | sound speed (climatology), absorption | U.S. Government work --- public domain | Reagan, J.R., *et al.* (2024). *World Ocean Atlas 2023.* NOAA National Centers for Environmental Information |
+| **Copernicus Marine Service** (optional `uacpy[data]`) | sound speed (operational) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**; free account required) | "Generated using E.U. Copernicus Marine Service Information; *&lt;product DOI&gt;*" |
+| **Argo** float profiles (`ssp_source='argo'`, via Ifremer ERDDAP) | sound speed (real in-situ profiles) | **Free and unrestricted** (Argo data policy) | "These data were collected and made freely available by the International Argo Program (argo.ucsd.edu)"; Argo (2024), Argo GDAC, SEANOE, doi:[10.17882/42182](https://doi.org/10.17882/42182) |
+| **EMODnet Geology** --- seabed substrate | sediment (European seas) | **CC-BY 4.0** | "EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0" |
+| **NCEI Seafloor Sediment Grain-Size Database** (NOAA, G00127; `bottom='grainsize'`) | sediment (global, public-domain samples) | U.S. Government work --- public domain | National Geophysical Data Center (1976), *The NGDC Seafloor Sediment Grain Size Database*, NOAA NCEI, doi:[10.7289/V5G44N6W](https://doi.org/10.7289/V5G44N6W). (The DECK41 G02094 lithology file is also accepted if supplied.) |
+| **Diesing 2020** global deep-sea seafloor lithology (`bottom='diesing'`) | sediment (global deep-sea, >500 m) | **CC-BY 4.0** | Diesing, M. (2020). *Deep-sea sediments of the global ocean.* Earth Syst. Sci. Data 12, 3367--3381. doi:[10.5194/essd-12-3367-2020](https://doi.org/10.5194/essd-12-3367-2020); data: PANGAEA doi:[10.1594/PANGAEA.911692](https://doi.org/10.1594/PANGAEA.911692) |
+| **Pelagic model** (`bottom='pelagic'`, depth/latitude classifier) | sediment (global open-ocean fallback, modelled) | **Public domain** (first-principles model) | after Diesing (2020) & Berger, W.H. (1974), *Deep-sea sedimentation* |
+| **GlobSed** total sediment thickness (NOAA NCEI) | sediment thickness (low-frequency seabed) | U.S. Government work --- public domain | Straume, E.O., *et al.* (2019). *GlobSed: Updated total sediment thickness in the world's oceans.* Geochem. Geophys. Geosyst. 20, 1756--1772. doi:[10.1029/2018GC008115](https://doi.org/10.1029/2018GC008115) |
+| **CRUST1.0** global crustal model (`bottom='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
+| **NSIDC Sea Ice Index** (`fetch_sea_ice_concentration`) | sea-ice concentration (surface; monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
+| **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
+
+> ✅ **All sources permit commercial use except CRUST1.0**, which ships with no
+> formal licence — cite Laske et al. 2013 and verify terms before commercial
+> deployment (`uacpy.data.citations()` flags it). **`bottom='auto'` resolves
+> anywhere in the ocean** — measured/regional sources first (EMODnet, grain-size),
+> then the global CC-BY Diesing deep-sea map, then a first-principles pelagic
+> model as the never-fail fallback (all commercial-clean). Surficial
+> seafloor sediment comes from EMODnet (European seas, CC-BY) or the NCEI
+> grain-size database (worldwide, public domain); for **low-frequency** work the
+> seabed is better described by a layered model — GlobSed sediment thickness +
+> CRUST1.0 Vp/Vs/density (`bottom='crust1'` → a layered elastic bottom). All
+> datasets are provided "as is", without warranty.
+
+> 💾 **Offline / local-cache backend.** Ten datasets can be downloaded once for
+> offline, rate-limit-free use — fetched-not-bundled into `./data_cache`
+> (gitignored), exactly like OASES: **GEBCO** (bathymetry), **WOA23** (sound
+> speed), the **NCEI grain-size DB** (global surficial sediment), **EMODnet**
+> seabed substrate (European-seas sediment, CC-BY), **Diesing 2020** (global
+> deep-sea seafloor lithology, CC-BY), **GlobSed** (global sediment thickness),
+> **CRUST1.0** (global layered Vp/Vs/density — low-frequency seabed, no formal
+> licence), **NSIDC** sea-ice concentration (monthly climatology) and **Natural
+> Earth** coastline (map backdrop). Install with
+> `./install.sh --data all` (or a subset such as `--data sediment,emodnet,crust1`;
+> an interactive prompt is also offered; each also downloads from Python via
+> `uacpy.data.download_sediment_db()` / `download_emodnet_db()` /
+> `download_globsed_db()` / `download_crust1_db()` /
+> `uacpy.visualization.basemap.download_coastline()`). Then pass `source='local'`
+> to the bathymetry/SSP fetchers or `offline=True` to `fetch_environment`; maps
+> use the cached coastline automatically. Offline `bottom='auto'` tries the local
+> EMODnet polygons (European seas) then the global grain-size DB; `bottom='crust1'`
+> builds a **layered elastic** bottom (sediment over crystalline basement, with
+> shear) for low-frequency work. The offline readers (netCDF4, shapely, pyproj,
+> tifffile) ship with the default install — `pip install uacpy` enables them all.
+>
+> 🛰️ **Higher-resolution live bathymetry.** Pass `source='gmrt'` to the
+> bathymetry fetchers (or `bathymetry_source='gmrt'` to `fetch_environment`) to
+> use the GMRT multibeam synthesis (CC-BY) — finer than GEBCO where surveyed,
+> never coarser elsewhere.
+
+> 📐 **Grain-size → geoacoustics conversion.** Turning a mean grain size into
+> ρ / c / α (`model='hamilton'` default, or `'apl-uw'`) uses published relations,
+> cited in the code: Hamilton & Bachman (1982) / Hamilton (1980), reproduced in
+> the open-access **CC-BY** supplement of Fonseca *et al.* (2025) (ESAB); and the
+> **APL-UW TR 9407 (1994)** *High-Frequency Ocean Environmental Acoustic Models
+> Handbook* (§IV.A.4). These are model coefficients, not redistributed datasets.
 
 
 ## 📬 Contact

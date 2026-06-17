@@ -14,6 +14,7 @@ import pytest  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
+from uacpy.core.exceptions import ConfigurationError  # noqa: E402
 from uacpy.core.results import (  # noqa: E402
     Field, Modes, Arrivals, Rays, ReflectionCoefficient,
 )
@@ -116,7 +117,7 @@ class TestCompare:
         plt.close(fig)
 
     def test_rejects_2d_input(self, tl_field):
-        with pytest.raises(ValueError, match="1 surviving axis"):
+        with pytest.raises(ConfigurationError, match="1 surviving axis"):
             plots.compare([tl_field, tl_field])
 
 
@@ -244,3 +245,105 @@ class TestAutoTLLimits:
         from uacpy.visualization.plots import _auto_tl_limits
         vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
         assert (vmin, vmax) == (30.0, 80.0)
+
+
+class TestBathymetryMap:
+    """plot_bathymetry_map — plain, coastline (mocked), and unreachable paths."""
+
+    @staticmethod
+    def _grid():
+        lats = np.linspace(36, 44, 8)
+        lons = np.linspace(0, 10, 10)
+        depth = np.random.default_rng(0).uniform(500, 3000, (8, 10))
+        depth[0, 0] = np.nan                 # a land cell
+        return lats, lons, depth
+
+    def test_plain_lonlat(self):
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(
+            lats, lons, depth, basemap=None,
+            transect=((42, 4), (38.3, 6)), title='t')
+        assert fig is not None and ax.has_data()
+        assert ax.get_xlabel().startswith('Longitude')
+        plt.close(fig)
+
+    def test_coastline_default(self, monkeypatch):
+        # Default backdrop = Natural Earth coastlines (public domain); stub fetch.
+        ring = np.array([[2, 40], [4, 40], [4, 42], [2, 42], [2, 40]], float)
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: [ring])
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth)   # default 'coastline'
+        assert any('°E' in t.get_text() for t in ax.get_xticklabels())
+        plt.close(fig)
+
+    def test_coastline_unreachable_still_draws(self, monkeypatch):
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth)   # sea only, no crash
+        assert ax.has_data()
+        plt.close(fig)
+
+    def test_coastline_with_transect(self, monkeypatch):
+        ring = np.array([[2, 40], [4, 40], [4, 42], [2, 42], [2, 40]], float)
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: [ring])
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(
+            lats, lons, depth, transect=((42, 4), (38.3, 6)))
+        assert ax.get_legend() is not None        # transect labelled
+        plt.close(fig)
+
+
+class TestOverview:
+    """plot_overview — the one-call map · TL · environment composite."""
+
+    @staticmethod
+    def _grid():
+        lats = np.linspace(36, 44, 8)
+        lons = np.linspace(0, 10, 10)
+        depth = np.random.default_rng(0).uniform(500, 3000, (8, 10))
+        return lats, lons, depth
+
+    def test_full_composite(self, env, tl_field):
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        fig, axes = plots.plot_overview(
+            env, self._grid(), transect=((42, 4), (38.3, 6)),
+            tl=tl_field, source=src, suptitle='ov')
+        assert fig is not None and len(axes) == 3
+        ax_map, ax_tl, ax_env = axes
+        assert ax_map.has_data() and ax_tl.has_data() and ax_env.has_data()
+        # accessible as a first-class library function
+        assert uacpy.plot.plot_overview is plots.plot_overview
+        plt.close(fig)
+
+    def test_without_tl_leaves_placeholder(self, env):
+        fig, (ax_map, ax_tl, ax_env) = plots.plot_overview(env, self._grid())
+        assert any('no TL' in t.get_text() for t in ax_tl.texts)
+        plt.close(fig)
+
+
+class TestSeaIce:
+    """plot_sea_ice_map (mirrors the depth map) + plot_environment(sea_ice=)."""
+
+    def test_sea_ice_map_notation(self, monkeypatch):
+        import uacpy.data.seaice_local as sil
+        # mock the reprojection so no cache/pyproj is needed
+        monkeypatch.setattr(sil, 'sea_ice_pixel', lambda pt, hemi='N': (2, 3))
+        grid = np.random.default_rng(0).uniform(0, 1, (8, 10))
+        grid[0, 0] = np.nan                            # land cell
+        fig, ax = plots.plot_sea_ice_map(
+            grid, transect=((88, 0), (79, -3)), source=(88, 0), title='ice')
+        assert ax.has_data()
+        assert ax.get_legend() is not None             # 'transect' legend, as on the map
+        assert uacpy.plot.plot_sea_ice_map is plots.plot_sea_ice_map
+        plt.close(fig)
+
+    def test_environment_shows_ice(self, env):
+        fig0, ax0 = plots.plot_environment(env)            # no ice
+        n0 = len(ax0.collections)
+        plt.close(fig0)
+        fig, ax = plots.plot_environment(env, sea_ice=0.8)
+        assert len(ax.collections) > n0                    # ice band added at surface
+        plt.close(fig)

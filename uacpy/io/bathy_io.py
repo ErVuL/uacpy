@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Tuple, Union
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import ModelExecutionError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError, ModelExecutionError,
+)
 from uacpy.io.units import km_to_m, m_to_km
 from uacpy.io._fortran_helpers import read_vector
 
@@ -90,7 +92,7 @@ def read_boundary_3d(
             if match:
                 bdry_type = match.group(1)
             else:
-                raise ValueError(f"Cannot parse boundary type from: {bdry_type_line}")
+                raise FileFormatError(f"Cannot parse boundary type from: {bdry_type_line}")
 
             if bdry_type == "R":
                 log_message('bathy_io',
@@ -101,7 +103,7 @@ def read_boundary_3d(
                             "Curvilinear approximation to boundary",
                             verbose=verbose)
             else:
-                raise ValueError(f"Unknown boundary type: {bdry_type}")
+                raise FileFormatError(f"Unknown boundary type: {bdry_type}")
 
             x_bot, n_x = read_vector(fid)
 
@@ -200,7 +202,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         bty_type = bty_type[:1].upper()
         if bty_type not in ["L", "C"]:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
             )
 
@@ -303,7 +305,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         ati_type = ati_type[:1].upper()
         if ati_type not in ["L", "C"]:
-            raise ValueError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
+            raise ConfigurationError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
 
         if ati_type == "L":
             log_message('bathy_io',
@@ -359,7 +361,7 @@ def _validate_interp_type(interp_type: str) -> str:
     """
     t = str(interp_type).strip().upper()
     if t not in ("L", "C"):
-        raise ValueError(
+        raise FileFormatError(
             f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
         )
     return t
@@ -585,7 +587,7 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     filepath = Path(filepath)
 
     if interp_type not in ['R', 'C']:
-        raise ValueError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
+        raise ConfigurationError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
 
     depth = depth.copy()
     depth[np.isnan(depth)] = 0.0
@@ -594,7 +596,7 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     ny = len(Y)
 
     if depth.shape != (ny, nx):
-        raise ValueError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
+        raise ConfigurationError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
 
     X_km = m_to_km(X)
     Y_km = m_to_km(Y)

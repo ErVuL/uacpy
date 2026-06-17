@@ -21,7 +21,7 @@ import numpy as np
 import struct
 import warnings
 
-from uacpy.core.exceptions import UnsupportedFeatureError
+from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
     read_fortran_record_marker as _read_fortran_record_marker,
     read_fortran_record as _read_fortran_record,
@@ -206,7 +206,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
                     pass
 
         if n_ranges is None or xoff is None or dx is None:
-            raise ValueError(
+            raise FileFormatError(
                 f"Could not parse grid from .plp file: "
                 f"n_ranges={n_ranges}, xoff={xoff}, dx={dx}"
             )
@@ -840,7 +840,7 @@ def read_oasr_reflection_coefficients(
 
                 sampling_type = format_type
             else:
-                raise ValueError(f"Invalid header format: {header_line}")
+                raise FileFormatError(f"Invalid header format: {header_line}")
 
             # Read data for each frequency
             frequencies = []

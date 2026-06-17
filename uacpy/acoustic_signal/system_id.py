@@ -4,6 +4,8 @@ import numpy as np
 import scipy.signal as _sig
 import matplotlib.pyplot as plt
 from scipy.linalg import toeplitz
+
+from uacpy.core.exceptions import ConfigurationError
 from matplotlib.gridspec import GridSpec
 
 
@@ -137,7 +139,7 @@ class FRF:
         if y.ndim == 1:
             y = y.reshape(1, -1)
         if x.shape[0] != y.shape[0]:
-            raise ValueError(
+            raise ConfigurationError(
                 f"FRF.compute: x and y must have the same number of measurements; "
                 f"got x.shape[0]={x.shape[0]}, y.shape[0]={y.shape[0]}"
             )
@@ -161,7 +163,7 @@ class FRF:
             elif self.method == "p_etfe":
                 freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, fs)
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     f"FRF.compute: unknown method={self.method!r}; "
                     "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'"
                 )
@@ -260,7 +262,7 @@ class FRF:
         n_periods = len(x) // period
 
         if n_periods < 1:
-            raise ValueError(
+            raise ConfigurationError(
                 f"FRF.compute_periodic_etfe: signal length must be at least one "
                 f"period; got len(x)={len(x)} samples, period={period} samples"
             )

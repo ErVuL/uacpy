@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 # Combined RNL measurement uncertainty by band (ISO 17208-2:2019 §5), in dB.
@@ -58,7 +59,7 @@ def nominal_source_depth(draught_m):
     return 0.7 * float(draught_m)
 
 
-def lloyd_mirror_correction(frequency, source_depth, sound_speed=1500.0):
+def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
     """ISO 17208-2 Formula 3 surface-image correction ``ΔL = L_s - L_RN`` [dB].
 
     Pressure-release sea surface (Lloyd's mirror), broadside aspect:
@@ -77,7 +78,7 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=1500.0):
     return -10.0 * np.log10(num / den)
 
 
-def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=1500.0):
+def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
     """Equivalent Monopole Source Level ``L_s = L_RN + ΔL`` (ISO 17208-2 Formula 2).
 
     ``frequency`` is the decidecade band centre(s) [Hz]; ``source_depth`` the

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union
+from uacpy.core.exceptions import ConfigurationError
 
 
 _TERM = "-1 -1\n"
@@ -31,7 +32,7 @@ def _write_block(
 ) -> None:
     """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator."""
     if not pairs:
-        raise ValueError("Cannot write empty profile block")
+        raise ConfigurationError("Cannot write empty profile block")
     for d, v in pairs:
         fh.write(f"{float(d):.6f} {float(v):.6f}\n")
     fh.write(_TERM)
@@ -114,15 +115,15 @@ def write_ramin(
     """
     kind = kind.lower()
     if kind not in ('rams', 'ramsurf'):
-        raise ValueError(
+        raise ConfigurationError(
             f"kind must be 'rams' or 'ramsurf'; got {kind!r}"
         )
     if kind == 'ramsurf' and not surface:
-        raise ValueError("kind='ramsurf' requires a surface profile")
+        raise ConfigurationError("kind='ramsurf' requires a surface profile")
     if kind == 'rams':
         for seg in range_segments:
             if 'bottom_cs' not in seg or 'bottom_attns' not in seg:
-                raise ValueError(
+                raise ConfigurationError(
                     "kind='rams' requires bottom_cs and bottom_attns "
                     "in every range segment"
                 )

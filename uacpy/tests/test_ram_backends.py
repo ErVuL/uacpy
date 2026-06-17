@@ -201,7 +201,7 @@ class TestRamInWriter:
 
     def test_rams_requires_shear_profiles(self, tmp_path):
         out = tmp_path / 'rams.in'
-        with pytest.raises(ValueError, match="bottom_cs and bottom_attns"):
+        with pytest.raises(ConfigurationError, match="bottom_cs and bottom_attns"):
             write_ramin(
                 str(out), kind='rams',
                 fc=100.0, zs=50.0, zr_line=50.0,

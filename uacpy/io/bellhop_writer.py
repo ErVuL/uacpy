@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Union
 
 from uacpy._log import log_message
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -172,12 +173,12 @@ def write_bellhop_env_file(
         bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
         ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
         if bty_code is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"interp_bathymetry must be 'linear' or 'curvilinear'; "
                 f"got {interp_bathymetry!r}"
             )
         if ati_code is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"interp_altimetry must be 'linear' or 'curvilinear'; "
                 f"got {interp_altimetry!r}"
             )
@@ -371,7 +372,7 @@ def write_bellhop_env_file(
                         f"generate it via BOUNCE or OASR first."
                     )
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     "bellhop_writer: acoustic_type='file' requires reflection_file= "
                     "on the bottom BoundaryProperties (path to a .brc file)."
                 )

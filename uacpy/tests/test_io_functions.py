@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 
 import uacpy
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
@@ -203,9 +204,9 @@ class TestSSPReadWriteRoundtrip:
 
         c = np.zeros((3, 4))
         out = tmp_path / "bad.ssp"
-        with pytest.raises(ValueError, match="does not match"):
+        with pytest.raises(ConfigurationError, match="does not match"):
             write_ssp(out, np.array([0.0, 5.0]), c)
-        with pytest.raises(ValueError, match="2-D"):
+        with pytest.raises(ConfigurationError, match="2-D"):
             write_ssp(out, np.array([0.0, 5.0]), np.zeros(5))
 
     def test_read_ssp_3d_canonical_bellhop3d_file(self):

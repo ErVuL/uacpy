@@ -29,7 +29,7 @@ uacpy/
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_rays / plot_modes / …
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
-    ├── examples/            36 numbered example scripts
+    ├── examples/            37 numbered example scripts (01–37)
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── parallel.py          run_parallel / Job — parallel batch runner
@@ -371,6 +371,48 @@ objects (typically `Field`) or raw arrays.
 Convention: each result-type plotting function takes the `Result`
 positionally + an optional `env=` for seafloor / surface overlays +
 optional axis-control kwargs.
+
+### 7.1 On-demand data layer (`uacpy/data/`)
+
+Builds an `Environment` from GPS coordinates (+ date) by fetching from public
+ocean databases. Sits *upstream* of the models — it produces carrier inputs,
+never touches model internals. **Data is fetched on demand, never bundled or
+redistributed** (same rule as OASES, §9).
+
+Module map (one per concern):
+
+- `_http.py` — `http_get(url, …)`, the only network call (stdlib `urllib`),
+  wraps failures in `DataFetchError`. No third-party HTTP dep.
+- `bathymetry.py` — GEBCO via OpenTopoData (`fetch_point_depth`, `fetch_transect`).
+- `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
+  + the shared `assemble_range_dependent(columns, ranges)` helper.
+- `copernicus.py` — Copernicus Marine operational SSP (optional `uacpy[data]` dep,
+  lazy-imported).
+- `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
+- `seabed.py` / `lithology.py` — EMODnet (CC-BY) and Dutkiewicz (CC-BY-NC) bottom.
+- `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
+- `environment.py` — `fetch_environment(...)`, the orchestrator + dispatch.
+
+Conventions: every fetcher shares the `(base_url, timeout, verbose)` trio,
+raises `DataFetchError`/`ConfigurationError` only, logs via `log_message`, and
+emits user notices via `warnings.warn`.
+
+**Adding a source.** Write a module exposing a fetcher with the standard trio,
+then:
+
+- *Sediment* → add one row to `environment._bottom_registry()`
+  (`id → (point_fetcher, transect_fetcher)`) and, to join `'auto'`, to
+  `_AUTO_BOTTOM_ORDER` / `_BOTTOM_SOURCE_KEYWORDS`.
+- *Sound speed* → add a branch to `environment._fetch_ssp` (and the
+  range-dependent block) keyed on `ssp_source`.
+- Add a `DataSource` row to `sources.SOURCES` (id, licence, attribution,
+  citation, `commercial_use`) and map the dispatch keyword to that id so
+  provenance is recorded automatically.
+
+**Provenance.** `fetch_environment` records the catalogue sources it used on
+`env.data_sources`; `uacpy.data.citations(env)` renders the required
+attribution/citation. Non-commercial sources (Dutkiewicz) emit a runtime
+`UserWarning` whenever fetched, so they are never returned silently.
 
 ---
 

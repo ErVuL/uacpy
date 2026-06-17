@@ -46,6 +46,21 @@ BIN_DIR_OASES="${BIN_ROOT}/oases"
 BIN_DIR_MPIRAMS="${BIN_ROOT}/mpirams"
 BIN_DIR_RAMSURF="${BIN_ROOT}/ramsurf"
 
+# Offline data cache (downloaded public datasets for uacpy.data's local backend;
+# gitignored, never bundled). Override at runtime with $UACPY_DATA_CACHE.
+DATA_CACHE_DIR="${UACPY_DATA_CACHE:-${SCRIPT_DIR}/data_cache}"
+# WOA23 download settings: 1° annual+monthly temperature & salinity (decav).
+WOA_RESOLUTION="1.00"
+WOA_CODE="01"
+WOA_DECADE="decav"
+# GEBCO 2025 ice-surface elevation grid, direct NetCDF from CEDA (no auth,
+# ~7.5 GB). md5 cd18ddc4162134465af310f714d50f01.
+GEBCO_NC_URL="https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2025/ice_surface_elevation/netcdf/GEBCO_2025.nc?download=1"
+
+# GlobSed v3 total sediment thickness NetCDF (NOAA NCEI archive). Fetched with
+# curl: NCEI/Akamai throttles Python urllib to a trickle, but serves curl fast.
+GLOBSED_NC_URL="https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/1.1/data/0-data/GlobSed/GlobSed_package3/GlobSed-v3.nc"
+
 # Bellhopcuda upstream release we build against. Tags are mutable on the
 # upstream side, so an immutable commit SHA is preferred. When
 # BELLHOPCUDA_COMMIT_SHA is non-empty install.sh checks out that exact
@@ -58,6 +73,8 @@ AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
 FORCE=0
 BELLHOP_VERSION="" # "fortran", "cxx", or "cuda" (empty => prompt/auto)
 INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
+INSTALL_DATA=""    # comma list of gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice | "all" | "no" (empty => skip)
+BUILD_MODELS=1     # 0 with --no-models: skip all native builds (data-only install)
 
 # -------------------------
 # Per-component build status
@@ -70,11 +87,13 @@ STATUS_BELLHOPCUDA="skipped"  # bellhopcxx / bellhopcuda (optional)
 STATUS_OASES="skipped"        # OAST / OASN / OASR / OASP (optional)
 STATUS_MPIRAMS="skipped"      # mpiramS PE
 STATUS_RAMSURF="skipped"      # rams0.5 + ramsurf1.5
+STATUS_DATA="skipped"         # offline data cache (GEBCO / WOA23 / sediment)
 NOTE_OALIB=""
 NOTE_BELLHOPCUDA=""
 NOTE_OASES=""
 NOTE_MPIRAMS=""
 NOTE_RAMSURF=""
+NOTE_DATA=""
 
 # Pretty-print one component status row. Used by the final summary.
 print_status_row() {
@@ -176,6 +195,26 @@ Options:
   --oases [yes|no]     Download and build OASES (MIT, distributed separately):
                          yes — Download from MIT and build OAST/OASN/OASR/OASP
                          no  — Skip OASES entirely
+  --data [LIST]        Download public datasets for uacpy.data's offline backend
+                       into ./data_cache (gitignored). LIST is a comma list of:
+                         gebco     — GEBCO 2025 bathymetry grid (~7.5 GB, CEDA)
+                         woa23     — WOA23 T/S climatology grids (NCEI)
+                         sediment  — NCEI grain-size DB (public domain, ~3 MB)
+                         emodnet   — EMODnet seabed substrate, Folk 5cl,
+                                     European seas (CC-BY, ~200 MB; needs shapely)
+                         coastline — Natural Earth land polygons (public domain)
+                         globsed   — GlobSed total sediment thickness, global
+                                     (NOAA NCEI, public domain, ~11 MB)
+                         crust1    — CRUST1.0 layered Vp/Vs/density, global,
+                                     low-frequency seabed (~1 MB, no formal licence)
+                         diesing   — Diesing 2020 global deep-sea seafloor
+                                     lithology map (CC-BY, ~40 MB; needs pyproj)
+                         seaice    — NSIDC sea-ice concentration monthly
+                                     climatology (public domain; needs tifffile)
+                         all       — all of the above   |   no — skip (default)
+  --no-models          Skip ALL native propagation-model builds (no compilers
+       (--data-only)   needed). Pure-Python install — pairs with --data for an
+                       offline data-only setup. Build prerequisites are skipped.
   -h, --help           Show this help
 
 Examples:
@@ -183,6 +222,10 @@ Examples:
   ./install.sh -y                  # Auto-detect everything, no prompts
   ./install.sh --bellhop cuda      # Use CUDA Bellhop, prompt for rest
   ./install.sh --oases no          # Skip OASES, prompt for rest
+  ./install.sh --data sediment     # Only the small public-domain sediment DB
+  ./install.sh --data crust1,globsed    # Low-frequency layered seabed stack
+  ./install.sh --data all          # Full stack (gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice)
+  ./install.sh --no-models --data all   # Data-only: no compilers, offline stack
 EOF
 }
 
@@ -215,6 +258,20 @@ while [[ $# -gt 0 ]]; do
                 echo -e "${RED}--oases requires an argument: yes|no${NC}"
                 exit 1
             fi
+            ;;
+        --data)
+            shift
+            if [[ $# -gt 0 ]]; then
+                INSTALL_DATA="$1"
+                shift
+            else
+                echo -e "${RED}--data requires an argument: gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice|all|no${NC}"
+                exit 1
+            fi
+            ;;
+        --no-models|--data-only)
+            BUILD_MODELS=0
+            shift
             ;;
         -h|--help)
             print_help
@@ -284,6 +341,42 @@ echo ""
 # supported platform (brew's libomp is the LLVM/clang runtime and is
 # unrelated).
 
+# Offer a data-only install interactively (mirrors choose_oases / choose_data).
+# An explicit --no-models flag, or -y, bypasses the prompt.
+choose_models() {
+    if [[ "$BUILD_MODELS" != "1" ]]; then
+        return 0          # --no-models already set on the command line
+    fi
+    if [[ $AUTO_YES -eq 1 ]]; then
+        return 0          # non-interactive default: build the models
+    fi
+    echo -e "${BLUE}Build native propagation models (Bellhop, Kraken, RAM, OASES, ...)?${NC}"
+    echo "  Compiling them needs gfortran/make (and optionally cmake/nvcc)."
+    echo "  Answer No for a pure-Python, data-only install (no compilers needed)."
+    echo ""
+    if ! prompt_yes_no "Build propagation models?"; then
+        BUILD_MODELS=0
+    fi
+    return 0
+}
+
+choose_models
+
+# --no-models: a data-only install. Preset the model selections so their prompts
+# are skipped, mark every model component "skipped", and gate the build region
+# below. The offline data cache (choose_data + download) still runs.
+if [[ "$BUILD_MODELS" != "1" ]]; then
+    echo -e "${YELLOW}--no-models: skipping native propagation-model builds (data-only).${NC}"
+    echo ""
+    BELLHOP_VERSION="fortran"   # value unused; just bypasses the prompt
+    INSTALL_OASES="no"
+    NOTE_OALIB="skipped (--no-models)"
+    NOTE_BELLHOPCUDA="skipped (--no-models)"
+    NOTE_OASES="skipped (--no-models)"
+    NOTE_MPIRAMS="skipped (--no-models)"
+    NOTE_RAMSURF="skipped (--no-models)"
+fi
+
 # -------------------------
 # Choose Bellhop variant
 # -------------------------
@@ -334,10 +427,11 @@ choose_bellhop() {
     esac
 }
 
-choose_bellhop
-
-echo -e "Selected Bellhop variant: ${GREEN}${BELLHOP_VERSION}${NC}"
-echo ""
+if [[ "$BUILD_MODELS" == "1" ]]; then
+    choose_bellhop
+    echo -e "Selected Bellhop variant: ${GREEN}${BELLHOP_VERSION}${NC}"
+    echo ""
+fi
 
 # -------------------------
 # Choose whether to install OASES
@@ -374,14 +468,79 @@ choose_oases() {
     fi
 }
 
-choose_oases
+if [[ "$BUILD_MODELS" == "1" ]]; then
+    choose_oases
+    if [[ "$INSTALL_OASES" == "yes" ]]; then
+        echo -e "OASES: ${GREEN}will be installed${NC}"
+    else
+        echo -e "OASES: ${YELLOW}skipped${NC}"
+    fi
+    echo ""
+fi
 
-if [[ "$INSTALL_OASES" == "yes" ]]; then
-    echo -e "OASES: ${GREEN}will be installed${NC}"
+# Choose which (if any) offline datasets to download for uacpy.data's local
+# backend. Mirrors choose_oases: respects an explicit --data flag, otherwise
+# prompts interactively. Because the grids are large (GEBCO ~4 GB), -y does NOT
+# auto-download — the user must opt in via --data or the prompt.
+choose_data() {
+    if [[ -n "$INSTALL_DATA" ]]; then
+        return 0
+    fi
+    if [[ $AUTO_YES -eq 1 ]]; then
+        INSTALL_DATA="no"
+        return 0
+    fi
+    echo -e "${BLUE}Offline data cache (uacpy.data local backend → ./data_cache)?${NC}"
+    echo "  Optional public datasets so uacpy.data works offline, with no rate"
+    echo "  limits. Downloaded only if you opt in; never bundled. Mostly public"
+    echo "  domain / CC-BY; CRUST1.0 has no formal licence (verify for commercial)."
+    echo ""
+    if ! prompt_yes_no "Configure offline datasets now?"; then
+        INSTALL_DATA="no"
+        return 0
+    fi
+    local sel=""
+    prompt_yes_no "  • Coastline: Natural Earth land polygons (~tens of MB, public domain)?" \
+        && sel="${sel}coastline,"
+    prompt_yes_no "  • Sediment samples: DECK41 + grain-size (~tens of MB, public domain)?" \
+        && sel="${sel}sediment,"
+    prompt_yes_no "  • EMODnet seabed substrate: Folk 5cl, European seas (~200 MB, CC-BY 4.0)?" \
+        && sel="${sel}emodnet,"
+    prompt_yes_no "  • GlobSed total sediment thickness, global (~11 MB, public domain)?" \
+        && sel="${sel}globsed,"
+    prompt_yes_no "  • CRUST1.0 layered Vp/Vs/density, global, low-freq (~1 MB, no formal licence)?" \
+        && sel="${sel}crust1,"
+    prompt_yes_no "  • Diesing 2020 global deep-sea seafloor lithology (~40 MB, CC-BY 4.0)?" \
+        && sel="${sel}diesing,"
+    prompt_yes_no "  • NSIDC sea-ice monthly climatology (built from ~120 grids, public domain)?" \
+        && sel="${sel}seaice,"
+    prompt_yes_no "  • WOA23 sound-speed climatology grids (~hundreds of MB, public domain)?" \
+        && sel="${sel}woa23,"
+    prompt_yes_no "  • GEBCO 2025 bathymetry grid (~4 GB, public domain)?" \
+        && sel="${sel}gebco,"
+    INSTALL_DATA="${sel%,}"
+    if [[ -z "$INSTALL_DATA" ]]; then
+        INSTALL_DATA="no"
+    fi
+    return 0
+}
+
+choose_data
+
+if [[ -n "$INSTALL_DATA" && "$INSTALL_DATA" != "no" ]]; then
+    echo -e "Offline data: ${GREEN}${INSTALL_DATA}${NC}"
 else
-    echo -e "OASES: ${YELLOW}skipped${NC}"
+    echo -e "Offline data: ${YELLOW}skipped${NC}"
 fi
 echo ""
+
+# =====================================================================
+# Native model builds (prerequisites + compilation). Gated by --no-models:
+# a data-only install skips this entire block (no compilers required) and
+# proceeds straight to the offline data cache + summary. The helper functions
+# defined inside are only used inside; the data block below does not need them.
+# =====================================================================
+if [[ "$BUILD_MODELS" == "1" ]]; then
 
 # -------------------------
 # Check and install prerequisites
@@ -1231,19 +1390,248 @@ fi
 
 echo ""
 
+fi   # end native model builds (--no-models skips the block above)
+
+# -------------------------
+# Offline data cache (uacpy.data local backend)
+# -------------------------
+# Public, fetched-not-bundled datasets for the offline backend. Downloaded into
+# DATA_CACHE_DIR (gitignored) only when requested via --data; like OASES, never
+# committed. GEBCO + WOA23 are stable public-domain URLs; the sediment sources
+# are NCEI public-domain point databases.
+data_requested() {
+    case ",${INSTALL_DATA_NORM}," in
+        *",$1,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+download_gebco() {
+    local dir="${DATA_CACHE_DIR}/gebco"
+    mkdir -p "$dir"
+    if [[ "$FORCE" != "1" ]] && ls "$dir"/*.nc >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ GEBCO grid already present${NC}"; return 0
+    fi
+    echo -e "${BLUE}Downloading GEBCO 2025 grid (~7.5 GB) — this is large...${NC}"
+    # Download to a temp name and rename only on success (atomic; a partial file
+    # never looks like a valid cached grid).
+    local tmp="${dir}/GEBCO_2025.nc.part"
+    if ! curl -fL --retry 3 -o "$tmp" "$GEBCO_NC_URL"; then
+        echo -e "${RED}✗ GEBCO download failed${NC}"; rm -f "$tmp"
+        NOTE_DATA="${NOTE_DATA} gebco:failed"; return 1
+    fi
+    mv -f "$tmp" "${dir}/GEBCO_2025.nc"
+    echo -e "${GREEN}✓ GEBCO grid ready${NC}"; return 0
+}
+
+download_woa23() {
+    local dir="${DATA_CACHE_DIR}/woa23"; mkdir -p "$dir"
+    local base="https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA"
+    local ok=1 var folder p fname url
+    echo -e "${BLUE}Downloading WOA23 ${WOA_RESOLUTION}° T/S grids (annual + 12 months)...${NC}"
+    for var in t s; do
+        if [[ "$var" == "t" ]]; then folder="temperature"; else folder="salinity"; fi
+        for p in 00 01 02 03 04 05 06 07 08 09 10 11 12; do
+            fname="woa23_${WOA_DECADE}_${var}${p}_${WOA_CODE}.nc"
+            if [[ "$FORCE" != "1" && -s "${dir}/${fname}" ]]; then continue; fi
+            url="${base}/${folder}/netcdf/${WOA_DECADE}/${WOA_RESOLUTION}/${fname}"
+            if ! curl -fL --retry 3 -o "${dir}/${fname}" "$url"; then
+                echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}"; ok=0
+            fi
+        done
+    done
+    if [[ "$ok" == "1" ]]; then
+        echo -e "${GREEN}✓ WOA23 grids ready${NC}"; return 0
+    fi
+    echo -e "${YELLOW}◐ WOA23 partially downloaded${NC}"; NOTE_DATA="${NOTE_DATA} woa23:partial"; return 1
+}
+
+download_sediment() {
+    local dir="${DATA_CACHE_DIR}/sediment"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && ( -s "${dir}/grainsize.csv" || -s "${dir}/deck41.csv" ) ]]; then
+        echo -e "${GREEN}✓ Sediment samples present in ${dir}${NC}"; return 0
+    fi
+    # Automatic: the NCEI grain-size DB (G00127, public domain) is downloaded and
+    # normalized to grainsize.csv by uacpy.data.download_sediment_db — if uacpy is
+    # importable in this Python. Otherwise fall back to a manual-placement note.
+    if python3 -c "import uacpy.data" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading + normalizing NCEI grain-size DB (~3 MB)...${NC}"
+        if python3 -c "import uacpy.data as d; d.download_sediment_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ Sediment grain-size DB ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic sediment download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy not importable here — sediment needs manual placement.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"import uacpy.data as d; d.download_sediment_db()\""
+    echo "    or drop a CSV into ${dir}/grainsize.csv (cols: latitude, longitude, mean_phi)."
+    NOTE_DATA="${NOTE_DATA} sediment:manual"
+    return 1
+}
+
+download_emodnet() {
+    local dir="${DATA_CACHE_DIR}/emodnet"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/seabed_substrate.pkl" ]]; then
+        echo -e "${GREEN}✓ EMODnet seabed substrate present in ${dir}${NC}"; return 0
+    fi
+    # EMODnet Geology seabed substrate (Folk 5cl, 1:1M, CC-BY) is paged from the
+    # public WFS and stored as a local polygon index by emodnet_local.
+    if python3 -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading EMODnet seabed substrate (European seas)...${NC}"
+        if python3 -c "from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ EMODnet seabed substrate ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic EMODnet download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy (shapely) not importable here — EMODnet skipped.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db()\""
+    NOTE_DATA="${NOTE_DATA} emodnet:manual"
+    return 1
+}
+
+download_coastline() {
+    local dir="${DATA_CACHE_DIR}/coastline"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/ne_50m_land.geojson" ]]; then
+        echo -e "${GREEN}✓ Coastline polygons present in ${dir}${NC}"; return 0
+    fi
+    if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading Natural Earth coastline (public domain)...${NC}"
+        if python3 -c "from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ Coastline polygons ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic coastline download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy not importable here — coastline skipped.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.visualization.basemap import download_coastline; download_coastline()\""
+    NOTE_DATA="${NOTE_DATA} coastline:manual"
+    return 1
+}
+
+download_globsed() {
+    local dir="${DATA_CACHE_DIR}/globsed"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/GlobSed-v3.nc" ]]; then
+        echo -e "${GREEN}✓ GlobSed grid present in ${dir}${NC}"; return 0
+    fi
+    # curl, not python: NCEI throttles urllib to a trickle but serves curl fast.
+    echo -e "${BLUE}Downloading GlobSed v3 sediment thickness (~11 MB)...${NC}"
+    local tmp="${dir}/GlobSed-v3.nc.part"
+    if ! curl -fL --retry 3 -o "$tmp" "$GLOBSED_NC_URL"; then
+        echo -e "${RED}✗ GlobSed download failed${NC}"; rm -f "$tmp"
+        NOTE_DATA="${NOTE_DATA} globsed:failed"; return 1
+    fi
+    mv -f "$tmp" "${dir}/GlobSed-v3.nc"
+    echo -e "${GREEN}✓ GlobSed grid ready${NC}"; return 0
+}
+
+download_crust1() {
+    local dir="${DATA_CACHE_DIR}/crust1"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" ]]; then
+        echo -e "${GREEN}✓ CRUST1.0 grids present in ${dir}${NC}"; return 0
+    fi
+    if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading CRUST1.0 layered crustal model (~1 MB, no formal licence)...${NC}"
+        if python3 -c "from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ CRUST1.0 grids ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic CRUST1.0 download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy not importable here — CRUST1.0 skipped.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import crust1_local; crust1_local.download_crust1_db()\""
+    NOTE_DATA="${NOTE_DATA} crust1:manual"
+    return 1
+}
+
+download_diesing() {
+    local dir="${DATA_CACHE_DIR}/diesing"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/lithology_classes.tif" ]]; then
+        echo -e "${GREEN}✓ Diesing lithology map present in ${dir}${NC}"; return 0
+    fi
+    # Diesing 2020 global deep-sea seafloor lithology (CC-BY); zip downloaded and
+    # the lithology raster extracted by diesing_local (PANGAEA serves urllib fast).
+    if python3 -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading Diesing 2020 deep-sea lithology (CC-BY, ~40 MB)...${NC}"
+        if python3 -c "from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ Diesing lithology map ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic Diesing download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy not importable here — Diesing skipped.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import diesing_local; diesing_local.download_diesing_db()\""
+    echo "    (querying it also needs uacpy's pyproj)"
+    NOTE_DATA="${NOTE_DATA} diesing:manual"
+    return 1
+}
+
+download_seaice() {
+    local dir="${DATA_CACHE_DIR}/seaice"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/seaice_climatology.pkl" ]]; then
+        echo -e "${GREEN}✓ Sea-ice climatology present in ${dir}${NC}"; return 0
+    fi
+    # Builds a monthly climatology from NSIDC Sea Ice Index grids (needs tifffile).
+    if python3 -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
+        echo -e "${BLUE}Building NSIDC sea-ice monthly climatology (downloads ~120 grids; a few minutes)...${NC}"
+        if python3 -c "from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ Sea-ice climatology ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic sea-ice build failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy (tifffile) not importable here — sea ice skipped.${NC}"
+    fi
+    echo "    Build it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import seaice_local; seaice_local.download_seaice_db()\""
+    NOTE_DATA="${NOTE_DATA} seaice:manual"
+    return 1
+}
+
+case "$INSTALL_DATA" in
+    all) INSTALL_DATA_NORM="gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice" ;;
+    no|"") INSTALL_DATA_NORM="" ;;
+    *) INSTALL_DATA_NORM="$INSTALL_DATA" ;;
+esac
+
+if [[ -n "$INSTALL_DATA_NORM" ]]; then
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${RED}--data needs curl, which was not found. Skipping data download.${NC}"
+        STATUS_DATA="failed"; NOTE_DATA="curl not found"
+    else
+        mkdir -p "$DATA_CACHE_DIR"
+        DATA_OK=1
+        data_requested gebco     && { download_gebco     || DATA_OK=0; }
+        data_requested woa23     && { download_woa23     || DATA_OK=0; }
+        data_requested sediment  && { download_sediment  || DATA_OK=0; }
+        data_requested emodnet   && { download_emodnet   || DATA_OK=0; }
+        data_requested coastline && { download_coastline || DATA_OK=0; }
+        data_requested globsed   && { download_globsed   || DATA_OK=0; }
+        data_requested crust1    && { download_crust1    || DATA_OK=0; }
+        data_requested diesing   && { download_diesing   || DATA_OK=0; }
+        data_requested seaice    && { download_seaice    || DATA_OK=0; }
+        if [[ "$DATA_OK" == "1" ]]; then STATUS_DATA="ok"; else STATUS_DATA="partial"; fi
+        echo -e "${BLUE}Data cache: ${DATA_CACHE_DIR}${NC}"
+    fi
+fi
+
 # -------------------------
 # Final harmonized summary
 # -------------------------
 # If the GPU/CXX build wasn't selected, mark it explicitly so the row prints
 # with a useful "skipped" reason instead of an empty default.
-if [[ "$BELLHOP_VERSION" == "fortran" ]]; then
+if [[ "$BUILD_MODELS" == "1" && "$BELLHOP_VERSION" == "fortran" ]]; then
     NOTE_BELLHOPCUDA="not selected (rerun with --bellhop cxx|cuda)"
 fi
 
 # Decide overall outcome: any "failed" row → failed, otherwise ok.
 OVERALL="ok"
 for s in "$STATUS_OALIB" "$STATUS_BELLHOPCUDA" "$STATUS_OASES" \
-         "$STATUS_MPIRAMS" "$STATUS_RAMSURF"; do
+         "$STATUS_MPIRAMS" "$STATUS_RAMSURF" "$STATUS_DATA"; do
     if [[ "$s" == "failed" || "$s" == "partial" ]]; then
         OVERALL="partial"
     fi
@@ -1265,6 +1653,7 @@ print_status_row "Bellhop (cxx/cuda)" "$STATUS_BELLHOPCUDA" "$NOTE_BELLHOPCUDA"
 print_status_row "mpiramS (PE)"      "$STATUS_MPIRAMS"    "$NOTE_MPIRAMS"
 print_status_row "Collins RAM family" "$STATUS_RAMSURF"   "$NOTE_RAMSURF"
 print_status_row "OASES suite"       "$STATUS_OASES"      "$NOTE_OASES"
+print_status_row "Offline data cache" "$STATUS_DATA"      "$NOTE_DATA"
 echo ""
 echo -e "${BLUE}Notes:${NC}"
 echo "  - OALIB row covers Bellhop (Fortran), Kraken, KrakenC, Bounce, Scooter, SPARC, KrakenField."

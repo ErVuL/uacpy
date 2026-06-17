@@ -26,6 +26,7 @@ from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import Field
 from uacpy.io._fortran_helpers import detect_endian
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -119,7 +120,7 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
                     f.seek(irec * 4 * recl, 0)
                     data = np.fromfile(f, dtype=f4, count=2 * nk)
                     if data.size < 2 * nk:
-                        raise ValueError(
+                        raise FileFormatError(
                             f"read_grn_file: truncated Green's-function record "
                             f"at ifreq={ifreq}, isd={isd}, ird={ird} "
                             f"(expected {2 * nk} float32 values, got {data.size})"
@@ -247,9 +248,9 @@ def _hankel_transform(
     source_type, spectrum : see table above
     """
     if source_type not in ('R', 'X'):
-        raise ValueError(f"source_type must be 'R' or 'X', got {source_type!r}")
+        raise ConfigurationError(f"source_type must be 'R' or 'X', got {source_type!r}")
     if spectrum not in ('P', 'N', 'B'):
-        raise ValueError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
+        raise ConfigurationError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
 
     dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
     ck = k + 1j * atten
@@ -340,7 +341,7 @@ def grn_to_field(
     cmin, cmax : optional phase-speed taper bounds (m/s).
     """
     if method != "fft_hankel":
-        raise ValueError(f"Unknown method: {method!r}. Use 'fft_hankel'.")
+        raise ConfigurationError(f"Unknown method: {method!r}. Use 'fft_hankel'.")
 
     nsd = grn_data["nsd"]
     if not (0 <= source_depth_idx < nsd):
@@ -394,7 +395,7 @@ def sparc_snapshot_to_field(
     'range'}``); use ``.tl`` or ``.to_tl()`` for transmission loss in dB.
     """
     if not grn_data["is_sparc"]:
-        raise ValueError(
+        raise ConfigurationError(
             "sparc_snapshot_to_field expects a SPARC GRN; got title "
             f"{grn_data['title']!r} (no 'SPARC' prefix)."
         )
@@ -409,7 +410,7 @@ def sparc_snapshot_to_field(
     tout = grn_data["freqVec"]                      # actually the time vector
     nt = len(tout)
     if nt < 2:
-        raise ValueError(
+        raise ConfigurationError(
             "SPARC snapshot has nt<2 — cannot extract a frequency component "
             "via time-FFT. Use a larger n_t_out."
         )
@@ -423,7 +424,7 @@ def sparc_snapshot_to_field(
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
     if frequency > nyquist:
-        raise ValueError(
+        raise ConfigurationError(
             f"Source frequency {frequency:.3f} Hz exceeds the snapshot's "
             f"Nyquist {nyquist:.3f} Hz; reduce dt by raising n_t_out or "
             "shortening t_max."

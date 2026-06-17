@@ -12,7 +12,9 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
-from uacpy.core.exceptions import ModelExecutionError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError, ModelExecutionError,
+)
 from uacpy.io._fortran_helpers import detect_endian
 
 
@@ -102,11 +104,11 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
                     elif comp == "N":
                         phi.append(phi_full[k + 3, :])
                     else:
-                        raise ValueError(f"Unknown component: {comp}")
+                        raise ConfigurationError(f"Unknown component: {comp}")
                 k += 4
 
             else:
-                raise ValueError(f"Unknown material type: {material}")
+                raise ConfigurationError(f"Unknown material type: {material}")
 
             jj += 1
 
@@ -216,7 +218,7 @@ def read_modes_asc(
                 while len(vals) < n:
                     line = fid.readline()
                     if not line:
-                        raise ValueError(
+                        raise FileFormatError(
                             f"Modes file {filename}: EOF while reading "
                             f"{n} floats (got {len(vals)})"
                         )
@@ -400,7 +402,7 @@ def read_modes_bin(
     with open(filename, "rb") as fid:
         head = fid.read(4)
         if len(head) < 4:
-            raise ValueError(f"Invalid mode file (truncated header): {filename}")
+            raise FileFormatError(f"Invalid mode file (truncated header): {filename}")
         endian = detect_endian(
             head, source=f'read_modes_bin:{os.path.basename(filename)}')
         i4 = np.dtype(endian + 'i4')
@@ -418,7 +420,7 @@ def read_modes_bin(
         NMat = np.fromfile(fid, dtype=i4, count=1)[0]
 
         if Ntot < 0:
-            raise ValueError("Invalid mode file: Ntot < 0")
+            raise FileFormatError("Invalid mode file: Ntot < 0")
         fid.seek(lrecl, 0)
         N = []
         Mater = []
@@ -594,7 +596,7 @@ def read_modes(
             Modes = read_modes_asc(filename, modes)
 
     else:
-        raise ValueError(f"read_modes: Unrecognized file extension {ext}")
+        raise ConfigurationError(f"read_modes: Unrecognized file extension {ext}")
     freq_diff = np.abs(Modes["freqVec"] - freq)
     freq_index = int(np.argmin(freq_diff))
     f_selected = float(Modes["freqVec"][freq_index])

@@ -263,12 +263,12 @@ class TestSignalExcessField:
         import matplotlib.pyplot as plt  # noqa: F401
         from uacpy.visualization.plots import plot_signal_excess
         field, _ = self._tl_field(complex_data=True)
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             plot_signal_excess(field)
         se = sonar.passive_signal_excess_field(
             field, source_level=140.0, noise_level=60.0,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             plot_signal_excess(se.at(depth=50.0))
 
 
@@ -407,7 +407,7 @@ class TestDetectionProbabilityField:
         assert ax.get_xlabel() == 'Range (km)'
         assert 'σ = 5.6 dB' in ax.get_title()
         plt.close(fig)
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigurationError):
             plot_detection_probability(pd.at(depth=0.0))
 
 

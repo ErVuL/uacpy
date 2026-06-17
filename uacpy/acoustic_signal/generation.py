@@ -13,6 +13,8 @@ from typing import Tuple, Literal, Optional
 import warnings
 import math
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def ssrp(Pxx, Fxx, duration=1, scale=1, *,
          n_fft=65536, fs=None, interp='linear'):
@@ -66,16 +68,16 @@ def ssrp(Pxx, Fxx, duration=1, scale=1, *,
     Pxx = np.asarray(Pxx, dtype=float)
     Fxx = np.asarray(Fxx, dtype=float)
     if Pxx.ndim != 1 or Fxx.shape != Pxx.shape:
-        raise ValueError(
+        raise ConfigurationError(
             f"ssrp: Pxx and Fxx must be 1-D arrays of equal length; "
             f"got Pxx.shape={Pxx.shape} and Fxx.shape={Fxx.shape}"
         )
     if Pxx.size < 2:
-        raise ValueError(
+        raise ConfigurationError(
             f"ssrp: Pxx must have at least 2 points (got {Pxx.size})"
         )
     if not np.all(np.diff(Fxx) > 0):
-        raise ValueError("ssrp: Fxx must be strictly increasing")
+        raise ConfigurationError("ssrp: Fxx must be strictly increasing")
 
     if fs is None:
         fs = 2 * Fxx[-1]
@@ -156,7 +158,7 @@ def _resample_psd(Pxx, Fxx, f_target, method):
 
     if method == 'log':
         if Fxx[0] <= 0 or np.any(Pxx <= 0):
-            raise ValueError(
+            raise ConfigurationError(
                 "ssrp: interp='log' requires strictly positive Pxx and Fxx"
             )
         out[in_range] = 10.0 ** np.interp(
@@ -177,7 +179,7 @@ def _resample_psd(Pxx, Fxx, f_target, method):
             bounds_error=False, fill_value=0.0)(f_target[in_range])
         return np.maximum(out, 0.0)
 
-    raise ValueError(
+    raise ConfigurationError(
         f"ssrp: unknown interp={method!r}; "
         "valid: 'linear', 'log', 'pchip', 'nearest'."
     )
@@ -342,7 +344,7 @@ def cans(
         pulse_title = "One-sided exponential"
 
     else:
-        raise ValueError(
+        raise ConfigurationError(
             f"Unknown pulse type: '{pulse_type}'. "
             "Valid types: P, R, A, S, H, N, M, G, T, C, E"
         )
@@ -643,7 +645,7 @@ def bpsk_modulate(
     samples_per_chip = int(fs / chips_per_sec)
 
     if fs / chips_per_sec != samples_per_chip:
-        raise ValueError("samples_per_chip must be an integer")
+        raise ConfigurationError("samples_per_chip must be an integer")
 
     deltat = 1 / fs
     t_chip = np.arange(0, samples_per_chip * deltat, deltat)
@@ -745,7 +747,7 @@ def mseq(m: int) -> np.ndarray:
     >>> scorr = np.real(np.fft.ifft(shat * np.conj(shat)))
     """
     if m < 2 or m > 15 or m != int(m):
-        raise ValueError("m must be an integer between 2 and 15")
+        raise ConfigurationError("m must be an integer between 2 and 15")
 
     m = int(m)
 

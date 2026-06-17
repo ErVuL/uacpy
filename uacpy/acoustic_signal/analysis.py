@@ -8,6 +8,8 @@ import numpy as np
 import scipy.signal as _sig
 import matplotlib.pyplot as plt
 
+from uacpy.core.exceptions import ConfigurationError
+
 from uacpy.core.constants import REFERENCE_PRESSURE_AIR, REFERENCE_PRESSURE_WATER
 
 
@@ -80,7 +82,7 @@ class PPSD:
                 else:
                     signals = [data[:, i] for i in range(data.shape[1])]
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     "PPSD.compute: data must be 1-D, 2-D, or a list of 1-D arrays; "
                     f"got ndim={data.ndim}"
                 )
@@ -89,7 +91,7 @@ class PPSD:
         overlap_samples = int(chunk_size * self.overlap_pct / 100)
         step = chunk_size - overlap_samples
         if step <= 0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"PPSD.compute: overlap_pct ({self.overlap_pct}) too high — "
                 "chunks never advance; require overlap_pct < 100."
             )
@@ -113,7 +115,7 @@ class PPSD:
                 psd_list.append(psd)
 
         if len(psd_list) == 0:
-            raise ValueError(
+            raise ConfigurationError(
                 f"PPSD.compute: no PSD segments computed; "
                 f"seg_duration={self.seg_duration}s vs signal length={len(sig)/fs:.2f}s"
             )
@@ -254,7 +256,7 @@ class SEL:
             List of tuples containing (low, center, high) frequencies for each band.
         """
         if self.fmin <= 0 or self.fmax <= self.fmin:
-            raise ValueError(
+            raise ConfigurationError(
                 f"SEL._generate_frequency_bands: require fmin > 0 and fmax > fmin; "
                 f"got fmin={self.fmin}, fmax={self.fmax}"
             )
@@ -289,7 +291,7 @@ class SEL:
 
         elif self.band_type == "linear":
             if self.num_bands <= 0:
-                raise ValueError(
+                raise ConfigurationError(
                     f"SEL._generate_frequency_bands: num_bands must be a "
                     f"positive integer for linear bands; got {self.num_bands}"
                 )
@@ -304,7 +306,7 @@ class SEL:
                 bands[-1] = (bands[-1][0], bands[-1][1], fmax)
 
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"SEL._generate_frequency_bands: unknown band_type={self.band_type!r}; "
                 "valid: 'octave', 'third_octave', 'linear'"
             )

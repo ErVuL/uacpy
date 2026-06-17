@@ -38,6 +38,7 @@ from uacpy.core.constants import (
 from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
 from uacpy.io.units import m_to_km
+from uacpy.core.exceptions import ConfigurationError
 
 
 _BOUNDARY_TYPE_MAP = {
@@ -91,7 +92,7 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
         return 'C'
     key = resolve_ssp_interp(env, model_interp)
     if key not in _AT_INTERP_TO_CODE:
-        raise ValueError(
+        raise ConfigurationError(
             f"interp_ssp={model_interp!r} not recognised. Valid: "
             f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
         )
@@ -161,11 +162,11 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     # otherwise produce a silently-malformed .ssp file that Bellhop
     # rejects deep in its run.
     if c.ndim != 2:
-        raise ValueError(
+        raise ConfigurationError(
             f"write_ssp: c must be 2-D (n_depth, n_ranges); got shape {c.shape}"
         )
     if c.shape[1] != Npts:
-        raise ValueError(
+        raise ConfigurationError(
             f"write_ssp: len(r_km) = {Npts} does not match c.shape[1] = "
             f"{c.shape[1]} (each column of c must be one profile)"
         )
@@ -292,7 +293,7 @@ def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> Non
         mean depth (m).
     """
     if params is None or len(params) != 4:
-        raise ValueError(
+        raise ConfigurationError(
             "write_fg_params: params must be a 4-tuple (T, S, pH, z_bar)"
         )
     T, S, pH, z_bar = params
@@ -315,11 +316,11 @@ def write_bio_layers(f: TextIO, bio_layers) -> None:
         [(Z1, Z2, f0, Q, a0), ...] per layer.
     """
     if not bio_layers:
-        raise ValueError("bio_layers must be a non-empty list of 5-tuples")
+        raise ConfigurationError("bio_layers must be a non-empty list of 5-tuples")
     f.write(f"{len(bio_layers)}\n")
     for layer in bio_layers:
         if len(layer) != 5:
-            raise ValueError(
+            raise ConfigurationError(
                 "Each bio layer must be a 5-tuple (Z1, Z2, f0, Q, a0)"
             )
         Z1, Z2, f0, Q, a0 = layer
@@ -571,14 +572,14 @@ def write_bottom_section(
                     f"generate it via BOUNCE or OASR first."
                 )
         elif hs.reflection_file is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "at_env_writer: acoustic_type='file' requires reflection_file= "
                 "on the bottom BoundaryProperties (path to a .brc file)."
             )
 
         if emit_reflection_table_block:
             if c_low is None or c_high is None or rmax is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "write_bottom_section: acoustic_type='file' with "
                     "emit_reflection_table_block=True requires "
                     "c_low, c_high, rmax to be passed by the caller."
@@ -929,15 +930,15 @@ def write_fieldflp(
     # Validate profile parameters
     if n_profiles > 1:
         if profile_ranges_km is None:
-            raise ValueError("profile_ranges_km required when n_profiles > 1")
+            raise ConfigurationError("profile_ranges_km required when n_profiles > 1")
         profile_ranges_km = np.asarray(profile_ranges_km, dtype=float)
         if len(profile_ranges_km) != n_profiles:
-            raise ValueError(
+            raise ConfigurationError(
                 f"profile_ranges_km length ({len(profile_ranges_km)}) "
                 f"must equal n_profiles ({n_profiles})"
             )
         if abs(profile_ranges_km[0]) > 1e-9:
-            raise ValueError("First profile range must be 0.0 km")
+            raise ConfigurationError("First profile range must be 0.0 km")
 
     with open(filepath, "w") as f:
         f.write(f"'{title}' ! Title \n")

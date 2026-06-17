@@ -18,10 +18,11 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import resample
 
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 
-def doppler_from_speed(speed_mps, sound_speed_mps=1500.0):
+def doppler_from_speed(speed_mps, sound_speed_mps=DEFAULT_SOUND_SPEED):
     """Doppler scale factor ``a = v/c`` (positive when range is closing)."""
     return float(speed_mps) / float(sound_speed_mps)
 

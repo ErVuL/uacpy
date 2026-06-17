@@ -39,9 +39,11 @@ import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as _mcolors
 from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import (
     Field, Arrivals, Rays, Modes,
     Covariance, Replicas, ReflectionCoefficient, ResultStack,
@@ -59,8 +61,10 @@ from uacpy.visualization.style import (
 ZORDER_SEDIMENT = 2
 ZORDER_RAYS = 2.5
 ZORDER_SURFACE = 4
-ZORDER_RECEIVERS = 5
-ZORDER_SOURCE = 6
+# Above the bottom rendering (fill/markers ≤ 7, seafloor line = 10) so the
+# source/receiver geometry is never occluded by the seabed.
+ZORDER_RECEIVERS = 11
+ZORDER_SOURCE = 12
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +75,7 @@ ZORDER_SOURCE = 6
 def plot_result(result, env: Optional[Environment] = None, **kwargs):
     """Type-dispatch to the right plotter. Used by :meth:`Result.plot`."""
     if isinstance(result, ResultStack):
-        raise TypeError(
+        raise ConfigurationError(
             "plot_result: ResultStack carries multiple slabs — pick one "
             "with stack[i] or stack.at(...) before plotting."
         )
@@ -89,7 +93,7 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
         return plot_replicas(result, **kwargs)
     if isinstance(result, ReflectionCoefficient):
         return plot_reflection_coefficient(result, **kwargs)
-    raise TypeError(
+    raise ConfigurationError(
         f"plot_result: no plotter registered for {type(result).__name__}"
     )
 
@@ -121,9 +125,9 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
         return field.data.real if field.is_complex else field.data, 'Re(p)'
     if value == 'imag':
         if not field.is_complex:
-            raise ValueError("plot_field: value='imag' requires complex data")
+            raise ConfigurationError("plot_field: value='imag' requires complex data")
         return field.data.imag, 'Im(p)'
-    raise ValueError(
+    raise ConfigurationError(
         f"plot_field: unknown value={value!r}; "
         "valid: 'tl', 'mag', 'phase', 'real', 'imag'"
     )
@@ -283,7 +287,7 @@ def plot_field(
 
     if stacked:
         if n_axes != 2 or 'time' not in axes_present:
-            raise ValueError(
+            raise ConfigurationError(
                 "plot_field(stacked=True): requires a 2-D field with a "
                 f"'time' axis; got coords {axes_present}"
             )
@@ -305,7 +309,7 @@ def plot_field(
             figsize=figsize, show_colorbar=show_colorbar,
             contours=contours, **mpl_kw,
         )
-    raise ValueError(
+    raise ConfigurationError(
         f"plot_field: cannot plot a {n_axes}-axis field (coords "
         f"{axes_present}); slice it first with .at(...) / .isel(...) "
         "so 1 or 2 axes remain."
@@ -520,13 +524,13 @@ def plot_signal_excess(
             f"plot_signal_excess: expected Field, got {type(field).__name__}"
         )
     if field.is_complex:
-        raise ValueError(
+        raise ConfigurationError(
             "plot_signal_excess: field must carry real signal excess in "
             "dB — build it with passive_signal_excess_field / "
             "active_signal_excess_field."
         )
     if list(field.coords) != ['depth', 'range']:
-        raise ValueError(
+        raise ConfigurationError(
             "plot_signal_excess: requires canonical ['depth', 'range'] "
             f"coords; got {list(field.coords)} — slice with .at(...) first."
         )
@@ -617,12 +621,12 @@ def plot_detection_probability(
             f"{type(field).__name__}"
         )
     if field.is_complex:
-        raise ValueError(
+        raise ConfigurationError(
             "plot_detection_probability: field must carry real P_D in "
             "[0, 1] — build it with probability_of_detection_field."
         )
     if list(field.coords) != ['depth', 'range']:
-        raise ValueError(
+        raise ConfigurationError(
             "plot_detection_probability: requires canonical "
             f"['depth', 'range'] coords; got {list(field.coords)} — "
             "slice with .at(...) first."
@@ -671,242 +675,6 @@ def plot_detection_probability(
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'])
     return fig, ax
-
-
-def plot_intensity_vectors(
-    field: Field,
-    ax=None,
-    *,
-    env: Optional[Environment] = None,
-    density: Optional[float] = None,
-    stride: int = 8,
-    arrow_scale: str = 'magnitude',
-    cmap: str = 'viridis',
-    arrow_color: str = 'white',
-    show_colorbar: bool = True,
-    title: Optional[str] = None,
-    figsize: Tuple[float, float] = (10, 5),
-    **mpl_kw,
-):
-    """Acoustic-intensity vector field over ``(depth, range)``.
-
-    Takes a **complex** pressure :class:`Field` (narrowband ``p(d, r)`` — slice
-    a broadband field with :meth:`Field.at` first), derives the active
-    intensity via :func:`uacpy.acoustic_signal.acoustic_intensity`, and draws
-    the energy-flux magnitude ``|I|`` (dB) as a heatmap with intensity-vector
-    arrows on top (length ∝ ``|I|`` by default; see ``arrow_scale``). The arrows
-    reveal where acoustic energy flows — around interference nulls, into shadow
-    zones, down-slope — which a scalar TL map cannot show.
-
-    Both axes are in metres so the arrow angles are physically faithful (energy
-    flow is not distorted by a km/m axis mismatch). Depth is positive down.
-
-    Parameters
-    ----------
-    field : Field
-        Complex pressure with canonical ``coords == {'depth', 'range'}``.
-    ax : matplotlib.axes.Axes, optional
-        Existing axes; a new figure is made when omitted.
-    env : Environment, optional
-        Overlays the seafloor, as in :func:`plot_field`.
-    density : float, optional
-        Seawater density (kg/m³); defaults to ``DENSITY_SEAWATER``.
-    stride : int or (depth_stride, range_stride), optional
-        Sub-sample factor for the arrow grid (every ``stride``-th point). Ocean
-        grids are typically far wider in range than depth, so a 2-tuple lets you
-        thin the two axes independently.
-    arrow_scale : {'magnitude', 'unit'}, optional
-        ``'magnitude'`` (default) scales each arrow's length by the energy-flux
-        magnitude ``|I|`` — the faithful intensity-vector field (arrows shrink to
-        nothing at nulls, where little energy flows). A perceptual ``sqrt``
-        compression is applied so the geometric-spreading falloff doesn't hide
-        the far field. ``'unit'`` draws every arrow the same length (direction
-        only), useful when you want to read the flux direction everywhere.
-    arrow_color : str, optional
-        Quiver colour. Default ``'white'`` (reads well on ``viridis``).
-
-    Notes
-    -----
-    With ``arrow_scale='magnitude'`` the interference nulls need no special
-    handling: ``|I|`` vanishes there, so the arrows shrink to nothing on their
-    own — no cell is hidden or removed.
-    """
-    from uacpy.acoustic_signal.vector import acoustic_intensity
-    from uacpy.core.constants import DENSITY_SEAWATER, PRESSURE_FLOOR
-
-    if not isinstance(field, Field):
-        raise TypeError(
-            f"plot_intensity_vectors: expected Field, got {type(field).__name__}"
-        )
-    if not field.is_complex:
-        raise ValueError(
-            "plot_intensity_vectors: requires a complex pressure Field "
-            "(particle velocity is undefined for a real / TL field)."
-        )
-    if list(field.coords) != ['depth', 'range']:
-        raise ValueError(
-            "plot_intensity_vectors: requires canonical ['depth', 'range'] "
-            f"coords; got {list(field.coords)} — slice with .at(...) first."
-        )
-    if arrow_scale not in ('magnitude', 'unit'):
-        raise ValueError(
-            "plot_intensity_vectors: arrow_scale must be 'magnitude' or "
-            f"'unit', got {arrow_scale!r}")
-
-    rho = DENSITY_SEAWATER if density is None else float(density)
-    intensity = acoustic_intensity(field, density=rho, kind='active')
-    Ir = np.asarray(intensity.range.data, dtype=float)   # (depth, range)
-    Iz = np.asarray(intensity.depth.data, dtype=float)
-    mag = np.hypot(Ir, Iz)
-    mag_db = 10.0 * np.log10(np.maximum(mag, PRESSURE_FLOOR))
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    r = field.coords['range']
-    z = field.coords['depth']
-    im = ax.pcolormesh(r, z, mag_db, cmap=cmap, shading='nearest', **mpl_kw)
-    if show_colorbar:
-        fig.colorbar(im, ax=ax, label='Active intensity |I| (dB re 1 W/m²)',
-                     fraction=0.046, pad=0.02)
-
-    if np.isscalar(stride):
-        sz = sr = max(int(stride), 1)
-    else:
-        sz, sr = max(int(stride[0]), 1), max(int(stride[1]), 1)
-    sl = (slice(None, None, sz), slice(None, None, sr))
-    R, Z = np.meshgrid(r, z)
-    safe = np.where(mag > 0.0, mag, 1.0)
-    dx, dy = Ir / safe, Iz / safe               # unit direction
-    if arrow_scale == 'magnitude':
-        ref = float(np.percentile(mag, 99.0))
-        length = (np.sqrt(np.clip(mag / ref, 0.0, 1.0))   # sqrt: tame 1/r falloff
-                  if ref > 0.0 else np.zeros_like(mag))
-        U, V = length * dx, length * dy
-    else:   # 'unit' — direction only (validated above)
-        U, V = dx, dy
-    ax.quiver(R[sl], Z[sl], U[sl], V[sl],
-              color=arrow_color, angles='xy', pivot='mid',
-              scale=22, width=0.003)
-
-    ax.set_xlabel('Range (m)')
-    ax.set_ylabel(_coord_label('depth'))
-    if not ax.yaxis_inverted():
-        ax.invert_yaxis()
-    if title:
-        ax.set_title(title)
-    else:
-        pin = _pinned_subtitle(field)
-        auto = 'Acoustic intensity (energy flux)'
-        ax.set_title(f"{auto} — {pin}" if pin else auto)
-    # Seafloor overlay in metres (the shared km helper would mis-place it here).
-    if env is not None and getattr(env, 'bathymetry', None) is not None:
-        bathy = np.asarray(env.bathymetry, dtype=float)
-        if bathy.ndim == 2 and bathy.shape[0] >= 2:
-            ax.plot(bathy[:, 0], bathy[:, 1], color='saddlebrown',
-                    lw=1.5, zorder=6)
-            ax.fill_between(bathy[:, 0], bathy[:, 1], float(z.max()),
-                            color='peru', alpha=0.3, zorder=5)
-        elif bathy.size:
-            ax.axhline(float(bathy.flat[-1]), color='saddlebrown',
-                       lw=1.5, zorder=6)
-    return fig, ax
-
-
-def plot_vector_sensor(
-    field: Field,
-    *,
-    depth: float,
-    range: float,
-    density: Optional[float] = None,
-    doa_floor: float = 0.05,
-    figsize: Tuple[float, float] = (10, 9),
-    title: Optional[str] = None,
-):
-    """Time-domain vector-sensor record at one ``(depth, range)`` point.
-
-    From a **real transient** pressure :class:`Field` ``p(d, r, t)``, shows what a
-    co-located pressure + particle-velocity (vector) sensor measures there: the
-    pressure waveform, the two particle-velocity components, and the
-    instantaneous energy-flux direction (DOA). Separate arrivals — e.g. a direct
-    path and a surface reflection — show up at distinct times with distinct DOAs,
-    which is exactly how a single vector sensor resolves arrival direction.
-
-    Velocity and instantaneous intensity are derived internally via
-    :func:`uacpy.acoustic_signal.particle_velocity_timeseries` and
-    :func:`uacpy.acoustic_signal.instantaneous_intensity`.
-
-    Parameters
-    ----------
-    field : Field
-        Real ``p(d, r, t)`` with exactly ``{'depth', 'range', 'time'}`` axes.
-    depth, range : float
-        Receiver location (m); the nearest grid point is used.
-    density : float, optional
-        Seawater density (kg/m³); defaults to ``DENSITY_SEAWATER``.
-    doa_floor : float, optional
-        Hide the DOA where ``|I|`` is below this fraction of its peak (i.e.
-        between arrivals, where the flux direction is meaningless). Default 0.05.
-
-    Returns
-    -------
-    (fig, axes) : the figure and its three stacked Axes.
-    """
-    from uacpy.acoustic_signal.vector import (
-        instantaneous_intensity, particle_velocity_timeseries)
-    from uacpy.core.constants import DENSITY_SEAWATER
-
-    if not isinstance(field, Field):
-        raise TypeError(
-            f"plot_vector_sensor: expected Field, got {type(field).__name__}")
-    if field.is_complex or set(field.axes) != {'depth', 'range', 'time'}:
-        raise ValueError(
-            "plot_vector_sensor: requires a real time-domain p(d, r, t) Field "
-            f"with exactly {{'depth','range','time'}} axes; got {field.axes} "
-            f"(complex={field.is_complex}).")
-
-    rho = DENSITY_SEAWATER if density is None else float(density)
-    vel = particle_velocity_timeseries(field, density=rho)
-    intensity = instantaneous_intensity(field, density=rho)
-
-    iz = int(np.argmin(np.abs(field.coords['depth'] - depth)))
-    ir = int(np.argmin(np.abs(field.coords['range'] - range)))
-
-    def _at_point(arr: np.ndarray) -> np.ndarray:
-        idx = [slice(None)] * arr.ndim
-        idx[field.axes.index('depth')] = iz
-        idx[field.axes.index('range')] = ir
-        return np.asarray(arr)[tuple(idx)]
-
-    t_ms = field.coords['time'] * 1e3
-    p_t = _at_point(field.data)
-    u_r, u_z = _at_point(vel.range.data), _at_point(vel.depth.data)
-    i_r, i_z = _at_point(intensity.range.data), _at_point(intensity.depth.data)
-    mag = np.hypot(i_r, i_z)
-    doa = np.degrees(np.arctan2(i_z, i_r))
-    if mag.max() > 0:
-        doa = np.where(mag < doa_floor * mag.max(), np.nan, doa)
-
-    fig, axes = plt.subplots(3, 1, sharex=True, figsize=figsize,
-                             constrained_layout=True)
-    axes[0].plot(t_ms, p_t, color='black', lw=1.2)
-    axes[0].set_ylabel('Pressure p(t) (Pa)')
-    axes[1].plot(t_ms, u_r, color='C0', lw=1.2, label='$u_{range}$')
-    axes[1].plot(t_ms, u_z, color='C1', lw=1.2, label='$u_{depth}$ (+down)')
-    axes[1].set_ylabel('Particle velocity (m/s)')
-    axes[1].legend(loc='upper right')
-    axes[2].plot(t_ms, doa, color='C3', lw=1.6)
-    axes[2].axhline(0.0, color='gray', lw=0.8, ls=':')
-    axes[2].set_ylim(-90, 90)
-    axes[2].set_ylabel('Energy-flux DOA (deg, + down)')
-    axes[2].set_xlabel('Time (ms)')
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
-    loc = f'z = {depth:g} m, r = {range:g} m'
-    fig.suptitle(title or f'Vector-sensor record ({loc})', fontweight='bold')
-    return fig, axes
 
 
 def _pinned_subtitle(field: Field) -> str:
@@ -997,7 +765,7 @@ def animate_field(
     from uacpy.core.results import Field  # local import to avoid cycle
 
     if not isinstance(field, Field) or field.kind != 'time_series':
-        raise ValueError(
+        raise ConfigurationError(
             "animate_field: needs a Field with kind='time_series' "
             "(real-valued, ``coords`` containing a 'time' axis). "
             f"Got kind={getattr(field, 'kind', None)!r}."
@@ -1005,7 +773,7 @@ def animate_field(
     expected_axes = {'depth', 'range', 'time'}
     if expected_axes - set(field.coords):
         missing = expected_axes - set(field.coords)
-        raise ValueError(
+        raise ConfigurationError(
             f"animate_field: field is missing coord axes {sorted(missing)}. "
             f"Need depth, range, and time — got {list(field.coords)}."
         )
@@ -1138,7 +906,7 @@ def save_animation(
         elif suffix in ('.mp4', '.mov', '.mkv'):
             writer = 'ffmpeg'
         else:
-            raise ValueError(
+            raise ConfigurationError(
                 f"save_animation: cannot infer writer for suffix "
                 f"{suffix!r} — pass `writer=` explicitly. Known "
                 "suffixes: .gif, .mp4, .mov, .mkv."
@@ -1212,7 +980,7 @@ def plot_time_snapshots(
     n_models = len(rows)
     n_times = len(times_s)
     if n_models == 0 or n_times == 0:
-        raise ValueError("plot_time_snapshots: empty fields or times_s.")
+        raise ConfigurationError("plot_time_snapshots: empty fields or times_s.")
 
     fig, axes = plt.subplots(
         n_models, n_times,
@@ -1235,7 +1003,7 @@ def plot_time_snapshots(
     else:
         p_max_per_row = [float(v) for v in p_max]
         if len(p_max_per_row) != n_models:
-            raise ValueError(
+            raise ConfigurationError(
                 f"plot_time_snapshots: p_max sequence length "
                 f"{len(p_max_per_row)} != n_models {n_models}."
             )
@@ -1334,14 +1102,14 @@ def compare(
             )
         axes = list(f.coords)
         if len(axes) != 1:
-            raise ValueError(
+            raise ConfigurationError(
                 f"compare: each field must have exactly 1 surviving axis; "
                 f"{lbl!r} has {axes}"
             )
         if common_axis is None:
             common_axis = axes[0]
         elif axes[0] != common_axis:
-            raise ValueError(
+            raise ConfigurationError(
                 f"compare: axis mismatch — {labels[0]!r} on {common_axis!r}, "
                 f"{lbl!r} on {axes[0]!r}"
             )
@@ -1399,7 +1167,7 @@ def compare_models(
         fields = list(fields.values())
     n = len(fields)
     if n == 0:
-        raise ValueError("compare_models: empty fields list")
+        raise ConfigurationError("compare_models: empty fields list")
     if labels is None:
         labels = [getattr(f, 'model', '') or f"#{i}" for i, f in enumerate(fields)]
     if ncols is None:
@@ -1663,6 +1431,10 @@ def plot_environment(
     *,
     source=None,
     receiver=None,
+    ax=None,
+    bottom_colorbar: bool = True,
+    data_source=True,
+    sea_ice=None,
     figsize: Tuple[float, float] = (10, 5),
 ):
     """Single-panel water column + bottom structure with two colorbars.
@@ -1681,13 +1453,31 @@ def plot_environment(
 
     Two colorbars: ``Water cp`` (Blues) and ``Bottom cp`` (YlOrBr) — each
     on its own dynamic range so neither is washed out by the other.
+
+    Pass ``ax=`` to draw into an existing axis (for composite figures); returns
+    ``(fig, ax)``. ``bottom_colorbar=False`` drops the second (bottom cp)
+    colorbar — useful in narrow/composite panels where the per-node property
+    card already lists the bottom values.
+
+    ``data_source`` adds a licence-required data-source credit footnote (for a
+    standalone figure, ``ax=None``): ``True`` (default) uses ``env.data_sources``
+    (nothing shown if the env carries none); ``None`` / ``False`` hides it; or
+    pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
+
+    ``sea_ice`` overlays a (symbolic, not-to-scale) ice cover at the surface — a
+    concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
+    e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
     """
     from uacpy.core.environment import (
         BoundaryProperties, LayeredBottom,
         RangeDependentBottom, RangeDependentLayeredBottom,
     )
 
-    fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
+    if ax is None:
+        fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
+    else:
+        ax_bathy = ax
+        fig = ax.figure
 
     ssp = env.ssp
 
@@ -2039,7 +1829,7 @@ def plot_environment(
             fontsize=7, family='monospace',
             zorder=20,
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                      alpha=0.95),
+                      alpha=0.6),
         )
         z_max_layer = hs_floor
 
@@ -2078,15 +1868,19 @@ def plot_environment(
             )
         z_max_layer = zmax_plot
 
-    # Two colorbars on opposite sides of the bathy panel: water cp on
-    # the LEFT, bottom cp on the RIGHT. Each on its own dynamic range.
-    # The bottom colorbar is suppressed when the bottom is a single
-    # half-space (no cs gradient — the property card already states cs).
+    # Two colorbars stacked on the RIGHT (water cp inner, bottom cp outer),
+    # each on its own dynamic range — kept off the left so they never collide
+    # with the depth axis (important in composite/`ax=` layouts). The bottom
+    # colorbar is suppressed for a single half-space (the property card states cs).
     fig.colorbar(water_sm, ax=ax_bathy, label='Water cp (m/s)',
-                 location='left', fraction=0.046, pad=0.10)
-    if not isinstance(bottom, BoundaryProperties):
+                 location='right', fraction=0.046, pad=0.02)
+    # Only add the bottom colorbar when the bottom cp actually varies — a single
+    # half-space or a uniform range-dependent bottom carries no gradient (the
+    # property card already states its values), and a second bar just crowds.
+    if (bottom_colorbar and not isinstance(bottom, BoundaryProperties)
+            and bot_cs_max - bot_cs_min > 1e-6):
         fig.colorbar(bottom_sm, ax=ax_bathy, label='Bottom cp (m/s)',
-                     location='right', fraction=0.046, pad=0.02)
+                     location='right', fraction=0.046, pad=0.12)
 
     # Seafloor line on top of the bottom rendering.
     if env.has_range_dependent_bathymetry():
@@ -2120,14 +1914,6 @@ def plot_environment(
         )
         ax_bathy.plot(RR.ravel(), RD.ravel(),
                       zorder=ZORDER_RECEIVERS, **rcv_style)
-        # X-axis label gets a "(receivers: N×M, 1/n×1/m shown)" suffix
-        # so the decimation is honest without occluding any data.
-        if step_r > 1 or step_d > 1:
-            decim = (f"  (receivers: {rd_full.size}×{rr_full.size}, "
-                     f"1/{step_d}×1/{step_r} shown)")
-        else:
-            decim = f"  (receivers: {rd_full.size}×{rr_full.size})"
-        ax_bathy.set_xlabel(f"Range (km){decim}", fontweight='bold')
 
     ax_bathy.set_xlim(*x_range)
     # Tight ylim — surface to a small margin past the deepest seafloor.
@@ -2136,15 +1922,477 @@ def plot_environment(
     # close to the physical water column.
     ax_bathy.set_ylim(0, seafloor_depth * 1.20)
     if not ax_bathy.get_xlabel():
-        ax_bathy.set_xlabel('Range (km)', fontweight='bold')
-    ax_bathy.set_ylabel('Depth (m)', fontweight='bold')
+        ax_bathy.set_xlabel('Range (km)')
+    ax_bathy.set_ylabel('Depth (m)')
     ax_bathy.invert_yaxis()
     ax_bathy.grid(True, alpha=0.3)
+    if sea_ice is not None:
+        _draw_sea_ice(ax_bathy, sea_ice)
     ax_bathy.set_title(f"Bottom — {type(env.bottom).__name__}",
                        fontweight='bold', fontsize=12)
 
-    fig.tight_layout()
+    if ax is None:
+        credit = _credit_attributions(data_source, carrier=env)
+        fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
+        _draw_data_credit(fig, credit, reserve=False)
     return fig, ax_bathy
+
+
+# Professional oceanographic depth ramp (shallow → deep): pale aqua through
+# teal and ocean blue to deep navy. A dependency-free stand-in for cmocean
+# 'deep', and the default for plot_bathymetry_map.
+BATHYMETRY_CMAP = _mcolors.LinearSegmentedColormap.from_list('uacpy_bathy', [
+    '#86c4cf', '#5aa6bd', '#3f86ab', '#2f6c98',
+    '#235485', '#193f6e', '#112c54', '#0a1d3d',
+])
+
+
+def plot_bathymetry_map(
+    lats,
+    lons,
+    depth,
+    *,
+    transect=None,
+    basemap: bool = True,
+    coastline_resolution: str = '50m',
+    graticule: float = 1.0,
+    graticule_minor: Optional[float] = 0.5,
+    cmap=BATHYMETRY_CMAP,
+    relief: bool = True,
+    relief_exag: float = 15.0,
+    contours=None,
+    figsize: Tuple[float, float] = (9, 7.5),
+    ax=None,
+    title: Optional[str] = None,
+    aspect=None,
+    source=None,
+    data_source=True,
+):
+    """Plot a fetched bathymetry grid as a geographic map.
+
+    ``lats`` / ``lons`` are the 1-D axes and ``depth`` the ``(n_lat, n_lon)``
+    array from :func:`uacpy.data.fetch_grid` (``NaN`` = land), with a labelled
+    lat/lon graticule (``graticule`` major spacing, ``graticule_minor`` fine
+    spacing — ``None`` to disable) and an optional A→B ``transect``.
+
+    With ``basemap=True`` (default) the coastline is drawn from **Natural Earth**
+    land polygons — *public domain*: no licence, no attribution, no usage limits.
+    ``coastline_resolution`` is ``'110m'`` / ``'50m'`` (default) / ``'10m'``.
+    ``basemap=False`` draws a plain lon/lat grid.
+
+    ``relief=True`` (default) renders **shaded relief** (hillshade, exaggeration
+    ``relief_exag``) so real seafloor texture shows instead of a smooth dome;
+    ``relief=False`` is a flat colormap. ``contours`` overlays labelled depth
+    contour lines: ``True`` for the default set (30 isobaths, 0–6000 m every
+    200 m), an ``int`` for that many auto levels, or an explicit sequence of
+    depths (m); ``None`` (default) draws none.
+
+    ``aspect`` overrides the axes aspect ratio: ``None`` (default) uses the
+    equirectangular correction (``1/cos(lat)``); pass a number (e.g. ``1`` for
+    equal degree-per-unit scaling) or any Matplotlib aspect value.
+
+    ``data_source`` adds a licence-required data-source credit footnote for a
+    standalone figure (``ax=None``). The depth grid carries no provenance itself,
+    so pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings
+    (``True`` — the default — has nothing to credit here unless one is given).
+
+    Returns ``(fig, ax)``.
+    """
+    from uacpy.visualization.basemap import land_polygons
+
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    dm = np.ma.masked_invalid(depth)
+    lon_rng, lat_rng = (lons.min(), lons.max()), (lats.min(), lats.max())
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    cm = plt.get_cmap(cmap).copy()
+    proj = (lambda la, lo: (lo, la))
+
+    if basemap:
+        rings = land_polygons(resolution=coastline_resolution)
+        cm.set_bad(alpha=0.0)
+        ax.set_facecolor('#d7ebf7')                        # sea
+        pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
+        if rings is not None:                              # land OVER the depth: covers
+            for ring in rings:                             # coastal grid-cell bleed + crisp border
+                ax.fill(ring[:, 0], ring[:, 1], facecolor='#e9e3d4',
+                        edgecolor='0.3', lw=0.6, zorder=2)
+        ax.set_xlim(*lon_rng)
+        ax.set_ylim(*lat_rng)
+        _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
+        ax.set_aspect(aspect if aspect is not None
+                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))  # equirectangular
+    else:
+        cm.set_bad('#d9cdb8')
+        pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
+        ax.set_xlabel("Longitude [°E]")
+        ax.set_ylabel("Latitude [°N]")
+        ax.set_aspect(aspect if aspect is not None else 'equal')
+
+    if contours is not None and contours is not False and dm.count() > 1:
+        levels = list(range(0, 6000, 200)) if contours is True else contours
+        cs = ax.contour(lons, lats, dm, levels=levels, colors='#0c1830',
+                        linewidths=0.8, alpha=0.85, zorder=1.5)
+        ax.clabel(cs, inline=True, fontsize=8)
+
+    if transect is not None:
+        (a_lat, a_lon), (b_lat, b_lon) = transect
+        pa, pb = proj(a_lat, a_lon), proj(b_lat, b_lon)
+        ax.plot([pa[0], pb[0]], [pa[1], pb[1]], '-', color='crimson', lw=2.5,
+                marker='o', mec='k', zorder=3, label='transect')
+        for lbl, (la, lo) in (('A', (a_lat, a_lon)), ('B', (b_lat, b_lon))):
+            ax.annotate(lbl, proj(la, lo), color='crimson', fontweight='bold',
+                        xytext=(6, 6), textcoords='offset points', zorder=3)
+        ax.legend(loc='upper left')
+    if source is not None:
+        s_lat, s_lon = source
+        sp = proj(s_lat, s_lon)
+        ax.plot(sp[0], sp[1], zorder=6, **SOURCE_MARKER_STYLE)
+
+    fig.colorbar(pc, ax=ax, label="Water depth [m]")
+    ax.set_title(title or "Bathymetry", loc='left', fontsize=11, fontweight='bold')
+    if own_fig:
+        credit = _credit_attributions(data_source)
+        fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
+        _draw_data_credit(fig, credit, reserve=False)
+    return fig, ax
+
+
+def plot_overview(
+    env,
+    map_args,
+    *,
+    map_fn=None,
+    transect=None,
+    tl=None,
+    source=None,
+    receiver=None,
+    figsize: Tuple[float, float] = (15.5, 5.2),
+    map_title: str = "Map",
+    tl_title: str = "Transmission loss",
+    env_title: str = "Environment",
+    suptitle: Optional[str] = None,
+    data_source=True,
+    sea_ice=None,
+    map_kwargs: Optional[dict] = None,
+):
+    """One-call composite for a fetched real-world environment.
+
+    Three panels: a regional **map** (left), a **transmission-loss** field (top
+    right) and the **range-dependent environment** (bottom right) — each drawn by
+    the corresponding uacpy plotter via its ``ax=`` argument.
+
+    The left map is **pluggable** via ``map_fn`` — any plotter with a
+    ``(*map_args, ax=, transect=, source=, title=, **map_kwargs)`` interface, such
+    as :func:`plot_bathymetry_map` (default) or :func:`plot_sea_ice_map`.
+
+    Parameters
+    ----------
+    env : Environment
+        The (typically range-dependent) environment for the env panel.
+    map_args : tuple
+        Positional arguments for ``map_fn`` — e.g. ``(lats, lons, depth)`` for
+        :func:`plot_bathymetry_map`, or ``(grid,)`` for :func:`plot_sea_ice_map`.
+    map_fn : callable, optional
+        Left-panel plotter; defaults to :func:`plot_bathymetry_map`. Map-specific
+        options (``contours``, ``aspect``, ``hemi``, …) go in ``map_kwargs``.
+    transect : ((latA, lonA), (latB, lonB)), optional
+        Drawn on the map (the env/TL transect).
+    tl : Field, optional
+        A transmission-loss result; if ``None`` the TL panel is left blank.
+    source, receiver : optional
+        Marked on the environment panel (and the source on the TL panel).
+    map_title, tl_title, env_title, suptitle : str, optional
+        Panel titles and an optional figure suptitle.
+    data_source : default ``True``
+        Data-source credit shown as a footnote under the map. ``True`` uses
+        ``env.data_sources``; ``None`` / ``False`` hides it; or pass an explicit
+        ``Environment`` / ``Result`` / list of ``DataSource`` / strings. See
+        :func:`plot_environment` for the same argument on a single panel.
+    sea_ice : optional
+        Sea-ice cover for the environment panel — a concentration 0–1 or
+        ``(ranges_km, concentration)`` (forwarded to :func:`plot_environment`).
+    map_kwargs : dict, optional
+        Extra keyword arguments forwarded to :func:`plot_bathymetry_map`
+        (e.g. ``coastline_resolution``, ``graticule``).
+
+    Returns ``(fig, (ax_map, ax_tl, ax_env))``.
+    """
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.45, 1.0], hspace=0.55, wspace=0.1)
+    ax_map = fig.add_subplot(gs[:, 0])
+    ax_tl = fig.add_subplot(gs[0, 1])
+    ax_env = fig.add_subplot(gs[1, 1])
+
+    # Left panel: any map drawer with a (transect, source, title, ax) interface —
+    # e.g. plot_bathymetry_map (default) or plot_sea_ice_map. The geographic
+    # source sits at the transect start.
+    geo_source = transect[0] if transect is not None else None
+    (map_fn or plot_bathymetry_map)(
+        *map_args, ax=ax_map, transect=transect, source=geo_source,
+        title=map_title, **(map_kwargs or {}))
+
+    if tl is not None:
+        plot_field(tl, ax=ax_tl, env=env, title=tl_title)
+        if sea_ice is not None:
+            _draw_sea_ice(ax_tl, sea_ice)
+        if source is not None and getattr(source, 'depths', None) is not None:
+            ax_tl.plot(0.0, float(np.atleast_1d(source.depths)[0]), marker='*',
+                       ms=13, color='red', mec='k', zorder=ZORDER_SOURCE)
+    else:
+        ax_tl.text(0.5, 0.5, "no TL result", ha='center', va='center',
+                   transform=ax_tl.transAxes)
+        ax_tl.set_xticks([])
+        ax_tl.set_yticks([])
+
+    plot_environment(env, ax=ax_env, source=source, receiver=receiver,
+                     bottom_colorbar=False, sea_ice=sea_ice)
+    ax_env.set_title(env_title)
+
+    _draw_data_credit(fig, _credit_attributions(data_source, carrier=env),
+                      center_ax=ax_map)
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=13, fontweight='bold')
+    return fig, (ax_map, ax_tl, ax_env)
+
+
+def _credit_attributions(data_source, *, carrier=None):
+    """Resolve a ``data_source`` plotter argument to attribution strings.
+
+    Accepts ``None`` / ``False`` (no credit), ``True`` (use ``carrier`` — the
+    plot's own provenance object), an object with a ``.data_sources`` attribute
+    (an ``Environment`` or ``Result``), an iterable of ``DataSource`` / str, or a
+    single ``DataSource`` / str. Returns the de-duplicated attribution texts.
+    """
+    if not data_source:
+        return []
+    if data_source is True:                       # use the plot's own provenance
+        items = list(getattr(carrier, 'data_sources', None) or [])
+    else:
+        items = getattr(data_source, 'data_sources', None)
+        if items is None:                         # an explicit list / DataSource / str
+            items = (list(data_source)
+                     if isinstance(data_source, (list, tuple, set))
+                     else [data_source])
+    out, seen = [], set()
+    for s in items:
+        attr = (getattr(s, 'attribution', None)
+                or (s if isinstance(s, str) else getattr(s, 'name', None)))
+        if attr and attr not in seen:
+            seen.add(attr)
+            out.append(attr)
+    return out
+
+
+def _draw_data_credit(fig, attributions, *, center_ax=None, reserve=True):
+    """Discreet grey data-source footnote along the figure bottom.
+
+    The licence-**required attribution** for every source used — the way a
+    scientific figure or map credits its data. Centred under ``center_ax`` when
+    given (e.g. the map panel), else bottom-left. ``reserve`` adds bottom margin
+    (set ``False`` when the caller already reserved space via ``tight_layout``).
+    """
+    if not attributions:
+        return
+    if reserve:                                        # one line reserved per source
+        fig.subplots_adjust(bottom=max(0.06 + 0.025 * len(attributions),
+                                       fig.subplotpars.bottom))
+    if center_ax is not None:
+        pos = center_ax.get_position()
+        x, ha = pos.x0 + pos.width / 2.0, 'center'
+    else:
+        x, ha = 0.012, 'left'
+    fig.text(x, 0.012, "\n".join(attributions), ha=ha, va='bottom',
+             fontsize=7, color='0.45', linespacing=1.5)
+
+
+def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
+                     cmap='Blues_r', graticule: float = 5.0, zoom: bool = True,
+                     concentration_label='Sea-ice concentration (fraction)',
+                     title=None, ax=None,
+                     figsize: Tuple[float, float] = (6.5, 6.5)):
+    """Plot a sea-ice concentration grid (0–1, ``NaN`` = land) as a polar map.
+
+    The sibling of :func:`plot_bathymetry_map` for sea ice: ``grid`` is a 2-D
+    concentration array on the NSIDC polar-stereographic grid (e.g.
+    ``uacpy.data.sea_ice_grid(month, hemi='N')``); ice maps to white, open water
+    to blue, land (``NaN``) to a neutral fill. ``transect`` (``((latA, lonA),
+    (latB, lonB))``) and ``source`` (``(lat, lon)``) are given in **lon/lat** and
+    drawn with the *same* crimson A→B line and source-star notation as the depth
+    map (reprojected to the grid via ``hemi``). With ``zoom`` (default) the view
+    is framed to a **regional window** around the transect/source — filling the
+    panel like the depth map — instead of the whole hemisphere. Pass ``ax=`` to
+    compose. Returns ``(fig, ax)``.
+    """
+    from uacpy.data.seaice_local import sea_ice_pixel
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    cm = plt.get_cmap(cmap).copy()
+    cm.set_bad('#b8a98f')                          # land / no-data
+    im = ax.imshow(np.ma.masked_invalid(grid), cmap=cm, vmin=0.0, vmax=1.0,
+                   origin='upper')
+
+    if graticule:                                  # labelled lat/lon graticule
+        sgn = 1 if hemi == 'N' else -1
+        suffix = 'N' if hemi == 'N' else 'S'
+
+        def _line(pts):
+            pts = [p for p in pts if p is not None]
+            if len(pts) > 1:
+                ax.plot([c for _, c in pts], [r for r, _ in pts], color='0.4',
+                        lw=0.6, alpha=0.45, zorder=2)
+        lon_s = np.arange(-180.0, 181.0, 2.0)
+        for lat_c in np.arange(50.0, 90.0, graticule) * sgn:       # parallels
+            _line([sea_ice_pixel((lat_c, lo), hemi=hemi) for lo in lon_s])
+            p0 = sea_ice_pixel((lat_c, 0.0), hemi=hemi)
+            if p0:
+                ax.annotate(f"{abs(int(lat_c))}°{suffix}", (p0[1], p0[0]),
+                            color='0.25', fontsize=7, ha='center', va='center',
+                            zorder=2, bbox=dict(boxstyle='round,pad=0.1',
+                                                fc='white', ec='none', alpha=0.6))
+        lat_s = np.arange(50.0, 89.0, 1.0) * sgn
+        for lon_c in np.arange(-180.0, 180.0, 30.0):               # meridians
+            _line([sea_ice_pixel((la, lon_c), hemi=hemi) for la in lat_s])
+
+    pa = pb = ps = None
+    if transect is not None:
+        (a_lat, a_lon), (b_lat, b_lon) = transect
+        pa = sea_ice_pixel((a_lat, a_lon), hemi=hemi)
+        pb = sea_ice_pixel((b_lat, b_lon), hemi=hemi)
+        if pa and pb:
+            ax.plot([pa[1], pb[1]], [pa[0], pb[0]], '-', color='crimson', lw=2.5,
+                    marker='o', mec='k', zorder=3, label='transect')
+            for lbl, p in (('A', pa), ('B', pb)):
+                ax.annotate(lbl, (p[1], p[0]), color='crimson', fontweight='bold',
+                            xytext=(6, 6), textcoords='offset points', zorder=3)
+            ax.legend(loc='upper left')
+    if source is not None:
+        ps = sea_ice_pixel(source, hemi=hemi)
+        if ps:
+            ax.plot(ps[1], ps[0], zorder=6, **SOURCE_MARKER_STYLE)
+
+    # Frame a regional window around the transect/source (square pixels kept, the
+    # window widened to the panel) so the map fills the axis like the depth map,
+    # rather than showing the whole hemisphere with the region a speck.
+    focus = [p for p in (pa, pb, ps) if p]
+    if zoom and focus:
+        rr = [p[0] for p in focus]
+        cc = [p[1] for p in focus]
+        cy, cx = 0.5 * (min(rr) + max(rr)), 0.5 * (min(cc) + max(cc))
+        half = max(max(rr) - min(rr), max(cc) - min(cc), 6.0) * 0.7 + 16.0
+        ny, nx = np.shape(grid)
+        ax.set_xlim(max(cx - 1.6 * half, -0.5), min(cx + 1.6 * half, nx - 0.5))
+        ax.set_ylim(min(cy + half, ny - 0.5), max(cy - half, -0.5))  # origin='upper'
+
+    fig.colorbar(im, ax=ax, label=concentration_label)
+    ax.set_title(title or "Sea-ice concentration", loc='left', fontsize=11,
+                 fontweight='bold')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():                   # match the depth-map frame
+        spine.set_edgecolor('0.2')
+        spine.set_linewidth(1.0)
+    if own_fig:
+        fig.tight_layout()
+    return fig, ax
+
+
+def _draw_sea_ice(ax, sea_ice):
+    """Sea-ice cover as a thick surface line coloured by concentration.
+
+    ``sea_ice`` is a concentration 0–1 (uniform) or ``(ranges_km, concentration)``
+    (**range-varying** — e.g. an ice edge). Drawn as one bold line riding the water
+    surface, coloured **dark → violet** with the local concentration (dark = thin /
+    open leads, bright violet = consolidated pack). Nothing is drawn for an
+    ice-free section.
+    """
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    if np.isscalar(sea_ice):
+        x0, x1 = ax.get_xlim()
+        rngs = np.array([x0, x1], dtype=float)
+        conc = np.array([float(sea_ice)] * 2, dtype=float)
+    else:
+        rngs, conc = (np.asarray(a, dtype=float) for a in sea_ice)
+    if rngs.size < 2 or not np.isfinite(np.nanmean(conc)) or np.nanmean(conc) <= 0:
+        return
+    lo, hi = ax.get_ylim()                             # inverted: surface = hi
+    ax.set_ylim(lo, hi - 0.06 * (lo - hi))             # headroom for the line
+    pts = np.column_stack([rngs, np.full(rngs.shape, hi)]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    ice_cmap = LinearSegmentedColormap.from_list('ice',
+                                                 ['#05051a', '#3a0d63', '#7a2da8'])
+    lc = LineCollection(segs, cmap=ice_cmap, norm=Normalize(0.0, 1.0),
+                        linewidths=4.5, capstyle='round', zorder=ZORDER_SURFACE)
+    lc.set_array(0.5 * (conc[:-1] + conc[1:]))
+    ax.add_collection(lc)
+    ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right', va='top',
+            fontsize=8, style='italic', color='#5b1a8b', zorder=ZORDER_SOURCE)
+
+
+def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
+    """Draw the depth field as shaded relief (``relief``) or flat ``pcolormesh``.
+
+    Shaded relief reveals real seafloor texture (slopes, canyons, seamounts) and
+    avoids the smooth-"dome" look of a flat sequential colormap on bowl-shaped
+    bathymetry. Returns a mappable for the colorbar. Land (NaN) is transparent.
+    """
+    dm = np.ma.masked_invalid(depth)
+    finite = np.asarray(depth, dtype=float)[np.isfinite(depth)]
+    if (not relief or finite.size < 4 or min(np.shape(depth)) < 3
+            or np.ptp(finite) < 1e-9):
+        return ax.pcolormesh(lons, lats, dm, cmap=cmap, shading='auto',
+                             zorder=zorder)
+
+    from matplotlib.colors import LightSource, Normalize
+    base = plt.get_cmap(cmap)
+    norm = Normalize(float(finite.min()), float(finite.max()))
+    dy = (lats.max() - lats.min()) / lats.size * 111320.0
+    dx = ((lons.max() - lons.min()) / lons.size * 111320.0
+          * np.cos(np.radians(float(lats.mean()))))
+    filled = np.where(np.isnan(depth), norm.vmax, depth)
+    rgb = LightSource(azdeg=315, altdeg=45).shade(
+        filled, cmap=base, blend_mode='soft', vert_exag=exag,
+        dx=dx, dy=dy, norm=norm)
+    rgb[np.isnan(depth), 3] = 0.0                       # land → transparent
+    ax.imshow(rgb, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+              origin='lower', zorder=zorder, interpolation='nearest',
+              aspect='auto')
+    return plt.cm.ScalarMappable(norm=norm, cmap=base)
+
+
+def _draw_graticule(ax, lon_range, lat_range, major, minor, proj):
+    """Labelled lat/lon graticule on a (possibly projected) map axis."""
+    def seq(rng, step):
+        return np.arange(np.ceil(rng[0] / step) * step, rng[1] + 1e-6, step)
+
+    def fmt(v, pos_hemi, neg_hemi):
+        return f"{abs(v):g}°{pos_hemi if v >= 0 else neg_hemi}"
+
+    lon_maj, lat_maj = seq(lon_range, major), seq(lat_range, major)
+    ax.set_xticks([proj(0.0, lo)[0] for lo in lon_maj])
+    ax.set_xticklabels([fmt(lo, 'E', 'W') for lo in lon_maj])
+    ax.set_yticks([proj(la, 0.0)[1] for la in lat_maj])
+    ax.set_yticklabels([fmt(la, 'N', 'S') for la in lat_maj])
+    ax.set_axisbelow(False)                             # graticule on top of the map
+    if minor:
+        ax.set_xticks([proj(0.0, lo)[0] for lo in seq(lon_range, minor)], minor=True)
+        ax.set_yticks([proj(la, 0.0)[1] for la in seq(lat_range, minor)], minor=True)
+        ax.grid(which='minor', color='1.0', lw=0.3, alpha=0.25, zorder=4)
+    ax.grid(which='major', color='1.0', lw=0.6, alpha=0.45, zorder=4)
+    ax.tick_params(which='major', length=5, direction='out', labelsize=9)
+    ax.tick_params(which='minor', length=2.5, direction='out')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('0.2')
+        spine.set_linewidth(1.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2298,7 +2546,7 @@ def plot_reflection_coefficient(
     ``show_phase=True`` overlays the phase ``φ(θ)`` on a twin y-axis
     when the input is narrowband (single frequency)."""
     if not isinstance(rc, ReflectionCoefficient):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_reflection_coefficient: expected ReflectionCoefficient, "
             f"got {type(rc).__name__}"
         )

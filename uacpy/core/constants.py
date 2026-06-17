@@ -8,9 +8,15 @@ conversions used by writers and model wrappers.
 import math
 from enum import Enum
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
+
+# Mean Earth radius (IUGG R1) for spherical great-circle geodesy when
+# sampling external geographic datasets (bathymetry transects, …).
+EARTH_RADIUS_M = 6_371_008.8  # m
 
 # Seawater density for SI particle-velocity / acoustic-intensity physics
 # (Euler relation u = -grad(p)/(i*omega*rho); intensity in W/m²). In kg/m³,
@@ -100,7 +106,9 @@ class BoundaryType(Enum):
             for bt in cls:
                 if bt.value == value_lower:
                     return bt
-            raise ValueError(f"invalid boundary type: {value!r}")
+            raise ConfigurationError(
+                f"invalid boundary type: {value!r}",
+                remediation=f"Use one of {[bt.value for bt in cls]}.")
 
     def to_acoustics_toolbox_code(self) -> str:
         """
@@ -149,7 +157,7 @@ class AttenuationUnits(Enum):
         if isinstance(value, AttenuationUnits):
             return value
         if value == 'm':
-            raise ValueError(
+            raise ConfigurationError(
                 "attenuation_unit 'm' (dB/m with power-law BETA/fT) is "
                 "distinct from 'M' (dB/m). The 'm' variant is rejected by "
                 "every uacpy writer and has no enum member; use 'M' for "
@@ -161,7 +169,9 @@ class AttenuationUnits(Enum):
         try:
             return cls[value.upper()]
         except KeyError:
-            raise ValueError(f"invalid attenuation unit: {value!r}")
+            raise ConfigurationError(
+                f"invalid attenuation unit: {value!r}",
+                remediation="Use one of 'W', 'N', 'F', 'M', 'Q', 'L'.")
 
     def to_char(self) -> str:
         """Return the single-character Acoustics Toolbox code."""

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
@@ -49,13 +50,13 @@ def read_shd_file(filepath: Union[str, Path]):
     freqs = np.asarray(shd['freqVec'], dtype=float)
     nfreq = len(freqs)
     if nfreq == 0:
-        raise ValueError(
+        raise FileFormatError(
             f"read_shd_file: {filepath} declares zero frequencies; the .shd "
             f"file is malformed (every Acoustics-Toolbox writer emits at "
             f"least one frequency record)."
         )
     if nfreq > 1:
-        raise ValueError(
+        raise FileFormatError(
             f"read_shd_file: {filepath} contains {nfreq} frequencies; "
             "use read_shd_bin(filepath) for the full broadband payload "
             "and construct a broadband Field from it."
@@ -260,7 +261,7 @@ def read_shd_bin(
 
         else:
             if ys is None:
-                raise ValueError("ys must be provided if xs is specified")
+                raise ConfigurationError("ys must be provided if xs is specified")
             # 3D / irregular multi-source files are single-frequency (no freq
             # stride in the record index), so freq= cannot select a slice here.
             if freq is not None and len(freqVec) > 1:
@@ -489,7 +490,7 @@ def read_arr_file(filepath: Union[str, Path]):
         elif "'3D'" in text_content:
             is_3d = True
         else:
-            raise ValueError(f"Not a valid arrivals file: {repr(text_content)}")
+            raise FileFormatError(f"Not a valid arrivals file: {repr(text_content)}")
 
         if not is_3d:
             f.close()
@@ -898,7 +899,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
         n_prof = int(fid.readline().strip())
         r_prof = np.fromstring(fid.readline(), sep=" ", count=n_prof)
         if r_prof.size != n_prof:
-            raise ValueError(
+            raise FileFormatError(
                 f"SSP file {filepath}: expected {n_prof} range values on line 2, "
                 f"parsed {r_prof.size}"
             )
@@ -912,7 +913,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
                 continue
             row = [float(t) for t in tokens]
             if len(row) != n_prof:
-                raise ValueError(
+                raise FileFormatError(
                     f"SSP file {filepath}: expected {n_prof} values per row, "
                     f"got {len(row)}"
                 )
@@ -986,7 +987,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     def _read_vec(fid, n):
         vec = np.fromstring(fid.readline(), sep=" ", count=n)
         if vec.size != n:
-            raise ValueError(
+            raise FileFormatError(
                 f"3D SSP file {filepath}: expected {n} values on line, "
                 f"parsed {vec.size}"
             )
@@ -1327,12 +1328,12 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
             raw_tokens.extend(line.strip().split())
 
     if not raw_tokens:
-        raise ValueError(f"RTS file {filepath} appears empty after the title line")
+        raise FileFormatError(f"RTS file {filepath} appears empty after the title line")
 
     # First token is NRr/NRz, then exactly NRr range/depth floats.
     nr = int(raw_tokens[0])
     if len(raw_tokens) < 1 + nr:
-        raise ValueError(
+        raise FileFormatError(
             f"RTS file {filepath} truncated: expected {nr} range/depth values, "
             f"only {len(raw_tokens) - 1} tokens available after count."
         )
@@ -1411,7 +1412,7 @@ def rts_to_pressure(
             p_at_freq[ir] = s0 - s1 * np.exp(-1j * omega * dt)
         p_at_freq = 2.0 * p_at_freq / nt
     else:
-        raise ValueError(
+        raise ConfigurationError(
             f"rts_to_pressure: unknown method {method!r}; "
             f"use 'fft' or 'goertzel'."
         )
@@ -1488,7 +1489,7 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
         rd = np.array([float(x) for x in f.readline().strip().split()])
 
         if len(rd) != nrd:
-            raise ValueError(f"Expected {nrd} receiver depths, got {len(rd)}")
+            raise FileFormatError(f"Expected {nrd} receiver depths, got {len(rd)}")
         data = []
         for line in f:
             line = line.strip()

@@ -12,7 +12,6 @@ Named ``acoustic_signal`` so it does not collide with Python's stdlib
 * ``system_id``  — FRF (transfer-function) estimation
 * ``channel``    — time-domain channel simulation
 * ``modal``      — modal / dispersion (waveguide warping)
-* ``vector``     — particle velocity / acoustic intensity / vector-sensor DOA
 """
 
 from .generation import (
@@ -66,15 +65,6 @@ from .channel import (
     simulate_reception,
 )
 from .modal import modal_group_velocity, unwarp_signal, warp_signal
-from .vector import (
-    VectorComponents,
-    acoustic_intensity,
-    instantaneous_intensity,
-    intensity_doa,
-    intensity_magnitude,
-    particle_velocity,
-    particle_velocity_timeseries,
-)
 from .timefreq import (
     Spectrogram,
     analytic_signal,
@@ -101,7 +91,6 @@ from . import (
     system_id,
     timefreq,
     transforms,
-    vector,
 )
 
 __all__ = [
@@ -128,10 +117,6 @@ __all__ = [
     "impulse_response_from_transfer_function",
     # modal
     "modal_group_velocity", "warp_signal", "unwarp_signal",
-    # vector acoustics (particle velocity / intensity / DOA)
-    "particle_velocity", "acoustic_intensity", "intensity_magnitude",
-    "intensity_doa", "VectorComponents",
-    "particle_velocity_timeseries", "instantaneous_intensity",
     # time-frequency
     "Spectrogram", "analytic_signal", "envelope", "instantaneous_frequency",
     "wigner_ville", "cwt", "inverse_cwt", "cepstrum", "complex_cepstrum",
@@ -140,5 +125,5 @@ __all__ = [
     "decidecade_bands", "decidecade_band_levels", "plot_band_levels",
     # sub-modules
     "generation", "arrays", "active", "transforms", "timefreq", "analysis",
-    "system_id", "channel", "modal", "bands", "vector",
+    "system_id", "channel", "modal", "bands",
 ]

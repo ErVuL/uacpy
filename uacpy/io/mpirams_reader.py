@@ -21,6 +21,7 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Dict
 from scipy.io import FortranFile
+from uacpy.core.exceptions import FileFormatError
 
 
 def read_psif(work_dir: Union[str, Path]) -> Dict:
@@ -51,7 +52,7 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     with FortranFile(str(psif_file), 'r') as f:
         header = f.read_reals(dtype=np.float64)
         if header.size != 8:
-            raise ValueError(
+            raise FileFormatError(
                 f"{psif_file}: header has {header.size} reals, expected 8."
             )
         Nsam = float(header[0])
@@ -66,7 +67,7 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
         frq = f.read_reals(dtype=np.float64).copy()
         rout = f.read_reals(dtype=np.float64).copy()
         if frq.size != nf or rout.size != nr:
-            raise ValueError(
+            raise FileFormatError(
                 f"{psif_file}: header says nf={nf}, nr={nr}; got frq.size="
                 f"{frq.size}, rout.size={rout.size}."
             )

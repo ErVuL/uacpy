@@ -12,6 +12,8 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Union
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def write_inpe(
     filepath: Union[str, Path],
@@ -216,7 +218,7 @@ def write_ssp_file(
     else:
         n_profiles = speeds.shape[1]
         if ranges_km is None:
-            raise ValueError("ranges_km required for range-dependent SSP")
+            raise ConfigurationError("ranges_km required for range-dependent SSP")
         ranges_km = np.asarray(ranges_km)
 
     with open(filepath, 'w') as f:

@@ -34,6 +34,8 @@ from typing import Optional, Union
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 # Canonical convention names — keep these in sync with the table in the
 # module docstring. The values double as the strings the reader output
@@ -110,7 +112,7 @@ def psi_to_travelling_wave(
     ndarray, same shape as ``psi``, complex.
     """
     if convention not in _VALID_CONVENTIONS:
-        raise ValueError(
+        raise ConfigurationError(
             f"unknown PE convention: {convention!r}; valid: "
             f"{sorted(_VALID_CONVENTIONS)}"
         )
@@ -140,7 +142,7 @@ def psi_to_travelling_wave(
         if k0 is None or freq_axis is None:
             # Narrowband ramsurf: a scalar k0 with no freq_axis is OK.
             if k0 is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "convention='ramsurf' requires k0= for the carrier."
                 )
             carrier = np.exp(-1j * float(k0) * ranges_m).reshape(rng_shape_only)

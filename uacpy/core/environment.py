@@ -27,7 +27,7 @@ def _validate_acoustic_type(value, label: str) -> None:
     from uacpy.core.constants import BoundaryType
     try:
         BoundaryType.from_string(value)
-    except (ValueError, KeyError, AttributeError) as exc:
+    except (ConfigurationError, ValueError, KeyError, AttributeError) as exc:
         valid = sorted({bt.value for bt in BoundaryType})
         raise ConfigurationError(
             f"{label}: acoustic_type={value!r} is not recognized. "

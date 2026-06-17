@@ -15,6 +15,7 @@ from typing import Dict, Union
 
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
 def read_reflection_coefficient(
@@ -86,7 +87,7 @@ def read_reflection_coefficient(
                 line = fid.readline().strip()
                 values = line.split()
                 if len(values) < 3:
-                    raise ValueError(
+                    raise FileFormatError(
                         f"Reflection coefficient file {filename}: "
                         f"line {i + 2} has fewer than 3 tokens "
                         f"({line!r}); expected 'theta magnitude phase'."
@@ -99,7 +100,7 @@ def read_reflection_coefficient(
 
             # Validate angles are non-decreasing
             if not np.all(np.diff(theta) >= 0):
-                raise ValueError("Angles must be non-decreasing")
+                raise ConfigurationError("Angles must be non-decreasing")
 
             return {"theta": theta, "R": R, "phi": phi, "n_pts": n_pts}
 

@@ -13,6 +13,7 @@ here.
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.models._pe_phase import (
     psi_to_travelling_wave,
     MPIRAMS, RAMS, RAMSURF,
@@ -112,7 +113,7 @@ def test_ramsurf_narrowband_scalar_k0():
 
 def test_unknown_convention_raises():
     psi = np.zeros((2, 2), dtype=complex)
-    with pytest.raises(ValueError, match="unknown PE convention"):
+    with pytest.raises(ConfigurationError, match="unknown PE convention"):
         psi_to_travelling_wave(
             psi, convention='lytaev_v2', ranges_m=np.array([1.0, 2.0]),
             range_axis=1,
@@ -121,7 +122,7 @@ def test_unknown_convention_raises():
 
 def test_ramsurf_without_k0_raises():
     psi = np.zeros((2, 2), dtype=complex)
-    with pytest.raises(ValueError, match="requires k0"):
+    with pytest.raises(ConfigurationError, match="requires k0"):
         psi_to_travelling_wave(
             psi, convention=RAMSURF, ranges_m=np.array([1.0, 2.0]),
             range_axis=1,

@@ -23,6 +23,7 @@ from typing import Tuple, Union
 import numpy as np
 
 from uacpy.io._fortran_helpers import detect_endian, read_fortran_record
+from uacpy.core.exceptions import FileFormatError
 
 
 def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
@@ -62,7 +63,7 @@ def _read_lz_records(
         file_size = f.tell()
         f.seek(0)
         if file_size < 12:
-            raise ValueError(f"{path}: too short to contain the header record")
+            raise FileFormatError(f"{path}: too short to contain the header record")
 
         probe = f.read(4)
         f.seek(0)
@@ -81,7 +82,7 @@ def _read_lz_records(
         while file_size - f.tell() >= 8 + expected:
             payload = read_fortran_record(f, raw=True, endian=endian)
             if len(payload) != expected:
-                raise ValueError(
+                raise FileFormatError(
                     f"{path}: expected {expected}-byte data record, "
                     f"got {len(payload)}"
                 )
@@ -91,7 +92,7 @@ def _read_lz_records(
             columns.append(col)
 
     if not columns:
-        raise ValueError(f"{path}: no data records found")
+        raise FileFormatError(f"{path}: no data records found")
 
     return lz, np.stack(columns, axis=1)
 

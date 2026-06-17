@@ -51,10 +51,11 @@ _LONG_TIMEOUT_STEMS = {
     "example_22_ram_lytaev_grid",
 }
 
-# Examples that are interactive / demo-only: too slow or output-heavy
-# (large GIFs) to run on every test session. Run them by hand.
+# Examples that are interactive / demo-only or depend on live external
+# services: not suitable as an offline smoke gate. Run them by hand.
 _SKIP_STEMS = {
-    "example_26_wave_propagation",
+    "example_26_wave_propagation",          # output-heavy (large GIFs)
+    "example_37_realworld_environment",     # fetches from live ocean databases
 }
 
 ALL_EXAMPLES = sorted(

@@ -11,6 +11,8 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'DataFetchError',
+    'FileFormatError',
 ]
 
 
@@ -128,4 +130,23 @@ class ConfigurationError(UACPYError):
     flags, missing required kwargs, malformed envs, etc.). The generic
     "bad inputs" exception across the package. Catch via
     ``except ConfigurationError`` or, more broadly, ``except UACPYError``."""
+    pass
+
+
+class DataFetchError(UACPYError):
+    """Raised when an on-demand external-data fetch (bathymetry, SSP,
+    sediment, …) fails: the remote service is unreachable, returns an
+    error or malformed payload, or has no valid data at the requested
+    location. Catch via ``except DataFetchError`` or, more broadly,
+    ``except UACPYError``."""
+    pass
+
+
+class FileFormatError(UACPYError):
+    """Raised when a model I/O file (``.shd``, ``.mod``, ``.grn``, …) is
+    malformed, truncated, or otherwise cannot be parsed — typically a sign
+    the model run produced corrupt/unexpected output. Distinct from
+    :class:`ConfigurationError` (bad user input) since the file is not
+    something the user supplied. Catch via ``except FileFormatError`` or,
+    more broadly, ``except UACPYError``."""
     pass

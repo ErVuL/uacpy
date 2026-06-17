@@ -48,6 +48,7 @@ from uacpy.core.exceptions import (
     InvalidDepthError,
     UnsupportedFeatureError,
     ConfigurationError,
+    DataFetchError,
 )
 
 from uacpy import models
@@ -59,6 +60,7 @@ from uacpy import acoustic_signal
 from uacpy import noise
 from uacpy import sonar
 from uacpy import comms
+from uacpy import data
 from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
@@ -89,6 +91,7 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'DataFetchError',
     'RunMode',
     'PropagationModel',
     'run_parallel',
@@ -101,6 +104,7 @@ __all__ = [
     'noise',
     'sonar',
     'comms',
+    'data',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
     'metrics',

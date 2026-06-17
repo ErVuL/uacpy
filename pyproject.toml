@@ -36,16 +36,32 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
+# The offline-database backend is on by default: a plain `pip install` pulls the
+# readers for every install.sh-downloadable dataset — netCDF4 (GEBCO/WOA23/GlobSed
+# grids), shapely (EMODnet seabed polygons), pyproj (Diesing/sea-ice reprojection)
+# and tifffile (NSIDC sea-ice GeoTIFFs). The live no-auth sources (OpenTopoData,
+# WOA23 OPeNDAP, EMODnet WFS, Natural Earth) and the Diesing raster (read with
+# Pillow, already a Matplotlib dep) need nothing extra.
 dependencies = [
     "numpy>=1.22.0,<3.0",
     "scipy>=1.8.0,<2.0",
     "matplotlib>=3.5.0,<4.0",
+    "netCDF4>=1.6",
+    "shapely>=2.0",
+    "pyproj>=3.4",
+    "tifffile>=2021.1",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=6.0,<9.0",
     "pytest-xdist>=3.0,<4.0",
+]
+# Only the online operational SSP (Copernicus Marine) stays opt-in: it is a heavy
+# stack (xarray/dask/zarr/boto3…) and needs a free account, and install.sh never
+# uses it. Everything else in uacpy.data works from the default install.
+data = [
+    "copernicusmarine>=1.3",
 ]
 dev = [
     "uacpy[test]",
@@ -84,5 +100,6 @@ markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
     "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
+    "requires_network: hits a live external service (uacpy.data fetchers); auto-skipped offline",
     "integration: end-to-end tests that exercise multiple subsystems",
 ]

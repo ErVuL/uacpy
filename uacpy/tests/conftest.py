@@ -6,6 +6,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import socket  # noqa: E402
 import tempfile  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -13,17 +14,40 @@ import pytest  # noqa: E402
 
 import uacpy  # noqa: E402
 
+_HAS_NETWORK = None
+
+
+def _has_network():
+    """One-shot connectivity probe (cached): can we open an outbound socket?"""
+    global _HAS_NETWORK
+    if _HAS_NETWORK is None:
+        try:
+            socket.create_connection(("1.1.1.1", 443), timeout=2).close()
+            _HAS_NETWORK = True
+        except OSError:
+            _HAS_NETWORK = False
+    return _HAS_NETWORK
+
 
 def pytest_collection_modifyitems(items):
-    """OASES ships as a native binary, so every ``requires_oases`` test also
-    needs a binary. Auto-attach ``requires_binary`` to anything marked
-    ``requires_oases`` so ``pytest -m 'not requires_binary'`` (the pure-Python
-    subset) excludes OASES tests too, without each OASES file having to carry
-    both markers."""
+    """Marker bookkeeping:
+
+    * OASES ships as a native binary, so every ``requires_oases`` test also
+      needs a binary → auto-attach ``requires_binary`` (so the pure-Python
+      subset ``-m 'not requires_binary'`` excludes OASES tests too).
+    * ``requires_network`` tests hit live external services (the ``uacpy.data``
+      fetchers); auto-skip them when there is no internet so an offline
+      ``pytest`` run stays green. Run only the network tests with
+      ``-m requires_network``; exclude them with ``-m 'not requires_network'``.
+    """
+    offline_skip = pytest.mark.skip(reason="no network (requires_network)")
+    offline = not _has_network()
     for item in items:
         if (item.get_closest_marker('requires_oases')
                 and not item.get_closest_marker('requires_binary')):
             item.add_marker(pytest.mark.requires_binary)
+        if offline and item.get_closest_marker('requires_network'):
+            item.add_marker(offline_skip)
 
 
 @pytest.fixture(autouse=True)
