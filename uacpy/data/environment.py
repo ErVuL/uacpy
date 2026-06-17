@@ -34,6 +34,30 @@ from uacpy.data.sources import SOURCES
 __all__ = ['fetch_environment']
 
 
+def _source_order(offline, prefer_cache, online, local='local'):
+    """Sources to try, in order: cache-only (offline), cache-then-online
+    (prefer_cache), or online-only."""
+    if offline:
+        return (local,)
+    if prefer_cache:
+        return (local, online)
+    return (online,)
+
+
+def _resolve_cached(call, order):
+    """Call ``call(source)`` for each source in ``order``, falling back to the
+    next only when the cache is absent (``ConfigurationError``). A
+    ``DataFetchError`` (e.g. land / no coverage) is *not* a cache miss and
+    propagates. Returns ``(result, source_used)``."""
+    last = None
+    for src in order:
+        try:
+            return call(src), src
+        except ConfigurationError as exc:
+            last = exc
+    raise last
+
+
 def fetch_environment(
     point: Coordinate,
     *,
@@ -52,6 +76,7 @@ def fetch_environment(
     resolution: str = '1.00',
     bathymetry_source: str = 'api',
     offline: bool = False,
+    prefer_cache: bool = False,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> Environment:
@@ -116,6 +141,14 @@ def fetch_environment(
         grid + WOA23 grids + grain-size samples) with no network — see
         ``install.sh --data``. Requires ``ssp_source='woa23'``; ``bottom='auto'``
         (or a fetch keyword) resolves to the local ``'grainsize'`` sediment.
+    prefer_cache : bool, optional
+        If ``True`` (and ``offline=False``), use the **local cache when it is
+        installed and fall back to the live service when it is not** — per axis:
+        bathymetry tries the local GEBCO grid then ``bathymetry_source``; WOA23
+        SSP tries the local grid then OPeNDAP; ``bottom`` tries the local backend
+        then the online one. Avoids redundant network calls without erroring when
+        a dataset isn't cached. ``offline=True`` takes precedence (cache-only).
+        Default ``False`` (always online unless ``offline``).
     formula, resolution, timeout, verbose
         Forwarded to the sound-speed / bathymetry fetchers.
 
@@ -130,16 +163,17 @@ def fetch_environment(
             f"got {ssp_source!r} (no local cache).",
             remediation="Use ssp_source='woa23', or drop offline=True.",
         )
-    bathy_source = 'local' if offline else bathymetry_source
-    woa_source = 'local' if offline else 'opendap'
-    if transect_to is None:
-        bathymetry = fetch_point_depth(
-            point, source=bathy_source, timeout=timeout, verbose=verbose)
-    else:
-        bathymetry = fetch_transect(
-            point, transect_to, n_points=n_points, source=bathy_source,
-            timeout=timeout, verbose=verbose,
-        )
+    bathy_order = _source_order(offline, prefer_cache, bathymetry_source)
+    woa_order = _source_order(offline, prefer_cache and ssp_source == 'woa23',
+                              'opendap')
+
+    def _fetch_bathy(src):
+        if transect_to is None:
+            return fetch_point_depth(point, source=src, timeout=timeout,
+                                     verbose=verbose)
+        return fetch_transect(point, transect_to, n_points=n_points, source=src,
+                              timeout=timeout, verbose=verbose)
+    bathymetry, bathy_source = _resolve_cached(_fetch_bathy, bathy_order)
 
     if range_dependent_ssp:
         if transect_to is None:
@@ -159,21 +193,24 @@ def fetch_environment(
                 formula=formula, timeout=timeout, verbose=verbose,
             )
         elif ssp_source == 'woa23':
-            ssp = fetch_ssp_transect(
-                point, transect_to, n_points=ssp_n_points, date=date,
-                formula=formula, resolution=resolution, source=woa_source,
-                timeout=timeout, verbose=verbose,
-            )
+            ssp, _ = _resolve_cached(
+                lambda src: fetch_ssp_transect(
+                    point, transect_to, n_points=ssp_n_points, date=date,
+                    formula=formula, resolution=resolution, source=src,
+                    timeout=timeout, verbose=verbose),
+                woa_order)
         else:
             raise ConfigurationError(
                 f"fetch_environment: unknown ssp_source={ssp_source!r}.",
                 remediation="Use 'woa23' or 'copernicus'.",
             )
     else:
-        ssp = _fetch_ssp(
-            point, date=date, ssp_source=ssp_source, formula=formula,
-            resolution=resolution, source=woa_source, timeout=timeout, verbose=verbose,
-        )
+        ssp, _ = _resolve_cached(
+            lambda src: _fetch_ssp(
+                point, date=date, ssp_source=ssp_source, formula=formula,
+                resolution=resolution, source=src, timeout=timeout,
+                verbose=verbose),
+            woa_order)
     if range_dependent_bottom:
         if transect_to is None:
             raise ConfigurationError(
@@ -183,12 +220,13 @@ def fetch_environment(
             )
         bottom_props, bottom_kw = _fetch_bottom(
             bottom, point, transect_to, transect=True, offline=offline,
+            prefer_cache=prefer_cache,
             n_points=bottom_n_points, timeout=timeout, verbose=verbose,
         )
     elif _is_bottom_source(bottom):
         bottom_props, bottom_kw = _fetch_bottom(
             bottom, point, transect=False, offline=offline,
-            timeout=timeout, verbose=verbose,
+            prefer_cache=prefer_cache, timeout=timeout, verbose=verbose,
         )
     else:
         bottom_props, bottom_kw = _resolve_bottom(bottom), None
@@ -329,28 +367,39 @@ _BOTTOM_SOURCE_ID = {'emodnet': 'emodnet', 'grainsize': 'grainsize',
 _BATHY_SOURCE_ID = {'api': 'gebco', 'gmrt': 'gmrt', 'local': 'gebco'}
 
 
-def _fetch_bottom(bottom, *args, transect, offline=False, **kwargs):
+def _fetch_bottom(bottom, *args, transect, offline=False, prefer_cache=False,
+                  **kwargs):
     """Fetch a bottom from a source keyword, with 'auto' fallback.
 
-    ``transect`` selects the point (``False``) or transect (``True``) fetcher;
-    ``offline`` picks the local backends. ``args``/``kwargs`` are forwarded to the
+    ``transect`` selects the point (``False``) or transect (``True``) fetcher.
+    ``offline`` uses local backends only; ``prefer_cache`` tries the local backend
+    then the online one per source (only ``emodnet`` actually differs — the others
+    are cache-or-compute either way). ``args``/``kwargs`` are forwarded to the
     fetcher. Returns ``(bottom, source_keyword)`` so the caller can record which
     source resolved. In 'auto', a source with no coverage (or no installed cache)
     falls through to the next.
     """
-    registry = _bottom_registry(offline=offline)
     idx = 1 if transect else 0
     source = bottom.lower() if _is_bottom_source(bottom) else 'auto'
+    local = offline or prefer_cache
     if source == 'auto':
-        order = _OFFLINE_AUTO_BOTTOM_ORDER if offline else _AUTO_BOTTOM_ORDER
+        order = _OFFLINE_AUTO_BOTTOM_ORDER if local else _AUTO_BOTTOM_ORDER
     else:
         order = (source,)
+    local_reg = _bottom_registry(offline=True) if local else None
+    online_reg = None if offline else _bottom_registry(offline=False)
     last_error = None
     for name in order:
-        try:
-            return registry[name][idx](*args, **kwargs), name
-        except (DataFetchError, ConfigurationError) as exc:
-            last_error = exc
+        tried = []
+        for reg in (local_reg, online_reg):           # cache first, then online
+            fn = reg[name][idx] if (reg is not None and name in reg) else None
+            if fn is None or fn in tried:             # skip the cache-or-compute dups
+                continue
+            tried.append(fn)
+            try:
+                return fn(*args, **kwargs), name
+            except (DataFetchError, ConfigurationError) as exc:
+                last_error = exc
     raise last_error
 
 

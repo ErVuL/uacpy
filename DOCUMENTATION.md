@@ -610,6 +610,11 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
 - `offline=True` needs `ssp_source='woa23'`. Offline `bottom='auto'` tries the
   local **EMODnet** polygons (European seas) then the global **grain-size** DB;
   `bottom='emodnet'` / `'grainsize'` force one. All are commercial-use clean.
+- `prefer_cache=True` (with `offline=False`) is the middle ground: **use the
+  local cache where installed, fall back to the live service where not** — per
+  axis (bathymetry → local GEBCO grid then `bathymetry_source`; WOA23 → local
+  grid then OPeNDAP; bottom → local backend then online). Avoids redundant
+  downloads without erroring on an uncached dataset. `offline=True` overrides it.
 - The local grain-size samples are **sparse points** (nearest-neighbour with a
   `max_distance_km` guard), gappier than EMODnet's continuous European-seas
   polygons — so EMODnet is preferred where it has coverage.

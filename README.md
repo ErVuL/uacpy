@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml"><img src="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python 3.12+"></a>
   <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="GPLv3 License"></a>
   <a href="#"><img src="https://img.shields.io/badge/Status-Beta-yellow.svg" alt="Beta"></a>
   <a href="#"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(WSL)-lightgrey.svg" alt="Platform"></a>
@@ -351,8 +351,7 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 ### 🔮 Future scope
 
 - **Model features** — coverage of every native model option, GPU acceleration for more models, full 3‑D propagation.
-- **Environmental data** — global bathymetry (GEBCO, SRTM), NOAA / IOOS / CMEMS oceanographic fields, on‑the‑fly extraction / caching / mesh generation.
-- **Framework** — scenario‑based batch simulations, reproducible experiment containers, interactive TL / mode dashboards.
+- **GUI** — scenario‑based simulations, interactive TL / mode / noise level / ...,  dashboards.
 
 
 ## 🙏 Acknowledgments
@@ -485,21 +484,4 @@ etc.), the maintainer can be reached at:
 - https://github.com/marcuskd/pyram
 - https://github.com/org-arl/UnderwaterAcoustics.jl
 - https://github.com/SPECFEM
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
