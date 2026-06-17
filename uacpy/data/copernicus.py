@@ -6,10 +6,9 @@ Copernicus Marine Service gives *date-specific* conditions: reanalysis for
 past dates, analysis/forecast for recent/near-future ones. Same output
 contract — a :class:`~uacpy.core.environment.SoundSpeedProfile`.
 
-This source is optional. It requires the ``copernicusmarine`` toolbox and a
-free Copernicus Marine account:
+The ``copernicusmarine`` toolbox ships with uacpy (a core dependency); this
+source only additionally needs a free Copernicus Marine account:
 
-    pip install "uacpy[data]"
     copernicusmarine login        # one-time, stores credentials
 
 Temperature comes back as potential temperature (``thetao``); it is used as a
@@ -237,6 +236,7 @@ def _import_copernicusmarine():
         raise DataFetchError(
             "The 'copernicusmarine' toolbox is required for operational SSP "
             "but is not installed.",
-            remediation="pip install \"uacpy[data]\" then run "
-                        "`copernicusmarine login` (free Copernicus account).",
+            remediation="`copernicusmarine` ships with uacpy; reinstall with "
+                        "`pip install -e .`, then run `copernicusmarine login` "
+                        "(free Copernicus account).",
         ) from exc

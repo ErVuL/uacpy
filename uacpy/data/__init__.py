@@ -11,8 +11,12 @@
   NCEI grain-size DB, the Diesing 2020 deep-sea map, a pelagic depth/latitude
   fallback (all surficial), or GlobSed thickness + CRUST1.0 → a layered elastic
   bottom for low-frequency work.
-- **Capstone**: :func:`fetch_environment` assembles all three; ``prefer_cache``
-  picks live-first (default) or cache-first, each falling back to the other.
+- **Surface**: NSIDC sea-ice concentration → an elastic ice-canopy
+  ``BoundaryProperties`` (:func:`fetch_sea_ice_surface`), so an ice-covered
+  point replaces the free surface with a pack-ice boundary.
+- **Capstone**: :func:`fetch_environment` assembles them (``sea_ice=True`` adds
+  the ice surface); ``prefer_cache`` picks live-first (default) or cache-first,
+  each falling back to the other.
 
 Examples
 --------
@@ -23,7 +27,7 @@ Examples
 """
 
 from uacpy.data.bathymetry import (
-    fetch_point_depth, fetch_transect, fetch_grid, transect_length,
+    fetch_bathy, fetch_bathy_transect, fetch_bathy_grid, transect_length,
 )
 from uacpy.data.sound_speed import (
     fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
@@ -63,15 +67,16 @@ from uacpy.data.diesing_local import (
 from uacpy.data.seaice_local import (
     download_seaice_db, fetch_sea_ice_concentration,
     fetch_sea_ice_concentration_transect, sea_ice_grid, sea_ice_pixel,
+    sea_ice_surface, fetch_sea_ice_surface,
 )
 from uacpy.data.environment import fetch_environment
 from uacpy.data.sources import DataSource, SOURCES, citations
 
 __all__ = [
     # bathymetry
-    'fetch_point_depth',
-    'fetch_transect',
-    'fetch_grid',
+    'fetch_bathy',
+    'fetch_bathy_transect',
+    'fetch_bathy_grid',
     'transect_length',
     # sound speed
     'fetch_ssp',
@@ -115,6 +120,8 @@ __all__ = [
     'fetch_sea_ice_concentration_transect',
     'sea_ice_grid',
     'sea_ice_pixel',
+    'sea_ice_surface',
+    'fetch_sea_ice_surface',
     # capstone
     'fetch_environment',
     # provenance / licensing

@@ -149,7 +149,7 @@ def fetch_ssp_transect(
     their own seafloor (constant extrapolation, the usual SSP convention).
 
     Each column costs a few HTTP requests, so ``n_points`` defaults to a
-    modest 6; pair it with a denser ``fetch_transect`` for the bathymetry.
+    modest 6; pair it with a denser ``fetch_bathy_transect`` for the bathymetry.
 
     Parameters mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     """

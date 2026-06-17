@@ -40,9 +40,9 @@ def test_depths_along(monkeypatch):
     assert out.tolist() == [1000.0, 1000.0, 1000.0]
 
 
-def test_fetch_point_depth_dispatches_gmrt(monkeypatch):
+def test_fetch_bathy_dispatches_gmrt(monkeypatch):
     monkeypatch.setattr(gmrt_live, 'http_get', _stub_point(-1234))
-    assert bathymetry.fetch_point_depth((43.2, 7.5), source='gmrt') == 1234.0
+    assert bathymetry.fetch_bathy((43.2, 7.5), source='gmrt') == 1234.0
 
 
 def test_region_grid(monkeypatch, tmp_path):

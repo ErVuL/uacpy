@@ -12,8 +12,10 @@ The bottom is the **sediment stack over the crystalline-crust half-space**
 (``Vs`` retained → elastic). CRUST1.0 carries no attenuation, so ``α`` is
 assigned from nominal defaults (overridable). It is a 1° crustal-scale average —
 excellent for the deep layered/elastic structure, coarse for fine surficial
-detail; combine with GlobSed (:mod:`uacpy.data.globsed_local`) to rescale the
-sediment column, or with the grain-size/EMODnet surficial layer.
+detail; the coarse sediment column is therefore rescaled to the
+higher-resolution **GlobSed** total thickness (:mod:`uacpy.data.globsed_local`)
+**by default**, falling back to CRUST1.0's own column where GlobSed is
+unavailable.
 
 Licensing: CRUST1.0 ships with **no formal licence** — the only stated obligation
 is to cite Laske et al. 2013; commercial terms are unspecified, so verify before
@@ -30,7 +32,7 @@ from uacpy._log import log_message
 from uacpy.core.environment import (
     BoundaryProperties, LayeredBottom, RangeDependentLayeredBottom, SedimentLayer,
 )
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon
 from uacpy.data._http import http_get
@@ -152,6 +154,23 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
     return LayeredBottom(layers=layers, halfspace=halfspace)
 
 
+def _globsed_thickness(point, *, verbose):
+    """GlobSed total sediment thickness (m) at ``point`` for CRUST1.0 rescaling.
+
+    Returns ``None`` when GlobSed is unavailable (dataset not cached) or has no
+    value at the point (land / unmapped) so the caller keeps CRUST1.0's own
+    1°-scale sediment column. GlobSed is the higher-resolution total thickness,
+    used by default to rescale the coarse CRUST1.0 sediment stack.
+    """
+    from uacpy.data.globsed_local import fetch_sediment_thickness
+    try:
+        return fetch_sediment_thickness(point)
+    except (DataFetchError, ConfigurationError):
+        log_message('crust1', f"GlobSed thickness unavailable at {point}; "
+                    "keeping CRUST1.0 native sediment column", verbose=verbose)
+        return None
+
+
 def fetch_crust1_profile(point):
     """Inspect the CRUST1.0 column at a point.
 
@@ -177,23 +196,34 @@ def fetch_crust1_profile(point):
 
 def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                         basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
-                        elastic=True, sediment_thickness=None,
+                        elastic=True, sediment_thickness=None, use_globsed=True,
                         timeout=None, verbose=False):
     """Layered **elastic** bottom from CRUST1.0 at a ``(lat, lon)`` point.
 
     The CRUST1.0 sediment layers over the crystalline-crust half-space, with
     ``Vs`` retained (``elastic=True``). ``sediment_attenuation`` /
     ``basement_attenuation`` set the (nominal) dB/λ losses CRUST1.0 lacks.
-    ``sediment_thickness`` (m) rescales the sediment column — e.g. pass a GlobSed
-    value for a higher-resolution total thickness. ``timeout`` is ignored
-    (offline) for signature parity with the network bottom fetchers.
+
+    The coarse 1° CRUST1.0 sediment column is rescaled to a higher-resolution
+    **GlobSed** total thickness by default (``use_globsed=True``); pass an
+    explicit ``sediment_thickness`` (m) to override, or ``use_globsed=False`` to
+    keep CRUST1.0's own column. Where GlobSed is not cached or has no value at
+    the point, CRUST1.0's native thickness is kept. The returned bottom carries
+    ``.sediment_thickness_source`` (``'globsed'`` or ``None``) recording which
+    was used. ``timeout`` is ignored (offline) for signature parity with the
+    network bottom fetchers.
     """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
+    globsed_applied = False
+    if sediment_thickness is None and use_globsed:
+        sediment_thickness = _globsed_thickness(point, verbose=verbose)
+        globsed_applied = sediment_thickness is not None
     bottom = _layered_from_column(
         bnds, vp, vs, rho, sediment_attenuation=sediment_attenuation,
         basement_attenuation=basement_attenuation, elastic=elastic,
         sediment_thickness=sediment_thickness)
+    bottom.sediment_thickness_source = 'globsed' if globsed_applied else None
     log_message('crust1', f"CRUST1.0 at {lat:.2f}, {lon:.2f} → {bottom!r}",
                 verbose=verbose)
     return bottom
@@ -202,15 +232,25 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
 def fetch_bottom_crust1_transect(start, end, *, n_points=6,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
-                                 elastic=True, timeout=None, verbose=False):
-    """Range-dependent layered bottom from CRUST1.0 along ``start`` → ``end``."""
+                                 elastic=True, use_globsed=True,
+                                 timeout=None, verbose=False):
+    """Range-dependent layered bottom from CRUST1.0 along ``start`` → ``end``.
+
+    Each profile rescales its CRUST1.0 sediment column to the local GlobSed
+    thickness by default (``use_globsed``); the result carries
+    ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
+    """
     from uacpy.data.bathymetry import _geodesic_waypoints
     lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
     profiles = [
         fetch_bottom_crust1((la, lo), sediment_attenuation=sediment_attenuation,
                             basement_attenuation=basement_attenuation,
-                            elastic=elastic)
+                            elastic=elastic, use_globsed=use_globsed)
         for la, lo in zip(lats, lons)
     ]
-    return RangeDependentLayeredBottom(ranges=np.asarray(ranges_m),
-                                       profiles=profiles)
+    rdl = RangeDependentLayeredBottom(ranges=np.asarray(ranges_m),
+                                      profiles=profiles)
+    rdl.sediment_thickness_source = (
+        'globsed' if any(getattr(p, 'sediment_thickness_source', None) == 'globsed'
+                         for p in profiles) else None)
+    return rdl

@@ -10,8 +10,10 @@ not a per-date observation.
 
 Sea ice matters acoustically at high latitudes: it replaces the wind-roughened
 free surface with an ice cover (different scattering, suppressed wind noise).
-This backend exposes the *data*; whether/how to set the surface boundary from it
-is left to the caller.
+:func:`sea_ice_surface` turns a fetched concentration into the elastic
+``BoundaryProperties`` an ice canopy presents to the water column, and
+:func:`fetch_sea_ice_surface` does the fetch-and-convert in one call (used by
+``fetch_environment(sea_ice=True)``).
 
 The grids are NSIDC polar-stereographic GeoTIFFs (North EPSG:3411, South
 EPSG:3412, 25 km); reading them needs ``tifffile`` and the lon/lat → polar
@@ -27,6 +29,12 @@ from typing import Optional
 import numpy as np
 
 from uacpy._log import log_message
+from uacpy.core.constants import (
+    SEA_ICE_COMPRESSIONAL_ATTENUATION, SEA_ICE_COMPRESSIONAL_SPEED,
+    SEA_ICE_DENSITY, SEA_ICE_EDGE_CONCENTRATION, SEA_ICE_SHEAR_ATTENUATION,
+    SEA_ICE_SHEAR_SPEED,
+)
+from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
@@ -35,7 +43,7 @@ from uacpy.data._time import parse_date
 
 __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
            'fetch_sea_ice_concentration_transect', 'sea_ice_grid',
-           'sea_ice_pixel']
+           'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface']
 
 INDEX_FILE = 'seaice_climatology.pkl'
 _BASE_URL = 'https://noaadata.apps.nsidc.org/NOAA/G02135'
@@ -183,6 +191,49 @@ def fetch_sea_ice_concentration(point: Coordinate, date=None, *,
             remediation="Pick an offshore point.",
         )
     return float(conc)
+
+
+def sea_ice_surface(
+    concentration: float, *,
+    threshold: float = SEA_ICE_EDGE_CONCENTRATION,
+) -> Optional[BoundaryProperties]:
+    """Ice concentration (0-1) → the elastic surface the canopy presents.
+
+    Above ``threshold`` (default the NSIDC 15 % ice-edge), returns a
+    half-space :class:`~uacpy.core.environment.BoundaryProperties` for a
+    homogeneous Arctic pack-ice canopy — compressional 3500 m/s, shear 1800
+    m/s, density 0.9 g/cm³, attenuations 0.5 / 1.0 dB/λ (Jensen, Kuperman,
+    Porter & Schmidt, *Computational Ocean Acoustics*). Below the threshold the
+    surface is open water, so the function returns ``None`` (leave the
+    free-surface default in place). The canopy is treated as a single
+    homogeneous elastic boundary regardless of concentration; partial cover is
+    reduced to the present/absent ice-edge decision rather than a mixed surface.
+    """
+    if concentration < threshold:
+        return None
+    return BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=SEA_ICE_COMPRESSIONAL_SPEED,
+        shear_speed=SEA_ICE_SHEAR_SPEED,
+        density=SEA_ICE_DENSITY,
+        attenuation=SEA_ICE_COMPRESSIONAL_ATTENUATION,
+        shear_attenuation=SEA_ICE_SHEAR_ATTENUATION,
+    )
+
+
+def fetch_sea_ice_surface(
+    point: Coordinate, date=None, *, month: Optional[int] = None,
+    threshold: float = SEA_ICE_EDGE_CONCENTRATION,
+) -> Optional[BoundaryProperties]:
+    """Fetch the climatological ice concentration and convert it to a surface.
+
+    Combines :func:`fetch_sea_ice_concentration` and :func:`sea_ice_surface`:
+    returns the elastic ice ``BoundaryProperties`` where the point is
+    ice-covered (concentration ≥ ``threshold``) for the given month, or ``None``
+    for open water. Used by ``fetch_environment(sea_ice=True)``.
+    """
+    conc = fetch_sea_ice_concentration(point, date, month=month)
+    return sea_ice_surface(conc, threshold=threshold)
 
 
 def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:

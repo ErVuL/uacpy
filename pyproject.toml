@@ -40,6 +40,12 @@ dependencies = [
     "numpy>=1.22.0,<3.0",
     "scipy>=1.8.0,<2.0",
     "matplotlib>=3.5.0,<4.0",
+    # External ocean data
+    "copernicusmarine>=1.3",
+    "netCDF4>=1.6",
+    "shapely>=2.0",
+    "pyproj>=3.4",
+    "tifffile>=2021.1",
 ]
 
 [project.optional-dependencies]
@@ -47,20 +53,7 @@ test = [
     "pytest>=6.0,<9.0",
     "pytest-xdist>=3.0,<4.0",
 ]
-# External ocean data. The live-API no-auth sources (GEBCO point depths via
-# OpenTopoData, WOA23 climatology via OPeNDAP, EMODnet WFS, Natural Earth
-# coastline) need no extra packages; these extras add the operational SSP toolbox
-# (copernicusmarine), the offline GEBCO/WOA23 grid readers (netCDF4), the offline
-# EMODnet seabed-polygon point-in-polygon backend (shapely) and the Diesing 2020
-# deep-sea lithology raster (pyproj for the Wagner IV reprojection; the LZW
-# GeoTIFF is read with Pillow, already a Matplotlib dependency).
-data = [
-    "copernicusmarine>=1.3",
-    "netCDF4>=1.6",
-    "shapely>=2.0",
-    "pyproj>=3.4",
-    "tifffile>=2021.1",
-]
+
 dev = [
     "uacpy[test]",
     "pytest-cov",

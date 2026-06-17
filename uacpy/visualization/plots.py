@@ -1971,7 +1971,7 @@ def plot_bathymetry_map(
     """Plot a fetched bathymetry grid as a geographic map.
 
     ``lats`` / ``lons`` are the 1-D axes and ``depth`` the ``(n_lat, n_lon)``
-    array from :func:`uacpy.data.fetch_grid` (``NaN`` = land), with a labelled
+    array from :func:`uacpy.data.fetch_bathy_grid` (``NaN`` = land), with a labelled
     lat/lon graticule (``graticule`` major spacing, ``graticule_minor`` fine
     spacing — ``None`` to disable) and an optional A→B ``transect``.
 

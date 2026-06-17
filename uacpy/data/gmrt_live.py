@@ -70,7 +70,7 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
 
     Fetches a GMRT GridServer COARDS subset, then samples it (nearest node) onto
     the requested ``n_lat × n_lon`` mesh so the return shape matches
-    :func:`uacpy.data.fetch_grid`.
+    :func:`uacpy.data.fetch_bathy_grid`.
     """
     import tempfile
     from pathlib import Path

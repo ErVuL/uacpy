@@ -33,7 +33,7 @@ def test_citations_from_ids():
 @pytest.fixture
 def stub_fetchers(monkeypatch):
     ssp = SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0])
-    monkeypatch.setattr(env_mod, 'fetch_point_depth', lambda point, **kw: 2000.0)
+    monkeypatch.setattr(env_mod, 'fetch_bathy', lambda point, **kw: 2000.0)
     monkeypatch.setattr(env_mod, 'fetch_ssp', lambda point, **kw: ssp)
 
 

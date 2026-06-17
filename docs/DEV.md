@@ -383,11 +383,11 @@ Module map (one per concern):
 
 - `_http.py` — `http_get(url, …)`, the only network call (stdlib `urllib`),
   wraps failures in `DataFetchError`. No third-party HTTP dep.
-- `bathymetry.py` — GEBCO via OpenTopoData (`fetch_point_depth`, `fetch_transect`).
+- `bathymetry.py` — GEBCO via OpenTopoData (`fetch_bathy`, `fetch_bathy_transect`).
 - `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
   + the shared `assemble_range_dependent(columns, ranges)` helper.
-- `copernicus.py` — Copernicus Marine operational SSP (optional `uacpy[data]` dep,
-  lazy-imported).
+- `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` core
+  dep, lazy-imported; needs a free Copernicus account + `copernicusmarine login`).
 - `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
 - `seabed.py` / `lithology.py` — EMODnet (CC-BY) and Dutkiewicz (CC-BY-NC) bottom.
 - `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).

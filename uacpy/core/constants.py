@@ -43,6 +43,19 @@ C_HIGH_FACTOR = 1.05
 DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
 DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
+# Sea-ice canopy as a homogeneous elastic surface. Canonical Arctic pack-ice
+# values from Jensen, Kuperman, Porter & Schmidt, *Computational Ocean
+# Acoustics* (the ice cover modelled as a homogeneous elastic medium): cp 3500
+# m/s, cs 1800 m/s, ρ 900 kg/m³, αp 0.5 dB/λ, αs 1.0 dB/λ. Typical ranges
+# (Etter, *Underwater Acoustic Modeling*): cp 1300-3900, cs 1400-1900 m/s.
+SEA_ICE_COMPRESSIONAL_SPEED = 3500.0       # m/s
+SEA_ICE_SHEAR_SPEED = 1800.0               # m/s
+SEA_ICE_DENSITY = 0.9                      # g/cm³
+SEA_ICE_COMPRESSIONAL_ATTENUATION = 0.5    # dB/wavelength
+SEA_ICE_SHEAR_ATTENUATION = 1.0            # dB/wavelength
+# NSIDC standard ice-edge definition: ≥15 % concentration counts as ice-covered.
+SEA_ICE_EDGE_CONCENTRATION = 0.15
+
 # Floor applied whenever we take 20*log10(|p|).
 PRESSURE_FLOOR = 1e-30
 

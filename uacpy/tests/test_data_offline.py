@@ -14,7 +14,8 @@ netCDF4 = pytest.importorskip('netCDF4')
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import (
-    _cache, emodnet_local, gebco_local, sediment_db, sound_speed, woa23_local,
+    _cache, crust1_local, emodnet_local, gebco_local, globsed_local, sediment_db,
+    sound_speed, woa23_local,
 )
 
 _FILL = 9.96921e36
@@ -50,8 +51,12 @@ def _write_woa(cache):
         name = 't_an' if var[0] == 't' else 's_an'
         ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'))[:] = arr
         ds.close()
-    mk('t00', [18, 16, 13, 8, 5.0])
-    mk('s00', [36, 36.1, 36.2, 35.5, 35.0])
+    # Period 00 = annual (date-less tests); 03 = March, so the sea-ice tests
+    # (which require a date) resolve WOA from the cache instead of falling
+    # through to a live OPeNDAP request.
+    for period in ('00', '03'):
+        mk(f't{period}', [18, 16, 13, 8, 5.0])
+        mk(f's{period}', [36, 36.1, 36.2, 35.5, 35.0])
 
 
 def _write_sediment(cache):
@@ -79,6 +84,32 @@ def _write_emodnet(cache):
         pickle.dump({'codes': [2], 'wkb': [shapely.to_wkb(poly)]}, fh)
 
 
+def _write_globsed(cache):
+    gdir = cache / 'globsed'; gdir.mkdir(parents=True)
+    ds = netCDF4.Dataset(gdir / 'GlobSed-v3.nc', 'w')
+    ds.createDimension('lat', 181); ds.createDimension('lon', 361)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = np.linspace(-90, 90, 181)
+    ds.createVariable('lon', 'f8', ('lon',))[:] = np.linspace(-180, 180, 361)
+    ds.createVariable('z', 'f4', ('lat', 'lon'))[:] = 500.0      # uniform 500 m
+    ds.close()
+
+
+def _write_crust1(cache):
+    cdir = cache / 'crust1'; cdir.mkdir(parents=True)
+    n = 180 * 360
+    rows = {                                       # uniform ocean column, 1 km sed
+        'crust1.bnds': [0, -4, -4, -5, -5, -5, -10, -20, -30],
+        'crust1.vp':   [1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1],
+        'crust1.vs':   [0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5],
+        'crust1.rho':  [1.02, 0.9, 1.9, 0, 0, 2.6, 2.8, 3.0, 3.3],
+    }
+    # Every cell is identical, so repeat one formatted line — far cheaper than
+    # np.savetxt over the full 64800×9 grid in this per-test fixture.
+    for name, row in rows.items():
+        line = ' '.join('%g' % v for v in row) + '\n'
+        (cdir / name).write_text(line * n)
+
+
 @pytest.fixture
 def cache(tmp_path, monkeypatch):
     """A synthetic, fully-populated offline cache wired via $UACPY_DATA_CACHE."""
@@ -93,6 +124,27 @@ def cache(tmp_path, monkeypatch):
     _write_woa(root)
     _write_sediment(root)
     _write_emodnet(root)
+    return root
+
+
+@pytest.fixture
+def seismic_cache(tmp_path, monkeypatch):
+    """Cache with the GlobSed + CRUST1.0 layered-bottom stack (and GEBCO/WOA).
+
+    Kept separate from ``cache`` so the bulky GlobSed grid / CRUST1.0 columns are
+    built only for the one capstone test that needs the layered seabed, not on
+    every offline test.
+    """
+    root = tmp_path / 'seismic_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    gebco_local._GRID.clear()
+    woa23_local._DATASETS.clear()
+    crust1_local._MODEL.clear()
+    globsed_local._GRID.clear()
+    _write_gebco(root)
+    _write_woa(root)
+    _write_globsed(root)
+    _write_crust1(root)
     return root
 
 
@@ -125,14 +177,14 @@ def test_gebco_region_grid_marks_land_nan(cache):
 
 
 def test_bathymetry_source_local(cache):
-    assert data.fetch_point_depth((12.0, 34.0), source='local') == 1500.0
-    t = data.fetch_transect((1.0, 1.0), (2.0, 2.0), n_points=4, source='local')
+    assert data.fetch_bathy((12.0, 34.0), source='local') == 1500.0
+    t = data.fetch_bathy_transect((1.0, 1.0), (2.0, 2.0), n_points=4, source='local')
     assert t.shape == (4, 2) and np.all(t[:, 1] == 1500.0)
 
 
 def test_bathymetry_bad_source_raises():
     with pytest.raises(ConfigurationError, match='source'):
-        data.fetch_point_depth((1.0, 2.0), source='nope')
+        data.fetch_bathy((1.0, 2.0), source='nope')
 
 
 # ── WOA23 local ─────────────────────────────────────────────────────────────
@@ -213,6 +265,44 @@ def test_fetch_environment_prefer_cache(cache):
     assert env.ssp.n_depths >= 5
     assert env.bottom.grain_size_phi == 3.0
     assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
+
+
+def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
+    # bottom='crust1' rescales its column with GlobSed by default, so both
+    # CRUST1.0 and GlobSed appear in the environment's provenance.
+    env = data.fetch_environment((30.5, -40.5), prefer_cache=True, bottom='crust1')
+    ids = [s.id for s in env.data_sources]
+    assert ids == ['gebco', 'woa23', 'crust1', 'globsed']
+    assert env.bottom.total_thickness() == pytest.approx(500.0)
+
+
+def test_fetch_environment_sea_ice(cache, monkeypatch):
+    # sea_ice=True sets the surface from the climatological concentration; an
+    # ice-covered point gets an elastic canopy + 'seaice' provenance.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None: 0.85)
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 prefer_cache=True, bottom='auto', sea_ice=True)
+    assert env.surface.acoustic_type == 'half-space'
+    assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface()
+    assert 'seaice' in [s.id for s in env.data_sources]
+
+
+def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
+    # Below the ice-edge → free surface untouched, no 'seaice' provenance.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None: 0.0)
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 prefer_cache=True, bottom='auto', sea_ice=True)
+    assert env.surface.acoustic_type == 'vacuum'
+    assert 'seaice' not in [s.id for s in env.data_sources]
+
+
+def test_fetch_environment_sea_ice_requires_date(cache):
+    with pytest.raises(ConfigurationError, match='sea_ice=True needs date'):
+        data.fetch_environment((30.5, -40.5), prefer_cache=True, sea_ice=True)
 
 
 def test_offline_emodnet_local_bottom(cache):

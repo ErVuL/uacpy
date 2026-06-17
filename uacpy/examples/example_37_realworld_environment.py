@@ -15,7 +15,7 @@ OBJECTIVE:
     Region: the NE Atlantic / Reykjanes mid-ocean ridge (international waters).
 
 FEATURES DEMONSTRATED:
-    ✓ uacpy.data.fetch_grid (regional bathymetry, land → NaN)
+    ✓ uacpy.data.fetch_bathy_grid (regional bathymetry, land → NaN)
     ✓ uacpy.data.fetch_environment (range-dependent bathymetry + SSP + bottom)
     ✓ uacpy.plot.plot_overview (map · transmission loss · environment, one call)
     ✓ Offline cache (./install.sh --data all): GEBCO, WOA23, grain-size,
@@ -94,7 +94,7 @@ print(f"  offline cache installed: {', '.join(_CACHED) if _CACHED else 'none'}")
 
 def _fetch_grid():
     try:
-        lats, lons, depth = data.fetch_grid(REGION_LAT, REGION_LON,
+        lats, lons, depth = data.fetch_bathy_grid(REGION_LAT, REGION_LON,
                                             n_lat=N_LAT, n_lon=N_LON,
                                             source=GRID_SOURCE)
         print(f"  grid: ok  ({N_LAT}×{N_LON} via {GRID_SOURCE}, "

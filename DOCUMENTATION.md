@@ -304,7 +304,10 @@ uacpy.Environment(
 )
 ```
 
-`env.depth` is a read-only property = `bathymetry[:,1].max()`.
+`env.depth` is a read-only property = `bathymetry[:,1].max()`. `env.max_range`
+is its range-axis sibling = the largest range across the bathymetry/SSP/bottom
+axes (`0.0` if range-independent) — e.g. the transect length for a fetched
+environment, so it sizes a receiver range grid without recomputing the geodesic.
 
 ### `SoundSpeedProfile`
 
@@ -551,10 +554,10 @@ print(uacpy.data.citations(env))      # required attribution for the sources use
 
 | Function | Returns | Source |
 |----------|---------|--------|
-| `fetch_environment(point, *, date=None, ssp_source='woa23', bottom=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, with_absorption=False, …)` | `Environment` | one-call assembly |
-| `fetch_point_depth(point)` · `fetch_transect(start, end, n_points=)` · `fetch_grid(lat_range, lon_range, n_lat=50, n_lon=50)` | depth (m) · `(N,2)` · `(lats, lons, depth)` | GEBCO (`source='api'`) or GMRT multibeam (`source='gmrt'`, higher-res) bathymetry |
+| `fetch_environment(point, *, date=None, ssp_source='woa23', bottom=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, sea_ice=False, with_absorption=False, prefer_cache=False, …)` | `Environment` | one-call assembly (`sea_ice=True` → elastic ice surface from NSIDC) |
+| `fetch_bathy(point)` · `fetch_bathy_transect(start, end, n_points=)` · `fetch_bathy_grid(lat_range, lon_range, n_lat=50, n_lon=50)` | depth (m) · `(N,2)` · `(lats, lons, depth)` | GEBCO (`source='api'`) or GMRT multibeam (`source='gmrt'`, higher-res) bathymetry |
 | `fetch_ssp(point, *, date= \| month=, formula='unesco', resolution='1.00')` · `fetch_ssp_transect(…)` · `fetch_ts_profile(…)` | `SoundSpeedProfile` · 2-D RD profile · `(z, T, S)` | WOA23 climatology |
-| `fetch_ssp_operational(point, date, …)` *(needs `uacpy[data]` + login)* | `SoundSpeedProfile` | Copernicus Marine |
+| `fetch_ssp_operational(point, date, …)` *(needs a free Copernicus account + login)* | `SoundSpeedProfile` | Copernicus Marine |
 | `fetch_ssp_argo(point, date, max_distance_km=, max_days=)` · `fetch_argo_profile(…)` | `SoundSpeedProfile` · dict | Argo float — nearest **real in-situ** profile (Ifremer ERDDAP, free) |
 | `fetch_seabed_substrate(point)` · `fetch_bottom(point)` | dict · `BoundaryProperties` | EMODnet (European seas, CC-BY) |
 | `fetch_sediment_sample(point)` · `fetch_bottom_local(point)` | dict · `BoundaryProperties` | NCEI grain-size DB (worldwide, public domain, offline) |
@@ -573,13 +576,15 @@ print(uacpy.data.citations(env))      # required attribution for the sources use
   `emodnet→grainsize→diesing→pelagic`). All sediment sources permit commercial
   use **except CRUST1.0** (`citations()` flags it). Surficial grain-size/EMODnet
   are high-frequency half-spaces; at a few tens of Hz prefer `'crust1'`
-  (sediment over crystalline basement, with shear), optionally rescaled by GlobSed.
+  (sediment over crystalline basement, with shear), whose coarse 1° sediment
+  column is rescaled to GlobSed total thickness by default (so `'crust1'` lists
+  both CRUST1.0 and GlobSed in `env.data_sources`).
 - A fetched `Environment` carries `env.data_sources`; `citations(env)` prints
   the attribution/citation text for exactly those sources.
 - SSP levels are delivered at their **native** sampling (no resampling); the
   profile is reconciled to the fetched bathymetry depth, and each model
   interpolates it per its own `interp_ssp` scheme.
-- `uacpy.plot.plot_bathymetry_map(...)` renders a `fetch_grid` result on a
+- `uacpy.plot.plot_bathymetry_map(...)` renders a `fetch_bathy_grid` result on a
   Natural Earth coastline map (see §7).
 
 **Offline / local-cache backend.** The same fetchers can read install-time
@@ -593,14 +598,14 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
 
 | Backend selector | Reads from | Needs |
 |---|---|---|
-| `fetch_point_depth(point, source='local')` · `fetch_transect(…, source='local')` · `fetch_grid(…, source='local')` | GEBCO 2025 grid | default install (netCDF4) |
+| `fetch_bathy(point, source='local')` · `fetch_bathy_transect(…, source='local')` · `fetch_bathy_grid(…, source='local')` | GEBCO 2025 grid | default install (netCDF4) |
 | `fetch_ssp(point, source='local')` · `fetch_ts_profile(…, source='local')` | WOA23 grids | default install (netCDF4) |
 | `download_sediment_db()` then `fetch_bottom_local(point)` · `bottom='grainsize'` | NCEI grain-size DB (auto-downloaded + normalized; public domain) | default install (scipy) |
 | `download_emodnet_db()` then `bottom='emodnet'` (offline) | EMODnet seabed substrate polygons (CC-BY, European seas) | default install (shapely) |
 | `download_diesing_db()` then `bottom='diesing'` | Diesing 2020 global deep-sea seafloor lithology (CC-BY, >500 m) | default install (pyproj) |
 | `download_globsed_db()` then `fetch_sediment_thickness(point)` | GlobSed total sediment thickness (NOAA NCEI, public domain) | default install (netCDF4) |
 | `download_crust1_db()` then `bottom='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
-| `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
+| `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` (or `fetch_sea_ice_surface(...)` → elastic ice `BoundaryProperties`) | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
 | `download_coastline()` → `plot_bathymetry_map` / `plot_overview` | Natural Earth coastline (public domain) | default install |
 | `fetch_environment(point, prefer_cache=True, bottom='auto')` | all of the above | default install |
 
@@ -1418,7 +1423,7 @@ want it scoped.
 | `plot_covariance(cov, *, freq_idx=0)` | `Covariance` | OASN spatial covariance heatmap. |
 | `plot_replicas(rep, *, freq_idx=0, sensor_idx=0)` | `Replicas` | MFP replica magnitude over (z, x). |
 | `plot_result(result, env=None, **kw)` | any `Result` | Type-dispatch — used by `Result.plot()`. |
-| `plot_bathymetry_map(lats, lons, depth, *, transect=None, source=None, basemap=True, coastline_resolution='50m', graticule=1.0, graticule_minor=0.5, ...)` | a `uacpy.data.fetch_grid` result | Regional bathymetry map: depth grid (NaN = land) over a **Natural Earth** coastline (public domain) drawn on top, with a labelled lat/lon graticule and an optional `((lat0,lon0),(lat1,lon1))` A→B transect + `(lat,lon)` source star. `basemap=False` → plain lon/lat. |
+| `plot_bathymetry_map(lats, lons, depth, *, transect=None, source=None, basemap=True, coastline_resolution='50m', graticule=1.0, graticule_minor=0.5, ...)` | a `uacpy.data.fetch_bathy_grid` result | Regional bathymetry map: depth grid (NaN = land) over a **Natural Earth** coastline (public domain) drawn on top, with a labelled lat/lon graticule and an optional `((lat0,lon0),(lat1,lon1))` A→B transect + `(lat,lon)` source star. `basemap=False` → plain lon/lat. |
 | `plot_sea_ice_map(grid, *, hemi='N', transect=None, source=None, graticule=5.0, zoom=True, ...)` | a `uacpy.data.sea_ice_grid(month)` result | Polar sea-ice concentration map (NSIDC grid) — the sibling of `plot_bathymetry_map`: ice → white, water → blue, land → neutral, with a reprojected lat/lon graticule and the *same* crimson A→B transect + source-star notation (given in lon/lat). `zoom` (default) frames a regional window around the transect/source so it fills the panel like the depth map. |
 | `plot_overview(env, map_args, *, map_fn=plot_bathymetry_map, transect=None, tl=None, source=None, receiver=None, sea_ice=None, ...)` | a fetched `Environment` + a map | One-call composite: **pluggable** left map (`map_fn` = `plot_bathymetry_map` *or* `plot_sea_ice_map`), TL field (top right) and the range-dependent environment (bottom right). `sea_ice=` (0–1 or `(ranges_km, conc)`) overlays the ice cover on the env + TL panels. |
 | `plot_environment(env, *, source=None, receiver=None, sea_ice=None, data_source=True, ...)` | a fetched/built `Environment` | Single water-column + bottom panel; `sea_ice=` (0–1 or `(ranges_km, conc)`) marks the cover as a bold surface line coloured dark → violet by local concentration (source/receiver drawn above it). |

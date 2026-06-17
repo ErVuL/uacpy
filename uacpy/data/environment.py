@@ -26,7 +26,7 @@ import numpy as np
 from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import Coordinate, as_coordinate
-from uacpy.data.bathymetry import fetch_point_depth, fetch_transect
+from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import fetch_ssp, fetch_ssp_transect
 from uacpy.data.sources import SOURCES
@@ -68,6 +68,7 @@ def fetch_environment(
     ssp_n_points: int = 6,
     range_dependent_bottom: bool = False,
     bottom_n_points: int = 6,
+    sea_ice: bool = False,
     with_absorption: bool = False,
     formula: str = 'unesco',
     resolution: str = '1.00',
@@ -124,6 +125,15 @@ def fetch_environment(
     bottom_n_points : int, optional
         Number of EMODnet samples along the transect when
         ``range_dependent_bottom``. Default 6.
+    sea_ice : bool, optional
+        If ``True`` (requires ``date=`` and the cached ``seaice`` climatology —
+        ``install.sh --data seaice``), set the surface boundary from the NSIDC
+        sea-ice concentration at the point for ``date``'s month: an ice-covered
+        point (≥15 %, the NSIDC ice-edge) gets a homogeneous elastic ice canopy
+        (cp 3500 m/s, cs 1800 m/s, ρ 0.9, αp/αs 0.5/1.0 dB/λ — *Computational
+        Ocean Acoustics*); open water keeps the default free surface. Point
+        classification only (the carrier's surface is a single boundary).
+        Default ``False``.
     with_absorption : bool, optional
         If ``True``, attach a Francois-Garrison absorption built from the
         site's fetched temperature/salinity column (costs one extra T/S
@@ -155,9 +165,9 @@ def fetch_environment(
 
     def _fetch_bathy(src):
         if transect_to is None:
-            return fetch_point_depth(point, source=src, timeout=timeout,
+            return fetch_bathy(point, source=src, timeout=timeout,
                                      verbose=verbose)
-        return fetch_transect(point, transect_to, n_points=n_points, source=src,
+        return fetch_bathy_transect(point, transect_to, n_points=n_points, source=src,
                               timeout=timeout, verbose=verbose)
     bathymetry, bathy_source = _resolve_cached(_fetch_bathy, bathy_order)
 
@@ -216,6 +226,17 @@ def fetch_environment(
     else:
         bottom_props, bottom_kw = _resolve_bottom(bottom), None
 
+    surface_props = None
+    if sea_ice:
+        if date is None:
+            raise ConfigurationError(
+                "fetch_environment: sea_ice=True needs date= to pick the "
+                "climatological sea-ice month.",
+                remediation="Pass date='YYYY-MM-DD', or leave sea_ice=False.",
+            )
+        from uacpy.data.seaice_local import fetch_sea_ice_surface
+        surface_props = fetch_sea_ice_surface(point, date)
+
     # Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
     # products, so their deepest points rarely coincide. Reconcile the SSP to
     # span exactly the fetched water column with the carrier's own method
@@ -233,6 +254,8 @@ def fetch_environment(
     )
     if bottom_props is not None:
         kwargs['bottom'] = bottom_props
+    if surface_props is not None:
+        kwargs['surface'] = surface_props
     if with_absorption:
         kwargs['absorption'] = _fetch_absorption(
             point, date=date, ssp_source=ssp_source,
@@ -244,6 +267,12 @@ def fetch_environment(
     used = [_BATHY_SOURCE_ID[bathy_source], ssp_source]
     if bottom_kw is not None:
         used.append(_BOTTOM_SOURCE_ID[bottom_kw])
+        # CRUST1.0 rescales its sediment column with GlobSed thickness by
+        # default; record GlobSed too whenever it was actually applied.
+        if getattr(bottom_props, 'sediment_thickness_source', None) == 'globsed':
+            used.append('globsed')
+    if surface_props is not None:
+        used.append('seaice')
     env.data_sources = tuple(SOURCES[i] for i in dict.fromkeys(used))
     return env
 

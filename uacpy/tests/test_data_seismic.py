@@ -105,6 +105,28 @@ def test_crust1_fluid_option(cache):
 def test_crust1_thickness_rescale(cache):
     b = crust1_local.fetch_bottom_crust1((30.0, -40.0), sediment_thickness=2000.0)
     assert b.total_thickness() == pytest.approx(2000.0)
+    assert b.sediment_thickness_source is None      # explicit, not GlobSed
+
+
+def test_crust1_uses_globsed_by_default(cache):
+    # GlobSed (500 m here) rescales CRUST1.0's native 1000 m column by default,
+    # and the bottom records that GlobSed supplied the thickness.
+    b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    assert b.total_thickness() == pytest.approx(500.0)
+    assert b.sediment_thickness_source == 'globsed'
+
+
+def test_crust1_globsed_fallback_keeps_native(cache):
+    # Where GlobSed has no value, CRUST1.0's own thickness is kept (no marker).
+    b = crust1_local.fetch_bottom_crust1((-90.0, -180.0))   # GlobSed NaN cell
+    assert b.total_thickness() == pytest.approx(1000.0)
+    assert b.sediment_thickness_source is None
+
+
+def test_crust1_use_globsed_false(cache):
+    b = crust1_local.fetch_bottom_crust1((30.0, -40.0), use_globsed=False)
+    assert b.total_thickness() == pytest.approx(1000.0)
+    assert b.sediment_thickness_source is None
 
 
 def test_crust1_transect(cache):
@@ -112,6 +134,7 @@ def test_crust1_transect(cache):
         (30.0, -40.0), (31.0, -40.0), n_points=3)
     assert isinstance(rdl, RangeDependentLayeredBottom)
     assert len(rdl.profiles) == 3 and rdl.ranges[0] == 0.0
+    assert rdl.sediment_thickness_source == 'globsed'   # GlobSed applied per point
 
 
 def test_crust1_missing_cache_names_flag(tmp_path, monkeypatch):

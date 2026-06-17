@@ -40,6 +40,13 @@ class TestEnvironment:
         assert range_dependent_env.bathymetry[0, 1] == 80.0
         assert range_dependent_env.bathymetry[-1, 1] == 120.0
 
+    def test_max_range(self, simple_env, range_dependent_env):
+        """max_range is the range extent (0 when range-independent), symmetric
+        with depth and matching the bathymetry range axis."""
+        assert simple_env.max_range == 0.0
+        assert range_dependent_env.max_range == pytest.approx(
+            float(range_dependent_env.bathymetry[:, 0].max()))
+
     def test_ssp_pairs_shape(self, simple_env, parabolic_ssp_env):
         """SSP pairs view always has shape (N, 2)."""
         assert simple_env.ssp.to_pairs().shape[1] == 2

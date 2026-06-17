@@ -72,11 +72,11 @@ def pelagic_grain_size(depth_m: float, lat: float) -> float:
 
 def _water_depth(point, timeout, verbose):
     """Water depth (m) from GEBCO — local cache if installed, else the live API."""
-    from uacpy.data.bathymetry import fetch_point_depth
+    from uacpy.data.bathymetry import fetch_bathy
     try:
-        return fetch_point_depth(point, source='local')
+        return fetch_bathy(point, source='local')
     except ConfigurationError:             # local grid not installed → live API
-        return fetch_point_depth(point, source='api', timeout=timeout,
+        return fetch_bathy(point, source='api', timeout=timeout,
                                  verbose=verbose)
 
 

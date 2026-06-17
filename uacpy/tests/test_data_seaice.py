@@ -78,6 +78,24 @@ def test_transect(synthetic_model):
     assert r.shape == (3,) and c.shape == (3,)
 
 
+def test_sea_ice_surface_gates_on_threshold():
+    # Below the 15 % ice-edge → open water (no surface override).
+    assert seaice_local.sea_ice_surface(0.10) is None
+    assert seaice_local.sea_ice_surface(0.30, threshold=0.5) is None
+    # At/above → an elastic ice canopy with the COA canonical values.
+    bp = seaice_local.sea_ice_surface(0.15)
+    assert bp is not None and bp.acoustic_type == 'half-space'
+    assert (bp.sound_speed, bp.shear_speed, bp.density) == (3500.0, 1800.0, 0.9)
+    assert (bp.attenuation, bp.shear_attenuation) == (0.5, 1.0)
+
+
+def test_fetch_sea_ice_surface(synthetic_model):
+    # 0.7 at the March pixel ≥ threshold → ice; June is land → raises.
+    assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3) is not None
+    with pytest.raises(DataFetchError, match='land / coast'):
+        seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=6)
+
+
 def test_download_builds_climatology(tmp_path, monkeypatch):
     pytest.importorskip('tifffile')             # default dep; guard a stripped-down env
     monkeypatch.setattr(seaice_local, 'http_get', lambda url, **kw: b'TIFF')

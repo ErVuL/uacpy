@@ -13,9 +13,9 @@ def stub_fetchers(monkeypatch):
     """Replace the network fetchers with deterministic stand-ins."""
     ssp = SoundSpeedProfile(depths=[0.0, 100.0, 2000.0],
                             data=[1500.0, 1490.0, 1510.0])
-    monkeypatch.setattr(env_mod, 'fetch_point_depth',
+    monkeypatch.setattr(env_mod, 'fetch_bathy',
                         lambda point, **kw: 2000.0)
-    monkeypatch.setattr(env_mod, 'fetch_transect',
+    monkeypatch.setattr(env_mod, 'fetch_bathy_transect',
                         lambda a, b, **kw: np.array([[0.0, 2000.0], [5000.0, 2200.0]]))
     monkeypatch.setattr(env_mod, 'fetch_ssp',
                         lambda point, **kw: ssp)

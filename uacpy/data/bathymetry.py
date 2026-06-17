@@ -29,13 +29,13 @@ from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 
-__all__ = ['fetch_point_depth', 'fetch_transect', 'fetch_grid',
+__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'fetch_bathy_grid',
            'transect_length']
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
 DEFAULT_DATASET = 'gebco2020'
 MAX_LOCATIONS_PER_REQUEST = 100  # OpenTopoData public-host limit
-MAX_GRID_REQUESTS = 100          # safety cap for fetch_grid (≤10 000 points)
+MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 points)
 
 BATHY_SOURCES = ('api', 'gmrt', 'local')
 
@@ -49,7 +49,7 @@ def _check_source(source):
         )
 
 
-def fetch_point_depth(
+def fetch_bathy(
     point: Coordinate,
     *,
     source: str = 'api',
@@ -103,7 +103,7 @@ def fetch_point_depth(
     return float(depths[0])
 
 
-def fetch_transect(
+def fetch_bathy_transect(
     start: Coordinate,
     end: Coordinate,
     *,
@@ -128,7 +128,7 @@ def fetch_transect(
     n_points : int, optional
         Number of samples (≥2). Default 50.
     dataset, base_url, timeout, verbose
-        See :func:`fetch_point_depth`.
+        See :func:`fetch_bathy`.
 
     Returns
     -------
@@ -145,7 +145,7 @@ def fetch_transect(
     _check_source(source)
     if n_points < 2:
         raise ConfigurationError(
-            f"fetch_transect: n_points must be >= 2, got {n_points}.",
+            f"fetch_bathy_transect: n_points must be >= 2, got {n_points}.",
             remediation="Pass n_points=2 or more to define a transect.",
         )
 
@@ -168,7 +168,7 @@ def fetch_transect(
     return np.column_stack([ranges_m, depths])
 
 
-def fetch_grid(
+def fetch_bathy_grid(
     lat_range: Tuple[float, float],
     lon_range: Tuple[float, float],
     *,
@@ -201,7 +201,7 @@ def fetch_grid(
     _check_source(source)
     if n_lat < 2 or n_lon < 2:
         raise ConfigurationError(
-            f"fetch_grid: n_lat and n_lon must be >= 2; got {n_lat}, {n_lon}.")
+            f"fetch_bathy_grid: n_lat and n_lon must be >= 2; got {n_lat}, {n_lon}.")
     if source == 'local':
         from uacpy.data import gebco_local
         log_message('bathymetry', f"GEBCO grid (local) {n_lat}×{n_lon} over "
@@ -216,7 +216,7 @@ def fetch_grid(
     n_requests = -(-(n_lat * n_lon) // MAX_LOCATIONS_PER_REQUEST)   # ceil-div
     if n_requests > MAX_GRID_REQUESTS:
         raise ConfigurationError(
-            f"fetch_grid: {n_lat}×{n_lon} = {n_lat * n_lon} points needs "
+            f"fetch_bathy_grid: {n_lat}×{n_lon} = {n_lat * n_lon} points needs "
             f"{n_requests} requests (> {MAX_GRID_REQUESTS}).",
             remediation="Use a coarser grid, or a self-hosted instance via base_url=.",
         )
@@ -274,8 +274,8 @@ def _geodesic_waypoints(
     ang = _central_angle(start, end)              # shared geodesic (haversine)
     if ang == 0.0:
         raise ConfigurationError(
-            "fetch_transect: start and end coordinates coincide.",
-            remediation="Use fetch_point_depth for a single location, or "
+            "fetch_bathy_transect: start and end coordinates coincide.",
+            remediation="Use fetch_bathy for a single location, or "
                         "pass distinct endpoints.",
         )
 

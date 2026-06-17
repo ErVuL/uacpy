@@ -1645,6 +1645,24 @@ class Environment:
         """Maximum water depth in metres (derived from bathymetry)."""
         return float(np.max(self.bathymetry[:, 1]))
 
+    @property
+    def max_range(self) -> float:
+        """Range extent in metres across the environment's range-dependent axes.
+
+        The largest range coordinate carried by the bathymetry, SSP or bottom;
+        ``0.0`` for a range-independent environment. Derived (read-only),
+        symmetric with :attr:`depth`. For an environment fetched along a
+        transect this equals the transect's great-circle length, so it sizes a
+        receiver range grid without recomputing the geodesic.
+        """
+        extent = float(np.max(self.bathymetry[:, 0]))
+        if self.ssp.is_range_dependent:
+            extent = max(extent, float(self.ssp.ranges[-1]))
+        if isinstance(self.bottom, (RangeDependentBottom,
+                                    RangeDependentLayeredBottom)):
+            extent = max(extent, float(self.bottom.ranges[-1]))
+        return extent
+
     def get_sound_speed(
         self, depth: Union[float, np.ndarray], range: float = 0.0
     ) -> np.ndarray:

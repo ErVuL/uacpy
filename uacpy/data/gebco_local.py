@@ -99,7 +99,7 @@ def depths_along(lats, lons):
 def region_grid(lat_range, lon_range, n_lat, n_lon):
     """``(lats, lons, depth)`` over a region; land cells are NaN.
 
-    Mirrors :func:`uacpy.data.fetch_grid` but with no request cap.
+    Mirrors :func:`uacpy.data.fetch_bathy_grid` but with no request cap.
     """
     lats, lons, elev = _grid().region(lat_range, lon_range, n_lat, n_lon)
     depth = np.where(elev < 0.0, -elev, np.nan)
