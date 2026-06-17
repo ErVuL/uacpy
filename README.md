@@ -255,6 +255,8 @@ pip install -e .
 ```bash
 cd uacpy
 git pull
+rm -rf uacpy/bin   # Optional (Required for v0.3.x -> v0.4.x)
+rm -rf data_cache  # Optional
 pip install -e .
 ./install.sh
 ```
