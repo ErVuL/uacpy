@@ -345,8 +345,12 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         return kf.at(frequency=50.0).to_tl()
 
     def rams_bb(env_unused, src_, rcv_):
+        # Only the fc=50 Hz slice is asserted, and each band frequency is an
+        # independent PE solve — so sample the band coarsely (Δf=1/T=5 Hz) while
+        # keeping fc exactly on the grid (offset to fc = fc·T/Q = 5, integer).
+        # 101 → 11 PE marches (~10× faster); the fc-slice TL is unchanged.
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  rams_theta=45.0, Q=2.0, T=2.0)
+                  rams_theta=45.0, Q=2.0, T=0.2)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=50.0).to_tl()
 
@@ -400,8 +404,11 @@ def _altimetry_broadband_at_fc() -> Scenario:
         return bh
 
     def ramsurf_bb(env_, src_, rcv_):
+        # Only the fc=200 Hz slice is asserted; sample the band coarsely
+        # (Δf=1/T=5 Hz) while keeping fc on the grid (offset = fc·T/Q = 20).
+        # 401 → 41 PE marches (~10× faster); the fc-slice TL is unchanged.
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  Q=2.0, T=2.0)
+                  Q=2.0, T=0.2)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=200.0).to_tl()
 
