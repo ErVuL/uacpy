@@ -128,7 +128,7 @@ def fetch_ssp_transect_operational(
             f"fetch_ssp_transect_operational: unknown formula={formula!r}.",
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
-    when = date.isoformat() if isinstance(date, _dt.date) else str(date)
+    when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     try:
         ds = marine.open_dataset(dataset_id=dataset_id)

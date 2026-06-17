@@ -41,6 +41,7 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import datetime as _dt  # noqa: E402
 import numpy as np  # noqa: E402
 
 import uacpy  # noqa: E402
@@ -202,7 +203,7 @@ def _sea_ice_overview(plt):
     from uacpy.data import seaice_local
     from uacpy.data.sources import SOURCES
     A, B = (84.0, 0.0), (87.0, 40.0)                 # central Arctic pack, int'l
-    month = int(DATE.split('-')[1])
+    month = _dt.date.fromisoformat(DATE).month
     try:
         env = data.fetch_environment(
             A, date=DATE, transect_to=B, n_points=TRANSECT_POINTS,

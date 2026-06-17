@@ -243,12 +243,21 @@ cd uacpy
 python3 -m venv uacpy_venv
 source uacpy_venv/bin/activate
 pip install -e .
-./install.sh -y
+./install.sh
 ```
 
 > **Tip:** clone into the WSL filesystem (`~/uacpy`), **not** into
 > `/mnt/c/...`. Cross-filesystem I/O is 10–20× slower and the
 > Acoustics-Toolbox build does a lot of small file writes.
+
+### Update
+
+```bash
+cd uacpy
+git pull
+pip install -e .
+./install.sh
+```
 
 ### Uninstall
 
