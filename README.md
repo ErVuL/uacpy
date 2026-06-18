@@ -65,7 +65,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 **Toolkits** — first‑class modules, not just glue around the models:
 
-- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice). Cache‑first by default (re‑uses install‑time local data, falls back to live); pass `*_sources='cache'` to pin an axis to local data only (no network).
+- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice).
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range.
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
@@ -431,6 +431,27 @@ when redistributing or modifying UACPY or its outputs.
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+
+
+### Python dependencies
+
+UACPY's runtime dependencies are installed from PyPI (not bundled or
+redistributed by UACPY); all are permissive and GPL-3.0-compatible.
+
+| Package | Used for | License |
+|---------|----------|---------|
+| **numpy** | arrays / numerics (core) | BSD-3-Clause |
+| **scipy** | interpolation, FFT, nearest-neighbour search | BSD-3-Clause |
+| **matplotlib** | visualization | Matplotlib License (PSF-based, BSD-style) |
+| **netCDF4** | reading WOA23 / GEBCO / GlobSed grids | MIT |
+| **shapely** | EMODnet seabed-substrate polygon lookups | BSD-3-Clause |
+| **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
+| **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
+| **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
+
+Test/development tooling (`pytest`, `pytest-xdist`, `pytest-cov`, `black`,
+`flake8` — the `[test]` / `[dev]` extras) is MIT-licensed and not required at
+runtime.
 
 
 ### External data sources
