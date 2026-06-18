@@ -25,7 +25,10 @@ import numpy as np
 
 from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, normalize_lon,
+    central_angle, geodesic_waypoints,
+)
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 
@@ -149,7 +152,7 @@ def fetch_bathy_transect(
             remediation="Pass n_points=2 or more to define a transect.",
         )
 
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     log_message(
         'bathymetry', f"sampling {n_points} GEBCO depths along "
         f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
@@ -232,16 +235,6 @@ def fetch_bathy_grid(
     return lats, lons, depth
 
 
-def _central_angle(start: Coordinate, end: Coordinate) -> float:
-    """Great-circle central angle (radians) between two ``(lat, lon)`` points
-    (haversine; numerically stable for small separations)."""
-    lat1, lon1 = np.radians(as_coordinate(start))
-    lat2, lon2 = np.radians(as_coordinate(end))
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return float(2 * np.arcsin(np.sqrt(a)))
-
-
 def transect_length(start: Coordinate, end: Coordinate) -> float:
     """Great-circle transect length (m) from ``start`` to ``end`` ``(lat, lon)``.
 
@@ -254,43 +247,7 @@ def transect_length(start: Coordinate, end: Coordinate) -> float:
 
     Returns ``0.0`` for coincident endpoints.
     """
-    return _central_angle(start, end) * EARTH_RADIUS_M
-
-
-def _geodesic_waypoints(
-    start: Coordinate, end: Coordinate, n_points: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Evenly spaced great-circle waypoints between two ``(lat, lon)``.
-
-    Returns ``(lats_deg, lons_deg, ranges_m)`` where ``ranges_m`` is the
-    cumulative spherical surface distance from ``start`` (0 at the first
-    point, total length at the last). Spherical-Earth slerp — accurate to a
-    few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
-    of ~450 m resolution.
-    """
-    lat1, lon1 = np.radians(as_coordinate(start))
-    lat2, lon2 = np.radians(as_coordinate(end))
-
-    ang = _central_angle(start, end)              # shared geodesic (haversine)
-    if ang == 0.0:
-        raise ConfigurationError(
-            "fetch_bathy_transect: start and end coordinates coincide.",
-            remediation="Use fetch_bathy for a single location, or "
-                        "pass distinct endpoints.",
-        )
-
-    f = np.linspace(0.0, 1.0, n_points)
-    sin_ang = np.sin(ang)
-    A = np.sin((1 - f) * ang) / sin_ang
-    B = np.sin(f * ang) / sin_ang
-    x = A * np.cos(lat1) * np.cos(lon1) + B * np.cos(lat2) * np.cos(lon2)
-    y = A * np.cos(lat1) * np.sin(lon1) + B * np.cos(lat2) * np.sin(lon2)
-    z = A * np.sin(lat1) + B * np.sin(lat2)
-    lats = np.degrees(np.arctan2(z, np.hypot(x, y)))
-    lons = np.degrees(np.arctan2(y, x))
-
-    ranges_m = f * ang * EARTH_RADIUS_M
-    return lats, lons, ranges_m
+    return central_angle(start, end) * EARTH_RADIUS_M
 
 
 def _fetch_elevations(

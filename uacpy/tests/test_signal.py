@@ -7,10 +7,10 @@ Bare minimum that the public API is reachable and behaves on simple inputs.
 import numpy as np
 import pytest
 
-from uacpy.acoustic_signal.generation import (
+from uacpy.acoustic_signal.waveforms import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
-from uacpy.acoustic_signal.generation import (
+from uacpy.acoustic_signal.noise_synthesis import (
     add_noise, make_bandlimited_noise,
 )
 

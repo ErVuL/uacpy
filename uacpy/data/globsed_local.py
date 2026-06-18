@@ -19,9 +19,9 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import as_coordinate
 from uacpy.data._http import http_get
-from uacpy.data._netcdf import open_netcdf
+from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['download_globsed_db', 'fetch_sediment_thickness',
            'fetch_sediment_thickness_transect']
@@ -70,39 +70,22 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     return out
 
 
-class _GlobSedGrid:
+class _GlobSedGrid(NetcdfGrid):
     """Nearest-cell accessor over the GlobSed ``z(lat, lon)`` thickness grid."""
 
     def __init__(self, path):
-        self._ds = open_netcdf(path)
-        names = {n.lower(): n for n in self._ds.variables}
         try:
-            self._lat = self._ds.variables[names['lat']]
-            self._lon = self._ds.variables[names['lon']]
-            self._z = self._ds.variables[names['z']]
+            super().__init__(path)
+            self._z = self.var('z')
         except KeyError as exc:
             raise DataFetchError(
                 f"GlobSed NetCDF {Path(path).name} is missing an expected "
                 f"variable ({exc}); its schema may have changed.",
                 remediation="Re-run ./install.sh --data globsed.",
             ) from exc
-        self._lat0 = float(self._lat[0])
-        self._lon0 = float(self._lon[0])
-        self._dlat = float(self._lat[1] - self._lat[0])
-        self._dlon = float(self._lon[1] - self._lon[0])
-        self._nlat = self._lat.shape[0]
-        self._nlon = self._lon.shape[0]
-
-    def _row(self, lat):
-        return int(np.clip(round((lat - self._lat0) / self._dlat),
-                           0, self._nlat - 1))
-
-    def _col(self, lon):
-        return int(np.clip(round((normalize_lon(lon) - self._lon0) / self._dlon),
-                           0, self._nlon - 1))
 
     def thickness(self, lat, lon):
-        v = self._z[self._row(lat), self._col(lon)]
+        v = self._z[self.row(lat), self.col(lon)]
         if v is None or np.ma.is_masked(v) or not np.isfinite(v):
             return np.nan
         return float(v)
@@ -137,8 +120,8 @@ def fetch_sediment_thickness_transect(start, end, n_points=6):
 
     ``thickness_m`` is ``NaN`` at any waypoint GlobSed does not cover.
     """
-    from uacpy.data.bathymetry import _geodesic_waypoints
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    from uacpy.data._geo import geodesic_waypoints
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()
     thk = np.array([g.thickness(la, lo) for la, lo in zip(lats, lons)])
     return np.asarray(ranges_m), thk

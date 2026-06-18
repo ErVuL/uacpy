@@ -25,7 +25,7 @@ from scipy.spatial import cKDTree
 from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
@@ -35,7 +35,6 @@ __all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_local'
            'fetch_bottom_local_transect']
 
 DEFAULT_MAX_DISTANCE_KM = 250.0
-_EARTH_RADIUS_KM = 6371.0
 
 # NCEI Seafloor Sediment Grain-Size Database (G00127, public domain): a ~3 MB
 # tarball of TSV tables. We join the per-sample lat/lon with a weighted-mean ϕ
@@ -236,7 +235,7 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
     tree, phis = _samples()
     chord, idx = tree.query(_unit_vectors(np.array([lat]), np.array([lon]))[0])
     # chord length on the unit sphere → great-circle distance.
-    dist_km = 2.0 * _EARTH_RADIUS_KM * np.arcsin(np.clip(chord / 2.0, 0, 1))
+    dist_km = 2.0 * EARTH_RADIUS_KM * np.arcsin(np.clip(chord / 2.0, 0, 1))
     if max_distance_km is not None and dist_km > max_distance_km:
         raise DataFetchError(
             f"Nearest sediment sample is {dist_km:.0f} km away "

@@ -25,7 +25,7 @@ from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, RangeDependentBottom,
     SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
-    SoundSpeedProfile,
+    SoundSpeedProfile, generate_sea_surface,
 )
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
@@ -49,6 +49,7 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
     ConfigurationError,
     DataFetchError,
+    FileFormatError,
 )
 
 from uacpy import models
@@ -76,7 +77,7 @@ __all__ = [
     'SedimentLayer',
     'LayeredBottom',
     'RangeDependentLayeredBottom',
-    'SoundSpeedProfile',
+    'SoundSpeedProfile', 'generate_sea_surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
@@ -92,6 +93,7 @@ __all__ = [
     'UnsupportedFeatureError',
     'ConfigurationError',
     'DataFetchError',
+    'FileFormatError',
     'RunMode',
     'PropagationModel',
     'run_parallel',

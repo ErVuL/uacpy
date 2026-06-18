@@ -37,6 +37,8 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Padé approximant of exp(ik·Δx·(√(1+ξ) − 1))
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +97,7 @@ def _pade_pp(taylor: np.ndarray, p: int) -> Tuple[np.ndarray, np.ndarray]:
     in ascending degree order (``P[0] + P[1]ξ + … + P[p]ξ^p``).
     """
     if len(taylor) < 2 * p + 1:
-        raise ValueError(
+        raise ConfigurationError(
             f"Need ≥ {2 * p + 1} Taylor coefficients for a [{p}/{p}] Padé; "
             f"got {len(taylor)}."
         )
@@ -369,6 +371,9 @@ def optimize_grid(
                         predicted_error=float(total),
                     )
     if best is None:
+        # Internal control-flow signal: RAM catches this RuntimeError to fall
+        # back to a user-pinned / coarser grid. NOT a user-facing config error —
+        # do not retype to ConfigurationError (RAM's except clause keys on it).
         raise RuntimeError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
             f"f={freq:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(theta_max):.1f}°, "

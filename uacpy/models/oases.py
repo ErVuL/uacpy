@@ -201,7 +201,32 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     return env
 
 
-class OAST(PropagationModel):
+class _OASESBase(PropagationModel):
+    """Shared base for the OASES sub-model wrappers (OAST/OASN/OASR/OASP).
+
+    The sub-models differ only in the per-binary ``FORnnn`` unit-number map
+    fed to the csh-wrapper environment; each declares it as ``_FOR_FILES`` and
+    inherits the one ``_execute`` below (run the binary, attach the ``.prt``
+    tail on failure)."""
+
+    _FOR_FILES: dict = {}
+
+    def _execute(self, input_file, work_dir: Path):
+        """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
+        base_name = input_file if isinstance(input_file, str) else input_file.stem
+        env = _oases_subprocess_env(base_name, **self._FOR_FILES)
+        try:
+            result = self._run_subprocess(
+                [str(self.executable)], cwd=work_dir, env=env,
+            )
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
+        if self.verbose and result.stdout:
+            self._log(f"OASES output:\n{result.stdout}", level='debug')
+
+
+class OAST(_OASESBase):
     """
     OAST - OASES Transmission Loss Model
 
@@ -447,25 +472,13 @@ class OAST(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OAST binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',  # Source file
-            FOR023='trc',  # Optional reflection-coef table
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR002': 'src',  # Source file
+        'FOR023': 'trc',  # Optional reflection-coef table
+    }
 
 
-class OASN(PropagationModel):
+class OASN(_OASESBase):
     """
     OASN — OASES Noise, Covariance Matrices and Signal Replicas.
 
@@ -907,26 +920,14 @@ class OASN(PropagationModel):
     # ``compute_covariance`` / ``compute_replicas`` come from the base class
     # (RunMode.COVARIANCE / RunMode.REPLICA dispatch).
 
-    def _execute(self, base_name: str, work_dir: Path):
-        """Execute OASN binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            base_name,
-            FOR014='rpo',  # Replica vectors (unit 14)
-            FOR016='xsm',  # Covariance matrix (unit 16)
-            FOR026='chk',  # Checkpoint file (per oasn wrapper)
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR014': 'rpo',  # Replica vectors (unit 14)
+        'FOR016': 'xsm',  # Covariance matrix (unit 16)
+        'FOR026': 'chk',  # Checkpoint file (per oasn wrapper)
+    }
 
 
-class OASR(PropagationModel):
+class OASR(_OASESBase):
     """
     OASR - OASES Reflection Coefficients Model
 
@@ -1194,27 +1195,15 @@ class OASR(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OASR binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',
-            FOR004='trf',
-            FOR022='rco',  # Reflection-coef table (slowness)
-            FOR023='trc',  # Reflection-coef table (angle)
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR002': 'src',
+        'FOR004': 'trf',
+        'FOR022': 'rco',  # Reflection-coef table (slowness)
+        'FOR023': 'trc',  # Reflection-coef table (angle)
+    }
 
 
-class OASP(PropagationModel):
+class OASP(_OASESBase):
     """
     OASP - OASES Pulse / Broadband Transfer-Function Model
 
@@ -1409,12 +1398,9 @@ class OASP(PropagationModel):
         freq_max = self.freq_max
 
         run_mode = self._resolve_run_mode(run_mode)
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-        source_waveform = self._pad_waveform_to_duration(
-            source_waveform, sample_rate, output_duration,
-        )
-        frequencies = self._resolve_time_series_frequencies(
+        source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
+            output_duration,
         )
 
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
@@ -1635,21 +1621,9 @@ class OASP(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OASP binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR002': 'src',
+    }
 
 
 def OASES(

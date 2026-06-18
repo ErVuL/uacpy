@@ -119,7 +119,7 @@ def music_spectrum(R, steering, n_sources: int):
     return 1.0 / denom
 
 
-def taper(n_elements: int, window: str = "hann"):
+def shading_taper(n_elements: int, window: str = "hann"):
     """Array-shading taper (amplitude weights), normalised to unit mean.
 
     ``window`` is any ``scipy.signal.get_window`` name (e.g. ``'hann'``,

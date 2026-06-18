@@ -1,6 +1,7 @@
 """Active-sonar waveform processing: matched filtering and ambiguity.
 
-Processes the echoes of the waveforms produced by :mod:`uacpy.acoustic_signal.generation`
+Processes the echoes of the waveforms produced by
+:mod:`uacpy.acoustic_signal.waveforms` / :mod:`~uacpy.acoustic_signal.sequences`
 (LFM/HFM chirps, m-sequences, ...): replica correlation (pulse compression),
 matched-filter processing gain, and the narrowband range-Doppler ambiguity
 function for waveform-resolution analysis.

@@ -286,7 +286,7 @@ def write_bellhop_env_file(
         z_max = float(f"{env.depth:.1f}")
 
         if env.ssp.is_range_dependent:
-            ssp_block = env.ssp.eval(range=0.0).extend_to(z_max)
+            ssp_block = env.ssp.at(range=0.0).extend_to(z_max)
         else:
             ssp_block = env.ssp.extend_to(z_max)
         ssp_data_extended = ssp_block.to_pairs()

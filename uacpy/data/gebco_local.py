@@ -11,46 +11,29 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._netcdf import open_netcdf
+from uacpy.data._geo import as_coordinate
+from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
 
 _GRID = {}   # path -> _GebcoGrid (open once, sample many)
 
 
-class _GebcoGrid:
-    """Lazy accessor over the GEBCO ``elevation`` variable on a regular grid."""
+class _GebcoGrid(NetcdfGrid):
+    """Nearest-cell accessor over the GEBCO ``elevation`` variable."""
 
     def __init__(self, path):
-        self._ds = open_netcdf(path)
-        names = {n.lower(): n for n in self._ds.variables}
-        self._lat = self._ds.variables[names.get('lat', 'lat')]
-        self._lon = self._ds.variables[names.get('lon', 'lon')]
-        elev = names.get('elevation') or names.get('z') or 'elevation'
-        self._elev = self._ds.variables[elev]
-        self._lat0 = float(self._lat[0])
-        self._lon0 = float(self._lon[0])
-        self._dlat = float(self._lat[1] - self._lat[0])
-        self._dlon = float(self._lon[1] - self._lon[0])
-        self._nlat = self._lat.shape[0]
-        self._nlon = self._lon.shape[0]
-
-    def _row(self, lat):
-        return int(np.clip(round((lat - self._lat0) / self._dlat), 0, self._nlat - 1))
-
-    def _col(self, lon):
-        return int(np.clip(round((normalize_lon(lon) - self._lon0) / self._dlon),
-                           0, self._nlon - 1))
+        super().__init__(path)
+        self._elev = self.var('elevation', 'z')
 
     def elevation(self, lat, lon):
-        return float(self._elev[self._row(lat), self._col(lon)])
+        return float(self._elev[self.row(lat), self.col(lon)])
 
     def region(self, lat_range, lon_range, n_lat, n_lon):
         lats = np.linspace(min(lat_range), max(lat_range), n_lat)
         lons = np.linspace(min(lon_range), max(lon_range), n_lon)
-        rows = [self._row(v) for v in lats]
-        cols = [self._col(v) for v in lons]
+        rows = [self.row(v) for v in lats]
+        cols = [self.col(v) for v in lons]
         block = np.asarray(self._elev[min(rows):max(rows) + 1,
                                       min(cols):max(cols) + 1], dtype=float)
         ri = [r - min(rows) for r in rows]

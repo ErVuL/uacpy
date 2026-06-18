@@ -13,7 +13,7 @@ free surface with an ice cover (different scattering, suppressed wind noise).
 :func:`sea_ice_surface` turns a fetched concentration into the elastic
 ``BoundaryProperties`` an ice canopy presents to the water column, and
 :func:`fetch_sea_ice_surface` does the fetch-and-convert in one call (used by
-``fetch_environment(sea_ice=True)``).
+``fetch_environment(surface_sources='seaice')``).
 
 The grids are NSIDC polar-stereographic GeoTIFFs (North EPSG:3411, South
 EPSG:3412, 25 km); reading them needs ``tifffile`` and the lon/lat → polar
@@ -230,7 +230,7 @@ def fetch_sea_ice_surface(
     Combines :func:`fetch_sea_ice_concentration` and :func:`sea_ice_surface`:
     returns the elastic ice ``BoundaryProperties`` where the point is
     ice-covered (concentration ≥ ``threshold``) for the given month, or ``None``
-    for open water. Used by ``fetch_environment(sea_ice=True)``.
+    for open water. Used by ``fetch_environment(surface_sources='seaice')``.
     """
     conc = fetch_sea_ice_concentration(point, date, month=month)
     return sea_ice_surface(conc, threshold=threshold)
@@ -270,8 +270,8 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
                                          date=None, month: Optional[int] = None,
                                          n_points: int = 6):
     """``(ranges_m, concentration)`` (0-1) sampled along ``start`` → ``end``."""
-    from uacpy.data.bathymetry import _geodesic_waypoints
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    from uacpy.data._geo import geodesic_waypoints
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     out = []
     for la, lo in zip(lats, lons):
         try:

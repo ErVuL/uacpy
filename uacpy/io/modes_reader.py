@@ -575,7 +575,6 @@ def read_modes(
     >>> # ASCII format
     >>> modes = read_modes('test.moa')
     """
-    import os
     from uacpy.core.acoustics import pekeris_root
     fileroot, ext = os.path.splitext(filename)
 

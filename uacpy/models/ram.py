@@ -631,8 +631,7 @@ class RAM(PropagationModel):
                 )
                 speeds_2d[:, i] = interp_func(depths)
 
-            # write_ssp_file (mpiramS .ssp format) expects ranges in km.
-            write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_m / 1000.0)
+            write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_m)
         else:
             write_ssp_file(work_dir / ssp_filename, depths, base_speeds)
 
@@ -672,7 +671,7 @@ class RAM(PropagationModel):
         if env.has_range_dependent_ssp():
             if range is None:
                 range = 0.0
-            ssp = env.ssp.eval(range=range).to_pairs()
+            ssp = env.ssp.at(range=range).to_pairs()
         else:
             ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
@@ -720,7 +719,7 @@ class RAM(PropagationModel):
                     env.bathymetry_at_range(rdl.ranges[i])
                 ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp.eval(range=rdl.ranges[i]).to_pairs()
+                    ssp_at_range = env.ssp.at(range=rdl.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -738,10 +737,9 @@ class RAM(PropagationModel):
 
             from uacpy.io.mpirams_writer import write_sediment_file
             sed_filename = 'sediment.sed'
-            # write_sediment_file (mpiramS .sed format) expects ranges in km.
             write_sediment_file(
                 work_dir / sed_filename,
-                rdl.ranges / 1000.0,
+                rdl.ranges,
                 cs_profiles, rho_profiles, attn_profiles
             )
 
@@ -792,7 +790,7 @@ class RAM(PropagationModel):
                 cb = bottom_rd.sound_speed[i]
                 seafloor_i = float(env.bathymetry_at_range(bottom_rd.ranges[i])[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp.eval(range=bottom_rd.ranges[i]).to_pairs()
+                    ssp_at_range = env.ssp.at(range=bottom_rd.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -811,10 +809,9 @@ class RAM(PropagationModel):
 
             from uacpy.io.mpirams_writer import write_sediment_file
             sed_filename = 'sediment.sed'
-            # write_sediment_file (mpiramS .sed format) expects ranges in km.
             write_sediment_file(
                 work_dir / sed_filename,
-                bottom_rd.ranges / 1000.0,
+                bottom_rd.ranges,
                 cs_profiles, rho_profiles, attn_profiles
             )
 
@@ -932,12 +929,9 @@ class RAM(PropagationModel):
             for BROADBAND, :class:`Field` for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-        source_waveform = self._pad_waveform_to_duration(
-            source_waveform, sample_rate, output_duration,
-        )
-        frequencies = self._resolve_time_series_frequencies(
+        source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
+            output_duration,
         )
 
         if frequencies is not None:

@@ -70,12 +70,12 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
         # Record 1: recl (int32, in 4-byte words) + title (80 chars)
         recl = int(np.fromfile(f, dtype=i4, count=1)[0])
-        title = f.read(80).decode("utf-8", errors="ignore").strip()
+        title = f.read(80).decode("ascii", errors="ignore").strip()
 
         f.seek(4 * recl, 0)
 
         # Record 2: PlotType (10 chars)
-        PlotType = f.read(10).decode("utf-8", errors="ignore").strip()
+        PlotType = f.read(10).decode("ascii", errors="ignore").strip()
 
         f.seek(2 * 4 * recl, 0)
 

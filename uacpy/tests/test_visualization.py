@@ -232,7 +232,7 @@ class TestAutoTLLimits:
     Bellhop's TL sentinel out of the auto-scale window."""
 
     def test_sentinel_removed(self):
-        from uacpy.visualization.plots import _auto_tl_limits
+        from uacpy.visualization.plots._common import _auto_tl_limits
         rng = np.random.default_rng(0)
         body = 50.0 + 10.0 * rng.standard_normal((30, 30))
         data = np.full((40, 40), 600.0)
@@ -242,7 +242,7 @@ class TestAutoTLLimits:
         assert vmin < vmax
 
     def test_no_finite_falls_back_to_default(self):
-        from uacpy.visualization.plots import _auto_tl_limits
+        from uacpy.visualization.plots._common import _auto_tl_limits
         vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
         assert (vmin, vmax) == (30.0, 80.0)
 

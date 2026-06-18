@@ -75,19 +75,18 @@ SOURCE_DEPTH = 100.0                                 # m
 FREQ_HZ = 800.0                                      # Bellhop TL frequency
 DATE = '2026-01-15'                                  # for the WOA climatology month
 FORCE_ONLINE = False                                 # True ⇒ ignore ./data_cache
-# Auto-use the install-time cache (./install.sh --data all) when present:
-# prefer_cache=True tries it first (no network, no rate limits) and falls back to
-# the live APIs where a dataset isn't installed. FORCE_ONLINE flips to live-first.
-PREFER_CACHE = (not FORCE_ONLINE) and _have('gebco') and _have('woa23')
-BATHY_SOURCE = 'api'        # live bathymetry backend: 'api' (GEBCO) or 'gmrt'
+# fetch_environment is cache-first by default: it uses the install-time cache
+# (./install.sh --data all) when present — no network, no rate limits — and
+# falls back to the live APIs for whatever isn't installed. (Passing
+# *_sources='cache' pins an axis to local data only, forbidding the network.)
+BATHY_SOURCE = 'gebco'      # bathymetry source: 'gebco' (global) or 'gmrt'
 GRID_SOURCE = 'local' if (not FORCE_ONLINE and _have('gebco')) else 'api'
 # Map resolution: the local GEBCO grid has no rate limit, so go fine; the online
 # OpenTopoData API is fair-use-capped, so stay coarse.
 N_LAT = N_LON = 400 if GRID_SOURCE == 'local' else 10
 _CACHED = [d for d in ('gebco', 'woa23', 'sediment', 'emodnet', 'coastline',
                        'globsed', 'crust1', 'diesing', 'seaice') if _have(d)]
-print(f"  data source: {'cache-first' if PREFER_CACHE else BATHY_SOURCE + ' (live-first)'}"
-      f"  ·  map grid {N_LAT}×{N_LON}")
+print(f"  data source: cache-first ({BATHY_SOURCE})  ·  map grid {N_LAT}×{N_LON}")
 print(f"  offline cache installed: {', '.join(_CACHED) if _CACHED else 'none'}")
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -116,9 +115,10 @@ def _fetch_env():
         env = data.fetch_environment(
             TRANSECT_START, date=DATE, transect_to=TRANSECT_END,
             name="Reykjanes Ridge transect", n_points=TRANSECT_POINTS,
-            bathymetry_source=BATHY_SOURCE, prefer_cache=PREFER_CACHE,
+            bathymetry_sources=BATHY_SOURCE,
             range_dependent_ssp=True, ssp_n_points=SSP_POINTS,
-            range_dependent_bottom=True, bottom='auto', bottom_n_points=BOTTOM_POINTS)
+            range_dependent_bottom=True, bottom_sources='auto',
+            bottom_n_points=BOTTOM_POINTS)
         print(f"  environment: ok  ({env!r})")
         return env
     except UACPYError as exc:
@@ -159,7 +159,7 @@ def _report_emodnet_seabed():
     coverage, so the transect's 'auto' bottom uses the global grain-size DB).
 
     Uses the offline EMODnet polygons (``--data emodnet``) when installed, else
-    the live WFS — exactly what ``fetch_environment(prefer_cache=...)`` selects."""
+    the live WFS — exactly what ``fetch_environment`` does cache-first."""
     point = (56.0, 3.0)                                  # central North Sea
     try:
         if not FORCE_ONLINE and _have('emodnet'):
@@ -208,9 +208,10 @@ def _sea_ice_overview(plt):
     try:
         env = data.fetch_environment(
             A, date=DATE, transect_to=B, n_points=TRANSECT_POINTS,
-            bathymetry_source=BATHY_SOURCE, prefer_cache=PREFER_CACHE,
+            bathymetry_sources=BATHY_SOURCE,
             range_dependent_ssp=True, ssp_n_points=SSP_POINTS,
-            range_dependent_bottom=True, bottom='auto', bottom_n_points=BOTTOM_POINTS)
+            range_dependent_bottom=True, bottom_sources='auto',
+            bottom_n_points=BOTTOM_POINTS)
         tl, source, receiver = _run_tl(env)
         rng_m, conc = seaice_local.fetch_sea_ice_concentration_transect(
             A, B, month=month, n_points=BOTTOM_POINTS)

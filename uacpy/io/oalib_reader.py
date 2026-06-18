@@ -25,7 +25,7 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
-from uacpy.io._fortran_helpers import read_vector as _read_vector
+from uacpy.io._fortran_helpers import read_vector as _read_vector, detect_endian
 from uacpy.io.units import km_to_m
 
 
@@ -170,7 +170,6 @@ def read_shd_bin(
     >>> shd = read_shd_bin('broadband.shd', freq=100.0)
     """
     with open(filename, "rb") as fid:
-        from uacpy.io._fortran_helpers import detect_endian
         head = fid.read(4)
         fid.seek(0)
         endian = detect_endian(head, source=f'read_shd_bin:{filename}')
@@ -359,10 +358,11 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     filepath = Path(filepath)
     try:
         fid = open(filepath, "r")
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise FileNotFoundError(
-            "No shade file with that name exists; you must run a model first"
-        )
+            f"ASCII shade file not found: {filepath}. Run a model first to "
+            "produce it."
+        ) from e
     title = fid.readline().strip()
     plot_type = fid.readline().strip()
 
@@ -793,8 +793,6 @@ def _read_ray_file_binary(filepath: Path) -> list:
         List of ray dictionaries
     """
     rays = []
-
-    from uacpy.io._fortran_helpers import detect_endian
 
     with open(filepath, "rb") as f:
         head = f.read(4)

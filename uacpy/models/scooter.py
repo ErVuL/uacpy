@@ -294,12 +294,9 @@ class Scooter(PropagationModel):
             for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-        source_waveform = self._pad_waveform_to_duration(
-            source_waveform, sample_rate, output_duration,
-        )
-        frequencies = self._resolve_time_series_frequencies(
+        source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
+            output_duration,
         )
 
         env = self._project_environment(env)
@@ -384,7 +381,7 @@ class Scooter(PropagationModel):
                     **transform_kwargs,
                 )
             result.model = self.model_name
-            result.backend = 'scooter.exe'
+            result.backend = 'scooter'
             result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
             result.frequencies = np.atleast_1d(np.asarray(freqs, dtype=float))

@@ -63,8 +63,8 @@ def test_bad_formula_raises(monkeypatch):
 
 
 def test_pressure_to_depth_inverts():
-    from uacpy.data.sound_speed import _depth_to_pressure_dbar
+    from uacpy.data._geo import depth_to_pressure_dbar
     z = np.array([0.0, 100.0, 1000.0, 4000.0])
-    p = _depth_to_pressure_dbar(z, 30.0)
+    p = depth_to_pressure_dbar(z, 30.0)
     z_back = argo._pressure_dbar_to_depth(p, 30.0)
     assert np.allclose(z, z_back, atol=0.1)

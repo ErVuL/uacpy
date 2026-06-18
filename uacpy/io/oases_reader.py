@@ -107,7 +107,7 @@ def read_oast_tl(
     # without .plp we have no way to know what range each TL value
     # corresponds to. Raise rather than fabricate.
     if not plp_file.exists():
-        raise OSError(
+        raise FileFormatError(
             f"OAST .plp grid file not found: {plp_file}. "
             "Without it the native range grid cannot be reconstructed."
         )
@@ -132,7 +132,7 @@ def read_oast_tl(
     tl_values = np.array(tl_values)
 
     if len(tl_values) == 0:
-        raise OSError(f"No TL data found in {tl_data_file}")
+        raise FileFormatError(f"No TL data found in {tl_data_file}")
 
     # OAST outputs data as: all ranges for depth 1, all ranges for depth 2, etc.
     expected_total = n_depths_oast * n_ranges_oast
@@ -220,8 +220,10 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
             'range_increment_km': dx
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to parse OAST .plp file: {e}") from e
+        raise FileFormatError(f"Failed to parse OAST .plp file: {e}") from e
 
 
 def read_oasn_covariance(
@@ -332,7 +334,7 @@ def read_oasn_covariance(
             # still covers ``n_total`` records.
             buf = f.read(n_total * recl)
             if len(buf) < (n_total - 1) * recl + 8:
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: truncated covariance data — expected "
                     f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
                 )
@@ -354,8 +356,10 @@ def read_oasn_covariance(
             'covariance': covariance
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASN covariance file {filepath}: {e}") from e
+        raise FileFormatError(f"Failed to read OASN covariance file {filepath}: {e}") from e
 
 
 def read_oasn_replicas(
@@ -477,12 +481,12 @@ def read_oasn_replicas(
             ])
             flat = np.fromfile(f, dtype=rep_dt, count=n_total)
             if flat.size < n_total:
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: truncated replica data — expected "
                     f"{n_total} records, got {flat.size}"
                 )
             if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: unexpected replica record layout — "
                     "Fortran record markers are not the expected 8-byte "
                     "payload length"
@@ -512,8 +516,10 @@ def read_oasn_replicas(
             'replicas': replicas
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASN replica file {filepath}: {e}") from e
+        raise FileFormatError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
 def read_oasp_trf(
@@ -579,7 +585,7 @@ def read_oasp_trf(
         errors.append(('ascii', e))
 
     err_msg = '\n'.join(f"  {k}: {v}" for k, v in errors)
-    raise OSError(
+    raise FileFormatError(
         f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
     )
 
@@ -621,7 +627,7 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
     with open(filepath, 'rb') as f:
         probe = f.read(4)
         if len(probe) < 4:
-            raise OSError(
+            raise FileFormatError(
                 f"Cannot open {filepath} as Fortran-unformatted TRF: too short"
             )
         endian = detect_endian(probe, source=f'read_oasp_trf:{filepath}')
@@ -629,12 +635,12 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         try:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:
-            raise OSError(
+            raise FileFormatError(
                 f"Cannot open {filepath} as Fortran-unformatted TRF: {e}"
             ) from e
         fileid = fileid_raw.decode('ascii', errors='ignore').strip()
         if 'PULSETRF' not in fileid:
-            raise OSError(
+            raise FileFormatError(
                 f"Expected 'PULSETRF' in first record, got {fileid!r}"
             )
 
@@ -703,7 +709,7 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 data_fmt = f'{2 * nout}d'      # double-precision COMPLEX*16
                 out_dtype = np.complex128
             elif rec_bytes != 2 * nout * 4:
-                raise OSError(
+                raise FileFormatError(
                     f"OASP .trf data record is {rec_bytes} bytes; expected "
                     f"{2 * nout * 4} (COMPLEX*8) or {2 * nout * 8} "
                     f"(COMPLEX*16) for nout={nout} (wrong endianness or "
@@ -888,8 +894,10 @@ def read_oasr_reflection_coefficients(
             'phase': phase_list,
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
+        raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
 
 
 def _trf_regression_selftest(tmp_path=None):

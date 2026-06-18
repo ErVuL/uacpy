@@ -324,6 +324,13 @@ def _receiver_block_lines(
     return [header, depth_line]
 
 
+def _source_block_line(src_depth: float) -> str:
+    """OASES Block-V single-source line ``SD NS DS AN IA FD DA``: one source at
+    ``src_depth`` (oast.tex/oasp.tex). Shared by the OAST/OASP writers so the
+    source-block format lives in one place, like ``_receiver_block_lines``."""
+    return f"{src_depth:.2f} 1 0 0 1 0 0"
+
+
 def write_oast_input(
     filepath: Union[str, Path],
     env: Environment,
@@ -507,10 +514,8 @@ def write_oast_input(
                 extra_columns=1,
             )
 
-        # Block V: Sources
-        # SD NS DS AN IA FD DA
-        # SD = source depth, NS = number of sources (1 for single source)
-        f.write(f"{src_depth:.2f} 1 0 0 1 0 0\n")
+        # Block V: Sources — SD NS DS AN IA FD DA (one source at src_depth).
+        f.write(_source_block_line(src_depth) + '\n')
 
         # Block VI: Receivers
         # RD1 RD2 NR IR  (NR<0 signals explicit depth list — oast.tex:464-493).
@@ -972,10 +977,8 @@ def write_oasp_input(
             extra_columns=2,
         )
 
-        # Block V: Sources
-        # SD NS DS AN IA FD DA
-        # For single source: SD 1 0 0 1 0 0
-        f.write(f"{src_depth:.2f} 1 0 0 1 0 0\n")
+        # Block V: Sources — SD NS DS AN IA FD DA (one source at src_depth).
+        f.write(_source_block_line(src_depth) + '\n')
 
         # Block VI: Receiver depths (NRD<0 signals explicit depth list —
         # oasp.tex:559-585).

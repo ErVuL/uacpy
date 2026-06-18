@@ -1158,13 +1158,12 @@ class KrakenField(_KrakenBase):
         run_mode = self._resolve_run_mode(run_mode, default=smart_default)
 
         if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
-            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-            source_waveform = self._pad_waveform_to_duration(
-                source_waveform, sample_rate, output_duration,
-            )
-            frequencies = self._resolve_time_series_frequencies(
+            source_waveform, frequencies = self._prepare_timeseries(
                 run_mode, source, frequencies, source_waveform, sample_rate,
+                output_duration,
             )
+            # _project_environment + validate_inputs run inside
+            # _compute_broadband_field (per-frequency), not here.
             tf = self._compute_broadband_field(
                 env, source, rcv,
                 frequencies=frequencies, n_modes=n_modes,
@@ -1378,9 +1377,7 @@ class KrakenField(_KrakenBase):
             flp_kwargs = dict(
                 title=getattr(env, 'name', ''),
                 n_profiles=n_profiles,
-                profile_ranges_km=(
-                    profile_ranges_m / 1000.0 if profile_ranges_m is not None else None
-                ),
+                profile_ranges_m=profile_ranges_m,
             )
             if n_modes is not None:
                 flp_kwargs['M_limit'] = int(n_modes)
@@ -1461,7 +1458,7 @@ class KrakenField(_KrakenBase):
                     phase_reference='travelling_wave',
                     **self._result_kwargs(
                         source,
-                        backend='field.exe',
+                        backend='field',
                         frequencies=freqs_read,
                         mode_coupling=self.mode_coupling if is_rd else 'none',
                         n_profiles=n_profiles,
@@ -1476,7 +1473,7 @@ class KrakenField(_KrakenBase):
                     coords={'depth': receiver.depths, 'range': receiver.ranges},
                     **self._result_kwargs(
                         source,
-                        backend='field.exe',
+                        backend='field',
                         frequencies=float(np.atleast_1d(source.frequencies)[0]),
                         mode_coupling=self.mode_coupling if is_rd else 'none',
                         n_profiles=n_profiles,
@@ -1493,7 +1490,7 @@ class KrakenField(_KrakenBase):
                 field.data = -field.data
                 field.phase_reference = 'travelling_wave'
                 field.model = self.model_name
-                field.backend = 'field.exe'
+                field.backend = 'field'
                 field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
                 field.frequencies = np.atleast_1d(np.asarray(
                     float(np.atleast_1d(source.frequencies)[0]), dtype=float,

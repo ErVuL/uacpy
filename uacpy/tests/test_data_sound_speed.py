@@ -182,7 +182,8 @@ def test_grid_index_and_lon_normalization():
 
 def test_depth_to_pressure_dbar():
     # ~1 dbar per metre, with the latitude/compressibility correction.
-    p = ss._depth_to_pressure_dbar(np.array([0.0, 1000.0, 5000.0]), 30.0)
+    from uacpy.data._geo import depth_to_pressure_dbar
+    p = depth_to_pressure_dbar(np.array([0.0, 1000.0, 5000.0]), 30.0)
     assert p[0] == pytest.approx(0.0, abs=1e-6)
     assert 1000 < p[1] < 1020
     assert 5000 < p[2] < 5120

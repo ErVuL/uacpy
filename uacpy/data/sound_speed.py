@@ -28,7 +28,9 @@ import numpy as np
 
 from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
 from uacpy.core.environment import SoundSpeedProfile
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
+)
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._http import http_get
@@ -113,7 +115,7 @@ def fetch_ssp(
         point, date=date, month=month, resolution=resolution, source=source,
         decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
     )
-    pressure = _depth_to_pressure_dbar(depths, lat)
+    pressure = depth_to_pressure_dbar(depths, lat)
     speed_fn = _FORMULAS[formula]
     c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
     log_message(
@@ -153,9 +155,9 @@ def fetch_ssp_transect(
 
     Parameters mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     """
-    from uacpy.data.bathymetry import _geodesic_waypoints
+    from uacpy.data._geo import geodesic_waypoints
 
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     columns = [
         fetch_ssp((la, lo), date=date, month=month, formula=formula,
                   resolution=resolution, source=source, decade=decade,
@@ -407,16 +409,3 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
     return values, depths
 
 
-def _depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
-    """Depth (m) → pressure (dbar), Leroy & Parthiot (1998) standard ocean.
-
-    Latitude-dependent gravity correction; accurate to ~0.1 % for the open
-    ocean, well within the sound-speed budget. ``soundspeed_*`` expect dbar.
-    """
-    z = np.asarray(depth_m, dtype=float)
-    phi = np.radians(latitude_deg)
-    g_phi = 9.7803 * (1 + 5.3e-3 * np.sin(phi) ** 2)
-    h45 = (1.00818e-2 * z + 2.465e-8 * z ** 2
-           - 1.25e-13 * z ** 3 + 2.8e-19 * z ** 4)          # MPa
-    k = (g_phi - 2e-5 * z) / (9.80612 - 2e-5 * z)
-    return h45 * k * 100.0                                   # MPa → dbar

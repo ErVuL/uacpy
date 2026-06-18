@@ -3,7 +3,8 @@
 Named ``acoustic_signal`` so it does not collide with Python's stdlib
 ``signal`` module. Sub-modules, each with one responsibility:
 
-* ``generation`` — waveforms, noise generation, Fourier synthesis
+* ``waveforms`` / ``sequences`` / ``noise_synthesis`` — deterministic pulses,
+  coded probe sequences, and stochastic/Fourier synthesis
 * ``arrays``     — steering vectors + conventional/adaptive beamforming
 * ``active``     — matched filter / pulse compression / ambiguity
 * ``transforms`` — f-k, tau-p, Radon (gather transforms + inverses)
@@ -12,24 +13,41 @@ Named ``acoustic_signal`` so it does not collide with Python's stdlib
 * ``system_id``  — FRF (transfer-function) estimation
 * ``channel``    — time-domain channel simulation
 * ``modal``      — modal / dispersion (waveguide warping)
+
+Class vs. function convention
+-----------------------------
+Several transforms/estimators expose **both** a CapWords class and a lower_case
+function for the same math (e.g. ``FK`` / ``Radon`` / ``TauP`` / ``Spectrogram``
+/ ``PSD`` vs. ``radon_transform`` / ``taup_transform`` / ...). They are not
+redundant — pick by use:
+
+* **Class** — a *configurable, reusable estimator*. Construct once with its
+  parameters (window, nfft, slowness grid, ...), then call it on many inputs;
+  it caches/validates configuration and carries result metadata.
+* **Function** — a *one-shot* call: transform a single array with the defaults
+  (or a few inline kwargs) and get the array back, no object to keep.
 """
 
-from .generation import (
-    add_noise,
-    bpsk_modulate,
-    cans,
-    fourier_synthesis,
+from .waveforms import (
+    sparc_pulse,
     gaussian_pulse,
     hfm_chirp,
     lfm_chirp,
-    make_bandlimited_noise,
-    make_mseq_probe,
-    make_noise_waveform,
-    mseq,
     nwave,
     ricker_wavelet,
-    ssrp,
     tone_burst,
+)
+from .sequences import (
+    bpsk_modulate,
+    make_mseq_probe,
+    mseq,
+)
+from .noise_synthesis import (
+    add_noise,
+    fourier_synthesis,
+    make_bandlimited_noise,
+    make_noise_waveform,
+    synthesize_noise_from_psd,
 )
 from .analysis import PPSD, PSD, SEL
 from .system_id import FRF
@@ -40,7 +58,7 @@ from .arrays import (
     mvdr_spectrum,
     sample_covariance,
     steering_vectors,
-    taper,
+    shading_taper,
 )
 from .active import (
     ambiguity_function,
@@ -86,7 +104,9 @@ from . import (
     arrays,
     bands,
     channel,
-    generation,
+    waveforms,
+    sequences,
+    noise_synthesis,
     modal,
     system_id,
     timefreq,
@@ -95,17 +115,17 @@ from . import (
 
 __all__ = [
     # generation
-    "ssrp", "lfm_chirp", "hfm_chirp", "tone_burst", "gaussian_pulse",
-    "ricker_wavelet", "bpsk_modulate", "add_noise", "make_bandlimited_noise",
-    "fourier_synthesis", "cans", "nwave", "mseq", "make_mseq_probe",
-    "make_noise_waveform",
+    "synthesize_noise_from_psd", "lfm_chirp", "hfm_chirp", "tone_burst",
+    "gaussian_pulse", "ricker_wavelet", "bpsk_modulate", "add_noise",
+    "make_bandlimited_noise", "fourier_synthesis", "sparc_pulse", "nwave",
+    "mseq", "make_mseq_probe", "make_noise_waveform",
     # spectral / level estimators
     "PSD", "PPSD", "SEL",
     # system identification
     "FRF",
     # arrays
     "steering_vectors", "beamform", "sample_covariance", "bartlett_spectrum",
-    "mvdr_spectrum", "music_spectrum", "taper",
+    "mvdr_spectrum", "music_spectrum", "shading_taper",
     # active
     "matched_filter", "pulse_compression", "processing_gain",
     "ambiguity_function", "shift_to_max_correlation",
@@ -124,6 +144,7 @@ __all__ = [
     # decidecade bands (ISO 18405 / IEC 61260-1)
     "decidecade_bands", "decidecade_band_levels", "plot_band_levels",
     # sub-modules
-    "generation", "arrays", "active", "transforms", "timefreq", "analysis",
-    "system_id", "channel", "modal", "bands",
+    "waveforms", "sequences", "noise_synthesis", "arrays", "active",
+    "transforms", "timefreq", "analysis", "system_id", "channel", "modal",
+    "bands",
 ]

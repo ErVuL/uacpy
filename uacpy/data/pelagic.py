@@ -8,8 +8,8 @@ and latitude (the high-productivity siliceous-ooze belts).
 
 It is **approximate** (a climatological rule, not a measurement) but **global**
 and **commercial-clean**: it uses only the GEBCO water depth and the latitude —
-no licensed data — so it makes ``bottom='auto'`` resolve *anywhere* in the ocean
-instead of failing offshore.
+no licensed data — so it makes ``bottom_sources='auto'`` resolve *anywhere* in
+the ocean instead of failing offshore.
 
 The thresholds reproduce the first-order findings of the reference global map of
 **Diesing (2020)** — *Deep-sea sediments of the global ocean*, Earth Syst. Sci.
@@ -70,28 +70,33 @@ def pelagic_grain_size(depth_m: float, lat: float) -> float:
     return _LITHOLOGY_PHI[pelagic_lithology(depth_m, lat)]
 
 
-def _water_depth(point, timeout, verbose):
-    """Water depth (m) from GEBCO — local cache if installed, else the live API."""
+def _water_depth(point, timeout, verbose, cache_only):
+    """Water depth (m) from GEBCO — local cache if installed, else the live API
+    (skipped when ``cache_only``, so the cache-miss error propagates instead)."""
     from uacpy.data.bathymetry import fetch_bathy
     try:
         return fetch_bathy(point, source='local')
-    except ConfigurationError:             # local grid not installed → live API
+    except ConfigurationError:             # local grid not installed
+        if cache_only:
+            raise
         return fetch_bathy(point, source='api', timeout=timeout,
                                  verbose=verbose)
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
-                         depth: float = None, timeout=None,
+                         depth: float = None, cache_only: bool = False,
+                         timeout=None,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
 
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
-    (local cache, falling back to the live API). The resulting lithology maps to
-    a mean grain size ϕ and then a half-space via
+    (local cache, falling back to the live API unless ``cache_only``). The
+    resulting lithology maps to a mean grain size ϕ and then a half-space via
     :func:`uacpy.data.bottom_from_grain_size`.
     """
     lat, lon = as_coordinate(point)
-    d = depth if depth is not None else _water_depth(point, timeout, verbose)
+    d = depth if depth is not None else _water_depth(point, timeout, verbose,
+                                                     cache_only)
     litho = pelagic_lithology(d, lat)
     bottom = bottom_from_grain_size(_LITHOLOGY_PHI[litho], roughness=roughness)
     log_message(
@@ -102,11 +107,12 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
 
 def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points: int = 6, roughness: float = 0.0,
-                                  timeout=None, verbose: Union[bool, str] = False
+                                  cache_only: bool = False, timeout=None,
+                                  verbose: Union[bool, str] = False
                                   ) -> RangeDependentBottom:
     """Range-dependent bottom from the pelagic model along ``start`` → ``end``."""
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_pelagic((la, lo), roughness=roughness,
-                                            timeout=timeout),
+                                            cache_only=cache_only, timeout=timeout),
         start, end, n_points, source_label='pelagic model',
     )

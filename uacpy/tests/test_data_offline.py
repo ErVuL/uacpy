@@ -1,9 +1,9 @@
 """Tests for the offline local-cache backend (uacpy.data._cache + readers).
 
 Builds a synthetic ``$UACPY_DATA_CACHE`` (tiny GEBCO/WOA23 NetCDF + sediment
-CSVs) so the GEBCO/WOA23/DECK41 readers (``source='local'``) and
-``fetch_environment(prefer_cache=True)`` run from the cache. Skipped where
-netCDF4 is unavailable (the grids need it).
+CSVs) so the GEBCO/WOA23/DECK41 readers (``source='local'``) and a cache-first
+``fetch_environment`` (gebco/woa23 + ``bottom_sources='grainsize'``) run from the
+cache with no network. Skipped where netCDF4 is unavailable (the grids need it).
 """
 
 import numpy as np
@@ -176,7 +176,7 @@ def test_gebco_region_grid_marks_land_nan(cache):
     assert np.nanmin(depth) == 1500.0
 
 
-def test_bathymetry_source_local(cache):
+def test_bathymetry_sources_local(cache):
     assert data.fetch_bathy((12.0, 34.0), source='local') == 1500.0
     t = data.fetch_bathy_transect((1.0, 1.0), (2.0, 2.0), n_points=4, source='local')
     assert t.shape == (4, 2) and np.all(t[:, 1] == 1500.0)
@@ -256,34 +256,73 @@ def test_sediment_transect(cache):
     assert rdb.sound_speed.shape == (4,)
 
 
-# ── capstone offline ────────────────────────────────────────────────────────
+# ── capstone from the cache ───────────────────────────────────────────────────
+# These pin cache-only sources (gebco/woa23 cache-first, bottom_sources='grainsize'
+# /'crust1'), so every fetch resolves locally with no network call.
 
-def test_fetch_environment_prefer_cache(cache):
-    # prefer_cache=True resolves entirely from the installed cache (no network).
-    env = data.fetch_environment((30.5, -40.5), prefer_cache=True, bottom='auto')
+def test_fetch_environment_from_cache(cache):
+    # Cache-first: gebco/woa23 resolve to their local twin, grainsize to the
+    # installed sediment DB — no network, fully reproducible.
+    env = data.fetch_environment((30.5, -40.5), bottom_sources='grainsize')
     assert env.depth == 1500.0
     assert env.ssp.n_depths >= 5
     assert env.bottom.grain_size_phi == 3.0
     assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
 
 
+def test_fetch_environment_cache_preset(cache):
+    # *_sources='cache' resolves every axis from local data only (no network):
+    # bathy→GEBCO-local, ssp→WOA23-local, bottom→cache chain (EMODnet local miss
+    # here → grain-size DB).
+    env = data.fetch_environment((30.5, -40.5), bathymetry_sources='cache',
+                                 ssp_sources='cache', bottom_sources='cache')
+    assert env.depth == 1500.0
+    assert env.bottom.grain_size_phi == 3.0
+    assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
+
+
+def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
+    # 'cache' must never reach the network. With an empty cache and literal
+    # bathy/ssp, the bottom 'cache' chain (incl. the pelagic last resort, whose
+    # depth lookup would otherwise fall back to the live API) must fail fast with
+    # the install hint rather than touching the net.
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    gebco_local._GRID.clear()
+    from uacpy.data import bathymetry
+    monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("ssp_sources/bottom_sources='cache' hit the live API")))
+    with pytest.raises(ConfigurationError, match='install.sh --data'):
+        data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
+                               bottom_sources='cache')
+
+
+def test_cache_preset_ssp_no_cache_raises(tmp_path, monkeypatch):
+    # ssp_sources='cache' with no WOA23 cache fails fast (no OpenDAP fallback).
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    woa23_local._DATASETS.clear()
+    with pytest.raises(ConfigurationError, match='install.sh --data woa23'):
+        data.fetch_environment((30.5, -40.5), bathymetry=3000.0,
+                               ssp_sources='cache')
+
+
 def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
-    # bottom='crust1' rescales its column with GlobSed by default, so both
-    # CRUST1.0 and GlobSed appear in the environment's provenance.
-    env = data.fetch_environment((30.5, -40.5), prefer_cache=True, bottom='crust1')
+    # bottom_sources='crust1' rescales its column with GlobSed by default, so
+    # both CRUST1.0 and GlobSed appear in the environment's provenance.
+    env = data.fetch_environment((30.5, -40.5), bottom_sources='crust1')
     ids = [s.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23', 'crust1', 'globsed']
     assert env.bottom.total_thickness() == pytest.approx(500.0)
 
 
 def test_fetch_environment_sea_ice(cache, monkeypatch):
-    # sea_ice=True sets the surface from the climatological concentration; an
-    # ice-covered point gets an elastic canopy + 'seaice' provenance.
+    # surface_sources='seaice' sets the surface from the climatological
+    # concentration; an ice-covered point gets an elastic canopy + provenance.
     from uacpy.data import seaice_local
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
                         lambda pt, date=None, *, month=None: 0.85)
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
-                                 prefer_cache=True, bottom='auto', sea_ice=True)
+                                 bottom_sources='grainsize',
+                                 surface_sources='seaice')
     assert env.surface.acoustic_type == 'half-space'
     assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface()
     assert 'seaice' in [s.id for s in env.data_sources]
@@ -295,14 +334,15 @@ def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
                         lambda pt, date=None, *, month=None: 0.0)
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
-                                 prefer_cache=True, bottom='auto', sea_ice=True)
+                                 bottom_sources='grainsize',
+                                 surface_sources='auto')
     assert env.surface.acoustic_type == 'vacuum'
     assert 'seaice' not in [s.id for s in env.data_sources]
 
 
 def test_fetch_environment_sea_ice_requires_date(cache):
-    with pytest.raises(ConfigurationError, match='sea_ice=True needs date'):
-        data.fetch_environment((30.5, -40.5), prefer_cache=True, sea_ice=True)
+    with pytest.raises(ConfigurationError, match="surface_sources='seaice' needs date"):
+        data.fetch_environment((30.5, -40.5), surface_sources='seaice')
 
 
 def test_offline_emodnet_local_bottom(cache):

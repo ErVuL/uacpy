@@ -2,11 +2,22 @@
 
 from typing import Tuple
 
+import numpy as np
+
+from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError
 
-__all__ = ['Coordinate', 'as_coordinate', 'normalize_lon']
+__all__ = [
+    'Coordinate', 'as_coordinate', 'normalize_lon',
+    'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
+    'depth_to_pressure_dbar',
+]
 
 Coordinate = Tuple[float, float]
+
+#: Spherical-Earth radius in km, derived from the single source of truth in
+#: ``core.constants`` so every haversine in the data layer shares one value.
+EARTH_RADIUS_KM = EARTH_RADIUS_M / 1000.0
 
 
 def as_coordinate(point) -> Coordinate:
@@ -35,3 +46,72 @@ def normalize_lon(lon: float) -> float:
     same result regardless of convention (and dateline values stay in range).
     """
     return ((float(lon) + 180.0) % 360.0) - 180.0
+
+
+def central_angle(start: Coordinate, end: Coordinate) -> float:
+    """Great-circle central angle (radians) between two ``(lat, lon)`` points
+    (haversine; numerically stable for small separations)."""
+    lat1, lon1 = np.radians(as_coordinate(start))
+    lat2, lon2 = np.radians(as_coordinate(end))
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return float(2 * np.arcsin(np.sqrt(a)))
+
+
+def great_circle_km(lat0, lon0, lat, lon):
+    """Haversine great-circle distance (km) from ``(lat0, lon0)`` to ``(lat,
+    lon)``. Vectorized over the second point; uses :data:`EARTH_RADIUS_KM`."""
+    la0, lo0, la, lo = map(np.radians, (lat0, lon0, lat, lon))
+    d = (np.sin((la - la0) / 2) ** 2
+         + np.cos(la0) * np.cos(la) * np.sin((lo - lo0) / 2) ** 2)
+    return 2.0 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(d))
+
+
+def geodesic_waypoints(
+    start: Coordinate, end: Coordinate, n_points: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Evenly spaced great-circle waypoints between two ``(lat, lon)``.
+
+    Returns ``(lats_deg, lons_deg, ranges_m)`` where ``ranges_m`` is the
+    cumulative spherical surface distance from ``start`` (0 at the first
+    point, total length at the last). Spherical-Earth slerp — accurate to a
+    few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
+    of ~450 m resolution.
+    """
+    lat1, lon1 = np.radians(as_coordinate(start))
+    lat2, lon2 = np.radians(as_coordinate(end))
+
+    ang = central_angle(start, end)               # shared geodesic (haversine)
+    if ang == 0.0:
+        raise ConfigurationError(
+            "geodesic_waypoints: start and end coordinates coincide.",
+            remediation="Use a single-point fetch, or pass distinct endpoints.",
+        )
+
+    f = np.linspace(0.0, 1.0, n_points)
+    sin_ang = np.sin(ang)
+    A = np.sin((1 - f) * ang) / sin_ang
+    B = np.sin(f * ang) / sin_ang
+    x = A * np.cos(lat1) * np.cos(lon1) + B * np.cos(lat2) * np.cos(lon2)
+    y = A * np.cos(lat1) * np.sin(lon1) + B * np.cos(lat2) * np.sin(lon2)
+    z = A * np.sin(lat1) + B * np.sin(lat2)
+    lats = np.degrees(np.arctan2(z, np.hypot(x, y)))
+    lons = np.degrees(np.arctan2(y, x))
+
+    ranges_m = f * ang * EARTH_RADIUS_M
+    return lats, lons, ranges_m
+
+
+def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
+    """Depth (m) → pressure (dbar), Leroy & Parthiot (1998) standard ocean.
+
+    Latitude-dependent gravity correction; accurate to ~0.1 % for the open
+    ocean, well within the sound-speed budget. ``soundspeed_*`` expect dbar.
+    """
+    z = np.asarray(depth_m, dtype=float)
+    phi = np.radians(latitude_deg)
+    g_phi = 9.7803 * (1 + 5.3e-3 * np.sin(phi) ** 2)
+    h45 = (1.00818e-2 * z + 2.465e-8 * z ** 2
+           - 1.25e-13 * z ** 3 + 2.8e-19 * z ** 4)          # MPa
+    k = (g_phi - 2e-5 * z) / (9.80612 - 2e-5 * z)
+    return h45 * k * 100.0                                   # MPa → dbar

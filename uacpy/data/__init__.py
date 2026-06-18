@@ -14,9 +14,13 @@
 - **Surface**: NSIDC sea-ice concentration → an elastic ice-canopy
   ``BoundaryProperties`` (:func:`fetch_sea_ice_surface`), so an ice-covered
   point replaces the free surface with a pack-ice boundary.
-- **Capstone**: :func:`fetch_environment` assembles them (``sea_ice=True`` adds
-  the ice surface); ``prefer_cache`` picks live-first (default) or cache-first,
-  each falling back to the other.
+- **Capstone**: :func:`fetch_environment` assembles them
+  (``surface_sources='seaice'`` adds the ice surface). Each axis is a literal
+  (``ssp=`` / ``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``)
+  and/or fetched from ordered-fallback ``*_sources`` (source first, literal as
+  fallback; ``'auto'`` = best available, ``'cache'`` = local data only, no
+  network); fetching is cache-first (a locally installed dataset is sampled
+  before any network call).
 
 Examples
 --------

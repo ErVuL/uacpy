@@ -134,7 +134,7 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100],
         ),
-        bottom=bottom_rd.eval(range=0, interp='nearest'),
+        bottom=bottom_rd.at(range=0, interp='nearest'),
         absorption=fg,
     )
 
@@ -147,7 +147,7 @@ def main():
         name="Slope (400m)",
         bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data),
-        bottom=bottom_rd.eval(range=20000, interp='nearest'),
+        bottom=bottom_rd.at(range=20000, interp='nearest'),
         absorption=fg,
     )
 

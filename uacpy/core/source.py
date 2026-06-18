@@ -85,6 +85,14 @@ class Source:
                 f"got {self.depths.tolist()}"
             )
 
+        # Strictly increasing, matching Receiver — outputs are indexed by source
+        # depth, so a defined order keeps result rows unambiguous across models.
+        if self.depths.size > 1 and np.any(np.diff(self.depths) <= 0):
+            raise ConfigurationError(
+                f"source depths must be strictly increasing; got "
+                f"{self.depths.tolist()}"
+            )
+
         if np.any(self.frequencies <= 0):
             raise ConfigurationError(
                 f"source frequencies must be strictly positive (Hz), got "

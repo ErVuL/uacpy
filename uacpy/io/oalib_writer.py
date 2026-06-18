@@ -862,7 +862,7 @@ def write_fieldflp(
     title: str = "",
     M_limit: int = 999999,
     n_profiles: int = 1,
-    profile_ranges_km: Any = None,
+    profile_ranges_m: Any = None,
 ) -> None:
     """
     Write field parameters file (.flp) for FIELD/FIELDS programs.
@@ -896,10 +896,12 @@ def write_fieldflp(
         Maximum number of modes to include (default: 999999 = all)
     n_profiles : int, optional
         Number of range profiles (default: 1 for range-independent).
-        For range-dependent, set > 1 and provide profile_ranges_km.
-    profile_ranges_km : array-like, optional
-        Profile boundary ranges in km. Required when n_profiles > 1.
-        First value must be 0.0. Length must equal n_profiles.
+        For range-dependent, set > 1 and provide profile_ranges_m.
+    profile_ranges_m : array-like, optional
+        Profile boundary ranges in metres, converted to the km the
+        ``.flp`` format expects at this boundary. Required when
+        n_profiles > 1. First value must be 0.0. Length must equal
+        n_profiles.
 
     Notes
     -----
@@ -929,12 +931,12 @@ def write_fieldflp(
 
     # Validate profile parameters
     if n_profiles > 1:
-        if profile_ranges_km is None:
-            raise ConfigurationError("profile_ranges_km required when n_profiles > 1")
-        profile_ranges_km = np.asarray(profile_ranges_km, dtype=float)
+        if profile_ranges_m is None:
+            raise ConfigurationError("profile_ranges_m required when n_profiles > 1")
+        profile_ranges_km = m_to_km(profile_ranges_m)
         if len(profile_ranges_km) != n_profiles:
             raise ConfigurationError(
-                f"profile_ranges_km length ({len(profile_ranges_km)}) "
+                f"profile_ranges_m length ({len(profile_ranges_km)}) "
                 f"must equal n_profiles ({n_profiles})"
             )
         if abs(profile_ranges_km[0]) > 1e-9:

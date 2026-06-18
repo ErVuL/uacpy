@@ -192,7 +192,7 @@ def _per_range_broadcast(values, tl_field, label: str) -> np.ndarray:
 
 
 def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
-    kwargs = tl_field._id_kwargs()
+    kwargs = tl_field.id_kwargs()
     kwargs['metadata']['sonar_budget'] = budget
     return Field(
         data=np.asarray(se, dtype=float),
@@ -418,7 +418,7 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
             f"got {sigma_db}"
         )
     pd = norm.cdf(np.asarray(se_field.data, dtype=float) / sigma)
-    kwargs = se_field._id_kwargs()
+    kwargs = se_field.id_kwargs()
     kwargs['metadata']['sigma_db'] = sigma
     return Field(
         data=pd,

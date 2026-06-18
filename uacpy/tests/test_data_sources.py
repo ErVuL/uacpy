@@ -46,13 +46,13 @@ def test_environment_records_data_sources(stub_fetchers):
     assert 'GEBCO' in text and 'EMODnet' not in text
 
 
-def test_environment_records_fetched_bottom_source(monkeypatch, stub_fetchers):
+def test_environment_records_fetched_bottom_sources(monkeypatch, stub_fetchers):
     import uacpy.data.seabed as seabed_mod
     from uacpy.core.environment import BoundaryProperties as BP
     monkeypatch.setattr(seabed_mod, 'fetch_bottom',
                         lambda point, **kw: BP(acoustic_type='grain-size',
                                                   grain_size_phi=2.0, sound_speed=1650,
                                                   density=1.9))
-    env = env_mod.fetch_environment((43.2, 7.5), bottom='emodnet')
+    env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='emodnet')
     ids = [s.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23', 'emodnet']

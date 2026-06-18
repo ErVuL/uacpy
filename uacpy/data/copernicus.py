@@ -24,10 +24,12 @@ import numpy as np
 
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
+)
 from uacpy.data._time import parse_date
 from uacpy.data.sound_speed import (
-    _FORMULAS, _depth_to_pressure_dbar, assemble_range_dependent,
+    _FORMULAS, assemble_range_dependent,
 )
 from uacpy._log import log_message
 
@@ -90,7 +92,7 @@ def fetch_ssp_operational(
     depths, temp, sal = fetch_ts_profile_operational(
         point, date, dataset_id=dataset_id, timeout=timeout, verbose=verbose,
     )
-    pressure = _depth_to_pressure_dbar(depths, lat)
+    pressure = depth_to_pressure_dbar(depths, lat)
     speed_fn = _FORMULAS[formula]
     c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
     log_message(
@@ -120,7 +122,7 @@ def fetch_ssp_transect_operational(
     :class:`~uacpy.core.environment.SoundSpeedProfile`. See
     :func:`fetch_ssp_operational` for parameters/exceptions.
     """
-    from uacpy.data.bathymetry import _geodesic_waypoints
+    from uacpy.data._geo import geodesic_waypoints
 
     if formula not in _FORMULAS:
         raise ConfigurationError(
@@ -137,7 +139,7 @@ def fetch_ssp_transect_operational(
             remediation="Run `copernicusmarine login` and check the dataset_id.",
         ) from exc
 
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speed_fn = _FORMULAS[formula]
     columns = []
     for la, lo in zip(lats, lons):
@@ -147,7 +149,7 @@ def fetch_ssp_transect_operational(
                 f"No Copernicus profile at {la:.3f}, {lo:.3f} on {when}.",
                 remediation="Keep the transect within the dataset's wet domain.",
             )
-        pressure = _depth_to_pressure_dbar(depths, la)
+        pressure = depth_to_pressure_dbar(depths, la)
         c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
         columns.append(SoundSpeedProfile(depths=depths, data=c, shape='measured'))
 

@@ -8,6 +8,7 @@ import numpy as np
 from typing import Union, List, Optional
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import _require_strictly_increasing
 
 
 class Receiver:
@@ -135,7 +136,6 @@ class Receiver:
                         "have the same length or one must be scalar"
                     )
         else:
-            from uacpy.core.environment import _require_strictly_increasing
             _require_strictly_increasing(self.depths, "Receiver.depths")
             _require_strictly_increasing(self.ranges, "Receiver.ranges")
 

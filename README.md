@@ -65,7 +65,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 **Toolkits** — first‑class modules, not just glue around the models:
 
-- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice). Works **online** or **fully offline** from an install‑time local cache (`prefer_cache=`).
+- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice). Cache‑first by default (re‑uses install‑time local data, falls back to live); pass `*_sources='cache'` to pin an axis to local data only (no network).
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range.
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
@@ -87,10 +87,10 @@ from uacpy.models import Bellhop, RunMode
 
 # 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
 #    WOA23 sound speed and NCEI seabed — across the Reykjanes mid-ocean ridge.
-A, B = (56.94, -28.50), (59.16, -27.40)
+A, B = (58.70, -27.00), (59.30, -34.00)   # (lat, lon): east flank → axis → west flank
 env  = data.fetch_environment(A, transect_to=B, date='2026-01-15',
-         range_dependent_ssp=True, range_dependent_bottom=True, bottom='auto')
-grid = data.fetch_bathy_grid((53, 61), (-33, -20))     # (lats, lons, depth)
+         range_dependent_ssp=True, range_dependent_bottom=True, bottom_sources='auto')
+grid = data.fetch_bathy_grid((56, 62), (-37, -23))     # (lats, lons, depth)
 
 # 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
 src = uacpy.Source(depths=100, frequencies=800)
@@ -446,17 +446,17 @@ users can point at their own mirror.
 | Source | Used for | License | Required attribution / citation |
 |--------|----------|---------|---------------------------------|
 | **GEBCO** grid (served via [OpenTopoData](https://www.opentopodata.org/), MIT) | bathymetry | Public domain (attribution requested) | "GEBCO Compilation Group, *GEBCO Grid*" (see [GEBCO terms](https://www.gebco.net/data-products/gridded-bathymetry/terms-of-use) for the grid DOI). OpenTopoData public API is fair-use: **≤1000 req/day, ≤1 req/s** --- self-host for heavy use |
-| **GMRT** Global Multi-Resolution Topography (`source='gmrt'`) | bathymetry (multibeam, higher-res) | **CC-BY 4.0** | Ryan, W.B.F., *et al.* (2009). *Global Multi-Resolution Topography synthesis.* Geochem. Geophys. Geosyst. 10, Q03014. doi:[10.1029/2008GC002332](https://doi.org/10.1029/2008GC002332) |
+| **GMRT** Global Multi-Resolution Topography (`bathymetry_sources='gmrt'`) | bathymetry (multibeam, higher-res) | **CC-BY 4.0** | Ryan, W.B.F., *et al.* (2009). *Global Multi-Resolution Topography synthesis.* Geochem. Geophys. Geosyst. 10, Q03014. doi:[10.1029/2008GC002332](https://doi.org/10.1029/2008GC002332) |
 | **World Ocean Atlas 2023** (NOAA NCEI) | sound speed (climatology), absorption | U.S. Government work --- public domain | Reagan, J.R., *et al.* (2024). *World Ocean Atlas 2023.* NOAA National Centers for Environmental Information |
 | **Copernicus Marine Service** (free account required) | sound speed (operational) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**; free account required) | "Generated using E.U. Copernicus Marine Service Information; *&lt;product DOI&gt;*" |
-| **Argo** float profiles (`ssp_source='argo'`, via Ifremer ERDDAP) | sound speed (real in-situ profiles) | **Free and unrestricted** (Argo data policy) | "These data were collected and made freely available by the International Argo Program (argo.ucsd.edu)"; Argo (2024), Argo GDAC, SEANOE, doi:[10.17882/42182](https://doi.org/10.17882/42182) |
-| **EMODnet Geology** --- seabed substrate | sediment (European seas) | **CC-BY 4.0** | "EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0" |
-| **NCEI Seafloor Sediment Grain-Size Database** (NOAA, G00127; `bottom='grainsize'`) | sediment (global, public-domain samples) | U.S. Government work --- public domain | National Geophysical Data Center (1976), *The NGDC Seafloor Sediment Grain Size Database*, NOAA NCEI, doi:[10.7289/V5G44N6W](https://doi.org/10.7289/V5G44N6W). (The DECK41 G02094 lithology file is also accepted if supplied.) |
-| **Diesing 2020** global deep-sea seafloor lithology (`bottom='diesing'`) | sediment (global deep-sea, >500 m) | **CC-BY 4.0** | Diesing, M. (2020). *Deep-sea sediments of the global ocean.* Earth Syst. Sci. Data 12, 3367--3381. doi:[10.5194/essd-12-3367-2020](https://doi.org/10.5194/essd-12-3367-2020); data: PANGAEA doi:[10.1594/PANGAEA.911692](https://doi.org/10.1594/PANGAEA.911692) |
-| **Pelagic model** (`bottom='pelagic'`, depth/latitude classifier) | sediment (global open-ocean fallback, modelled) | **Public domain** (first-principles model) | after Diesing (2020) & Berger, W.H. (1974), *Deep-sea sedimentation* |
+| **Argo** float profiles (`ssp_sources='argo'`, via Ifremer ERDDAP) | sound speed (real in-situ profiles) | **Free and unrestricted** (Argo data policy) | "These data were collected and made freely available by the International Argo Program (argo.ucsd.edu)"; Argo (2024), Argo GDAC, SEANOE, doi:[10.17882/42182](https://doi.org/10.17882/42182) |
+| **EMODnet Geology** --- seabed substrate (`bottom_sources='emodnet'`) | sediment (European seas) | **CC-BY 4.0** | "EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0" |
+| **NCEI Seafloor Sediment Grain-Size Database** (NOAA, G00127; `bottom_sources='grainsize'`) | sediment (global, public-domain samples) | U.S. Government work --- public domain | National Geophysical Data Center (1976), *The NGDC Seafloor Sediment Grain Size Database*, NOAA NCEI, doi:[10.7289/V5G44N6W](https://doi.org/10.7289/V5G44N6W). (The DECK41 G02094 lithology file is also accepted if supplied.) |
+| **Diesing 2020** global deep-sea seafloor lithology (`bottom_sources='diesing'`) | sediment (global deep-sea, >500 m) | **CC-BY 4.0** | Diesing, M. (2020). *Deep-sea sediments of the global ocean.* Earth Syst. Sci. Data 12, 3367--3381. doi:[10.5194/essd-12-3367-2020](https://doi.org/10.5194/essd-12-3367-2020); data: PANGAEA doi:[10.1594/PANGAEA.911692](https://doi.org/10.1594/PANGAEA.911692) |
+| **Pelagic model** (`bottom_sources='pelagic'`, depth/latitude classifier) | sediment (global open-ocean fallback, modelled) | **Public domain** (first-principles model) | after Diesing (2020) & Berger, W.H. (1974), *Deep-sea sedimentation* |
 | **GlobSed** total sediment thickness (NOAA NCEI) | sediment thickness (low-frequency seabed) | U.S. Government work --- public domain | Straume, E.O., *et al.* (2019). *GlobSed: Updated total sediment thickness in the world's oceans.* Geochem. Geophys. Geosyst. 20, 1756--1772. doi:[10.1029/2018GC008115](https://doi.org/10.1029/2018GC008115) |
-| **CRUST1.0** global crustal model (`bottom='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
-| **NSIDC Sea Ice Index** (`sea_ice=True`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
+| **CRUST1.0** global crustal model (`bottom_sources='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
+| **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
 | **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
 
 > A fetched environment carries its provenance: `env.data_sources` lists the

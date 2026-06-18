@@ -18,10 +18,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from uacpy.acoustic_signal.generation import (  # noqa: E402
-    lfm_chirp, hfm_chirp, ricker_wavelet,
-    gaussian_pulse, mseq
+from uacpy.acoustic_signal.waveforms import (  # noqa: E402
+    lfm_chirp, hfm_chirp, ricker_wavelet, gaussian_pulse,
 )
+from uacpy.acoustic_signal.sequences import mseq  # noqa: E402
 
 
 def main():

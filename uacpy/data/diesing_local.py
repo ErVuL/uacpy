@@ -145,8 +145,8 @@ def fetch_seafloor_lithology(point: Coordinate) -> dict:
         raise DataFetchError(
             f"Diesing has no seafloor lithology at {lat:.3f}, {lon:.3f} "
             "(deep-sea map; coverage is water deeper than 500 m).",
-            remediation="On the shelf use bottom='grainsize'/'emodnet', or "
-                        "'pelagic' for a global model.",
+            remediation="On the shelf use bottom_sources='grainsize'/'emodnet', "
+                        "or 'pelagic' for a global model.",
         )
     litho, phi = _CLASS[code]
     return {'lithology': litho, 'grain_size_phi': phi,

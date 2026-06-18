@@ -556,6 +556,27 @@ class PropagationModel(ABC):
         )
         return derived
 
+    def _prepare_timeseries(
+        self, run_mode, source, frequencies, source_waveform, sample_rate,
+        output_duration=None,
+    ):
+        """Common TIME_SERIES/BROADBAND dispatch preamble for the IFFT-based
+        synthesizers (RAM, KrakenField, Scooter, OASP): validate the source
+        pulse, zero-pad it to ``output_duration``, and derive the broadband
+        frequency grid. Returns ``(source_waveform, frequencies)``.
+
+        Bellhop validates the pulse directly and resolves its own grid, and
+        SPARC uses ``pulse_type`` instead, so neither calls this.
+        """
+        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+        source_waveform = self._pad_waveform_to_duration(
+            source_waveform, sample_rate, output_duration,
+        )
+        frequencies = self._resolve_time_series_frequencies(
+            run_mode, source, frequencies, source_waveform, sample_rate,
+        )
+        return source_waveform, frequencies
+
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
         parent); when ``None``, a fresh temp dir is created.
@@ -905,8 +926,8 @@ class PropagationModel(ABC):
         Parameters
         ----------
         env : Environment
-            Ocean environment. Must be range-independent for most models;
-            only ``KrakenField`` handles range-dependent mode computation.
+            Ocean environment. A range-dependent env is collapsed to range-
+            independent (with a warning) before the mode solve.
         source : Source
             Acoustic source (used for frequency).
         n_modes : int, optional
@@ -933,13 +954,13 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "normal mode computation",
-                alternatives=['Kraken', 'KrakenC', 'KrakenField']
+                alternatives=['Kraken', 'KrakenC']
             )
 
-        if env.is_range_dependent and self.model_name != 'KrakenField':
-            # Range-independent mode solvers (Kraken, KrakenC) collapse
-            # the environment via ``collapse={'bathymetry': …}`` and warn,
-            # rather than reject — same pattern as OAST/OASP/Scooter/SPARC.
+        if env.is_range_dependent:
+            # Mode solvers (Kraken, KrakenC) collapse the environment via
+            # ``collapse={'bathymetry': …}`` and warn, rather than reject —
+            # same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
 
         return self._compute_modes_impl(env, source, n_modes)
@@ -1629,7 +1650,16 @@ class PropagationModel(ABC):
         for name, default in _collect_init_params(type(self)):
             if not hasattr(self, name):
                 continue
+            # Resolved binary paths are machine-specific and not copy-paste-
+            # portable — hide them regardless of value.
+            if name in ('executable', 'field_executable'):
+                continue
             value = getattr(self, name)
+            # ``cleanup`` resolves to ``work_dir is None`` when left at its None
+            # default; hide it while it carries that auto value (copy-stable,
+            # since copy passes the resolved bool back).
+            if name == 'cleanup' and value == (self.work_dir is None):
+                continue
             if default is not _NO_DEFAULT and _values_equal(value, default):
                 continue
             bits.append(f"{name}={_short_repr(value)}")

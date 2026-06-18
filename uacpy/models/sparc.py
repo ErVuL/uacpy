@@ -482,7 +482,7 @@ class SPARC(PropagationModel):
                             },
                             **self._result_kwargs(
                                 source,
-                                backend='sparc.exe',
+                                backend='sparc',
                                 frequencies=freq,
                                 phase_reference='time_domain_native',
                                 dt=float(dt),
@@ -567,7 +567,7 @@ class SPARC(PropagationModel):
                             },
                             **self._result_kwargs(
                                 source,
-                                backend='sparc.exe',
+                                backend='sparc',
                                 frequencies=freq,
                                 phase_reference='time_domain_native',
                                 dt=float(dt),
@@ -586,7 +586,7 @@ class SPARC(PropagationModel):
                     coords={'depth': receiver.depths, 'range': ranges_out},
                     **self._result_kwargs(
                         source,
-                        backend='sparc.exe',
+                        backend='sparc',
                         frequencies=freq,
                         phase_reference='travelling_wave',
                         conversion_method='fft',
@@ -662,7 +662,7 @@ class SPARC(PropagationModel):
                     coords={'depth': depths_out, 'range': receiver.ranges},
                     **self._result_kwargs(
                         source,
-                        backend='sparc.exe',
+                        backend='sparc',
                         frequencies=freq,
                         phase_reference='travelling_wave',
                         conversion_method='fft',
@@ -716,7 +716,7 @@ class SPARC(PropagationModel):
                     grn_data, receiver.ranges, frequency=freq,
                 )
                 result.model = self.model_name
-                result.backend = 'sparc.exe'
+                result.backend = 'sparc'
                 result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
                 result.frequencies = np.atleast_1d(np.asarray(freq, dtype=float))
                 result.phase_reference = 'travelling_wave'

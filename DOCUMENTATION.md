@@ -73,7 +73,7 @@ Environment + Source + Receiver  →  Model.run()  →  Result
 ```
 
 - **`Environment`** — water column: bathymetry, SSP, surface, bottom.
-- **`Source`** — depth(s), frequency(ies), source geometry ('point' / 'line').
+- **`Source`** — depth(s), frequency(ies), and `source_type=` geometry (`'point'` / `'line'`).
 - **`Receiver`** — grid or paired line of hydrophones.
 - **`Result`** — concrete typed subclass, one per output kind (see §6).
 
@@ -84,7 +84,7 @@ Every model inherits from `PropagationModel` (`uacpy.models.base`):
 | Method | Purpose |
 |---|---|
 | `run(env, src, rcv, run_mode=…, *, frequencies=…, source_waveform=…, sample_rate=…)` | Full-control entry point. Fixed keyword-only signature; no `**kwargs`. |
-| `compute_tl / rays / eigenrays / modes / arrivals(...)` | Convenience wrappers over `run()`. Each takes `(env, source, receiver)`; `compute_tl` adds keyword-only `run_mode=`, `compute_time_series` forwards `source_waveform=`/`sample_rate=`, `compute_transfer_function` forwards `frequencies=`. |
+| `compute_tl / rays / eigenrays / arrivals / modes / reflection / time_series / transfer_function / covariance / replicas(...)` | Convenience wrappers over `run()` (one per `RunMode`). Each takes `(env, source, receiver)`; `compute_tl` adds keyword-only `run_mode=`, `compute_time_series` forwards `source_waveform=`/`sample_rate=`, `compute_transfer_function` forwards `frequencies=`. |
 | `supports_mode(RunMode.X)` / `supported_modes` | Capability check. |
 
 Convenience wrappers raise `UnsupportedFeatureError` when the underlying
@@ -348,8 +348,8 @@ policy with one tailored warning.
 
 Useful methods:
 - `value` — the scalar sound speed when unambiguous (isovelocity profile,
-  or one sliced to a single cell via `eval(...)`); raises if it varies.
-- `eval(range=…, depth=…, interp='linear'|'nearest')` — label-based
+  or one sliced to a single cell via `at(...)`); raises if it varies.
+- `at(range=…, depth=…, interp='linear'|'nearest')` — label-based
   interpolated read.
 - `collapse(method)` — `r0`/`rmax`/`mean`/`median` → 1-D profile (used by
   the projection pipeline).
@@ -548,13 +548,13 @@ data sources* table.
 
 ```python
 import uacpy
-env = uacpy.data.fetch_environment((43.0, 7.5), date='2026-07-15', bottom='auto')
+env = uacpy.data.fetch_environment((43.0, 7.5), date='2026-07-15', bottom_sources='auto')
 print(uacpy.data.citations(env))      # required attribution for the sources used
 ```
 
 | Function | Returns | Source |
 |----------|---------|--------|
-| `fetch_environment(point, *, date=None, ssp_source='woa23', bottom=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, sea_ice=False, with_absorption=False, prefer_cache=False, …)` | `Environment` | one-call assembly (`sea_ice=True` → elastic ice surface from NSIDC) |
+| `fetch_environment(point, *, date=None, ssp=None, ssp_sources=None, bathymetry=None, bathymetry_sources=None, bottom=None, bottom_sources=None, surface=None, surface_sources=None, altimetry=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, with_absorption=False, …)` | `Environment` | one-call assembly. Each axis is a **literal** (`ssp=`/`bathymetry=`/`bottom=`/`surface=`/`altimetry=`, as `Environment` takes them) and/or **fetched** from ordered-fallback `*_sources` (str ok); if both are given the source is fetched first and the literal is the fallback. Bathy/SSP fetch `'gebco'`/`'woa23'` by default; any `*_sources='auto'` picks best-available (ssp argo→copernicus→woa23, bathy gmrt→gebco, bottom emodnet→diesing→pelagic, surface seaice). `surface_sources='seaice'` → elastic ice surface from NSIDC (`altimetry` has no fetch source — literal only). Fetching is cache-first; `*_sources='cache'` pins an axis to local data only (no network) |
 | `fetch_bathy(point)` · `fetch_bathy_transect(start, end, n_points=)` · `fetch_bathy_grid(lat_range, lon_range, n_lat=50, n_lon=50)` | depth (m) · `(N,2)` · `(lats, lons, depth)` | GEBCO (`source='api'`) or GMRT multibeam (`source='gmrt'`, higher-res) bathymetry |
 | `fetch_ssp(point, *, date= \| month=, formula='unesco', resolution='1.00')` · `fetch_ssp_transect(…)` · `fetch_ts_profile(…)` | `SoundSpeedProfile` · 2-D RD profile · `(z, T, S)` | WOA23 climatology |
 | `fetch_ssp_operational(point, date, …)` *(needs a free Copernicus account + login)* | `SoundSpeedProfile` | Copernicus Marine |
@@ -600,34 +600,37 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
 |---|---|---|
 | `fetch_bathy(point, source='local')` · `fetch_bathy_transect(…, source='local')` · `fetch_bathy_grid(…, source='local')` | GEBCO 2025 grid | default install (netCDF4) |
 | `fetch_ssp(point, source='local')` · `fetch_ts_profile(…, source='local')` | WOA23 grids | default install (netCDF4) |
-| `download_sediment_db()` then `fetch_bottom_local(point)` · `bottom='grainsize'` | NCEI grain-size DB (auto-downloaded + normalized; public domain) | default install (scipy) |
-| `download_emodnet_db()` then `bottom='emodnet'` (offline) | EMODnet seabed substrate polygons (CC-BY, European seas) | default install (shapely) |
-| `download_diesing_db()` then `bottom='diesing'` | Diesing 2020 global deep-sea seafloor lithology (CC-BY, >500 m) | default install (pyproj) |
+| `download_sediment_db()` then `fetch_bottom_local(point)` · `bottom_sources='grainsize'` | NCEI grain-size DB (auto-downloaded + normalized; public domain) | default install (scipy) |
+| `download_emodnet_db()` then `bottom_sources='emodnet'` | EMODnet seabed substrate polygons (CC-BY, European seas) | default install (shapely) |
+| `download_diesing_db()` then `bottom_sources='diesing'` | Diesing 2020 global deep-sea seafloor lithology (CC-BY, >500 m) | default install (pyproj) |
 | `download_globsed_db()` then `fetch_sediment_thickness(point)` | GlobSed total sediment thickness (NOAA NCEI, public domain) | default install (netCDF4) |
-| `download_crust1_db()` then `bottom='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
+| `download_crust1_db()` then `bottom_sources='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
 | `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` (or `fetch_sea_ice_surface(...)` → elastic ice `BoundaryProperties`) | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
 | `download_coastline()` → `plot_bathymetry_map` / `plot_overview` | Natural Earth coastline (public domain) | default install |
-| `fetch_environment(point, prefer_cache=True, bottom='auto')` | all of the above | default install |
+| `fetch_environment(point, ssp_sources='cache', bathymetry_sources='cache', bottom_sources='cache')` | all of the above | default install (local data only, no network) |
 
 - The cache lives at `./data_cache` (override with `$UACPY_DATA_CACHE`); the
   low-level `source='local'` fetchers raise a `ConfigurationError` naming the
-  `install.sh --data` flag when a dataset isn't cached (use these for a
-  guaranteed no-network run).
-- **`prefer_cache`** sets the per-axis access order with the *other* access as a
-  fallback if the first fails: `False` (default) → **live first, fall back to the
-  local cache**; `True` → **cache first, fall back to the live service**. Applies
-  to bathymetry (GEBCO local↔api), WOA23 SSP (local↔OPeNDAP) and the bottom
-  (local↔online). Sources with no local twin (GMRT, Copernicus, Argo) have no
-  fallback. `bottom='auto'` tries EMODnet → (grain-size, offline order) → Diesing
-  → pelagic; `bottom='emodnet'`/`'grainsize'`/`'crust1'`/`'diesing'`/`'pelagic'`
-  force one. All are commercial-use clean.
+  `install.sh --data` flag when a dataset isn't cached.
+- **Source selection** is per-axis ordered fallback lists — `ssp_sources`
+  (`'woa23'`/`'copernicus'`/`'argo'`), `bathymetry_sources` (`'gebco'`/`'gmrt'`)
+  and `bottom_sources` — each tried in order, the next on failure (a bare string
+  is a 1-element list). `bottom_sources='auto'` is the preset chain EMODnet →
+  Diesing → pelagic (grain-size added when `offline`); `bottom=` instead takes a
+  *literal* override (ϕ float / material name / `BoundaryProperties`). All
+  sources are commercial-use clean.
+- **`offline`** is the cache/network axis. `False` (default) is **cache-first**:
+  re-use any installed local twin (a static global grid/climatology — same data,
+  faster), fetch live only for what isn't cached. `True` uses **only** cached
+  backends and never touches the network, raising a clear error for a source
+  with no cached twin (GMRT, Copernicus, Argo).
 - The local grain-size samples are **sparse points** (nearest-neighbour with a
   `max_distance_km` guard), gappier than EMODnet's continuous European-seas
   polygons — so EMODnet is preferred where it has coverage.
 - Maps draw the coastline from the cached Natural Earth polygons when installed
   (offline), else fetch it live, else fall back to a sea-only map.
 - Bathymetry also has a higher-resolution live option: `source='gmrt'` (GMRT
-  multibeam, CC-BY) on the fetchers, or `fetch_environment(bathymetry_source='gmrt')`.
+  multibeam, CC-BY) on the fetchers, or `fetch_environment(bathymetry_sources='gmrt')`.
 
 ---
 
@@ -1220,8 +1223,9 @@ without relying on the originating model. The same string also appears
 in `repr(field)` so REPL output reads `Field(kind='tl', model='…',
 f=… Hz, axes=(depth, range))`.
 
-`SoundSpeedProfile` and `RangeDependentBottom` split nearest vs.
-interpolation: `.at(...)` is nearest, `.eval(...)` interpolates.
+`SoundSpeedProfile` and `RangeDependentBottom` read with
+`.at(..., interp='linear'|'nearest')` — `'linear'` interpolates between
+stored samples, `'nearest'` snaps to the closest one.
 
 ### Common metadata
 
@@ -1367,15 +1371,14 @@ within = rays.filter_by_miss_distance(max_miss=15.0)
 direct = rays.filter_by_bounces(kind='direct')
 ```
 
-For multi-receiver eigenray runs, pass a `Receiver` instead of
-`range=`/`depth=`; the result has `is_eigen=True` and carries
-`receiver_depths` / `receiver_ranges`.
+For eigenray runs, pass a multi-point `Receiver`; the result has
+`is_eigen=True` and carries `receiver_depths` / `receiver_ranges`.
 
 ---
 
 ## 7. Visualization
 
-`uacpy.visualization` ships a **canonical 18-function surface**. Slice
+`uacpy.visualization` ships a **canonical 20-function surface**. Slice
 the `Field` first (`.at()` / `.isel()`) and the auto-shape plotters do
 the rest. Every result type has a `.plot(env=env)` method that
 dispatches to the right helper.
@@ -1401,7 +1404,7 @@ Note that this call mutates process-global `mpl.rcParams` and persists
 across subsequent plots — wrap in `matplotlib.rc_context()` if you
 want it scoped.
 
-### The 17 helpers
+### The 20 helpers
 
 | Helper | Takes | Notes |
 |---|---|---|
@@ -1465,8 +1468,8 @@ Reachable as `uacpy.acoustic_signal`. Sub-modules:
 
 | Module | Purpose | Reach |
 |---|---|---|
-| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `cans`, `nwave`, `mseq`, `make_mseq_probe`, `bpsk_modulate`, `ssrp`, `add_noise`, `make_bandlimited_noise`, `make_noise_waveform`, `fourier_synthesis` |
-| `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `taper` |
+| `…generation` | Waveforms + noise generation + Fourier synthesis | `tone_burst`, `lfm_chirp`, `hfm_chirp`, `gaussian_pulse`, `ricker_wavelet`, `sparc_pulse`, `nwave`, `mseq`, `make_mseq_probe`, `bpsk_modulate`, `synthesize_noise_from_psd`, `add_noise`, `make_bandlimited_noise`, `make_noise_waveform`, `fourier_synthesis` |
+| `…arrays` | Steering vectors + conventional & adaptive beamforming | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` |
 | `…active` | Matched filter / pulse compression / ambiguity / alignment | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function`, `shift_to_max_correlation` |
 | `…transforms` | Gather transforms: f-k, tau-p, Radon (each with inverse + acoustic-cone overlay) | `FK`, `TauP`, `Radon`, `inverse_fk`, `taup_transform`/`inverse_taup`, `radon_transform`/`inverse_radon` |
 | `…timefreq` | Hilbert, spectrogram, wavelet (Morlet/Paul/DOG), Wigner–Ville, cepstrum (+ inverses) | `analytic_signal`, `envelope`, `instantaneous_frequency`, `Spectrogram`, `wigner_ville`, `cwt`/`inverse_cwt`, `cepstrum`/`complex_cepstrum`/`inverse_complex_cepstrum` |
@@ -1773,11 +1776,11 @@ fig, ax = wenz.plot()                    # stacked components
 `water_depth ∈ {deep, shallow}`. Wind speed in **knots**.
 
 Round-trip a noise spectrum to a time-domain realisation with
-`uacpy.acoustic_signal.ssrp` and verify with `PPSD`:
+`uacpy.acoustic_signal.synthesize_noise_from_psd` and verify with `PPSD`:
 
 ```python
 Pxx = wenz.as_psd()                                  # Pa²/Hz
-t, x, fs = uacpy.acoustic_signal.ssrp(Pxx, wenz.frequencies, duration=30.0)
+t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(Pxx, wenz.frequencies, duration=30.0)
 ppsd = uacpy.acoustic_signal.PPSD(ref=1e-6, seg_duration=1.0)
 ppsd.compute(x, fs); ppsd.plot()
 ```
@@ -1906,7 +1909,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 06 | `example_06_kraken_advanced.py` | Modal analysis with Kraken | |
 | 07 | `example_07_all_models_comparison.py` | All models side by side, `compare_models` + `plot_environment` | |
 | 08 | `example_08_long_range.py` | Convergence-zone propagation | |
-| 09 | `example_09_ambient_noise.py` | Wenz noise + ssrp synthesis + PPSD verification | |
+| 09 | `example_09_ambient_noise.py` | Wenz noise + PSD→time-series synthesis + PPSD verification | |
 | 10 | `example_10_signal_processing.py` | CW, chirps, matched filtering | |
 | 11 | `example_11_bellhop_run_modes.py` | Every Bellhop run mode + `compute_eigenrays` | |
 | 12 | `example_12_attenuation_models.py` | Thorp / Francois-Garrison / biological | |

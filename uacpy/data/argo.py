@@ -25,7 +25,9 @@ from uacpy._log import log_message
 from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, normalize_lon, great_circle_km,
+)
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
 
@@ -34,27 +36,19 @@ __all__ = ['fetch_argo_profile', 'fetch_ssp_argo']
 ARGO_ERDDAP_URL = 'https://erddap.ifremer.fr/erddap/tabledap/ArgoFloats.csv'
 DEFAULT_MAX_DISTANCE_KM = 250.0
 DEFAULT_MAX_DAYS = 15
-_EARTH_RADIUS_KM = 6371.0
 _FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso}
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
 
 
-def _great_circle_km(lat0, lon0, lat, lon):
-    la0, lo0, la, lo = map(np.radians, (lat0, lon0, lat, lon))
-    d = (np.sin((la - la0) / 2) ** 2
-         + np.cos(la0) * np.cos(la) * np.sin((lo - lo0) / 2) ** 2)
-    return 2.0 * _EARTH_RADIUS_KM * np.arcsin(np.sqrt(d))
-
-
 def _pressure_dbar_to_depth(pres_dbar, lat):
     """Pressure (dbar) → depth (m): Newton inversion of the depth→pressure law."""
-    from uacpy.data.sound_speed import _depth_to_pressure_dbar
+    from uacpy.data._geo import depth_to_pressure_dbar
     p = np.asarray(pres_dbar, dtype=float)
     z = p * 0.9905                                   # ~1 m per dbar initial guess
     for _ in range(5):
-        f = _depth_to_pressure_dbar(z, lat) - p
-        df = (_depth_to_pressure_dbar(z + 1.0, lat)
-              - _depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
+        f = depth_to_pressure_dbar(z, lat) - p
+        df = (depth_to_pressure_dbar(z + 1.0, lat)
+              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
         z = z - f / df
     return z
 
@@ -120,17 +114,17 @@ def fetch_argo_profile(
             f"No Argo profile within {max_distance_km:.0f} km / {max_days} days "
             f"of {lat:.3f}, {lon:.3f} on {parse_date(date)}.",
             remediation="Widen max_distance_km / max_days, or use "
-                        "ssp_source='woa23' (climatology).",
+                        "ssp_sources='woa23' (climatology).",
         )
     (plat, cyc), prof = min(
         profiles.items(),
-        key=lambda kv: _great_circle_km(lat, lon, kv[1]['lat'], kv[1]['lon']))
-    dist = _great_circle_km(lat, lon, prof['lat'], prof['lon'])
+        key=lambda kv: great_circle_km(lat, lon, kv[1]['lat'], kv[1]['lon']))
+    dist = great_circle_km(lat, lon, prof['lat'], prof['lon'])
     if dist > max_distance_km:
         raise DataFetchError(
             f"Nearest Argo profile is {dist:.0f} km away "
             f"(> max_distance_km={max_distance_km:.0f}).",
-            remediation="Widen max_distance_km, or use ssp_source='woa23'.",
+            remediation="Widen max_distance_km, or use ssp_sources='woa23'.",
         )
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
     return {'platform': plat, 'cycle': cyc, 'lat': prof['lat'],

@@ -141,8 +141,8 @@ def fetch_seabed_local(point: Coordinate) -> dict:
         raise DataFetchError(
             f"EMODnet has no seabed substrate at {lat:.3f}, {lon:.3f} "
             "(coverage is European seas only).",
-            remediation="Outside European seas, use bottom='grainsize' (global) "
-                        "or pass an explicit grain size (ϕ) / sediment class.",
+            remediation="Outside European seas, use bottom_sources='grainsize' "
+                        "(global) or pass an explicit grain size (ϕ) / class via bottom=.",
         )
     return {'folk_5cl': int(codes[hits[0]]),
             'source': 'EMODnet Geology seabed substrate 1:1M (offline)'}

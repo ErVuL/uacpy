@@ -240,8 +240,8 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6,
     thickness by default (``use_globsed``); the result carries
     ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
     """
-    from uacpy.data.bathymetry import _geodesic_waypoints
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    from uacpy.data._geo import geodesic_waypoints
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     profiles = [
         fetch_bottom_crust1((la, lo), sediment_attenuation=sediment_attenuation,
                             basement_attenuation=basement_attenuation,

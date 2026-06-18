@@ -1,12 +1,13 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 09: Ambient noise (Wenz) + ssrp synthesis + PPSD verification
+EXAMPLE 09: Ambient noise (Wenz) + PSD→time-series synthesis + PPSD verification
 ═══════════════════════════════════════════════════════════════════════════════
 
 Pipeline:
   1. Build a Wenz total ambient-noise PSD via :class:`uacpy.noise.WenzNoise`
      (deep water, Beaufort-6 wind, heavy shipping + rain).
-  2. Synthesise a time-domain realisation with :func:`uacpy.acoustic_signal.ssrp`
+  2. Synthesise a time-domain realisation with
+     :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`
      (spectral synthesis of random processes).
   3. Visualise the time–frequency content with
      :class:`uacpy.acoustic_signal.Spectrogram` — a stationary process should show
@@ -82,9 +83,10 @@ def main():
     Pxx = wenz_ssrp.as_psd()                           # Pa² / Hz (linear)
 
     duration = 30.0                                    # seconds
-    t, x, fs = uacpy.acoustic_signal.ssrp(Pxx, f_ssrp, fs=96000,
-                                 duration=duration, scale=1.0, n_fft=n_fft)
-    print(f"  ssrp: synthesised {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
+    t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
+        Pxx, f_ssrp, fs=96000,
+        duration=duration, scale=1.0, n_fft=n_fft)
+    print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
 
     # Snapshot of the waveform (first 0.2 s).

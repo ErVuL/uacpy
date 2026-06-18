@@ -129,6 +129,12 @@ class TestSource:
         source = uacpy.Source(depths=50.0, frequencies=[50.0, 100.0, 200.0])
         assert len(source.frequencies) == 3
 
+    def test_source_depths_must_be_strictly_increasing(self):
+        """Multi-element source depths must be sorted (matches Receiver), so
+        output rows indexed by source depth stay unambiguous across models."""
+        with pytest.raises(ConfigurationError, match="strictly increasing"):
+            uacpy.Source(depths=[30.0, 10.0, 20.0], frequencies=100.0)
+
 
 @pytest.mark.parametrize("ctor,kwargs", [
     # Source / Receiver reject NaN or inf in any
@@ -583,14 +589,14 @@ class TestSoundSpeedProfileNearestVsInterp:
     def test_eval_nearest_picks_nearest_depth(self):
         ssp = self._ssp()
         # depth=51 is closer to 100 than to 0 → returns the 100m sample
-        sliced = ssp.eval(depth=51.0, interp='nearest')
+        sliced = ssp.at(depth=51.0, interp='nearest')
         assert sliced.depths[0] == 100.0
         assert sliced.value == 1490.0
 
     def test_interp_linear(self):
         ssp = self._ssp()
         # depth=50 is halfway between (0, 1500) and (100, 1490) → 1495
-        sliced = ssp.eval(depth=50.0, interp='linear')
+        sliced = ssp.at(depth=50.0, interp='linear')
         assert sliced.depths[0] == 50.0
         assert sliced.value == pytest.approx(1495.0)
 

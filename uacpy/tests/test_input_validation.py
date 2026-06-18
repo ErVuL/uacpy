@@ -61,6 +61,24 @@ def test_rd_bottom_ranges_must_be_strictly_increasing():
         )
 
 
+def test_rd_bottom_shear_array_length_validated():
+    # A mismatched explicit shear array must raise ConfigurationError at
+    # construction (not a bare numpy ValueError later inside at()).
+    with pytest.raises(ConfigurationError, match="shear_speed length"):
+        RangeDependentBottom(
+            ranges=np.array([0.0, 1000.0, 2000.0]),
+            sound_speed=np.array([1600.0, 1700.0, 1800.0]),
+            density=np.array([1.5, 1.6, 1.7]),
+            attenuation=np.array([0.3, 0.4, 0.5]),
+            shear_speed=np.array([200.0, 300.0]),     # length 2 != 3
+        )
+
+
+def test_sediment_layer_rejects_negative_attenuation():
+    with pytest.raises(ConfigurationError, match="attenuation must be non-negative"):
+        SedimentLayer(thickness=5, sound_speed=1600, density=1.6, attenuation=-0.1)
+
+
 def test_rd_layered_bottom_ranges_must_be_strictly_increasing():
     layer = SedimentLayer(thickness=5, sound_speed=1600, density=1.6, attenuation=0.4)
     hs = BoundaryProperties(acoustic_type='half-space',
@@ -276,7 +294,7 @@ def test_ssp_eval_interpolates_off_grid_range():
         matrix=np.array([[1500.0, 1490.0, 1480.0],
                          [1480.0, 1470.0, 1460.0]])
     )
-    sliced = ssp.eval(range=2_000.0)
+    sliced = ssp.at(range=2_000.0)
     assert sliced.data[0, 0] == pytest.approx(1495.0)
     assert sliced.data[1, 0] == pytest.approx(1475.0)
 
@@ -287,7 +305,7 @@ def test_ssp_eval_clamps_beyond_last_range():
         ranges=np.array([0.0, 4_000.0]),
         matrix=np.array([[1500.0, 1490.0], [1480.0, 1470.0]])
     )
-    sliced = ssp.eval(range=10_000.0)
+    sliced = ssp.at(range=10_000.0)
     assert sliced.data[0, 0] == pytest.approx(1490.0)
     assert sliced.data[1, 0] == pytest.approx(1470.0)
 
@@ -300,7 +318,7 @@ def test_rd_bottom_eval_interpolates_off_grid_range():
         attenuation=np.array([0.3, 0.5]),
         acoustic_type='half-space',
     )
-    bp = rd.eval(range=2_500.0)
+    bp = rd.at(range=2_500.0)
     assert bp.sound_speed == pytest.approx(1700.0)
     assert bp.density == pytest.approx(1.7)
 
@@ -333,8 +351,8 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     env = Environment(bathymetry=bathy, ssp=ssp, bottom=rd_bot)
     assert env.is_range_dependent
     assert env.bathymetry_at_range(4_000.0)[0] == pytest.approx(140.0)
-    assert env.ssp.eval(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
-    assert env.bottom.eval(range=4_500.0).sound_speed == pytest.approx(1675.0)
+    assert env.ssp.at(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
+    assert env.bottom.at(range=4_500.0).sound_speed == pytest.approx(1675.0)
 
 
 def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):

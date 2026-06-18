@@ -68,15 +68,23 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
     levels = np.full(centers.size, np.nan)
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         m = (freqs >= lo) & (freqs < hi)
-        if np.count_nonzero(m) >= 1:
+        # Need ≥2 samples: np.trapezoid over a single point is 0, which would
+        # silently NaN the band on a PSD grid too coarse to resolve it.
+        if np.count_nonzero(m) >= 2:
             power = np.trapezoid(psd[m], freqs[m])
             if power > 0:
                 levels[i] = 10.0 * np.log10(power / ref ** 2)
     return centers, levels
 
 
-def plot_band_levels(centers, levels, ax=None, title="", width=0.8, **kwargs):
-    """Bar plot of decidecade band levels vs centre frequency. Returns ``(fig, ax)``."""
+def plot_band_levels(centers, levels, ax=None, title="", width=0.8,
+                     ref_label="1 µPa²", **kwargs):
+    """Bar plot of decidecade band levels vs centre frequency. Returns ``(fig, ax)``.
+
+    ``ref_label`` is the reference shown in the y-axis label; pass the reference
+    matching the ``ref`` used in :func:`decidecade_band_levels` (e.g. ``"20 µPa²"``
+    in air) so the units stay honest.
+    """
     import matplotlib.pyplot as plt
     c = np.asarray(centers, dtype=float)
     lv = np.asarray(levels, dtype=float)
@@ -91,7 +99,7 @@ def plot_band_levels(centers, levels, ax=None, title="", width=0.8, **kwargs):
     ax.set_xticks(ticks)
     ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
     ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel("Band level [dB re 1 µPa²]")
+    ax.set_ylabel(f"Band level [dB re {ref_label}]")
     ax.set_title(f"[decidecade] band levels {title}", loc="left")
     ax.grid(alpha=0.3, axis="y")
     return fig, ax

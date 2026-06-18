@@ -54,7 +54,7 @@ class enforces a tight API contract; bend it only when you must.
 ```python
 result = Model(...).run(env, source, receiver, run_mode=None, *,
                         frequencies=None, source_waveform=None,
-                        sample_rate=None)
+                        sample_rate=None, output_duration=None)
 ```
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an

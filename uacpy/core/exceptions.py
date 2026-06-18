@@ -81,10 +81,13 @@ class ModelExecutionError(UACPYError):
 
 
 class InvalidDepthError(UACPYError):
-    """Raised when a source or receiver depth exceeds the environment depth."""
+    """Raised when a source or receiver depth exceeds the depth a model can
+    resolve. For most models that is the water depth; for spectral solvers
+    (Scooter/SPARC) it includes the sediment column, so the message says
+    "resolvable depth" rather than "environment depth"."""
 
     def __init__(self, depth: float, max_depth: float, context: str):
-        message = f"{context} depth ({depth:.1f}m) exceeds environment depth ({max_depth:.1f}m)"
+        message = f"{context} depth ({depth:.1f}m) exceeds resolvable depth ({max_depth:.1f}m)"
         remediation = f"Set {context.lower()} depth to ≤ {max_depth:.1f}m"
         super().__init__(message, remediation)
         self.depth = depth

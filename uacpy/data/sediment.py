@@ -279,9 +279,9 @@ def range_dependent_bottom_along(
     only if *no* point along the transect is covered. Shared by the EMODnet and
     local grain-size range-dependent bottom fetchers.
     """
-    from uacpy.data.bathymetry import _geodesic_waypoints
+    from uacpy.data._geo import geodesic_waypoints
 
-    lats, lons, ranges_m = _geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     cp: List = []
     rho: List = []
     alpha: List = []

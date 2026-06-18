@@ -11,7 +11,7 @@ from uacpy.acoustic_signal import (
     mvdr_spectrum,
     sample_covariance,
     steering_vectors,
-    taper,
+    shading_taper,
 )
 from uacpy.core.exceptions import ConfigurationError
 
@@ -82,6 +82,6 @@ class TestBeamformers:
 
 class TestTaper:
     def test_mean_normalised(self):
-        w = taper(16, "hann")
+        w = shading_taper(16, "hann")
         assert w.size == 16
         assert np.mean(w) == pytest.approx(1.0)

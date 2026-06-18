@@ -1294,7 +1294,7 @@ class Bellhop(PropagationModel):
                     'time': t_vec,
                 },
                 **self._result_kwargs(
-                    source, backend='bellhop', frequencies=fc,
+                    source, backend=self.model_name.lower(), frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
                 ),
@@ -1330,7 +1330,7 @@ class Bellhop(PropagationModel):
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
-                backend='bellhop',
+                backend=self.model_name.lower(),
                 frequencies=frequencies,
                 center_frequency=fc,
                 arrivals_field=arr_field,
