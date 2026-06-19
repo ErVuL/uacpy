@@ -109,25 +109,6 @@ uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver
 plt.show()
 ```
 
-**Range-dependent propagation with RAM** — fetch a real transect from GPS and run the parabolic-equation model. `RAM` auto-dispatches the right backend for the seabed (`mpiramS` here; `ramgeo` for fluid *layered* sediment, `rams0.5` elastic, `ramsurf1.5` rough surface — or force one with `RAM(backend=…)`):
-
-``` python
-import numpy as np
-import uacpy
-from uacpy import data
-from uacpy.models import RAM, RunMode
-
-# Fetch a real range-dependent transect from GPS — GEBCO bathymetry, WOA23 SSP, seabed.
-A, B = (45.0, -2.5), (45.5, -6.5)                     # Bay of Biscay slope → abyssal plain
-env = data.fetch_environment(A, transect_to=B, date='2026-01-15',
-                             range_dependent_ssp=True, range_dependent_bottom=True)
-
-src = uacpy.Source(depths=100, frequencies=50)
-rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 120),
-                     ranges=np.linspace(100, env.max_range, 250))
-tl  = RAM().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)   # → mpiramS PE (auto-selected)
-```
-
 ## 📦 Installation
 
 **Linux is the primary supported platform.** macOS works with Homebrew.
@@ -278,7 +259,7 @@ source uacpy_venv/bin/activate
 pip install -e .
 rm -rf uacpy/bin   # Optional (Required for v0.3.x -> v0.4.x)
 rm -rf data_cache  # Optional
-./install.sh
+./install.sh       # Optional (Required for v0.3.x -> v0.4.x) 
 ```
 
 ### Uninstall
