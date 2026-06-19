@@ -9,13 +9,13 @@ OBJECTIVE:
        bottoms. (Bellhop.run() already auto-routes through BOUNCE for
        elastic / layered bottoms with a UserWarning; use
        run_with_bounce when you need to pin c_low / c_high / rmax.)
-    2. LayeredBottom — multi-layer sediment with Kraken
+    2. SeabedColumn — multi-layer sediment with Kraken
     3. Range-dependent bottom properties — with RAM and visualization
 
 FEATURES DEMONSTRATED:
     - Bellhop.run_with_bounce() for explicit BOUNCE parameters
-    - LayeredBottom + SedimentLayer for depth-dependent sediment
-    - RangeDependentBottom with RAM (true Fortran RD support)
+    - SeabedColumn + SedimentLayer for depth-dependent sediment
+    - Bottom with RAM (true Fortran RD support)
     - plot_field(), plot_environment(), plot_environment()
     - plot_environment(), plot_environment()
 
@@ -34,8 +34,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import (  # noqa: E402
-    RangeDependentBottom, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, BoundaryProperties,
+    Bottom, SedimentLayer, SeabedColumn,
+    BoundaryProperties,
 )
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
@@ -179,7 +179,7 @@ def demo_layered_bottom():
         sound_speed=2000.0, density=2.2, attenuation=0.1,
     )
 
-    layered = LayeredBottom(layers=layers, halfspace=halfspace)
+    layered = SeabedColumn(layers=layers, halfspace=halfspace)
     print(f"Total sediment thickness: {layered.total_thickness():.1f} m")
 
     env = uacpy.Environment(
@@ -239,8 +239,7 @@ def demo_range_dependent_bottom():
         [9000, 200], [12000, 220], [15000, 250],
     ])
 
-    bottom_rd = RangeDependentBottom(
-        ranges=bathymetry_rd[:, 0].astype(float),
+    bottom_rd = Bottom.from_halfspaces(bathymetry_rd[:, 0].astype(float),
         sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
         density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
         attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4, 0.3]),
@@ -315,7 +314,7 @@ def demo_rd_layered_bottom():
     print("=" * 70)
 
     # Near-shore: soft mud over clay
-    near = LayeredBottom(
+    near = SeabedColumn(
         layers=[
             SedimentLayer(thickness=5.0, sound_speed=1500.0, density=1.2,
                           attenuation=1.0),
@@ -329,7 +328,7 @@ def demo_rd_layered_bottom():
     )
 
     # Mid-range: mixed sediment
-    mid = LayeredBottom(
+    mid = SeabedColumn(
         layers=[
             SedimentLayer(thickness=3.0, sound_speed=1580.0, density=1.5,
                           attenuation=0.6),
@@ -343,7 +342,7 @@ def demo_rd_layered_bottom():
     )
 
     # Offshore: hard sand over rock
-    far = LayeredBottom(
+    far = SeabedColumn(
         layers=[
             SedimentLayer(thickness=2.0, sound_speed=1700.0, density=1.9,
                           attenuation=0.3),
@@ -356,10 +355,7 @@ def demo_rd_layered_bottom():
         ),
     )
 
-    rdl = RangeDependentLayeredBottom(
-        ranges=np.array([0, 7500, 15000]),
-        profiles=[near, mid, far],
-    )
+    rdl = Bottom.from_columns([near, mid, far], ranges=np.array([0, 7500, 15000]))
     rdl_bathymetry = np.column_stack([
         np.array([0.0, 7500.0, 15000.0]),
         np.array([120.0, 180.0, 280.0]),
@@ -367,7 +363,7 @@ def demo_rd_layered_bottom():
 
     print(f"Max sediment thickness: {rdl.max_total_thickness():.1f} m")
     print(f"Ranges: {rdl.ranges / 1000.0} km")
-    for i, lb in enumerate(rdl.profiles):
+    for i, lb in enumerate(rdl.columns):
         print(f"  r={(rdl.ranges / 1000.0)[i]:.1f} km: {len(lb.layers)} layers, "
               f"total {lb.total_thickness():.0f} m")
 
@@ -426,7 +422,7 @@ def main():
 
     print("\nFeatures demonstrated:")
     print("  - Bellhop.run_with_bounce() for elastic bottom")
-    print("  - LayeredBottom with Scooter (NMEDIA > 1)")
+    print("  - SeabedColumn with Scooter (NMEDIA > 1)")
     print("  - Range-dependent bottom (scalar) with RAM")
     print("  - Range-dependent LAYERED bottom (depth+range) with RAM")
     print("  - plot_field() with contours")

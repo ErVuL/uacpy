@@ -717,15 +717,32 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 )
         f.seek(pos)
 
+        # uacpy reads the axisymmetric, single-output-parameter OASP case.
+        # The writer nests DO IS=1,ISROW / DO M=1,MSUFT / DO JRH / DO JRV with
+        # NOUT components per record (oasiun23.f:305-311); for isrow>1, msuft>1
+        # or nout>1 the (nf, nplots, nrd)/first-component layout below would
+        # silently collapse slabs/parameters, so reject those rather than
+        # return wrong data.
+        if isrow != 1 or msuft != 1:
+            raise FileFormatError(
+                f"OASP .trf has isrow={isrow}, msuft={msuft}: multi-source-row "
+                f"or azimuthal (3D bearing) transfer functions are not "
+                f"supported — uacpy reads the axisymmetric single-slab case "
+                f"only."
+            )
+        if nout != 1:
+            raise FileFormatError(
+                f"OASP .trf carries nout={nout} output parameters; uacpy reads "
+                f"a single component (normal stress / pressure). Use a "
+                f"single-output OASP option string."
+            )
+
         transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
         for j in range(nf):
-            for _is in range(max(1, isrow)):
-                for _m in range(max(1, msuft)):
-                    for jrh in range(nplots):
-                        for jrv in range(nrd):
-                            rec = _read_fortran_record(
-                                f, data_fmt, endian=endian)
-                            transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
+            for jrh in range(nplots):
+                for jrv in range(nrd):
+                    rec = _read_fortran_record(f, data_fmt, endian=endian)
+                    transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
     return {
         'title': title,
@@ -898,84 +915,3 @@ def read_oasr_reflection_coefficients(
         raise
     except Exception as e:
         raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
-
-
-def _trf_regression_selftest(tmp_path=None):
-    """Write a synthetic PULSETRF-style file and round-trip through the reader.
-
-    Produces a minimal single-frequency, single-depth, single-range file with
-    known complex payload and validates the reader returns matching values.
-    Used by the OASES reader test-suite and available as a quick sanity check::
-
-        from uacpy.io.oases_reader import _trf_regression_selftest
-        _trf_regression_selftest()
-    """
-    import tempfile
-    endian = '<'
-
-    def w(f, payload: bytes):
-        f.write(struct.pack(endian + 'i', len(payload)))
-        f.write(payload)
-        f.write(struct.pack(endian + 'i', len(payload)))
-
-    if tmp_path is None:
-        tmp_path = Path(tempfile.mkdtemp()) / 'synthetic.trf'
-    else:
-        tmp_path = Path(tmp_path)
-
-    # --- Build synthetic header matching the documented layout ---
-    title = 'synthetic-trf-test'
-    prognm = 'OASP17'
-    nout = 1
-    iparm = [1]
-    signn = '+'
-    freqs = 100.0
-    sd = 50.0
-    rd, rdlow, ir = 20.0, 20.0, 1   # single receiver depth
-    r0, rspace, nplots = 1000.0, 1000.0, 1  # single range
-    nx, lx, mx, dt = 4, 1, 1, 0.01       # NX=power of 2, single freq bin
-    icdr = 0
-    omegim = 0.0
-    msuft = 1
-    isrow = 1
-    inttyp = 0
-
-    test_real, test_imag = 0.75, -0.25
-
-    with open(tmp_path, 'wb') as f:
-        w(f, b'PULSETRF')
-        w(f, prognm.encode())
-        w(f, struct.pack(endian + 'i', nout))
-        w(f, struct.pack(endian + f'{nout}i', *iparm))
-        w(f, title.ljust(80).encode())
-        w(f, signn.encode())
-        w(f, struct.pack(endian + 'f', freqs))
-        w(f, struct.pack(endian + 'f', sd))
-        w(f, struct.pack(endian + 'ffi', rd, rdlow, ir))
-        w(f, struct.pack(endian + 'ffi', r0, rspace, nplots))
-        w(f, struct.pack(endian + 'iiif', nx, lx, mx, dt))
-        w(f, struct.pack(endian + 'i', icdr))
-        w(f, struct.pack(endian + 'f', omegim))
-        w(f, struct.pack(endian + 'i', msuft))
-        w(f, struct.pack(endian + 'i', isrow))
-        w(f, struct.pack(endian + 'i', inttyp))
-        for _ in range(2):
-            w(f, struct.pack(endian + 'i', 0))
-        for _ in range(5):
-            w(f, struct.pack(endian + 'f', 0.0))
-        # Data records: 1 freq * 1 isrow * 1 msuft * 1 nplots * 1 ir
-        w(f, struct.pack(endian + 'ff', test_real, test_imag))
-
-    data = _read_oasp_trf_binary(tmp_path)
-    tf = data['transfer_function']
-    assert tf.shape == (1, 1, 1), f"shape mismatch: {tf.shape}"
-    assert np.isclose(tf[0, 0, 0].real, test_real), tf[0, 0, 0]
-    assert np.isclose(tf[0, 0, 0].imag, test_imag), tf[0, 0, 0]
-    assert np.isclose(data['source_depth'], sd)
-    assert np.isclose(data['center_frequency'], freqs)
-    return True
-
-
-if __name__ == '__main__':
-    _trf_regression_selftest()
-    print('TRF regression self-test: OK')

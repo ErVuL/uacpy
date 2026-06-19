@@ -543,5 +543,3 @@ class PSD:
             ax.legend()
 
         return ax
-
-

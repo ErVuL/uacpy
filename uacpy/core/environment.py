@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING, Union, List, Tuple, Optional
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _require_strictly_increasing, _sanitize_title
 from uacpy.core.bottom import (
-    SedimentLayer, BoundaryProperties, RangeDependentBottom,
-    LayeredBottom, RangeDependentLayeredBottom, _boundary_has_shear,
+    SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
 )
 from uacpy.core.ssp import SoundSpeedProfile, generate_sea_surface
 
@@ -47,8 +46,11 @@ class Environment:
     altimetry : array-like, optional
         Surface altimetry as ``[(range, height_m), …]`` (height
         positive up). Default ``None`` (flat surface).
-    bottom : BoundaryProperties, RangeDependentBottom, LayeredBottom, or RangeDependentLayeredBottom, optional
-        Bottom acoustic properties. Default is a fluid sand-like half-space
+    bottom : Bottom, SeabedColumn, BoundaryProperties, float, or str, optional
+        Seabed. Coerced to a :class:`Bottom`: a scalar is a half-space sound
+        speed (``bottom=1800``), a string is a material preset
+        (``bottom='sand'``), and a ``BoundaryProperties`` / ``SeabedColumn`` /
+        ``Bottom`` is used directly. Default is a fluid sand-like half-space
         (``sound_speed=1600`` m/s, ``density=1.5`` g/cm³,
         ``attenuation=0.5`` dB/wavelength). For a perfectly reflecting bottom,
         pass ``BoundaryProperties(acoustic_type='rigid')``.
@@ -104,8 +106,7 @@ class Environment:
         ]] = None,
         altimetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
         bottom: Optional[Union[
-            BoundaryProperties, RangeDependentBottom,
-            'LayeredBottom', 'RangeDependentLayeredBottom',
+            Bottom, SeabedColumn, BoundaryProperties, float, str,
         ]] = None,
         surface: Optional[BoundaryProperties] = None,
         absorption: Optional['Absorption'] = None,
@@ -124,10 +125,10 @@ class Environment:
 
         if np.ndim(bathymetry) == 0:   # scalar or 0-D ndarray
             water_depth = float(bathymetry)
-            if water_depth <= 0:
+            if not np.isfinite(water_depth) or water_depth <= 0:
                 raise ConfigurationError(
-                    f"Environment: bathymetry depth must be positive (m); "
-                    f"got {water_depth}"
+                    f"Environment: bathymetry depth must be finite and positive "
+                    f"(m); got {water_depth}"
                 )
             self.bathymetry = np.array([[0.0, water_depth]], dtype=np.float64)
         else:
@@ -137,6 +138,11 @@ class Environment:
                     f"Environment: bathymetry must be a positive scalar or shape "
                     f"(N, 2) as [(range, depth), ...]; got shape "
                     f"{self.bathymetry.shape} (example: [(0, 100), (5000, 200)])"
+                )
+            if not np.all(np.isfinite(self.bathymetry)):
+                raise ConfigurationError(
+                    f"Environment: bathymetry must be finite; got "
+                    f"{self.bathymetry.tolist()}"
                 )
             if np.any(self.bathymetry[:, 0] < 0):
                 raise ConfigurationError(
@@ -154,6 +160,11 @@ class Environment:
 
         max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
 
+        # Carrier instances (ssp / surface / bottom) are stored by reference,
+        # not deep-copied: every model copies the whole env (``env.copy()``)
+        # before mutating any of them, so the env never mutates a caller's
+        # carrier. Do not mutate ``env.ssp`` / ``env.bottom`` / ``env.surface``
+        # in place without an ``env.copy()`` first.
         if ssp is None:
             # default isovelocity at 1500 m/s
             self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, 1500.0)
@@ -193,22 +204,32 @@ class Environment:
         else:
             self.surface = surface
 
+        self.bottom = self._coerce_bottom(bottom)
+
+    @staticmethod
+    def _coerce_bottom(bottom) -> Bottom:
+        """Coerce ``bottom=`` into a :class:`Bottom`, mirroring ``ssp=``:
+        scalar cp, preset name, ``BoundaryProperties``, ``SeabedColumn`` or
+        ``Bottom`` (``None`` → the default half-space)."""
         if bottom is None:
-            self.bottom = BoundaryProperties(
-                acoustic_type='half-space',
-                density=1.5,
-                sound_speed=1600.0,
-                attenuation=0.5,
-            )
-        elif isinstance(bottom, (BoundaryProperties, RangeDependentBottom,
-                                 LayeredBottom, RangeDependentLayeredBottom)):
-            self.bottom = bottom
-        else:
-            raise ConfigurationError(
-                f"Environment: bottom must be BoundaryProperties, "
-                f"RangeDependentBottom, LayeredBottom, or "
-                f"RangeDependentLayeredBottom; got {type(bottom).__name__}"
-            )
+            return Bottom.from_halfspace(BoundaryProperties(
+                acoustic_type='half-space', density=1.5,
+                sound_speed=1600.0, attenuation=0.5))
+        if isinstance(bottom, Bottom):
+            return bottom
+        if isinstance(bottom, SeabedColumn):
+            return Bottom.from_column(bottom)
+        if isinstance(bottom, BoundaryProperties):
+            return Bottom.from_halfspace(bottom)
+        if isinstance(bottom, (int, float, np.integer, np.floating)):
+            return Bottom.from_halfspace(
+                BoundaryProperties(sound_speed=float(bottom)))
+        if isinstance(bottom, str):
+            return Bottom.from_halfspace(BoundaryProperties.from_preset(bottom))
+        raise ConfigurationError(
+            "Environment: bottom must be a Bottom, SeabedColumn, "
+            "BoundaryProperties, a scalar sound speed (m/s), or a material "
+            f"preset name; got {type(bottom).__name__}")
 
     @property
     def depth(self) -> float:
@@ -228,8 +249,7 @@ class Environment:
         extent = float(np.max(self.bathymetry[:, 0]))
         if self.ssp.is_range_dependent:
             extent = max(extent, float(self.ssp.ranges[-1]))
-        if isinstance(self.bottom, (RangeDependentBottom,
-                                    RangeDependentLayeredBottom)):
+        if self.bottom.is_range_dependent:
             extent = max(extent, float(self.bottom.ranges[-1]))
         return extent
 
@@ -254,35 +274,16 @@ class Environment:
         return np.interp(range, self.bathymetry[:, 0], self.bathymetry[:, 1])
 
     def halfspace_at_range(self, range: float) -> 'BoundaryProperties':
-        """Return the *halfspace* :class:`BoundaryProperties` at ``range`` (m).
+        """The half-space :class:`BoundaryProperties` at ``range`` (m): the
+        properties beneath all sediment layers, linearly interpolated for an
+        all-half-space range-dependent bottom and nearest-neighbour when the
+        bottom is layered. Used by env-file writers that emit a single bottom
+        row."""
+        return self.bottom.halfspace_at(range=range)
 
-        Always returns a flat :class:`BoundaryProperties` regardless of
-        the bottom flavour: for :class:`LayeredBottom` and
-        :class:`RangeDependentLayeredBottom` this is the underlying
-        halfspace beneath all sediment layers; for
-        :class:`RangeDependentBottom` it is the linearly-interpolated
-        sample; for a plain :class:`BoundaryProperties` it is the
-        bottom itself. Used by env-file writers that emit a single
-        bottom row (acoustic_type / sound_speed / density / ...).
-        """
-        b = self.bottom
-        if isinstance(b, RangeDependentLayeredBottom):
-            return b.at(range=range).halfspace
-        if isinstance(b, LayeredBottom):
-            return b.halfspace
-        if isinstance(b, RangeDependentBottom):
-            return b.at(range=range)
-        return b
-
-    def bottom_at_range(self, range: float):
-        """Bottom properties at the requested range. Returns
-        :class:`LayeredBottom` for layered envs, otherwise
-        :class:`BoundaryProperties`."""
-        if isinstance(self.bottom, RangeDependentLayeredBottom):
-            return self.bottom.at(range=range)
-        if isinstance(self.bottom, RangeDependentBottom):
-            return self.bottom.at(range=range)
-        return self.bottom
+    def bottom_at_range(self, range: float) -> 'SeabedColumn':
+        """The :class:`SeabedColumn` (layers + half-space) nearest ``range``."""
+        return self.bottom.column_at(range=range)
 
     def has_range_dependent_bathymetry(self) -> bool:
         """``True`` iff the seafloor depth actually varies with range.
@@ -299,36 +300,32 @@ class Environment:
         return self.ssp.is_range_dependent
 
     def has_range_dependent_bottom(self) -> bool:
-        return isinstance(self.bottom, RangeDependentBottom)
+        """``True`` for a range-dependent *half-space* bottom (no layers)."""
+        return self.bottom.is_range_dependent and not self.bottom.is_layered
 
     def has_layered_bottom(self) -> bool:
-        return isinstance(self.bottom, LayeredBottom)
+        """``True`` for a range-*independent* layered bottom."""
+        return self.bottom.is_layered and not self.bottom.is_range_dependent
 
     def has_range_dependent_layered_bottom(self) -> bool:
-        return isinstance(self.bottom, RangeDependentLayeredBottom)
+        """``True`` for a bottom that varies with range *and* has layers."""
+        return self.bottom.is_range_dependent and self.bottom.is_layered
 
     def has_elastic_bottom(self) -> bool:
-        """``True`` iff any sample of ``self.bottom`` carries non-zero shear.
-
-        Walks the layer/profile structure of :class:`LayeredBottom` and
-        :class:`RangeDependentLayeredBottom` so a stratified env with a
-        single elastic layer reports ``True``. For
-        :class:`RangeDependentBottom`, ``True`` iff *any* range sample has
-        ``shear_speed > 0``.
-        """
-        return _boundary_has_shear(self.bottom)
+        """``True`` iff any layer or half-space of ``self.bottom`` has shear."""
+        return self.bottom.is_elastic
 
     def has_elastic_surface(self) -> bool:
         """``True`` iff ``self.surface`` carries non-zero shear."""
-        return _boundary_has_shear(self.surface)
+        return (self.surface is not None
+                and getattr(self.surface, 'shear_speed', 0.0) > 0)
 
     @property
     def is_range_dependent(self) -> bool:
         return (
             self.has_range_dependent_bathymetry()
             or self.ssp.is_range_dependent
-            or isinstance(self.bottom, (RangeDependentBottom,
-                                        RangeDependentLayeredBottom))
+            or self.bottom.is_range_dependent
         )
 
     def __repr__(self) -> str:
@@ -400,7 +397,6 @@ class Environment:
 
 __all__ = [
     'Environment',
-    'SedimentLayer', 'BoundaryProperties', 'RangeDependentBottom',
-    'LayeredBottom', 'RangeDependentLayeredBottom',
+    'SedimentLayer', 'BoundaryProperties', 'SeabedColumn', 'Bottom',
     'SoundSpeedProfile', 'generate_sea_surface',
 ]

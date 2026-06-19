@@ -104,12 +104,11 @@ class TestVolumeAttenuation:
     @pytest.mark.requires_binary
     def test_kraken_thorp_attenuation(self, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """Test Kraken with Thorp attenuation formula."""
+        """Test Kraken with Thorp attenuation formula (modes path)."""
         kraken = Kraken(verbose=False)
-        result = kraken.run(
+        result = kraken.compute_modes(
             env=shallow_env_thorp,
             source=high_freq_source,
-            receiver=receiver,
         )
         assert isinstance(result, Modes)
         assert result.k is not None

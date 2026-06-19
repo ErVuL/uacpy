@@ -13,9 +13,6 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results._base import Result, _complex_to_db
 
 
-_CANONICAL_AXIS_ORDER = ('source_depth', 'depth', 'range', 'frequency', 'time')
-
-
 class Field(Result):
     """Generic gridded result. One container for every spatially or
     spectrally gridded uacpy output.
@@ -70,7 +67,9 @@ class Field(Result):
             )
         normalised: Dict[str, np.ndarray] = {}
         for name, v in coords.items():
-            arr = np.atleast_1d(np.asarray(v, dtype=float))
+            # np.array (not asarray) so each Field owns its coord vectors —
+            # slices/derived Fields never alias a parent's (or caller's) arrays.
+            arr = np.atleast_1d(np.array(v, dtype=float))
             if arr.ndim != 1:
                 raise ConfigurationError(
                     f"Field.coords[{name!r}]: must be 1-D; got shape {arr.shape}"
@@ -761,6 +760,26 @@ class ResultStack:
         idx = int(np.argmin(np.abs(self.coordinate - target)))
         return self.slabs[idx]
 
+    @property
+    def tl(self) -> np.ndarray:
+        """Transmission loss stacked along the coordinate axis — shape
+        ``(n_slabs, *slab.tl.shape)`` — so generic code can read ``result.tl``
+        whether one or many source depths were requested. Requires Field slabs.
+        """
+        if not hasattr(self.slabs[0], 'tl'):
+            raise ConfigurationError(
+                f"ResultStack.tl: slabs are {self.slab_type.__name__}, not "
+                f"Field — no transmission loss. Pick a slab with stack[i] or "
+                f"stack.at({self.coordinate_name}=...)."
+            )
+        return np.stack([s.tl for s in self.slabs], axis=0)
+
+    def plot(self, **kwargs):
+        """Plot every slab as a labelled panel grid (Field stacks), delegating
+        to :func:`uacpy.visualization.plot_result`."""
+        from uacpy.visualization import plots
+        return plots.plot_result(self, **kwargs)
+
     def __repr__(self) -> str:
         return (
             f"ResultStack[{self.slab_type.__name__}]"
@@ -1022,4 +1041,3 @@ def _synthesize_time_series(
         phase_reference=tf.phase_reference,
         metadata={'source_waveform_fs': sample_rate, 'window': window},
     )
-

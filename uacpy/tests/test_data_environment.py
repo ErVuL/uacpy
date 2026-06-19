@@ -40,7 +40,7 @@ def test_bottom_from_phi(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bottom=2.0)  # ϕ → sand-ish
     assert env.bottom is not None
     assert env.bottom.acoustic_type == 'half-space'   # universal across models
-    assert env.bottom.grain_size_phi == 2.0
+    assert env.bottom.columns[0].halfspace.grain_size_phi == 2.0
 
 
 def test_bottom_from_class_name(stub_fetchers):
@@ -51,7 +51,8 @@ def test_bottom_from_class_name(stub_fetchers):
 def test_bottom_passthrough(stub_fetchers):
     bp = BoundaryProperties(acoustic_type='half-space', sound_speed=1700, density=1.8)
     env = env_mod.fetch_environment((43.2, 7.5), bottom=bp)
-    assert env.bottom is bp
+    # A bare BoundaryProperties is coerced into a Bottom, preserving the halfspace.
+    assert env.bottom.columns[0].halfspace is bp
 
 
 def test_literal_ssp_skips_fetch(monkeypatch):
@@ -177,8 +178,8 @@ def test_bottom_auto_falls_back_to_pelagic(tmp_path, monkeypatch, stub_fetchers)
 def test_range_dependent_bottom(monkeypatch, stub_fetchers):
     # 'auto' is cache-first, so EMODnet's local transect fetcher is tried first.
     import uacpy.data.emodnet_local as emodnet_mod
-    from uacpy.core.environment import RangeDependentBottom
-    rdb = RangeDependentBottom(ranges=[0.0, 5000.0], sound_speed=[1650.0, 1600.0],
+    from uacpy.core.environment import Bottom
+    rdb = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1650.0, 1600.0],
                                density=[1.9, 1.7], attenuation=[0.8, 1.0])
     monkeypatch.setattr(emodnet_mod, 'fetch_bottom_local_transect',
                         lambda start, end, **kw: rdb)

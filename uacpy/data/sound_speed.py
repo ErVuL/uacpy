@@ -407,5 +407,3 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
             j += 1
         j += 1
     return values, depths
-
-

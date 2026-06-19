@@ -201,5 +201,3 @@ def beamform(
     peak_snr = np.max(snr)
 
     return snr, angles, peak_snr
-
-

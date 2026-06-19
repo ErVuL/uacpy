@@ -78,15 +78,11 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
     return np.asarray(coord), _coord_label(name)
 
 
-def _auto_tl_limits(arr: np.ndarray, span: float = 50.0) -> Tuple[float, float]:
-    """Cosmetic auto-clip for TL heatmaps: ``vmax = median + 0.75·std``
-    rounded to 10 dB, ``vmin = vmax - span``. Filters out the 600 dB
-    no-data sentinel some AT binaries emit."""
-    finite = arr[np.isfinite(arr) & (arr < 200.0)]
-    if finite.size == 0:
-        return (30.0, 80.0)
-    vmax = 10.0 * np.round((np.median(finite) + 0.75 * np.std(finite)) / 10.0)
-    return (float(vmax - span), float(vmax))
+# Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
+# ``vmax = 120 dB``. A fixed scale keeps TL panels directly comparable across
+# models / frequencies / runs (and the 600 dB no-data sentinel some AT binaries
+# emit clips harmlessly to the top).
+_TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 
 def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):

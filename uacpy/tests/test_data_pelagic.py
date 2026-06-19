@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.data import pelagic
 
 
@@ -39,6 +39,6 @@ def test_transect(monkeypatch):
     depths = iter([5500.0, 3000.0, 2000.0])
     monkeypatch.setattr(pelagic, '_water_depth', lambda *a, **k: next(depths))
     rdb = pelagic.fetch_bottom_pelagic_transect((0.0, 0.0), (2.0, 0.0), n_points=3)
-    assert isinstance(rdb, RangeDependentBottom)
-    assert rdb.sound_speed.shape == (3,)
-    assert np.all(np.isfinite(rdb.sound_speed)) and np.all(rdb.sound_speed > 1400.0)
+    assert isinstance(rdb, Bottom)
+    assert rdb.halfspace_sound_speed.shape == (3,)
+    assert np.all(np.isfinite(rdb.halfspace_sound_speed)) and np.all(rdb.halfspace_sound_speed > 1400.0)

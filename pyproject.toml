@@ -67,6 +67,10 @@ Issues = "https://github.com/ErVuL/uacpy/issues"
 Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
 
 [tool.setuptools.packages.find]
+# Restrict discovery to the uacpy package tree; without an explicit include,
+# flat-layout discovery also sweeps root .py-bearing dirs (docs/, notebooks/,
+# data_cache/) into the wheel as importable top-level modules.
+include = ["uacpy*"]
 exclude = ["uacpy.tests", "uacpy.tests.*"]
 
 [tool.setuptools.package-data]
@@ -86,7 +90,11 @@ testpaths = ["uacpy/tests"]
 # by default (one worker per logical CPU, work-stealing scheduler).
 # Install with `pip install -e ".[test]"`; override with `-n 0` for a
 # single-process run when debugging.
-addopts = "-n logical --dist=worksteal"
+# Live-network tests (``requires_network``) hit external NOAA/GMRT servers
+# and are minutes-long + server-dependent, so they are deselected by default.
+# Run them explicitly with ``pytest -m requires_network`` (a command-line
+# ``-m`` overrides this one) — CI does so in a dedicated job.
+addopts = "-n logical --dist=worksteal -m 'not requires_network'"
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",

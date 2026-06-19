@@ -9,7 +9,7 @@ from uacpy.models.base import _collect_init_params
 from uacpy.parallel import Job, ParallelResult, run_parallel
 
 CONCRETE_MODELS = [
-    'Bellhop', 'BellhopCUDA', 'Bounce', 'Kraken', 'KrakenC', 'KrakenField',
+    'Bellhop', 'Bounce', 'Kraken',
     'OASN', 'OASP', 'OASR', 'OAST', 'RAM', 'SPARC', 'Scooter',
 ]
 
@@ -173,7 +173,7 @@ def test_run_parallel_cross_model(pekeris_env):
     jobs = [
         Job(uacpy.models.Bellhop(n_beams=800), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='bellhop'),
-        Job(uacpy.models.KrakenField(), pekeris_env, src, rcv,
+        Job(uacpy.models.Kraken(), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='kraken'),
         Job(uacpy.models.RAM(), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='ram'),

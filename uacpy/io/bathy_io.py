@@ -18,7 +18,7 @@ from typing import Tuple, Union
 
 from uacpy._log import log_message
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError, ModelExecutionError,
+    ConfigurationError, FileFormatError,
 )
 from uacpy.io.units import km_to_m, m_to_km
 from uacpy.io._fortran_helpers import read_vector
@@ -130,12 +130,11 @@ def read_boundary_3d(
             # each (bdry3DMod.f90: DO iy = 1, NbtyPts(2); READ Bot(:, iy)).
             z_bot = np.array(z_values).reshape(n_y, n_x)
 
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Boundary file not found: {filename}")
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Boundary file not found: {filename}") from e
     except Exception as e:
-        raise ModelExecutionError(
-            'Bellhop3D', return_code=0, stdout=None,
-            stderr=f"Error reading boundary file {filename}: {e}",
+        raise FileFormatError(
+            f"Malformed 3-D boundary file {filename}: {e}"
         ) from e
 
     x_bot = km_to_m(x_bot)
@@ -435,10 +434,11 @@ def write_bty_long_format(
         Output .bty path.
     bathymetry : ndarray
         Shape (N, 2): range (m), depth (m).
-    bottom_rd : RangeDependentBottom
-        Object carrying per-range geoacoustics with attributes
-        ``ranges`` (metres), ``sound_speed``, ``density``, ``attenuation``,
-        ``shear_speed``, ``shear_attenuation``.
+    bottom_rd : Bottom
+        Range-dependent ``Bottom`` carrying per-range halfspace geoacoustics:
+        ``ranges`` (metres) plus the ``halfspace_sound_speed`` /
+        ``halfspace_density`` / ``halfspace_attenuation`` /
+        ``halfspace_shear_speed`` / ``halfspace_shear_attenuation`` views.
     interp_type : str, optional
         'L' (linear, default) or 'C' (curvilinear).
 
@@ -468,16 +468,12 @@ def write_bty_long_format(
     n_pts = bathy_km.shape[0]
 
     rd_r_km = m_to_km(bottom_rd.ranges)
-    cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.sound_speed)
-    rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.density)
-    alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.attenuation)
-    cs_arr = bottom_rd.shear_speed if bottom_rd.shear_speed is not None \
-        else np.zeros_like(rd_r_km)
-    cs = np.interp(bathy_km[:, 0], rd_r_km, cs_arr)
-    alpha_s_arr = getattr(bottom_rd, 'shear_attenuation', None)
-    if alpha_s_arr is None:
-        alpha_s_arr = np.zeros_like(rd_r_km)
-    alpha_s = np.interp(bathy_km[:, 0], rd_r_km, alpha_s_arr)
+    cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_sound_speed)
+    rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_density)
+    alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_attenuation)
+    cs = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_shear_speed)
+    alpha_s = np.interp(bathy_km[:, 0], rd_r_km,
+                        bottom_rd.halfspace_shear_attenuation)
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")

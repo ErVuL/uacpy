@@ -13,7 +13,7 @@ import pytest
 
 netCDF4 = pytest.importorskip('netCDF4')
 
-from uacpy.core.environment import LayeredBottom, RangeDependentLayeredBottom
+from uacpy.core.environment import SeabedColumn, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import crust1_local, globsed_local
 
@@ -90,7 +90,7 @@ def test_crust1_profile(cache):
 
 def test_crust1_bottom_layered_elastic(cache):
     b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
-    assert isinstance(b, LayeredBottom)
+    assert isinstance(b, SeabedColumn)
     assert b.layers[0].sound_speed == 2000.0       # 2.0 km/s → m/s
     assert b.layers[0].shear_speed == 600.0        # 0.6 km/s → m/s (elastic)
     assert b.halfspace.sound_speed == 5000.0       # upper crystalline crust
@@ -132,8 +132,8 @@ def test_crust1_use_globsed_false(cache):
 def test_crust1_transect(cache):
     rdl = crust1_local.fetch_bottom_crust1_transect(
         (30.0, -40.0), (31.0, -40.0), n_points=3)
-    assert isinstance(rdl, RangeDependentLayeredBottom)
-    assert len(rdl.profiles) == 3 and rdl.ranges[0] == 0.0
+    assert isinstance(rdl, Bottom)
+    assert len(rdl.columns) == 3 and rdl.ranges[0] == 0.0
     assert rdl.sediment_thickness_source == 'globsed'   # GlobSed applied per point
 
 

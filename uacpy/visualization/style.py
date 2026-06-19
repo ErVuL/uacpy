@@ -162,6 +162,24 @@ BOTTOM_FILL_STYLE = {
     'linewidth': 0.4,
 }
 
+# "Ground" colormap used to shade the seabed by sound speed: light sandy tan
+# (soft sediment) → a rich medium-brown (hard rock). Terrain-toned like
+# ``copper`` but deliberately capped well short of black, so the hard/fast end
+# reads as warm brown ground rather than a near-black band. Callers sample its
+# 0.25–0.85 band, which spans light-tan → medium-brown.
+def _bottom_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list('uacpy_bottom', [
+        (0.00, '#efe2c8'),   # very light tan
+        (0.25, '#e0c49a'),   # light sand-tan  (soft sediment)
+        (0.55, '#b9824c'),   # sienna / copper
+        (0.85, '#835331'),   # medium-dark brown (hard rock) — not black
+        (1.00, '#6a4226'),
+    ])
+
+
+BOTTOM_CMAP = _bottom_cmap()
+
 # Seafloor edge styles — applied above ``BOTTOM_FILL_STYLE`` at the
 # water-sediment interface. RD bathymetry traces the actual seafloor and
 # is drawn solid; a flat bottom is an idealization and is drawn dashed.

@@ -1,9 +1,11 @@
 """
 SPARC - Seismo-Acoustic Propagation in Realistic oCeans
 
-SPARC is an FFP (Fast Field Program) model that includes elastic bottom effects
-and seismo-acoustic coupling. It uses the same wavenumber integration approach
-as Scooter but with support for elastic media.
+SPARC is a time-domain FFP (Fast Field Program) model using the same wavenumber
+integration approach as Scooter. The underlying ``sparc.f90`` reads shear and is
+elastic-capable, but the uacpy writer currently restricts the bottom boundary to
+vacuum / rigid (any halfspace is force-rigidified with a warning), so as wired
+uacpy's SPARC is a rigid/vacuum-bounded fluid model.
 """
 
 import warnings
@@ -181,9 +183,8 @@ class SPARC(PropagationModel):
     the wrapper raises a ``ValueError`` otherwise.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'`` (SPARC consumes ``LayeredBottom``
-    natively).
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer
+    stack is kept since SPARC consumes layered seabed columns natively).
 
     Defaults auto-derived at ``run()`` time:
 
@@ -226,7 +227,6 @@ class SPARC(PropagationModel):
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -290,7 +290,7 @@ class SPARC(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            timeout=timeout, cleanup=cleanup, collapse=collapse, **kwargs,
+            timeout=timeout, cleanup=cleanup, collapse=collapse,
         )
 
         self.c_low = c_low
@@ -347,8 +347,7 @@ class SPARC(PropagationModel):
         # whole spectrum. Median/mean samples represent the path.
         self._set_collapse_defaults({
             'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
 
         if executable is None:
@@ -371,6 +370,7 @@ class SPARC(PropagationModel):
         *,
         source_waveform=None,
         sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run SPARC simulation (range-dependent environments will be approximated)
@@ -399,16 +399,36 @@ class SPARC(PropagationModel):
         """
         run_mode = self._resolve_run_mode(run_mode)
 
+        # The native transient p(t) is assembled only on the 'R' (horizontal,
+        # range-native) path; the 'D'/'S' branches return a frequency-domain
+        # field. Reject TIME_SERIES for those rather than silently returning
+        # the wrong result kind.
+        if run_mode == RunMode.TIME_SERIES and self.output_mode != 'R':
+            raise UnsupportedFeatureError(
+                model_name='SPARC',
+                feature=(
+                    f"RunMode.TIME_SERIES with output_mode="
+                    f"{self.output_mode!r} (only output_mode='R' assembles "
+                    f"the native time series)"
+                ),
+                alternatives=[
+                    "Use SPARC(output_mode='R') for time series",
+                    "Use the default COHERENT_TL run mode with this output_mode",
+                ],
+            )
+
         # SPARC drives its source pulse via the constructor ``pulse_type``.
-        # ``source_waveform`` / ``sample_rate`` exist on the signature for
-        # API uniformity but cannot influence the run — warn loudly when
-        # the caller supplies them so they don't expect their waveform to
-        # propagate.
-        if source_waveform is not None or sample_rate is not None:
+        # ``source_waveform`` / ``sample_rate`` / ``output_duration`` exist on
+        # the signature for API uniformity but cannot influence the run — warn
+        # loudly when the caller supplies them so they don't expect their
+        # waveform / window to propagate.
+        if (source_waveform is not None or sample_rate is not None
+                or output_duration is not None):
             warnings.warn(
-                "SPARC.run: source_waveform / sample_rate are ignored — "
-                "SPARC builds p(t) from its native pulse_type. To shape "
-                "the pulse, pass SPARC(pulse_type=...).",
+                "SPARC.run: source_waveform / sample_rate / output_duration "
+                "are ignored — SPARC builds p(t) from its native pulse_type "
+                "over its own time grid. To shape the pulse, pass "
+                "SPARC(pulse_type=...).",
                 UserWarning, stacklevel=2,
             )
         env = self._project_environment(env)
@@ -715,11 +735,8 @@ class SPARC(PropagationModel):
                 result = sparc_snapshot_to_field(
                     grn_data, receiver.ranges, frequency=freq,
                 )
-                result.model = self.model_name
-                result.backend = 'sparc'
-                result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
-                result.frequencies = np.atleast_1d(np.asarray(freq, dtype=float))
-                result.phase_reference = 'travelling_wave'
+                self._stamp_result(result, source, backend='sparc',
+                                   frequencies=freq, phase_reference='travelling_wave')
                 result.metadata['output_mode'] = 'S'
                 result.metadata['note'] = 'Snapshot mode: time-FFT then Hankel transform'
 
@@ -755,14 +772,10 @@ class SPARC(PropagationModel):
         ``Vacuum`` / ``Rigid``-only writer accepts it. Emits one
         :class:`UserWarning` per run.
 
-        For ``LayeredBottom`` / ``RangeDependentLayeredBottom`` the
-        ``acoustic_type`` lives on the inner ``.halfspace`` (and per
-        range profile for RDL), not on the outer container; the walk
-        flips it everywhere.
+        For a ``Bottom`` the ``acoustic_type`` lives on each column's
+        ``.halfspace`` (per range when range-dependent), not on the outer
+        container; the walk flips it everywhere.
         """
-        from uacpy.core.environment import (
-            LayeredBottom, RangeDependentLayeredBottom,
-        )
         hs = env.halfspace_at_range(0.0)
         kind = (hs.acoustic_type or '').lower()
         if kind not in ('half-space', 'halfspace', 'a'):
@@ -777,13 +790,8 @@ class SPARC(PropagationModel):
             UserWarning, stacklevel=2,
         )
         e = env.copy()
-        if isinstance(e.bottom, RangeDependentLayeredBottom):
-            for prof in e.bottom.profiles:
-                prof.halfspace.acoustic_type = 'rigid'
-        elif isinstance(e.bottom, LayeredBottom):
-            e.bottom.halfspace.acoustic_type = 'rigid'
-        elif hasattr(e.bottom, 'acoustic_type'):
-            e.bottom.acoustic_type = 'rigid'
+        for col in e.bottom.columns:
+            col.halfspace.acoustic_type = 'rigid'
         return e
 
     def _resolve_rmax_safety_margin(self, run_mode: RunMode) -> float:
@@ -874,15 +882,6 @@ class SPARC(PropagationModel):
         appends the ``.prt`` tail to the raised ``ModelExecutionError`` for
         easier diagnosis. Override via the ``timeout`` constructor kwarg.
         """
-        try:
-            result = self._run_subprocess(
-                [str(self.executable), base_name],
-                cwd=work_dir,
-                timeout=self.timeout,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-
-        if self.verbose and result.stdout:
-            self._log(f"SPARC output:\n{result.stdout}", level='debug')
+        self._run_and_attach_prt(
+            [str(self.executable), base_name], work_dir, base_name,
+            timeout=self.timeout)

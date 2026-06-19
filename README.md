@@ -86,14 +86,15 @@ from uacpy import data
 from uacpy.models import Bellhop, RunMode
 
 # 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
-#    WOA23 sound speed and NCEI seabed — across the Reykjanes mid-ocean ridge.
-A, B = (58.70, -27.00), (59.30, -34.00)   # (lat, lon): east flank → axis → west flank
+#    WOA23 sound speed and NCEI seabed — across the Bay of Biscay continental
+#    slope into the deep Iberian abyssal plain (~4800 m).
+A, B = (45.0, -2.5), (45.5, -6.5)         # (lat, lon): shelf slope → abyssal plain
 env  = data.fetch_environment(A, transect_to=B, date='2026-01-15',
          range_dependent_ssp=True, range_dependent_bottom=True, bottom_sources='auto')
-grid = data.fetch_bathy_grid((56, 62), (-37, -23))     # (lats, lons, depth)
+grid = data.fetch_bathy_grid((43.0, 47.0), (-8.0, -1.0))     # (lats, lons, depth)
 
-# 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
-src = uacpy.Source(depths=100, frequencies=800)
+# 2. Model transmission loss with Bellhop at 1000 Hz, out to the transect length.
+src = uacpy.Source(depths=100, frequencies=1000)
 rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
                      ranges=np.linspace(100, env.max_range, 350))  # env range extent
 tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
@@ -101,11 +102,30 @@ tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 # 3. One call → the figure above: map · transmission loss · environment.
 #    The left map is pluggable (map_fn=); the default is the bathymetry map.
 uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver=rcv,
-                         map_title="Reykjanes Ridge",
-                         tl_title="Transmission loss (800 Hz)",
+                         map_title="Bay of Biscay — Iberian abyssal plain",
+                         tl_title="Transmission loss (1000 Hz)",
                          env_title="Range-dependent environment",
                          map_kwargs=dict(contours=True, aspect=1))
 plt.show()
+```
+
+**Range-dependent propagation with RAM** — fetch a real transect from GPS and run the parabolic-equation model. `RAM` auto-dispatches the right backend for the seabed (`mpiramS` here; `ramgeo` for fluid *layered* sediment, `rams0.5` elastic, `ramsurf1.5` rough surface — or force one with `RAM(backend=…)`):
+
+``` python
+import numpy as np
+import uacpy
+from uacpy import data
+from uacpy.models import RAM, RunMode
+
+# Fetch a real range-dependent transect from GPS — GEBCO bathymetry, WOA23 SSP, seabed.
+A, B = (45.0, -2.5), (45.5, -6.5)                     # Bay of Biscay slope → abyssal plain
+env = data.fetch_environment(A, transect_to=B, date='2026-01-15',
+                             range_dependent_ssp=True, range_dependent_bottom=True)
+
+src = uacpy.Source(depths=100, frequencies=50)
+rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 120),
+                     ranges=np.linspace(100, env.max_range, 250))
+tl  = RAM().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)   # → mpiramS PE (auto-selected)
 ```
 
 ## 📦 Installation
@@ -372,7 +392,7 @@ is summarised in the [licensing table](#-licensing); full diffs for
 modified sources live in
 [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 
-### Acoustics Toolbox --- Bellhop, Kraken, KrakenField, Scooter, SPARC, Bounce
+### Acoustics Toolbox --- Bellhop, Kraken, Scooter, SPARC, Bounce
 
 Michael B. Porter --- http://oalib.hlsresearch.com/AcousticsToolbox/
 - Porter, *The BELLHOP Manual and User's Guide*, 2011

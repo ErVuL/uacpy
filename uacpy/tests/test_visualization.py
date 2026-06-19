@@ -178,6 +178,47 @@ class TestPlotEnvironment:
         plt.close(fig)
 
 
+class TestPlotBottomProperties:
+    def _env(self, bottom, bathy=None):
+        from uacpy.core import Environment
+        return Environment(name='bp', bathymetry=bathy or [(0, 100), (5000, 120)],
+                           ssp=[(0, 1500), (120, 1490)], bottom=bottom)
+
+    def test_elastic_layered_shows_five_panels(self):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        lay = SeabedColumn(
+            layers=[SedimentLayer(thickness=15, sound_speed=1650, density=1.6,
+                                  attenuation=0.4, shear_speed=300,
+                                  shear_attenuation=0.3)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=2000, density=2.0,
+                                         attenuation=0.2, shear_speed=600,
+                                         shear_attenuation=0.5))
+        fig, axes = plots.plot_bottom_properties(self._env(lay), data_source=None)
+        # cp, cs, ρ, αp, αs all present and non-zero → 5 visible panels.
+        assert sum(a.get_visible() for a in axes.ravel()) == 5
+        plt.close(fig)
+
+    def test_fluid_halfspace_skips_shear(self):
+        from uacpy.core import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                                density=1.8, attenuation=0.3)
+        fig, axes = plots.plot_bottom_properties(self._env(hs), data_source=None)
+        # No shear → cp, ρ, αp only.
+        assert sum(a.get_visible() for a in axes.ravel()) == 3
+        plt.close(fig)
+
+    def test_properties_filter(self):
+        from uacpy.core import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                                density=1.8, attenuation=0.3)
+        fig, axes = plots.plot_bottom_properties(
+            self._env(hs), properties=['cp'], data_source=None)
+        assert sum(a.get_visible() for a in axes.ravel()) == 1
+        plt.close(fig)
+
+
 class TestPlotModes:
     @pytest.fixture
     def modes(self):
@@ -227,24 +268,12 @@ class TestPlotReflectionCoefficient:
         plt.close(fig)
 
 
-class TestAutoTLLimits:
-    """The internal helper used by ``plot_field`` / ``compare_models`` clips
-    Bellhop's TL sentinel out of the auto-scale window."""
+class TestTLLimits:
+    """The fixed TL colour scale used everywhere TL is drawn."""
 
-    def test_sentinel_removed(self):
-        from uacpy.visualization.plots._common import _auto_tl_limits
-        rng = np.random.default_rng(0)
-        body = 50.0 + 10.0 * rng.standard_normal((30, 30))
-        data = np.full((40, 40), 600.0)
-        data[:30, :30] = body
-        vmin, vmax = _auto_tl_limits(data)
-        assert vmax < 200.0
-        assert vmin < vmax
-
-    def test_no_finite_falls_back_to_default(self):
-        from uacpy.visualization.plots._common import _auto_tl_limits
-        vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
-        assert (vmin, vmax) == (30.0, 80.0)
+    def test_fixed_limits(self):
+        from uacpy.visualization.plots._common import _TL_LIMITS
+        assert _TL_LIMITS == (20.0, 120.0)
 
 
 class TestBathymetryMap:

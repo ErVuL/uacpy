@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import (  # noqa: E402
-    BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, SoundSpeedProfile, generate_sea_surface,
+    BoundaryProperties, SedimentLayer, SeabedColumn,
+    Bottom, SoundSpeedProfile, generate_sea_surface,
 )
 
 
@@ -104,7 +104,7 @@ def example_ice_surface():
 def example_single_layer_bottom():
     """Single sediment layer over a rock halfspace."""
     source, receiver = make_source_receiver()
-    lb = LayeredBottom(
+    lb = SeabedColumn(
         layers=[
             SedimentLayer(thickness=10.0, sound_speed=1550, density=1.3,
                           attenuation=0.8),
@@ -125,7 +125,7 @@ def example_single_layer_bottom():
 def example_multi_layer_bottom():
     """Sand over clay over rock — 3 sediment layers."""
     source, receiver = make_source_receiver()
-    lb = LayeredBottom(
+    lb = SeabedColumn(
         layers=[
             SedimentLayer(thickness=5.0, sound_speed=1550, density=1.3,
                           attenuation=0.8),
@@ -157,7 +157,7 @@ def example_preset_layered_bottom():
     on its dz cap and would degrade accuracy at 200 Hz / 100 m water.
     """
     source, receiver = make_source_receiver()
-    lb = LayeredBottom.from_presets(
+    lb = SeabedColumn.from_presets(
         layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
         halfspace='limestone',
     )
@@ -174,7 +174,7 @@ def example_preset_layered_bottom():
 def example_range_dependent_layered():
     """Mud-over-clay nearshore, sand-over-rock offshore."""
     source, receiver = make_source_receiver()
-    near = LayeredBottom(
+    near = SeabedColumn(
         layers=[
             SedimentLayer(thickness=8.0, sound_speed=1500, density=1.2,
                           attenuation=1.0),
@@ -186,7 +186,7 @@ def example_range_dependent_layered():
             density=2.0, attenuation=0.2,
         ),
     )
-    far = LayeredBottom(
+    far = SeabedColumn(
         layers=[
             SedimentLayer(thickness=3.0, sound_speed=1650, density=1.8,
                           attenuation=0.3),
@@ -198,10 +198,7 @@ def example_range_dependent_layered():
             density=2.5, attenuation=0.05,
         ),
     )
-    rdl = RangeDependentLayeredBottom(
-        ranges=np.array([0, 10000]),
-        profiles=[near, far],
-    )
+    rdl = Bottom.from_columns([near, far], ranges=np.array([0, 10000]))
     env = uacpy.Environment(
         name='rd_layered_bottom', bathymetry=100,
         ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),

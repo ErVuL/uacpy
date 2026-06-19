@@ -25,7 +25,7 @@ from typing import Union
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate
@@ -154,16 +154,21 @@ def fetch_seafloor_lithology(point: Coordinate) -> dict:
 
 
 def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
+                         water_sound_speed: float = None,
                          timeout=None, verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
 
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
-    parity with the network bottom fetchers.
+    parity with the network bottom fetchers. ``water_sound_speed`` (m/s) scales
+    the grain-size velocity ratio to the in-situ near-seabed water; ``None``
+    uses the Hamilton reference.
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seafloor_lithology(point)
-    bottom = bottom_from_grain_size(sub['grain_size_phi'], roughness=roughness)
+    bottom = bottom_from_grain_size(
+        sub['grain_size_phi'], roughness=roughness,
+        water_sound_speed=water_sound_speed)
     log_message(
         'diesing', f"Diesing {sub['lithology']} at {lat:.2f}, {lon:.2f} → "
         f"ϕ={sub['grain_size_phi']}", verbose=verbose)
@@ -172,10 +177,13 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
 
 def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   n_points: int = 6, roughness: float = 0.0,
+                                  water_sound_speed: float = None,
                                   timeout=None, verbose: Union[bool, str] = False
-                                  ) -> RangeDependentBottom:
+                                  ) -> Bottom:
     """Range-dependent bottom from the Diesing 2020 map along a transect."""
     return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_diesing((la, lo), roughness=roughness),
+        lambda la, lo: fetch_bottom_diesing(
+            (la, lo), roughness=roughness,
+            water_sound_speed=water_sound_speed),
         start, end, n_points, source_label='Diesing 2020',
     )

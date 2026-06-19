@@ -163,5 +163,3 @@ def shift_to_max_correlation(x, y):
     # lag == 0: signals already aligned, no trimming (y[:-0] would empty y).
 
     return x, y
-
-

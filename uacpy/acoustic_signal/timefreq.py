@@ -481,5 +481,3 @@ class Spectrogram:
         ax.grid(which="both", alpha=0.25, color="black")
 
         return fig, ax
-
-

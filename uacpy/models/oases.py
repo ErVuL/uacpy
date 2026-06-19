@@ -201,32 +201,62 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     return env
 
 
-class _OASESBase(PropagationModel):
-    """Shared base for the OASES sub-model wrappers (OAST/OASN/OASR/OASP).
+class OASES(PropagationModel):
+    """Public base + factory for the OASES sub-models (OAST/OASN/OASR/OASP).
 
-    The sub-models differ only in the per-binary ``FORnnn`` unit-number map
-    fed to the csh-wrapper environment; each declares it as ``_FOR_FILES`` and
-    inherits the one ``_execute`` below (run the binary, attach the ``.prt``
-    tail on failure)."""
+    Each sub-model wraps one OASES binary and differs only in its per-binary
+    ``FORnnn`` unit-number map (``_FOR_FILES``) and its run modes; all share the
+    one ``_execute`` below. They subclass ``OASES``, so ``isinstance(model,
+    OASES)`` is True for any of them. ``OASES`` itself is abstract — instantiate
+    a sub-model directly, or use :meth:`OASES.for_mode` to pick one by
+    ``RunMode``."""
 
     _FOR_FILES: dict = {}
+
+    def __new__(cls, *args, **kwargs):
+        if cls is OASES:
+            raise ConfigurationError(
+                "OASES is the abstract base for OAST/OASN/OASR/OASP. "
+                "Instantiate a sub-model directly, or use "
+                "OASES.for_mode(run_mode=...) to pick one by RunMode."
+            )
+        return super().__new__(cls)
+
+    @classmethod
+    def for_mode(cls, run_mode: RunMode = RunMode.COHERENT_TL, *,
+                 broadband: bool = False, **kwargs) -> PropagationModel:
+        """Instantiate the OASES sub-model that handles ``run_mode``.
+
+        ``COHERENT_TL`` → ``OAST`` (``OASP`` when ``broadband=True``);
+        ``COVARIANCE``/``REPLICA`` → ``OASN``; ``REFLECTION`` → ``OASR``;
+        ``BROADBAND``/``TIME_SERIES`` → ``OASP``. ``**kwargs`` forward to the
+        chosen sub-model (a kwarg it doesn't accept raises ``TypeError``).
+        """
+        dispatch = {
+            RunMode.COHERENT_TL: OASP if broadband else OAST,
+            RunMode.COVARIANCE: OASN,
+            RunMode.REPLICA: OASN,
+            RunMode.REFLECTION: OASR,
+            RunMode.BROADBAND: OASP,
+            RunMode.TIME_SERIES: OASP,
+        }
+        target = dispatch.get(run_mode)
+        if target is None:
+            raise UnsupportedFeatureError(
+                'OASES', str(run_mode),
+                alternatives=[str(m) for m in dispatch],
+                alternatives_label='run modes',
+            )
+        return target(**kwargs)
 
     def _execute(self, input_file, work_dir: Path):
         """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
         base_name = input_file if isinstance(input_file, str) else input_file.stem
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+        self._run_and_attach_prt([str(self.executable)], work_dir, base_name, env=env)
 
 
-class OAST(_OASESBase):
+class OAST(OASES):
     """
     OAST - OASES Transmission Loss Model
 
@@ -259,10 +289,10 @@ class OAST(_OASESBase):
 
     Notes
     -----
-    Range-independent wavenumber integration; consumes ``LayeredBottom``
-    natively. **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Range-independent wavenumber integration; consumes layered seabed
+    columns natively. **Collapse defaults (overrides of
+    :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'``,
+    ``'bottom_range': 'median'`` (the layer stack is kept).
 
     Examples
     --------
@@ -288,12 +318,10 @@ class OAST(_OASESBase):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
         self.compute_contour = bool(compute_contour)
         self.compute_depth_average = bool(compute_depth_average)
@@ -324,8 +352,7 @@ class OAST(_OASESBase):
         # median/mean samples represent the path the field describes.
         self._set_collapse_defaults({
             'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
         if executable is None:
             self.executable = _oases_find_executable(self, 'oast')
@@ -456,6 +483,15 @@ class OAST(_OASESBase):
                 # neighbours reads back ≈ −50 dB). Align receiver.ranges to the
                 # OAST native FFT grid (ranges_match) to avoid the smoothing,
                 # or use OASP (.trf complex pressure) when null depth matters.
+                warnings.warn(
+                    "OAST: receiver.ranges do not match the OAST native FFT "
+                    "range grid, so TL is linearly interpolated IN dB. This "
+                    "smears sharp interference minima (a true −80 dB null "
+                    "between −40 dB neighbours reads back ≈ −50 dB). Align "
+                    "receiver.ranges to the native grid, or use OASP (.trf "
+                    "complex pressure) when null depth matters.",
+                    UserWarning, stacklevel=2,
+                )
                 result = native.resample_to(receiver_ranges, receiver_depths)
                 result.metadata['oast_native_ranges'] = native_ranges
                 result.metadata['interpolated'] = True
@@ -478,7 +514,7 @@ class OAST(_OASESBase):
     }
 
 
-class OASN(_OASESBase):
+class OASN(OASES):
     """
     OASN — OASES Noise, Covariance Matrices and Signal Replicas.
 
@@ -491,8 +527,7 @@ class OASN(_OASESBase):
     - **Replica fields** (option ``R`` → ``.rpo``): array response per
       candidate source position per frequency. Used as MFP templates.
 
-    For depth-eigenfunction normal modes use :class:`Kraken` or
-    :class:`KrakenC`.
+    For depth-eigenfunction normal modes use :class:`Kraken`.
 
     Parameters
     ----------
@@ -557,8 +592,8 @@ class OASN(_OASESBase):
     these.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
+    layer stack is kept).
 
     Examples
     --------
@@ -616,11 +651,10 @@ class OASN(_OASESBase):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.options = options
         self.surface_noise_level = float(surface_noise_level)
@@ -663,8 +697,7 @@ class OASN(_OASESBase):
         # represent the path the array sees.
         self._set_collapse_defaults({
             'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
         if executable is None:
             self.executable = _oases_find_executable(self, 'oasn2_bin')
@@ -674,7 +707,7 @@ class OASN(_OASESBase):
         if not self.executable.exists():
             raise ExecutableNotFoundError('OASN', str(self.executable))
 
-    def _build_writer_kwargs(self, run_mode: 'RunMode') -> dict:
+    def _build_writer_kwargs(self) -> dict:
         """Materialise the writer's expected kwarg dict from ``self.*``.
 
         Translates uacpy's public API (singular names, metres) to the
@@ -790,7 +823,7 @@ class OASN(_OASESBase):
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-        writer_kwargs = self._build_writer_kwargs(run_mode)
+        writer_kwargs = self._build_writer_kwargs()
 
         # The OASN options block must include the file output the run
         # mode produces. The user-supplied options (or default 'J') win
@@ -927,7 +960,7 @@ class OASN(_OASESBase):
     }
 
 
-class OASR(_OASESBase):
+class OASR(OASES):
     """
     OASR - OASES Reflection Coefficients Model
 
@@ -957,8 +990,8 @@ class OASR(_OASESBase):
     ``freq_max``, ``n_frequencies`` on ``run()`` for a broadband sweep.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'bottom': 'median'``, ``'rd_layered_layers':
-    'preserve'``. SSP collapse left at the global ``'r0'`` because the
+    Per-model: ``'bottom_range': 'median'`` (the layer stack is
+    kept). SSP collapse left at the global ``'r0'`` because the
     SSP boundary speed is essentially irrelevant to the reflection
     coefficient.
 
@@ -984,7 +1017,6 @@ class OASR(_OASESBase):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -1014,7 +1046,7 @@ class OASR(_OASESBase):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.angles = (
             np.asarray(angles, dtype=float) if angles is not None else None
@@ -1046,8 +1078,7 @@ class OASR(_OASESBase):
         # SSP collapse left at the global default ('r0') because the
         # SSP is essentially irrelevant to the reflection coefficient.
         self._set_collapse_defaults({
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
         if executable is None:
             self.executable = _oases_find_executable(self, 'oasr')
@@ -1102,6 +1133,15 @@ class OASR(_OASESBase):
             writer_kwargs['freq_min'] = fmin
             writer_kwargs['freq_max'] = fmax
             writer_kwargs['n_frequencies'] = n_freq
+        else:
+            # OASR expresses the frequency axis as (fmin, fmax, N), so a
+            # non-equispaced source.frequencies vector would be silently
+            # regridded by the writer. Warn (and resample) here so the user
+            # sees it — mirrors OASN/OASP.
+            source_freqs = np.atleast_1d(
+                np.asarray(source.frequencies, dtype=float))
+            if source_freqs.size > 1:
+                _oases_resample_frequencies(source_freqs, 'OASR')
 
         if self.options is not None:
             writer_kwargs['options'] = self.options
@@ -1203,7 +1243,7 @@ class OASR(_OASESBase):
     }
 
 
-class OASP(_OASESBase):
+class OASP(OASES):
     """
     OASP - OASES Pulse / Broadband Transfer-Function Model
 
@@ -1234,8 +1274,8 @@ class OASP(_OASESBase):
     problems, RAM is recommended.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
+    layer stack is kept).
 
     Examples
     --------
@@ -1262,7 +1302,6 @@ class OASP(_OASESBase):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -1287,7 +1326,8 @@ class OASP(_OASESBase):
             ``max(1, n_frequencies // 10)``.
         options : str, optional
             Raw OASES option string. ``None`` defers to the writer's
-            default (``'N'``).
+            default (``'N J'``); the ``'J'`` forces a real frequency axis
+            (OMEGIM=0) so the broadband ``.trf`` synthesis stays valid.
         range_start : float, optional
             First receiver range (m). ``None`` defaults to
             ``receiver.ranges.min()``.
@@ -1299,7 +1339,6 @@ class OASP(_OASESBase):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
         self.n_time_samples = int(n_time_samples)
         self.freq_max = float(freq_max) if freq_max is not None else None
@@ -1336,8 +1375,7 @@ class OASP(_OASESBase):
         # to range and time. Median/mean samples represent the path.
         self._set_collapse_defaults({
             'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
 
         if executable is None:
@@ -1624,55 +1662,3 @@ class OASP(_OASESBase):
     _FOR_FILES = {
         'FOR002': 'src',
     }
-
-
-def OASES(
-    run_mode: RunMode = RunMode.COHERENT_TL,
-    *,
-    broadband: bool = False,
-    **kwargs,
-) -> PropagationModel:
-    """Factory: instantiate the OASES sub-class that handles ``run_mode``.
-
-    Returns an ``OAST``/``OASN``/``OASR``/``OASP`` instance configured with
-    ``**kwargs``. Kwargs not accepted by the chosen sub-class raise
-    ``TypeError`` — pick the right sub-class directly if you need
-    sub-class-specific options.
-
-    Parameters
-    ----------
-    run_mode : RunMode, optional
-        Selects the sub-class:
-        ``COHERENT_TL`` → ``OAST`` (or ``OASP`` when ``broadband=True``);
-        ``COVARIANCE`` / ``REPLICA`` → ``OASN``;
-        ``REFLECTION`` → ``OASR``;
-        ``BROADBAND`` / ``TIME_SERIES`` → ``OASP``.
-    broadband : bool, optional
-        When True with ``COHERENT_TL``, route to ``OASP`` (broadband
-        transfer function) instead of ``OAST``. Both kernels are
-        range-independent; use RAM for genuinely range-dependent
-        problems.
-    **kwargs
-        Forwarded verbatim to the sub-class constructor.
-
-    Returns
-    -------
-    PropagationModel
-        ``OAST``/``OASN``/``OASR``/``OASP`` instance ready to ``.run(...)``.
-    """
-    dispatch = {
-        RunMode.COHERENT_TL: OASP if broadband else OAST,
-        RunMode.COVARIANCE: OASN,
-        RunMode.REPLICA: OASN,
-        RunMode.REFLECTION: OASR,
-        RunMode.BROADBAND: OASP,
-        RunMode.TIME_SERIES: OASP,
-    }
-    cls = dispatch.get(run_mode)
-    if cls is None:
-        raise UnsupportedFeatureError(
-            'OASES', str(run_mode),
-            alternatives=[str(m) for m in dispatch],
-            alternatives_label='run modes',
-        )
-    return cls(**kwargs)

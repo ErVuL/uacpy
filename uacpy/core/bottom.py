@@ -47,17 +47,18 @@ class SedimentLayer:
     shear_attenuation: float = 0.0
 
     def __post_init__(self):
-        if self.thickness <= 0:
-            raise ConfigurationError(f"SedimentLayer: thickness must be positive (m); got {self.thickness}")
-        if self.sound_speed <= 0:
-            raise ConfigurationError(f"SedimentLayer: sound_speed must be positive (m/s); got {self.sound_speed}")
-        if self.density <= 0:
-            raise ConfigurationError(f"SedimentLayer: density must be positive (g/cm^3); got {self.density}")
+        # isfinite first: NaN/inf pass every plain ``<= 0`` / ``< 0`` test.
+        if not np.isfinite(self.thickness) or self.thickness <= 0:
+            raise ConfigurationError(f"SedimentLayer: thickness must be finite and positive (m); got {self.thickness}")
+        if not np.isfinite(self.sound_speed) or self.sound_speed <= 0:
+            raise ConfigurationError(f"SedimentLayer: sound_speed must be finite and positive (m/s); got {self.sound_speed}")
+        if not np.isfinite(self.density) or self.density <= 0:
+            raise ConfigurationError(f"SedimentLayer: density must be finite and positive (g/cm^3); got {self.density}")
         for name in ('attenuation', 'shear_speed', 'shear_attenuation'):
             value = getattr(self, name)
-            if value < 0:
+            if not np.isfinite(value) or value < 0:
                 raise ConfigurationError(
-                    f"SedimentLayer: {name} must be non-negative; got {value}")
+                    f"SedimentLayer: {name} must be finite and non-negative; got {value}")
 
     def __repr__(self) -> str:
         bits = [
@@ -159,31 +160,23 @@ class BoundaryProperties:
     roughness: float = 0.0
     shear_speed: float = 0.0
     shear_attenuation: float = 0.0
-    grain_size_phi: float = 1.0
+    grain_size_phi: Optional[float] = None
     reflection_file: Optional[str] = None
 
     def __post_init__(self):
-        if self.density <= 0:
+        # isfinite first: NaN/inf pass every plain ``<= 0`` / ``< 0`` test.
+        if not np.isfinite(self.density) or self.density <= 0:
             raise ConfigurationError(
-                f"BoundaryProperties: density must be positive (g/cm^3); got {self.density}"
+                f"BoundaryProperties: density must be finite and positive (g/cm^3); got {self.density}"
             )
-        if self.sound_speed < 0:
-            raise ConfigurationError(
-                f"BoundaryProperties: sound_speed must be non-negative (m/s); got {self.sound_speed}"
-            )
-        if self.attenuation < 0:
-            raise ConfigurationError(
-                f"BoundaryProperties: attenuation must be non-negative; got {self.attenuation}"
-            )
-        if self.shear_speed < 0:
-            raise ConfigurationError(
-                f"BoundaryProperties: shear_speed must be non-negative (m/s); got {self.shear_speed}"
-            )
-        if self.shear_attenuation < 0:
-            raise ConfigurationError(
-                f"BoundaryProperties: shear_attenuation must be non-negative; "
-                f"got {self.shear_attenuation}"
-            )
+        for name in ('sound_speed', 'attenuation', 'shear_speed',
+                     'shear_attenuation'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0:
+                raise ConfigurationError(
+                    f"BoundaryProperties: {name} must be finite and "
+                    f"non-negative; got {value}"
+                )
 
         # Detect which acoustic params differ from their dataclass defaults
         # (read from the field definitions so a default change cannot
@@ -259,7 +252,7 @@ class BoundaryProperties:
         The boundary is **fluid by default** (shear dropped) so it works
         with every model. Pass ``elastic=True`` to keep the preset's shear
         speed / attenuation — needed only for the elastic-capable solvers
-        (OASES, Scooter, KrakenC). ``shear_*`` in ``**overrides`` wins
+        (OASES, Scooter, Kraken). ``shear_*`` in ``**overrides`` wins
         regardless.
         """
         from uacpy.core.materials import get_material
@@ -279,257 +272,71 @@ class BoundaryProperties:
         return cls(**kwargs)
 
 
-@dataclass
-class RangeDependentBottom:
-    """
-    Range-dependent bottom properties for realistic geoacoustic modeling.
-
-    Allows bottom acoustic properties to vary with range, essential for
-    continental shelf transitions, sediment type changes, etc.
-
-    Bathymetry is **not** carried here — it lives on
-    ``Environment.bathymetry``. Models that need the seafloor depth at
-    one of these range points interpolate ``env.bathymetry`` at
-    ``ranges[i]``.
-
-    Attributes
-    ----------
-    ranges : ndarray
-        Range points in **meters**, shape (N,).
-    sound_speed : ndarray
-        Compressional wave speed at each range (m/s), shape (N,)
-    density : ndarray
-        Density at each range (g/cm³), shape (N,)
-    attenuation : ndarray
-        Attenuation at each range (dB/wavelength), shape (N,)
-    shear_speed : ndarray, optional
-        Shear wave speed at each range (m/s), shape (N,). Default is 0 (fluid).
-    shear_attenuation : ndarray, optional
-        Shear attenuation at each range (dB/wavelength), shape (N,). Default 0.
-    acoustic_type : str, optional
-        Boundary type (same at all ranges): 'half-space' (default — inferred
-        from the required cp/ρ/α arrays), 'grain-size', 'file'. 'vacuum' /
-        'rigid' are rejected because they would discard the supplied arrays.
-
-    Examples
-    --------
-    Continental shelf transition (sediment hardening with range):
-
-    >>> ranges = np.array([0, 10000, 20000, 30000])  # meters
-    >>> sound_speed = np.array([1600, 1650, 1700, 1750])
-    >>> density = np.array([1.5, 1.7, 1.9, 2.1])
-    >>> attenuation = np.array([0.5, 0.4, 0.3, 0.2])
-    >>>
-    >>> bottom_rd = RangeDependentBottom(
-    ...     ranges=ranges,
-    ...     sound_speed=sound_speed,
-    ...     density=density,
-    ...     attenuation=attenuation,
-    ...     shear_speed=np.zeros(4),
-    ...     acoustic_type='half-space'
-    ... )
-    """
-    ranges: np.ndarray
-    sound_speed: np.ndarray
-    density: np.ndarray
-    attenuation: np.ndarray
-    shear_speed: np.ndarray = None
-    shear_attenuation: np.ndarray = None
-    acoustic_type: Optional[str] = None
-
-    def __post_init__(self):
-        """Validate array lengths and set defaults."""
-        # Range-dependent bottoms always carry user-supplied cp/ρ/α arrays,
-        # so 'half-space' is the only physically coherent default. 'rigid'
-        # and 'grain-size' remain opt-in via explicit ``acoustic_type=``.
-        if self.acoustic_type is None:
-            self.acoustic_type = 'half-space'
-        _validate_acoustic_type(self.acoustic_type, "RangeDependentBottom")
-        self.ranges = np.asarray(self.ranges, dtype=float).ravel()
-        _require_strictly_increasing(self.ranges, "RangeDependentBottom.ranges")
-        n = len(self.ranges)
-
-        if self.shear_speed is None:
-            self.shear_speed = np.zeros(n)
-        if self.shear_attenuation is None:
-            self.shear_attenuation = np.zeros(n)
-
-        # Validate after defaulting so the zeros above stay length-n and only
-        # explicitly-passed arrays are length-checked (a mismatched shear array
-        # would otherwise raise a bare numpy ValueError later, in eval()).
-        for attr_name in ['sound_speed', 'density', 'attenuation',
-                          'shear_speed', 'shear_attenuation']:
-            attr = getattr(self, attr_name)
-            if len(attr) != n:
-                raise ConfigurationError(
-                    f"RangeDependentBottom: {attr_name} length ({len(attr)}) must "
-                    f"match ranges length ({n})"
-                )
-
-        # Explicit-conflict guard: vacuum/rigid ignore cp/ρ/α, so pairing
-        # them with an RD bottom (which requires those arrays) is wrong.
-        if self.acoustic_type in ('vacuum', 'rigid'):
-            raise ConfigurationError(
-                f"RangeDependentBottom(acoustic_type={self.acoustic_type!r}) "
-                f"is incoherent — vacuum/rigid boundaries ignore cp/ρ/α, "
-                f"but RangeDependentBottom requires those arrays. Drop "
-                f"``acoustic_type=`` to let uacpy infer 'half-space'."
-            )
-
-    def __repr__(self) -> str:
-        n = len(self.ranges)
-        r_lo, r_hi = float(self.ranges[0]) / 1000, float(self.ranges[-1]) / 1000
-        c_lo, c_hi = float(np.min(self.sound_speed)), float(np.max(self.sound_speed))
-        elastic = " elastic" if np.any(np.asarray(self.shear_speed) > 0) else ""
-        return (
-            f"RangeDependentBottom({self.acoustic_type}{elastic}, "
-            f"n={n}, range=[{r_lo:g}, {r_hi:g}] km, "
-            f"cp=[{c_lo:g}, {c_hi:g}] m/s)"
-        )
-
-    def at(self, *, range: float, interp: str = 'linear') -> BoundaryProperties:
-        """``BoundaryProperties`` at the requested range (m).
-
-        ``interp='linear'`` (default) interpolates between stored samples;
-        ``interp='nearest'`` returns the nearest stored sample.
-        """
-        if interp == 'nearest':
-            idx = int(np.argmin(np.abs(self.ranges - range)))
-            return BoundaryProperties(
-                acoustic_type=self.acoustic_type,
-                sound_speed=float(self.sound_speed[idx]),
-                density=float(self.density[idx]),
-                attenuation=float(self.attenuation[idx]),
-                shear_speed=float(self.shear_speed[idx]),
-                shear_attenuation=float(self.shear_attenuation[idx]),
-            )
-        if interp != 'linear':
-            raise ConfigurationError(
-                f"RangeDependentBottom.at: interp must be 'linear' or "
-                f"'nearest'; got {interp!r}"
-            )
-        ranges = self.ranges
-        return BoundaryProperties(
-            acoustic_type=self.acoustic_type,
-            sound_speed=float(np.interp(range, ranges, self.sound_speed)),
-            density=float(np.interp(range, ranges, self.density)),
-            attenuation=float(np.interp(range, ranges, self.attenuation)),
-            shear_speed=float(np.interp(range, ranges, self.shear_speed)),
-            shear_attenuation=float(
-                np.interp(range, ranges, self.shear_attenuation)
-            ),
-        )
-
-    def collapse(self, method: str = 'r0') -> BoundaryProperties:
-        """Collapse to a single ``BoundaryProperties`` for models that don't
-        support range-dependent bottoms.
-
-        Methods
-        -------
-        ``'r0'``     : range-0 sample.
-        ``'rmax'``   : last (deepest range) sample.
-        ``'mean'``   : per-property mean across ranges.
-        ``'median'`` : per-property median across ranges.
-        """
-        if method == 'r0':
-            return self.at(range=float(self.ranges[0]))
-        if method == 'rmax':
-            return self.at(range=float(self.ranges[-1]))
-        if method == 'mean':
-            reduce = np.mean
-        elif method == 'median':
-            reduce = np.median
-        else:
-            raise ConfigurationError(
-                f"RangeDependentBottom.collapse: unknown method={method!r}; "
-                "valid: 'r0', 'rmax', 'mean', 'median'"
-            )
-        return BoundaryProperties(
-            acoustic_type=self.acoustic_type,
-            sound_speed=float(reduce(self.sound_speed)),
-            density=float(reduce(self.density)),
-            attenuation=float(reduce(self.attenuation)),
-            shear_speed=float(reduce(self.shear_speed)),
-            shear_attenuation=float(reduce(self.shear_attenuation)),
-        )
+# ─────────────────────────────────────────────────────────────────────────────
+# Unified bottom carrier — one ``Bottom`` (range as an optional axis), mirroring
+# ``SoundSpeedProfile``. A ``SeabedColumn`` is "layers over a half-space" at one
+# range; an empty layer list means a pure half-space. ``Bottom`` holds one or
+# more columns plus an optional ``ranges`` vector.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class LayeredBottom:
-    """
-    Depth-dependent (layered) sediment structure.
+class SeabedColumn:
+    """A seabed column at one range: sediment layers over a half-space.
 
-    Defines a stack of sediment layers above a deepest half-space.
-    Used by models that support multi-layered bottoms (Kraken, Scooter,
-    SPARC via NMEDIA > 1; OASES via layered format).
+    ``layers`` may be **empty** — that is a pure half-space. A non-empty
+    stack is a layered seabed.
 
     Parameters
     ----------
     layers : list of SedimentLayer
-        Sediment layers from top (shallowest) to bottom (deepest),
-        stacked below the water column.
+        Sediment layers, shallow → deep. May be empty (pure half-space).
     halfspace : BoundaryProperties
-        Properties of the deepest half-space below all layers.
-
-    Examples
-    --------
-    Continental shelf with sand over clay over rock:
-
-    >>> from uacpy.core.environment import SedimentLayer, LayeredBottom, BoundaryProperties
-    >>> bottom = LayeredBottom(
-    ...     layers=[
-    ...         SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
-    ...         SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
-    ...     ],
-    ...     halfspace=BoundaryProperties(
-    ...         acoustic_type='half-space',
-    ...         sound_speed=1800, density=2.0, attenuation=0.1
-    ...     )
-    ... )
+        The deep half-space below all layers.
     """
     layers: List[SedimentLayer]
     halfspace: BoundaryProperties
 
     def __post_init__(self):
-        if not self.layers:
-            raise ConfigurationError("LayeredBottom: requires at least one SedimentLayer; got 0")
+        if self.layers is None:
+            self.layers = []
+        self.layers = list(self.layers)
+        if not isinstance(self.halfspace, BoundaryProperties):
+            raise ConfigurationError(
+                "SeabedColumn: halfspace must be a BoundaryProperties; "
+                f"got {type(self.halfspace).__name__}"
+            )
+
+    @property
+    def is_layered(self) -> bool:
+        return len(self.layers) > 0
 
     def __repr__(self) -> str:
-        n = len(self.layers)
-        thick = self.total_thickness()
-        bits = [f"n_layers={n}", f"thickness={thick:g} m"]
-        if any(layer.shear_speed > 0 for layer in self.layers):
+        bits = [f"n_layers={len(self.layers)}"]
+        if self.layers:
+            bits.append(f"thickness={self.total_thickness():g} m")
+        if any(layer.shear_speed > 0 for layer in self.layers) \
+                or self.halfspace.shear_speed > 0:
             bits.append("elastic")
         bits.append(f"halfspace={self.halfspace.acoustic_type}")
         if self.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
             bits.append(f"cp={self.halfspace.sound_speed:g} m/s")
-        return f"LayeredBottom({', '.join(bits)})"
+        return f"SeabedColumn({', '.join(bits)})"
 
     def total_thickness(self) -> float:
-        """Total thickness of all sediment layers (m)."""
+        """Total thickness of all sediment layers (m); 0 for a half-space."""
         return sum(layer.thickness for layer in self.layers)
 
     def layer_depths(self, seafloor_depth: float) -> List[Tuple[float, float]]:
-        """
-        Compute (top_depth, bottom_depth) for each layer.
-
-        Parameters
-        ----------
-        seafloor_depth : float
-            Depth of the seafloor (top of first layer) in meters.
-
-        Returns
-        -------
-        list of (float, float)
-            (top_depth, bottom_depth) pairs for each layer.
-        """
+        """``(top, bottom)`` depth pairs for each layer (empty for a
+        half-space). ``seafloor_depth`` is the top of the first layer (m)."""
         depths = []
-        current_depth = seafloor_depth
+        current = seafloor_depth
         for layer in self.layers:
-            top = current_depth
-            bottom = current_depth + layer.thickness
+            top = current
+            bottom = current + layer.thickness
             depths.append((top, bottom))
-            current_depth = bottom
+            current = bottom
         return depths
 
     def to_piecewise_breakpoints(
@@ -540,43 +347,10 @@ class LayeredBottom:
             'sound_speed', 'density', 'attenuation',
         ),
     ) -> Dict[str, List[Tuple[float, float]]]:
-        """
-        Project this layered bottom onto Collins-style ``(depth, value)``
-        breakpoint sequences — the format consumed by ``ram.in`` for
-        rams0.5 (elastic) and ramsurf1.5 (rough surface).
-
-        Each layer becomes two breakpoints (top depth, bottom depth) with
-        the same value, producing a step function under the linear
-        interpolation rules of Collins' ``zread`` routine. The half-space
-        is appended as one final breakpoint at ``zmax`` (or at the deepest
-        layer bottom if ``zmax`` is omitted) carrying the half-space
-        value. When ``zmax`` does not exceed the deepest layer bottom the
-        final breakpoint is emitted 1 m below it instead — past the
-        physical grid but harmless, since Collins clamps to the last
-        breakpoint inside the absorbing layer.
-
-        Parameters
-        ----------
-        seafloor_depth : float
-            Depth of the top of the first sediment layer (m).
-        zmax : float, optional
-            Maximum depth of the PE computational grid. If provided, a
-            final breakpoint is emitted at ``zmax`` with the half-space
-            value so the absorbing region carries the right properties.
-        properties : tuple of str, optional
-            Which fields to extract. Pass e.g. ``('sound_speed', 'density',
-            'attenuation', 'shear_speed', 'shear_attenuation')`` for RAMS.
-            Layers / half-space that don't expose the property contribute
-            ``0.0`` (the convention RAM family uses for "no shear").
-
-        Returns
-        -------
-        dict
-            ``{property_name: [(depth, value), ...]}`` — one list per
-            requested property, in increasing depth order.
-        """
+        """Collins-style ``(depth, value)`` breakpoints per property — each
+        layer becomes a (top, bottom) step, then the half-space to ``zmax``.
+        With 0 layers the half-space spans from ``seafloor_depth`` down."""
         out = {p: [] for p in properties}
-
         depths = self.layer_depths(seafloor_depth)
         for (top, bottom), layer in zip(depths, self.layers):
             for prop in properties:
@@ -588,101 +362,113 @@ class LayeredBottom:
         final_depth = float(zmax) if zmax is not None else deepest_layer_bottom
         if final_depth <= deepest_layer_bottom:
             final_depth = deepest_layer_bottom + 1.0
-
         for prop in properties:
             hs_value = float(getattr(self.halfspace, prop, 0.0) or 0.0)
             out[prop].append((deepest_layer_bottom, hs_value))
             out[prop].append((final_depth, hs_value))
-
         return out
 
     def collapse(self, method: str = 'halfspace') -> BoundaryProperties:
-        """Collapse layers to a single ``BoundaryProperties`` for models
-        that don't support layered bottoms.
+        """Collapse the column to a single ``BoundaryProperties``.
 
-        Methods
-        -------
-        ``'halfspace'``       : return the deep half-space alone.
-        ``'top_layer'``       : return the topmost sediment layer's
-                                acoustic properties (with the half-space
-                                as fallback for missing fields).
-        ``'volume_average'``  : thickness-weighted mean of layer
-                                properties; the half-space contributes
-                                with weight equal to the deepest layer
-                                (a stand-in for "infinite extent").
-        """
-        if method == 'halfspace':
+        ``'halfspace'`` → the deep half-space; ``'top_layer'`` → topmost
+        layer's properties (half-space when there are no layers);
+        ``'volume_average'`` → thickness-weighted mean (half-space alone when
+        there are no layers)."""
+        if method == 'halfspace' or not self.layers:
+            if method not in ('halfspace', 'top_layer', 'volume_average'):
+                raise ConfigurationError(
+                    f"SeabedColumn.collapse: unknown method={method!r}; "
+                    "valid: 'halfspace', 'top_layer', 'volume_average'"
+                )
             return _copy.deepcopy(self.halfspace)
         if method == 'top_layer':
             top = self.layers[0]
             return BoundaryProperties(
                 acoustic_type=self.halfspace.acoustic_type,
-                density=top.density,
-                sound_speed=top.sound_speed,
-                attenuation=top.attenuation,
-                shear_speed=top.shear_speed,
+                density=top.density, sound_speed=top.sound_speed,
+                attenuation=top.attenuation, shear_speed=top.shear_speed,
                 shear_attenuation=top.shear_attenuation,
             )
         if method == 'volume_average':
-            weights = np.array([float(layer.thickness) for layer in self.layers])
-            hs_weight = float(weights[-1]) if weights.size else 1.0
-            weights = np.append(weights, hs_weight)
-            cs = np.array(
-                [layer.sound_speed for layer in self.layers]
-                + [self.halfspace.sound_speed]
-            )
-            rho = np.array(
-                [layer.density for layer in self.layers]
-                + [self.halfspace.density]
-            )
-            alpha = np.array(
-                [layer.attenuation for layer in self.layers]
-                + [self.halfspace.attenuation]
-            )
-            cs_shear = np.array(
-                [layer.shear_speed for layer in self.layers]
-                + [self.halfspace.shear_speed]
-            )
-            alpha_shear = np.array(
-                [layer.shear_attenuation for layer in self.layers]
-                + [self.halfspace.shear_attenuation]
-            )
+            # Thickness-weighted mean over the finite layers plus the
+            # half-space. The semi-infinite half-space has no finite thickness,
+            # so it is weighted by the deepest layer's thickness — a pragmatic
+            # choice that keeps it comparable to the adjacent layer rather than
+            # dominating (∞ weight) or vanishing (0). (Layers are non-empty
+            # here; the no-layer case returned the half-space above.)
+            weights = np.array([float(la.thickness) for la in self.layers])
+            weights = np.append(weights, float(weights[-1]))
+
+            def _avg(field):
+                vals = np.array([getattr(la, field) for la in self.layers]
+                                + [getattr(self.halfspace, field)])
+                return float(np.average(vals, weights=weights))
             return BoundaryProperties(
                 acoustic_type=self.halfspace.acoustic_type,
-                sound_speed=float(np.average(cs, weights=weights)),
-                density=float(np.average(rho, weights=weights)),
-                attenuation=float(np.average(alpha, weights=weights)),
-                shear_speed=float(np.average(cs_shear, weights=weights)),
-                shear_attenuation=float(np.average(alpha_shear, weights=weights)),
+                sound_speed=_avg('sound_speed'), density=_avg('density'),
+                attenuation=_avg('attenuation'), shear_speed=_avg('shear_speed'),
+                shear_attenuation=_avg('shear_attenuation'),
             )
         raise ConfigurationError(
-            f"LayeredBottom.collapse: unknown method={method!r}; "
+            f"SeabedColumn.collapse: unknown method={method!r}; "
             "valid: 'halfspace', 'top_layer', 'volume_average'"
         )
+
+    def sample_at_depths(
+        self, n_points: int = 4, max_thickness: Optional[float] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample ``(cs, rho, attn)`` at ``n_points`` evenly-spaced depths in
+        ``[0, max_thickness]`` (defaults to this column's own thickness). Used
+        by RAM to map arbitrary layers onto its fixed sediment grid."""
+        max_thick = (float(max_thickness) if max_thickness is not None
+                     else self.total_thickness())
+        if max_thick <= 0:
+            max_thick = 1.0
+        sample_depths = np.linspace(0, max_thick, n_points)
+        cs = np.empty(n_points)
+        rho = np.empty(n_points)
+        attn = np.empty(n_points)
+        for i, d in enumerate(sample_depths):
+            cumulative = 0.0
+            found = False
+            for layer in self.layers:
+                if d <= cumulative + layer.thickness:
+                    cs[i], rho[i], attn[i] = (layer.sound_speed, layer.density,
+                                              layer.attenuation)
+                    found = True
+                    break
+                cumulative += layer.thickness
+            if not found:
+                cs[i] = self.halfspace.sound_speed
+                rho[i] = self.halfspace.density
+                attn[i] = self.halfspace.attenuation
+        return cs, rho, attn
 
     @classmethod
     def from_halfspace(
         cls,
         halfspace: BoundaryProperties,
-        water_depth: float,
+        *,
+        water_depth: Optional[float] = None,
         sediment_thickness: Optional[float] = None,
         sediment_fraction: float = 0.10,
         min_thickness: float = 5.0,
-    ) -> 'LayeredBottom':
-        """Wrap a plain half-space as a synthetic single-layer bottom.
+        synthesize: bool = False,
+    ) -> 'SeabedColumn':
+        """Build a column from a half-space.
 
-        Used by RAM-family backends (which require a sediment layer
-        above the half-space for the PE update). The synthetic layer
-        carries the same acoustic properties as the half-space, with a
-        thickness derived from ``sediment_fraction * water_depth``
-        (clamped to ``min_thickness``) unless ``sediment_thickness`` is
-        provided explicitly.
-        """
+        ``synthesize=False`` (default) → a pure half-space (0 layers).
+        ``synthesize=True`` → a single synthetic sediment layer carrying the
+        half-space properties (thickness from ``sediment_thickness`` or
+        ``sediment_fraction*water_depth`` clamped to ``min_thickness``), as
+        the RAM PE update requires a layer above the half-space."""
+        if not synthesize:
+            return cls(layers=[], halfspace=_copy.deepcopy(halfspace))
         if sediment_thickness is None:
-            sediment_thickness = max(
-                float(sediment_fraction) * float(water_depth),
-                float(min_thickness),
-            )
+            base = float(water_depth) if water_depth is not None else 0.0
+            sediment_thickness = max(float(sediment_fraction) * base,
+                                     float(min_thickness))
         layer = SedimentLayer(
             thickness=float(sediment_thickness),
             sound_speed=float(halfspace.sound_speed),
@@ -690,8 +476,7 @@ class LayeredBottom:
             attenuation=float(halfspace.attenuation),
             shear_speed=float(getattr(halfspace, 'shear_speed', 0.0) or 0.0),
             shear_attenuation=float(
-                getattr(halfspace, 'shear_attenuation', 0.0) or 0.0
-            ),
+                getattr(halfspace, 'shear_attenuation', 0.0) or 0.0),
         )
         return cls(layers=[layer], halfspace=_copy.deepcopy(halfspace))
 
@@ -703,31 +488,10 @@ class LayeredBottom:
         halfspace: str,
         halfspace_overrides: Optional[Dict] = None,
         elastic: bool = False,
-    ) -> 'LayeredBottom':
-        """Build a stratigraphic stack from :mod:`uacpy.core.materials`
-        preset names.
-
-        Parameters
-        ----------
-        layers : list of tuples
-            Each entry is ``(name, thickness)`` or
-            ``(name, thickness, overrides)`` where ``overrides`` is a
-            dict of per-layer field overrides.
-        halfspace : str
-            Preset name for the substrate half-space.
-        halfspace_overrides : dict, optional
-            Field overrides applied to the half-space.
-        elastic : bool, optional
-            Keep the presets' shear properties (default ``False`` ⇒ fluid).
-            Per-layer / half-space ``shear_*`` overrides win regardless.
-
-        Examples
-        --------
-        >>> LayeredBottom.from_presets(
-        ...     layers=[('clay', 5), ('silt', 15), ('sand', 30)],
-        ...     halfspace='limestone',
-        ... )
-        """
+    ) -> 'SeabedColumn':
+        """Build a column from :mod:`uacpy.core.materials` presets. Each
+        ``layers`` entry is ``(name, thickness)`` or
+        ``(name, thickness, overrides)``; ``halfspace`` is a preset name."""
         sediment_layers = []
         for entry in layers:
             if len(entry) == 2:
@@ -737,7 +501,7 @@ class LayeredBottom:
                 name, thickness, overrides = entry
             else:
                 raise ConfigurationError(
-                    f"LayeredBottom.from_presets: layer entry must be "
+                    "SeabedColumn.from_presets: layer entry must be "
                     f"(name, thickness) or (name, thickness, overrides); "
                     f"got {entry!r}"
                 )
@@ -746,216 +510,280 @@ class LayeredBottom:
                                           elastic=elastic, **overrides)
             )
         hs = BoundaryProperties.from_preset(
-            halfspace, elastic=elastic, **(halfspace_overrides or {}),
-        )
+            halfspace, elastic=elastic, **(halfspace_overrides or {}))
         return cls(layers=sediment_layers, halfspace=hs)
 
 
 @dataclass
-class RangeDependentLayeredBottom:
+class Bottom:
+    """Unified seabed carrier — one or more :class:`SeabedColumn` columns with
+    an optional ``ranges`` axis (metres). ``ranges=None`` ⇒ range-independent
+    (exactly one column), mirroring ``SoundSpeedProfile(ranges=None)``.
+
+    Construct via the ``from_*`` factories or let ``Environment(bottom=...)``
+    coerce a scalar cp, preset name, ``BoundaryProperties``, ``SeabedColumn``
+    or ``Bottom``.
     """
-    Range-dependent layered sediment: a LayeredBottom at each range point.
-
-    Combines range variation (different sediment stacks along the
-    propagation path) with depth variation (multiple layers at each
-    range).  RAM maps each stack to its 4-point sediment profile;
-    AT models (Kraken/Scooter/SPARC) warn because NMEDIA is fixed.
-
-    Bathymetry is **not** carried here — it lives on ``Environment.bathymetry``.
-    Models that need the seafloor depth at one of these range points
-    interpolate ``env.bathymetry`` at ``ranges[i]``.
-
-    Parameters
-    ----------
-    ranges : ndarray
-        Range points in **meters**, shape (N,).
-    profiles : list of LayeredBottom
-        One LayeredBottom per range point (length N).
-
-    Examples
-    --------
-    Mud-over-clay near-shore transitioning to sand-over-rock offshore:
-
-    >>> from uacpy.core.environment import (
-    ...     SedimentLayer, LayeredBottom, BoundaryProperties,
-    ...     RangeDependentLayeredBottom,
-    ... )
-    >>> near = LayeredBottom(
-    ...     layers=[SedimentLayer(5, 1500, 1.2, 1.0),
-    ...             SedimentLayer(15, 1550, 1.4, 0.8)],
-    ...     halfspace=BoundaryProperties(acoustic_type='half-space',
-    ...                                  sound_speed=1800, density=2.0, attenuation=0.1),
-    ... )
-    >>> far = LayeredBottom(
-    ...     layers=[SedimentLayer(3, 1650, 1.8, 0.3),
-    ...             SedimentLayer(10, 1750, 2.0, 0.2)],
-    ...     halfspace=BoundaryProperties(acoustic_type='half-space',
-    ...                                  sound_speed=2200, density=2.5, attenuation=0.05),
-    ... )
-    >>> rdl = RangeDependentLayeredBottom(
-    ...     ranges=np.array([0, 20000]),  # meters
-    ...     profiles=[near, far],
-    ... )
-    """
-    ranges: np.ndarray
-    profiles: List[LayeredBottom]
+    columns: List[SeabedColumn]
+    ranges: Optional[np.ndarray] = None
 
     def __post_init__(self):
-        self.ranges = np.asarray(self.ranges, dtype=float).ravel()
-        n = len(self.ranges)
-        if n < 1:
-            raise ConfigurationError(
-                "RangeDependentLayeredBottom: at least one range point is required"
-            )
-        _require_strictly_increasing(
-            self.ranges, "RangeDependentLayeredBottom.ranges",
-        )
-        if len(self.profiles) != n:
-            raise ConfigurationError(
-                f"RangeDependentLayeredBottom: profiles length ({len(self.profiles)}) "
-                f"must match ranges length ({n})"
-            )
+        self.columns = list(self.columns)
+        if not self.columns:
+            raise ConfigurationError("Bottom: requires at least one SeabedColumn")
+        for c in self.columns:
+            if not isinstance(c, SeabedColumn):
+                raise ConfigurationError(
+                    "Bottom: columns must be SeabedColumn instances; got "
+                    f"{type(c).__name__}")
+        if self.ranges is None:
+            if len(self.columns) != 1:
+                raise ConfigurationError(
+                    "Bottom: range-independent bottom (ranges=None) needs "
+                    f"exactly one column; got {len(self.columns)}")
+        else:
+            self.ranges = np.asarray(self.ranges, dtype=float).ravel()
+            _require_strictly_increasing(self.ranges, "Bottom.ranges")
+            if len(self.ranges) != len(self.columns):
+                raise ConfigurationError(
+                    f"Bottom: ranges length ({len(self.ranges)}) must match "
+                    f"columns length ({len(self.columns)})")
+
+    # ── queries (replace isinstance dispatch) ──────────────────────────────
+    @property
+    def is_range_dependent(self) -> bool:
+        return self.ranges is not None and len(self.columns) > 1
+
+    @property
+    def is_layered(self) -> bool:
+        return any(c.is_layered for c in self.columns)
+
+    @property
+    def is_elastic(self) -> bool:
+        for c in self.columns:
+            if c.halfspace.shear_speed > 0 or any(
+                    la.shear_speed > 0 for la in c.layers):
+                return True
+        return False
+
+    @property
+    def n_ranges(self) -> int:
+        return len(self.columns)
+
+    @property
+    def acoustic_type(self) -> str:
+        return self.columns[0].halfspace.acoustic_type
 
     def __repr__(self) -> str:
-        n = len(self.ranges)
+        if not self.is_range_dependent:
+            return f"Bottom({self.columns[0]!r})"
         r_lo = float(self.ranges[0]) / 1000
         r_hi = float(self.ranges[-1]) / 1000
-        max_layers = max(len(p.layers) for p in self.profiles)
-        return (
-            f"RangeDependentLayeredBottom(n_profiles={n}, "
-            f"range=[{r_lo:g}, {r_hi:g}] km, "
-            f"max_layers={max_layers})"
+        kind = "layered" if self.is_layered else "half-space"
+        return (f"Bottom(range-dependent {kind}, n={len(self.columns)}, "
+                f"range=[{r_lo:g}, {r_hi:g}] km)")
+
+    # ── slicing ─────────────────────────────────────────────────────────────
+    def _nearest_index(self, range: float) -> int:
+        if self.ranges is None:
+            return 0
+        return int(np.argmin(np.abs(self.ranges - float(range))))
+
+    def column_at(self, *, range: float) -> SeabedColumn:
+        """Nearest :class:`SeabedColumn` to ``range`` (m). Always nearest —
+        layer stacks cannot be linearly blended."""
+        return self.columns[self._nearest_index(range)]
+
+    def halfspace_at(self, *, range: float,
+                     interp: Optional[str] = None) -> BoundaryProperties:
+        """Half-space ``BoundaryProperties`` at ``range`` (m). ``interp=None``
+        auto-resolves: **linear** when every column is a pure half-space
+        (the only case where blending properties is well-defined), else
+        **nearest**."""
+        if interp is None:
+            interp = 'nearest' if self.is_layered else 'linear'
+        if self.ranges is None or interp == 'nearest':
+            return _copy.deepcopy(self.column_at(range=range).halfspace)
+        if interp != 'linear':
+            raise ConfigurationError(
+                f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
+                f"None; got {interp!r}")
+        hs = [c.halfspace for c in self.columns]
+        return BoundaryProperties(
+            acoustic_type=hs[0].acoustic_type,
+            sound_speed=float(np.interp(range, self.ranges,
+                                        [h.sound_speed for h in hs])),
+            density=float(np.interp(range, self.ranges,
+                                    [h.density for h in hs])),
+            attenuation=float(np.interp(range, self.ranges,
+                                        [h.attenuation for h in hs])),
+            shear_speed=float(np.interp(range, self.ranges,
+                                        [h.shear_speed for h in hs])),
+            shear_attenuation=float(np.interp(range, self.ranges,
+                                              [h.shear_attenuation for h in hs])),
         )
 
     def max_total_thickness(self) -> float:
-        """Maximum total sediment thickness across all range points."""
-        return max(p.total_thickness() for p in self.profiles)
+        """Maximum sediment thickness across all columns (0 if all half-space)."""
+        return max(c.total_thickness() for c in self.columns)
 
-    def at(self, *, range: float) -> 'LayeredBottom':
-        """Return the nearest LayeredBottom profile for a given range (m)."""
-        idx = int(np.argmin(np.abs(self.ranges - range)))
-        return self.profiles[idx]
+    def all_sound_speeds(self) -> List[float]:
+        """Every compressional speed in the seabed (all layers + half-spaces),
+        for c₀ / grid sizing."""
+        speeds: List[float] = []
+        for c in self.columns:
+            speeds.extend(float(la.sound_speed) for la in c.layers)
+            if getattr(c.halfspace, 'sound_speed', None):
+                speeds.append(float(c.halfspace.sound_speed))
+        return speeds
 
-    def sample_at_depths(
-        self,
-        profile_idx: int,
-        n_points: int = 4,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Sample a LayeredBottom profile at evenly-spaced depth points.
+    # ── SoA half-space views (one value per column) ─────────────────────────
+    @property
+    def halfspace_sound_speed(self) -> np.ndarray:
+        return np.array([c.halfspace.sound_speed for c in self.columns])
 
-        Returns arrays of (sound_speed, density, attenuation) sampled at
-        ``n_points`` depths spanning [0, max_total_thickness].  Used by RAM
-        to map arbitrary layers to its fixed 4-point sediment grid.
+    @property
+    def halfspace_density(self) -> np.ndarray:
+        return np.array([c.halfspace.density for c in self.columns])
 
-        Parameters
-        ----------
-        profile_idx : int
-            Index into ``self.profiles``.
-        n_points : int
-            Number of sample points (default 4, matching RAM).
+    @property
+    def halfspace_attenuation(self) -> np.ndarray:
+        return np.array([c.halfspace.attenuation for c in self.columns])
 
-        Returns
-        -------
-        cs : ndarray, shape (n_points,)
-            Sound speed at each depth sample.
-        rho : ndarray, shape (n_points,)
-            Density at each depth sample.
-        attn : ndarray, shape (n_points,)
-            Attenuation at each depth sample.
-        """
-        lb = self.profiles[profile_idx]
-        max_thick = self.max_total_thickness()
-        if max_thick <= 0:
-            max_thick = 1.0
-        sample_depths = np.linspace(0, max_thick, n_points)
+    @property
+    def halfspace_shear_speed(self) -> np.ndarray:
+        return np.array([c.halfspace.shear_speed for c in self.columns])
 
-        cs = np.empty(n_points)
-        rho = np.empty(n_points)
-        attn = np.empty(n_points)
+    @property
+    def halfspace_shear_attenuation(self) -> np.ndarray:
+        return np.array([c.halfspace.shear_attenuation for c in self.columns])
 
-        for i, d in enumerate(sample_depths):
-            # Walk through layers to find which layer this depth falls in
-            cumulative = 0.0
-            found = False
-            for layer in lb.layers:
-                if d <= cumulative + layer.thickness:
-                    cs[i] = layer.sound_speed
-                    rho[i] = layer.density
-                    attn[i] = layer.attenuation
-                    found = True
-                    break
-                cumulative += layer.thickness
-            if not found:
-                # Below all layers → halfspace
-                cs[i] = lb.halfspace.sound_speed
-                rho[i] = lb.halfspace.density
-                attn[i] = lb.halfspace.attenuation
+    # ── reductions ──────────────────────────────────────────────────────────
+    def select_range(self, method: str = 'r0') -> 'Bottom':
+        """Reduce the range axis to a single column (range-independent result).
 
-        return cs, rho, attn
-
-    def to_profile(self, method: str = 'r0') -> 'LayeredBottom':
-        """Pick one ``LayeredBottom`` profile from the range axis.
-
-        ``method`` ∈ ``'r0'`` | ``'rmax'`` | ``'median'``.
-        """
+        ``'r0'`` / ``'rmax'`` pick the first / last column (layers kept).
+        ``'mean'`` / ``'median'`` numerically average the half-spaces — only
+        meaningful when no column is layered. For a layered bottom ``'median'``
+        falls back to picking the middle column (layers can't be averaged) and
+        ``'mean'`` is rejected."""
+        if not self.is_range_dependent:
+            return Bottom(columns=[self.columns[0]], ranges=None)
         if method == 'r0':
-            idx = 0
-        elif method == 'rmax':
-            idx = len(self.profiles) - 1
-        elif method == 'median':
-            idx = len(self.profiles) // 2
-        else:
+            return Bottom(columns=[self.columns[0]], ranges=None)
+        if method == 'rmax':
+            return Bottom(columns=[self.columns[-1]], ranges=None)
+        if method not in ('mean', 'median'):
             raise ConfigurationError(
-                f"RangeDependentLayeredBottom.to_profile: unknown "
-                f"method={method!r}; valid: 'r0', 'rmax', 'median'"
-            )
-        return self.profiles[idx]
+                f"Bottom.select_range: unknown method={method!r}; "
+                "valid: 'r0', 'rmax', 'mean', 'median'")
+        if self.is_layered:
+            if method == 'median':
+                return Bottom(columns=[self.columns[len(self.columns) // 2]],
+                              ranges=None)
+            raise ConfigurationError(
+                "Bottom.select_range('mean') is undefined for a layered "
+                "bottom (layer stacks can't be averaged); use 'r0', 'rmax' "
+                "or 'median'.")
+        reduce = np.mean if method == 'mean' else np.median
+        hs0 = self.columns[0].halfspace
+        return Bottom(columns=[SeabedColumn(layers=[], halfspace=(
+            BoundaryProperties(
+                acoustic_type=hs0.acoustic_type,
+                sound_speed=float(reduce(self.halfspace_sound_speed)),
+                density=float(reduce(self.halfspace_density)),
+                attenuation=float(reduce(self.halfspace_attenuation)),
+                shear_speed=float(reduce(self.halfspace_shear_speed)),
+                shear_attenuation=float(
+                    reduce(self.halfspace_shear_attenuation)),
+            )))], ranges=None)
 
-    def collapse(self, method: str = 'halfspace') -> BoundaryProperties:
-        """Full collapse to a single ``BoundaryProperties``.
+    def collapse(self, *, range: Optional[str] = None,
+                 layers: Optional[str] = None) -> 'Bottom':
+        """Reduce along one or both axes, returning a new ``Bottom``.
 
-        Selects the median-range profile, then collapses its layers via
-        ``method`` (see :meth:`LayeredBottom.collapse`). The median range
-        matches what :meth:`PropagationModel._project_environment` uses
-        when it auto-collapses an RDLB env. For control over the
-        range-axis selection, chain explicitly:
-        ``rdl.to_profile('rmax').collapse('top_layer')``.
-        """
-        return self.to_profile('median').collapse(method)
+        ``range=`` collapses the range axis (see :meth:`select_range`).
+        ``layers=`` flattens each column's layers to a half-space (per-column,
+        keeping the range axis), via :meth:`SeabedColumn.collapse`."""
+        b = self
+        if range is not None:
+            b = b.select_range(range)
+        if layers is not None:
+            new_cols = [SeabedColumn(layers=[], halfspace=c.collapse(layers))
+                        for c in b.columns]
+            b = Bottom(columns=new_cols,
+                       ranges=None if len(new_cols) == 1 else b.ranges)
+        return b
 
+    def to_halfspace(self, range_method: str = 'r0') -> BoundaryProperties:
+        """Collapse fully to a single ``BoundaryProperties``."""
+        return self.select_range(range_method).columns[0].collapse('halfspace')
 
-def _boundary_has_shear(boundary) -> bool:
-    """Shared helper: does this boundary carry any non-zero shear speed?
+    # ── factories (mirror SoundSpeedProfile.from_*) ─────────────────────────
+    @classmethod
+    def from_halfspace(cls, halfspace: BoundaryProperties) -> 'Bottom':
+        """Range-independent pure half-space bottom."""
+        return cls(columns=[SeabedColumn(layers=[], halfspace=halfspace)],
+                   ranges=None)
 
-    Handles ``BoundaryProperties``, ``RangeDependentBottom``,
-    ``LayeredBottom``, and ``RangeDependentLayeredBottom``. ``None``
-    returns ``False`` so callers can pass ``env.surface`` directly.
-    """
-    if boundary is None:
-        return False
+    @classmethod
+    def from_column(cls, column: SeabedColumn) -> 'Bottom':
+        """Range-independent bottom from a single column."""
+        return cls(columns=[column], ranges=None)
 
-    def _scalar(b) -> bool:
-        cs = getattr(b, 'shear_speed', None)
-        if cs is None:
-            return False
-        try:
-            arr = np.atleast_1d(np.asarray(cs, dtype=float))
-        except (TypeError, ValueError):
-            return False
-        return bool(np.any(arr > 0))
+    @classmethod
+    def from_columns(cls, columns: List[SeabedColumn],
+                     ranges) -> 'Bottom':
+        """Range-dependent bottom from one column per range break."""
+        return cls(columns=list(columns), ranges=ranges)
 
-    if isinstance(boundary, RangeDependentLayeredBottom):
-        for prof in boundary.profiles:
-            for layer in prof.layers:
-                if _scalar(layer):
-                    return True
-            if _scalar(prof.halfspace):
-                return True
-        return False
-    if isinstance(boundary, LayeredBottom):
-        for layer in boundary.layers:
-            if _scalar(layer):
-                return True
-        return _scalar(boundary.halfspace)
-    return _scalar(boundary)
+    @classmethod
+    def from_halfspaces(
+        cls,
+        ranges,
+        *,
+        sound_speed,
+        density,
+        attenuation,
+        shear_speed=None,
+        shear_attenuation=None,
+        acoustic_type: Optional[str] = None,
+    ) -> 'Bottom':
+        """Range-dependent half-space bottom from parallel property arrays."""
+        # RD bottoms always carry user cp/ρ/α, so 'half-space' is the coherent
+        # default — never infer vacuum just because a sample happens to equal
+        # the BoundaryProperties defaults.
+        if acoustic_type is None:
+            acoustic_type = 'half-space'
+        ranges = np.asarray(ranges, dtype=float).ravel()
+        n = len(ranges)
+        cp = np.asarray(sound_speed, dtype=float).ravel()
+        rho = np.asarray(density, dtype=float).ravel()
+        alpha = np.asarray(attenuation, dtype=float).ravel()
+        cs = (np.zeros(n) if shear_speed is None
+              else np.asarray(shear_speed, dtype=float).ravel())
+        a_s = (np.zeros(n) if shear_attenuation is None
+               else np.asarray(shear_attenuation, dtype=float).ravel())
+        for name, arr in (('sound_speed', cp), ('density', rho),
+                          ('attenuation', alpha), ('shear_speed', cs),
+                          ('shear_attenuation', a_s)):
+            if len(arr) != n:
+                raise ConfigurationError(
+                    f"Bottom.from_halfspaces: {name} length ({len(arr)}) must "
+                    f"match ranges length ({n})")
+        columns = [
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                acoustic_type=acoustic_type, sound_speed=float(cp[i]),
+                density=float(rho[i]), attenuation=float(alpha[i]),
+                shear_speed=float(cs[i]), shear_attenuation=float(a_s[i])))
+            for i in range(n)
+        ]
+        return cls(columns=columns, ranges=ranges if n > 1 else None)
+
+    @classmethod
+    def from_presets(cls, layers, *, halfspace, halfspace_overrides=None,
+                     elastic: bool = False) -> 'Bottom':
+        """Range-independent layered bottom from material presets."""
+        return cls.from_column(SeabedColumn.from_presets(
+            layers, halfspace=halfspace,
+            halfspace_overrides=halfspace_overrides, elastic=elastic))

@@ -58,15 +58,23 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
     dlat = max_distance_km / 111.0
     dlon = dlat / max(np.cos(np.radians(lat)), 1e-3)
     la0, la1 = lat - dlat, lat + dlat
-    lo0, lo1 = normalize_lon(lon - dlon), normalize_lon(lon + dlon)
+    lo_lo, lo_hi = normalize_lon(lon) - dlon, normalize_lon(lon) + dlon
     t0 = (when - np.timedelta64(max_days, 'D'))
     t1 = (when + np.timedelta64(max_days, 'D'))
+    # A box straddling the antimeridian can't be expressed as a single
+    # longitude>=A & longitude<=B clause (it would invert to ~the whole globe);
+    # drop the longitude clause there and let the haversine distance guard in
+    # the caller select the nearest profile. Only triggers within ``dlon`` of ±180°.
+    if lo_lo < -180.0 or lo_hi > 180.0:
+        lon_clause = ""
+    else:
+        lon_clause = f"&longitude%3E={lo_lo:.4f}&longitude%3C={lo_hi:.4f}"
     return (
         f"{base_url}?platform_number,cycle_number,time,latitude,longitude,"
         f"pres,temp,psal,temp_qc,psal_qc"
         f"&time%3E={t0}T00:00:00Z&time%3C={t1}T00:00:00Z"
         f"&latitude%3E={la0:.4f}&latitude%3C={la1:.4f}"
-        f"&longitude%3E={min(lo0, lo1):.4f}&longitude%3C={max(lo0, lo1):.4f}"
+        f"{lon_clause}"
     )
 
 

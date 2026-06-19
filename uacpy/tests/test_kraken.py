@@ -4,11 +4,52 @@ import pytest
 import numpy as np
 
 from uacpy.core.results import Field, Modes
-from uacpy.models import Kraken, KrakenC, KrakenField
+from uacpy.models import Kraken
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 
 pytestmark = pytest.mark.requires_binary
+
+
+class TestKrakenFieldBackend:
+    """The KrakenField ``backend=`` override (kraken / krakenc)."""
+
+    def _fluid(self):
+        return Environment(
+            name='f', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800, density=1.8,
+                                      attenuation=0.3))
+
+    def _elastic(self):
+        return Environment(
+            name='e', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800, density=1.8,
+                                      attenuation=0.3, shear_speed=400))
+
+    def test_auto_dispatch(self):
+        assert Kraken(verbose=False)._select_kraken_exe(
+            self._fluid()).name == 'kraken.exe'
+        assert Kraken(verbose=False)._select_kraken_exe(
+            self._elastic()).name == 'krakenc.exe'
+
+    def test_force_each_backend(self):
+        assert Kraken(verbose=False, backend='krakenc')._select_kraken_exe(
+            self._fluid()).name == 'krakenc.exe'
+        assert Kraken(verbose=False, backend='kraken')._select_kraken_exe(
+            self._fluid()).name == 'kraken.exe'
+
+    def test_force_kraken_on_elastic_raises(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match="elastic media"):
+            Kraken(verbose=False, backend='kraken')._select_kraken_exe(
+                self._elastic())
+
+    def test_unknown_backend_raises(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match="not a known backend"):
+            Kraken(verbose=False, backend='nope')
 
 
 class TestKrakenFieldBroadband:
@@ -25,7 +66,7 @@ class TestKrakenFieldBroadband:
         )
         frequencies = np.linspace(80.0, 120.0, 5)
 
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         result = kf.run(
             env, source, receiver,
             run_mode=RunMode.BROADBAND,
@@ -55,7 +96,7 @@ class TestKrakenFieldBroadband:
         # → no DFT-wraparound warning from synthesize_time_series.
         frequencies = np.linspace(60.0, 140.0, 17)
 
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         result = kf.run(
             env, source, receiver,
             run_mode=RunMode.TIME_SERIES,
@@ -97,12 +138,11 @@ class TestKrakenFieldBroadband:
     @pytest.mark.requires_binary
     def test_krakenc_complex_modes(self, elastic_env, source, receiver):
         """Test KrakenC complex mode computation."""
-        krakenc = KrakenC(verbose=False)
+        krakenc = Kraken(backend='krakenc', verbose=False)
 
-        modes = krakenc.run(
+        modes = krakenc.compute_modes(
             env=elastic_env,
             source=source,
-            receiver=receiver
         )
 
         assert isinstance(modes, Modes)
@@ -138,12 +178,12 @@ class TestKrakenAttenuationUnit:
 class TestKrakenModePointsPerMeter:
     """B6: Kraken / KrakenC expose mode_points_per_meter."""
 
-    @pytest.mark.parametrize('cls', [Kraken, KrakenC])
+    @pytest.mark.parametrize('cls', [Kraken])
     def test_default_is_1_5(self, cls):
         m = cls()
         assert m.mode_points_per_meter == 1.5
 
-    @pytest.mark.parametrize('cls', [Kraken, KrakenC])
+    @pytest.mark.parametrize('cls', [Kraken])
     def test_density_kwarg_accepted(self, cls):
         m = cls(mode_points_per_meter=3.0)
         assert m.mode_points_per_meter == 3.0
@@ -167,3 +207,27 @@ class TestKrakenModePointsPerMeter:
         # 200 m * 5 pts/m = 1000 pts (>=100 floor).
         assert captured['n_depths'] == 1000
         assert captured['z_max'] == pytest.approx(200.0)
+
+
+class TestKrakenMergedSurface:
+    """The merged Kraken serves MODES (modes binary only) and field modes
+    (modes → field.exe) from ONE class — exercise both on one instance."""
+
+    def test_compute_modes_then_compute_tl_same_instance(self):
+        env = Environment(
+            name='k_merge', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800, density=1.8,
+                                      attenuation=0.3))
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([25.0, 50.0, 75.0]),
+                       ranges=np.array([1000.0, 3000.0]))
+        kr = Kraken(verbose=False)
+        modes = kr.compute_modes(env, src)
+        assert isinstance(modes, Modes) and len(modes.k) > 0
+        tl = kr.compute_tl(env, src, rcv)
+        assert isinstance(tl, Field)
+        assert tl.shape == (len(rcv.depths), len(rcv.ranges))
+        # modes again after the field run — no shared-state regression
+        modes2 = kr.compute_modes(env, src)
+        assert len(modes2.k) == len(modes.k)

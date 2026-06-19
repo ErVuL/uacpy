@@ -1,9 +1,9 @@
 """Plotting surface for uacpy results and environments.
 
-Formerly one large ``visualization/plots.py``; now a package split by plot
-kind. Every public ``plot_*`` (and the ``plot_result`` type-dispatcher) is
-re-exported here, so ``from uacpy.visualization.plots import plot_field`` and
-``uacpy.plot.plot_field`` are unchanged. Shared primitives live in
+A package split by plot kind. Every public ``plot_*`` (and the
+``plot_result`` type-dispatcher) is re-exported here, so
+``from uacpy.visualization.plots import plot_field`` and
+``uacpy.plot.plot_field`` both resolve. Shared primitives live in
 :mod:`._common`.
 """
 
@@ -28,18 +28,23 @@ from uacpy.visualization.plots.rays_modes import (
     plot_modes_heatmap, plot_reflection_coefficient, plot_covariance,
     plot_replicas,
 )
-from uacpy.visualization.plots.environment import plot_environment
+from uacpy.visualization.plots.environment import (
+    plot_environment, plot_bottom_properties,
+)
 from uacpy.visualization.plots.maps import (
-    plot_bathymetry_map, plot_overview, plot_sea_ice_map, BATHYMETRY_CMAP,
+    plot_bathymetry_map, plot_overview, plot_sea_ice_map,
 )
 
 
 def plot_result(result, env: Optional[Environment] = None, **kwargs):
     """Type-dispatch to the right plotter. Used by :meth:`Result.plot`."""
     if isinstance(result, ResultStack):
+        if issubclass(result.slab_type, Field):
+            from uacpy.visualization.plots.fields import plot_field_stack
+            return plot_field_stack(result, env=env, **kwargs)
         raise ConfigurationError(
-            "plot_result: ResultStack carries multiple slabs — pick one "
-            "with stack[i] or stack.at(...) before plotting."
+            f"plot_result: this ResultStack holds {result.slab_type.__name__} "
+            "slabs — pick one with stack[i] or stack.at(...) before plotting."
         )
     if isinstance(result, Field):
         return plot_field(result, env=env, **kwargs)
@@ -70,6 +75,7 @@ __all__ = [
     'plot_rays',
     'plot_arrivals',
     'plot_environment',
+    'plot_bottom_properties',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',

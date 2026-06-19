@@ -8,12 +8,13 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 """
 
 import os
+import struct
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError, ModelExecutionError,
+    ConfigurationError, FileFormatError,
 )
 from uacpy.io._fortran_helpers import detect_endian
 
@@ -295,12 +296,11 @@ def read_modes_asc(
                     idx = modes_to_read.index(mode_num)
                     phi[:, idx] = phi_mode
 
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Mode file not found: {filename}")
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Mode file not found: {filename}") from e
     except Exception as e:
-        raise ModelExecutionError(
-            'Kraken', return_code=0, stdout=None,
-            stderr=f"Error reading mode file {filename}: {e}",
+        raise FileFormatError(
+            f"Malformed Kraken mode file {filename}: {e}"
         ) from e
     return {
         "pltitl": pltitl,
@@ -325,8 +325,29 @@ def read_modes_bin(
     freq: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
+    """Read a KRAKEN binary ``.mod`` file, converting any malformed-file
+    parse error into a typed :class:`FileFormatError` (a truncated/garbage
+    file otherwise surfaces as a bare ``IndexError`` / ``struct.error`` from
+    the record reads)."""
+    try:
+        return _read_modes_bin_impl(filename, freq=freq, modes=modes)
+    except FileFormatError:
+        raise
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Mode file not found: {filename}") from e
+    except (IndexError, ValueError, struct.error, EOFError) as e:
+        raise FileFormatError(
+            f"Malformed Kraken mode file {filename}: {e}"
+        ) from e
+
+
+def _read_modes_bin_impl(
+    filename: str,
+    freq: float = 0.0,
+    modes: Optional[Union[int, list, np.ndarray]] = None,
+) -> Dict[str, Any]:
     """
-    Read mode data from KRAKEN binary format (.moA file).
+    Read mode data from KRAKEN binary format (.mod file).
 
     This function reads normal mode data including eigenvalues (wavenumbers),
     eigenfunctions (mode shapes), and environmental parameters from KRAKEN
@@ -336,7 +357,7 @@ def read_modes_bin(
     ----------
     filename : str
         Mode file path. If no extension is given, ``.mod`` is appended
-        (this is the extension that Kraken/KrakenC actually emit per
+        (this is the extension that Kraken actually emit per
         ``Kraken/kraken.f90`` — ``OPEN(FILE=TRIM(FileRoot)//'.mod', ...)``).
     freq : float, optional
         Frequency in Hz for which to read modes. For broadband runs,
@@ -375,7 +396,7 @@ def read_modes_bin(
     Notes
     -----
     - The canonical extension is ``.mod`` (binary direct-access produced by
-      Kraken/KrakenC). Any explicit extension on ``filename`` is honoured;
+      Kraken). Any explicit extension on ``filename`` is honoured;
       otherwise ``.mod`` is appended.
     - Modes are stored in Fortran unformatted direct-access binary.
     - Record length (lrecl) is determined from first 4 bytes.

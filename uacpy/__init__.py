@@ -23,8 +23,7 @@ from uacpy._log import install_warning_formatter as _install_warning_formatter
 
 from uacpy.core.source import Source
 from uacpy.core.environment import (
-    Environment, BoundaryProperties, RangeDependentBottom,
-    SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
+    Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
     SoundSpeedProfile, generate_sea_surface,
 )
 from uacpy.core.absorption import (
@@ -54,8 +53,14 @@ from uacpy.core.exceptions import (
 
 from uacpy import models
 from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models import (
+    Bellhop, Kraken, RAM, Scooter, SPARC, Bounce, OAST, OASN, OASR, OASP, OASES,
+)
 from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
+from uacpy.visualization.plots import (
+    plot_result, plot_field, plot_overview, plot_environment, compare_models,
+)
 from uacpy import io
 from uacpy import acoustic_signal
 from uacpy import noise
@@ -73,10 +78,9 @@ __all__ = [
     'Source',
     'Environment',
     'BoundaryProperties',
-    'RangeDependentBottom',
     'SedimentLayer',
-    'LayeredBottom',
-    'RangeDependentLayeredBottom',
+    'SeabedColumn',
+    'Bottom',
     'SoundSpeedProfile', 'generate_sea_surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
@@ -96,11 +100,15 @@ __all__ = [
     'FileFormatError',
     'RunMode',
     'PropagationModel',
+    'Bellhop', 'Kraken', 'RAM', 'Scooter', 'SPARC', 'Bounce',
+    'OAST', 'OASN', 'OASR', 'OASP', 'OASES',
     'run_parallel',
     'Job',
     'ParallelResult',
     'models',
     'plot',
+    'plot_result', 'plot_field', 'plot_overview', 'plot_environment',
+    'compare_models',
     'io',
     'acoustic_signal',
     'noise',

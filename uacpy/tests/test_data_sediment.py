@@ -98,3 +98,41 @@ def test_bottom_from_class():
 def test_bottom_from_class_unknown_raises():
     with pytest.raises(ConfigurationError, match='unknown sediment class'):
         sediment.bottom_from_class('mud')
+
+
+def test_grain_size_none_water_uses_hamilton_reference():
+    """Audit M3: water_sound_speed=None reproduces the 1510 m/s Hamilton
+    reference (so threading None is a no-op vs the old default)."""
+    explicit = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1510.0,
+                                                   water_density=1.030)
+    default = sediment.grain_size_to_geoacoustics(1.0)
+    assert default['sound_speed'] == pytest.approx(explicit['sound_speed'])
+    assert default['density'] == pytest.approx(explicit['density'])
+
+
+def test_grain_size_scales_with_in_situ_water_speed():
+    """Audit M3: sediment cp is a velocity *ratio* to the overlying water, so a
+    colder/warmer in-situ water speed must shift the bottom cp proportionally
+    instead of always referencing 1510 m/s."""
+    cold = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1450.0)
+    warm = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1540.0)
+    ref = sediment.grain_size_to_geoacoustics(1.0)  # 1510 m/s reference
+    assert cold['sound_speed'] < ref['sound_speed'] < warm['sound_speed']
+    # Ratio is preserved: cp scales linearly with the water speed.
+    ratio = ref['sound_speed'] / 1510.0
+    assert warm['sound_speed'] == pytest.approx(ratio * 1540.0, rel=1e-6)
+
+
+def test_range_dependent_bottom_preserves_shear():
+    """Audit M4: range_dependent_bottom_along must carry shear so an elastic
+    (rock) waypoint is not silently flattened to a fluid half-space."""
+    elastic = BoundaryProperties(
+        acoustic_type='half-space', sound_speed=2500.0, density=2.0,
+        attenuation=0.1, shear_speed=1200.0, shear_attenuation=0.2)
+    bottom = sediment.range_dependent_bottom_along(
+        lambda la, lo: elastic, (0.0, 0.0), (0.0, 0.1), 4,
+        source_label='test')
+    # Every column's half-space must retain the shear speed.
+    for col in bottom.columns:
+        assert col.halfspace.shear_speed == pytest.approx(1200.0)
+        assert col.halfspace.shear_attenuation == pytest.approx(0.2)

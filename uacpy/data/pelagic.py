@@ -29,7 +29,7 @@ Provinces (dominant surficial lithology → representative mean grain size ϕ):
 from typing import Union
 
 from uacpy._log import log_message
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.data._geo import Coordinate, as_coordinate
 from uacpy.data.sediment import (
@@ -84,6 +84,7 @@ def _water_depth(point, timeout, verbose, cache_only):
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
+                         water_sound_speed: float = None,
                          depth: float = None, cache_only: bool = False,
                          timeout=None,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
@@ -92,13 +93,17 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
     (local cache, falling back to the live API unless ``cache_only``). The
     resulting lithology maps to a mean grain size ϕ and then a half-space via
-    :func:`uacpy.data.bottom_from_grain_size`.
+    :func:`uacpy.data.bottom_from_grain_size`. ``water_sound_speed`` (m/s)
+    scales the grain-size velocity ratio to the in-situ near-seabed water;
+    ``None`` uses the Hamilton reference.
     """
     lat, lon = as_coordinate(point)
     d = depth if depth is not None else _water_depth(point, timeout, verbose,
                                                      cache_only)
     litho = pelagic_lithology(d, lat)
-    bottom = bottom_from_grain_size(_LITHOLOGY_PHI[litho], roughness=roughness)
+    bottom = bottom_from_grain_size(
+        _LITHOLOGY_PHI[litho], roughness=roughness,
+        water_sound_speed=water_sound_speed)
     log_message(
         'pelagic', f"pelagic {litho} at {lat:.2f}, {lon:.2f} "
         f"(depth {d:.0f} m) → ϕ={_LITHOLOGY_PHI[litho]}", verbose=verbose)
@@ -107,12 +112,15 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
 
 def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points: int = 6, roughness: float = 0.0,
+                                  water_sound_speed: float = None,
                                   cache_only: bool = False, timeout=None,
                                   verbose: Union[bool, str] = False
-                                  ) -> RangeDependentBottom:
+                                  ) -> Bottom:
     """Range-dependent bottom from the pelagic model along ``start`` → ``end``."""
     return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_pelagic((la, lo), roughness=roughness,
-                                            cache_only=cache_only, timeout=timeout),
+        lambda la, lo: fetch_bottom_pelagic(
+            (la, lo), roughness=roughness,
+            water_sound_speed=water_sound_speed,
+            cache_only=cache_only, timeout=timeout),
         start, end, n_points, source_label='pelagic model',
     )

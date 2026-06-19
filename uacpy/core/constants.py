@@ -65,7 +65,7 @@ REFERENCE_PRESSURE_WATER = 1e-6  # Pa (1 µPa)
 REFERENCE_PRESSURE_AIR = 2e-5    # Pa (20 µPa)
 
 # Broadband-mode auto-generated frequency grid: when the user runs a
-# broadband-capable wrapper (Bellhop, Scooter, KrakenField, RAM, OASP)
+# broadband-capable wrapper (Bellhop, Scooter, Kraken, RAM, OASP)
 # without an explicit ``frequencies=`` override, the wrapper picks
 # ``N`` bins linearly spaced over ``[fc·(1 - BW/2), fc·(1 + BW/2)]``
 # (clipped to [1, ∞)) where ``fc = source.frequencies[0]``.
@@ -108,10 +108,16 @@ class BoundaryType(Enum):
             return value
 
         value_lower = value.lower()
-        if value_lower in ['halfspace', 'elastic', 'half-space', 'a']:
+        if value_lower in ['halfspace', 'elastic', 'half-space']:
             return cls.HALF_SPACE
-        if value_lower in ['grain-size', 'grainsize', 'grain_size', 'g']:
+        if value_lower in ['grain-size', 'grainsize', 'grain_size']:
             return cls.GRAIN_SIZE
+        # Single-letter Acoustics-Toolbox codes — the inverse of
+        # ``to_acoustics_toolbox_code``, symmetric across all six types.
+        at_codes = {'v': cls.VACUUM, 'r': cls.RIGID, 'a': cls.HALF_SPACE,
+                    'g': cls.GRAIN_SIZE, 'f': cls.FILE, 'p': cls.PRECALC}
+        if value_lower in at_codes:
+            return at_codes[value_lower]
 
         try:
             return cls[value.upper().replace('-', '_')]

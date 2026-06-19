@@ -183,6 +183,71 @@ Collins backends loop in Python (one subprocess per frequency).
 
 ---
 
+## ramgeo (RAMGEO — range-dependent layered fluid PE)
+
+Vendored at `third_party/ramgeo/` as a single source, `ramgeo1.5.f`
+(Collins' RAMGEO, version 1.5g). Sourced from the OALIB Acoustics Toolbox
+mirror of the NRL distribution.
+
+- **Licence:** U.S. Government work — **public domain**. Unlike the BSD-3
+  quiet-oceans `ramsurf/` port, RAMGEO carries no extra copyright or
+  redistribution clause, so it adds nothing to uacpy's licence surface.
+- **What it is:** the split-step Padé PE [Collins, JASA 93, 1736 (1993)]
+  with *"multiple sediment layers that parallel the bathymetry"* — i.e. a
+  range-dependent **layered fluid** seabed. Reads `ramgeo.in`, writes
+  `tl.line` (text) and `tl.grid` (unformatted), the same output family as
+  `rams0.5` / `ramsurf1.5`. Built by a plain top-level `Makefile`
+  (mirrors `ramsurf/`: `gfortran -O2 -std=legacy -w`, single source →
+  `ramgeo` binary); `install.sh` installs it to `uacpy/bin/ramgeo/`.
+  `ramgeo.in` is the upstream sample, kept for a smoke test.
+
+Two patches give it full parity with the other Collins backends (the same
+two `ramsurf1.5.f` carries):
+
+### Enlarged array dimensions
+
+Stock RAMGEO dimensions `parameter (mr=100,mz=8000,mp=10)` are too small
+for uacpy's fine Lytaev range/depth grids (a few-hundred-Hz run can need
+>8000 depth points), causing a silent array overflow and an empty
+`tl.grid`. Enlarged to match the patched `ramsurf1.5.f`:
+
+```diff
+-      parameter (mr=100,mz=8000,mp=10)
++      parameter (mr=505,mz=20002,mp=10)
+```
+
+### `outpt` patch — complex-envelope dump
+
+Stock `outpt` writes only real TL to `tl.grid`, discarding the phase a
+broadband transfer function needs. Patched to also dump the complex PE
+envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
+`tl.grid`'s record geometry — **the identical envelope and convention as
+`ramsurf1.5.f`** (carrier `exp(+i k0 r)` factored out; the Python wrapper
+applies the same `'ramsurf'` correction in `psi_to_travelling_wave`). This
+is what lets a forced `RAM(backend='ramgeo')` serve `BROADBAND` /
+`TIME_SERIES`, not just `COHERENT_TL`.
+
+```diff
+       open(unit=3,status='unknown',file='tl.grid',form='unformatted')
++      open(unit=11,status='unknown',file='pcomplex.bin',
++     >  form='unformatted')
+...
+       write(3)lz
++      write(11)lz
+...
+       subroutine outpt(mz,mdr,ndr,ndz,iz,nzplt,lz,ir,dir,eps,r,f3,u,tlg)
+-      complex ur,u(mz)
++      complex ur,u(mz),urg(mz)
+...
+       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
++      urg(j)=ur/sqrt(r+eps)
+     1 continue
+       write(3)(tlg(j),j=1,lz)
++      write(11)(urg(j),j=1,lz)
+```
+
+---
+
 ## mpiramS (RAM parabolic-equation model)
 
 ### `Makefile` -- portability

@@ -32,11 +32,11 @@ Sources used (the documents the coefficients were taken from):
 """
 
 import warnings
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS, get_material, list_materials
 
@@ -160,7 +160,8 @@ _GEOACOUSTIC_MODELS = {'hamilton': _hamilton_geoacoustics,
 
 def grain_size_to_geoacoustics(
     grain_size_phi: float, *, model: str = 'hamilton',
-    water_sound_speed: float = _HB_REF_CW, water_density: float = _HB_REF_RHOW,
+    water_sound_speed: Optional[float] = None,
+    water_density: Optional[float] = None,
 ) -> Dict[str, float]:
     """Map a mean grain size (Wentworth ϕ) to bulk geoacoustic properties.
 
@@ -181,7 +182,8 @@ def grain_size_to_geoacoustics(
         APL-UW TR 9407 (1994) grain-size relations (ρ, ν polynomials + α₂/f).
     water_sound_speed, water_density : float, optional
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are
-        scaled by. Default to Hamilton's reference (1510 m/s, 1.030 g/cm³).
+        scaled by. ``None`` (default) uses Hamilton's reference
+        (1510 m/s, 1.030 g/cm³).
 
     A ``UserWarning`` is emitted when ``grain_size_phi`` is well outside the
     model's valid range (ϕ is then clamped).
@@ -195,6 +197,10 @@ def grain_size_to_geoacoustics(
             f"grain_size_to_geoacoustics: unknown model {model!r}.",
             remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
         )
+    if water_sound_speed is None:
+        water_sound_speed = _HB_REF_CW
+    if water_density is None:
+        water_density = _HB_REF_RHOW
     lo, hi = _MODEL_RANGE[model]
     phi = float(np.clip(grain_size_phi, lo, hi))
     if grain_size_phi < lo - 1.0 or grain_size_phi > hi + 1.0:
@@ -210,7 +216,8 @@ def grain_size_to_geoacoustics(
 
 def bottom_from_grain_size(
     grain_size_phi: float, *, roughness: float = 0.0, model: str = 'hamilton',
-    water_sound_speed: float = _HB_REF_CW, water_density: float = _HB_REF_RHOW,
+    water_sound_speed: Optional[float] = None,
+    water_density: Optional[float] = None,
 ) -> BoundaryProperties:
     """Build a ``BoundaryProperties`` bottom from a mean grain size (ϕ).
 
@@ -262,7 +269,7 @@ def bottom_from_class(name: str, *, roughness: float = 0.0) -> BoundaryPropertie
         density=mat['density'],
         attenuation=mat['attenuation'],
         shear_speed=mat.get('shear_speed', 0.0) or 0.0,
-        grain_size_phi=mat.get('grain_size_phi') or 1.0,
+        grain_size_phi=mat.get('grain_size_phi'),
         roughness=roughness,
     )
 
@@ -270,8 +277,8 @@ def bottom_from_class(name: str, *, roughness: float = 0.0) -> BoundaryPropertie
 def range_dependent_bottom_along(
     point_bottom: Callable[[float, float], BoundaryProperties],
     start, end, n_points: int, *, source_label: str,
-) -> RangeDependentBottom:
-    """Sample a point-bottom fetcher along a geodesic → ``RangeDependentBottom``.
+) -> Bottom:
+    """Sample a point-bottom fetcher along a geodesic → range-dependent ``Bottom``.
 
     ``point_bottom(lat, lon)`` returns a :class:`BoundaryProperties` or raises
     ``DataFetchError`` where the source has no coverage; such gaps hold the
@@ -285,6 +292,8 @@ def range_dependent_bottom_along(
     cp: List = []
     rho: List = []
     alpha: List = []
+    cs: List = []
+    alpha_s: List = []
     last = None
     for la, lo in zip(lats, lons):
         try:
@@ -294,6 +303,10 @@ def range_dependent_bottom_along(
         cp.append(None if last is None else last.sound_speed)
         rho.append(None if last is None else last.density)
         alpha.append(None if last is None else last.attenuation)
+        # Preserve shear so an elastic waypoint (e.g. a rock seabed) is not
+        # silently flattened to a fluid half-space, matching the point fetcher.
+        cs.append(None if last is None else last.shear_speed)
+        alpha_s.append(None if last is None else last.shear_attenuation)
 
     if all(v is None for v in cp):
         raise DataFetchError(
@@ -301,11 +314,13 @@ def range_dependent_bottom_along(
             remediation="Use a transect the source covers, or pass an explicit "
                         "grain size / class for a uniform bottom.",
         )
-    return RangeDependentBottom(
-        ranges=np.asarray(ranges_m),
+    return Bottom.from_halfspaces(
+        np.asarray(ranges_m),
         sound_speed=np.asarray(_backfill_leading(cp)),
         density=np.asarray(_backfill_leading(rho)),
         attenuation=np.asarray(_backfill_leading(alpha)),
+        shear_speed=np.asarray(_backfill_leading(cs)),
+        shear_attenuation=np.asarray(_backfill_leading(alpha_s)),
     )
 
 

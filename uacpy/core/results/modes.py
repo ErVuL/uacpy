@@ -184,7 +184,7 @@ class Modes(Result):
         attenuation natively from the environment passed to its field
         run rather than from ``Im(k)`` of the ``.mod`` file. To get the
         perturbed TL from ``field.exe``, attach an :class:`Absorption`
-        to the :class:`Environment` and run :class:`KrakenField`.
+        to the :class:`Environment` and run :class:`Kraken`.
         """
         omega = 2.0 * np.pi * float(self.f0 or 0.0)
         if omega == 0.0:
@@ -317,7 +317,7 @@ class Modes(Result):
             ])
         k = np.asarray(self.k)
         # Normalize the attenuation sign so modes always decay with range under
-        # the exp(+i k r) convention used below. Raw Kraken/KrakenC eigenvalues
+        # the exp(+i k r) convention used below. Raw Kraken eigenvalues
         # encode decay as k.imag < 0 (see modes_reader), whereas with_attenuation
         # builds k.imag > 0; a passive medium can only attenuate, so force
         # Im(k) >= 0 and the result is convention-agnostic either way.

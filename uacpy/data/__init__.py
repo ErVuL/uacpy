@@ -18,7 +18,7 @@
   (``surface_sources='seaice'`` adds the ice surface). Each axis is a literal
   (``ssp=`` / ``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``)
   and/or fetched from ordered-fallback ``*_sources`` (source first, literal as
-  fallback; ``'auto'`` = best available, ``'cache'`` = local data only, no
+  fallback; ``'auto'`` = best available, ``'local'`` = local data only, no
   network); fetching is cache-first (a locally installed dataset is sampled
   before any network call).
 

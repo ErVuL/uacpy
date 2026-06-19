@@ -3,7 +3,6 @@
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.data._geo import normalize_lon
 
 __all__ = ['open_netcdf', 'NetcdfGrid']
 
@@ -58,5 +57,9 @@ class NetcdfGrid:
                            0, self._nlat - 1))
 
     def col(self, lon):
-        return int(np.clip(round((normalize_lon(lon) - self._lon0) / self._dlon),
+        # Wrap the query into this grid's OWN longitude convention so both
+        # [-180, 180) (GEBCO) and [0, 360) (some NCEI products, e.g. GlobSed)
+        # stored axes resolve correctly; out-of-range falls to the nearest edge.
+        lon = self._lon0 + ((float(lon) - self._lon0) % 360.0)
+        return int(np.clip(round((lon - self._lon0) / self._dlon),
                            0, self._nlon - 1))

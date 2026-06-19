@@ -49,6 +49,11 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     if not psif_file.exists():
         raise FileNotFoundError(f"mpiramS output not found: {psif_file}")
 
+    # ``psif.dat`` is written by mpiramS on this host during the same run, so
+    # its byte order is the host's; ``FortranFile`` reads native endianness,
+    # which is therefore correct here. (Unlike the vendored/cross-host binaries
+    # read elsewhere, this is never a foreign-endian file — so it does not go
+    # through ``_fortran_helpers.detect_endian``.)
     with FortranFile(str(psif_file), 'r') as f:
         header = f.read_reals(dtype=np.float64)
         if header.size != 8:

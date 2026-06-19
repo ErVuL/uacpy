@@ -25,7 +25,7 @@ SOURCE:
 MODELS TESTED:
     ✓ Bellhop      (ray tracing)
     ✓ RAM          (parabolic equation)
-    ✓ KrakenField  (normal modes)
+    ✓ Kraken  (normal modes)
     ✓ Scooter      (wavenumber integration)
     ✓ OAST         (wavenumber integration)
 
@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
+from uacpy.models import Bellhop, RAM, Kraken, Scooter, OAST  # noqa: E402
 from plotting_utils import create_example_report  # noqa: E402
 
 
@@ -98,7 +98,7 @@ def main():
     models = [
         ('Bellhop', Bellhop(verbose=False)),
         ('RAM', RAM(verbose=False)),
-        ('KrakenField', KrakenField(verbose=False)),
+        ('Kraken', Kraken(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
         ('OAST', OAST(verbose=False)),
     ]

@@ -43,7 +43,7 @@ class RunMode(Enum):
     EIGENRAYS = 'eigenrays'              # Eigenrays (specific paths)
     ARRIVALS = 'arrivals'                # Arrival structure
 
-    MODES = 'modes'                      # Normal modes (Kraken/KrakenC depth eigenfunctions)
+    MODES = 'modes'                      # Normal modes (Kraken depth eigenfunctions)
 
     # OASN frequency-domain array products: COVARIANCE → C(f, i, j) hydrophone
     # × hydrophone matrix; REPLICA → Green's-function samples at the array
@@ -54,7 +54,7 @@ class RunMode(Enum):
 
     # Time-domain pressure p(t) at the receiver(s). Models that compute a
     # broadband transfer function natively (Bellhop, RAM, Scooter,
-    # KrakenField, OASES) require ``source_waveform=`` + ``sample_rate=``;
+    # Kraken, OASES) require ``source_waveform=`` + ``sample_rate=``;
     # SPARC computes p(t) directly from its source pulse and ignores them.
     TIME_SERIES = 'time_series'
 
@@ -67,10 +67,8 @@ class RunMode(Enum):
 DEFAULT_COLLAPSE: Dict[str, str] = {
     'bathymetry': 'max',
     'ssp': 'r0',
-    'bottom': 'r0',
-    'layered': 'halfspace',
-    'rd_layered_range': 'median',
-    'rd_layered_layers': 'halfspace',
+    'bottom_range': 'r0',
+    'bottom_layers': 'halfspace',
     'altimetry': 'drop',
     'elastic': 'fluid',
 }
@@ -81,19 +79,17 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
 VALID_COLLAPSE_METHODS: Dict[str, frozenset] = {
     'bathymetry':        frozenset({'max', 'median', 'mean', 'min', 'initial'}),
     'ssp':               frozenset({'r0', 'rmax', 'mean', 'median'}),
-    'bottom':            frozenset({'r0', 'rmax', 'mean', 'median'}),
-    'layered':           frozenset({'halfspace', 'top_layer', 'volume_average'}),
-    'rd_layered_range':  frozenset({'r0', 'rmax', 'median'}),
-    'rd_layered_layers': frozenset({'preserve', 'halfspace', 'top_layer', 'volume_average'}),
+    'bottom_range':      frozenset({'r0', 'rmax', 'mean', 'median'}),
+    'bottom_layers':     frozenset({'halfspace', 'top_layer', 'volume_average'}),
     'altimetry':         frozenset({'drop'}),
     'elastic':           frozenset({'fluid', 'vacuum'}),
 }
-assert set(VALID_COLLAPSE_METHODS) == set(DEFAULT_COLLAPSE), (
-    "VALID_COLLAPSE_METHODS keys must match DEFAULT_COLLAPSE keys"
-)
-assert all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COLLAPSE), (
-    "DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS"
-)
+# Dev invariants on the collapse-policy constants (raise, not assert, so they
+# survive `python -O`).
+if set(VALID_COLLAPSE_METHODS) != set(DEFAULT_COLLAPSE):
+    raise RuntimeError("VALID_COLLAPSE_METHODS keys must match DEFAULT_COLLAPSE keys")
+if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COLLAPSE):
+    raise RuntimeError("DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS")
 
 
 class PropagationModel(ABC):
@@ -152,19 +148,15 @@ class PropagationModel(ABC):
         # ``collapse={'bathymetry': 'min', 'ssp': 'mean', ...}`` to override
         # any subset; missing keys keep the defaults.
         #
-        # 'bathymetry'        : 'max'|'median'|'mean'|'min'|'initial'
-        # 'ssp'               : 'r0'|'rmax'|'mean'|'median'
-        # 'bottom'            : 'r0'|'rmax'|'mean'|'median'
-        # 'layered'           : 'halfspace'|'top_layer'|'volume_average'
-        # 'rd_layered_range'  : 'r0'|'rmax'|'median' — which range to
-        #                       sample for an RDLB env
-        # 'rd_layered_layers' : 'preserve'|'halfspace'|'top_layer'|
-        #                       'volume_average' — how to flatten the
-        #                       layer stack at that range. 'preserve'
-        #                       keeps the LayeredBottom and requires
-        #                       the model to support layered bottoms.
-        # 'altimetry'         : 'drop'
-        # 'elastic'           : 'fluid' (zero shear) | 'vacuum'
+        # 'bathymetry'    : 'max'|'median'|'mean'|'min'|'initial'
+        # 'ssp'           : 'r0'|'rmax'|'mean'|'median'
+        # 'bottom_range'  : 'r0'|'rmax'|'mean'|'median' — reduce a range-
+        #                   dependent bottom to one column (mean/median
+        #                   numeric only for an all-half-space bottom)
+        # 'bottom_layers' : 'halfspace'|'top_layer'|'volume_average' — flatten
+        #                   each column's layer stack to a half-space
+        # 'altimetry'     : 'drop'
+        # 'elastic'       : 'fluid' (zero shear) | 'vacuum'
         self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
         self._user_collapse: Dict[str, str] = {}
         self.collapse = dict(collapse) if collapse else None
@@ -204,6 +196,9 @@ class PropagationModel(ABC):
         self._supports_range_dependent_ssp: bool = False
         self._supports_range_dependent_bottom: bool = False
         self._supports_layered_bottom: bool = False
+        # Declared per model to document the axis as live; the combined
+        # range-dependent-layered capability is the conjunction of the two
+        # axes above (which is what _project_environment collapses against).
         self._supports_range_dependent_layered_bottom: bool = False
         self._supports_elastic_media: bool = False
         # Bellhop is the only model that runs one source-depth grid in
@@ -236,7 +231,7 @@ class PropagationModel(ABC):
         are coerced to the corresponding enum member.
 
         Pass ``default=`` to override the auto-pick when the model has a
-        smarter rule (e.g. KrakenField picks BROADBAND when a frequency
+        smarter rule (e.g. Kraken picks BROADBAND when a frequency
         vector is supplied).
         """
         if run_mode is None:
@@ -342,7 +337,7 @@ class PropagationModel(ABC):
 
         ``run()`` accepts a fixed keyword-only set: ``frequencies``,
         ``source_waveform``, ``sample_rate``, ``output_duration``. Every
-        TIME_SERIES-capable wrapper (Bellhop, Scooter, KrakenField,
+        TIME_SERIES-capable wrapper (Bellhop, Scooter, Kraken,
         OASP, RAM) consumes ``source_waveform`` and ``sample_rate``;
         SPARC warns that they are ignored (it uses its constructor
         ``pulse_type``). ``output_duration`` is the desired output time
@@ -352,7 +347,7 @@ class PropagationModel(ABC):
         maps it to ``time_window`` for delay-and-sum synthesis. Models
         with a broadband path consume ``frequencies`` as an explicit
         override for ``source.frequencies``. The Kraken family
-        (Kraken / KrakenC / KrakenField) additionally takes ``n_modes``
+        (Kraken) additionally takes ``n_modes``
         to cap the modal set used. No other kwargs are accepted —
         passing one raises :class:`TypeError`.
 
@@ -398,7 +393,7 @@ class PropagationModel(ABC):
         ``source_waveform`` and ``sample_rate``.
 
         Used by every wrapper that synthesises p(t) from a broadband
-        transfer function (Bellhop, RAM, Scooter, KrakenField, OASP).
+        transfer function (Bellhop, RAM, Scooter, Kraken, OASP).
         SPARC has its own pulse mechanism (``pulse_type``) and does not
         call this helper.
         """
@@ -490,7 +485,6 @@ class PropagationModel(ABC):
     def _resolve_time_series_frequencies(
         self,
         run_mode: 'RunMode',
-        source: 'Source',
         frequencies,
         source_waveform,
         sample_rate,
@@ -561,7 +555,7 @@ class PropagationModel(ABC):
         output_duration=None,
     ):
         """Common TIME_SERIES/BROADBAND dispatch preamble for the IFFT-based
-        synthesizers (RAM, KrakenField, Scooter, OASP): validate the source
+        synthesizers (RAM, Kraken, Scooter, OASP): validate the source
         pulse, zero-pad it to ``output_duration``, and derive the broadband
         frequency grid. Returns ``(source_waveform, frequencies)``.
 
@@ -573,7 +567,7 @@ class PropagationModel(ABC):
             source_waveform, sample_rate, output_duration,
         )
         frequencies = self._resolve_time_series_frequencies(
-            run_mode, source, frequencies, source_waveform, sample_rate,
+            run_mode, frequencies, source_waveform, sample_rate,
         )
         return source_waveform, frequencies
 
@@ -765,10 +759,6 @@ class PropagationModel(ABC):
         what every downstream writer / interpolator does in that case;
         this surfaces it instead of leaving it silent.
         """
-        from uacpy.core.environment import (
-            RangeDependentBottom, RangeDependentLayeredBottom,
-        )
-
         r_target = float(receiver.range_max)
         if r_target <= 0:
             return
@@ -787,8 +777,7 @@ class PropagationModel(ABC):
             _check("env.bathymetry", float(env.bathymetry[-1, 0]))
         if env.ssp.is_range_dependent:
             _check("env.ssp.ranges", float(env.ssp.ranges[-1]))
-        if isinstance(env.bottom, (RangeDependentBottom,
-                                   RangeDependentLayeredBottom)):
+        if env.bottom.is_range_dependent:
             _check("env.bottom.ranges", float(env.bottom.ranges[-1]))
         if env.altimetry is not None and len(env.altimetry) > 1:
             _check("env.altimetry ranges", float(env.altimetry[-1, 0]))
@@ -833,7 +822,7 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "transmission loss computation",
-                alternatives=['Bellhop', 'KrakenField', 'RAM', 'Scooter', 'OAST'],
+                alternatives=['Bellhop', 'Kraken', 'RAM', 'Scooter', 'OAST'],
             )
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
@@ -943,6 +932,14 @@ class PropagationModel(ABC):
         UnsupportedFeatureError
             If the model does not support mode computation.
 
+        Notes
+        -----
+        This is the one ``compute_*`` wrapper that takes no ``receiver``:
+        normal modes are receiver-independent depth eigenfunctions, so there is
+        nothing for the caller to position. A placeholder receiver is fabricated
+        internally only to satisfy the shared ``run()`` recipe (the Kraken
+        backend overrides it with its own dense depth grid).
+
         Examples
         --------
         >>> kraken = Kraken()
@@ -954,11 +951,11 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "normal mode computation",
-                alternatives=['Kraken', 'KrakenC']
+                alternatives=['Kraken']
             )
 
         if env.is_range_dependent:
-            # Mode solvers (Kraken, KrakenC) collapse the environment via
+            # Mode solvers (the Kraken backends) collapse the environment via
             # ``collapse={'bathymetry': …}`` and warn, rather than reject —
             # same pattern as OAST/OASP/Scooter/SPARC.
             env = self._project_environment(env)
@@ -1032,19 +1029,23 @@ class PropagationModel(ABC):
         *,
         source_waveform=None,
         sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """Compute time-domain pressure p(t) at the receiver(s).
 
-        Forwards ``source_waveform`` and ``sample_rate`` to
-        ``run(run_mode=RunMode.TIME_SERIES)``. SPARC ignores both (it
-        builds p(t) from its native ``pulse_type``); every other
-        TIME_SERIES model requires them.
+        Forwards ``source_waveform``, ``sample_rate`` and
+        ``output_duration`` to ``run(run_mode=RunMode.TIME_SERIES)``.
+        ``output_duration`` (seconds) sets the synthesised time window for
+        the broadband synthesizers (Bellhop / RAM / Scooter / Kraken /
+        OASP) — e.g. the length of an animation; SPARC ignores all three
+        (it builds p(t) from its native ``pulse_type`` and ``t_max``), and
+        every other TIME_SERIES model requires the waveform/rate.
         """
         if not self.supports_mode(RunMode.TIME_SERIES):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "time-series computation",
-                alternatives=['Bellhop', 'KrakenField', 'RAM', 'Scooter',
+                alternatives=['Bellhop', 'Kraken', 'RAM', 'Scooter',
                               'OASP', 'SPARC'],
             )
         return self.run(
@@ -1052,6 +1053,7 @@ class PropagationModel(ABC):
             run_mode=RunMode.TIME_SERIES,
             source_waveform=source_waveform,
             sample_rate=sample_rate,
+            output_duration=output_duration,
         )
 
     def compute_transfer_function(
@@ -1072,7 +1074,7 @@ class PropagationModel(ABC):
             raise UnsupportedFeatureError(
                 self.model_name,
                 "broadband transfer-function computation",
-                alternatives=['Bellhop', 'KrakenField', 'RAM',
+                alternatives=['Bellhop', 'Kraken', 'RAM',
                               'Scooter', 'OASP'],
             )
         return self.run(
@@ -1290,55 +1292,52 @@ class PropagationModel(ABC):
 
     @staticmethod
     def _has_shear(boundary) -> bool:
-        """True if ``boundary`` carries any non-zero shear speed."""
-        from uacpy.core.environment import _boundary_has_shear
-        return _boundary_has_shear(boundary)
+        """True if ``boundary`` carries any non-zero shear speed. Accepts a
+        :class:`Bottom` or a surface :class:`BoundaryProperties`."""
+        from uacpy.core.bottom import Bottom
+        if boundary is None:
+            return False
+        if isinstance(boundary, Bottom):
+            return boundary.is_elastic
+        return getattr(boundary, 'shear_speed', 0.0) > 0
 
     @staticmethod
     def _collapse_elastic_boundary(boundary, method: str):
-        """Collapse elastic shear properties on ``boundary`` per ``method``.
+        """Collapse elastic shear on ``boundary`` per ``method``.
 
         ``'fluid'``  : zero shear_speed and shear_attenuation; keep cp / ρ / α.
-        ``'vacuum'`` : replace with default vacuum BoundaryProperties.
+        ``'vacuum'`` : replace with a vacuum boundary.
 
-        Walks layer/profile structure for :class:`LayeredBottom` and
-        :class:`RangeDependentLayeredBottom`.
+        Accepts a :class:`Bottom` (every column's layers + half-space) or a
+        surface :class:`BoundaryProperties`, returning the same kind.
         """
-        from uacpy.core.environment import (
-            BoundaryProperties, LayeredBottom, RangeDependentLayeredBottom,
-        )
+        from uacpy.core.bottom import BoundaryProperties, Bottom
 
         def _zero_shear(b):
             if hasattr(b, 'shear_speed'):
-                cs = b.shear_speed
-                b.shear_speed = (
-                    np.zeros_like(cs) if isinstance(cs, np.ndarray) else 0.0
-                )
+                b.shear_speed = 0.0
             if hasattr(b, 'shear_attenuation'):
-                cas = b.shear_attenuation
-                b.shear_attenuation = (
-                    np.zeros_like(cas) if isinstance(cas, np.ndarray) else 0.0
-                )
+                b.shear_attenuation = 0.0
 
-        if method == 'vacuum':
-            return BoundaryProperties(acoustic_type='vacuum')
-        if method != 'fluid':
+        if method not in ('fluid', 'vacuum'):
             raise ConfigurationError(
                 f"Unknown elastic collapse method {method!r}. Use "
                 "'fluid' or 'vacuum'."
             )
-        b = _copy.deepcopy(boundary)
-        if isinstance(b, RangeDependentLayeredBottom):
-            for prof in b.profiles:
-                for layer in prof.layers:
+        if isinstance(boundary, Bottom):
+            if method == 'vacuum':
+                return Bottom.from_halfspace(
+                    BoundaryProperties(acoustic_type='vacuum'))
+            b = _copy.deepcopy(boundary)
+            for col in b.columns:
+                for layer in col.layers:
                     _zero_shear(layer)
-                _zero_shear(prof.halfspace)
-        elif isinstance(b, LayeredBottom):
-            for layer in b.layers:
-                _zero_shear(layer)
-            _zero_shear(b.halfspace)
-        else:
-            _zero_shear(b)
+                _zero_shear(col.halfspace)
+            return b
+        if method == 'vacuum':
+            return BoundaryProperties(acoustic_type='vacuum')
+        b = _copy.deepcopy(boundary)
+        _zero_shear(b)
         return b
 
     def _project_environment(self, env: 'Environment') -> 'Environment':
@@ -1391,65 +1390,27 @@ class PropagationModel(ABC):
                 UserWarning, stacklevel=3,
             )
 
-        if e.has_range_dependent_bottom() and not self._supports_range_dependent_bottom:
-            method = self._collapse["bottom"]
-            e.bottom = e.bottom.collapse(method)
+        # Bottom: two orthogonal axes. Collapse the range axis first (to a
+        # single column, keeping its layers), then flatten the layer axis if
+        # the model can't take layers — leaving, for a model that supports RD
+        # but not layers (Bellhop), a range-dependent half-space bottom.
+        if e.bottom.is_range_dependent and not self._supports_range_dependent_bottom:
+            method = self._collapse["bottom_range"]
+            e.bottom = e.bottom.select_range(method)
             warnings.warn(
-                f"{self.model_name} does not support range-dependent bottom "
-                f"geoacoustics; collapsed to single profile "
-                f"(collapse['bottom']={method!r}).",
+                f"{self.model_name} does not support range-dependent bottoms; "
+                f"reduced to a single column "
+                f"(collapse['bottom_range']={method!r}).",
                 UserWarning, stacklevel=3,
             )
 
-        if e.has_range_dependent_layered_bottom() and not self._supports_range_dependent_layered_bottom:
-            range_step = self._collapse["rd_layered_range"]
-            layers_method = self._collapse["rd_layered_layers"]
-            range_methods = ('r0', 'rmax', 'median')
-            layers_methods = ('preserve', 'halfspace', 'top_layer', 'volume_average')
-            if range_step not in range_methods:
-                raise ConfigurationError(
-                    f"Unknown collapse['rd_layered_range']={range_step!r}. "
-                    f"Valid: {range_methods}."
-                )
-            if layers_method not in layers_methods:
-                raise ConfigurationError(
-                    f"Unknown collapse['rd_layered_layers']={layers_method!r}. "
-                    f"Valid: {layers_methods}."
-                )
-            if layers_method == 'preserve':
-                if not self._supports_layered_bottom:
-                    raise ConfigurationError(
-                        f"{self.model_name} does not support layered bottoms, "
-                        f"so collapse['rd_layered_layers']='preserve' would "
-                        f"leave a LayeredBottom the model cannot consume. "
-                        f"Pick one of "
-                        f"{layers_methods[1:]!r} to also flatten the layers."
-                    )
-                e.bottom = e.bottom.to_profile(range_step)
-                warnings.warn(
-                    f"{self.model_name} does not support range-dependent "
-                    f"layered bottoms; selected the {range_step!r} layered "
-                    f"profile (collapse['rd_layered_range']={range_step!r}, "
-                    f"collapse['rd_layered_layers']='preserve').",
-                    UserWarning, stacklevel=3,
-                )
-            else:
-                e.bottom = e.bottom.to_profile(range_step).collapse(layers_method)
-                warnings.warn(
-                    f"{self.model_name} does not support range-dependent "
-                    f"layered bottoms; collapsed to single boundary "
-                    f"(collapse['rd_layered_range']={range_step!r}, "
-                    f"collapse['rd_layered_layers']={layers_method!r}).",
-                    UserWarning, stacklevel=3,
-                )
-
-        if e.has_layered_bottom() and not self._supports_layered_bottom:
-            method = self._collapse["layered"]
-            e.bottom = e.bottom.collapse(method)
+        if e.bottom.is_layered and not self._supports_layered_bottom:
+            method = self._collapse["bottom_layers"]
+            e.bottom = e.bottom.collapse(layers=method)
             warnings.warn(
-                f"{self.model_name} does not support layered (depth-"
-                f"dependent) bottoms; collapsed to single boundary "
-                f"(collapse['layered']={method!r}).",
+                f"{self.model_name} does not support layered (depth-dependent) "
+                f"bottoms; flattened each column to a half-space "
+                f"(collapse['bottom_layers']={method!r}).",
                 UserWarning, stacklevel=3,
             )
 
@@ -1460,7 +1421,7 @@ class PropagationModel(ABC):
                     e.surface, self._collapse["elastic"],
                 )
                 collapsed_at.append('surface')
-            if e.bottom is not None and self._has_shear(e.bottom):
+            if e.bottom.is_elastic:
                 e.bottom = self._collapse_elastic_boundary(
                     e.bottom, self._collapse["elastic"],
                 )
@@ -1523,6 +1484,22 @@ class PropagationModel(ABC):
             f"{exc.args[0] if exc.args else exc}\n\n.prt tail:\n{tail}",
         ) + exc.args[1:]
 
+    def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
+                            timeout: Optional[float] = None,
+                            env: Optional[dict] = None):
+        """Run a Fortran/AT binary via :meth:`_run_subprocess`, appending the
+        ``<base>.prt`` tail to a :class:`ModelExecutionError` on failure and
+        logging stdout when verbose. Returns the ``CompletedProcess``. Shared
+        by every model's binary-launch wrapper."""
+        try:
+            result = self._run_subprocess(cmd, cwd=work_dir, timeout=timeout, env=env)
+        except ModelExecutionError as exc:
+            self._attach_prt_tail(exc, work_dir, base_name)
+            raise
+        if self.verbose and result.stdout:
+            self._log(f"{self.model_name} output:\n{result.stdout}", level='debug')
+        return result
+
     def _result_kwargs(
         self,
         source: 'Source',
@@ -1552,6 +1529,23 @@ class PropagationModel(ABC):
             kw['phase_reference'] = phase_reference
         return kw
 
+    def _stamp_result(self, result, source: 'Source', *,
+                      backend: Optional[str] = None,
+                      frequencies: Optional[Union[float, np.ndarray]] = None,
+                      phase_reference: Optional[str] = None):
+        """Stamp the cross-model identification fields onto a ``Result`` that an
+        io reader already constructed (so it couldn't take them as kwargs).
+        Mirrors :meth:`_result_kwargs` for the reader-built path (Scooter,
+        SPARC); leaves ``result.metadata`` untouched. Returns ``result``."""
+        kw = self._result_kwargs(source, backend=backend,
+                                 frequencies=frequencies,
+                                 phase_reference=phase_reference)
+        for attr in ('model', 'backend', 'source_depths', 'frequencies'):
+            setattr(result, attr, kw[attr])
+        if phase_reference is not None:
+            result.phase_reference = phase_reference
+        return result
+
     def _max_receiver_depth(self, env: 'Environment') -> float:
         """Deepest receiver depth this model can resolve the field at.
 
@@ -1571,15 +1565,9 @@ class PropagationModel(ABC):
         valid receiver range extends to this depth — not merely to
         ``env.depth`` (the seafloor).
         """
-        from uacpy.core.environment import (
-            LayeredBottom, RangeDependentLayeredBottom,
-        )
         depth = float(env.depth)
-        bottom = env.bottom
-        if isinstance(bottom, LayeredBottom):
-            depth += bottom.total_thickness()
-        elif isinstance(bottom, RangeDependentLayeredBottom):
-            depth += bottom.max_total_thickness()
+        if env.bottom.is_layered:
+            depth += env.bottom.max_total_thickness()
         return depth
 
     def _clip_receiver_depths(
@@ -1627,8 +1615,8 @@ class PropagationModel(ABC):
                 f"{media_depth - margin:.1f} m clipped to that depth "
                 f"(deepest modelled interface {media_depth:.1f} m; the "
                 f"field is not resolved inside the semi-infinite halfspace). "
-                f"Add sediment layers (LayeredBottom) to place receivers "
-                f"below the seafloor.",
+                f"Add sediment layers (a layered SeabedColumn) to place "
+                f"receivers below the seafloor.",
                 UserWarning,
                 stacklevel=2,
             )

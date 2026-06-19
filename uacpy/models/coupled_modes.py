@@ -1,5 +1,5 @@
 """
-Range-dependent environment segmentation for KrakenField.
+Range-dependent environment segmentation for Kraken.
 
 Segments a range-dependent environment into range slices, each with a
 range-independent Environment, for use by AT's multi-profile .env format.
@@ -8,9 +8,7 @@ range-independent Environment, for use by AT's multi-profile .env format.
 import numpy as np
 from typing import List, Tuple, Optional
 
-from uacpy.core.environment import (
-    Environment, RangeDependentBottom, RangeDependentLayeredBottom,
-)
+from uacpy.core.environment import Environment
 
 
 def segment_environment_by_range(
@@ -48,7 +46,7 @@ def segment_environment_by_range(
 
     if env.ssp.is_range_dependent:
         max_range_m = max(max_range_m, float(env.ssp.ranges[-1]))
-    if isinstance(env.bottom, (RangeDependentBottom, RangeDependentLayeredBottom)):
+    if env.bottom.is_range_dependent:
         max_range_m = max(max_range_m, float(env.bottom.ranges[-1]))
 
     if max_range_m <= 0:
@@ -64,7 +62,7 @@ def segment_environment_by_range(
         key_ranges_m = set(bathy_ranges_m.tolist())
         if env.ssp.is_range_dependent:
             key_ranges_m.update(env.ssp.ranges.tolist())
-        if isinstance(env.bottom, (RangeDependentBottom, RangeDependentLayeredBottom)):
+        if env.bottom.is_range_dependent:
             key_ranges_m.update(env.bottom.ranges.tolist())
         key_ranges_m = sorted(key_ranges_m)
 

@@ -21,7 +21,7 @@ import math
 import urllib.parse
 from typing import Dict, Union
 
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
@@ -108,6 +108,7 @@ def fetch_bottom(
     point: Coordinate,
     *,
     roughness: float = 0.0,
+    water_sound_speed: float = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -117,14 +118,18 @@ def fetch_bottom(
 
     Convenience wrapper: :func:`fetch_seabed_substrate` → Folk-class mapping →
     :func:`uacpy.data.bottom_from_grain_size` / ``bottom_from_class``. Raises
-    ``DataFetchError`` outside European-seas coverage.
+    ``DataFetchError`` outside European-seas coverage. ``water_sound_speed``
+    (m/s) scales the grain-size velocity ratio to the in-situ near-seabed
+    water; ``None`` uses the Hamilton reference (class bottoms are absolute and
+    unaffected).
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
                                  timeout=timeout, verbose=verbose)
     kind, value = _FOLK5_TO_BOTTOM.get(sub['folk_5cl'], ('phi', 3.0))
     if kind == 'phi':
-        bottom = bottom_from_grain_size(value, roughness=roughness)
+        bottom = bottom_from_grain_size(
+            value, roughness=roughness, water_sound_speed=water_sound_speed)
     else:
         bottom = bottom_from_class(value, roughness=roughness)
     log_message(
@@ -139,15 +144,16 @@ def fetch_bottom_transect(
     start: Coordinate, end: Coordinate, *,
     n_points: int = 6,
     roughness: float = 0.0,
+    water_sound_speed: float = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
-) -> RangeDependentBottom:
+) -> Bottom:
     """Range-dependent bottom from EMODnet sampled along ``start`` → ``end``.
 
     Queries EMODnet at ``n_points`` evenly-spaced points along the great-circle
-    path and assembles a :class:`~uacpy.core.environment.RangeDependentBottom`
+    path and assembles a :class:`~uacpy.core.environment.Bottom`
     (explicit ``c_p`` / ρ / α arrays vs range, from the Folk-class mapping), with
     ranges measured from ``start`` — the seafloor analogue of
     :func:`uacpy.data.fetch_ssp_transect`.
@@ -156,7 +162,9 @@ def fetch_bottom_transect(
     raises only if *no* point along the transect is covered.
     """
     return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom((la, lo), roughness=roughness, layer=layer,
-                                    base_url=base_url, timeout=timeout, verbose=verbose),
+        lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
+                                    water_sound_speed=water_sound_speed,
+                                    layer=layer, base_url=base_url,
+                                    timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='EMODnet',
     )

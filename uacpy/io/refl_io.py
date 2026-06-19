@@ -165,7 +165,7 @@ def read_source_beam_pattern(
             beam_pattern = np.zeros((NSBPPts, 2))
             for i in range(NSBPPts):
                 line = fid.readline()
-                vals = np.fromstring(line, sep=" ", count=2)
+                vals = np.array(line.split()[:2], dtype=float)
                 beam_pattern[i, :] = vals
             log_message(
                 'refl_io',

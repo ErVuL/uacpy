@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as _mcolors
+import matplotlib.collections as _mcoll
 from typing import Optional, Tuple
 
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
@@ -156,6 +157,7 @@ def plot_overview(
     data_source=True,
     sea_ice=None,
     map_kwargs: Optional[dict] = None,
+    tl_kwargs: Optional[dict] = None,
 ):
     """One-call composite for a fetched real-world environment.
 
@@ -196,6 +198,10 @@ def plot_overview(
     map_kwargs : dict, optional
         Extra keyword arguments forwarded to :func:`plot_bathymetry_map`
         (e.g. ``coastline_resolution``, ``graticule``).
+    tl_kwargs : dict, optional
+        Extra keyword arguments forwarded to :func:`plot_field` for the TL
+        panel — e.g. ``dict(vmin=40, vmax=110, cmap='turbo')`` to override
+        the default TL colour scale (20–120 dB).
 
     Returns ``(fig, (ax_map, ax_tl, ax_env))``.
     """
@@ -214,7 +220,19 @@ def plot_overview(
         title=map_title, **(map_kwargs or {}))
 
     if tl is not None:
-        plot_field(tl, ax=ax_tl, env=env, title=tl_title)
+        # Suppress plot_field's width-stealing fig.colorbar(fraction=) and draw
+        # the TL colorbar as an inset instead, mirroring the env panel's inset
+        # cp bars. A stealing colorbar shrinks only ax_tl, leaving the two
+        # right-column panels unequal; an inset bar steals no axes width, so
+        # both panels keep the full gridspec cell and line up.
+        tl_kw = dict(tl_kwargs or {})
+        tl_kw.pop('show_colorbar', None)
+        plot_field(tl, ax=ax_tl, env=env, title=tl_title, show_colorbar=False,
+                   **tl_kw)
+        tl_mappable = next(c for c in ax_tl.collections
+                           if isinstance(c, _mcoll.QuadMesh))
+        tl_cax = ax_tl.inset_axes([1.04, 0.0, 0.03, 1.0])
+        fig.colorbar(tl_mappable, cax=tl_cax, label='TL (dB)')
         if sea_ice is not None:
             _draw_sea_ice(ax_tl, sea_ice)
         if source is not None and getattr(source, 'depths', None) is not None:
@@ -227,8 +245,16 @@ def plot_overview(
         ax_tl.set_yticks([])
 
     plot_environment(env, ax=ax_env, source=source, receiver=receiver,
-                     bottom_colorbar=False, sea_ice=sea_ice)
+                     bottom_colorbar=True, sea_ice=sea_ice)
     ax_env.set_title(env_title)
+
+    # Both right-column panels now keep their full gridspec cell — neither
+    # colorbar steals axes width (the TL bar is the inset above; the env cp
+    # bars are inset by plot_environment) — so they share x0/width by
+    # construction. Sync the x-limits so the equal-width panels line up
+    # range-for-range.
+    if tl is not None:
+        ax_env.set_xlim(ax_tl.get_xlim())
 
     _draw_data_credit(fig, _credit_attributions(data_source, carrier=env),
                       center_ax=ax_map)
@@ -388,8 +414,3 @@ def _draw_graticule(ax, lon_range, lat_range, major, minor, proj):
     for spine in ax.spines.values():
         spine.set_edgecolor('0.2')
         spine.set_linewidth(1.0)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Modes — three distinct views
-# ─────────────────────────────────────────────────────────────────────────────

@@ -78,7 +78,7 @@ class Bounce(PropagationModel):
     need the on-disk files.
 
     To **chain to another model** (Bellhop / Scooter / Kraken /
-    KrakenC reading ``acoustic_type='file'``), pin ``work_dir=`` so the
+    Kraken reading ``acoustic_type='file'``), pin ``work_dir=`` so the
     ``.brc`` / ``.irc`` files outlive the call. The same uniform
     ``(work_dir, cleanup)`` rule every other model uses applies here:
 
@@ -92,9 +92,8 @@ class Bounce(PropagationModel):
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     BOUNCE produces ONE BRC consumed across the whole receiver-range
     axis; the median sample is the most representative single profile.
-    Per-model: ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'`` (BOUNCE consumes
-    ``LayeredBottom`` natively).
+    Per-model: ``'bottom_range': 'median'`` (the layer stack is kept since
+    BOUNCE consumes layered seabed columns natively).
 
     Examples
     --------
@@ -178,7 +177,6 @@ class Bounce(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -207,17 +205,15 @@ class Bounce(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.interp_ssp = interp_ssp
 
         # BOUNCE produces ONE BRC consumed across the whole range axis;
         # the median sample is the most representative single profile.
-        # ``rd_layered_layers='preserve'`` keeps the layer stack (BOUNCE
-        # handles LayeredBottom natively).
+        # The layer stack is kept (BOUNCE handles layered columns natively).
         self._set_collapse_defaults({
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
 
         self.c_low = c_low
@@ -274,7 +270,7 @@ class Bounce(PropagationModel):
         ``work_dir`` (constructor kwarg). Pin the location with
         ``Bounce(work_dir='./bounce_out')`` — a pinned work dir defaults
         ``cleanup=False`` so the files outlive the call and can be
-        consumed by Bellhop / Scooter / Kraken / KrakenC; an unpinned
+        consumed by Bellhop / Scooter / Kraken; an unpinned
         temp work dir is wiped after ``run()``.
 
         Parameters
@@ -305,7 +301,7 @@ class Bounce(PropagationModel):
           (``c_high=1e9`` triggers ``kmin=0`` in the Fortran; see
           ``bounce.f90``).
         - Larger ``rmax`` gives finer angular resolution.
-        - ``.brc`` is consumed by Bellhop / Scooter / KrakenC via
+        - ``.brc`` is consumed by Bellhop / Scooter / Kraken via
           ``BoundaryProperties(acoustic_type='file', reflection_file=…)``.
           ``.irc`` is consumed by Kraken (true normal modes).
         """
@@ -482,16 +478,6 @@ class Bounce(PropagationModel):
         )
 
     def _execute(self, input_file: Path, work_dir: Path):
-        """Execute BOUNCE binary via base-class subprocess helper."""
+        """Execute BOUNCE binary via the shared binary-launch helper."""
         base_name = input_file.stem
-        try:
-            result = self._run_subprocess(
-                [str(self.executable), base_name],
-                cwd=work_dir,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"Bounce output:\n{result.stdout}", level='debug')
-
+        self._run_and_attach_prt([str(self.executable), base_name], work_dir, base_name)

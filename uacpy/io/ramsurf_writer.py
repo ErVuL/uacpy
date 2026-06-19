@@ -71,11 +71,13 @@ def write_ramin(
     filepath : str
         Destination file path. Convention is ``ram.in`` in the working
         directory of the binary.
-    kind : {'rams', 'ramsurf'}
+    kind : {'rams', 'ramsurf', 'ramgeo'}
         Which binary the file is targeted at. ``'ramsurf'`` adds a
         surface block right after row 5; ``'rams'`` swaps row-5 from
         ``(ns, rs)`` to ``(irot, theta)`` and emits two extra profile
-        blocks per range (shear speed + shear attenuation).
+        blocks per range (shear speed + shear attenuation). ``'ramgeo'``
+        is the fluid, flat-surface form — row-5 ``(ns, rs)``, no surface
+        block, no shear blocks (i.e. ``'ramsurf'`` without the surface).
     fc, zs, zr_line : float
         Centre frequency (Hz), source depth (m), receiver depth (m) at
         which ``tl.line`` is written.
@@ -114,9 +116,9 @@ def write_ramin(
         Header line (row 1). Free text, ignored by the binary.
     """
     kind = kind.lower()
-    if kind not in ('rams', 'ramsurf'):
+    if kind not in ('rams', 'ramsurf', 'ramgeo'):
         raise ConfigurationError(
-            f"kind must be 'rams' or 'ramsurf'; got {kind!r}"
+            f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}"
         )
     if kind == 'ramsurf' and not surface:
         raise ConfigurationError("kind='ramsurf' requires a surface profile")

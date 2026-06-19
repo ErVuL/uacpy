@@ -786,5 +786,3 @@ class FRF:
             ax2.legend()
 
         return axes
-
-

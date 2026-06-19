@@ -1,10 +1,10 @@
 """
-EXAMPLE 26: Animated wave propagation (SPARC vs RAM)
-====================================================
+EXAMPLE 26: Animated wave propagation (wave-equation solvers vs a ray solver)
+============================================================================
 
 Watch a pulse propagate through a Pekeris waveguide and bounce off the
-seafloor — two wave-equation solvers shown on the same grid, same
-physics target.
+seafloor — five solvers shown on the same grid, same physics target. The
+two pedagogically interesting time-domain paths are spelled out below.
 
 * **SPARC** — native time-marched FFP. The TIME_SERIES output is the
   pressure field the solver produced directly. The range domain has an
@@ -20,6 +20,10 @@ physics target.
   window has a soft periodicity but the source-pulse envelope keeps
   late-time content small.
 
+**Scooter** (spectral FFP) and **Kraken** (coupled normal modes) are
+shown too — additional full-wave references built through the same
+broadband H(f) → IFFT path as RAM.
+
 Bellhop is included for contrast: its TIME_SERIES output is a
 *per-receiver* delay-and-sum of arrivals — not a wave-equation
 solution. The 2-D animation is then a grid of independent time-series,
@@ -28,16 +32,17 @@ stitched from neighbour-receiver arrivals. At fc=200 Hz / 50 m water
 the eigenray sum still tracks the modal field reasonably; at lower
 frequencies or shorter ranges it falls apart.
 
-The script saves:
+The script saves (under ``output/``):
 
-* ``example_26_wave_propagation.png`` — 6-frame snapshot grid, SPARC + RAM.
-* ``example_26_sparc.gif``           — SPARC animation.
-* ``example_26_ram_ifft.gif``        — RAM animation.
+* ``example_26_wave_propagation.png`` — snapshot grid: all five solvers ×
+  time frames.
+* ``example_26_<model>.gif`` — one animation per solver (``sparc``,
+  ``scooter``, ``ram``, ``krakenfield``, ``bellhop``).
 
 ENVIRONMENT
     Pekeris guide, 100 m deep, fluid half-space bottom. Source at 20 m,
-    pulse centred at 200 Hz. Both models share a 5-depth × 40-range
-    receiver grid so the snapshot panels are directly comparable.
+    pulse centred at 200 Hz. All five models share the same receiver grid
+    so the snapshot panels are directly comparable.
 """
 
 import sys
@@ -50,7 +55,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.models import (  # noqa: E402
-    RAM, SPARC, Scooter, KrakenField, Bellhop, RunMode,
+    RAM, SPARC, Scooter, Kraken, Bellhop, RunMode,
 )
 from uacpy.visualization import (  # noqa: E402
     save_animation, plot_time_snapshots,
@@ -64,13 +69,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # grid. Constraints kept in mind:
 #   * RMax / safety-margin / interpolation-edge knobs (SPARC's
 #     ``rmax_safety_margin``, Scooter's ``rmax_multiplier``,
-#     KrakenField's ``rmax_m``) are now auto-widened to 3× receiver_max
+#     Kraken's ``rmax_m``) are now auto-widened to 3× receiver_max
 #     in TIME_SERIES mode — no need to compute them by hand here.
 #   * Range sampling resolves λ_min ≈ 4.3 m at f_max=350 Hz; 2 m
 #     spacing → 100 range bins over 200 m.
 BATHYMETRY = 50.0                                # water depth (m)
-RECEIVER_DEPTHS = np.linspace(1, 49, 50)         # 1 m vertical spacing
-RECEIVER_RANGES = np.linspace(2, 200, 100)       # 2 m horizontal spacing
+RECEIVER_DEPTHS = np.linspace(1, 49, 32)         # ~1.5 m vertical spacing
+RECEIVER_RANGES = np.linspace(2, 200, 64)        # ~3 m horizontal spacing
 T_MAX = 0.18           # seconds — wave at 270 m past array, shows reflections
 F_CENTER = 200.0       # Hz, source-pulse centre frequency
 F_MIN = 50.0           # Hz, pulse-band lower edge (SPARC only)
@@ -161,7 +166,7 @@ def _run(name, model, env, source, receiver, waveform=None,
     """Single call site for every solver: TIME_SERIES with output_duration.
 
     SPARC builds p(t) from its native ``pulse_type``; the IFFT models
-    (RAM / Scooter / KrakenField / Bellhop) auto-derive their frequency
+    (RAM / Scooter / Kraken / Bellhop) auto-derive their frequency
     grid from the source-waveform spectrum, zero-pad the waveform
     internally to ``output_duration``, and auto-widen their ``rmax_*``.
     ``waveform_peak_t`` is the time-offset of the source-emission peak
@@ -212,7 +217,7 @@ def main():
         ), None),
         ('Scooter', Scooter(verbose=False), waveform),
         ('RAM', RAM(verbose=False, dr=1.0, dz=0.5, c0=1500.0), waveform),
-        ('KrakenField', KrakenField(verbose=False), waveform),
+        ('Kraken', Kraken(verbose=False), waveform),
         # Bellhop is a ray solver — its TIME_SERIES output is the
         # delay-and-sum of arrivals per receiver, not a wave-equation
         # solution. At 200 Hz / 50 m water / 200 m range the

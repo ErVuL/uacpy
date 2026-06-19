@@ -383,8 +383,3 @@ def plot_time_snapshots(
         fig.suptitle(title, fontsize=11, fontweight='bold')
     fig.tight_layout()
     return fig, axes
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# compare / compare_models
-# ─────────────────────────────────────────────────────────────────────────────

@@ -25,7 +25,7 @@ import pytest
 from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
-from uacpy.models import Bellhop, KrakenField, RAM, RunMode, Scooter
+from uacpy.models import Bellhop, Kraken, RAM, RunMode, Scooter
 
 
 pytestmark = pytest.mark.requires_binary
@@ -78,7 +78,7 @@ def _bellhop_bb(env, src, rcv):
 
 
 def _kraken_bb(env, src, rcv):
-    return KrakenField(verbose=False).run(
+    return Kraken(verbose=False).run(
         env, src, rcv,
         frequencies=np.linspace(F_LO, F_HI, N_FREQ),
         run_mode=RunMode.BROADBAND,
@@ -101,7 +101,7 @@ def _ram_bb(env, src, rcv):
 
 _RUNNERS = {
     'Bellhop': _bellhop_bb,
-    'KrakenField': _kraken_bb,
+    'Kraken': _kraken_bb,
     'Scooter': _scooter_bb,
     'RAM': _ram_bb,
 }

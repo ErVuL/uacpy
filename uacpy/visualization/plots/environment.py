@@ -8,16 +8,69 @@ import matplotlib.pyplot as plt
 from typing import Tuple
 
 from uacpy.core.environment import Environment
-from uacpy.visualization.style import BOTTOM_FILL_STYLE, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
+from uacpy.visualization.style import (
+    BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
+    BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE, _blend,
+)
 from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_data_credit, _draw_sea_ice
 from uacpy.core.environment import BoundaryProperties
+from uacpy.core.exceptions import ConfigurationError
+
+
+# A single half-space is shaded by sound speed on a fixed (absolute) scale so
+# different half-spaces read differently, while the '///' hatch still flags the
+# region as the semi-infinite half-space (vs the solid-filled finite layers).
+# The scale spans realistic *surficial* seabeds (clay ≈1450 → coarse/cemented
+# ≈2300 m/s) so ordinary sediments spread across the ramp instead of clustering
+# at the soft end; harder bottoms (rock basements) simply saturate at the dark
+# end. The exact cp is always in the property card.
+_HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
+
+
+def _halfspace_cp(bottom) -> float | None:
+    """The half-space sound speed to shade by, or ``None`` when there is no
+    meaningful value (vacuum / rigid / reflection-file boundary)."""
+    if bottom is None or bottom.acoustic_type in ('vacuum', 'rigid', 'file'):
+        return None
+    cp = getattr(bottom, 'sound_speed', None)
+    return cp if cp and cp > 0 else None
+
+
+def _hatched_fill(facecolor) -> dict:
+    """``fill_between`` kwargs: a solid ``facecolor`` under the half-space's
+    diagonal hatch, so it still reads as the semi-infinite half-space."""
+    return {'color': facecolor, 'hatch': BOTTOM_FILL_HATCH,
+            'edgecolor': _blend('black', facecolor, 0.4), 'linewidth': 0.4}
+
+
+def _halfspace_fill_style(cp) -> dict:
+    """Absolute-scale half-space fill — used for a *single* half-space (no
+    per-plot bottom colorbar): flat tan when ``cp`` is ``None`` (vacuum / rigid
+    / file), else an earthy BOTTOM_CMAP shade mapped from ``cp`` (m/s) on a fixed scale, so
+    different half-spaces read differently across plots. Keeps the hatch."""
+    if cp is None:
+        return dict(BOTTOM_FILL_STYLE)
+    t = float(np.clip((cp - _HALFSPACE_CP_LO)
+                      / (_HALFSPACE_CP_HI - _HALFSPACE_CP_LO), 0.0, 1.0))
+    return _hatched_fill(BOTTOM_CMAP(0.25 + 0.6 * t))
+
+
+def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
+    """Basement-half-space fill for a *layered* bottom: shaded on the SAME
+    (relative) ``cmap``/range as the sediment layers so it agrees with the
+    plot's 'Bottom cp' colorbar; flat tan for vacuum / rigid / file."""
+    cp = _halfspace_cp(hs)
+    if cp is None:
+        return dict(BOTTOM_FILL_STYLE)
+    norm = min(1.0, max(0.0, (cp - cs_min) / cs_range))
+    return _hatched_fill(cmap(0.25 + 0.6 * norm))
 
 
 def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
                         _layer_cmap_and_norm):
-    # Per-layer fills (YlOrBr by sound speed) + dashed inter-layer
+    # Per-layer fills (earthy BOTTOM_CMAP by sound speed) + dashed inter-layer
     # edges + hatched half-space + side legend card. Same visual
-    # template as the RangeDependentLayeredBottom branch below.
+    # template as the range-dependent layered branch below.
     cmap, cs_min, cs_max, sm = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
     z_top = z_max_layer
@@ -37,39 +90,10 @@ def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
     hs = bottom.halfspace
     hs_display = z_top + max(10.0, bottom.total_thickness() * 0.3)
     ax_bathy.fill_between(
-        r_km, z_top, hs_display,
-        zorder=ZORDER_SEDIMENT, **BOTTOM_FILL_STYLE,
+        r_km, z_top, hs_display, zorder=ZORDER_SEDIMENT,
+        **_layered_halfspace_style(hs, cmap, cs_min, cs_range),
     )
 
-    legend_lines = ['Layered bottom']
-    for i, layer in enumerate(bottom.layers):
-        line = (f"L{i+1}: thk={layer.thickness:g} m  c={layer.sound_speed:g}  "
-                f"ρ={layer.density:g}  α={layer.attenuation:g}")
-        if layer.shear_speed > 0:
-            line += f"  cs={layer.shear_speed:g}"
-            if layer.shear_attenuation > 0:
-                line += f"  αs={layer.shear_attenuation:g}"
-        legend_lines.append(line)
-    if hs.acoustic_type in ('vacuum', 'rigid'):
-        hs_line = f"Half-space: {hs.acoustic_type}"
-    else:
-        hs_line = (f"Half-space ({hs.acoustic_type}): "
-                   f"c={hs.sound_speed:g}  ρ={hs.density:g}  α={hs.attenuation:g}")
-        if hs.shear_speed > 0:
-            hs_line += f"  cs={hs.shear_speed:g}"
-            if hs.shear_attenuation > 0:
-                hs_line += f"  αs={hs.shear_attenuation:g}"
-        if hs.roughness > 0:
-            hs_line += f"  σ={hs.roughness:g}"
-    legend_lines.append(hs_line)
-    ax_bathy.text(
-        0.98, 0.03, '\n'.join(legend_lines),
-        transform=ax_bathy.transAxes, ha='right', va='bottom',
-        fontsize=7, family='monospace',
-        zorder=20,
-        bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                  alpha=0.95),
-    )
     z_max_layer = hs_display
     return z_max_layer
 
@@ -91,14 +115,14 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
 
     max_thickness = max(
         (sum(layer.thickness for layer in prof.layers)
-         for prof in bottom.profiles), default=0.0,
+         for prof in bottom.columns), default=0.0,
     )
     hs_extension = max(z_max_layer * 0.25, 20.0)
     hs_floor = z_max_layer + max_thickness + hs_extension
 
     total_span = prof_ranges_km[-1] - prof_ranges_km[0]
     for i_r, (r_node, prof) in enumerate(zip(prof_ranges_km,
-                                             bottom.profiles)):
+                                             bottom.columns)):
         r_lo, r_hi = boundaries[i_r], boundaries[i_r + 1]
         n_pts = max(20, int(401 * (r_hi - r_lo) / max(total_span, 1e-9)))
         x_bin = np.linspace(r_lo, r_hi, n_pts)
@@ -117,10 +141,11 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
                 zorder=ZORDER_SEDIMENT + 1,
             )
             z_top_arr = z_bot_arr
-        # Hatched half-space below this column.
+        # Hatched half-space below this column, shaded by its basement cp.
         ax_bathy.fill_between(
             x_bin, z_top_arr, np.full_like(x_bin, hs_floor),
-            zorder=ZORDER_SEDIMENT, **BOTTOM_FILL_STYLE,
+            zorder=ZORDER_SEDIMENT,
+            **_layered_halfspace_style(prof.halfspace, cmap, cs_min, cs_range),
         )
         label_x = 0.5 * (r_lo + r_hi)
         ax_bathy.text(
@@ -137,60 +162,25 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
         ax_bathy.axvline(b, color='black', linewidth=1.0, alpha=0.6,
                          linestyle='--', zorder=ZORDER_SEDIMENT + 4)
 
-    legend_lines = ['Profiles']
-    for i_p, prof in enumerate(bottom.profiles):
-        for j, layer in enumerate(prof.layers):
-            line = (f"P{i_p+1} L{j+1}: thk={layer.thickness:g} m  "
-                    f"c={layer.sound_speed:g}  ρ={layer.density:g}  "
-                    f"α={layer.attenuation:g}")
-            if layer.shear_speed > 0:
-                line += f"  cs={layer.shear_speed:g}"
-                if layer.shear_attenuation > 0:
-                    line += f"  αs={layer.shear_attenuation:g}"
-            legend_lines.append(line)
-        hs_p = prof.halfspace
-        if hs_p.acoustic_type in ('vacuum', 'rigid'):
-            hs_line = f"P{i_p+1} HS: {hs_p.acoustic_type}"
-        else:
-            hs_line = (f"P{i_p+1} HS ({hs_p.acoustic_type}): "
-                       f"c={hs_p.sound_speed:g}  ρ={hs_p.density:g}  "
-                       f"α={hs_p.attenuation:g}")
-            if hs_p.shear_speed > 0:
-                hs_line += f"  cs={hs_p.shear_speed:g}"
-        legend_lines.append(hs_line)
-    ax_bathy.text(
-        0.98, 0.03, '\n'.join(legend_lines),
-        transform=ax_bathy.transAxes, ha='right', va='bottom',
-        fontsize=6, family='monospace',
-        zorder=20,
-        bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                  alpha=0.95),
-    )
     z_max_layer = hs_floor
     return z_max_layer
 
 
 def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
-    # Hatched half-space spans the full bathy extent. The cap is
-    # piecewise-constant (one solid color per node) with Voronoi
-    # boundaries: each node's color extends from the midpoint with
-    # its left neighbour to the midpoint with its right neighbour;
-    # outer nodes reach the bathymetry edges. Cap edges follow the
+    # A range-dependent half-space: properties vary with range, uniform with
+    # depth. So each node colours its whole column (seafloor → floor) by its
+    # sound speed, hatched like any half-space, with Voronoi boundaries: each
+    # node owns from the midpoint with its left neighbour to the midpoint with
+    # its right; outer nodes reach the bathymetry edges. Tops follow the
     # seafloor so kinks are honoured.
     bot_r_km = np.asarray(bottom.ranges, dtype=float) / 1000.0
     bathy_r = r_km
     bathy_z = seafloor
-    sub_thickness = max(z_max_layer * 0.18, 5.0)
-    cs = np.asarray(bottom.sound_speed, dtype=float)
+    cs = np.asarray(bottom.halfspace_sound_speed, dtype=float)
     cs_min, cs_max = float(cs.min()), float(cs.max())
     cs_range = max(1e-9, cs_max - cs_min)
-    cmap = plt.get_cmap('YlOrBr')
-    hs_floor = z_max_layer * 1.3 + sub_thickness
-
-    ax_bathy.fill_between(
-        bathy_r, bathy_z, hs_floor,
-        zorder=ZORDER_SEDIMENT, **BOTTOM_FILL_STYLE,
-    )
+    cmap = BOTTOM_CMAP
+    hs_floor = z_max_layer * 1.3 + max(z_max_layer * 0.18, 5.0)
 
     # Voronoi cell edges: midpoints between consecutive nodes,
     # clamped to the bathymetry extent at the outer ends.
@@ -217,12 +207,12 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
         )
         poly_r = np.concatenate([poly_r_top, poly_r_top[::-1]])
         poly_z = np.concatenate(
-            [poly_z_top, (poly_z_top + sub_thickness)[::-1]]
+            [poly_z_top, np.full(poly_r_top.shape, hs_floor)]
         )
         colour = cmap(0.25 + 0.6 * (cs[i] - cs_min) / cs_range)
         ax_bathy.fill(
-            poly_r, poly_z, color=colour, alpha=1.0,
-            edgecolor='black', linewidth=0.3,
+            poly_r, poly_z, facecolor=colour, hatch=BOTTOM_FILL_HATCH,
+            edgecolor=_blend('black', colour, 0.4), linewidth=0.3,
             zorder=ZORDER_SEDIMENT + 1,
         )
 
@@ -233,64 +223,18 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
         ax_bathy.axvline(r_node, color='gray', linewidth=0.6,
                          linestyle='--', alpha=0.5,
                          zorder=ZORDER_SEDIMENT + 3)
-    legend_lines = ['Bottom (per node)']
-    ss = getattr(bottom, 'shear_speed', None)
-    sa = getattr(bottom, 'shear_attenuation', None)
-    ss_arr = np.asarray(ss) if ss is not None else np.zeros(len(bot_r_km))
-    sa_arr = np.asarray(sa) if sa is not None else np.zeros(len(bot_r_km))
-    for i in range(len(bot_r_km)):
-        line = (f"P{i+1}: c={cs[i]:.0f}  ρ={bottom.density[i]:.2f}  "
-                f"α={bottom.attenuation[i]:.2f}")
-        if ss_arr[i] > 0:
-            line += f"  cs={ss_arr[i]:.0f}"
-            if sa_arr[i] > 0:
-                line += f"  αs={sa_arr[i]:.2f}"
-        legend_lines.append(line)
-    ax_bathy.text(
-        0.98, 0.03, '\n'.join(legend_lines),
-        transform=ax_bathy.transAxes, ha='right', va='bottom',
-        fontsize=7, family='monospace',
-        zorder=20,
-        bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                  alpha=0.6),
-    )
     z_max_layer = hs_floor
     return z_max_layer
 
 
 def _draw_halfspace_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
     zmax_plot = z_max_layer * 1.2
-    # Single half-space — keep the canonical sandy-tan / hatched
-    # signature; cs is reported in the property card so a colored
-    # cmap fill would add no information.
+    # Single half-space shaded by its sound speed (the '///' hatch keeps the
+    # half-space signature); flat tan for vacuum / rigid / file (no cp value).
+    cp = _halfspace_cp(bottom) if isinstance(bottom, BoundaryProperties) else None
     ax_bathy.fill_between(r_km, seafloor, zmax_plot,
                           zorder=ZORDER_SEDIMENT,
-                          **BOTTOM_FILL_STYLE)
-    if isinstance(bottom, BoundaryProperties):
-        lines = [bottom.acoustic_type]
-        if bottom.acoustic_type == 'file' and bottom.reflection_file:
-            lines.append(f"file = {bottom.reflection_file}")
-        elif bottom.acoustic_type == 'grain-size':
-            lines.append(f"phi  = {bottom.grain_size_phi:g}")
-            lines.append(f"ρ    = {bottom.density:.2f} g/cm³")
-        elif bottom.acoustic_type not in ('vacuum', 'rigid'):
-            lines.append(f"cp = {bottom.sound_speed:.0f} m/s")
-            lines.append(f"ρ  = {bottom.density:.2f} g/cm³")
-            lines.append(f"α  = {bottom.attenuation:.2f} dB/λ")
-            if bottom.shear_speed > 0:
-                lines.append(f"cs = {bottom.shear_speed:.0f} m/s")
-                if bottom.shear_attenuation > 0:
-                    lines.append(f"αs = {bottom.shear_attenuation:.2f} dB/λ")
-            if bottom.roughness > 0:
-                lines.append(f"σ  = {bottom.roughness:g} m")
-        ax_bathy.text(
-            0.98, 0.95, '\n'.join(lines),
-            transform=ax_bathy.transAxes, ha='right', va='top',
-            fontsize=9, family='monospace',
-            zorder=20,
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                      alpha=0.95),
-        )
+                          **_halfspace_fill_style(cp))
     z_max_layer = zmax_plot
     return z_max_layer
 
@@ -311,22 +255,23 @@ def plot_environment(
     The water column is colour-mapped by SSP (Blues) and the bottom
     rendering depends on ``env.bottom``:
 
-    * :class:`BoundaryProperties` — half-space fill with a property card.
-    * :class:`LayeredBottom` — coloured per-layer fills (YlOrBr) +
-      hatched half-space + side legend listing ``(thk, c, ρ, α[, cs])``.
-    * :class:`RangeDependentBottom` — Voronoi-tiled solid-colour bands
+    * half-space column — half-space fill.
+    * layered column — coloured per-layer fills (earthy ground
+      colormap) + hatched half-space.
+    * range-dependent half-space — Voronoi-tiled solid-colour bands
       under the seafloor, one per range node.
-    * :class:`RangeDependentLayeredBottom` — one column per profile,
-      each column drawing the layer stack at that range; per-profile
-      legend below the colorbar.
+    * range-dependent layered — one column per profile, each column
+      drawing the layer stack at that range.
 
-    Two colorbars: ``Water cp`` (Blues) and ``Bottom cp`` (YlOrBr) — each
+    Everything is coloured by ``sound_speed`` (cp); for the seabed's other
+    geoacoustic properties (cs, ρ, αp, αs) use :func:`plot_bottom_properties`.
+
+    Two colorbars: ``Water cp`` (Blues) and ``Bottom cp`` (earthy brown) — each
     on its own dynamic range so neither is washed out by the other.
 
     Pass ``ax=`` to draw into an existing axis (for composite figures); returns
     ``(fig, ax)``. ``bottom_colorbar=False`` drops the second (bottom cp)
-    colorbar — useful in narrow/composite panels where the per-node property
-    card already lists the bottom values.
+    colorbar — useful in narrow/composite panels.
 
     ``data_source`` adds a licence-required data-source credit footnote (for a
     standalone figure, ``ax=None``): ``True`` (default) uses ``env.data_sources``
@@ -337,11 +282,6 @@ def plot_environment(
     concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
     e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
     """
-    from uacpy.core.environment import (
-        BoundaryProperties, LayeredBottom,
-        RangeDependentBottom, RangeDependentLayeredBottom,
-    )
-
     if ax is None:
         fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
     else:
@@ -357,7 +297,7 @@ def plot_environment(
     candidate_rmaxes = []
     if env.has_range_dependent_bathymetry():
         candidate_rmaxes.append(float(env.bathymetry[-1, 0]) / 1000.0)
-    if isinstance(bottom, (RangeDependentBottom, RangeDependentLayeredBottom)):
+    if bottom.is_range_dependent:
         candidate_rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
     if (receiver is not None and getattr(receiver, 'ranges', None) is not None
             and len(receiver.ranges) > 0):
@@ -384,13 +324,13 @@ def plot_environment(
 
     # Independent cmaps + colorbars for water vs bottom. Each is
     # normalized to its own cs range so neither is washed out by the
-    # other's extent. Convention: blue family for water, YlOrBr for the
+    # other's extent. Convention: blue family for water, the earthy BOTTOM_CMAP for the
     # sediment / bottom.
-    def _truncated(name, lo, hi, n=256):
+    def _truncated(cmap, lo, hi, n=256):
         from matplotlib.colors import LinearSegmentedColormap
-        base = plt.get_cmap(name)
+        base = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
         return LinearSegmentedColormap.from_list(
-            f"{name}_clip", base(np.linspace(lo, hi, n)),
+            f"{getattr(base, 'name', 'cmap')}_clip", base(np.linspace(lo, hi, n)),
         )
 
     def _make_sm(cs_values, cmap):
@@ -408,33 +348,40 @@ def plot_environment(
         return cs_min, cs_max, sm
 
     water_cmap = _truncated('Blues', 0.25, 0.95)
-    bottom_cmap_full = plt.get_cmap('YlOrBr')          # raw, used by 0.25+0.6*x trick
-    bottom_cmap_truncated = _truncated('YlOrBr', 0.25, 0.85)
+    bottom_cmap_full = BOTTOM_CMAP                      # raw, used by 0.25+0.6*x trick
+    bottom_cmap_truncated = _truncated(BOTTOM_CMAP, 0.25, 0.85)
 
     water_cs_pool = list(np.asarray(ssp.data, dtype=float).ravel())
     bottom_cs_pool: list = []
-    if isinstance(bottom, LayeredBottom):
-        bottom_cs_pool.extend(layer.sound_speed for layer in bottom.layers)
-        bottom_cs_pool.append(bottom.halfspace.sound_speed)
-    elif isinstance(bottom, RangeDependentBottom):
-        bottom_cs_pool.extend(np.asarray(bottom.sound_speed, dtype=float).ravel())
-    elif isinstance(bottom, RangeDependentLayeredBottom):
-        for prof in bottom.profiles:
-            bottom_cs_pool.extend(layer.sound_speed for layer in prof.layers)
-            bottom_cs_pool.append(prof.halfspace.sound_speed)
-    elif isinstance(bottom, BoundaryProperties):
-        if bottom.acoustic_type not in ('vacuum', 'rigid', 'file'):
-            bottom_cs_pool.append(bottom.sound_speed)
+    for col in bottom.columns:
+        bottom_cs_pool.extend(layer.sound_speed for layer in col.layers)
+        if col.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
+            bottom_cs_pool.append(col.halfspace.sound_speed)
 
     water_cs_min, water_cs_max, water_sm = _make_sm(water_cs_pool, water_cmap)
-    bot_cs_min, bot_cs_max, bottom_sm = _make_sm(
-        bottom_cs_pool or water_cs_pool, bottom_cmap_truncated,
-    )
+    # Uniform bottom-cp handling: every bottom that carries a cp value gets a
+    # 'Bottom cp' colorbar, built the same way regardless of bottom type. A
+    # single half-space is shaded on the fixed absolute sediment scale (see
+    # _halfspace_fill_style), so its colorbar spans exactly that range; layered
+    # / range-dependent bottoms span their own (relative) cp range.
+    bottom_has_cp = bool(bottom_cs_pool)
+    is_single_halfspace = not bottom.is_range_dependent and not bottom.is_layered
+    if is_single_halfspace and bottom_has_cp:
+        from matplotlib.colors import Normalize
+        from matplotlib.cm import ScalarMappable
+        bot_cs_min, bot_cs_max = _HALFSPACE_CP_LO, _HALFSPACE_CP_HI
+        bottom_sm = ScalarMappable(cmap=bottom_cmap_truncated,
+                                   norm=Normalize(bot_cs_min, bot_cs_max))
+        bottom_sm.set_array([])
+    else:
+        bot_cs_min, bot_cs_max, bottom_sm = _make_sm(
+            bottom_cs_pool or water_cs_pool, bottom_cmap_truncated,
+        )
 
     def _layer_cmap_and_norm(cs_values=None):
-        """Bottom-only normalization (legacy helper used by the LayeredBottom /
-        RDLB / RangeDependentBottom branches). Returns ``(base_cmap, cs_min,
-        cs_max, sm)`` where ``base_cmap`` is the raw YlOrBr — branches sample
+        """Bottom-only normalization shared by the layered / range-dependent
+        seabed branches. Returns ``(base_cmap, cs_min,
+        cs_max, sm)`` where ``base_cmap`` is the raw BOTTOM_CMAP — branches sample
         it at ``0.25 + 0.6 * norm`` for the truncated band, so the
         ``ScalarMappable`` has to match (truncated) for the colorbar to read."""
         if cs_values is None:
@@ -465,33 +412,48 @@ def plot_environment(
             shading='nearest', zorder=0,
         )
 
-    if isinstance(bottom, LayeredBottom):
-        z_max_layer = _draw_layered_bottom(
-            ax_bathy, bottom, r_km, z_max_layer, _layer_cmap_and_norm)
-    elif isinstance(bottom, RangeDependentLayeredBottom):
+    if bottom.is_range_dependent and bottom.is_layered:
         z_max_layer = _draw_rdl_bottom(
             ax_bathy, bottom, r_km, seafloor, z_max_layer, env,
             _layer_cmap_and_norm)
-    elif isinstance(bottom, RangeDependentBottom):
+    elif bottom.is_range_dependent:
         z_max_layer = _draw_rd_bottom(
             ax_bathy, bottom, r_km, seafloor, z_max_layer)
-    else:  # BoundaryProperties or other half-space
+    elif bottom.is_layered:
+        z_max_layer = _draw_layered_bottom(
+            ax_bathy, bottom.columns[0], r_km, z_max_layer, _layer_cmap_and_norm)
+    else:  # single half-space
         z_max_layer = _draw_halfspace_bottom(
-            ax_bathy, bottom, r_km, seafloor, z_max_layer)
+            ax_bathy, bottom.columns[0].halfspace, r_km, seafloor, z_max_layer)
 
-    # Two colorbars stacked on the RIGHT (water cp inner, bottom cp outer),
-    # each on its own dynamic range — kept off the left so they never collide
-    # with the depth axis (important in composite/`ax=` layouts). The bottom
-    # colorbar is suppressed for a single half-space (the property card states cs).
-    fig.colorbar(water_sm, ax=ax_bathy, label='Water cp (m/s)',
-                 location='right', fraction=0.046, pad=0.02)
-    # Only add the bottom colorbar when the bottom cp actually varies — a single
-    # half-space or a uniform range-dependent bottom carries no gradient (the
-    # property card already states its values), and a second bar just crowds.
-    if (bottom_colorbar and not isinstance(bottom, BoundaryProperties)
-            and bot_cs_max - bot_cs_min > 1e-6):
-        fig.colorbar(bottom_sm, ax=ax_bathy, label='Bottom cp (m/s)',
-                     location='right', fraction=0.046, pad=0.12)
+    # Colorbars on the RIGHT (kept off the left so they never collide with the
+    # depth axis in composite/`ax=` layouts). Uniform handling: ANY bottom that
+    # carries a cp value (half-space, layered, range-dependent — all the same)
+    # gets a 'Bottom cp' bar; only vacuum / rigid / file (no cp) show the water
+    # bar alone. The Bottom cp bar is the INNER (left) of the two, with its ticks
+    # /label on its own LEFT side (toward the plot) so nothing sits between the
+    # two bars — they read cleanly as [plot] Bottom | Water.
+    has_bottom_cbar = bottom_colorbar and bottom_has_cp
+    if has_bottom_cbar:
+        # Stack the two cp colorbars vertically in a single right-margin
+        # column so they occupy the width of one bar (keeps narrow composite
+        # panels uncrowded). Equal-size, near-full-height halves with a small
+        # gap; compact labels + ≤3 ticks so they stay legible even in the
+        # small env panel of plot_overview. Water on top, Bottom below.
+        from matplotlib.ticker import MaxNLocator
+        water_cax = ax_bathy.inset_axes([1.04, 0.54, 0.03, 0.45])
+        bottom_cax = ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.45])
+        cbar_water = fig.colorbar(water_sm, cax=water_cax, label='Water cp')
+        cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax, label='Bottom cp')
+        for cb in (cbar_water, cbar_bottom):
+            cb.ax.tick_params(labelsize=6)
+            cb.ax.yaxis.label.set_size(7)
+            cb.ax.yaxis.set_major_locator(MaxNLocator(3))
+    else:
+        cbar_water = fig.colorbar(
+            water_sm, ax=ax_bathy, label='Water cp (m/s)', location='right',
+            fraction=0.046, pad=0.02,
+        )
 
     # Seafloor line on top of the bottom rendering.
     if env.has_range_dependent_bathymetry():
@@ -547,6 +509,146 @@ def plot_environment(
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
         _draw_data_credit(fig, credit, reserve=False)
     return fig, ax_bathy
+
+
+# Seabed geoacoustic properties shown by ``plot_bottom_properties`` —
+# (attribute, symbol, unit, colormap). cp / density are always present; the
+# rest are skipped when uniformly zero (e.g. shear for a fluid seabed).
+# Per-property colormaps, grouped by physical quantity so the panels read as
+# a coherent set: cool perceptually-uniform 'viridis' for the wave speeds, a
+# neutral 'bone_r' for density (heavier → darker), and a clean warm 'YlOrRd'
+# for the attenuations (lossier → redder). Avoids the muddy cividis/YlOrBr mix.
+_BOTTOM_PROPERTIES = (
+    ('sound_speed',       'cp', 'm/s',   'viridis'),
+    ('shear_speed',       'cs', 'm/s',   'viridis'),
+    ('density',           'ρ',  'g/cm³', 'bone_r'),
+    ('attenuation',       'αp', 'dB/λ',  'YlOrRd'),
+    ('shear_attenuation', 'αs', 'dB/λ',  'YlOrRd'),
+)
+
+
+def _layered_property_at_depths(layered, prop, seafloor, z):
+    """Step profile of ``prop`` for a ``SeabedColumn``: each layer from
+    ``seafloor`` downward, then the half-space. ``z`` is absolute depth (m)."""
+    out = np.full(z.shape, float(getattr(layered.halfspace, prop, 0.0) or 0.0))
+    top = float(seafloor)
+    for layer in layered.layers:
+        bot = top + float(layer.thickness)
+        out[(z >= top) & (z < bot)] = float(getattr(layer, prop, 0.0) or 0.0)
+        top = bot
+    return out
+
+
+def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
+    """``[len(z), len(r_km)]`` grid of ``prop`` in the seabed, NaN above the
+    range-local seafloor."""
+    grid = np.full((len(z), len(r_km)), np.nan)
+    for j, r_node in enumerate(r_km):
+        r_m = float(r_node) * 1000.0
+        below = z >= seafloor_r[j]
+        if not np.any(below):
+            continue
+        col = bottom.column_at(range=r_m)
+        grid[below, j] = _layered_property_at_depths(
+            col, prop, seafloor_r[j], z[below])
+    return grid
+
+
+def plot_bottom_properties(env, *, properties=None, figsize=None,
+                           n_range=240, n_depth=200, data_source=True):
+    """Small-multiples cross-sections of the **seabed geoacoustic properties**.
+
+    One range × sub-bottom-depth heatmap per property present in
+    ``env.bottom`` — sound speed ``cp``, shear speed ``cs``, density ``ρ``,
+    compressional / shear attenuation ``αp`` / ``αs`` — each with its own
+    colorbar. Properties that are uniformly zero or absent (e.g. shear for a
+    fluid seabed) are skipped. Complements :func:`plot_environment`, which
+    colours the seabed by ``cp`` alone; this is where ``cs`` and friends live.
+
+    Works for every ``Bottom`` shape (half-space, layered, range-dependent
+    half-space, range-dependent layered); for layered
+    seabeds the layers track the bathymetry. Pass ``properties=`` (attribute
+    names or symbols) to restrict the panels. Returns ``(fig, axes)``.
+    """
+    bottom = env.bottom
+    if bottom is None:
+        raise ConfigurationError("plot_bottom_properties: env.bottom is None.")
+
+    rmaxes = []
+    if env.has_range_dependent_bathymetry():
+        rmaxes.append(float(env.bathymetry[-1, 0]) / 1000.0)
+    if bottom.is_range_dependent:
+        rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
+    x_max = max(rmaxes) if rmaxes else 1.0
+    r_km = np.linspace(0.0, x_max, n_range)
+
+    if env.has_range_dependent_bathymetry():
+        bz = env.bathymetry
+        seafloor_r = np.interp(r_km * 1000.0, bz[:, 0], bz[:, 1])
+    else:
+        seafloor_r = np.full(r_km.shape, float(env.depth))
+
+    max_thk = bottom.max_total_thickness()
+    sf_max = float(np.max(seafloor_r))
+    z_floor = sf_max + max_thk + max(20.0, 0.25 * sf_max)
+    z = np.linspace(0.0, z_floor, n_depth)
+
+    panels = []
+    for prop, sym, unit, cmap in _BOTTOM_PROPERTIES:
+        if (properties is not None and prop not in properties
+                and sym not in properties):
+            continue
+        grid = _seabed_property_grid(bottom, prop, r_km, z, seafloor_r)
+        finite = grid[np.isfinite(grid)]
+        if finite.size == 0:
+            continue
+        if prop not in ('sound_speed', 'density') and np.allclose(finite, 0.0):
+            continue
+        panels.append((prop, sym, unit, cmap, grid))
+
+    if not panels:
+        raise ConfigurationError(
+            "plot_bottom_properties: no plottable seabed properties found.")
+
+    n = len(panels)
+    ncols = min(n, 3)
+    nrows = int(np.ceil(n / ncols))
+    if figsize is None:
+        figsize = (4.4 * ncols, 3.1 * nrows + 0.4)
+    # Shared range/depth axes (every panel is the same cross-section) so only
+    # the edge axes carry labels — far less clutter than per-panel labels.
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False,
+                             sharex=True, sharey=True,
+                             constrained_layout=True)
+    axes_flat = axes.ravel()
+
+    for idx, (ax_p, (prop, sym, unit, cmap, grid)) in enumerate(
+            zip(axes_flat, panels)):
+        finite = grid[np.isfinite(grid)]
+        vmin, vmax = float(np.min(finite)), float(np.max(finite))
+        if vmin == vmax:
+            vmin, vmax = vmin - 0.5, vmax + 0.5
+        pcm = ax_p.pcolormesh(r_km, z, grid, cmap=cmap,
+                              vmin=vmin, vmax=vmax, shading='auto')
+        ax_p.plot(r_km, seafloor_r, color='black', linewidth=1.2, zorder=5)
+        ax_p.set_title(f"{sym}  ({unit})", fontweight='bold', fontsize=11)
+        if idx % ncols == 0:                       # left column only
+            ax_p.set_ylabel("Depth (m)")
+        if idx + ncols >= n:                       # bottom-most visible per col
+            ax_p.set_xlabel("Range (km)")
+            ax_p.tick_params(labelbottom=True)
+        cb = fig.colorbar(pcm, ax=ax_p, pad=0.015, fraction=0.05)
+        cb.ax.tick_params(labelsize=8)
+
+    axes_flat[0].invert_yaxis()                    # shared → inverts all
+    for ax_p in axes_flat[n:]:                     # hide unused cells
+        ax_p.set_visible(False)
+
+    fig.suptitle(f"Seabed properties — {type(bottom).__name__}",
+                 fontweight='bold', fontsize=13)
+    _draw_data_credit(fig, _credit_attributions(data_source, carrier=env),
+                      reserve=False)
+    return fig, axes
 
 
 # Professional oceanographic depth ramp (shallow → deep): pale aqua through

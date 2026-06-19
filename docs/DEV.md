@@ -59,9 +59,9 @@ result = Model(...).run(env, source, receiver, run_mode=None, *,
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site.
-The only sanctioned extensions are `n_modes=` on the Kraken family
-(Kraken, KrakenC, KrakenField) and `output_duration=` on the broadband
-synthesizers (Bellhop, BellhopCUDA, RAM, Scooter, KrakenField, OASP). Model configuration is
+The only sanctioned extensions are `n_modes=` on Kraken and
+`output_duration=` on the broadband
+synthesizers (Bellhop, RAM, Scooter, Kraken, OASP). Model configuration is
 **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter
@@ -129,10 +129,8 @@ default reduction method:
 ```
 'bathymetry'        : 'max'
 'ssp'               : 'r0'
-'bottom'            : 'r0'
-'layered'           : 'halfspace'
-'rd_layered_range'  : 'median'
-'rd_layered_layers' : 'halfspace'
+'bottom_range'      : 'r0'
+'bottom_layers'     : 'halfspace'
 'altimetry'         : 'drop'
 'elastic'           : 'fluid'
 ```
@@ -263,8 +261,7 @@ utils.py                            misc reader/writer-shared utilities
 These are the physics-agnostic primitives every model consumes:
 
 - `environment.py` — `Environment`, `BoundaryProperties`,
-  `SedimentLayer`, `LayeredBottom`, `RangeDependentBottom`,
-  `RangeDependentLayeredBottom`, `SoundSpeedProfile`.
+  `SedimentLayer`, `SeabedColumn`, `Bottom`, `SoundSpeedProfile`.
 - `source.py` / `receiver.py` — `Source(depths, frequencies)`,
   `Receiver(depths, ranges)`.
 - `results.py` — `Result` base + `Field`, `Arrivals`, `Rays`, `Modes`,

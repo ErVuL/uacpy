@@ -2,7 +2,7 @@
 
 Underwater acoustic propagation for Python — concepts, API surface, and
 the gotchas that aren't obvious from the docstrings. Per-class detail
-lives on the constructor docstrings (`help(Bellhop)`, `help(KrakenField)`,
+lives on the constructor docstrings (`help(Bellhop)`, `help(Kraken)`,
 …); this doc is the **reference for shapes, conventions, model
 selection, and cross-cutting behaviour**.
 
@@ -42,11 +42,16 @@ pip install -e .
 submodule). OASES is fetched from MIT on demand by `install.sh` —
 it is not redistributable.
 
+The model classes and the headline plotters are also re-exported at the top
+level for convenience (``uacpy.Bellhop``, ``uacpy.Kraken``, …,
+``uacpy.plot_result`` / ``uacpy.plot_field`` / ``uacpy.plot_overview``), so the
+imports below are interchangeable with ``from uacpy import Bellhop, plot_field``.
+
 ```python
 import numpy as np, matplotlib.pyplot as plt
 import uacpy
-from uacpy.models import Bellhop
-from uacpy.visualization import plot_field
+from uacpy.models import Bellhop          # or: from uacpy import Bellhop
+from uacpy.visualization import plot_field  # or: from uacpy import plot_field
 
 env      = uacpy.Environment(name='shallow', bathymetry=100.0, ssp=1500.0)
 source   = uacpy.Source(depths=50.0, frequencies=100.0)
@@ -84,7 +89,7 @@ Every model inherits from `PropagationModel` (`uacpy.models.base`):
 | Method | Purpose |
 |---|---|
 | `run(env, src, rcv, run_mode=…, *, frequencies=…, source_waveform=…, sample_rate=…)` | Full-control entry point. Fixed keyword-only signature; no `**kwargs`. |
-| `compute_tl / rays / eigenrays / arrivals / modes / reflection / time_series / transfer_function / covariance / replicas(...)` | Convenience wrappers over `run()` (one per `RunMode`). Each takes `(env, source, receiver)`; `compute_tl` adds keyword-only `run_mode=`, `compute_time_series` forwards `source_waveform=`/`sample_rate=`, `compute_transfer_function` forwards `frequencies=`. |
+| `compute_tl / rays / eigenrays / arrivals / modes / reflection / time_series / transfer_function / covariance / replicas(...)` | Convenience wrappers over `run()` (one per `RunMode`). Each takes `(env, source, receiver)`; `compute_tl` adds keyword-only `run_mode=`, `compute_time_series` forwards `source_waveform=`/`sample_rate=`/`output_duration=`, `compute_transfer_function` forwards `frequencies=`. |
 | `supports_mode(RunMode.X)` / `supported_modes` | Capability check. |
 
 Convenience wrappers raise `UnsupportedFeatureError` when the underlying
@@ -97,7 +102,7 @@ emits reflection coefficients).
 |---|---|
 | `COHERENT_TL` / `INCOHERENT_TL` / `SEMICOHERENT_TL` | TL field |
 | `RAYS` / `EIGENRAYS` / `ARRIVALS` | Bellhop ray products |
-| `MODES` | Kraken / KrakenC eigenfunctions |
+| `MODES` | Kraken eigenfunctions |
 | `BROADBAND` | complex `H(f)` |
 | `TIME_SERIES` | real `p(t)` |
 | `COVARIANCE` / `REPLICA` | OASN array products |
@@ -120,10 +125,8 @@ Model(
     collapse={                # see §5.2 — global defaults shown
         'bathymetry':        'max',
         'ssp':               'r0',
-        'bottom':            'r0',
-        'layered':           'halfspace',
-        'rd_layered_range':  'median',
-        'rd_layered_layers': 'halfspace',
+        'bottom_range':      'r0',
+        'bottom_layers':     'halfspace',
         'altimetry':         'drop',
         'elastic':           'fluid',
     },
@@ -145,10 +148,10 @@ Model(
    are the **only** kwargs `run()` accepts. Every model shares the fixed
    spine `run(env, source, receiver, run_mode=None, *, …)`; the signal
    kwargs appear per capability — the broadband synthesizers (Bellhop,
-   BellhopCUDA, RAM, Scooter, KrakenField, OASP) take all four, SPARC
+   RAM, Scooter, Kraken, OASP) take all four, SPARC
    takes `source_waveform=`/`sample_rate=` only, OASR takes
    `frequencies=` only, and Bounce/OAST/OASN take none.
-   The Kraken family (Kraken, KrakenC, KrakenField) additionally takes
+   Kraken additionally takes
    `n_modes=` for the mode-count / field-reconstruction limit.
 
 **Unknown kwargs raise `TypeError`** — there is no `**kwargs` on `run()`,
@@ -163,7 +166,7 @@ inspects it to write TopOpt(4) and the supporting per-formula lines.
 See *Volume Absorption* below.
 
 **Mode-specific kwargs.** Every `RunMode.TIME_SERIES`-capable wrapper
-(Bellhop, Scooter, KrakenField, OASP, RAM) takes `source_waveform=` +
+(Bellhop, Scooter, Kraken, OASP, RAM) takes `source_waveform=` +
 `sample_rate=` on `run()`. Models with a broadband path also accept
 `frequencies=` for an explicit override of `source.frequencies`. Pass
 `output_duration=` for a specific output time window (seconds) — the
@@ -181,7 +184,7 @@ reporting what it picked. Pin `frequencies=` to skip the derivation.
 `Field.synthesize_time_series` additionally warns if `1/Δf <
 waveform_duration` (DFT wraparound).
 
-**Canonical TIME_SERIES recipe** (works on RAM / Scooter / KrakenField
+**Canonical TIME_SERIES recipe** (works on RAM / Scooter / Kraken
 / Bellhop / OASP):
 
 ```python
@@ -199,7 +202,7 @@ field = model.run(
 ```
 
 Every per-model alias / wrap / band-derivation knob (SPARC's
-`rmax_safety_margin`, Scooter's `rmax_multiplier`, KrakenField's
+`rmax_safety_margin`, Scooter's `rmax_multiplier`, Kraken's
 `rmax_m`, RAM's `Q` / `T`) auto-widens for TIME_SERIES — there's
 nothing to tune at the call site for the common case. Pin any of
 them on the constructor when you want explicit control.
@@ -247,7 +250,7 @@ prt = result.metadata.get('prt_file')   # debug log path, when persisted
 The most common reason to pin `work_dir` is **chaining models**:
 `Bounce.run(...)` → `result.metadata['brc_file']` → consumer model's
 `BoundaryProperties(acoustic_type='file', reflection_file=…)` (Bellhop /
-Scooter / Kraken / KrakenC). Bellhop's auto-route through BOUNCE
+Scooter / Kraken). Bellhop's auto-route through BOUNCE
 handles its own work-dir lifecycle internally; the user never needs
 to manage it.
 
@@ -284,7 +287,7 @@ machinery.
 Model instances mutate `self.file_manager` per `run()` and are **not
 safe to share across threads**. To run many models concurrently, use
 `uacpy.run_parallel` — a process pool with one model instance per worker
-(see §5.11, *Running in parallel*).
+(see §5.10, *Running in parallel*).
 
 ---
 
@@ -394,7 +397,7 @@ bottom = uacpy.BoundaryProperties.from_preset('sand')                   # fluid 
 bottom = uacpy.BoundaryProperties.from_preset('sand', elastic=True)     # keep preset shear
 bottom = uacpy.BoundaryProperties.from_preset('sand', attenuation=0.5)  # tweak
 layer  = uacpy.SedimentLayer.from_preset('silt', thickness=10.0)
-column = uacpy.LayeredBottom.from_presets(
+column = uacpy.SeabedColumn.from_presets(
     layers=[('clay', 5), ('silt', 15, {'attenuation': 1.5}), ('sand', 30)],
     halfspace='limestone',
     halfspace_overrides={'attenuation': 0.05},
@@ -404,7 +407,7 @@ column = uacpy.LayeredBottom.from_presets(
 Presets are **fluid by default** (shear dropped) so the boundary works with
 every model — pass `elastic=True` (uniform across `from_preset` /
 `from_presets`) to keep the catalog's shear speed for the elastic-capable
-solvers (OASES, Scooter, KrakenC). Explicit `shear_*` overrides always win.
+solvers (OASES, Scooter, Kraken backend='krakenc'). Explicit `shear_*` overrides always win.
 
 | Material | c_p (m/s) | c_s (m/s) | ρ (g/cm³) | α_p (dB/λ) | α_s (dB/λ) |
 |---|---|---|---|---|---|
@@ -426,58 +429,66 @@ reflection.
 
 ### Range-dependent and layered bottoms
 
-uacpy carries four bottom flavours, all stored on `env.bottom`:
+The seabed is one `Bottom` on `env.bottom`, built exactly like
+`SoundSpeedProfile`: a `Bottom` is a list of `SeabedColumn`s (each =
+sediment layers over a half-space; an empty layer list ⇒ a pure
+half-space) plus an optional `ranges` axis. **Range is one optional
+axis**, so all four classic shapes are the same type:
 
-| Class | What it represents |
+| Shape | How to build it |
 |---|---|
-| `BoundaryProperties` | flat halfspace (the default). |
-| `RangeDependentBottom` | per-range halfspace properties (interpolated). |
-| `LayeredBottom` | depth-dependent stack of `SedimentLayer`s + halfspace. |
-| `RangeDependentLayeredBottom` | per-range list of `LayeredBottom` profiles. |
+| flat half-space (default) | `bottom='sand'`, `bottom=1600`, a `BoundaryProperties`, or `Bottom.from_halfspace(bp)` |
+| layered column | `Bottom.from_column(SeabedColumn(...))` |
+| range-dependent half-space | `Bottom.from_halfspaces(ranges, sound_speed=…, …)` |
+| range-dependent layered | `Bottom.from_columns(columns, ranges)` |
 
-Predicates: `env.has_layered_bottom()`,
-`env.has_range_dependent_bottom()`,
-`env.has_range_dependent_layered_bottom()`,
+`env.bottom` **auto-coerces** scalars / preset strings /
+`BoundaryProperties` / `SeabedColumn` into a `Bottom`, mirroring `ssp=`.
+
+Predicates (on `env` or the `Bottom`): `bottom.is_range_dependent`,
+`bottom.is_layered`, `bottom.is_elastic`; plus `env.has_layered_bottom()`,
+`env.has_range_dependent_bottom()`, `env.has_range_dependent_layered_bottom()`,
 `env.has_elastic_bottom()`, `env.has_elastic_surface()`.
 
-Slicing: `env.bottom_at_range(r)` returns `LayeredBottom` for RDLB,
-`BoundaryProperties` otherwise. `env.halfspace_at_range(r)` always
-returns a flat `BoundaryProperties` (digs into `.halfspace` for layered
-structures) — used by env-file writers that emit a single bottom row.
+Slicing: `bottom.column_at(range=r)` returns the nearest `SeabedColumn`
+(layer stacks can't be blended). `bottom.halfspace_at(range=r)` /
+`env.halfspace_at_range(r)` always return a flat `BoundaryProperties`
+(linear-interpolated for an all-halfspace bottom, nearest when layered) —
+used by env-file writers that emit a single bottom row.
 
 ```python
-from uacpy import RangeDependentBottom, LayeredBottom, SedimentLayer, RangeDependentLayeredBottom
+from uacpy import Bottom, SeabedColumn, SedimentLayer, BoundaryProperties
 
-# RD halfspace — geoacoustics that vary with range
-bot_rd = RangeDependentBottom(
+# flat half-space (coerced from a preset string)
+env = uacpy.Environment(bathymetry=200, ssp=1500, bottom='sand')
+
+# RD half-space — geoacoustics that vary with range
+bot_rd = Bottom.from_halfspaces(
     ranges=np.array([0, 5000, 10000, 15000]),       # metres
     sound_speed=np.array([1600, 1650, 1700, 1750]),
     density=np.array([1.5, 1.7, 1.9, 2.1]),
     attenuation=np.array([0.8, 0.6, 0.4, 0.3]),
-    shear_speed=np.zeros(4),
-    acoustic_type='half-space',
 )
 
-# Stratified column (depth-dependent)
-bot_layered = LayeredBottom(
+# stratified column (depth-dependent)
+column = SeabedColumn(
     layers=[
         SedimentLayer(thickness=5,  sound_speed=1550, density=1.5, attenuation=0.3),
         SedimentLayer(thickness=20, sound_speed=1800, density=2.0, attenuation=0.8),
     ],
-    halfspace=uacpy.BoundaryProperties(acoustic_type='half-space',
-                                       sound_speed=2000, density=2.2, attenuation=0.1),
+    halfspace=BoundaryProperties(acoustic_type='half-space',
+                                 sound_speed=2000, density=2.2, attenuation=0.1),
 )
+bot_layered = Bottom.from_column(column)
 
-# RD layered — list of profiles along range
-rdlb = RangeDependentLayeredBottom(
-    ranges=np.array([0, 20000]),
-    profiles=[near_layered, far_layered],
-)
+# RD layered — one column per range node
+bot_rdl = Bottom.from_columns([near_column, far_column],
+                              ranges=np.array([0, 20000]))
 ```
 
-The bathymetry lives on `env.bathymetry` regardless of bottom flavour;
-RDLB only carries the sediment-stack range axis. See §5.2 for which
-model honours which flavour natively.
+The bathymetry lives on `env.bathymetry` regardless of bottom shape; the
+`Bottom` only carries the sediment-stack range axis. See §5.2 for which
+model honours which shape natively.
 
 ### Bathymetry & altimetry
 
@@ -529,7 +540,7 @@ env = uacpy.Environment(bathymetry=100, ssp=1500,
 `None` (default) means no volume absorption. `ConstantAbsorption(v)`
 writes the value into every SSP row's `alphaI` column (dB/wavelength) —
 useful when you have a calibrated value that isn't Thorp/FG. The choice
-is read by Bellhop, Kraken, KrakenC, KrakenField, Scooter, SPARC, Bounce,
+is read by Bellhop, Kraken, Scooter, SPARC, Bounce,
 OAST, OASN, OASR, OASP. RAM uses Q/T attenuation envelopes internally
 and ignores this field.
 
@@ -554,7 +565,7 @@ print(uacpy.data.citations(env))      # required attribution for the sources use
 
 | Function | Returns | Source |
 |----------|---------|--------|
-| `fetch_environment(point, *, date=None, ssp=None, ssp_sources=None, bathymetry=None, bathymetry_sources=None, bottom=None, bottom_sources=None, surface=None, surface_sources=None, altimetry=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, with_absorption=False, …)` | `Environment` | one-call assembly. Each axis is a **literal** (`ssp=`/`bathymetry=`/`bottom=`/`surface=`/`altimetry=`, as `Environment` takes them) and/or **fetched** from ordered-fallback `*_sources` (str ok); if both are given the source is fetched first and the literal is the fallback. Bathy/SSP fetch `'gebco'`/`'woa23'` by default; any `*_sources='auto'` picks best-available (ssp argo→copernicus→woa23, bathy gmrt→gebco, bottom emodnet→diesing→pelagic, surface seaice). `surface_sources='seaice'` → elastic ice surface from NSIDC (`altimetry` has no fetch source — literal only). Fetching is cache-first; `*_sources='cache'` pins an axis to local data only (no network) |
+| `fetch_environment(point, *, date=None, ssp=None, ssp_sources=None, bathymetry=None, bathymetry_sources=None, bottom=None, bottom_sources=None, surface=None, surface_sources=None, altimetry=None, transect_to=None, range_dependent_ssp=False, range_dependent_bottom=False, with_absorption=False, …)` | `Environment` | one-call assembly. Each axis is a **literal** (`ssp=`/`bathymetry=`/`bottom=`/`surface=`/`altimetry=`, as `Environment` takes them) and/or **fetched** from ordered-fallback `*_sources` (str ok); if both are given the source is fetched first and the literal is the fallback. Bathy/SSP fetch `'gebco'`/`'woa23'` by default; any `*_sources='auto'` picks best-available (ssp argo→copernicus→woa23, bathy gmrt→gebco, bottom emodnet→diesing→pelagic, surface seaice). `surface_sources='seaice'` → elastic ice surface from NSIDC (`altimetry` has no fetch source — literal only). Fetching is cache-first; `*_sources='local'` pins an axis to local data only (no network) |
 | `fetch_bathy(point)` · `fetch_bathy_transect(start, end, n_points=)` · `fetch_bathy_grid(lat_range, lon_range, n_lat=50, n_lon=50)` | depth (m) · `(N,2)` · `(lats, lons, depth)` | GEBCO (`source='api'`) or GMRT multibeam (`source='gmrt'`, higher-res) bathymetry |
 | `fetch_ssp(point, *, date= \| month=, formula='unesco', resolution='1.00')` · `fetch_ssp_transect(…)` · `fetch_ts_profile(…)` | `SoundSpeedProfile` · 2-D RD profile · `(z, T, S)` | WOA23 climatology |
 | `fetch_ssp_operational(point, date, …)` *(needs a free Copernicus account + login)* | `SoundSpeedProfile` | Copernicus Marine |
@@ -607,7 +618,7 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
 | `download_crust1_db()` then `bottom_sources='crust1'` / `fetch_bottom_crust1(point)` | CRUST1.0 layered Vp/Vs/density → **layered elastic** bottom for low-freq (no formal licence; cite Laske et al. 2013, verify for commercial) | default install (numpy) |
 | `download_seaice_db()` then `fetch_sea_ice_concentration(point, date=/month=)` (or `fetch_sea_ice_surface(...)` → elastic ice `BoundaryProperties`) | NSIDC sea-ice concentration monthly climatology (public domain) | default install (tifffile, pyproj) |
 | `download_coastline()` → `plot_bathymetry_map` / `plot_overview` | Natural Earth coastline (public domain) | default install |
-| `fetch_environment(point, ssp_sources='cache', bathymetry_sources='cache', bottom_sources='cache')` | all of the above | default install (local data only, no network) |
+| `fetch_environment(point, ssp_sources='local', bathymetry_sources='local', bottom_sources='local')` | all of the above | default install (local data only, no network) |
 
 - The cache lives at `./data_cache` (override with `$UACPY_DATA_CACHE`); the
   low-level `source='local'` fetchers raise a `ConfigurationError` naming the
@@ -616,14 +627,17 @@ Download them like OASES (gitignored, never bundled), then opt in per call:
   (`'woa23'`/`'copernicus'`/`'argo'`), `bathymetry_sources` (`'gebco'`/`'gmrt'`)
   and `bottom_sources` — each tried in order, the next on failure (a bare string
   is a 1-element list). `bottom_sources='auto'` is the preset chain EMODnet →
-  Diesing → pelagic (grain-size added when `offline`); `bottom=` instead takes a
-  *literal* override (ϕ float / material name / `BoundaryProperties`). All
-  sources are commercial-use clean.
-- **`offline`** is the cache/network axis. `False` (default) is **cache-first**:
-  re-use any installed local twin (a static global grid/climatology — same data,
-  faster), fetch live only for what isn't cached. `True` uses **only** cached
+  Diesing → pelagic (grain-size added in the `'local'` chain); `bottom=` instead
+  takes a *literal* override (ϕ float / material name / `BoundaryProperties`).
+  All sources are commercial-use clean.
+- **Cache vs network** is driven by the source tokens, not a separate flag.
+  `*_sources='local'` (e.g. `fetch_environment(ssp_sources='local',
+  bathymetry_sources='local', bottom_sources='local')`) uses **only** cached
   backends and never touches the network, raising a clear error for a source
-  with no cached twin (GMRT, Copernicus, Argo).
+  with no cached twin (GMRT, Copernicus, Argo). The default (and `'auto'`) is
+  **cache-first**: re-use any installed local twin (a static global
+  grid/climatology — same data, faster), fetching live only for what isn't
+  cached.
 - The local grain-size samples are **sparse points** (nearest-neighbour with a
   `max_distance_km` guard), gappier than EMODnet's continuous European-seas
   polygons — so EMODnet is preferred where it has coverage.
@@ -691,11 +705,10 @@ valid for very wide propagation angles, large depth variations, and
 
 | Model | Method | Frequency regime | Range dependence | Bottom physics | Output types | Reach for it when |
 |---|---|---|---|---|---|---|
-| **Bellhop** / **BellhopCUDA** | Gaussian-beam ray tracing | High f (D/λ ≳ 100); degrades as D/λ → 30 | Native (bathy, 2-D SSP, altimetry) | Fluid halfspace; layered/elastic via auto-routed Bounce `.brc` | TL, rays, eigenrays, arrivals, H(f), p(t) | HF sonar studies, eigenray/arrival structure, fast RD surveys, any deep-water work |
-| **Kraken** / **KrakenC** | Normal modes (real / complex k) | Low f, shallow (D/λ ≲ 30; mode count grows with f·D) | RI (collapses + warns) | Layered native; KrakenC adds elastic + leaky modes | Modes (k_m, ψ_m) | Modal physics: dispersion, group speeds, mode filtering, warping |
-| **KrakenField** | Modes + adiabatic/coupled coupling | Same as Kraken | Mild RD via profile segments | Layered native; elastic via krakenc | TL, H(f), p(t) | Low-f shallow TL when modal structure matters; gradual RD |
+| **Bellhop** (fortran/cxx/cuda) | Gaussian-beam ray tracing | High f (D/λ ≳ 100); degrades as D/λ → 30 | Native (bathy, 2-D SSP, altimetry) | Fluid halfspace; layered/elastic via auto-routed Bounce `.brc` | TL, rays, eigenrays, arrivals, H(f), p(t) | HF sonar studies, eigenray/arrival structure, fast RD surveys, any deep-water work |
+| **Kraken** (kraken/krakenc) | Normal modes (`compute_modes`) + adiabatic/coupled field (`compute_tl`) | Low f, shallow (D/λ ≲ 30; mode count grows with f·D) | Modes RI (collapses + warns); field path mild RD via segments | Layered native; `backend='krakenc'` (auto) adds elastic + leaky modes | Modes (k_m, ψ_m), TL, H(f), p(t) | Modal physics (dispersion, group speeds, warping) and low-f shallow TL when modal structure matters |
 | **Scooter** | Wavenumber integration (FFP) | Any f (cost ∝ f); exact | RI only | Full layered + elastic; receivers inside sediment | TL, H(f), p(t) | Range-independent **benchmark** truth; near-field; seismo-acoustics light |
-| **RAM** (mpiramS / rams0.5 / ramsurf1.5) | Split-step Padé PE (one-way) | Low–mid f (≲ 1 kHz practical; cost grows fast with f) | Native (bathy, 2-D SSP, RD sediment; rough surface via ramsurf1.5) | Layered fluid native; elastic via rams0.5 | TL, H(f), p(t) | The RD workhorse below ~1 kHz: slopes, ducts, shelf propagation |
+| **RAM** (mpiramS / ramgeo / rams0.5 / ramsurf1.5) | Split-step Padé PE (one-way) | Low–mid f (≲ 1 kHz practical; cost grows fast with f) | Native (bathy, 2-D SSP, RD sediment; layered fluid via ramgeo; rough surface via ramsurf1.5) | Layered fluid native (ramgeo, layers ∥ bathymetry); elastic via rams0.5 | TL, H(f), p(t) | The RD workhorse below ~1 kHz: slopes, ducts, shelf propagation |
 | **SPARC** | Time-marched FFP | Low f, pulse-band | RI only | Layered native | p(t), snapshots | RI pulse propagation / dispersion without Fourier synthesis |
 | **OAST** | Wavenumber integration | Any f (cost ∝ f); exact | RI only | Full elastic / porous layered stacks | TL | Benchmark TL over complex elastic seabeds |
 | **OASP** | Wavenumber integration, pulse | Any f; exact | RI only | Full elastic | H(f), p(t) | Broadband pulses over elastic seabeds |
@@ -711,7 +724,7 @@ valid for very wide propagation angles, large depth variations, and
   (incoherent TL for sonar-performance maps); in the 1–3 kHz gap both
   are defensible — check D/λ and cross-validate on a slice.
 - Modal quantities themselves (dispersion, ψ_m(z), group speed):
-  **Kraken/KrakenC**, fields via **KrakenField**.
+  **Kraken.compute_modes**; fields via **Kraken.compute_tl**.
 - Pulses: RI exact → **OASP** / **SPARC**; RD or arrival-resolved →
   **RAM** / **Bellhop** broadband synthesis.
 - Arrays / MFP / noise covariance: **OASN**. Seabed reflectivity:
@@ -721,11 +734,8 @@ valid for very wide propagation angles, large depth variations, and
 
 | Model | Coh TL | Incoh TL | Rays | Eigen | Arr. | Modes | Time series | Trans. fn | Refl. | Altim. |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Bellhop | ✓ | ✓ | ✓ | ✓ | ✓ | – | ✓ | ✓ | – | ✓ |
-| BellhopCUDA | ✓ | ✓ | ✓ | ✓ | ✓ | – | ✓ | ✓ | – | ✓ |
-| Kraken | – | – | – | – | – | ✓ | – | – | – | – |
-| KrakenC | – | – | – | – | – | ✓ | – | – | – | – |
-| KrakenField | ✓ | – | – | – | – | – | ✓ | ✓ | – | – |
+| Bellhop (fortran / cxx / cuda) | ✓ | ✓ | ✓ | ✓ | ✓ | – | ✓ | ✓ | – | ✓ |
+| Kraken (kraken / krakenc) | ✓ | – | – | – | – | ✓ | ✓ | ✓ | – | – |
 | Scooter | ✓ | – | – | – | – | – | ✓ | ✓ | – | – |
 | RAM (mpiramS / rams0.5 / ramsurf1.5) | ✓ | – | – | – | – | – | ✓ | ✓ | – | ✓ |
 | SPARC | ✓ | – | – | – | – | – | ✓ | – | – | – |
@@ -737,22 +747,22 @@ valid for very wide propagation angles, large depth variations, and
 
 OASN-only modes: `RunMode.COVARIANCE`, `RunMode.REPLICA`. `Time series`
 is genuine time-domain output (SPARC, OASP) **or** synthesised from
-arrivals (Bellhop) / a broadband transfer function (KrakenField,
+arrivals (Bellhop) / a broadband transfer function (Kraken,
 Scooter, RAM).
 
 ### 5.2 Environment feature support + collapse
 
-| Env feature | Bellhop | RAM | Kraken / KrakenC | KrakenField | Scooter | SPARC | OASES | Bounce |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| 1-D SSP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 2-D SSP | quad-only | mpiramS | warn | **segments** | warn | warn | warn | warn |
-| RD bathymetry | ✓ | ✓ | warn | **segments** | warn | warn | warn | warn |
-| `RangeDependentBottom` | **native** (long .bty) | mpiramS | warn | warn | warn | warn | warn | warn |
-| `LayeredBottom` | warn → BOUNCE | **native** | **native** | **native** | **native** | **native** | **native** | **native** |
-| `RangeDependentLayeredBottom` | warn → BOUNCE | **native** (mpiramS) | warn | warn | warn | warn | warn | warn |
-| Elastic bottom | auto → BOUNCE | auto → rams0.5 | Kraken→KrakenC; KrakenC native | krakenc.exe | ✓ | warn → rigid | ✓ | ✓ |
-| Reflection file (.brc / .trc) | ✓ | – | ✓ | ✓ | ✓ | – | – | **output** |
-| Altimetry | ✓ | auto → ramsurf1.5 | – | – | – | – | – | – |
+| Env feature | Bellhop | RAM | Kraken | Scooter | SPARC | OASES | Bounce |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| 1-D SSP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 2-D SSP | quad-only | mpiramS | **segments** | warn | warn | warn | warn |
+| RD bathymetry | ✓ | ✓ | **segments** | warn | warn | warn | warn |
+| RD half-space bottom | **native** (long .bty) | mpiramS | warn | warn | warn | warn | warn |
+| layered bottom | warn → BOUNCE | **native** | **native** | **native** | **native** | **native** | **native** |
+| RD layered bottom | warn → BOUNCE | **native** (ramgeo fluid / rams0.5 elastic / mpiramS) | warn | warn | warn | warn | warn |
+| Elastic bottom | auto → BOUNCE | auto → rams0.5 | auto → krakenc | ✓ | warn → rigid | ✓ | ✓ |
+| Reflection file (.brc / .trc) | ✓ | – | ✓ | ✓ | – | – | **output** |
+| Altimetry | ✓ | auto → ramsurf1.5 | – | – | – | – | – |
 
 Each model declares its env-shape capability via boolean flags on
 `__init__`; `_project_environment` walks every axis on `run()` and
@@ -765,22 +775,25 @@ reduces unsupported ones via the matching collapse key, with one
 |---|---|---|---|
 | `bathymetry` | `max\|median\|mean\|min\|initial` | `max` | RD bathy → flat depth |
 | `ssp` | `r0\|rmax\|mean\|median` | `r0` | 2-D SSP → 1-D |
-| `bottom` | `r0\|rmax\|mean\|median` | `r0` | RD halfspace → flat halfspace |
-| `layered` | `halfspace\|top_layer\|volume_average` | `halfspace` | layer stack → halfspace |
-| `rd_layered_range` | `r0\|rmax\|median` | `median` | RDLB → which range to sample |
-| `rd_layered_layers` | `preserve\|halfspace\|top_layer\|volume_average` | `halfspace` | flatten layers (or `preserve` to keep them — requires layered support) |
+| `bottom_range` | `r0\|rmax\|mean\|median` | `r0` | range-dependent bottom → one column (`mean`/`median` only for all-halfspace bottoms) |
+| `bottom_layers` | `halfspace\|top_layer\|volume_average` | `halfspace` | layer stack → halfspace |
 | `altimetry` | `drop` | `drop` | flat surface |
 | `elastic` | `fluid\|vacuum` | `fluid` | drop shear, keep cp/ρ/α |
 
+The bottom collapses on two independent axes: `bottom_range` picks a
+single `SeabedColumn` when the model can't honour the range axis, and
+`bottom_layers` flattens that column's layer stack when the model can't
+honour layers. A model that natively consumes layers simply never
+triggers the `bottom_layers` branch — there is no explicit "preserve".
+
 **Per-model defaults override the global table.** Single-shot
 range-independent solvers (Kraken/C, Scooter, SPARC, OAST, OASN, OASP,
-Bounce) default to `'bottom': 'median'` and `'rd_layered_layers':
-'preserve'` (when they natively consume `LayeredBottom`); the
-single-spectrum solvers also default `'ssp': 'mean'`. KrakenField
-defaults `'bottom': 'median'` and `'rd_layered_layers': 'preserve'`
-since it segments bathy/SSP natively but still needs to collapse the
-bottom axis. Bellhop, BellhopCUDA, OASR (SSP irrelevant), and RAM use
-the global defaults.
+Bounce) default to `'bottom_range': 'median'` (and keep the layer stack,
+which they consume natively); the single-spectrum solvers also default
+`'ssp': 'mean'`. Kraken defaults `'bottom_range': 'median'` since it
+segments bathy/SSP natively but still collapses the bottom range axis.
+Bellhop, OASR (SSP irrelevant), and RAM use the global
+defaults.
 
 `Bellhop` **auto-routes through BOUNCE** for any env with a layered or
 elastic bottom (one `UserWarning`, the parent's `collapse={…}` dict is
@@ -789,15 +802,21 @@ sits on `result.metadata['bounce_result']` for inspection without
 re-running BOUNCE. Use `Bellhop.run_with_bounce(...)` to override
 `c_low`/`c_high`/`rmax`, or `Bellhop(auto_bounce=False)` to disable.
 
-### 5.3 Bellhop / BellhopCUDA — Gaussian beam / ray tracing
+### 5.3 Bellhop — Gaussian beam / ray tracing (Fortran / C++ / CUDA)
 
-Ray/beam tracer (`bellhop.exe`); `BellhopCUDA` is the CUDA / C++ port
-auto-picked by `Bellhop(prefer_cuda=True)`. Supports every ray product
-and broadband synthesis via the arrivals → `H(f)` → IFFT pipeline.
+Ray/beam tracer with three interchangeable binaries selected by
+`backend=`: `'fortran'` (`bellhop`), `'cxx'` (`bellhopcxx`, multithreaded
+CPU), `'cuda'` (`bellhopcuda`, GPU). `backend=None` (default) auto-picks
+CUDA > C++ > Fortran among whatever `install.sh` built; an explicitly
+requested-but-missing variant falls back to the Fortran binary with a
+`UserWarning`. (Mirrors `RAM(backend=…)`.) Supports every ray product and
+broadband synthesis via the arrivals → `H(f)` → IFFT pipeline.
 
 ```python
 from uacpy.models import Bellhop, RunMode
-bh = Bellhop(beam_type='B',          # B Gaussian | R ray-centered | C Cartesian | g/G geometric
+bh = Bellhop(backend=None,           # None auto | 'fortran' | 'cxx' | 'cuda'
+             dimensionality='2D',     # '--2D'/'--3D' flag for the cxx/cuda CLIs
+             beam_type='B',          # B Gaussian | R ray-centered | C Cartesian | g/G geometric
              alpha=(-80, 80),         # launch-angle limits (deg)
              arrivals_format='ascii') # 'binary' (Fortran unformatted) is not parseable
 field = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
@@ -823,9 +842,15 @@ trace = ts.to_time_trace(depth=50.0, range=2000.0)    # 1-D Field over time
   source for TL modes, one :class:`Rays` for ``RAYS``/``EIGENRAYS``,
   one :class:`Arrivals` for ``ARRIVALS``). The stack carries the
   source-depth labels in ``stack.coordinate`` (with
-  ``stack.coordinate_name == 'source_depth'``). Pick a slab via
-  ``stack[i]`` or ``stack.at(source_depth=z)`` before calling slab-
-  typed accessors (``.tl``, ``.rays``, ``.plot()``).
+  ``stack.coordinate_name == 'source_depth'``). For TL (Field) stacks the
+  stack itself exposes Field-like accessors — ``stack.tl`` returns the TL
+  stacked along the source-depth axis (shape ``(n_src, …)``) and
+  ``stack.plot()`` draws one TL panel per source — so generic code that does
+  ``result.tl`` / ``result.plot()`` works whether one or many source depths
+  were requested. Pick an individual slab via ``stack[i]`` or
+  ``stack.at(source_depth=z)`` for per-slab work (and for ``Rays`` /
+  ``Arrivals`` stacks, whose ``.rays`` / ``.arrivals`` accessors live on the
+  slab, not the stack).
 - :class:`ResultStack` generalises to any stacking axis — pass
   ``coordinate_name='frequency'`` or any external coordinate name
   (``'wind_speed'``, ``'azimuth'``, …) to bundle slabs from a custom
@@ -836,75 +861,59 @@ trace = ts.to_time_trace(depth=50.0, range=2000.0)    # 1-D Field over time
 
 Examples: 01, 04, 11, 16, 24.
 
-### 5.4 Kraken / KrakenC — normal modes
+### 5.4 Kraken — normal modes + field pipeline (`backend=`)
 
-Real (Kraken) and complex (KrakenC) normal-modes solvers. Both share
-`_KrakenBase`; KrakenC finds eigenvalues in the complex plane and so
-handles elastic / lossy / leaky cases (a strict superset — it also
-solves fluid envs). **No auto-route at the class level** — `Kraken`
-on an env with ``shear_speed > 0`` or ``leaky_modes=True`` raises
-:class:`UnsupportedFeatureError` up front pointing at ``KrakenC``;
-instantiate ``KrakenC`` directly for those. (Other numerical
-mode-finding failures on fluid envs still surface as a PRT-aware
-:class:`ModelExecutionError` that likewise suggests KrakenC.)
-``KrakenField`` *does* pick ``krakenc.exe`` for its internal modes
-solve automatically — choosing the modes binary is its job, so it
-does so silently.
+One `Kraken` over the AT pipeline, mirroring `RAM(backend=…)`. `backend=`
+selects the modes binary — `'kraken'` (real) or `'krakenc'` (complex:
+elastic / lossy / leaky, a strict superset that also solves fluid envs);
+`None` (default) **auto-picks** `krakenc` when the env carries shear or
+`leaky_modes=True`, else `kraken`. Forcing `'kraken'` where complex
+eigenvalues are required raises :class:`ConfigurationError`. `field.exe`
+runs **only when the run mode needs a field**:
+
+- `compute_modes` (`RunMode.MODES`) → modes binary only → `Modes` (`k`, `phi`).
+- `compute_tl` / `compute_transfer_function` / `compute_time_series`
+  (`COHERENT_TL` / `BROADBAND` / `TIME_SERIES`) → modes binary → `field.exe`
+  → `.shd` → `Field` (TL / `H(f)` / `p(t)`), via adiabatic or coupled-mode
+  theory (`mode_coupling=`).
+
+> **`run()` defaults to a field mode** (`COHERENT_TL`, or `BROADBAND` when
+> a multi-frequency `frequencies=` is passed). For modes, call
+> `compute_modes(...)` (or `run(run_mode=RunMode.MODES)`).
 
 ```python
-from uacpy.models import Kraken, KrakenC
-modes = Kraken(c_low=None, c_high=None,   # None ⇒ 0.95 × min SSP / 1.05 × max SSP+bottom
+from uacpy.models import Kraken
+modes = Kraken(c_low=None, c_high=None,   # None ⇒ auto phase-speed bounds
                n_mesh=0,                   # 0 ⇒ auto
                leaky_modes=False) \
-        .run(env, source, receiver)
+        .compute_modes(env, source)        # → Modes
 modes.k          # complex wavenumbers, shape (M,)
 modes.phi        # (n_z, M) eigenfunctions
+
+# Field (auto-routes to krakenc for elastic; force with backend=)
+tl = Kraken(mode_coupling='adiabatic', n_segments=10).compute_tl(env, source, receiver)
 ```
 
 **Caveats:**
 - Modes solve an eigenproblem of the **whole** water column; no
-  source-side. Per-model defaults: `'ssp': 'mean'`, `'bottom': 'median'`
-  (RD inputs collapse to representative samples).
-- KrakenField — not Kraken — handles range-dependent envs (segments).
-- Real Kraken raises `UnsupportedFeatureError` on elastic / leaky envs
-  pointing at KrakenC (no auto-route).
-- An elastic `LayeredBottom` layer over a **fluid** halfspace (a
-  solid-over-liquid bottom interface) is rejected up front by all three
-  Kraken-family models — `krakenc.exe` hangs in setup on it. Use
-  Scooter / OASES. (Elastic half-spaces and elastic-over-elastic stacks
-  are fine.)
-
-Example: 06.
-
-### 5.5 KrakenField — modes + field pipeline
-
-Runs `kraken.exe` (or `krakenc.exe` for elastic) then `field.exe`.
-Produces TL grids via adiabatic or coupled-mode theory, plus broadband
-`H(f)` and `p(t)` through `RunMode.BROADBAND` / `RunMode.TIME_SERIES`.
-
-```python
-from uacpy.models import KrakenField
-kf = KrakenField(mode_coupling='adiabatic',    # 'adiabatic' | 'coupled'
-                 coherent=True,                  # coupled+coherent=False is rejected
-                 n_segments=10)                  # range segments for RD
-field = kf.run(env, source, receiver)            # default RunMode.COHERENT_TL
-```
-
-**Caveats:**
-- Range-dependent bathymetry and SSP are honoured natively (segments).
-- Range-dependent / layered bottoms still collapse — defaults
-  `'bottom': 'median'`, `'rd_layered_layers': 'preserve'`.
-- Rejects `'Q'` SSP interp (Bellhop-only).
-- No altimetry support.
-- With an elastic `LayeredBottom` layer present, receivers below the
+  source-side. The MODES path is range-independent and samples the r=0
+  profile of any RD env (with a warning). Per-model collapse default
+  `'bottom_range': 'median'`.
+- Range-dependent bathymetry and SSP are honoured natively in the field
+  path (segments); the MODES path collapses them.
+- Rejects `'Q'` SSP interp (Bellhop-only). No altimetry support.
+- An elastic layered column over a **fluid** halfspace (a
+  solid-over-liquid bottom interface) is rejected up front —
+  `krakenc.exe` hangs in setup on it. Use Scooter / OASES. (Elastic
+  half-spaces and elastic-over-elastic stacks are fine.)
+- With an elastic layered column present, field-mode receivers below the
   water column are returned as **NaN** (`field.exe`'s `Comp` selector
   cannot evaluate the field inside elastic media); the water-column
-  receivers are computed normally. One `UserWarning` is emitted. (The
-  elastic-over-fluid-halfspace geometry is rejected earlier — see §5.4.)
+  receivers are computed normally, with one `UserWarning`.
 
-Examples: 18, 19.
+Examples: 06, 18, 19.
 
-### 5.6 Scooter — wavenumber integration (FFP)
+### 5.5 Scooter — wavenumber integration (FFP)
 
 Range-independent finite-element FFP (frequency domain). The `.grn`
 output is converted to range-domain TL via the in-tree Python Hankel
@@ -921,22 +930,31 @@ field = sc.run(env, source, receiver)
 
 Supported run modes: `COHERENT_TL`, `BROADBAND`, `TIME_SERIES`. Supports
 elastic + layered bottoms natively. Per-model defaults: `'ssp': 'mean'`,
-`'bottom': 'median'`, `'rd_layered_layers': 'preserve'`.
+`'bottom_range': 'median'` (the layer stack is kept).
 
 Example: 19.
 
-### 5.7 RAM — parabolic equation (multi-backend dispatcher)
+### 5.6 RAM — parabolic equation (multi-backend dispatcher)
 
-Façade that auto-picks one of three vendored Collins-family PE binaries:
+Façade that auto-picks one of four vendored Collins-family PE binaries:
 
 | Env shape | Backend | Source |
 |---|---|---|
-| fluid bottom + flat surface | `mpiramS` | Dushaw broadband Fortran 95 PE |
+| fluid + flat, **layered** bottom, narrowband | `ramgeo` | Collins RD layered-fluid PE (layers parallel the bathymetry) |
+| fluid + flat (other / broadband) | `mpiramS` | Dushaw broadband Fortran 95 PE |
 | any `shear_speed > 0` | `rams0.5` | Collins elastic PE |
 | `env.altimetry is not None` | `ramsurf1.5` | Collins variable-surface PE |
-| elastic + altimetry | `NotImplementedError` | (no published Collins PE) |
+| elastic + altimetry | `UnsupportedFeatureError` | (no published Collins PE) |
 
-Inspect via `RAM(...).select_backend(env)`. Every result carries
+`ramgeo` is auto-selected only for `COHERENT_TL` (its bathymetry-parallel
+sediment layers are the most faithful Collins treatment of a sloping layered
+fluid seabed); broadband stays on `mpiramS`'s faster native sweep. All four
+backends support every run mode when **forced** via `RAM(backend=...)`
+(`'mpiramS'`/`'ramgeo'`/`'rams'`/`'ramsurf'`) — a forced backend that cannot
+represent the env (e.g. a fluid backend for an elastic bottom) raises
+`ConfigurationError`.
+
+Inspect via `RAM(...).select_backend(env, run_mode=…)`. Every result carries
 `result.backend` so you can audit what the dispatcher chose, plus
 `dr`/`dz`/`c0`/`zmax`/`Q`/`T` on `result.metadata`.
 
@@ -977,7 +995,7 @@ angle across a band.
 
 Examples: 05, 18, 19, 20, 22.
 
-### 5.8 SPARC — time-domain PE
+### 5.7 SPARC — time-domain PE
 
 Range-independent time-marched FFP. Native time-domain — `RunMode.TIME_SERIES`
 returns a `Field` directly, shape `(n_d, n_r, n_t)`.
@@ -1008,15 +1026,15 @@ envelope).
   source frequency must stay below the snapshot Nyquist (`0.5/dt`); the
   wrapper raises with a remediation hint if not.
 - Only `Vacuum` / `Rigid` bottom interfaces (writer auto-converts).
-- Per-model defaults: `'ssp': 'mean'`, `'bottom': 'median'`,
-  `'rd_layered_layers': 'preserve'`.
+- Per-model defaults: `'ssp': 'mean'`, `'bottom_range': 'median'`
+  (the layer stack is kept).
 
 Example: 19.
 
-### 5.9 Bounce — reflection-coefficient writer
+### 5.8 Bounce — reflection-coefficient writer
 
 Writes `.brc` (bottom) and `.irc` (internal) reflection-coefficient
-files for use by Bellhop / Scooter / KrakenC (`.brc`) or Kraken
+files for use by Bellhop / Scooter / Kraken (`.brc`) or Kraken
 (`.irc`). Only emits `RunMode.REFLECTION`.
 
 ```python
@@ -1034,18 +1052,29 @@ res.metadata['irc_file']                      # Kraken consumer
 
 Pin `work_dir` to persist the `.brc` / `.irc` files (default
 `cleanup=True` wipes the tempdir; see §2 for the rule). Per-model
-defaults: `'bottom': 'median'`, `'rd_layered_layers': 'preserve'` —
+default: `'bottom_range': 'median'` (the layer stack is kept) —
 one BRC consumed across the whole receiver-range axis.
 
 Examples: 15, 16.
 
-### 5.10 OASES — OAST / OASN / OASR / OASP
+### 5.9 OASES — OAST / OASN / OASR / OASP
 
-Four sub-models mirror the OASES Fortran utilities. Volume absorption is
-read from `env.absorption` like every other AT-family model; the chosen
-formula's single-letter marker is appended to the OASES options string
-(OASES uses empirical Skretting–Leroy internally, so the marker is
-informational rather than a physics switch).
+Four sub-models wrap the OASES Fortran utilities. **OASES is a
+run-mode-keyed factory, not a single class** — unlike every other model
+(one class, `run_mode` passed to `.run()`), `OASES.for_mode(run_mode=...)` *returns*
+the matching sub-model (`OAST`/`OASN`/`OASR`/`OASP`), and those sub-models
+have intentionally **different `run()` signatures** (OAST takes no
+`frequencies`; OASP takes the full broadband set; OASR takes `frequencies`
+only). So `OASES.for_mode(run_mode=BROADBAND)` works but `OAST().run(run_mode=BROADBAND)`
+does not — pick the sub-model (or the factory) for the output you want.
+
+**Volume absorption is NOT taken from `env.absorption`.** Unlike the AT
+family / RAM, OASES applies its own internal empirical Skretting–Leroy
+attenuation to any AC=0 water layer, so a non-`None` `env.absorption`
+(Thorp / Francois–Garrison / Biological / Constant) is **ignored with a
+`UserWarning`** — the water column is still attenuated, just by OASES's
+formula, not the chosen one. Use Scooter for an FFP model that honours
+`env.absorption`.
 
 ```python
 from uacpy.models import OAST, OASN, OASR, OASP, OASES
@@ -1078,19 +1107,19 @@ oasp = OASP(n_time_samples=4096, freq_max=250.0)
 tf = oasp.run(env, source, receiver, run_mode=RunMode.BROADBAND)
 
 # One-line factory — pick the right sub-class by run_mode
-m = OASES(run_mode=RunMode.COVARIANCE)     # → OASN
-m = OASES(broadband=True)                   # → OASP (instead of default OAST)
+m = OASES.for_mode(run_mode=RunMode.COVARIANCE)     # → OASN
+m = OASES.for_mode(broadband=True)                   # → OASP (instead of default OAST)
 ```
 
 OASP is wideband wavenumber-integration / pulse synthesis (NOT a
-parabolic equation). Per-model defaults for all four:
-`'bottom': 'median'`, `'rd_layered_layers': 'preserve'`. OAST/OASN/OASP
+parabolic equation). Per-model default for all four:
+`'bottom_range': 'median'` (the layer stack is kept). OAST/OASN/OASP
 also default `'ssp': 'mean'`; OASR keeps `'ssp': 'r0'` (the SSP
 boundary speed is essentially irrelevant to the reflection coefficient).
 
 Examples: 13, 19.
 
-### 5.11 Running in parallel — `run_parallel`
+### 5.10 Running in parallel — `run_parallel`
 
 Every model run is an independent, subprocess-bound computation, so a
 batch of runs is embarrassingly parallel. `uacpy.run_parallel` runs a
@@ -1102,7 +1131,7 @@ from uacpy import Job, run_parallel, RunMode
 jobs = [
     Job(uacpy.models.Bellhop(n_beams=800), env, src, rcv,
         run_mode=RunMode.COHERENT_TL, label='bellhop'),
-    Job(uacpy.models.KrakenField(),        env, src, rcv,
+    Job(uacpy.models.Kraken(),             env, src, rcv,
         run_mode=RunMode.COHERENT_TL, label='kraken'),
     Job(uacpy.models.RAM(),                env, src, rcv,
         run_mode=RunMode.COHERENT_TL, label='ram'),
@@ -1223,9 +1252,10 @@ without relying on the originating model. The same string also appears
 in `repr(field)` so REPL output reads `Field(kind='tl', model='…',
 f=… Hz, axes=(depth, range))`.
 
-`SoundSpeedProfile` and `RangeDependentBottom` read with
-`.at(..., interp='linear'|'nearest')` — `'linear'` interpolates between
-stored samples, `'nearest'` snaps to the closest one.
+`SoundSpeedProfile.at(...)` and `Bottom.halfspace_at(range=,
+interp='linear'|'nearest')` read between stored samples — `'linear'`
+interpolates, `'nearest'` snaps to the closest one (a layered `Bottom`
+forces `'nearest'`, since layer stacks can't be blended).
 
 ### Common metadata
 
@@ -1233,7 +1263,7 @@ Every `Result` carries:
 
 | Attribute | Type | Meaning |
 |---|---|---|
-| `model` | `str` | wrapper class name (`'Bellhop'`, `'KrakenField'`, …) |
+| `model` | `str` | wrapper class name (`'Bellhop'`, `'Kraken'`, …) |
 | `backend` | `str` | concrete binary that ran (`'mpiramS'`, `'kraken.exe'`, …); `== model` (lowercased) when no dispatcher |
 | `source_depths` | `ndarray` | every source depth in the run |
 | `frequencies` | `ndarray` | always 1-D, plural; `result.f0` is the convenience scalar |
@@ -1254,9 +1284,8 @@ cleaned up, no signal needed.
 
 | Model | Keys (when present) |
 |---|---|
-| Bellhop / BellhopCUDA | `shd_file` / `arr_file` / `ray_file` (run-mode dependent), `prt_file` |
-| Kraken / KrakenC | `mod_file`, `prt_file` |
-| KrakenField | `shd_file`, `mod_file`, `prt_file` |
+| Bellhop | `shd_file` / `arr_file` / `ray_file` (run-mode dependent), `prt_file` |
+| Kraken | `mod_file` (modes), `shd_file` (field), `prt_file` |
 | Scooter | `grn_file`, `prt_file` |
 | SPARC | `grn_file` / `rts_file` (output-mode dependent), `prt_file` |
 | OAST | `plt_file`, `prt_file` |
@@ -1281,12 +1310,12 @@ result.metadata['shd_file']                   # → './out/bellhop_run.shd'
 `Field.phase_reference` is a `PhaseReference` enum (subclass
 of `str`). Two values today:
 
-- **`'travelling_wave'`** — Bellhop / Scooter / OASP / KrakenField /
+- **`'travelling_wave'`** — Bellhop / Scooter / OASP / Kraken /
   RAM (all backends) / SPARC steady-state modes (`output_mode='R'/'D'/'S'`,
   recovered via time-FFT + Hankel transform of the native pressure).
   `H(f)` carries the engineering propagator `exp(-i 2πf r/c)`; a direct
   IFFT aligns arrivals at `t = r/c`. The wrappers normalise across
-  solvers (negate KrakenField field.exe to match Scooter polarity; bake
+  solvers (negate Kraken field.exe to match Scooter polarity; bake
   the carrier into RAM mpiramS / rams0.5 / ramsurf1.5 outputs which
   each store a different raw quantity).
 - **`'time_domain_native'`** — SPARC `RunMode.TIME_SERIES`. Result data
@@ -1378,7 +1407,7 @@ For eigenray runs, pass a multi-point `Receiver`; the result has
 
 ## 7. Visualization
 
-`uacpy.visualization` ships a **canonical 20-function surface**. Slice
+`uacpy.visualization` ships a **canonical set of plotting helpers**. Slice
 the `Field` first (`.at()` / `.isel()`) and the auto-shape plotters do
 the rest. Every result type has a `.plot(env=env)` method that
 dispatches to the right helper.
@@ -1404,7 +1433,7 @@ Note that this call mutates process-global `mpl.rcParams` and persists
 across subsequent plots — wrap in `matplotlib.rc_context()` if you
 want it scoped.
 
-### The 20 helpers
+### The helpers
 
 | Helper | Takes | Notes |
 |---|---|---|
@@ -1418,7 +1447,8 @@ want it scoped.
 | `compare_models(fields, labels=None, *, env=None, ncols=None, contours=None, ...)` | list/dict of 2-D `Field`s | Side-by-side heatmap grid with one shared colourbar. |
 | `plot_rays(rays, *, env=None, color_by='bounces', ...)` | `Rays` | Direct/surface/bottom/both colour-coded; auto-overlays seafloor and source/receivers. |
 | `plot_arrivals(arrivals, ...)` | `Arrivals` | Stem plot, same multipath palette as `plot_rays`. |
-| `plot_environment(env, *, source=None, receiver=None)` | `Environment` | **Single panel** showing water column (Blues, by SSP) + bottom (YlOrBr, by cs) on the same axes. Auto-branches over the four bottom flavours (half-space / `LayeredBottom` / `RangeDependentBottom` / `RangeDependentLayeredBottom`); each layer / Voronoi cell / RDLB column is colored by its `sound_speed`, with a per-flavour property-card legend. **Two colorbars**: `Water cp` (left) and `Bottom cp` (right; suppressed when bottom is a single half-space). `source=` adds a red star at `(r=0, z=src.depths)`; `receiver=` adds green markers, auto-decimated to ≤20×20 with the decimation labelled on the x-axis (`(receivers: N×M, 1/n×1/m shown)`). |
+| `plot_environment(env, *, source=None, receiver=None)` | `Environment` | **Single panel** showing water column (Blues, by SSP) + bottom (YlOrBr, by cp) on the same axes. Auto-branches over the four `Bottom` shapes (half-space / layered / RD half-space / RD layered); each layer / Voronoi cell / range column is colored by its `sound_speed`. **Two colorbars**: `Water cp` (left) and `Bottom cp` (right; suppressed when bottom is a single half-space). `source=` adds a red star at `(r=0, z=src.depths)`; `receiver=` adds green markers, auto-decimated to ≤20×20 with the decimation labelled on the x-axis (`(receivers: N×M, 1/n×1/m shown)`). For the seabed's other geoacoustic properties (cs, ρ, αp, αs), use `plot_bottom_properties`. |
+| `plot_bottom_properties(env, *, properties=None, ...)` | `Environment` | **Small-multiples** seabed cross-sections — one range×sub-bottom-depth heatmap per property present in `env.bottom`: sound speed `cp`, shear speed `cs`, density `ρ`, compressional/shear attenuation `αp`/`αs`, each with its own colorbar. Properties uniformly zero/absent (e.g. shear for a fluid seabed) are skipped; layers track the bathymetry. The visual home for shear & friends after the env-panel property cards were retired. |
 | `plot_mode_functions(modes, n_modes=None, ...)` | `Modes` | Overlaid `ψ_m(z)` curves. |
 | `plot_mode_wavenumbers(modes, ...)` | `Modes` | `Re(k_m)` scatter + `Im` twin axis when leaky. |
 | `plot_modes_heatmap(modes, *, mode_range=None, normalize=True, cmap='RdBu_r')` | `Modes` | Heatmap of `ψ_m(z)` across mode index. |
@@ -1453,7 +1483,7 @@ caller can pass a pre-built axes for multi-panel layouts) and returns
 fig, ax = plot_field(field, env=env, contours=[70, 80, 90])
 
 # Multi-model comparison with one shared colourbar
-compare_models({'Bellhop': f_bh, 'RAM': f_ram, 'KrakenField': f_kf},
+compare_models({'Bellhop': f_bh, 'RAM': f_ram, 'Kraken': f_kf},
                env=env, contours=[70, 80])
 ```
 
@@ -1847,25 +1877,29 @@ the modelled medium. A **receiver** there is *accepted* with a
 transmitted field, Kraken evanescent tail, RAM `NaN` in the PE absorbing
 layer). Full-waveguide solvers (Scooter, SPARC, the Kraken family) mesh
 through sediment, so their resolvable depth is the water column plus all
-`LayeredBottom` sediment thicknesses, not just `env.depth`.
+sediment-layer thicknesses, not just `env.depth`.
 
-**Kraken says "does not support range-dependent environments".** Use
-`KrakenField` (adiabatic / coupled modes) or switch to Bellhop / RAM.
+**Range-dependent environment with Kraken.** Kraken's *field* modes
+(`compute_tl` / broadband) segment RD bathymetry & SSP natively
+(`mode_coupling='adiabatic'|'coupled'`); only the RD *bottom* axis
+collapses (`bottom_range`). `compute_modes` is range-independent and
+samples the r=0 profile (with a warning). For RD that Kraken can't
+segment, switch to Bellhop / RAM.
 
 **A model dropped my range-dependent SSP / bottom / layered bottom.**
 Each unsupported feature triggers one `UserWarning` per `run()`. Either
 pick a model that supports it (§5.2) or change the collapse policy —
-`Kraken(collapse={'ssp': 'mean', 'bottom': 'median'})`.
+`Kraken(collapse={'ssp': 'mean', 'bottom_range': 'median'})`.
 
-**`LayeredBottom` / RDLB / elastic / shear-RD bottom in Bellhop.**
+**Layered / RD-layered / elastic / shear-RD bottom in Bellhop.**
 Auto-routed through BOUNCE — generates a `.brc` table and re-runs
 Bellhop against `acoustic_type='file'`, with one `UserWarning`. Use
 `Bellhop.run_with_bounce(...)` for explicit BOUNCE parameters, or pick
-a natively-layered model (Kraken / KrakenC / Scooter / SPARC / OASES).
+a natively-layered model (Kraken / Scooter / SPARC / OASES).
 
 **OASN normal modes.** OASN does NOT produce eigenfunctions; it produces
 covariance matrices (`.xsm` → `Covariance`) and matched-field replicas
-(`.rpo` → `Replicas`). For eigenfunctions, use Kraken / KrakenC.
+(`.rpo` → `Replicas`). For eigenfunctions, use Kraken.compute_modes.
 
 **Bellhop ray box too small.** Increase `r_box` / `z_box`, or let them
 default (1.2 × receiver extent).
@@ -1885,7 +1919,7 @@ response with `source_waveform`. For native time-domain propagation,
 use SPARC (time-marched PE) or OASP (broadband wavenumber-integration /
 pulse synthesis).
 
-**OASES factory rejects a kwarg.** `OASES(...)` forwards kwargs to the
+**OASES factory rejects a kwarg.** `OASES.for_mode(...)` forwards kwargs to the
 chosen sub-class; mistypes surface as `TypeError` instead of being
 silently dropped. Check the targeted class's signature
 (`help(OASN)` / `help(OASR)` / etc.).
@@ -1916,7 +1950,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 13 | `example_13_oases_suite.py` | OAST / OASN / OASR / OASP | |
 | 14 | `example_14_plotting_features.py` | Visualization tour | |
 | 15 | `example_15_elastic_boundaries_comparison.py` | Fluid vs elastic bottoms | |
-| 16 | `example_16_bellhop_bounce_integration.py` | `Bellhop.run_with_bounce()` + `LayeredBottom` | |
+| 16 | `example_16_bellhop_bounce_integration.py` | `Bellhop.run_with_bounce()` + layered `Bottom` | |
 | 17 | `example_17_boundary_conditions_layered.py` | Surface BC + layered bottoms (RD layered, preset stacks) | ✓ |
 | 18 | `example_18_rd_bottom_krakenfield_vs_ram.py` | RD layered bottom: adiabatic vs coupled vs RAM | |
 | 19 | `example_19_broadband_comparison.py` | Multi-model `H(f)` + `p(t)` (Bellhop / RAM / Scooter / OASP / SPARC) | ✓ |
@@ -1926,7 +1960,7 @@ needing a longer subprocess timeout (240 s instead of 120 s).
 | 23 | `example_23_collapse_methods.py` | Same RD env collapsed multiple ways via `collapse={…}` | |
 | 24 | `example_24_synthesize_time_series.py` | Bellhop `H(f)` → IFFT → `p(t)` via `Field.synthesize_time_series` | |
 | 25 | `example_25_canonical_presets.py` | Parametric SSPs + plane-wave bottom-loss overlay | |
-| 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / KrakenField / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
+| 26 | `example_26_wave_propagation.py` | Animated p(d, r, t) — SPARC / Scooter / RAM / Kraken / Bellhop side by side via the `output_duration=` API | demo-only (skipped in CI) |
 | 27 | `example_27_sonar_equation.py` | `uacpy.sonar`: signal excess, reverberation vs noise, detection range; SE + detection-probability maps over a Bellhop TL grid (`*_signal_excess_field`, `probability_of_detection_field`, `detection_range_by_depth`) | |
 | 28 | `example_28_matched_filter.py` | Pulse compression + range-Doppler ambiguity function | |
 | 29 | `example_29_array_processing.py` | Bartlett vs MVDR/Capon vs MUSIC direction-of-arrival | |

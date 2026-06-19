@@ -58,8 +58,8 @@ def test_transect_holds_and_varies(tmp_path, monkeypatch):
     emodnet_local.download_emodnet_db()
     rdb = emodnet_local.fetch_bottom_local_transect(
         (30.5, -40.5), (31.5, -40.5), n_points=3)
-    assert rdb.sound_speed.shape == (3,)
-    assert (rdb.sound_speed > 1500).all()
+    assert rdb.halfspace_sound_speed.shape == (3,)
+    assert (rdb.halfspace_sound_speed > 1500).all()
 
 
 def test_missing_cache_names_install_flag(tmp_path, monkeypatch):

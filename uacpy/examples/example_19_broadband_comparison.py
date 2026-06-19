@@ -7,13 +7,13 @@ OBJECTIVE:
     Demonstrate broadband / time-series capability across all models that
     support it:
     - Bellhop: ray-tracing arrivals → transfer function or delay-and-sum
-    - RAM (mpiramS, ramsurf1.5): native broadband fluid PE — two independent
-      codes on the same fluid Pekeris (the elastic backend rams0.5 is excluded
-      here; its rotated-Padé march is marginally stable and unsuited to
-      wide-band time-series synthesis — see §3 below)
+    - RAM (mpiramS, ramgeo, ramsurf1.5): native broadband fluid PE — three
+      independent Collins-family codes on the same fluid Pekeris (the elastic
+      backend rams0.5 is excluded here; its rotated-Padé march is marginally
+      stable and unsuited to wide-band time-series synthesis — see §3 below)
     - SPARC: time-marched FFP, returns time-domain pressure
     - Scooter: multi-frequency FFP, returns transfer function
-    - KrakenField: multi-frequency normal modes, returns transfer function
+    - Kraken: multi-frequency normal modes, returns transfer function
 
 SCENARIO:
     Pekeris waveguide (isovelocity, 100 m depth, 100 Hz center frequency).
@@ -37,7 +37,7 @@ FEATURES DEMONSTRATED:
     - RunMode.TIME_SERIES for time-domain p(t):
         * SPARC: native time-marching (no source waveform required)
         * Bellhop: delay-and-sum with source_waveform + sample_rate
-        * RAM/Scooter/KrakenField: BROADBAND + IFFT-convolve with source waveform
+        * RAM/Scooter/Kraken: BROADBAND + IFFT-convolve with source waveform
     - Transfer function (complex pressure vs. frequency) output
     - IFFT synthesis for time-domain impulse response
     - Delay-and-sum convolution with LFM chirp source
@@ -60,7 +60,7 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 import uacpy  # noqa: E402
-from uacpy.models import Bellhop, RAM, SPARC, Scooter, KrakenField, OASP  # noqa: E402
+from uacpy.models import Bellhop, RAM, SPARC, Scooter, Kraken, OASP  # noqa: E402
 from uacpy.models.base import RunMode  # noqa: E402
 
 
@@ -127,12 +127,15 @@ def main():
         print(f"  SKIPPED: {e}")
 
     # =========================================================================
-    # 3. RAM BROADBAND — the two fluid PE backends
+    # 3. RAM BROADBAND — the three fluid PE backends
     # =========================================================================
     # The dispatcher routes by env: Pekeris fluid + flat surface → mpiramS;
     # fluid + a flat z=0 altimetry line → ramsurf1.5 (the altimetry merely
-    # forces the ramsurf code path on the SAME fluid Pekeris). So this is a
-    # clean fluid-PE-vs-fluid-PE algorithm comparison on identical physics.
+    # forces the ramsurf code path on the SAME fluid Pekeris). RAMGEO is
+    # forced via backend='ramgeo' on the flat env (its bathymetry-parallel
+    # layering isn't exercised on a half-space, but it is a third independent
+    # Collins fluid PE on identical physics). So this is a clean fluid-PE
+    # algorithm cross-comparison on the same Pekeris.
     #
     # The elastic backend rams0.5 is deliberately NOT included in this
     # broadband time-series comparison. Its rotated-Padé elastic march is only
@@ -140,7 +143,7 @@ def main():
     # Collins & Siegmann §3.3, Milinazzo 1997), so that marginal error
     # compounds across a wide frequency sweep + IFFT and contaminates the
     # synthesized pulse. rams0.5 is robust and validated in NARROWBAND TL —
-    # it matches KrakenC to ~0.1 dB on the elastic Pekeris (see
+    # it matches krakenc to ~0.1 dB on the elastic Pekeris (see
     # tests/test_cross_model_agreement.py, the ``pekeris-elastic`` scenario) —
     # which is its proper regime; wide-band time-series synthesis is not.
     from uacpy.core.environment import BoundaryProperties
@@ -168,6 +171,7 @@ def main():
     common_numerics = dict(Q=2.0, T=1.0)
     ram_specs = [
         ('RAM (mpiramS)', env_mp, dict(**common_numerics)),
+        ('RAM (ramgeo)', env_mp, dict(backend='ramgeo', **common_numerics)),
         ('RAM (ramsurf1.5)', env_rs, dict(**common_numerics)),
     ]
 
@@ -205,9 +209,9 @@ def main():
     # =========================================================================
     # 5. KRAKENFIELD BROADBAND (multi-frequency normal modes)
     # =========================================================================
-    print("\n--- KrakenField Broadband ---")
+    print("\n--- Kraken Broadband ---")
     try:
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         result_kf = kf.run(
             env, source, receiver,
             run_mode=RunMode.BROADBAND,
@@ -215,7 +219,7 @@ def main():
         )
         print(f"  Output shape: {result_kf.data.shape} (depth x range x freq)")
         print(f"  Frequencies: {result_kf.frequencies[0]:.1f} - {result_kf.frequencies[-1]:.1f} Hz")
-        results['KrakenField'] = result_kf
+        results['Kraken'] = result_kf
     except Exception as e:
         print(f"  SKIPPED: {e}")
 
@@ -547,9 +551,9 @@ def main():
 
     print("\nModels with TIME_SERIES support:")
     print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
-    print("  RAM         - native broadband PE (mpiramS), returns transfer_function")
+    print("  RAM         - native broadband PE (mpiramS/ramgeo/ramsurf1.5), transfer_function")
     print("  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
-    print("  KrakenField - multi-freq normal modes (Python loop), returns transfer_function")
+    print("  Kraken - multi-freq normal modes (Python loop), returns transfer_function")
     print("  SPARC       - time-marched FFP (native time domain), returns time_series")
     print("  OASP        - OASES PE broadband, returns transfer_function")
 

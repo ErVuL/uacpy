@@ -14,18 +14,19 @@ Each axis is handled the same way: supply it as a **literal** (``ssp=`` /
 ``surface_sources``). If both are given for an axis the source is fetched first
 and the literal is the **fallback** when the fetch yields nothing (no coverage,
 service down). ``*_sources`` are ordered fallback lists (a bare string is a
-1-element list, ``'auto'`` the best-available preset, ``'cache'`` the
+1-element list, ``'auto'`` the best-available preset, ``'local'`` the
 best-available *cached* source — local data only, no network); bathymetry and
 SSP default to fetching ``'gebco'`` / ``'woa23'`` when neither form is given,
 while bottom and surface are optional (fetched only when asked). Altimetry
 (sea-state roughness) has no fetch source, so it is literal-only. Fetching is
 **cache-first**: a locally installed dataset is sampled before any network call,
-and ``*_sources='cache'`` skips the network entirely (failing fast with an
-install hint), so an air-gapped or reproducible run sets ``'cache'`` on the axes
+and ``*_sources='local'`` skips the network entirely (failing fast with an
+install hint), so an air-gapped or reproducible run sets ``'local'`` on the axes
 it wants pinned to local data (see ``install.sh --data``).
 """
 
 import datetime as _dt
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Union
 
@@ -54,7 +55,7 @@ _BATHY_BACKENDS = {
     'gebco': ('local', 'api'),
     'gmrt': ('gmrt',),
 }
-_CACHE_BACKEND = 'local'   # the cached-twin backend token (``*_sources='cache'``)
+_CACHE_BACKEND = 'local'   # the cached-twin backend token (``*_sources='local'``)
 # Default fetch chains for the two mandatory axes (used when neither a literal
 # nor an explicit ``*_sources`` is given). Both are global and need no login.
 _DEFAULT_SSP_SOURCES = ('woa23',)
@@ -69,10 +70,10 @@ _AUTO_BATHY_SOURCES = ('gmrt', 'gebco')
 
 def _resolve_axis_sources(spec, *, auto):
     """Expand a ``*_sources`` spec to ``(sources, cache_only)``: ``'auto'`` →
-    the axis's best-available chain; ``'cache'`` → the same chain but cached
+    the axis's best-available chain; ``'local'`` → the same chain but cached
     backends only (no network); else the explicit list. (Bottom has its own
     ``_bottom_order``.)"""
-    if spec == 'cache':
+    if spec == 'local':
         return auto, True
     if spec == 'auto':
         return auto, False
@@ -106,7 +107,7 @@ def _resolve_cached(call, order, *, axis):
     next on any fetch failure (cache absent → ``ConfigurationError``; live
     failure / no coverage → ``DataFetchError``). Returns ``(result, token)``.
 
-    If ``order`` is empty (``*_sources='cache'`` with no cached source) or
+    If ``order`` is empty (``*_sources='local'`` with no cached source) or
     every attempt fails, raise the most *substantive* error — a
     ``DataFetchError`` (no coverage / on land / live failure) over a bare
     ``ConfigurationError`` ("cache not installed") — so the user sees the real
@@ -114,7 +115,7 @@ def _resolve_cached(call, order, *, axis):
     """
     if not order:
         raise ConfigurationError(
-            f"fetch_environment: {axis}_sources='cache' but no cached {axis} "
+            f"fetch_environment: {axis}_sources='local' but no cached {axis} "
             f"source is available.",
             remediation="Install a cached dataset (see install.sh --data), or "
                         "use 'auto' / a live source.",
@@ -181,7 +182,7 @@ def fetch_environment(
         Sound-speed source(s) to **fetch**, tried in order with the next as
         fallback (a bare string is a 1-element list), or a preset: ``'auto'``
         (best-available: ``argo`` → ``copernicus`` → ``woa23``, i.e. real float
-        → model → climatology) or ``'cache'`` (the cached WOA23 climatology
+        → model → climatology) or ``'local'`` (the cached WOA23 climatology
         only — no network). Choices: ``'woa23'`` (climatology, global),
         ``'copernicus'`` (operational model) and ``'argo'`` (nearest real
         float) — the latter two need ``date=`` and the network (``'auto'``
@@ -196,7 +197,7 @@ def fetch_environment(
     bathymetry_sources : str or sequence of str, optional
         Bathymetry source(s) to **fetch**, tried in order, or a preset:
         ``'auto'`` (best-available: ``gmrt`` → ``gebco``, i.e. high-res multibeam
-        where surveyed, else the global grid) or ``'cache'`` (the cached GEBCO
+        where surveyed, else the global grid) or ``'local'`` (the cached GEBCO
         grid only — no network). Choices: ``'gebco'`` (global) or ``'gmrt'``
         (multibeam, higher-res, CC-BY). Default ``None`` → fetch ``'gebco'``.
     bottom : float or str or BoundaryProperties, optional
@@ -209,7 +210,7 @@ def fetch_environment(
         are separate args.)
     bottom_sources : str or sequence of str, optional
         Seafloor source(s) to **fetch**, tried in order, or a preset: ``'auto'``
-        (best-available: EMODnet → Diesing → pelagic) or ``'cache'`` (network-
+        (best-available: EMODnet → Diesing → pelagic) or ``'local'`` (network-
         free: EMODnet-local → grain-size → Diesing → pelagic, cached backends
         only). Per-source choices: ``'emodnet'`` (European seas, high-res,
         CC-BY), ``'grainsize'`` (NCEI grain-size samples, worldwide, public-
@@ -232,7 +233,7 @@ def fetch_environment(
         Default 6.
     range_dependent_bottom : bool, optional
         If ``True`` (requires ``transect_to``), the seafloor is sampled along
-        the transect → a ``RangeDependentBottom`` sharing the range axis, from
+        the transect → a range-dependent ``Bottom`` sharing the range axis, from
         ``bottom_sources`` (default ``'auto'`` when ``range_dependent_bottom``
         is set). Default ``False``. Note: a single source is used for the whole
         transect, so gaps outside its coverage forward-fill the nearest covered
@@ -247,9 +248,9 @@ def fetch_environment(
         first and this is the **fallback**; on its own, the surface is not
         fetched. Default ``None`` (free surface).
     surface_sources : str or sequence of str, optional
-        Top-boundary source(s) to **fetch**, or ``'auto'`` / ``'cache'``. The
+        Top-boundary source(s) to **fetch**, or ``'auto'`` / ``'local'``. The
         only source is the cached ``'seaice'`` climatology (so ``'auto'`` and
-        ``'cache'`` both == ``('seaice',)``): requires ``date=`` and
+        ``'local'`` both == ``('seaice',)``): requires ``date=`` and
         the cached ``seaice`` climatology (``install.sh --data seaice``), and
         sets the surface from the NSIDC concentration at the point for
         ``date``'s month — an ice-covered point (≥15 %, the NSIDC ice-edge) gets
@@ -308,9 +309,16 @@ def fetch_environment(
         try:
             bathymetry, (bathy_src, _) = _resolve_cached(
                 _bathy_call, bathy_order, axis='bathymetry')
-        except (DataFetchError, ConfigurationError):
+        except (DataFetchError, ConfigurationError) as exc:
             if bathymetry is None:
                 raise
+            if transect_to is not None:
+                warnings.warn(
+                    f"fetch_environment: range-dependent bathymetry fetch "
+                    f"failed ({exc}); falling back to the supplied bathymetry= "
+                    f"literal. A range-independent literal reduces the transect "
+                    f"to a single depth.",
+                    UserWarning, stacklevel=2)
             bathy_src = None                        # fall back to the literal
 
     # ── SSP ──
@@ -366,9 +374,16 @@ def fetch_environment(
             ssp, (ssp_src, ssp_backend) = _resolve_cached(
                 _ssp_call, ssp_order, axis='ssp')
             ssp_fetched = True
-        except (DataFetchError, ConfigurationError):
+        except (DataFetchError, ConfigurationError) as exc:
             if ssp is None:
                 raise
+            if range_dependent_ssp:
+                warnings.warn(
+                    f"fetch_environment: range-dependent SSP fetch failed "
+                    f"({exc}); falling back to the supplied ssp= literal. A "
+                    f"single-profile literal reduces the transect to "
+                    f"range-independent.",
+                    UserWarning, stacklevel=2)
             ssp_src = None                          # fall back to the literal ssp
 
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
@@ -382,24 +397,36 @@ def fetch_environment(
             )
         order, bottom_cache_only = _bottom_order(
             bottom_sources if bottom_sources is not None else 'auto')
+        # Scale grain-size geoacoustics to the in-situ near-seabed water sound
+        # speed (the conversion is a velocity ratio; the Hamilton 1510 m/s
+        # reference can be ~100 m/s off on a warm shelf / cold deep site).
+        water_c = _near_seabed_sound_speed(ssp)
         try:
             if range_dependent_bottom:
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect_to, transect=True,
-                    cache_only=bottom_cache_only,
+                    cache_only=bottom_cache_only, water_sound_speed=water_c,
                     n_points=bottom_n_points, timeout=timeout, verbose=verbose,
                 )
             else:
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect=False, cache_only=bottom_cache_only,
-                    timeout=timeout, verbose=verbose,
+                    water_sound_speed=water_c, timeout=timeout, verbose=verbose,
                 )
-        except (DataFetchError, ConfigurationError):
+        except (DataFetchError, ConfigurationError) as exc:
             if bottom is None:
                 raise
-            bottom_props = _resolve_bottom(bottom)  # fall back to the literal
+            if range_dependent_bottom:
+                warnings.warn(
+                    f"fetch_environment: range-dependent bottom fetch failed "
+                    f"({exc}); falling back to the supplied bottom= literal. A "
+                    f"uniform literal makes the bottom range-independent.",
+                    UserWarning, stacklevel=2)
+            bottom_props = _resolve_bottom(  # fall back to the literal
+                bottom, water_sound_speed=water_c)
     elif bottom is not None:
-        bottom_props = _resolve_bottom(bottom)
+        bottom_props = _resolve_bottom(
+            bottom, water_sound_speed=_near_seabed_sound_speed(ssp))
 
     # ── Surface (top boundary, optional): fetch sea ice, else literal ──
     # The only fetchable surface is NSIDC sea ice; a point classified as open
@@ -407,8 +434,8 @@ def fetch_environment(
     surface_props, surface_src = None, None
     if surface_sources is not None:
         # The only surface source is the cached sea-ice climatology, so 'auto'
-        # and 'cache' are identical here.
-        srcs = (('seaice',) if surface_sources in ('auto', 'cache')
+        # and 'local' are identical here.
+        srcs = (('seaice',) if surface_sources in ('auto', 'local')
                 else _as_source_tuple(surface_sources))
         for s in srcs:
             if s != 'seaice':
@@ -461,7 +488,7 @@ def fetch_environment(
     if with_absorption:
         kwargs['absorption'] = _fetch_absorption(
             point, date=date, ssp_source=ssp_src, ssp_backend=ssp_backend,
-            timeout=timeout, verbose=verbose,
+            cache_only=ssp_cache_only, timeout=timeout, verbose=verbose,
         )
     env = Environment(**kwargs)
 
@@ -481,15 +508,23 @@ def fetch_environment(
     return env
 
 
-def _fetch_absorption(point, *, date, ssp_source, ssp_backend, timeout, verbose):
+def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
+                      timeout, verbose):
     """Francois-Garrison absorption from the site's fetched T/S column.
 
     Reuses the backend the SSP resolved to (``ssp_backend``) for the WOA23 T/S
     column, so a cache-resolved SSP draws its absorption from the same cached
     grid rather than re-fetching it live. ``None`` (literal SSP) leaves the
-    WOA fetcher on its own default.
+    WOA fetcher on its own default. ``cache_only`` (a ``*_sources='local'``
+    run) forces the local WOA23 grid so the T/S column never hits the network
+    either — including when a cache-pinned SSP fell back to a literal.
     """
     from uacpy.data.absorption import build_francois_garrison
+    if cache_only:
+        from uacpy.data.sound_speed import fetch_ts_profile
+        depths, temp, sal = fetch_ts_profile(
+            point, date=date, source='local', timeout=timeout, verbose=verbose)
+        return build_francois_garrison(depths, temp, sal)
     if ssp_source == 'copernicus':
         from uacpy.data.copernicus import fetch_ts_profile_operational
         depths, temp, sal = fetch_ts_profile_operational(
@@ -555,7 +590,7 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
 class _BottomProvider:
     """One bottom data source. ``id`` doubles as the source keyword and the
     provenance catalogue id. ``in_auto`` puts it in the 'auto' fallback chain,
-    ``in_cache_auto`` in the network-free 'cache' chain. ``has_cached_variant``
+    ``in_cache_auto`` in the network-free 'local' chain. ``has_cached_variant``
     means it has a local twin tried before its live/compute backend
     (cache-first); under ``cache_only`` only the local twin is used."""
 
@@ -615,10 +650,10 @@ _CACHE_BOTTOM_ORDER = tuple(p.id for p in _BOTTOM_PROVIDERS if p.in_cache_auto)
 def _bottom_order(bottom_source):
     """Ordered bottom source keywords + a ``cache_only`` flag from the user
     spec. ``'auto'`` → the best-available chain (EMODnet → Diesing → pelagic);
-    ``'cache'`` → the network-free chain (EMODnet local → grain-size → Diesing →
+    ``'local'`` → the network-free chain (EMODnet local → grain-size → Diesing →
     pelagic, cached backends only); a str/sequence of keywords is used as-is.
     Validates each keyword."""
-    if bottom_source == 'cache':
+    if bottom_source == 'local':
         return _CACHE_BOTTOM_ORDER, True
     if bottom_source == 'auto':
         return _AUTO_BOTTOM_ORDER, False
@@ -627,7 +662,7 @@ def _bottom_order(bottom_source):
         if name not in _BOTTOM_BY_ID:
             raise ConfigurationError(
                 f"fetch_environment: unknown bottom source {name!r}.",
-                remediation=f"Use 'auto', 'cache' or one of {sorted(_BOTTOM_BY_ID)}.",
+                remediation=f"Use 'auto', 'local' or one of {sorted(_BOTTOM_BY_ID)}.",
             )
     return order, False
 
@@ -661,13 +696,40 @@ def _fetch_bottom(order, *args, transect, cache_only=False, **kwargs):
     raise (data_errs[0] if data_errs else errors[-1])
 
 
-def _resolve_bottom(bottom):
+def _near_seabed_sound_speed(ssp):
+    """Deepest in-water sound speed (m/s) from a resolved SSP, or ``None``.
+
+    Used to scale grain-size geoacoustics to the in-situ near-seabed water
+    instead of the Hamilton 1510 m/s reference. ``ssp`` may be a
+    :class:`SoundSpeedProfile`, a scalar, an array of ``(depth, speed)`` pairs,
+    or ``None``. Returns ``None`` when no usable value can be derived.
+    """
+    if ssp is None:
+        return None
+    if isinstance(ssp, (int, float)):
+        return float(ssp)
+    data = getattr(ssp, 'data', None)
+    if data is not None and getattr(data, 'size', 0) > 0:
+        # SoundSpeedProfile.depths is strictly increasing → deepest row;
+        # take the r = 0 column for range-dependent profiles.
+        return float(np.asarray(data, dtype=float)[-1, 0])
+    try:
+        arr = np.asarray(ssp, dtype=float)
+        if arr.ndim == 2 and arr.shape[1] >= 2:
+            return float(arr[np.argmax(arr[:, 0]), 1])
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _resolve_bottom(bottom, *, water_sound_speed=None):
     if bottom is None or isinstance(bottom, BoundaryProperties):
         return bottom
     if isinstance(bottom, str):
         return bottom_from_class(bottom)
     if isinstance(bottom, (int, float)):
-        return bottom_from_grain_size(float(bottom))
+        return bottom_from_grain_size(
+            float(bottom), water_sound_speed=water_sound_speed)
     raise ConfigurationError(
         f"fetch_environment: bottom must be a ϕ float, a class name, a "
         f"BoundaryProperties, or None; got {type(bottom).__name__}.",

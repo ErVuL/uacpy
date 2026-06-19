@@ -28,12 +28,12 @@ import pytest
 
 import uacpy
 from uacpy.core.environment import (
-    BoundaryProperties, Environment, LayeredBottom, SedimentLayer,
+    BoundaryProperties, Environment, SeabedColumn, SedimentLayer,
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import (
-    Bellhop, KrakenField, RAM, RunMode, Scooter,
+    Bellhop, Kraken, RAM, RunMode, Scooter,
 )
 
 
@@ -87,7 +87,7 @@ class Scenario:
 
 def _kraken_field_tl(env, src, rcv):
     """KrakenField.run → COHERENT_TL Field."""
-    return KrakenField(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+    return Kraken(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
 def _scooter_tl(env, src, rcv):
@@ -157,7 +157,7 @@ def _pekeris_elastic() -> Scenario:
     RMSE against KrakenField (which auto-routes to KrakenC for elastic)
     is ~1.5 dB over the 1-8 km window and TL @ 5 km matches within 0.1 dB.
     """
-    elastic_layered = LayeredBottom(
+    elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
             thickness=10.0, sound_speed=1700.0, density=1.8,
             attenuation=0.2, shear_speed=400.0, shear_attenuation=0.5,
@@ -308,7 +308,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     theta sensitivity vs. frequency; the centre-frequency agreement is
     the meaningful regression anchor.
     """
-    elastic_layered = LayeredBottom(
+    elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
             thickness=10.0, sound_speed=1700.0, density=1.8,
             attenuation=0.2, shear_speed=400.0, shear_attenuation=0.5,
@@ -337,7 +337,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     )
 
     def reference(env_unused, src_, rcv_):
-        kf = KrakenField(verbose=False).run(
+        kf = Kraken(verbose=False).run(
             env_halfspace, src_, rcv_,
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,

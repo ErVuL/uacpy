@@ -30,7 +30,7 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.environment import (
-    BoundaryProperties, LayeredBottom, RangeDependentLayeredBottom, SedimentLayer,
+    BoundaryProperties, SeabedColumn, Bottom, SedimentLayer,
 )
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
@@ -51,6 +51,12 @@ _UPPER_CRYST, _MID_CRYST = 5, 6
 # CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
 DEFAULT_SEDIMENT_ATTENUATION = 0.5
 DEFAULT_BASEMENT_ATTENUATION = 0.1
+
+# Below this total sediment thickness (m) the seabed is treated as bare rock —
+# a thinner column (e.g. at a spreading-ridge crest, or after a near-zero GlobSed
+# rescale) is acoustically negligible and would only yield a sub-resolution
+# sediment medium downstream.
+_MIN_SEDIMENT_M = 1.0
 
 _MODEL = {}   # cache_root -> dict(bnds=, vp=, vs=, rho=) each (64800, 9)
 
@@ -132,10 +138,20 @@ def _halfspace(i, vp, vs, rho, atten, elastic):
 
 def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                          basement_attenuation, elastic, sediment_thickness):
-    """Build a :class:`LayeredBottom`: sediment stack over crystalline basement."""
+    """Build a :class:`SeabedColumn`: sediment stack over crystalline basement."""
     sed = [i for i in range(_UPPER_SED, _LOW_SED + 1)
            if bnds[i] - bnds[i + 1] > 1e-3]
+    # Effective sediment thickness (the GlobSed override when given, else the
+    # CRUST1.0 column). Below ``_MIN_SEDIMENT_M`` the column is negligible and a
+    # real layer would only produce a sub-resolution medium, so emit bare rock.
     if sed:
+        crust1_total = sum((bnds[i] - bnds[i + 1]) * 1000.0 for i in sed)
+        eff_sed = (sediment_thickness
+                   if (sediment_thickness is not None and sediment_thickness > 0)
+                   else crust1_total)
+    else:
+        eff_sed = 0.0
+    if sed and eff_sed >= _MIN_SEDIMENT_M:
         layers = [_layer(i, bnds, vp, vs, rho, sediment_attenuation, elastic)
                   for i in sed]
         if sediment_thickness is not None and sediment_thickness > 0:
@@ -146,12 +162,12 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                     layer.thickness *= scale
         halfspace = _halfspace(_UPPER_CRYST, vp, vs, rho, basement_attenuation,
                                elastic)
-    else:                                  # bare rock seabed: crust over crust
+    else:           # bare rock / negligible sediment: crust over crust
         layers = [_layer(_UPPER_CRYST, bnds, vp, vs, rho, basement_attenuation,
                          elastic)]
         halfspace = _halfspace(_MID_CRYST, vp, vs, rho, basement_attenuation,
                                elastic)
-    return LayeredBottom(layers=layers, halfspace=halfspace)
+    return SeabedColumn(layers=layers, halfspace=halfspace)
 
 
 def _globsed_thickness(point, *, verbose):
@@ -197,6 +213,7 @@ def fetch_crust1_profile(point):
 def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                         basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
                         elastic=True, sediment_thickness=None, use_globsed=True,
+                        water_sound_speed=None,
                         timeout=None, verbose=False):
     """Layered **elastic** bottom from CRUST1.0 at a ``(lat, lon)`` point.
 
@@ -211,7 +228,8 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     the point, CRUST1.0's native thickness is kept. The returned bottom carries
     ``.sediment_thickness_source`` (``'globsed'`` or ``None``) recording which
     was used. ``timeout`` is ignored (offline) for signature parity with the
-    network bottom fetchers.
+    network bottom fetchers; ``water_sound_speed`` is likewise accepted and
+    ignored (CRUST1.0 yields absolute Vp/Vs/ρ, not water-referenced ratios).
     """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
@@ -233,6 +251,7 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
                                  elastic=True, use_globsed=True,
+                                 water_sound_speed=None,
                                  timeout=None, verbose=False):
     """Range-dependent layered bottom from CRUST1.0 along ``start`` → ``end``.
 
@@ -248,8 +267,7 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6,
                             elastic=elastic, use_globsed=use_globsed)
         for la, lo in zip(lats, lons)
     ]
-    rdl = RangeDependentLayeredBottom(ranges=np.asarray(ranges_m),
-                                      profiles=profiles)
+    rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges_m))
     rdl.sediment_thickness_source = (
         'globsed' if any(getattr(p, 'sediment_thickness_source', None) == 'globsed'
                          for p in profiles) else None)

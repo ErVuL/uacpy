@@ -1,7 +1,7 @@
 """
 Acoustics Toolbox / OALIB output-file readers.
 
-One file per shared output format (Kraken, Scooter, SPARC, Bounce, KrakenField,
+One file per shared output format (Kraken, Scooter, SPARC, Bounce,
 Bellhop output formats; modes are kept in their own ``modes_reader.py``).
 
 Provides:
@@ -367,7 +367,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     plot_type = fid.readline().strip()
 
     line = fid.readline()
-    vals = np.fromstring(line, sep=" ")
+    vals = np.array(line.split(), dtype=float)
     Nfreq = int(vals[0])
     Ntheta = int(vals[1])
     Nsd = int(vals[2])
@@ -375,7 +375,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     Nrr = int(vals[4])
 
     line = fid.readline()
-    vals = np.fromstring(line, sep=" ", count=2)
+    vals = np.array(line.split()[:2], dtype=float)
     freq0 = vals[0]
     atten = vals[1]
     freq_vec = np.zeros(Nfreq)
@@ -895,7 +895,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     # which mismatched the canonical AT files (e.g. tests/Munk/MunkB_geo_rot.ssp).
     with open(filepath, "r") as fid:
         n_prof = int(fid.readline().strip())
-        r_prof = np.fromstring(fid.readline(), sep=" ", count=n_prof)
+        r_prof = np.array(fid.readline().split()[:n_prof], dtype=float)
         if r_prof.size != n_prof:
             raise FileFormatError(
                 f"SSP file {filepath}: expected {n_prof} range values on line 2, "
@@ -983,7 +983,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     # vector and each per-(z, y) SSP row with a single list-directed
     # READ statement — one Fortran record per vector / row.
     def _read_vec(fid, n):
-        vec = np.fromstring(fid.readline(), sep=" ", count=n)
+        vec = np.array(fid.readline().split()[:n], dtype=float)
         if vec.size != n:
             raise FileFormatError(
                 f"3D SSP file {filepath}: expected {n} values on line, "

@@ -15,7 +15,7 @@ side-by-side via `compare_models` so the effect of each collapse choice
 is visible.
 
 A range-independent model is the right vehicle here: range-aware models
-like RAM or KrakenField *honour* RD bathymetry and SSP natively, so
+like RAM or Kraken *honour* RD bathymetry and SSP natively, so
 their collapse kwargs would be no-ops on this env.
 """
 

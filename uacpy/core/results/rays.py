@@ -231,7 +231,7 @@ class Arrivals(Result):
 
 
 class Rays(Result):
-    """Ray paths from Bellhop / BellhopCUDA.
+    """Ray paths from Bellhop (any backend).
 
     Pure data container: a list of ray polylines plus the geometric
     context of the run. Filtering helpers return new ``Rays`` objects;

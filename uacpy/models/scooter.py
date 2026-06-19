@@ -66,15 +66,14 @@ class Scooter(PropagationModel):
     Notes
     -----
     Range-independent FFP — single spectral solve over the full
-    wavenumber axis, Hankel-transformed to range. Supports
-    ``LayeredBottom`` and elastic bottoms natively. The Green's-function
+    wavenumber axis, Hankel-transformed to range. Supports layered
+    and elastic bottoms natively. The Green's-function
     ``.grn`` is converted to range-domain TL via the in-tree Python
     Hankel transform (``uacpy.io.grn_reader``).
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'`` (Scooter consumes
-    ``LayeredBottom`` natively).
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer
+    stack is kept since Scooter consumes layered seabed columns natively).
 
     Defaults auto-derived at ``run()`` time:
 
@@ -111,7 +110,6 @@ class Scooter(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -164,7 +162,6 @@ class Scooter(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
 
         # Range-independent FFP — single spectral solve over the full
@@ -172,8 +169,7 @@ class Scooter(PropagationModel):
         # samples are the representative single profile.
         self._set_collapse_defaults({
             'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
+            'bottom_range': 'median',
         })
 
         self.c_low = c_low
@@ -380,12 +376,9 @@ class Scooter(PropagationModel):
                     grn_data, receiver.ranges, method='fft_hankel',
                     **transform_kwargs,
                 )
-            result.model = self.model_name
-            result.backend = 'scooter'
-            result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
-            result.frequencies = np.atleast_1d(np.asarray(freqs, dtype=float))
-            result.phase_reference = 'travelling_wave'
+            self._stamp_result(result, source, backend='scooter',
+                               frequencies=freqs, phase_reference='travelling_wave')
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,
@@ -474,14 +467,5 @@ class Scooter(PropagationModel):
         )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
-        """Execute Scooter via the shared ``_run_subprocess`` helper."""
-        try:
-            result = self._run_subprocess(
-                [self.executable, base_name],
-                cwd=work_dir,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"Scooter output:\n{result.stdout}", level='debug')
+        """Execute Scooter via the shared binary-launch helper."""
+        self._run_and_attach_prt([self.executable, base_name], work_dir, base_name)

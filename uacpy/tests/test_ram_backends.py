@@ -7,7 +7,7 @@ import pytest
 from uacpy.core.environment import (
     BoundaryProperties,
     Environment,
-    LayeredBottom,
+    SeabedColumn,
     SedimentLayer,
 )
 from uacpy import Field
@@ -28,8 +28,23 @@ def _fluid_bottom():
     )
 
 
+def _fluid_layered_bottom():
+    """A layered bottom with no shear — the regime RAMGEO is built for."""
+    return SeabedColumn(
+        layers=[
+            SedimentLayer(
+                thickness=15, sound_speed=1650, density=1.6, attenuation=0.4,
+            ),
+        ],
+        halfspace=BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1900, density=1.9, attenuation=0.2,
+        ),
+    )
+
+
 def _elastic_bottom():
-    return LayeredBottom(
+    return SeabedColumn(
         layers=[
             SedimentLayer(
                 thickness=20, sound_speed=1700, density=1.5,
@@ -63,9 +78,62 @@ def _env(*, bottom, altimetry=None):
 class TestBackendSelection:
     """Pure-Python dispatch logic — no native binaries required."""
 
-    def test_fluid_flat_selects_mpirams(self):
+    def test_fluid_flat_simple_selects_mpirams(self):
+        # A simple half-space fluid bottom auto-routes to mpiramS (native
+        # half-space, more accurate than ramgeo's synthetic-layer wrapping).
         env = _env(bottom=_fluid_bottom())
         assert RAM(verbose=False, dr=20.0, dz=2.0).select_backend(env) == 'mpiramS'
+
+    def test_fluid_flat_layered_narrowband_selects_ramgeo(self):
+        env = _env(bottom=_fluid_layered_bottom())
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
+        assert ram.select_backend(env, RunMode.COHERENT_TL) == 'ramgeo'
+        # run_mode=None defaults to the COHERENT_TL choice
+        assert ram.select_backend(env) == 'ramgeo'
+
+    def test_fluid_flat_layered_broadband_stays_mpirams(self):
+        env = _env(bottom=_fluid_layered_bottom())
+        ram = RAM(verbose=False, dr=20.0, dz=2.0)
+        assert ram.select_backend(env, RunMode.BROADBAND) == 'mpiramS'
+        assert ram.select_backend(env, RunMode.TIME_SERIES) == 'mpiramS'
+
+    def test_ramgeo_accepts_forced_simple_bottom(self):
+        # 'simple bottom should also be accepted' — ramgeo runs on a plain
+        # half-space when forced (wrapped as a synthetic single layer).
+        env = _env(bottom=_fluid_bottom())
+        assert RAM(verbose=False, dr=20.0, dz=2.0,
+                   backend='ramgeo').select_backend(env) == 'ramgeo'
+
+    def test_backend_override_forces_choice(self):
+        env = _env(bottom=_fluid_layered_bottom())
+        assert RAM(verbose=False, dr=20.0, dz=2.0,
+                   backend='mpiramS').select_backend(env) == 'mpiramS'
+        assert RAM(verbose=False, dr=20.0, dz=2.0,
+                   backend='ramgeo').select_backend(env) == 'ramgeo'
+
+    def test_backend_override_unknown_raises(self):
+        with pytest.raises(ConfigurationError, match="not a known backend"):
+            RAM(verbose=False, dr=20.0, dz=2.0, backend='nope')
+
+    def test_backend_override_fluid_on_elastic_raises(self):
+        env = _env(bottom=_elastic_bottom())
+        for bk in ('mpiramS', 'ramgeo', 'ramsurf'):
+            with pytest.raises(ConfigurationError, match="fluid PE"):
+                RAM(verbose=False, dr=20.0, dz=2.0,
+                    backend=bk).select_backend(env)
+
+    def test_backend_override_flat_on_rough_raises(self):
+        env = _env(bottom=_fluid_bottom(), altimetry=_rough_altimetry())
+        for bk in ('mpiramS', 'ramgeo', 'rams'):
+            with pytest.raises(ConfigurationError, match="flat pressure-release"):
+                RAM(verbose=False, dr=20.0, dz=2.0,
+                    backend=bk).select_backend(env)
+
+    def test_backend_override_ramsurf_needs_altimetry(self):
+        env = _env(bottom=_fluid_bottom())  # flat
+        with pytest.raises(ConfigurationError, match="variable surface"):
+            RAM(verbose=False, dr=20.0, dz=2.0,
+                backend='ramsurf').select_backend(env)
 
     def test_elastic_flat_selects_rams(self):
         env = _env(bottom=_elastic_bottom())
@@ -81,13 +149,13 @@ class TestBackendSelection:
             RAM(verbose=False, dr=20.0, dz=2.0).select_backend(env)
 
 
-# ─── LayeredBottom → piecewise ────────────────────────────────────────────
+# ─── SeabedColumn → piecewise ────────────────────────────────────────────
 
 
 class TestPiecewiseBreakpoints:
 
     def test_two_layers_emit_step_function(self):
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550,
                               density=1.3, attenuation=0.5),
@@ -111,7 +179,7 @@ class TestPiecewiseBreakpoints:
         assert values == [1550, 1550, 1650, 1650, 1800, 1800]
 
     def test_elastic_properties_round_trip(self):
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=5, sound_speed=1700,
                                   density=1.6, attenuation=0.4,
                                   shear_speed=350, shear_attenuation=1.5)],
@@ -133,7 +201,7 @@ class TestPiecewiseBreakpoints:
 
     def test_missing_property_defaults_to_zero(self):
         # SedimentLayer without explicit shear → 0.0 emitted
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=5, sound_speed=1600,
                                   density=1.5, attenuation=0.5)],
             halfspace=BoundaryProperties(
@@ -199,6 +267,32 @@ class TestRamInWriter:
         # bath + 6 profile blocks (cw, cp, cs, rho, attnp, attns) = 7 terminators
         assert text.count('-1 -1') == 7
 
+    def test_ramgeo_kind_is_fluid_flat(self, tmp_path):
+        """ramgeo = ramsurf format minus the surface block, no shear: row-5
+        carries (ns, rs) and there are only 4 profile blocks per range."""
+        out = tmp_path / 'ramgeo.in'
+        write_ramin(
+            str(out), kind='ramgeo',
+            fc=100.0, zs=50.0, zr_line=50.0,
+            rmax=5000.0, dr=10.0, ndr=2,
+            zmax=400.0, dz=1.0, ndz=2, zmplt=200.0,
+            c0=1500.0, np_pade=4, ns_stab=1, rs_stab=0.0,
+            bathymetry=[(0.0, 100.0), (5000.0, 100.0)],
+            range_segments=[dict(
+                range=0.0,
+                water_ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+                bottom_c=[(0.0, 1600.0), (400.0, 1600.0)],
+                bottom_rho=[(0.0, 1.5), (400.0, 1.5)],
+                bottom_attn=[(0.0, 0.5), (400.0, 0.5)],
+            )],
+        )
+        text = out.read_text()
+        # Row 5 carries (ns, rs) — fluid, no irot/theta
+        assert '1500.000000 4 1 0.000000' in text
+        # bathy + 4 profile blocks (cw, cp, rho, attnp) = 5 terminators; no
+        # surface block (cf. ramsurf's 6).
+        assert text.count('-1 -1') == 5
+
     def test_rams_requires_shear_profiles(self, tmp_path):
         out = tmp_path / 'rams.in'
         with pytest.raises(ConfigurationError, match="bottom_cs and bottom_attns"):
@@ -258,6 +352,49 @@ class TestCollinsBinaries:
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
 
+    def test_ramgeo_layered_runs(self):
+        """A fluid layered Pekeris auto-routes to RAMGEO and gives a sane,
+        finite, bounded TL field."""
+        env = _env(bottom=_fluid_layered_bottom())
+        src, rcv = self._src_rcv()
+        result = RAM(verbose=False, dr=20.0, dz=1.0).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        assert isinstance(result, Field)
+        assert result.backend == 'ramgeo'
+        assert result.data.shape == (3, 20)
+        assert np.all(np.isfinite(result.data))
+        assert 0 < result.tl.min() < 80
+        assert result.tl.max() < 200
+
+    def test_ramgeo_agrees_with_mpirams(self):
+        """RAMGEO and mpiramS are independent PE codes; on the same fluid
+        layered Pekeris their TL envelopes should agree closely."""
+        env = _env(bottom=_fluid_layered_bottom())
+        src, rcv = self._src_rcv()
+        geo = RAM(verbose=False, dr=20.0, dz=1.0, backend='ramgeo').run(
+            env, src, rcv)
+        mpi = RAM(verbose=False, dr=20.0, dz=1.0, backend='mpiramS').run(
+            env, src, rcv)
+        d = np.abs(geo.tl - mpi.tl)
+        assert np.nanmedian(d) < 6.0
+
+    def test_ramgeo_broadband_runs(self):
+        """A forced ramgeo serves BROADBAND via its complex-envelope patch —
+        capability parity with rams0.5 / ramsurf1.5."""
+        env = _env(bottom=_fluid_layered_bottom())
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([25.0, 50.0, 75.0]),
+                       ranges=np.linspace(500.0, 5000.0, 20))
+        # Smoke test (type/shape/finite only): a coarse grid keeps it cheap.
+        f = RAM(verbose=False, np_pade=6, dr=8.0, dz=1.0, zmax=200.0,
+                Q=2.0, T=2.0, backend='ramgeo').run(
+            env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert isinstance(f, Field)
+        assert f.backend == 'ramgeo'
+        assert f.phase_reference == 'travelling_wave'
+        assert f.data.ndim == 3 and f.frequencies.size > 1
+        assert np.all(np.isfinite(f.data))
+
     @pytest.mark.slow
     def test_collins_backend_broadband_returns_transfer_function(self):
         """ramsurf BROADBAND emits the patched complex envelope and the
@@ -266,7 +403,8 @@ class TestCollinsBinaries:
         backends the same."""
         env = _env(bottom=_fluid_bottom(), altimetry=_rough_altimetry())
         src, rcv = self._src_rcv()
-        ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
+        # Smoke test (type/shape/finite only): a coarse grid keeps it cheap.
+        ram = RAM(verbose=False, np_pade=6, dr=8.0, dz=1.0, zmax=200.0,
                   Q=2.0, T=2.0)
         f = ram.run(env, src, rcv, run_mode=RunMode.BROADBAND)
         assert isinstance(f, Field)
@@ -321,8 +459,8 @@ class TestRamPekerisReference:
         return src, rcv
 
     def _kraken_reference(self, env, src, rcv):
-        from uacpy.models import KrakenField
-        return KrakenField(verbose=False).run(
+        from uacpy.models import Kraken
+        return Kraken(verbose=False).run(
             env, src, rcv, run_mode=RunMode.COHERENT_TL,
         )
 

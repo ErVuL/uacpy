@@ -67,14 +67,14 @@ def test_no_coverage_raises(monkeypatch):
 
 
 def test_fetch_bottom_transect(monkeypatch):
-    from uacpy.core.environment import RangeDependentBottom
+    from uacpy.core.environment import Bottom
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: _geojson(2, '2. Sand'))
     rdb = seabed.fetch_bottom_transect((0.0, 0.0), (1.0, 0.0), n_points=4)
-    assert isinstance(rdb, RangeDependentBottom)
-    assert rdb.ranges.shape == (4,) and rdb.sound_speed.shape == (4,)
+    assert isinstance(rdb, Bottom)
+    assert rdb.ranges.shape == (4,) and rdb.halfspace_sound_speed.shape == (4,)
     assert rdb.ranges[0] == 0.0
-    assert (rdb.sound_speed > 1500).all()
+    assert (rdb.halfspace_sound_speed > 1500).all()
 
 
 def test_fetch_bottom_transect_holds_gaps(monkeypatch):
@@ -89,7 +89,7 @@ def test_fetch_bottom_transect_holds_gaps(monkeypatch):
 
     monkeypatch.setattr(seabed, 'http_get', flaky)
     rdb = seabed.fetch_bottom_transect((0.0, 0.0), (1.0, 0.0), n_points=3)
-    assert (rdb.sound_speed == rdb.sound_speed[0]).all()   # held across gaps
+    assert (rdb.halfspace_sound_speed == rdb.halfspace_sound_speed[0]).all()   # held across gaps
 
 
 def test_fetch_bottom_transect_all_uncovered_raises(monkeypatch):

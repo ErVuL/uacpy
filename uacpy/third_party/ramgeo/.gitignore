@@ -1,0 +1,6 @@
+# Build artifacts — the binary is installed to uacpy/bin/ramgeo/ by install.sh.
+/ramgeo
+*.o
+# Scratch outputs from a smoke run of the vendored ramgeo.in.
+/tl.line
+/tl.grid

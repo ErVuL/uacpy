@@ -34,7 +34,7 @@ class PhaseReference(str, Enum):
     TRAVELLING_WAVE
         ``H(f)`` carries the engineering propagator ``exp(-i k0 r)``;
         ``2*Re[ifft(H)]`` lands the causal arrival at ``t = r/c0``.
-        Used by Bellhop, Scooter, OASES OAST/OASP, KrakenField, and RAM
+        Used by Bellhop, Scooter, OASES OAST/OASP, Kraken, and RAM
         (mpiramS / Collins backends bake the carrier into the data).
     TIME_DOMAIN_NATIVE
         SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
@@ -63,7 +63,7 @@ _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
 }
 
 _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
-    # ───────── Bellhop / BellhopCUDA ─────────
+    # ───────── Bellhop ─────────
     ('Bellhop', 'shd_file'): (str, 'Bellhop pressure-field output (.shd).'),
     ('Bellhop', 'arr_file'): (str, 'Bellhop arrivals output (.arr).'),
     ('Bellhop', 'ray_file'): (str, 'Bellhop ray paths (.ray).'),
@@ -99,7 +99,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('Bellhop', 't_start'): (
         float, 'Start time (s) of the delay-and-sum window.'
     ),
-    # ───────── Kraken / KrakenC (mode solvers) ─────────
+    # ───────── Kraken (modes + field pipeline, backend=kraken/krakenc) ─────────
     ('Kraken', 'mod_file'): (str, 'Kraken modes file (.mod).'),
     ('Kraken', 'n_modes_requested'): (
         int, 'User-supplied mode-count cap. Kraken itself does not cap '
@@ -107,32 +107,21 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('Kraken', 'leaky_modes'): (
         bool, 'True when the run was configured to include leaky modes '
-        '(c_high pushed to ~1e9). Real Kraken raises on leaky modes — '
-        'they require KrakenC.'
+        '(c_high pushed to ~1e9). The real-arithmetic backend raises on '
+        'leaky modes — they require backend=krakenc (complex k).'
     ),
-    ('KrakenC', 'mod_file'): (str, 'KrakenC modes file (.mod, complex k).'),
-    ('KrakenC', 'n_modes_requested'): (
-        int, 'User-supplied mode-count cap (see Kraken).'
+    ('Kraken', 'shd_file'): (
+        str, 'Kraken pressure-field output (.shd) from the field.exe step.'
     ),
-    ('KrakenC', 'leaky_modes'): (
-        bool, 'True when leaky / complex-k modes were retained.'
-    ),
-    # ───────── KrakenField (modes + field pipeline) ─────────
-    ('KrakenField', 'shd_file'): (
-        str, 'KrakenField pressure-field output (.shd).'
-    ),
-    ('KrakenField', 'mod_file'): (
-        str, 'Modes used by KrakenField (.mod).'
-    ),
-    ('KrakenField', 'mode_coupling'): (
+    ('Kraken', 'mode_coupling'): (
         str, "'adiabatic', 'coupled', or 'none' (range-independent run)."
     ),
-    ('KrakenField', 'n_profiles'): (
-        int, 'Number of modal segments KrakenField used for the '
-        'range-dependent path.'
+    ('Kraken', 'n_profiles'): (
+        int, 'Number of modal segments used for the range-dependent '
+        'field path.'
     ),
-    ('KrakenField', 'native_broadband'): (
-        bool, 'True when KrakenField produced H(f) natively from a '
+    ('Kraken', 'native_broadband'): (
+        bool, 'True when Kraken produced H(f) natively from a '
         'multi-frequency .mod file (versus a Python frequency loop).'
     ),
     # ───────── Scooter (FFP / wavenumber integration) ─────────
@@ -356,7 +345,7 @@ class Result:
     ----------
     model : str
         Name of the wrapper class that produced this result (e.g. ``'RAM'``,
-        ``'Bellhop'``, ``'KrakenField'``).
+        ``'Bellhop'``, ``'Kraken'``).
     backend : str, optional
         Concrete binary that ran (e.g. ``'mpiramS'``, ``'kraken.exe'``,
         ``'bellhop'``). Defaults to ``model.lower()`` when the wrapper is
@@ -485,8 +474,3 @@ class Result:
                 'description': description,
             }
         return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Field — unified gridded result
-# ─────────────────────────────────────────────────────────────────────────────

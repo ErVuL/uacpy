@@ -106,7 +106,7 @@ def test_oases_writers_emit_ice_surface(writer, tmp_path, src_rcv):
 
 
 @pytest.mark.requires_binary
-@pytest.mark.parametrize("model_cls_name", ['Kraken', 'KrakenC', 'KrakenField'])
+@pytest.mark.parametrize("model_cls_name", ['Kraken'])
 def test_kraken_family_env_writes_top_bc_for_halfspace_surface(
     model_cls_name, tmp_path, src_rcv,
 ):

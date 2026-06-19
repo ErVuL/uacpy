@@ -12,21 +12,22 @@ from typing import Tuple
 
 import numpy as np
 
+from uacpy._log import log_message
+
 
 _ENDIAN_WARN_EMITTED = False
 
 
 def _warn_non_little_endian(detected: str, source: str) -> None:
-    """Emit a one-shot warning the first time we decode a non-little-endian
+    """Log a one-shot notice the first time we decode a non-little-endian
     Fortran file. uacpy CI runs little-endian; big-endian decode works but
     is unvalidated."""
     global _ENDIAN_WARN_EMITTED
     if detected == 'big' and not _ENDIAN_WARN_EMITTED:
-        warnings.warn(
-            f"{source}: detected big-endian Fortran record framing; "
-            "uacpy decodes it correctly but this byte order is not "
-            "validated by CI.",
-            UserWarning, stacklevel=3,
+        log_message(
+            source,
+            "detected big-endian Fortran record framing; uacpy decodes it "
+            "correctly but this byte order is not validated by CI.",
         )
         _ENDIAN_WARN_EMITTED = True
 
@@ -38,7 +39,8 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     every record. On a well-formed file that integer is much smaller than
     ``2**31`` in the correct endianness and absurdly large in the wrong
     one. We pick the byte order that yields the smaller positive integer
-    (with a sanity cap of ``2**28``) and warn once if it isn't little-endian.
+    (with a sanity cap of ``2**28``) and log a one-shot notice if it isn't
+    little-endian.
 
     Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
     """
@@ -208,7 +210,7 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
         # Extract numbers before '/'
         nums_str = line.split("/")[0].strip()
         if nums_str:
-            values = np.fromstring(nums_str, sep=" ")
+            values = np.array(nums_str.split(), dtype=float)
         else:
             values = np.array([])
 
@@ -270,7 +272,7 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
             x = np.array([])
     else:
         # Read explicit values
-        x = np.fromstring(line, sep=" ", count=Nx)
+        x = np.array(line.split()[:Nx], dtype=float)
 
     # Ensure x is a 1D array
     x = np.atleast_1d(x)

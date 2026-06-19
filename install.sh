@@ -38,6 +38,7 @@ BHC_DIR="${SCRIPT_DIR}/uacpy/third_party/bellhopcuda"           # C++/CUDA bellh
 OASES_DIR="${SCRIPT_DIR}/uacpy/third_party/oases"               # OASES
 MPIRAMS_DIR="${SCRIPT_DIR}/uacpy/third_party/mpiramS"           # mpiramS PE
 RAMSURF_DIR="${SCRIPT_DIR}/uacpy/third_party/ramsurf"           # Collins RAM family
+RAMGEO_DIR="${SCRIPT_DIR}/uacpy/third_party/ramgeo"             # RAMGEO (RD layered fluid)
 BIN_ROOT="${SCRIPT_DIR}/uacpy/bin"
 
 BIN_DIR_OALIB="${BIN_ROOT}/oalib"
@@ -45,6 +46,7 @@ BIN_DIR_BELLHOP="${BIN_ROOT}/bellhopcuda"
 BIN_DIR_OASES="${BIN_ROOT}/oases"
 BIN_DIR_MPIRAMS="${BIN_ROOT}/mpirams"
 BIN_DIR_RAMSURF="${BIN_ROOT}/ramsurf"
+BIN_DIR_RAMGEO="${BIN_ROOT}/ramgeo"
 
 # Offline data cache (downloaded public datasets for uacpy.data's local backend;
 # gitignored, never bundled). Override at runtime with $UACPY_DATA_CACHE.
@@ -87,12 +89,14 @@ STATUS_BELLHOPCUDA="skipped"  # bellhopcxx / bellhopcuda (optional)
 STATUS_OASES="skipped"        # OAST / OASN / OASR / OASP (optional)
 STATUS_MPIRAMS="skipped"      # mpiramS PE
 STATUS_RAMSURF="skipped"      # rams0.5 + ramsurf1.5
+STATUS_RAMGEO="skipped"       # RAMGEO (RD layered fluid)
 STATUS_DATA="skipped"         # offline data cache (GEBCO / WOA23 / sediment)
 NOTE_OALIB=""
 NOTE_BELLHOPCUDA=""
 NOTE_OASES=""
 NOTE_MPIRAMS=""
 NOTE_RAMSURF=""
+NOTE_RAMGEO=""
 NOTE_DATA=""
 
 # Pretty-print one component status row. Used by the final summary.
@@ -375,6 +379,7 @@ if [[ "$BUILD_MODELS" != "1" ]]; then
     NOTE_OASES="skipped (--no-models)"
     NOTE_MPIRAMS="skipped (--no-models)"
     NOTE_RAMSURF="skipped (--no-models)"
+    NOTE_RAMGEO="skipped (--no-models)"
 fi
 
 # -------------------------
@@ -784,6 +789,7 @@ ensure_dir "$BIN_DIR_OASES"
 ensure_dir "$BIN_DIR_BELLHOP"
 ensure_dir "$BIN_DIR_MPIRAMS"
 ensure_dir "$BIN_DIR_RAMSURF"
+ensure_dir "$BIN_DIR_RAMGEO"
 
 # -------------------------
 # Build bellhopcxx / bellhopcuda (if selected)
@@ -1242,6 +1248,49 @@ fi
 echo ""
 
 # -------------------------
+# Build RAMGEO (range-dependent layered fluid PE)
+# -------------------------
+echo -e "${BLUE}=== Building RAMGEO (range-dependent layered fluid) ===${NC}"
+if [ -d "$RAMGEO_DIR" ]; then
+    cd "$RAMGEO_DIR"
+
+    if [ "$FORCE" -eq 1 ]; then
+        echo -e "${YELLOW}Cleaning previous RAMGEO builds (--force)...${NC}"
+        make clean 2>/dev/null || true
+    fi
+
+    echo -e "${BLUE}Compiling ramgeo (Collins layered fluid PE)...${NC}"
+    # Same numerics rationale as ramsurf: -O2 (no -ffast-math) for the
+    # complex Padé recursion, -std=legacy -w for the F77-era source.
+    RAMGEO_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # FC=gfortran: make's built-in FC=f77 would otherwise win over the
+    # Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS
+    # (gfortran ships via the Homebrew `gcc` formula). No OpenMP — RAMGEO is
+    # single-threaded, like ramsurf.
+    set +e
+    make FC=gfortran FFLAGS="$RAMGEO_FFLAGS" 2>&1 | tee /tmp/ramgeo_build.log
+    RAMGEO_STATUS=${PIPESTATUS[0]:-1}
+    set -e
+
+    if [[ $RAMGEO_STATUS -eq 0 ]] && [ -f "$RAMGEO_DIR/ramgeo" ]; then
+        cp "$RAMGEO_DIR/ramgeo" "$BIN_DIR_RAMGEO/ramgeo"
+        chmod +x "$BIN_DIR_RAMGEO/ramgeo"
+        echo -e "${GREEN}✓ Installed RAMGEO binary: ramgeo${NC}"
+        STATUS_RAMGEO="ok"
+        NOTE_RAMGEO="$BIN_DIR_RAMGEO"
+    else
+        echo -e "${YELLOW}⚠ RAMGEO build failed. See /tmp/ramgeo_build.log${NC}"
+        STATUS_RAMGEO="failed"
+        NOTE_RAMGEO="see /tmp/ramgeo_build.log"
+    fi
+else
+    echo -e "${YELLOW}RAMGEO source not found at: $RAMGEO_DIR. Skipping.${NC}"
+    STATUS_RAMGEO="skipped"
+    NOTE_RAMGEO="source missing: $RAMGEO_DIR"
+fi
+echo ""
+
+# -------------------------
 # Install executables to bin directories
 # -------------------------
 echo -e "${BLUE}=== Installing executables to ${BIN_ROOT} ===${NC}"
@@ -1652,6 +1701,7 @@ print_status_row "OALIB (Fortran)"   "$STATUS_OALIB"      "$NOTE_OALIB"
 print_status_row "Bellhop (cxx/cuda)" "$STATUS_BELLHOPCUDA" "$NOTE_BELLHOPCUDA"
 print_status_row "mpiramS (PE)"      "$STATUS_MPIRAMS"    "$NOTE_MPIRAMS"
 print_status_row "Collins RAM family" "$STATUS_RAMSURF"   "$NOTE_RAMSURF"
+print_status_row "RAMGEO (RD layered)" "$STATUS_RAMGEO"   "$NOTE_RAMGEO"
 print_status_row "OASES suite"       "$STATUS_OASES"      "$NOTE_OASES"
 print_status_row "Offline data cache" "$STATUS_DATA"      "$NOTE_DATA"
 echo ""

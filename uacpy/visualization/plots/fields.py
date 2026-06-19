@@ -12,7 +12,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _auto_tl_limits, _overlay_seafloor, _pinned_subtitle
+from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle
 
 
 def plot_field(
@@ -218,7 +218,7 @@ def _plot_field_2d(
         value_label = 'p(t)'
     elif value == 'tl':
         if vmin is None or vmax is None:
-            v_lo, v_hi = _auto_tl_limits(Z)
+            v_lo, v_hi = _TL_LIMITS
             vmin = v_lo if vmin is None else vmin
             vmax = v_hi if vmax is None else vmax
         if cmap is None:
@@ -594,10 +594,7 @@ def compare_models(
                 break
 
     if value == 'tl' and (vmin is None or vmax is None):
-        cat = np.concatenate(
-            [np.asarray(_value_array(f, value)[0]).ravel() for f in fields]
-        )
-        v_lo, v_hi = _auto_tl_limits(cat)
+        v_lo, v_hi = _TL_LIMITS
         vmin = v_lo if vmin is None else vmin
         vmax = v_hi if vmax is None else vmax
     if cmap is None:
@@ -631,6 +628,25 @@ def compare_models(
     return fig, axes_flat
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Rays / Arrivals
-# ─────────────────────────────────────────────────────────────────────────────
+def plot_field_stack(stack, env: Optional[Environment] = None, *,
+                     ncols: Optional[int] = None,
+                     figsize: Optional[Tuple[float, float]] = None, **kwargs):
+    """Grid of TL panels, one per slab of a Field :class:`ResultStack`.
+
+    Each panel is a :func:`plot_field` heatmap titled by the slab's stacking
+    coordinate (e.g. ``source_depth=20``). Extra kwargs forward to
+    :func:`plot_field`.
+    """
+    n = len(stack)
+    ncols = ncols or min(n, 3)
+    nrows = int(np.ceil(n / ncols))
+    figsize = figsize or (5.5 * ncols, 4.0 * nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    flat = axes.ravel()
+    for i, (coord, slab) in enumerate(stack):
+        plot_field(slab, ax=flat[i], env=env, **kwargs)
+        flat[i].set_title(f"{stack.coordinate_name}={coord:g}")
+    for j in range(n, len(flat)):
+        flat[j].axis('off')
+    fig.tight_layout()
+    return fig, axes

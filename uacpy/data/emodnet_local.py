@@ -23,7 +23,7 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
@@ -149,18 +149,22 @@ def fetch_seabed_local(point: Coordinate) -> dict:
 
 
 def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
+                       water_sound_speed: float = None,
                        timeout=None, verbose: Union[bool, str] = False
                        ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
 
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
-    uniformity with the network bottom fetchers.
+    uniformity with the network bottom fetchers. ``water_sound_speed`` (m/s)
+    scales the grain-size velocity ratio to the in-situ near-seabed water;
+    ``None`` uses the Hamilton reference.
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_local(point)
     kind, value = _FOLK5_TO_BOTTOM.get(sub['folk_5cl'], ('phi', 3.0))
     if kind == 'phi':
-        bottom = bottom_from_grain_size(value, roughness=roughness)
+        bottom = bottom_from_grain_size(
+            value, roughness=roughness, water_sound_speed=water_sound_speed)
     else:
         bottom = bottom_from_class(value, roughness=roughness)
     log_message(
@@ -173,10 +177,13 @@ def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
 
 def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
                                 n_points: int = 6, roughness: float = 0.0,
+                                water_sound_speed: float = None,
                                 timeout=None, verbose: Union[bool, str] = False
-                                ) -> RangeDependentBottom:
+                                ) -> Bottom:
     """Range-dependent bottom from the offline EMODnet polygons along a transect."""
     return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_local((la, lo), roughness=roughness),
+        lambda la, lo: fetch_bottom_local(
+            (la, lo), roughness=roughness,
+            water_sound_speed=water_sound_speed),
         start, end, n_points, source_label='EMODnet (offline)',
     )

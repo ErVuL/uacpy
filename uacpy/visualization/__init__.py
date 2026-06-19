@@ -25,6 +25,9 @@ Canonical surface
 * :func:`plot_environment` — single-panel view of the env: water column
   (SSP, Blues cmap) + bottom (every flavour, YlOrBr cmap) + optional
   ``source=``/``receiver=`` markers, with two independent colorbars.
+* :func:`plot_bottom_properties` — small-multiples seabed cross-sections,
+  one panel per property (cp, cs, ρ, αp, αs); shows shear & friends that
+  ``plot_environment`` (cp-only) does not.
 * :func:`plot_mode_functions`, :func:`plot_mode_wavenumbers`,
   :func:`plot_modes_heatmap` — three distinct mode views.
 * :func:`plot_reflection_coefficient`, :func:`plot_covariance`,
@@ -50,6 +53,7 @@ from uacpy.visualization.plots import (
     plot_rays,
     plot_arrivals,
     plot_environment,
+    plot_bottom_properties,
     plot_bathymetry_map,
     plot_overview,
     plot_sea_ice_map,
@@ -74,6 +78,7 @@ __all__ = [
     'plot_rays',
     'plot_arrivals',
     'plot_environment',
+    'plot_bottom_properties',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',

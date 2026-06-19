@@ -10,7 +10,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from uacpy.core.environment import BoundaryProperties, RangeDependentBottom
+from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import diesing_local
 
@@ -42,8 +42,8 @@ def test_transect(monkeypatch):
     monkeypatch.setattr(diesing_local, '_class_code', lambda lat, lon: next(codes))
     rdb = diesing_local.fetch_bottom_diesing_transect((0.0, 0.0), (2.0, 0.0),
                                                       n_points=3)
-    assert isinstance(rdb, RangeDependentBottom)
-    assert rdb.sound_speed.shape == (3,) and np.all(np.isfinite(rdb.sound_speed))
+    assert isinstance(rdb, Bottom)
+    assert rdb.halfspace_sound_speed.shape == (3,) and np.all(np.isfinite(rdb.halfspace_sound_speed))
 
 
 def test_download_extracts_raster(tmp_path, monkeypatch):

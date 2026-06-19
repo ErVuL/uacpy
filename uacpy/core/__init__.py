@@ -4,8 +4,7 @@ Core classes for underwater acoustics modeling
 
 from uacpy.core.source import Source
 from uacpy.core.environment import (
-    Environment, BoundaryProperties, RangeDependentBottom,
-    SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
+    Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
     SoundSpeedProfile, generate_sea_surface,
 )
 from uacpy.core.absorption import (
@@ -40,10 +39,9 @@ __all__ = [
     'Source',
     'Environment',
     'BoundaryProperties',
-    'RangeDependentBottom',
     'SedimentLayer',
-    'LayeredBottom',
-    'RangeDependentLayeredBottom',
+    'SeabedColumn',
+    'Bottom',
     'SoundSpeedProfile',
     'generate_sea_surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',

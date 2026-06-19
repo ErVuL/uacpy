@@ -253,7 +253,7 @@ def test_sediment_too_far_raises(cache):
 def test_sediment_transect(cache):
     rdb = sediment_db.fetch_bottom_local_transect(
         (30.5, -40.5), (43.0, 7.0), n_points=4)
-    assert rdb.sound_speed.shape == (4,)
+    assert rdb.halfspace_sound_speed.shape == (4,)
 
 
 # ── capstone from the cache ───────────────────────────────────────────────────
@@ -266,43 +266,43 @@ def test_fetch_environment_from_cache(cache):
     env = data.fetch_environment((30.5, -40.5), bottom_sources='grainsize')
     assert env.depth == 1500.0
     assert env.ssp.n_depths >= 5
-    assert env.bottom.grain_size_phi == 3.0
+    assert env.bottom.columns[0].halfspace.grain_size_phi == 3.0
     assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
 
 
 def test_fetch_environment_cache_preset(cache):
-    # *_sources='cache' resolves every axis from local data only (no network):
+    # *_sources='local' resolves every axis from local data only (no network):
     # bathy→GEBCO-local, ssp→WOA23-local, bottom→cache chain (EMODnet local miss
     # here → grain-size DB).
-    env = data.fetch_environment((30.5, -40.5), bathymetry_sources='cache',
-                                 ssp_sources='cache', bottom_sources='cache')
+    env = data.fetch_environment((30.5, -40.5), bathymetry_sources='local',
+                                 ssp_sources='local', bottom_sources='local')
     assert env.depth == 1500.0
-    assert env.bottom.grain_size_phi == 3.0
+    assert env.bottom.columns[0].halfspace.grain_size_phi == 3.0
     assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
 
 
 def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
-    # 'cache' must never reach the network. With an empty cache and literal
-    # bathy/ssp, the bottom 'cache' chain (incl. the pelagic last resort, whose
+    # 'local' must never reach the network. With an empty cache and literal
+    # bathy/ssp, the bottom 'local' chain (incl. the pelagic last resort, whose
     # depth lookup would otherwise fall back to the live API) must fail fast with
     # the install hint rather than touching the net.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
     gebco_local._GRID.clear()
     from uacpy.data import bathymetry
     monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("ssp_sources/bottom_sources='cache' hit the live API")))
+        AssertionError("ssp_sources/bottom_sources='local' hit the live API")))
     with pytest.raises(ConfigurationError, match='install.sh --data'):
         data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
-                               bottom_sources='cache')
+                               bottom_sources='local')
 
 
 def test_cache_preset_ssp_no_cache_raises(tmp_path, monkeypatch):
-    # ssp_sources='cache' with no WOA23 cache fails fast (no OpenDAP fallback).
+    # ssp_sources='local' with no WOA23 cache fails fast (no OpenDAP fallback).
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
     woa23_local._DATASETS.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data woa23'):
         data.fetch_environment((30.5, -40.5), bathymetry=3000.0,
-                               ssp_sources='cache')
+                               ssp_sources='local')
 
 
 def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
@@ -311,7 +311,7 @@ def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
     env = data.fetch_environment((30.5, -40.5), bottom_sources='crust1')
     ids = [s.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23', 'crust1', 'globsed']
-    assert env.bottom.total_thickness() == pytest.approx(500.0)
+    assert env.bottom.columns[0].total_thickness() == pytest.approx(500.0)
 
 
 def test_fetch_environment_sea_ice(cache, monkeypatch):

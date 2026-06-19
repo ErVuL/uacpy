@@ -115,7 +115,7 @@ class TestResolveTimeSeriesFrequencies:
 
     def test_non_time_series_passes_through(self):
         out = self.model._resolve_time_series_frequencies(
-            RunMode.COHERENT_TL, self.source, None,
+            RunMode.COHERENT_TL, None,
             source_waveform=_gaussian_pulse(), sample_rate=FS,
         )
         assert out is None
@@ -123,7 +123,7 @@ class TestResolveTimeSeriesFrequencies:
     def test_explicit_frequencies_bypasses_derivation(self):
         freqs_in = np.linspace(100, 300, 11)
         out = self.model._resolve_time_series_frequencies(
-            RunMode.TIME_SERIES, self.source, freqs_in,
+            RunMode.TIME_SERIES, freqs_in,
             source_waveform=_gaussian_pulse(), sample_rate=FS,
         )
         assert out is freqs_in  # user-supplied wins, no derivation
@@ -132,7 +132,7 @@ class TestResolveTimeSeriesFrequencies:
         wf = _gaussian_pulse()
         with pytest.warns(UserWarning, match=r"auto-derived"):
             freqs = self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, self.source, None,
+                RunMode.TIME_SERIES, None,
                 source_waveform=wf, sample_rate=FS,
             )
         assert freqs is not None
@@ -149,7 +149,7 @@ class TestResolveTimeSeriesFrequencies:
         wf = np.zeros(100)
         with pytest.raises(ConfigurationError, match='identically zero'):
             self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, self.source, None,
+                RunMode.TIME_SERIES, None,
                 source_waveform=wf, sample_rate=FS,
             )
 

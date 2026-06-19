@@ -7,7 +7,7 @@ OBJECTIVE:
     Compare ALL propagation models with advanced features:
     - Bellhop (with Cerveny beams)
     - RAM (with range-dependent SSP and bottom)
-    - KrakenField (with mode coupling)
+    - Kraken (with mode coupling)
     - Scooter (with volume attenuation)
     - OAST (wavenumber integration)
 SCENARIO:
@@ -41,8 +41,8 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy import RangeDependentBottom  # noqa: E402
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter, OAST  # noqa: E402
+from uacpy import Bottom  # noqa: E402
+from uacpy.models import Bellhop, RAM, Kraken, Scooter, OAST  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_environment,
     compare_models,
@@ -99,8 +99,7 @@ def main():
         [8000, 170],
     ])
 
-    bottom_rd = RangeDependentBottom(
-        ranges=bathymetry[:, 0],
+    bottom_rd = Bottom.from_halfspaces(bathymetry[:, 0],
         sound_speed=np.array([1550, 1600, 1640, 1680, 1720]),
         density=np.array([1.4, 1.55, 1.7, 1.85, 2.0]),
         attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4]),
@@ -162,11 +161,11 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # KrakenField with mode coupling
-    print("[3/5] KrakenField (adiabatic mode coupling)...")
+    # Kraken with mode coupling
+    print("[3/5] Kraken (adiabatic mode coupling)...")
     try:
-        krakenfield = KrakenField(verbose=False, mode_coupling='adiabatic', n_segments=4)
-        results['KrakenField'] = krakenfield.run(
+        krakenfield = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=4)
+        results['Kraken'] = krakenfield.run(
             env, source, receiver
         )
         print("  ✓ Success - coupled modes with range-dependent bottom!")

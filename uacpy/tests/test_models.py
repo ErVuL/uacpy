@@ -6,7 +6,7 @@ import pytest
 
 import numpy as np
 from uacpy.models import (
-    Bellhop, RAM, Kraken, KrakenField,
+    Bellhop, RAM, Kraken,
     Bounce, Scooter,
 )
 from uacpy.models.base import RunMode
@@ -33,15 +33,14 @@ class TestBellhop:
         assert isinstance(result, Field)
         assert result.shape[0] == len(receiver_small.depths)
 
-    def test_bellhopcuda_compute_tl(self, simple_env, source, receiver_small):
-        """Smoke test for ``BellhopCUDA``. Skipped when no CUDA/CXX binary
-        is available — instantiation will raise ``ExecutableNotFoundError``.
+    def test_bellhop_cuda_backend_compute_tl(self, simple_env, source, receiver_small):
+        """Smoke test for ``Bellhop(backend='cuda')``. Skipped when no
+        CUDA/CXX binary is built — the backend gracefully falls back to the
+        Fortran binary (with a warning), so detect that and skip.
         """
-        from uacpy.models import BellhopCUDA
-        from uacpy.core.exceptions import ExecutableNotFoundError
-        try:
-            bhc = BellhopCUDA(verbose=False)
-        except ExecutableNotFoundError:
+        from uacpy.models import Bellhop
+        bhc = Bellhop(backend='cuda', verbose=False)
+        if bhc.version not in ('cuda', 'cxx'):
             pytest.skip("bellhopcuda / bellhopcxx binary not installed")
         result = bhc.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         assert isinstance(result, Field)
@@ -95,7 +94,7 @@ class TestKrakenField:
 
     def test_krakenfield_compute_tl(self, simple_env, source, receiver_small):
         """Test KrakenField TL computation."""
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         result = kf.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         assert isinstance(result, Field)
@@ -244,6 +243,27 @@ class TestRAM:
         assert result.data.shape[0] == 1
         assert result.data.shape[1] == 1
 
+    def test_compute_time_series_forwards_output_duration(self, simple_env, source):
+        """compute_time_series must forward output_duration (+ waveform/rate)
+        to run() — it's the knob that sets the synthesised animation window."""
+        receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+        ram = RAM(verbose=False)
+        captured = {}
+
+        def _spy(env, src, rcv, *, run_mode=None, **kw):
+            captured.update(run_mode=run_mode, **kw)
+            return object()
+
+        ram.run = _spy
+        wf = np.ones(8)
+        ram.compute_time_series(simple_env, source, receiver,
+                                source_waveform=wf, sample_rate=4000.0,
+                                output_duration=0.5)
+        assert captured['run_mode'] is RunMode.TIME_SERIES
+        assert captured['output_duration'] == 0.5
+        assert captured['sample_rate'] == 4000.0
+        assert captured['source_waveform'] is wf
+
 
 # OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;
 # the cross-model workflow tests below cover Bounce → {Bellhop, Scooter, KrakenC}.
@@ -289,7 +309,6 @@ class TestModelConsistency:
         import os
 
         from uacpy.core import Environment, BoundaryProperties
-        from uacpy.models import KrakenC
 
         # Step 1 — BOUNCE on elastic bottom
         bottom_elastic = BoundaryProperties(
@@ -332,9 +351,9 @@ class TestModelConsistency:
         c_high_brc = bounce_result.metadata['c_high']
 
         if downstream == "KrakenC":
-            modes = KrakenC(
+            modes = Kraken(backend='krakenc',
                 verbose=False, c_low=c_low_brc, c_high=c_high_brc,
-            ).run(env=env_with_rc, source=source, receiver=receiver_small)
+            ).compute_modes(env=env_with_rc, source=source, receiver=receiver_small)
             assert isinstance(modes, Modes)
             assert modes.k is not None and len(modes.k) > 0
             assert modes.phi.shape[1] == len(modes.k)

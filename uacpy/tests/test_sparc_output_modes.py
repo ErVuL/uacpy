@@ -10,7 +10,7 @@ Tests all three SPARC output modes:
 import pytest
 import numpy as np
 
-from uacpy import Environment, Source, Receiver
+from uacpy import Environment, Source, Receiver, BoundaryProperties
 from uacpy import Field
 from uacpy.models import SPARC
 
@@ -23,13 +23,13 @@ def sparc_simple_env():
     vacuum-bottom requirement does not shadow the shared half-space
     fixture used by other models.
     """
+    # SPARC requires vacuum or rigid bottom
     env = Environment(
         name="Test Environment",
         bathymetry=100.0,
-        ssp=1500.0
+        ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='vacuum'),
     )
-    # SPARC requires vacuum or rigid bottom
-    env.bottom.acoustic_type = 'vacuum'
     return env
 
 
@@ -73,6 +73,9 @@ class TestSPARCOutputModes:
         assert result.data.shape == (len(receiver_grid.depths), len(receiver_grid.ranges))
         assert result.metadata.get('output_mode') == 'R'
         assert result.model == 'SPARC'
+        # Catch the Fortran exit-0/garbage trap: real finite, non-constant field.
+        assert np.all(np.isfinite(result.data)) and np.any(result.data != 0)
+        assert np.all(result.tl < 200.0)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -103,6 +106,8 @@ class TestSPARCOutputModes:
         assert result.metadata.get('output_mode') == 'D'
         assert result.model == 'SPARC'
         assert result.metadata.get('n_range_runs') == len(ranges)
+        assert np.all(np.isfinite(result.data)) and np.any(result.data != 0)
+        assert np.all(result.tl < 200.0)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -129,6 +134,8 @@ class TestSPARCOutputModes:
         assert result.metadata.get('output_mode') == 'S'
         assert result.model == 'SPARC'
         assert 'Hankel transform' in result.metadata.get('note', '')
+        assert np.all(np.isfinite(result.data)) and np.any(result.data != 0)
+        assert np.all(result.tl < 200.0)
 
 
 class TestSPARCModeComparison:
@@ -256,8 +263,9 @@ class TestSPARCErrorHandling:
         the pytest warnings summary; ``pytest.warns`` inside the test
         body still asserts the warning fires (``catch_warnings`` scope
         overrides the filter for assertion purposes)."""
+        # Default bottom is a fluid half-space, which SPARC doesn't support
+        # → it must auto-convert to vacuum and warn.
         env = Environment(name="Test", bathymetry=100, ssp=1500)
-        env.bottom.acoustic_type = 'half-space'  # SPARC doesn't support this
 
         sparc = SPARC(verbose=False)
 
@@ -287,3 +295,21 @@ class TestSPARCDepthDispatch:
             result = sparc.run(sparc_simple_env, source_50hz, receiver)
             assert result is not None
             assert result.metadata.get('n_depth_runs') == n_depths
+
+
+class TestSPARCTimeSeriesGuard:
+    """Audit M1: only output_mode='R' assembles the native transient p(t); the
+    'D'/'S' branches return a frequency-domain field, so TIME_SERIES must be
+    rejected for them instead of silently returning the wrong result kind.
+    The guard fires before any binary work, so no binary is needed."""
+
+    @pytest.mark.parametrize('output_mode', ['D', 'S'])
+    def test_time_series_rejected_for_d_and_s(self, sparc_simple_env,
+                                              source_50hz, output_mode):
+        from uacpy.models.base import RunMode
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        receiver = Receiver(depths=[60.0], ranges=[500.0, 1000.0])
+        model = SPARC(verbose=False, output_mode=output_mode)
+        with pytest.raises(UnsupportedFeatureError):
+            model.run(sparc_simple_env, source_50hz, receiver,
+                      run_mode=RunMode.TIME_SERIES)

@@ -62,6 +62,13 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: data rows ({self.data.shape[0]}) must match "
                 f"depths length ({self.depths.size})"
             )
+        # Sound speeds must be finite and positive (NaN/inf fail every plain
+        # ``<= 0`` check, so guard with isfinite explicitly).
+        if not np.all(np.isfinite(self.data)) or np.any(self.data <= 0):
+            raise ConfigurationError(
+                "SoundSpeedProfile: sound speeds must be finite and positive; "
+                "got non-finite or non-positive values in data."
+            )
         _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths")
         if self.ranges is not None:
             self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
@@ -420,6 +427,15 @@ def generate_sea_surface(
         Column 0: range (m), Column 1: surface height (m, positive up).
         Suitable for passing directly to ``Environment(altimetry=...)``.
     """
+    if not np.isfinite(wind_speed_ms) or wind_speed_ms <= 0:
+        raise ConfigurationError(
+            f"generate_sea_surface: wind_speed_ms must be a positive m/s value; "
+            f"got {wind_speed_ms}."
+        )
+    if n_points < 2:
+        raise ConfigurationError(
+            f"generate_sea_surface: n_points must be >= 2; got {n_points}."
+        )
     g = 9.81
     rng = np.random.default_rng(seed)
 

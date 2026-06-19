@@ -372,14 +372,14 @@ class TestBellhopRangeDependentSSP:
         )
 
     @pytest.mark.requires_binary
-    @pytest.mark.parametrize('prefer_cuda', [False, True])
-    def test_rd_ssp_quad_runs_end_to_end(self, rd_ssp_env, prefer_cuda):
+    @pytest.mark.parametrize('backend', [None, 'fortran'])
+    def test_rd_ssp_quad_runs_end_to_end(self, rd_ssp_env, backend):
         src = Source(depths=20.0, frequencies=200.0)
         rcv = Receiver(
             depths=np.linspace(5.0, 95.0, 19),
             ranges=np.linspace(100.0, 8000.0, 41),
         )
-        bh = Bellhop(verbose=False, interp_ssp='quad', prefer_cuda=prefer_cuda)
+        bh = Bellhop(verbose=False, interp_ssp='quad', backend=backend)
         res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
         tl = np.asarray(res.tl)
         # Drop the 600 dB shadow sentinels Bellhop fills in.
@@ -391,8 +391,8 @@ class TestBellhopRangeDependentSSP:
         assert real.max() < 200
 
     @pytest.mark.requires_binary
-    @pytest.mark.parametrize('prefer_cuda', [False, True])
-    def test_rd_ssp_extended_past_box(self, rd_ssp_env, prefer_cuda):
+    @pytest.mark.parametrize('backend', [None, 'fortran'])
+    def test_rd_ssp_extended_past_box(self, rd_ssp_env, backend):
         """A receiver past the RD-SSP range grid must not crash: the writer
         holds the last profile constant out beyond the ray box (with a
         UserWarning) instead of letting rays exit the soundspeed box."""
@@ -402,7 +402,7 @@ class TestBellhopRangeDependentSSP:
             depths=np.linspace(5.0, 95.0, 19),
             ranges=np.linspace(100.0, 14000.0, 30),
         )
-        bh = Bellhop(verbose=False, interp_ssp='quad', prefer_cuda=prefer_cuda)
+        bh = Bellhop(verbose=False, interp_ssp='quad', backend=backend)
         # Two warnings fire for this geometry: the writer holds the last SSP
         # profile constant past the box, and validate_inputs flags the same
         # range shortfall. Capture both so neither leaks to the summary.
@@ -591,3 +591,83 @@ class TestBellhopMultiSourceDepth:
                                    np.array([20.0, 50.0, 80.0]))
         for sd, slab in stack:
             assert slab.is_eigen is True
+
+
+def test_bellhop_backend_fallback_warns(monkeypatch):
+    """An explicitly requested backend that isn't built must fall back to the
+    Fortran binary with a ``UserWarning`` (not a hard error). Verified by
+    hiding the cxx/cuda variants so only ``bellhop`` resolves."""
+    from uacpy.core.exceptions import ExecutableNotFoundError
+    fortran = Bellhop(backend='fortran', verbose=False)._exe   # real bellhop path
+
+    def fake_find(self, names, **kw):
+        names = list(names) if isinstance(names, (list, tuple)) else [names]
+        if 'bellhop' in names:
+            return fortran
+        raise ExecutableNotFoundError('Bellhop', repr(names))
+
+    monkeypatch.setattr(Bellhop, '_find_executable_in_paths', fake_find)
+    with pytest.warns(UserWarning, match='falling back'):
+        bh = Bellhop(backend='cuda', verbose=False)
+    assert bh.version == 'fortran'
+    assert bh.backend == 'cuda'                # requested value retained for copy()
+
+
+def test_bellhop_compute_arrivals_and_transfer_function():
+    """Smoke-cover the ``compute_arrivals`` / ``compute_transfer_function``
+    convenience wrappers (capability-check + kwarg-forwarding layer), which
+    are otherwise only reached via ``run(run_mode=...)``."""
+    env = Environment(name='cf', bathymetry=200.0, ssp=1500.0)
+    src = Source(depths=50.0, frequencies=200.0)
+    rcv = Receiver(depths=np.array([60.0, 120.0]),
+                   ranges=np.array([2000.0, 5000.0]))
+    bh = Bellhop(verbose=False)
+    arr = bh.compute_arrivals(env, src, rcv)
+    assert isinstance(arr, Arrivals)
+    hf = bh.compute_transfer_function(env, src, rcv,
+                                      frequencies=np.linspace(180.0, 220.0, 5))
+    assert isinstance(hf, Field) and np.iscomplexobj(hf.data)
+
+
+class TestConstructorValidation:
+    """Binary-affecting ctor args are validated up front (audit H2 + the
+    related ctor-validation cross-cutting theme): a bad value must raise a
+    ``ConfigurationError`` rather than silently mis-drive the binary."""
+
+    def test_dimensionality_3d_raises(self):
+        # '3D' would emit --3D against a 2D-only env file (silent 2D on
+        # Fortran, abort on cxx/cuda).
+        with pytest.raises(ConfigurationError):
+            Bellhop(dimensionality='3D')
+
+    def test_dimensionality_arbitrary_raises(self):
+        with pytest.raises(ConfigurationError):
+            Bellhop(dimensionality='foo')
+
+    def test_dimensionality_2d_ok(self):
+        assert Bellhop(dimensionality='2D').dimensionality == '2D'
+
+    def test_invalid_beam_type_raises(self):
+        # Unknown letters silently map to geometric-hat in the Fortran reader.
+        with pytest.raises(ConfigurationError):
+            Bellhop(beam_type='Q')
+
+    @pytest.mark.parametrize('bt', ['B', 'R', 'C', 'b', 'g', 'G', 'S'])
+    def test_valid_beam_types_ok(self, bt):
+        assert Bellhop(beam_type=bt).beam_type == bt
+
+    def test_invalid_source_type_raises(self):
+        with pytest.raises(ConfigurationError):
+            Bellhop(source_type='Z')
+
+    def test_invalid_grid_type_raises(self):
+        with pytest.raises(ConfigurationError):
+            Bellhop(grid_type='Q')
+
+    def test_alpha_wrong_length_raises(self):
+        with pytest.raises(ConfigurationError):
+            Bellhop(alpha=(-80, 0, 80))
+
+    def test_alpha_scalar_raises(self):
+        with pytest.raises(ConfigurationError):
+            Bellhop(alpha=80)

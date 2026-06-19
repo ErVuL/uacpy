@@ -29,7 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.core.environment import (  # noqa: E402
-    BoundaryProperties, Environment, LayeredBottom, SedimentLayer,
+    BoundaryProperties, Environment, SeabedColumn, SedimentLayer,
 )
 from uacpy.core.receiver import Receiver  # noqa: E402
 from uacpy.core.source import Source  # noqa: E402
@@ -57,7 +57,7 @@ def main():
         sound_speed=1700.0, density=1.7, attenuation=0.5,
     )
 
-    elastic_layered = LayeredBottom(
+    elastic_layered = SeabedColumn(
         layers=[
             SedimentLayer(
                 thickness=15.0, sound_speed=1700.0, density=1.7,
