@@ -89,8 +89,7 @@ from uacpy.models import Bellhop, RunMode
 #    WOA23 sound speed and NCEI seabed — across the Bay of Biscay continental
 #    slope into the deep Iberian abyssal plain (~4800 m).
 A, B = (45.0, -2.5), (45.5, -6.5)         # (lat, lon): shelf slope → abyssal plain
-env  = data.fetch_environment(A, transect_to=B, date='2026-01-15',
-         range_dependent_ssp=True, range_dependent_bottom=True, bottom_sources='auto')
+env  = data.fetch_environment(A, transect_to=B, date='2026-01-15', bottom_sources='auto')
 grid = data.fetch_bathy_grid((43.0, 47.0), (-8.0, -1.0))     # (lats, lons, depth)
 
 # 2. Model transmission loss with Bellhop at 1000 Hz, out to the transect length.

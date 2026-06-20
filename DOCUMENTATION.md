@@ -1275,21 +1275,101 @@ Example 35 chains site sound speed → decidecade bands → ship SL → weighted
 
 uacpy is SI throughout; underwater levels reference **1 µPa**.
 
+### Units
+
 | Quantity | Unit | Note |
 |----------|------|------|
 | Length / depth / range | metres | suffix `_km` only when kilometres (`m_to_km` at IO boundaries) |
 | Frequency | Hz | |
+| Time | seconds | |
+| Angle | degrees | launch angles, grazing/incidence angles, wedge angles (radians only inside formulas) |
 | Sound speed | m/s | |
-| Density | g/cm³ | |
-| Attenuation | dB per wavelength | models emit the right `AT` TopOpt letter |
-| Pressure level | dB re 1 µPa | |
+| Density | g/cm³ | **acoustic inputs** (bottom/sediment). SI `kg/m³` only for the intensity constant — see *Density* below |
+| Attenuation (geoacoustic) | dB per wavelength | models emit the matching `AT` TopOpt letter |
+| Attenuation (volume) | dB/km | `francois_garrison_db_per_km`, `thorp_db_per_km` |
+| Pressure | Pa (µPa for levels) | |
+| Pressure level / SPL | dB re 1 µPa | air would be dB re 20 µPa |
+| Noise spectral level | dB re 1 µPa²/Hz | |
 
-- **Depth is positive down**; **altimetry is positive up**.
+### Geometry & coordinate system
+
+- **Depth `z` is positive down** from the sea surface (`z = 0`); **altimetry is
+  positive up** (surface elevation above the mean).
+- Range `r` is horizontal distance **from the source** (`r = 0` at the source);
+  range-dependent carriers (`Bathymetry`/`ssp`/`Bottom`) index their `ranges`
+  axis from the source too.
+- The field is **range–depth (2-D / N×2-D)**: azimuthal symmetry is assumed, so
+  a point source spreads **cylindrically** (`∝ 1/√r`) in a waveguide.
+
+### Fields, pressure normalization & transmission loss
+
+- A `Field` with **complex** `data` holds the **acoustic pressure normalized to
+  a unit point source at 1 m** — i.e. referenced to the free-field
+  `p₀(r) = e^{i k₀ r}/(4π r)`. Hence transmission loss is simply
+  **`TL = −20·log₁₀|p|`** (`Field.tl`), in dB re 1 m. Real `data` is already in
+  dB and returned as-is.
+- This is the 3-D point-source convention. A 2-D (line-source) analytic
+  solution differs by the spreading factor `|G₃D/G₂D| = √(k/2πr)` — relevant
+  only when comparing against closed-form 2-D references (see the ideal-wedge
+  benchmark in `tests/test_benchmarks_analytic.py`).
+- `SEL`, `PSD`, `PPSD` and `Spectrogram` form levels through
+  `core.acoustics.power_to_db` (`10·log₁₀(power/ref²)`), which floors `power` at
+  `PRESSURE_FLOOR` before the log so a silent sample yields a finite, very
+  negative level rather than `−inf`.
+
+### Phase / time convention
+
+- Harmonic time dependence and the sign of the imaginary part **follow the
+  underlying Acoustics-Toolbox binaries** (KRAKEN, e.g., is implemented with the
+  `e^{+iωt}` convention). Magnitudes and TL are convention-independent; **phase**
+  is not — this matters for matched-field processing and for broadband IFFT,
+  where the `phase_reference` carried on a `Result` fixes the reference (see §8,
+  *Phase reference — why IFFT needs it*).
+- Broadband bands are defined per model: RAM uses `bandwidth = fc/Q`, `Δf = 1/T`;
+  Bellhop synthesizes `n_freqs` bins over `bandwidth_factor·fc` (§18).
+
+### Boundaries & angles
+
+- **Surface** is pressure-release by default; **bottom** `acoustic_type` ∈
+  `{'half-space', 'vacuum' (pressure-release), 'rigid', 'file', …}`.
+- **Geoacoustic attenuation is dB per wavelength** (the AT default); the writer
+  sets the corresponding TopOpt letter. Volume absorption is dB/km.
+- Reflection coefficients (`Bounce`, OASR) are tabulated over **grazing angle**
+  (degrees) by default; `OASR(angle_type='incidence')` converts via
+  `grazing = 90 − incidence`. `ReflectionCoefficient` carries `|R|` and phase
+  (radians). The critical grazing angle for `c₂>c₁` is `cos θ_c = c₁/c₂`.
+
+### Sound speed & density
+
+- Sound-speed helpers: **`soundspeed` = Mackenzie (1981)** (T °C, S ppt, depth m)
+  is the default; **`soundspeed_unesco` = Chen & Millero / UNESCO** (T °C, S PSU,
+  **pressure in dbar**) is the international-standard algorithm.
+- **Density has two distinct roles** — do not conflate them:
+  - *Acoustic input* density (bottom/sediment, and the water column on disk) is
+    **g/cm³**; when a water density is not written, the AT binaries use their
+    default **ρ_water = 1.0 g/cm³** (this is what the propagation models see).
+  - `constants.DENSITY_SEAWATER = 1027 kg/m³` is used **only** for SI
+    particle-velocity / acoustic-intensity physics, never as a model input.
+
+### Modal & numerical conventions
+
+- Kraken modes are depth-normalized so `∫ Z_m²/ρ dz = 1`; horizontal
+  wavenumbers `k_m` are returned in descending order (mode 1 first), real for
+  trapped modes with `k₂ < k_m < k₁`.
 - SSP *shape* (the profile data) lives on `Environment`; the SSP *interpolation
   scheme* is a model knob (`Model(interp_ssp=...)`).
+- Out-of-range positional indexing (`.isel`) raises `IndexError`; invalid
+  configuration raises the typed `core.exceptions` hierarchy.
 - Status logging goes through `uacpy._log.log_message` (never `print`);
   user-facing notices go through `warnings.warn` (a custom formatter is
   installed at import).
+
+> These conventions are exercised by the **benchmark suite**
+> (`pytest -m benchmark`), every test of which compares uacpy output against a
+> published or closed-form reference: the TL/pressure normalization against the
+> analytic Pekeris modal-sum and ideal-wedge solutions, the reflection-angle
+> convention against the Rayleigh coefficient, and the sound-speed equations
+> against their published check values.
 
 ## 16. Troubleshooting
 
