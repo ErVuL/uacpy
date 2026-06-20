@@ -82,7 +82,7 @@ class TestSeabedColumnAccessors:
         c = self._col()
         assert c.isel(layer=0).sound_speed == 1600
         assert isinstance(c.isel(layer=1), SedimentLayer)
-        with pytest.raises(IndexError):
+        with pytest.raises(IndexError, match="SeabedColumn.isel"):
             c.isel(layer=9)
 
     def test_no_eval(self):
@@ -160,6 +160,14 @@ class TestRDHalfspace:
         assert b.select_range('mean').columns[0].halfspace.sound_speed == pytest.approx(1700)
         assert b.select_range('median').columns[0].halfspace.sound_speed == pytest.approx(1700)
 
+    def test_select_range_mean_carries_roughness(self):
+        lo = _hs(); lo.roughness = 0.5
+        hi = _hs(); hi.roughness = 1.5
+        b = Bottom.from_columns([SeabedColumn([], lo), SeabedColumn([], hi)],
+                                ranges=[0, 5000])
+        assert b.select_range('mean').columns[0].halfspace.roughness == pytest.approx(1.0)
+        assert b.select_range('median').columns[0].halfspace.roughness == pytest.approx(1.0)
+
 
 # ─── range-dependent layered: nearest only ──────────────────────────────────
 
@@ -179,7 +187,7 @@ class TestRDLayered:
         b = self._b()
         assert b.isel(range=0).halfspace.sound_speed == 1900
         assert b.isel(range=1).halfspace.sound_speed == 2200
-        with pytest.raises(IndexError):
+        with pytest.raises(IndexError, match="Bottom.isel"):
             b.isel(range=9)
 
     def test_halfspace_at_is_nearest_when_layered(self):

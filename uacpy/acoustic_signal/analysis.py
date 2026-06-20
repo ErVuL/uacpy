@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.constants import REFERENCE_PRESSURE_AIR, REFERENCE_PRESSURE_WATER
+from uacpy.core.acoustics import power_to_db
 
 
 class PPSD:
@@ -124,7 +125,7 @@ class PPSD:
 
         # Convert to dB once; mean/std/percentiles all live in dB-space so
         # they line up with the histogram (and with how users read PPSD).
-        psd_segments_dB = 10 * np.log10(psd_array / self.ref**2)
+        psd_segments_dB = power_to_db(psd_array, self.ref)
 
         self.mean_psd = np.mean(psd_segments_dB, axis=0)
         self.std_psd = np.std(psd_segments_dB, axis=0)
@@ -414,7 +415,7 @@ class SEL:
         width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
         ax.bar(
             Fedges[:-1],
-            10 * np.log10(self.sel / (self.ref**2)),
+            power_to_db(self.sel, self.ref),
             width=width,
             align="edge",
             edgecolor="black",
@@ -505,8 +506,9 @@ class PSD:
             Additional keyword arguments passed to ``ax.semilogx``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
-            raise RuntimeError("PSD.plot: compute() must be called before plotting")
-        psd_db = 10 * np.log10(self.psd / (self.ref**2))
+            raise ConfigurationError(
+                "PSD.plot: compute() must be called before plotting")
+        psd_db = power_to_db(self.psd, self.ref)
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.semilogx(self.frequencies, psd_db, label=label, **kwargs)
 
@@ -537,7 +539,7 @@ class PSD:
         if ref is None:
             ref = self.ref
 
-        psd_db = 10 * np.log10(Pxx / (ref**2))
+        psd_db = power_to_db(Pxx, ref)
         ax.plot(Fxx, psd_db, label=label, **kwargs)
         if label != "":
             ax.legend()

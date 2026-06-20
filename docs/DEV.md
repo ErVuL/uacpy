@@ -298,8 +298,13 @@ These are the physics-agnostic primitives every model consumes:
   / SPL utilities. **Not** imported by the model wrappers; safe to
   use from notebooks. Some functions are arlpy-adapted; see
   `third_party/arlpy/NOTICE`.
-- `materials.py` — named-material presets (`SAND`, `MUD`, `BASALT`,
-  `ICE`, …) for `BoundaryProperties`.
+- `materials.py` — named-material presets for `BoundaryProperties`,
+  keyed (case-insensitively) in the `MATERIALS` dict and looked up via
+  `get_material(name)` / enumerated via `list_materials()`. Keys are
+  seafloor classes: `'clay'`, `'silt'`, `'sand'`, `'gravel'`, `'moraine'`,
+  `'chalk'`, `'limestone'`, `'basalt'`, `'granite'`. There are no
+  uppercase module-level constants and no `'mud'`/`'ice'` entries (sea-ice
+  lives as `SEA_ICE_*` constants in `constants.py`).
 - `metrics.py` — cross-model comparison helpers (TL bias, residual,
   band-averaged TL).
 - `constants.py` — `DEFAULT_SOUND_SPEED`, `TL_MAX_DB`, `PRESSURE_FLOOR`,

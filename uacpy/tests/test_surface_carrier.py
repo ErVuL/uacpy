@@ -49,6 +49,22 @@ class TestSurfaceCarrier:
         with pytest.raises(ConfigurationError):
             Surface(properties=[_ice(), _ice()], ranges=[0.0])
 
+    def test_isel_out_of_range_is_typed(self):
+        s = Surface.coerce([(0.0, _ice()), (5000.0, _ice())])
+        with pytest.raises(IndexError, match="Surface.isel"):
+            s.isel(range=99)
+        with pytest.raises(IndexError, match="Surface.isel"):
+            s.isel(range=-99)
+
+    def test_collapse_mean_carries_roughness(self):
+        a = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
+                               density=0.9, shear_speed=1800.0, roughness=1.5)
+        b = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
+                               density=0.9, shear_speed=1800.0, roughness=2.5)
+        s = Surface(properties=[a, b], ranges=[0.0, 5000.0])
+        assert s.collapse('mean').properties[0].roughness == pytest.approx(2.0)
+        assert s.collapse('median').properties[0].roughness == pytest.approx(2.0)
+
 
 class TestAltimetryCarrier:
     def test_at_eval_isel(self):
@@ -62,6 +78,11 @@ class TestAltimetryCarrier:
         a = Altimetry(ranges=[0.0, 5000.0], heights=[2.0, -3.0])  # crest + trough
         assert float(np.max(a.heights)) == 2.0 and a.eval(range=0) == 2.0
 
+    def test_isel_out_of_range_is_typed(self):
+        a = Altimetry(ranges=[0.0, 10000.0], heights=[0.0, -8.0])
+        with pytest.raises(IndexError, match="Altimetry.isel"):
+            a.isel(range=99)
+
 
 class TestBathymetryCarrier:
     def test_at_eval_isel(self):
@@ -74,6 +95,11 @@ class TestBathymetryCarrier:
     def test_positive_depth_enforced(self):
         with pytest.raises(ConfigurationError):
             Bathymetry(ranges=[0.0], depths=[-5.0])
+
+    def test_isel_out_of_range_is_typed(self):
+        b = Bathymetry(ranges=[0.0, 8000.0], depths=[100.0, 60.0])
+        with pytest.raises(IndexError, match="Bathymetry.isel"):
+            b.isel(range=99)
 
 
 class TestSurfaceModelBehaviour:

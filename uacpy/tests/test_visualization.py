@@ -120,6 +120,10 @@ class TestCompare:
         with pytest.raises(ConfigurationError, match="1 surviving axis"):
             plots.compare([tl_field, tl_field])
 
+    def test_rejects_empty_input(self):
+        with pytest.raises(ConfigurationError, match="empty fields list"):
+            plots.compare([])
+
 
 class TestCompareModels:
     def test_grid_of_heatmaps(self, tl_field, env):

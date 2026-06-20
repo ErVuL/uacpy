@@ -198,7 +198,7 @@ class TestRadonClass:
         assert np.corrcoef(g.ravel(), rec.ravel())[0, 1] > 0.85
 
     def test_plot_before_compute_raises(self):
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ConfigurationError):
             Radon().plot()
 
 

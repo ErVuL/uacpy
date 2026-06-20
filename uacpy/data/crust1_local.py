@@ -26,6 +26,9 @@ import io
 import tarfile
 from pathlib import Path
 
+import re
+import warnings
+
 import numpy as np
 
 from uacpy._log import log_message
@@ -51,6 +54,20 @@ _UPPER_CRYST, _MID_CRYST = 5, 6
 # CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
 DEFAULT_SEDIMENT_ATTENUATION = 0.5
 DEFAULT_BASEMENT_ATTENUATION = 0.1
+
+# CRUST1.0 is the catalogue's only commercial_use=False source and ships with no
+# formal licence. Direct callers of the low-level fetcher bypass the orchestrator
+# warning in fetch_environment, so warn here too — a non-commercial dataset must
+# never enter a result silently (DEV.md §7.1).
+_COMMERCIAL_WARNING = (
+    "CRUST1.0 has no formal licence and does not permit commercial use without "
+    "verification — cite Laske et al. 2013 and verify terms before commercial "
+    "use. See uacpy.data.citations() for attribution."
+)
+
+
+def _warn_non_commercial():
+    warnings.warn(_COMMERCIAL_WARNING, UserWarning, stacklevel=3)
 
 # Below this total sediment thickness (m) the seabed is treated as bare rock —
 # a thinner column (e.g. at a spreading-ridge crest, or after a near-zero GlobSed
@@ -231,6 +248,7 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     network bottom fetchers; ``water_sound_speed`` is likewise accepted and
     ignored (CRUST1.0 yields absolute Vp/Vs/ρ, not water-referenced ratios).
     """
+    _warn_non_commercial()
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
     globsed_applied = False
@@ -247,7 +265,7 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     return bottom
 
 
-def fetch_bottom_crust1_transect(start, end, *, n_points=6,
+def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
                                  elastic=True, use_globsed=True,
@@ -258,15 +276,26 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6,
     Each profile rescales its CRUST1.0 sediment column to the local GlobSed
     thickness by default (``use_globsed``); the result carries
     ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
+    ``max_points`` caps the waypoint count (signature parity with the other
+    transect bottom fetchers); CRUST1.0 is a cached 1° grid, so the sole effect
+    is clamping ``n_points``.
     """
     from uacpy.data._geo import geodesic_waypoints
+    if max_points is not None:
+        n_points = max(2, min(int(n_points), int(max_points)))
+    _warn_non_commercial()
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    profiles = [
-        fetch_bottom_crust1((la, lo), sediment_attenuation=sediment_attenuation,
-                            basement_attenuation=basement_attenuation,
-                            elastic=elastic, use_globsed=use_globsed)
-        for la, lo in zip(lats, lons)
-    ]
+    with warnings.catch_warnings():
+        # The per-waypoint fetches would each re-warn; emit once at the transect
+        # level above instead (filter only the commercial notice, not others).
+        warnings.filterwarnings('ignore', message=re.escape(_COMMERCIAL_WARNING),
+                                category=UserWarning)
+        profiles = [
+            fetch_bottom_crust1((la, lo), sediment_attenuation=sediment_attenuation,
+                                basement_attenuation=basement_attenuation,
+                                elastic=elastic, use_globsed=use_globsed)
+            for la, lo in zip(lats, lons)
+        ]
     rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges_m))
     rdl.sediment_thickness_source = (
         'globsed' if any(getattr(p, 'sediment_thickness_source', None) == 'globsed'

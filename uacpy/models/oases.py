@@ -189,6 +189,15 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     ``base_name`` is the stem of the input file (no extension).
     """
     import os
+    import re
+    # ``base_name`` is interpolated straight into the FORnnn filenames the
+    # OASES csh wrappers open; a value with a path separator or ``..`` would
+    # become a traversal. It is a hard-coded literal in every caller today —
+    # keep it that way by rejecting anything that isn't a plain stem.
+    if not re.fullmatch(r'[A-Za-z0-9_]+', base_name):
+        raise ConfigurationError(
+            f"OASES base_name must match [A-Za-z0-9_]+; got {base_name!r}"
+        )
     env = os.environ.copy()
     env['FOR001'] = f'{base_name}.dat'
     env['FOR019'] = f'{base_name}.plp'

@@ -68,6 +68,28 @@ def test_compute_windnoise_band_integrate(freqs):
     assert np.all(np.isfinite(integrated))
 
 
+def test_compute_windnoise_pinned_anchors():
+    """Pin the wind-noise spectral level at a few (wind, frequency) anchors.
+
+    The melding constants in ``compute_windnoise`` (``f0w``, ``L0w``, the
+    ``s1w``/``s2w`` slopes) descend from a secondary IDL/MATLAB lineage and
+    are **not yet reconciled line-by-line against the primary references**
+    (Wenz 1962). These anchors are NOT independently validated — they lock
+    the *current* output so any future change to those coefficients is caught
+    and forced to be deliberate. Re-validate against Wenz (1962) before
+    updating the expected values here.
+    """
+    expected = {
+        (10.0, 100.0): 58.9076655148,
+        (10.0, 1000.0): 59.6619005873,
+        (20.0, 100.0): 65.3631715344,
+        (20.0, 1000.0): 65.6516662333,
+    }
+    for (u, fhz), level in expected.items():
+        got = compute_windnoise(np.array([fhz]), u=u, water_depth='deep')
+        assert got[0] == pytest.approx(level, abs=1e-6)
+
+
 def test_wenznoise_high_freq_only_no_rain_meld_crash():
     """Rain melding only fires when both <7kHz and >7kHz frequencies exist."""
     f_high = np.logspace(4.0, 5.0, 30)  # all > 7 kHz
@@ -268,3 +290,10 @@ class TestMarineMammalWeighting:
         assert np.allclose(apply_weighting(lvl, f, "LF"),
                            lvl + auditory_weighting(f, "LF"))
         assert np.isfinite(weighted_level(lvl, f, "LF"))
+        # weighted_level integrates over frequency, so it must be independent
+        # of the grid density (a bare sample-sum was not — it swung ~10 dB).
+        f_coarse = np.linspace(20.0, 20000.0, 50)
+        f_fine = np.linspace(20.0, 20000.0, 500)
+        wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), f_coarse, "LF")
+        wl_fine = weighted_level(np.full(f_fine.size, 120.0), f_fine, "LF")
+        assert abs(wl_coarse - wl_fine) < 0.5     # was ~10 dB before the fix

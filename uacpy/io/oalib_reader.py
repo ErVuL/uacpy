@@ -450,8 +450,10 @@ def read_arr_file(filepath: Union[str, Path]):
           measured from the horizontal (positive downward).
         - ``n_top_bounces``, ``n_bot_bounces`` : integer bounce counts.
 
-        Depths are in **m**, ranges in **m** (the reader converts from
-        km on disk), frequencies in **Hz**.
+        Depths are in **m**, ranges in **m** (already metres on disk — AT
+        converts km→m at env-read time, so ``Pos%Rr`` in the ``.arr`` is
+        metres and the reader applies no further conversion), frequencies
+        in **Hz**.
     """
     filepath = Path(filepath)
 

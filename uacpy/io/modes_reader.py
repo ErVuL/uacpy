@@ -335,7 +335,7 @@ def read_modes_bin(
         raise
     except FileNotFoundError as e:
         raise FileFormatError(f"Mode file not found: {filename}") from e
-    except (IndexError, ValueError, struct.error, EOFError) as e:
+    except (IndexError, ValueError, struct.error, EOFError, OSError) as e:
         raise FileFormatError(
             f"Malformed Kraken mode file {filename}: {e}"
         ) from e
@@ -442,6 +442,25 @@ def _read_modes_bin_impl(
 
         if Ntot < 0:
             raise FileFormatError("Invalid mode file: Ntot < 0")
+
+        # File-size-aware sanity bound on the header counts before any
+        # array is sized off them. A corrupt/hostile header (e.g.
+        # NMat=0x7fffffff) would otherwise drive a multi-GB np.zeros below.
+        # The smallest a single sample can occupy on disk is 4 bytes
+        # (float32 / int32), so no count of 4-byte items can exceed the
+        # remaining file size; use that as a generous upper bound.
+        fid.seek(0, 2)
+        file_size = fid.tell()
+        max_items = file_size // 4
+        for _name, _val in (("Nfreq", Nfreq), ("Nmedia", Nmedia),
+                            ("Ntot", Ntot), ("NMat", NMat)):
+            if _val < 0 or _val > max_items:
+                raise FileFormatError(
+                    f"Invalid mode file: header count {_name}={_val} is "
+                    f"implausible for a {file_size}-byte file "
+                    f"(max {max_items} 4-byte items)."
+                )
+
         fid.seek(lrecl, 0)
         N = []
         Mater = []

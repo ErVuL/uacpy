@@ -154,11 +154,11 @@ def fetch_environment(
     transect_to: Optional[Coordinate] = None,
     n_points: Union[int, str] = 50,
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
-    range_dependent_ssp: bool = False,
+    range_dependent_ssp: Optional[bool] = None,
     ssp_n_points: Union[int, str] = 'auto',
-    range_dependent_bottom: bool = False,
+    range_dependent_bottom: Optional[bool] = None,
     bottom_n_points: Union[int, str] = 6,
-    range_dependent_surface: bool = False,
+    range_dependent_surface: Optional[bool] = None,
     surface_n_points: Union[int, str] = 'auto',
     with_absorption: bool = False,
     formula: str = 'unesco',
@@ -221,7 +221,9 @@ def fetch_environment(
         CC-BY), ``'grainsize'`` (NCEI grain-size samples, worldwide, public-
         domain — cached), ``'crust1'``, ``'diesing'``, ``'pelagic'`` (first-
         principles, never fails). Default ``None`` — bottom is optional, so it
-        is only fetched when you ask. All sources permit commercial use.
+        is only fetched when you ask. Most sources permit commercial use;
+        CRUST1.0 does not without verification — a non-commercial source emits a
+        ``UserWarning`` when fetched. See ``uacpy.data.citations(env)``.
     transect_to : (lat, lon), optional
         If given, bathymetry is sampled along the great-circle path from
         ``(lat, lon)`` to here (range-dependent); otherwise a single depth.
@@ -234,10 +236,11 @@ def fetch_environment(
         reduction — the fetch budget; the reduced grid is never larger. Default
         1000. Applies to bathymetry, SSP, and bottom transects.
     range_dependent_ssp : bool, optional
-        If ``True`` (requires ``transect_to``), the sound-speed profile is also
-        sampled along the transect → a 2-D, range-dependent SSP sharing the
-        transect's range axis. Default ``False`` (single profile at the start
-        point). WOA23 only.
+        Whether the SSP varies along the transect. **Default (``None``): a
+        transect makes the SSP range-dependent** (a single point is always
+        range-independent — there is nothing to vary). Pass ``False`` to force a
+        single profile at the start point even along a transect; ``True`` on a
+        point raises. WOA23 only.
     ssp_n_points : int or 'auto', optional
         SSP columns along the transect when ``range_dependent_ssp``. Default
         ``'auto'``: the transect is sampled at the **distinct WOA23 cells** it
@@ -245,13 +248,14 @@ def fetch_environment(
         analytically so no duplicate column is fetched), capped at
         ``max_points``. Pass an int for exactly that many evenly-spaced columns.
     range_dependent_bottom : bool, optional
-        If ``True`` (requires ``transect_to``), the seafloor is sampled along
-        the transect → a range-dependent ``Bottom`` sharing the range axis, from
-        ``bottom_sources`` (default ``'auto'`` when ``range_dependent_bottom``
-        is set). Default ``False``. Note: a single source is used for the whole
-        transect, so gaps outside its coverage forward-fill the nearest covered
-        value — pass ``bottom_sources='grainsize'`` for a uniform worldwide
-        (public-domain) source.
+        Whether a fetched seafloor varies along the transect. A bottom is fetched
+        only when requested (``bottom_sources=`` given, or this flag ``True``).
+        **Default (``None``): a requested bottom is range-dependent on a
+        transect**, range-independent at a point. Pass ``False`` to force a
+        single representative bottom even along a transect; ``True`` on a point
+        raises (and, with no ``bottom_sources``, implies ``'auto'``). A single
+        source spans the transect, so gaps forward-fill the nearest covered
+        value — ``bottom_sources='grainsize'`` is a uniform worldwide source.
     bottom_n_points : int or 'auto', optional
         Seabed samples along the transect when ``range_dependent_bottom``.
         Default 6 (explicit) — unlike SSP, the bottom sources expose no cheap
@@ -259,13 +263,15 @@ def fetch_environment(
         for the local sample DBs, but up to ``max_points`` live calls for the
         EMODnet WFS). Opt into ``'auto'`` for native resolution on local sources.
     range_dependent_surface : bool, optional
-        If ``True`` (requires ``transect_to``), the sea-ice canopy is sampled
-        along the transect → a range-dependent ``Surface`` sharing the range
-        axis (a marginal ice zone: open water ↔ pack ice). Implies the
-        ``'seaice'`` source, so ``surface_sources`` need not be set. The
-        solvers carry a single global top boundary, so every model collapses it
-        to one boundary (with a warning) — the range-dependent surface is for
-        inspecting / plotting the zone. Default ``False``.
+        Whether a fetched sea-ice surface varies along the transect. A surface
+        is fetched only when requested (``surface_sources='seaice'`` given, or
+        this flag ``True``) — a bare transect does **not** auto-fetch ice.
+        **Default (``None``): a requested surface is range-dependent on a
+        transect** (a marginal ice zone: open water ↔ pack ice), range-
+        independent at a point. ``False`` forces a single surface; ``True`` on a
+        point raises (and implies the ``'seaice'`` source). The solvers carry a
+        single global top boundary, so every model collapses it to one (with a
+        warning) — the range-dependent surface is for inspecting/plotting.
     surface_n_points : int or 'auto', optional
         Sea-ice samples along the transect when ``range_dependent_surface``.
         Default ``'auto'``: probe the local NSIDC grid (cheap) and collapse
@@ -352,18 +358,37 @@ def fetch_environment(
                     UserWarning, stacklevel=2)
             bathy_src = None                        # fall back to the literal
 
+    # ── Range-dependence resolution ──
+    # A transect makes each *fetched* axis range-dependent by default; a single
+    # point is always range-independent. ``range_dependent_*=True`` on a point
+    # is an error; ``=False`` forces a single representative sample even along a
+    # transect. SSP is always fetched (so a transect makes it range-dependent);
+    # bottom and surface are fetched only on request (their ``*_sources`` or an
+    # explicit ``True``), and become range-dependent when fetched on a transect.
+    for _flag, _ax in ((range_dependent_ssp, 'ssp'),
+                       (range_dependent_bottom, 'bottom'),
+                       (range_dependent_surface, 'surface')):
+        if _flag is True and transect_to is None:
+            raise ConfigurationError(
+                f"fetch_environment: range_dependent_{_ax}=True requires "
+                f"transect_to=.",
+                remediation="Pass transect_to=(lat, lon), or leave it unset "
+                            "for a single point.")
+    _on_transect = transect_to is not None
+    rd_ssp = _on_transect and range_dependent_ssp is not False
+    want_bottom = bottom_sources is not None or range_dependent_bottom is True
+    rd_bottom = (want_bottom and _on_transect
+                 and range_dependent_bottom is not False)
+    want_surface = surface_sources is not None or range_dependent_surface is True
+    rd_surface = (want_surface and _on_transect
+                  and range_dependent_surface is not False)
+
     # ── SSP ──
-    if range_dependent_ssp and transect_to is None:
-        raise ConfigurationError(
-            "fetch_environment: range_dependent_ssp=True requires transect_to=.",
-            remediation="Pass transect_to=(lat, lon), or leave "
-                        "range_dependent_ssp=False for a single profile.",
-        )
     ssp_cache_only = False
     if ssp_sources is not None:
         ssp_srcs, ssp_cache_only = _resolve_axis_sources(
             ssp_sources, auto=_AUTO_SSP_SOURCES)
-    elif ssp is None or range_dependent_ssp:
+    elif ssp is None or range_dependent_ssp is True:
         ssp_srcs = _DEFAULT_SSP_SOURCES             # mandatory default / rd-fetch
     else:
         ssp_srcs = None                             # literal only
@@ -376,7 +401,7 @@ def fetch_environment(
 
         def _ssp_call(token):
             src, backend = token
-            if not range_dependent_ssp:
+            if not rd_ssp:
                 return _fetch_ssp(
                     point, date=date, ssp_source=src, formula=formula,
                     resolution=resolution, source=backend, timeout=timeout,
@@ -412,7 +437,7 @@ def fetch_environment(
         except (DataFetchError, ConfigurationError) as exc:
             if ssp is None:
                 raise
-            if range_dependent_ssp:
+            if rd_ssp:
                 warnings.warn(
                     f"fetch_environment: range-dependent SSP fetch failed "
                     f"({exc}); falling back to the supplied ssp= literal. A "
@@ -423,13 +448,7 @@ def fetch_environment(
 
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
     bottom_props, bottom_kw = None, None
-    if bottom_sources is not None or range_dependent_bottom:
-        if range_dependent_bottom and transect_to is None:
-            raise ConfigurationError(
-                "fetch_environment: range_dependent_bottom=True requires transect_to=.",
-                remediation="Pass transect_to=(lat, lon), or leave "
-                            "range_dependent_bottom=False for a uniform bottom.",
-            )
+    if want_bottom:
         order, bottom_cache_only = _bottom_order(
             bottom_sources if bottom_sources is not None else 'auto')
         # Scale grain-size geoacoustics to the in-situ near-seabed water sound
@@ -437,7 +456,7 @@ def fetch_environment(
         # reference can be ~100 m/s off on a warm shelf / cold deep site).
         water_c = _near_seabed_sound_speed(ssp)
         try:
-            if range_dependent_bottom:
+            if rd_bottom:
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect_to, transect=True,
                     cache_only=bottom_cache_only, water_sound_speed=water_c,
@@ -452,7 +471,7 @@ def fetch_environment(
         except (DataFetchError, ConfigurationError) as exc:
             if bottom is None:
                 raise
-            if range_dependent_bottom:
+            if rd_bottom:
                 warnings.warn(
                     f"fetch_environment: range-dependent bottom fetch failed "
                     f"({exc}); falling back to the supplied bottom= literal. A "
@@ -470,7 +489,7 @@ def fetch_environment(
     surface_props, surface_src = None, None
     # range_dependent_surface implies the sea-ice source, mirroring how
     # range_dependent_ssp / _bottom auto-fetch their axis along the transect.
-    if surface_sources is not None or range_dependent_surface:
+    if want_surface:
         # The only surface source is the cached sea-ice climatology, so 'auto'
         # and 'local' (and the implied default) are identical here.
         srcs = (('seaice',) if surface_sources in ('auto', 'local', None)
@@ -487,15 +506,8 @@ def fetch_environment(
                 "pick the climatological sea-ice month.",
                 remediation="Pass date='YYYY-MM-DD', or supply surface= / drop it.",
             )
-        if range_dependent_surface and transect_to is None:
-            raise ConfigurationError(
-                "fetch_environment: range_dependent_surface=True requires "
-                "transect_to=.",
-                remediation="Pass transect_to=(lat, lon), or leave "
-                            "range_dependent_surface=False for a single surface.",
-            )
         try:
-            if range_dependent_surface:
+            if rd_surface:
                 from uacpy.data.seaice_local import sea_ice_surface_transect
                 fetched = sea_ice_surface_transect(
                     point, transect_to, date=date,
@@ -568,6 +580,16 @@ def fetch_environment(
     if surface_src is not None:
         used.append(surface_src)   # 'seaice' (a literal surface= cites nothing)
     env.data_sources = tuple(SOURCES[i] for i in dict.fromkeys(used))
+    # A licence-restricted source must never enter a result silently: warn at
+    # fetch time for any non-commercial dataset used (e.g. CRUST1.0). Driven off
+    # the catalogue flag so future non-commercial sources are covered too.
+    for s in env.data_sources:
+        if not s.commercial_use:
+            warnings.warn(
+                f"fetch_environment: data source {s.id!r} ({s.name}) does not "
+                f"permit commercial use without verification — see "
+                f"uacpy.data.citations(env) for its licence/attribution.",
+                UserWarning, stacklevel=2)
     return env
 
 

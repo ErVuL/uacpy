@@ -34,6 +34,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
+from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 
 
@@ -499,13 +500,17 @@ class Bellhop(PropagationModel):
         # DEFAULT_COLLAPSE (bathymetry='max', ssp='r0', …) unchanged.
         self._supports_altimetry = True
         self._supports_range_dependent_bathymetry = True
-        # RD-SSP is honoured natively only on the default / 'quad' path (the
-        # external 2-D .ssp file). For any other interp_ssp the SSP is collapsed
-        # to 1-D by the manual branch in run() BEFORE _project_environment — so
-        # the flag stays True (the default path honours it) and the manual
-        # collapse, not _project_environment, handles the non-quad case. The two
-        # must never both fire; an assert in run() guards that invariant.
-        self._supports_range_dependent_ssp = True
+        # RD-SSP is honoured natively only via the external 2-D .ssp file,
+        # which Bellhop reaches on the 'quad' interp. ``interp_ssp=None`` auto-
+        # picks 'quad' for a range-dependent SSP (oalib_writer.resolve_ssp_interp),
+        # so the default path honours it. A user who *pins* a non-quad interp
+        # ('linear', 'cubic', …) gets a 1-D collapse — so the flag must be
+        # False for that instance, and ``_project_environment`` does the
+        # collapse with the standard one-warning-per-feature. Keeping the flag
+        # honest means the advertised capability matches the run-time behaviour.
+        self._supports_range_dependent_ssp = (
+            interp_ssp is None or str(interp_ssp).lower() == 'quad'
+        )
         self._supports_range_dependent_bottom = True
         self._supports_layered_bottom = False
         self._supports_range_dependent_layered_bottom = False
@@ -852,21 +857,7 @@ class Bellhop(PropagationModel):
                 f"interp_ssp auto-picked = {effective_interp!r} "
                 f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp()})"
             )
-        if env.has_range_dependent_ssp() and effective_interp != 'quad':
-            method = self._collapse['ssp']
-            env = env.copy()
-            env.ssp = env.ssp.collapse(method)
-            warnings.warn(
-                f"Bellhop reads range-dependent SSP only when "
-                f"interp_ssp='quad' (external .ssp file). With "
-                f"interp_ssp={self.interp_ssp!r} (resolved to "
-                f"{effective_interp!r}) the SSP is collapsed to 1-D "
-                f"(collapse['ssp']={method!r}). Pass "
-                f"``Bellhop(interp_ssp='quad')`` (or leave the default "
-                f"``None`` for auto-detection) to enable the 2-D profile.",
-                UserWarning, stacklevel=2,
-            )
-        elif effective_interp == 'quad' and not env.has_range_dependent_ssp():
+        if effective_interp == 'quad' and not env.has_range_dependent_ssp():
             # 'quad' is Bellhop's external .ssp (2-D) interpolator; with a
             # range-independent SSP there is no .ssp file to write, so fall
             # back to the auto 1-D interp instead of letting Bellhop fail on
@@ -882,20 +873,10 @@ class Bellhop(PropagationModel):
             effective_interp = fallback
             interp_for_writer = fallback
 
-        # Invariant guard for the RD-SSP capability flag: any RD-SSP env still
-        # range-dependent at this point must be on the 'quad' path (the only
-        # interp Bellhop honours natively). _project_environment will NOT
-        # collapse SSP (the flag is True), so a non-quad RD-SSP reaching here
-        # would silently propagate uncollapsed — the manual branch above must
-        # already have collapsed it. Raise rather than emit a wrong field.
-        if env.has_range_dependent_ssp() and effective_interp != 'quad':
-            raise ConfigurationError(
-                "Bellhop: range-dependent SSP reached the writer with "
-                f"interp_ssp resolved to {effective_interp!r} (not 'quad'); the "
-                "manual SSP collapse should have run first. This is a uacpy "
-                "bug — please report it."
-            )
-
+        # When ``interp_ssp`` is pinned to a non-quad scheme, the RD-SSP
+        # capability flag is False and ``_project_environment`` collapses the
+        # SSP to 1-D (one UserWarning per dropped feature). On the 'quad' /
+        # auto path the flag is True and the 2-D profile is written verbatim.
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
@@ -1162,10 +1143,16 @@ class Bellhop(PropagationModel):
             Bellhop simulation results using reflection coefficients
         """
         from uacpy.models.bounce import Bounce
-        import tempfile
 
         self._log("Running BOUNCE to compute reflection coefficients...")
-        bounce_work_dir = Path(tempfile.mkdtemp(prefix='bellhop_bounce_'))
+        # Route the bounce scratch through FileManager so it honours
+        # ``use_tmpfs`` like every other path and is cleaned up here.
+        bounce_fm = FileManager(
+            use_tmpfs=self.use_tmpfs,
+            prefix='bellhop_bounce_',
+            cleanup=True,
+        )
+        bounce_work_dir = bounce_fm.create_work_dir()
         bounce = Bounce(
             verbose=self.verbose,
             c_low=c_low,
@@ -1210,7 +1197,7 @@ class Bellhop(PropagationModel):
             result.metadata['bounce_result'] = bounce_result
             return result
         finally:
-            shutil.rmtree(bounce_work_dir, ignore_errors=True)
+            bounce_fm.cleanup_work_dir()
 
     def _run_broadband(
         self,

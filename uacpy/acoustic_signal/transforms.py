@@ -13,6 +13,7 @@ from scipy.signal import get_window
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.acoustics import power_to_db
 
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
@@ -245,7 +246,7 @@ class Radon:
         To reconstruct a (filtered) panel, pass it to :func:`inverse_radon`.
         """
         if not hasattr(self, "R"):
-            raise RuntimeError("Radon.plot: compute() must be called before plotting")
+            raise ConfigurationError("Radon.plot: compute() must be called before plotting")
         amp = np.abs(self.R)
         xlabel, scale = self._AXIS.get(self.kind, ("Moveout", 1.0))
         m = self.moveout * scale
@@ -339,7 +340,7 @@ class TauP:
         To reconstruct a (filtered) panel, pass it to :func:`inverse_taup`.
         """
         if not hasattr(self, "taup"):
-            raise RuntimeError("TauP.plot: compute() must be called before plotting")
+            raise ConfigurationError("TauP.plot: compute() must be called before plotting")
         p_skm = self.slownesses * 1000.0
         amp = np.abs(self.taup)
         if vmax is None:
@@ -511,12 +512,11 @@ class FK:
             Additional keyword arguments passed to ``ax.imshow``.
         """
         if not hasattr(self, "frequencies") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "FK.plot: compute() must be called before plotting"
             )
 
-        floor = np.finfo(float).tiny
-        fk_db = 10 * np.log10(np.maximum(self.fk, floor) / (self.ref ** 2))
+        fk_db = power_to_db(self.fk, self.ref)
 
         fig, ax = plt.subplots(figsize=(10, 6))
         im = ax.imshow(

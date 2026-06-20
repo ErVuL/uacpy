@@ -35,9 +35,14 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
 
     Returns
     -------
-    dict with keys:
-        Nsam, nf, nzo, nr  : ints / floats from the header
-        c0, cmin, fs, Q    : float scalars from the header
+    dict with keys (header scalars use the DEV.md §4.2 metadata schema —
+    the raw Fortran ``Nsam`` / ``cmin`` are renamed to ``n_samples`` /
+    ``c_min`` here so consumers forward them to ``Result.metadata``
+    verbatim):
+        n_samples, nf, nzo, nr : ints / floats from the header
+                                 (``n_samples`` ← Fortran ``Nsam``)
+        c0, c_min, fs, Q       : float scalars from the header
+                                 (``c_min`` ← Fortran ``cmin``)
         rout : ndarray, shape (nr,)        — output ranges (m)
         frq  : ndarray, shape (nf,)        — frequency vector (Hz)
         zg   : ndarray, shape (nzo,)       — output depth grid (m)
@@ -88,13 +93,13 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
                 psif[ii, :, ir] = rec[1::2][:nf] + 1j * rec[2::2][:nf]
 
     return {
-        'Nsam': Nsam,
+        'n_samples': Nsam,
         'nf': nf,
         'nzo': nzo,
         'nr': nr,
         'rout': rout,
         'c0': c0,
-        'cmin': cmin,
+        'c_min': cmin,
         'fs': fs,
         'Q': Q,
         'frq': frq,

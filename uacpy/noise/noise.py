@@ -95,8 +95,13 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
                     "frequencies to define band edges; got one. Use "
                     "band_integrate=False for a scalar spectral level."
                 )
-            f2 = np.concatenate(([0], f, [2 * f[-1] - f[-2]]))
-            df = (f2[2:] - f2[:-2]) / 2
+            # Band edges at the midpoints between consecutive frequencies; the
+            # two outer bands span only the half-spacing to their single
+            # neighbour (df[0]=(f[1]-f[0])/2, df[-1]=(f[-1]-f[-2])/2). A leading
+            # 0 / symmetric extrapolation would over-weight the end bands.
+            mids = (f[1:] + f[:-1]) / 2
+            edges = np.concatenate(([f[0]], mids, [f[-1]]))
+            df = edges[1:] - edges[:-1]
         else:
             df = np.ones_like(f)
 

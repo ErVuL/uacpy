@@ -22,6 +22,12 @@ on:
     branches: [main, master]
   pull_request:
 
+# Least-privilege default token: the workflow only builds + tests (no PR
+# comments, releases, or pushes), so a read-only token caps the blast radius
+# if a build/test step is ever subverted by a malicious PR.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same branch / PR.
 concurrency:
   group: ci-${{ github.ref }}
@@ -35,6 +41,11 @@ jobs:
     # CI minutes on a stuck build.
     timeout-minutes: 30
 
+    # Actions below are pinned to floating major tags (e.g. @v5). For full
+    # supply-chain integrity they could be pinned to commit SHAs with a
+    # trailing version comment (uses: actions/checkout@<sha> # v5); these are
+    # first-party GitHub actions and the token is read-only (see permissions
+    # above), so the residual risk is low.
     steps:
       - name: Checkout (recursive submodules)
         # bellhopcuda is a git submodule pinned to BELLHOPCUDA_COMMIT_SHA

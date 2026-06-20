@@ -7,6 +7,7 @@ run fully offline. Skipped where netCDF4 (the grid dependency) is unavailable.
 
 import io
 import tarfile
+import warnings
 
 import numpy as np
 import pytest
@@ -135,6 +136,32 @@ def test_crust1_transect(cache):
     assert isinstance(rdl, Bottom)
     assert len(rdl.columns) == 3 and rdl.ranges[0] == 0.0
     assert rdl.sediment_thickness_source == 'globsed'   # GlobSed applied per point
+
+
+def test_crust1_transect_accepts_max_points(cache):
+    # environment._fetch_bottom forwards max_points to every transect bottom
+    # fetcher; crust1's must accept it (it used to raise TypeError) and clamp
+    # n_points to it.
+    rdl = crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=3)
+    assert isinstance(rdl, Bottom)
+    assert len(rdl.columns) == 3                         # clamped to max_points
+
+
+def test_crust1_emits_commercial_warning(cache):
+    # CRUST1.0 is non-commercial (no formal licence); the low-level fetcher must
+    # warn so a direct caller is never silent, and the transect fetcher must
+    # warn exactly once (not once per waypoint).
+    with pytest.warns(UserWarning, match='commercial'):
+        crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=4)
+    commercial = [w for w in caught
+                  if issubclass(w.category, UserWarning)
+                  and 'commercial' in str(w.message)]
+    assert len(commercial) == 1
 
 
 def test_crust1_missing_cache_names_flag(tmp_path, monkeypatch):

@@ -135,7 +135,12 @@ class Surface:
     def isel(self, *, range: int) -> BoundaryProperties:
         """Surface :class:`BoundaryProperties` at integer index ``range`` — the
         positional counterpart of :meth:`at`."""
-        return self.properties[int(range)]
+        i = int(range)
+        n = len(self.properties)
+        if not -n <= i < n:
+            raise IndexError(
+                f"Surface.isel: range index {i} out of range for {n} node(s)")
+        return self.properties[i]
 
     def collapse(self, method: str = 'r0') -> 'Surface':
         """Collapse a range-dependent surface to a single uniform boundary.
@@ -175,6 +180,7 @@ class Surface:
             attenuation=_pull('attenuation'),
             shear_speed=_pull('shear_speed'),
             shear_attenuation=_pull('shear_attenuation'),
+            roughness=_pull('roughness'),
         )])
 
     def __getattr__(self, name):

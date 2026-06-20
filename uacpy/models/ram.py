@@ -2371,11 +2371,11 @@ class RAM(PropagationModel):
                     backend='mpiramS',
                     frequencies=result['frq'],
                     dr=float(dr), dz=float(dz),
-                    n_samples=result['Nsam'],
+                    n_samples=result['n_samples'],
                     fs=result['fs'],
                     Q=result['Q'],
                     c0=result['c0'],
-                    c_min=result['cmin'],
+                    c_min=result['c_min'],
                 )
             )
             # Mask sub-seafloor samples with NaN (same semantics as every backend).
@@ -2393,11 +2393,16 @@ class RAM(PropagationModel):
     def _run_binary(self, work_dir: Path):
         """Execute s_mpiram in the given working directory."""
         env = os.environ.copy()
-        # Limit OpenMP threads to avoid oversubscription
-        omp_source = 'inherited'
-        if 'OMP_NUM_THREADS' not in env:
-            env['OMP_NUM_THREADS'] = str(os.cpu_count() or 1)
-            omp_source = 'auto = os.cpu_count()'
+        # Avoid oversubscription: under ``run_parallel`` (a process pool) every
+        # worker would otherwise spawn ``cpu_count()`` OpenMP threads → N×N
+        # threads. Respect an explicit ``OMP_NUM_THREADS`` if the user set one;
+        # otherwise pin to a single thread and let parallelism come from the
+        # process pool. Opt into intra-run threading by exporting the var.
+        if 'OMP_NUM_THREADS' in env:
+            omp_source = 'inherited'
+        else:
+            env['OMP_NUM_THREADS'] = '1'
+            omp_source = 'default = 1 (set OMP_NUM_THREADS to opt in)'
         self._log(
             f"Executing mpiramS: {self._exe} "
             f"(cwd={work_dir}, OMP_NUM_THREADS={env['OMP_NUM_THREADS']} "

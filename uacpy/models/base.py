@@ -127,6 +127,50 @@ class PropagationModel(ABC):
         File manager instance (populated during ``run``).
     """
 
+    # The leading positional run() parameters every wrapper must carry, in
+    # order. Anything a wrapper adds beyond these must be keyword-only (after
+    # a bare ``*``) and no wrapper may use ``**kwargs`` — an unknown keyword
+    # has to fail with TypeError at the call site, not be silently swallowed.
+    _RUN_POSITIONAL = ('self', 'env', 'source', 'receiver', 'run_mode')
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        run = cls.__dict__.get('run')
+        if run is None:
+            return
+        import inspect
+
+        params = list(inspect.signature(run).parameters.values())
+        for p in params:
+            if p.kind is inspect.Parameter.VAR_KEYWORD:
+                raise TypeError(
+                    f"{cls.__name__}.run() must not use **kwargs: an unknown "
+                    "keyword has to raise TypeError, not be swallowed. Declare "
+                    "the accepted extras as keyword-only after a bare '*'."
+                )
+
+        leading = params[:len(cls._RUN_POSITIONAL)]
+        names = tuple(p.name for p in leading)
+        if names != cls._RUN_POSITIONAL:
+            raise TypeError(
+                f"{cls.__name__}.run() must begin with "
+                f"{cls._RUN_POSITIONAL!r}; got {names!r}."
+            )
+        for p in leading:
+            if p.kind is inspect.Parameter.KEYWORD_ONLY:
+                raise TypeError(
+                    f"{cls.__name__}.run() parameter {p.name!r} must be "
+                    "positional-or-keyword, not keyword-only."
+                )
+
+        for p in params[len(cls._RUN_POSITIONAL):]:
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                raise TypeError(
+                    f"{cls.__name__}.run() parameter {p.name!r} must be "
+                    "keyword-only (place it after a bare '*') so unknown "
+                    "positional args cannot reach it."
+                )
+
     def __init__(
         self,
         use_tmpfs: bool = False,

@@ -135,7 +135,7 @@ class TestValidationHelpers:
         from uacpy.models.base import PropagationModel
 
         Model = type('M', (PropagationModel,), {
-            'run': lambda self, *a, **kw: None,
+            'run': lambda self, env, source, receiver, run_mode=None: None,
         })
         m = Model()
         source_deep = uacpy.Source(depths=150, frequencies=100)
@@ -151,7 +151,7 @@ class TestValidationHelpers:
         from uacpy.models.base import PropagationModel
 
         Model = type('M', (PropagationModel,), {
-            'run': lambda self, *a, **kw: None,
+            'run': lambda self, env, source, receiver, run_mode=None: None,
         })
         m = Model()
         source = uacpy.Source(depths=50, frequencies=100)

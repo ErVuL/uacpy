@@ -23,11 +23,18 @@ import matplotlib.pyplot as plt
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
+from uacpy.core.acoustics import power_to_db
 
 
 def analytic_signal(x):
     """Analytic signal ``x + j*Hilbert(x)`` of a real signal."""
-    xr = np.asarray(x, dtype=float)
+    xa = np.asarray(x)
+    if np.iscomplexobj(xa):
+        raise ConfigurationError(
+            "analytic_signal: x must be real; the analytic/Hilbert representation "
+            "is only defined for a real signal (got complex input)."
+        )
+    xr = xa.astype(float)
     if xr.ndim != 1:
         raise ConfigurationError("analytic_signal: x must be 1-D")
     return hilbert(xr)
@@ -446,10 +453,10 @@ class Spectrogram:
             or not hasattr(self, "times")
             or not hasattr(self, "Sxx")
         ):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "Spectrogram.plot: compute() must be called before plotting"
             )
-        Sxx_db = 10 * np.log10(self.Sxx / (self.ref**2))
+        Sxx_db = power_to_db(self.Sxx, self.ref)
 
         fig, ax = plt.subplots(figsize=(10, 6))
         pcm = ax.pcolormesh(

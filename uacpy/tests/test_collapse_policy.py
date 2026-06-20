@@ -118,7 +118,7 @@ def _bare_model_factory(supports_layered: bool):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
 
-        def run(self, env, source, receiver, run_mode=None, **kwargs):
+        def run(self, env, source, receiver, run_mode=None):
             return self._project_environment(env)
 
     return _Bare

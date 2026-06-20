@@ -661,7 +661,7 @@ class FRF:
         """
 
         if not hasattr(self, "frequencies") or not hasattr(self, "tf"):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "FRF.plot: compute() must be called before plotting"
             )
 

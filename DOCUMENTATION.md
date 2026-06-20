@@ -29,6 +29,7 @@ and the internals are documented in `docs/DEV.md`.
 15. [Units & Conventions](#15-units--conventions)
 16. [Troubleshooting](#16-troubleshooting)
 17. [Examples Index](#17-examples-index)
+18. [Parameter Reference](#18-parameter-reference)
 
 ## 1. Introduction
 
@@ -584,6 +585,10 @@ shares one contract:
   `compute_transfer_function`, `compute_covariance`, `compute_replicas`. Each
   capability-checks first, then forwards its mode's kwargs.
 - **Units:** metres, Hz, m/s, g/cm³, dB-per-wavelength. Depth is positive down.
+
+The sections below are usage-oriented. For the **complete per-parameter tables**
+(every constructor knob with *unit · default · meaning*) see
+[§18 Parameter Reference](#18-parameter-reference).
 
 ### Choosing a model
 
@@ -1340,3 +1345,240 @@ All 37 runnable scripts live in `uacpy/examples/`.
 | 35 | Underwater noise impact assessment — standards chain |
 | 36 | Modeled noise impact — ship SL through a real TL field |
 | 37 | Real-world environment — map · transmission loss · section |
+
+## 18. Parameter Reference
+
+Every constructor knob with **unit · default · meaning**, grounded in the
+constructor docstrings (the authoritative source). Configuration is
+constructor-only (§4); to sweep a value, build one instance per setting or use
+`model.copy(**overrides)`. Unit **`—`** marks a non-dimensional knob (enum code,
+flag, count, path, factor); enum choices are spelled out under *Meaning*. `λ` =
+wavelength.
+
+### Common plumbing (every model)
+
+These seven appear on **all** models with identical meaning and are omitted from
+the per-model tables below.
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `executable` | path | `None` | Explicit binary path; `None` auto-detects the binary `install.sh` built. |
+| `use_tmpfs` | — | `False` | Run scratch files in `/dev/shm` (tmpfs) instead of `$TMPDIR`. |
+| `verbose` | — | `False` | Status-logging gate: `False`/`'silent'` → warnings+errors only; `True`/`'info'`; `'debug'`. |
+| `work_dir` | path | `None` | Fixed scratch directory; `None` → a fresh temp dir per run. |
+| `cleanup` | — | `None` | Delete scratch after the run; `None` → `True` unless `work_dir` is pinned. |
+| `timeout` | s | `600.0` | Per-subprocess wall-clock limit (SPARC default `180.0`). |
+| `collapse` | dict | `None` | Per-feature range/layer collapse-policy overrides (see §7, "Environment feature support and collapse"). |
+
+### `run()` call arguments (every model)
+
+Passed at call time, not construction — the fixed no-`**kwargs` signature (§4):
+
+| Argument | Unit | Default | Meaning |
+|---|---|---|---|
+| `run_mode` | `RunMode` | `None` | Which product to compute; `None` → the model's default mode. |
+| `frequencies` | Hz | `None` | Explicit frequency or band; a multi-element array selects a broadband run. |
+| `source_waveform` | array | `None` | Source pressure pulse for `TIME_SERIES` synthesis. |
+| `sample_rate` | Hz | `None` | Sample rate of `source_waveform` / the synthesised output. |
+| `output_duration` | s | `None` | Time-series window length, overriding the auto/constructor value. |
+| `n_modes` *(Kraken only)* | count | — | Number of modes to retain. |
+
+### Source / Receiver
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `Source.depths` | m | *required* | Source depth(s), positive down. |
+| `Source.frequencies` | Hz | *required* | Source frequency or frequencies. |
+| `Source.source_type` | — | `'point'` | `'point'` or `'line'` (physical line-source geometry). |
+| `Receiver.depths` | m | *required* | Receiver depth(s), positive down. |
+| `Receiver.ranges` | m | `None` | Receiver range(s); `None` → a single point at 0 m. |
+| `Receiver.receiver_type` | — | `'grid'` | `'grid'` (depth×range cross-product) or `'line'` (depths/ranges paired point-by-point, `len(depths)==len(ranges)`). |
+
+*(Environment and its carriers — bathymetry, SSP, bottom, surface, altimetry — are documented in §5; their units follow §15: metres / m/s / g/cm³ / dB-per-λ.)*
+
+### Bellhop
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `backend` | — | `None` | Binary variant: `'fortran'`/`'cxx'`/`'cuda'`; `None` auto-selects CUDA > C++ > Fortran. |
+| `dimensionality` | — | `'2D'` | Only `'2D'` is supported; `'3D'` raises. |
+| `beam_type` | — | `'B'` | `B` Gaussian, `R` ray-centered, `C` Cartesian, `b` geometric Gaussian, `g` geometric hat, `G` geometric hat Cartesian, `S` simple Gaussian. |
+| `n_beams` | count | `0` | Number of beams; `0` defers to Bellhop's auto-selection. |
+| `alpha` | deg | `(-80, 80)` | Launch-angle limits `(min, max)`. |
+| `step` | m | `0.0` | Ray step size; `0` = automatic. |
+| `z_box` | m | `None` | Max depth of the ray box; `None` = 1.2 × max depth. |
+| `r_box` | m | `None` | Max range of the ray box; `None` = 1.2 × max range. |
+| `source_type` | — | `'R'` | `'R'` point (cylindrical), `'X'` line (Cartesian). |
+| `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular. |
+| `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`); also `'linear'`/`'pchip'`/`'cubic'`/`'quad'`/`'n2linear'`/`'analytic'`. |
+| `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` or `'curvilinear'`. |
+| `interp_altimetry` | — | `'linear'` | `.ati` interpolation: `'linear'` or `'curvilinear'`. |
+| `source_beam_pattern_file` | path/array | `None` | `.sbp` path or `(angle_deg, level_dB)` pairs; `None` = omnidirectional. |
+| `arrivals_format` | — | `'ascii'` | `ARRIVALS` output format. Use `'ascii'`; `'binary'` (`'a'`, Fortran unformatted) is accepted at construction but **not yet parseable** — `compute_arrivals` raises `ConfigurationError` on read. |
+| `beam_width_type` | — | `'F'` | Cerveny width: `'F'` filling, `'M'` match, `'W'` waveguide (used for `beam_type` ∈ C/R). |
+| `beam_curvature` | — | `'D'` | `'D'` double, `'S'` single, `'Z'` zero. |
+| `eps_multiplier` | factor | `1.0` | Beam-width epsilon multiplier. |
+| `r_loop` | m | `1000.0` | Range at which the beam width is chosen. |
+| `n_image` | count | `1` | Number of images. |
+| `ib_win` | — | `4` | Beam-windowing parameter. |
+| `component` | — | `'P'` | Displacement-receiver output: `'P'` pressure, `'D'` displacement. |
+| `beam_shift` | — | `False` | Enable beam-shift on boundary reflections. |
+| `n_freqs` | count | `128` | Frequency bins for BROADBAND/TIME_SERIES synthesis from a single centre frequency. |
+| `bandwidth_factor` | factor | `0.5` | Fractional bandwidth of the synthesised band around the centre frequency. |
+| `time_window` | s | `None` | TIME_SERIES window length; `None` auto-derives. |
+| `t_start` | s | `None` | TIME_SERIES start time; `None` auto-derives. |
+| `auto_bounce` | — | `True` | Auto-route layered/elastic bottoms through BOUNCE; `False` collapses to fluid (one warning). |
+
+### Kraken
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `backend` | — | `None` | Modes binary: `'kraken'`/`'krakenc'`; `None` auto-picks `krakenc` for elastic/leaky media. |
+| `mode_coupling` | — | `'adiabatic'` | RD mode transitions: `'adiabatic'` or `'coupled'`. |
+| `coherent` | — | `True` | Coherent mode addition; `'coupled'` + `coherent=False` is rejected. |
+| `n_segments` | count | `None` | Range segments for RD; `None` auto-picks from change-points (gaps > 2 km split). |
+| `mode_points_per_meter` | pts/m | `1.5` | Mode-depth grid density. |
+| `source_type` | — | `'R'` | `field.exe` Opt(1): `'R'` cylindrical, `'X'` Cartesian line, `'S'` scaled-cylindrical. |
+| `source_beam_pattern_file` | path | `None` | `.sbp` file; sets `field.exe` Opt(3)=`'*'`. |
+| `field_executable` | path | `None` | `field.exe` path; auto-detected if `None`. |
+| `c_low` | m/s | `None` | Lower phase-speed limit of the modal solver. |
+| `c_high` | m/s | `None` | Upper phase-speed limit. |
+| `n_mesh` | count | `0` | Mesh points per medium; `0` = auto. |
+| `roughness` | m | `0.0` | Bottom RMS roughness. |
+| `interp_ssp` | — | `None` | SSP interpolation scheme (as Bellhop). |
+| `leaky_modes` | — | `False` | Include leaky modes (forces `krakenc`). |
+| `top_reflection_file` | path | `None` | Top-boundary reflection-coefficient file. |
+| `rmax_m` | m | `None` | Max range for `field.exe`. |
+| `mode_depth_grid` | array | `None` | Explicit mode-depth output grid. |
+
+### Scooter
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = 0.95 × min SSP. |
+| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = 1.05 × max(SSP, bottom). |
+| `n_mesh` | count | `0` | Total FE mesh points **per medium** (AT `NG`); `0` = auto. Not points-per-wavelength. |
+| `roughness` | m | `0.0` | Bottom RMS roughness. |
+| `rmax_multiplier` | factor | `None` | Wavenumber-resolution range multiplier; `None` → 2.0 narrowband / 3.0 broadband. |
+| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+| `source_type` | — | `'R'` | FLP Opt(1): `'R'` cylindrical, `'X'` Cartesian. |
+| `spectrum` | — | `'positive'` | FLP Opt(2): `'positive'`/`'negative'`/`'both'` wavenumber spectrum. |
+| `stabilizing_attenuation_off` | — | `False` | Disable Scooter's stabilising attenuation (TopOpt pos 7 = `'0'`). |
+| `field_interp` | — | `'O'` | FLP Opt(3): `'O'` polynomial, `'P'` Padé. |
+
+### SPARC
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = auto. |
+| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = auto. |
+| `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
+| `roughness` | m | `0.0` | Bottom RMS roughness. |
+| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. |
+| `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. |
+| `n_t_out` | count | `512` | Number of output time samples. |
+| `t_max` | s | `None` | Max time; `None` = auto (2.5 × travel time). |
+| `t_start` | s | `-0.1` | Integration start time. |
+| `t_mult` | factor | `0.999` | Integration time multiplier. |
+| `max_depths` | count | `20` | Max number of depths before a warning. |
+| `rmax_safety_margin` | factor | `None` | RMax multiplier on receiver max range; `None` → 1.0001 (COHERENT_TL) / 3.0 (TIME_SERIES). |
+| `f_min` | Hz | `None` | Pulse-band lower edge; `None` → one octave around source freq. |
+| `f_max` | Hz | `None` | Pulse-band upper edge; `None` → one octave around source freq. |
+| `sound_speed` | m/s | `None` | Reference speed for the travel-time window when `t_max` is auto; `None` → default. |
+
+### RAM
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `backend` | — | `None` | RAM-family backend: `'mpiramS'`/`'ramgeo'`/`'rams'`/`'ramsurf'`; `None` auto-dispatches by env shape. |
+| `dr` | m | `None` | Range step; `None` → Lytaev optimiser. |
+| `dz` | m | `None` | Depth step; `None` → Lytaev optimiser (snapped to integer depth count). |
+| `zmax` | m | `None` | PE domain depth; `None` = seafloor + absorbing layer. |
+| `np_pade` | count | `6` | Number of Padé coefficients (2–8). |
+| `ns_stability` | count | `1` | Number of stability terms. |
+| `rs_stability` | m | `None` | Stability range; `None` = max output range. |
+| `Q` | — | `None` | Broadband bandwidth factor (bandwidth = fc/Q); `None` → 2.0 broadband / 1e6 COHERENT_TL. |
+| `T` | s | `None` | Time-window width; `None` → 10.0 broadband / 1.0 COHERENT_TL. |
+| `depth_decimation` | factor | `1` | Output depth-decimation factor. |
+| `flat_earth` | — | `True` | Apply the flat-earth transformation. |
+| `absorbing_layer_width` | λ | `20.0` | Absorbing-layer width below the seafloor (in wavelengths). |
+| `absorbing_layer_attn` | dB/λ | `10.0` | Attenuation at the absorbing-layer floor (ramped from sediment attn). |
+| `n_sed_points` | count | `50` | Sediment depth control points for the mpiramS profile. |
+| `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15). |
+| `accuracy` | — | `0.001` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|). |
+| `theta_max` | deg | `30.0` | Max propagation angle bounding the PE spectrum (Lytaev). |
+| `rams_theta` | deg | `45.0` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke). |
+| `rams_irot` | — | `1` | `rams` rotation flag. |
+| `rams_dr_safety_factor` | factor | `5.0` | Tightening factor on the Lytaev `dr` for the `rams` backend (1.0 disables). |
+
+### Bounce
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `c_low` | m/s | `1400.0` | Min phase velocity for tabulation (must be > 0). |
+| `c_high` | m/s | `10000.0` | Max phase velocity (`1e9` ≈ full 90° coverage; must be > `c_low`). |
+| `rmax` | m | `None` | Max range for angular sampling; `None` = 10000. Ignored when `n_angles` is set. |
+| `n_angles` | count | `None` | Explicit number of angular samples; `None` = bounce computes it from `rmax`. |
+| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+
+### OASES — OAST (transmission loss)
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `compute_contour` | — | `False` | Add `'C'` option (range-depth contour plot). |
+| `compute_depth_average` | — | `False` | Add `'A'` option (depth-averaged TL). |
+| `complex_contour` | — | `True` | `'J'` option (complex integration contour). |
+| `options` | — | `None` | Raw OASES options string; `None` derives it from the three flags above. |
+| `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
+| `nw_samples` | count | `-1` | Number of wavenumber samples; `-1` = OASES auto. |
+| `plot_rmin` | m | `None` | TL plot range-axis min; `None` → 0. |
+| `plot_rmax` | m | `None` | TL plot range-axis max; `None` → `receiver.range_max`. |
+
+### OASES — OASP (broadband pulse / transfer function)
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `n_time_samples` | count | `4096` | Power-of-two FFT length (samples per receiver trace). |
+| `freq_max` | Hz | `None` | Sweep upper edge; `None` → 2.5 × centre frequency. |
+| `freq_min` | Hz | `0.0` | Sweep lower edge. |
+| `center_frequency` | Hz | `None` | Pulse carrier frequency; `None` → `source.frequencies[0]`. |
+| `freq_output_increment` | factor | `None` | `.trf` frequency-axis decimation; `None` → `max(1, n_freq // 10)`. |
+| `options` | — | `None` | Raw OASES options string; `None` → `'N J'`. |
+| `range_start` | m | `None` | First receiver range; `None` → `receiver.ranges.min()`. |
+| `integration_offset` | dB/λ | `0.0` | Wavenumber-contour offset. |
+| `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
+
+### OASES — OASR (reflection coefficients)
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `angles` | deg | `None` | Angle grid; `None` → `linspace(0, 90, 181)`. |
+| `angle_type` | — | `'grazing'` | `'grazing'` (native) or `'incidence'` (grazing = 90 − incidence). |
+| `reflection_type` | — | `'P-P'` | `'P-P'`, `'P-SV'`, `'P-Slow'` (Biot), or `'transmission'`. |
+| `options` | — | `None` | Raw OASES options string; `None` derives from `reflection_type`. |
+| `angle_output_increment` | factor | `None` | Output angle-table decimation; `None` keeps every sample. |
+| `interface_roughness` | m | `None` | Per-interface RMS roughness (top → bottom). |
+
+### OASES — OASN (noise covariance / replicas)
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `options` | — | `None` | OASES options string; `None` → `'N'` (covariance) / `'R'` (replica). |
+| `surface_noise_level` | dB re 1 µPa²/Hz | `0.0` | Surface-generated noise spectral level (0 disables). |
+| `white_noise_level` | dB re 1 µPa²/Hz | `0.0` | Uncorrelated per-hydrophone white-noise level (0 disables). |
+| `deep_noise_level` | dB re 1 µPa²/Hz | `0.0` | Deep broad-area source spectral level (0 disables). |
+| `deep_source_depth` | m | `None` | Depth of the deep noise sheet; `None` → half the water depth. |
+| `discrete_sources` | list | `None` | Point sources: dicts with `depth`/`x`/`y` (m), `level` (dB), `phase` (rad). |
+| `xmin` / `xmax` | m | `None` | Replica grid x-bounds; `None` → 100 / 10000. |
+| `nx` | count | `50` | Replica grid points in x. |
+| `ymin` / `ymax` | m | `None` | Replica grid y-bounds; `None` → 0 / 0. |
+| `ny` | count | `1` | Replica grid points in y. |
+| `zmin` / `zmax` | m | `None` | Replica grid depth-bounds; `None` → 10 / `env.depth − 10`. |
+| `nz` | count | `20` | Replica grid points in depth. |
+| `cmin` / `cmax` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.95 × min(c_water) / 1e8. |
+| `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
+| `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
+| `plot_rmin` / `plot_rmax` | m | `None` | TL plot range-axis bounds. |
+| `vrec` | m/s | `0.0` | Vertical receiver velocity (for Doppler). |
+| `offdb` | dB | `None` | Single-mode horizontal offset. |

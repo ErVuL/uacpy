@@ -380,10 +380,22 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     dx = ((lons.max() - lons.min()) / lons.size * 111320.0
           * np.cos(np.radians(float(lats.mean()))))
     filled = np.where(np.isnan(depth), norm.vmax, depth)
+    nan_mask = np.isnan(depth)
+    # imshow's extent below is anchored to (min-lat, min-lon) with
+    # origin='lower', so the array must run south→north / west→east. Flip
+    # any descending input axis to that canonical order — otherwise a
+    # descending lat_range/lon_range renders the relief mirrored relative to
+    # the flat pcolormesh path (which follows the real coordinate order).
+    if lats.size > 1 and lats[-1] < lats[0]:
+        filled = filled[::-1, :]
+        nan_mask = nan_mask[::-1, :]
+    if lons.size > 1 and lons[-1] < lons[0]:
+        filled = filled[:, ::-1]
+        nan_mask = nan_mask[:, ::-1]
     rgb = LightSource(azdeg=315, altdeg=45).shade(
         filled, cmap=base, blend_mode='soft', vert_exag=exag,
         dx=dx, dy=dy, norm=norm)
-    rgb[np.isnan(depth), 3] = 0.0                       # land → transparent
+    rgb[nan_mask, 3] = 0.0                              # land → transparent
     ax.imshow(rgb, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
               origin='lower', zorder=zorder, interpolation='nearest',
               aspect='auto')

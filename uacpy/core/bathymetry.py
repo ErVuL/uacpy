@@ -128,6 +128,13 @@ class Bathymetry:
         """Seafloor depth at integer index ``range`` — the positional
         counterpart of :meth:`at`."""
         idx = np.asarray(range)
+        n = self.depths.size
+        if idx.ndim == 0:
+            i = int(idx)
+            if not -n <= i < n:
+                raise IndexError(
+                    f"Bathymetry.isel: range index {i} out of range for "
+                    f"{n} point(s)")
         out = self.depths[idx.astype(int)]
         return float(out) if idx.ndim == 0 else out
 

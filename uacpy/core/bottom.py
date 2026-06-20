@@ -414,7 +414,13 @@ class SeabedColumn:
         """The :class:`SedimentLayer` at integer index ``layer`` — the
         positional counterpart of :meth:`at`. (The deep half-space is
         ``self.halfspace``.)"""
-        return self.layers[int(layer)]
+        i = int(layer)
+        n = len(self.layers)
+        if not -n <= i < n:
+            raise IndexError(
+                f"SeabedColumn.isel: layer index {i} out of range for "
+                f"{n} layer(s)")
+        return self.layers[i]
 
     def layer_depths(self, seafloor_depth: float) -> List[Tuple[float, float]]:
         """``(top, bottom)`` depth pairs for each layer (empty for a
@@ -692,7 +698,13 @@ class Bottom:
     def isel(self, *, range: int) -> SeabedColumn:
         """:class:`SeabedColumn` at integer position ``range`` — the positional
         counterpart of :meth:`at`."""
-        return self.columns[int(range)]
+        i = int(range)
+        n = len(self.columns)
+        if not -n <= i < n:
+            raise IndexError(
+                f"Bottom.isel: range index {i} out of range for "
+                f"{n} column(s)")
+        return self.columns[i]
 
     def halfspace_at(self, *, range: float,
                      interp: Optional[str] = None) -> BoundaryProperties:
@@ -758,6 +770,10 @@ class Bottom:
     def halfspace_shear_attenuation(self) -> np.ndarray:
         return np.array([c.halfspace.shear_attenuation for c in self.columns])
 
+    @property
+    def halfspace_roughness(self) -> np.ndarray:
+        return np.array([c.halfspace.roughness for c in self.columns])
+
     # ── reductions ──────────────────────────────────────────────────────────
     def select_range(self, method: str = 'r0') -> 'Bottom':
         """Reduce the range axis to a single column (range-independent result).
@@ -796,6 +812,7 @@ class Bottom:
                 shear_speed=float(reduce(self.halfspace_shear_speed)),
                 shear_attenuation=float(
                     reduce(self.halfspace_shear_attenuation)),
+                roughness=float(reduce(self.halfspace_roughness)),
             )))], ranges=None)
 
     def collapse(self, *, range: Optional[str] = None,

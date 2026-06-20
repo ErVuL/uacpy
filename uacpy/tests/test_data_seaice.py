@@ -100,6 +100,14 @@ def test_sea_ice_surface_gates_on_threshold():
     assert (bp.attenuation, bp.shear_attenuation) == (0.5, 1.0)
 
 
+def test_sea_ice_surface_nan_is_open_water():
+    # A non-finite concentration (NaN land/coast/out-of-grid cell) must be
+    # treated as open water, never silently as ice: NaN < threshold is False,
+    # so without the isfinite guard a land pixel would get an elastic canopy.
+    assert seaice_local.sea_ice_surface(np.nan) is None
+    assert seaice_local.sea_ice_surface(float('inf')) is None
+
+
 def test_fetch_sea_ice_surface(synthetic_model):
     # 0.7 at the March pixel ≥ threshold → ice; June is land → raises.
     assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3) is not None

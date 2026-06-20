@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Dict, Tuple, Union
 import numpy as np
 import struct
-import warnings
 
 from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
@@ -139,15 +138,14 @@ def read_oast_tl(
 
     if len(tl_values) < expected_total:
         missing = expected_total - len(tl_values)
-        warnings.warn(
+        raise FileFormatError(
             f"Truncated OAST output: got {len(tl_values)} TL values, "
             f"expected {expected_total} "
             f"(n_depths={n_depths_oast}, n_ranges={n_ranges_oast}); "
-            f"padding {missing} cells with the last sample. File: "
-            f"{tl_data_file}",
-            UserWarning, stacklevel=2,
+            f"{missing} cells missing. A truncated run (crash, disk-full, "
+            f"killed job) cannot be completed without fabricating TL. "
+            f"File: {tl_data_file}"
         )
-        tl_values = np.pad(tl_values, (0, missing), mode='edge')
 
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 

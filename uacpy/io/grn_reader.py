@@ -88,6 +88,29 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         freq0 = float(np.fromfile(f, dtype=f8, count=1)[0])
         atten = float(np.fromfile(f, dtype=f8, count=1)[0])
 
+        # File-size-aware sanity bound on the header counts before any
+        # vector or the (nfreq, nsd, nrd, nk) cube is sized off them. A
+        # corrupt/hostile header (e.g. nk=0x3ffffff0, or all counts = 1000)
+        # would otherwise drive a multi-GB/TB allocation before a single
+        # data record is validated. The G cube holds nfreq*nsd*nrd*nk
+        # complex samples, each stored on disk as 2 float32 (8 bytes), so
+        # the element count cannot exceed file_size // 8.
+        f.seek(0, 2)
+        file_size = f.tell()
+        for _name, _val in (("nfreq", nfreq), ("nsd", nsd),
+                            ("nrd", nrd), ("nk", nk)):
+            if _val < 0:
+                raise FileFormatError(
+                    f"read_grn_file: negative header count {_name}={_val}."
+                )
+        if nfreq * nsd * nrd * nk > file_size // 8:
+            raise FileFormatError(
+                f"read_grn_file: header counts "
+                f"(nfreq={nfreq}, nsd={nsd}, nrd={nrd}, nk={nk}) imply "
+                f"{nfreq * nsd * nrd * nk} complex samples, implausible for "
+                f"a {file_size}-byte file."
+            )
+
         f.seek(3 * 4 * recl, 0)
 
         # Record 4: frequency vector (or time vector for SPARC snapshot)

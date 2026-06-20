@@ -71,6 +71,50 @@ def test_region_grid(monkeypatch, tmp_path):
     assert np.isnan(depth).sum() >= 1                  # the land node
 
 
+def test_nearest_indices_ascending_and_descending():
+    # Nearest-node selection must be exact on an ascending axis (not the
+    # upper-biased searchsorted insertion index) and equally correct on a
+    # descending axis (GMRT COARDS latitude is commonly stored descending).
+    asc = np.array([10.0, 11.0, 12.0, 13.0])
+    desc = asc[::-1].copy()
+    q = np.array([11.4, 12.6])                     # nearest nodes: 11.0, 13.0
+    ia = gmrt_live._nearest_indices(asc, q)
+    idesc = gmrt_live._nearest_indices(desc, q)
+    assert asc[ia].tolist() == [11.0, 13.0]
+    assert desc[idesc].tolist() == [11.0, 13.0]
+
+
+def test_region_grid_descending_latitude(monkeypatch, tmp_path):
+    # A descending-latitude COARDS subset must still sample the right cells —
+    # the old searchsorted resample returned meaningless indices on a
+    # descending axis. Encode depth as the latitude so a wrong row is visible.
+    netCDF4 = pytest.importorskip('netCDF4')
+    path = tmp_path / 'grid_desc.nc'
+    lon = np.linspace(7.0, 7.5, 6)
+    lat = np.linspace(43.5, 43.0, 10)              # DESCENDING
+    # altitude[r, c] = -(100 + lat_index*10): each row a distinct depth.
+    alt = -(100.0 + np.arange(lat.size)[:, None] * 10.0
+            + np.zeros((lat.size, lon.size)))
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('lon', lon.size); ds.createDimension('lat', lat.size)
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('altitude', 'f4', ('lat', 'lon'))[:] = alt
+    ds.close()
+    blob = path.read_bytes()
+    monkeypatch.setattr(gmrt_live, 'http_get',
+                        lambda url, **kw: blob)
+
+    lats, lons, depth = gmrt_live.region_grid((43.0, 43.5), (7.0, 7.5), 5, 4)
+    assert depth.shape == (5, 4)
+    # Requested lats ascend; the deepest native row is lat=43.0 (last, index 9),
+    # the shallowest is lat=43.5 (index 0). So the smallest requested lat must
+    # map to the deepest cell and the largest to the shallowest.
+    assert depth[0, 0] > depth[-1, 0]              # 43.0 deeper than 43.5
+    assert np.nanmax(depth) == 100.0 + 9 * 10.0    # 190 m at lat 43.0
+    assert np.nanmin(depth) == 100.0               # 100 m at lat 43.5
+
+
 @pytest.mark.requires_network
 def test_live_gmrt_point():
     try:

@@ -643,3 +643,27 @@ def test_surface_source_warns_for_field_runs():
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         Bellhop().compute_tl(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)
+
+
+# --- C4/C6 manual-audit regression locks -----------------------------------
+def test_get_sound_speed_warns_on_extrapolation():
+    """Depths outside the (bathymetry-extended) SSP are constant-extrapolated
+    with a UserWarning, not silently."""
+    ssp = SoundSpeedProfile(depths=[0, 50, 100], data=[1500, 1490, 1480])
+    env = Environment(ssp=ssp, bathymetry=200.0)  # SSP extended to 200 m
+    with pytest.warns(UserWarning, match="constant-extrapolated"):
+        assert float(env.get_sound_speed(250)[0]) == 1480.0
+    with pytest.warns(UserWarning, match="constant-extrapolated"):
+        assert float(env.get_sound_speed(-10)[0]) == 1500.0
+    # in-range query must not warn
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        env.get_sound_speed(75)
+
+
+def test_francois_garrison_accepts_list_pH():
+    """pH as a Python list must not raise a bare TypeError (it is coerced)."""
+    from uacpy.core.absorption import francois_garrison_db_per_km
+    out = francois_garrison_db_per_km(10000, 10, 35, [8.0, 8.1], 100)
+    out = np.atleast_1d(np.asarray(out, dtype=float))
+    assert out.shape == (2,) and np.all(out > 0)

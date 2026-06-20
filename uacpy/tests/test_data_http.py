@@ -9,13 +9,15 @@ from uacpy.data import _http
 
 
 class _FakeResp:
+    headers = {}                      # mirror a real urllib response
+
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return False
 
-    def read(self):
+    def read(self, amt=-1):           # real responses accept a byte count
         return b'OK'
 
 

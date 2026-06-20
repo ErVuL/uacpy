@@ -488,6 +488,8 @@ def compare(
 
         compare([f1.at(depth=20), f2.at(depth=20)], labels=['Bellhop', 'RAM'])
     """
+    if not fields:
+        raise ConfigurationError("compare: empty fields list")
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:

@@ -208,8 +208,12 @@ def sea_ice_surface(
     free-surface default in place). The canopy is treated as a single
     homogeneous elastic boundary regardless of concentration; partial cover is
     reduced to the present/absent ice-edge decision rather than a mixed surface.
+
+    A non-finite concentration (``NaN`` land/coast/out-of-grid cell) is treated
+    as open water and returns ``None`` — never silently as ice, since
+    ``NaN < threshold`` is False.
     """
-    if concentration < threshold:
+    if not np.isfinite(concentration) or concentration < threshold:
         return None
     return BoundaryProperties(
         acoustic_type='half-space',

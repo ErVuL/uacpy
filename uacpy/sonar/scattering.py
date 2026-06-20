@@ -50,7 +50,7 @@ def lambert_bottom(grazing_deg, mu_db: float = LAMBERT_MU_DB):
 def chapman_harris_surface(grazing_deg, wind_speed_kn: float, freq_hz: float):
     """Sea-surface backscattering strength, Chapman & Harris (1962).
 
-    ``S_s = 3.3*beta*log10(theta/30) - 42.2*log10(beta) + 2.6``
+    ``S_s = 3.3*beta*log10(theta/30) - 42.4*log10(beta) + 2.6``
     with ``beta = 158*(v*f**(1/3))**(-0.58)``.
 
     Validated 0.4-6.4 kHz, grazing angle below 80 deg (Chapman & Scott 1964).
@@ -77,7 +77,9 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, freq_hz: float):
         )
     theta = np.asarray(grazing_deg, dtype=float)
     beta = 158.0 * (v * f ** (1.0 / 3.0)) ** (-0.58)
-    return 3.3 * beta * np.log10(theta / 30.0) - 42.2 * np.log10(beta) + 2.6
+    # -42.4 per Chapman & Harris (1962) JASA 34(10):1592, eq. as reproduced in
+    # Urick (1983) Ch. 8 and Jensen et al. "Computational Ocean Acoustics".
+    return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 
 
 def column_scattering_strength(sv_db, thickness_m: float):

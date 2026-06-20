@@ -6,6 +6,7 @@ The seafloor/boundary classes and the sound-speed-profile carrier live in
 """
 
 import copy as _copy
+import warnings
 import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional
 
@@ -299,11 +300,24 @@ class Environment:
     def get_sound_speed(
         self, depth: Union[float, np.ndarray], range: float = 0.0
     ) -> np.ndarray:
-        """Sound speed at given depth(s), at ``range`` for 2-D profiles."""
+        """Sound speed at given depth(s), at ``range`` for 2-D profiles.
+
+        Always **linear** in depth (``np.interp``); depths outside the profile
+        are constant-extrapolated to the nearest endpoint and emit a
+        ``UserWarning`` (the value is held flat, not fabricated).
+        """
         slice_1d = (self.ssp.eval(range=range)
                     if self.ssp.is_range_dependent else self.ssp)
-        return np.interp(np.atleast_1d(depth), slice_1d.depths,
-                         slice_1d.data[:, 0])
+        d = np.atleast_1d(depth)
+        z = slice_1d.depths
+        if d.size and (np.any(d < z[0]) or np.any(d > z[-1])):
+            warnings.warn(
+                f"get_sound_speed: depth(s) outside the profile "
+                f"[{float(z[0]):.1f}, {float(z[-1]):.1f}] m were "
+                f"constant-extrapolated to the nearest endpoint.",
+                UserWarning, stacklevel=2,
+            )
+        return np.interp(d, z, slice_1d.data[:, 0])
 
     def has_range_dependent_bathymetry(self) -> bool:
         """``True`` iff the seafloor depth actually varies with range.

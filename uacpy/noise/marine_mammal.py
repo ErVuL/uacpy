@@ -73,14 +73,24 @@ def apply_weighting(level_db, frequency, group):
     return np.asarray(level_db, dtype=float) + auditory_weighting(frequency, group)
 
 
-def weighted_level(level_db, frequency, group):
-    """Single weighted level [dB] = energy sum of the weighted band levels.
+def weighted_level(psd_db, frequency, group):
+    """Broadband group-weighted level [dB] from a level-*density* spectrum.
 
-    ``10*log10(sum 10^((L_i + W(f_i))/10))`` over the spectrum — the broadband
-    weighted level for the hearing group.
+    Integrates the weighted spectral density over frequency::
+
+        10·log10( ∫ 10^((L(f) + W(f))/10) df )
+
+    where ``psd_db`` is a level density (dB re ref²/Hz) at ``frequency`` [Hz].
+    Integrating — rather than summing the samples — makes the result
+    **independent of the frequency-grid spacing** (a bare sum is not: it scales
+    with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.bands`
+    and SEL integrate a PSD. ``frequency`` need not be pre-sorted.
     """
-    w = apply_weighting(level_db, frequency, group)
-    return float(10.0 * np.log10(np.sum(10.0 ** (np.asarray(w, dtype=float) / 10.0))))
+    w = np.asarray(apply_weighting(psd_db, frequency, group), dtype=float)
+    f = np.asarray(frequency, dtype=float)
+    order = np.argsort(f)
+    integral = np.trapezoid(10.0 ** (w[order] / 10.0), f[order])
+    return float(10.0 * np.log10(max(float(integral), np.finfo(float).tiny)))
 
 
 def plot_weighting(group, frequency=None, ax=None, **kwargs):

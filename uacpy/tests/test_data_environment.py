@@ -10,15 +10,27 @@ from uacpy.data import environment as env_mod
 
 @pytest.fixture
 def stub_fetchers(monkeypatch):
-    """Replace the network fetchers with deterministic stand-ins."""
+    """Replace the network fetchers with deterministic stand-ins.
+
+    Stubs both the point and the transect SSP fetchers — a transect request
+    routes through ``fetch_ssp_transect`` (range-dependent SSP), so without that
+    stub a transect test would fall through to a live WOA23 OPeNDAP fetch and
+    block offline.
+    """
     ssp = SoundSpeedProfile(depths=[0.0, 100.0, 2000.0],
                             data=[1500.0, 1490.0, 1510.0])
+    rd_ssp = SoundSpeedProfile(depths=[0.0, 100.0, 2000.0],
+                               data=[[1500.0, 1502.0], [1490.0, 1492.0],
+                                     [1510.0, 1512.0]],
+                               ranges=[0.0, 5000.0])
     monkeypatch.setattr(env_mod, 'fetch_bathy',
                         lambda point, **kw: 2000.0)
     monkeypatch.setattr(env_mod, 'fetch_bathy_transect',
                         lambda a, b, **kw: np.array([[0.0, 2000.0], [5000.0, 2200.0]]))
     monkeypatch.setattr(env_mod, 'fetch_ssp',
                         lambda point, **kw: ssp)
+    monkeypatch.setattr(env_mod, 'fetch_ssp_transect',
+                        lambda start, end, **kw: rd_ssp)
     return ssp
 
 

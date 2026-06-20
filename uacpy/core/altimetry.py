@@ -116,6 +116,13 @@ class Altimetry:
         """Surface height at integer index ``range`` — the positional
         counterpart of :meth:`at`."""
         idx = np.asarray(range)
+        n = self.heights.size
+        if idx.ndim == 0:
+            i = int(idx)
+            if not -n <= i < n:
+                raise IndexError(
+                    f"Altimetry.isel: range index {i} out of range for "
+                    f"{n} point(s)")
         out = self.heights[idx.astype(int)]
         return float(out) if idx.ndim == 0 else out
 
