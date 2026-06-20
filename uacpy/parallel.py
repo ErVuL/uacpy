@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -146,6 +148,19 @@ class ParallelResult:
         return iter(self.results)
 
 
+def _main_is_importable() -> bool:
+    """Whether ``__main__`` can be re-imported by a spawned worker.
+
+    The ``spawn`` / ``forkserver`` start methods re-import the parent's
+    ``__main__`` module in every worker. That needs an importable main module
+    — a ``.py`` file run as a script. Interactive sessions (REPL, Jupyter,
+    ``python -c``, piped stdin) have no importable ``__main__``, so spawned
+    workers crash on import with a cryptic ``BrokenProcessPool``.
+    """
+    f = getattr(sys.modules.get('__main__'), '__file__', None)
+    return bool(f) and os.path.isfile(f)
+
+
 def run_parallel(
     jobs: Sequence[Job],
     *,
@@ -175,7 +190,11 @@ def run_parallel(
         Pool start method (``'spawn'`` / ``'forkserver'`` / ``'fork'``).
         Defaults to ``'spawn'``: ``'fork'`` is unsafe here because uacpy is
         multi-threaded (numpy/BLAS) and forking a multi-threaded process can
-        deadlock the child on a copied lock.
+        deadlock the child on a copied lock. ``'spawn'``/``'forkserver'``
+        re-import ``__main__`` in each worker, so from an interactive session
+        (REPL, Jupyter, ``python -c``, piped stdin) run your code from a ``.py``
+        script — otherwise ``run_parallel`` raises a clear error telling you to
+        (or to pass ``start_method='fork'``).
     coordinate_name : str, default 'case'
         Label for the stacking axis of the returned ``ParallelResult``.
 
@@ -212,22 +231,40 @@ def run_parallel(
     results: List[Optional[Result]] = [None] * len(jobs)
     errors: Dict[int, BaseException] = {}
 
-    with ProcessPoolExecutor(
-        max_workers=n_workers, mp_context=mp.get_context(start_method)
-    ) as executor:
-        future_to_idx = {
-            executor.submit(_job_worker, job): i for i, job in enumerate(jobs)
-        }
-        for future in as_completed(future_to_idx):
-            i = future_to_idx[future]
-            try:
-                results[i] = future.result()
-            except Exception as exc:  # noqa: BLE001 — surface or collect per policy
-                if raise_on_error:
-                    for f in future_to_idx:
-                        f.cancel()
-                    raise
-                errors[i] = exc
+    try:
+        with ProcessPoolExecutor(
+            max_workers=n_workers, mp_context=mp.get_context(start_method)
+        ) as executor:
+            future_to_idx = {
+                executor.submit(_job_worker, job): i for i, job in enumerate(jobs)
+            }
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                try:
+                    results[i] = future.result()
+                except Exception as exc:  # noqa: BLE001 — surface or collect per policy
+                    if raise_on_error:
+                        for f in future_to_idx:
+                            f.cancel()
+                        raise
+                    errors[i] = exc
+    except BrokenProcessPool as exc:
+        # The worker pool died before returning. The usual cause in interactive
+        # use: spawn/forkserver workers re-import __main__, but an interactive
+        # session (REPL, Jupyter, ``python -c``, piped stdin) has none, so the
+        # children crash on bootstrap. Turn the opaque error into a fix. A
+        # genuine in-worker crash (segfault/OOM in a native binary) keeps the
+        # original BrokenProcessPool.
+        if start_method in ('spawn', 'forkserver') and not _main_is_importable():
+            raise ConfigurationError(
+                f"run_parallel: the {start_method!r} worker pool died on "
+                f"startup — most likely because it cannot re-import __main__ "
+                f"from an interactive session (REPL, Jupyter, `python -c`, or "
+                f"piped stdin). Run from a .py script (guarded with "
+                f"`if __name__ == '__main__':`), or pass start_method='fork' "
+                f"(note: fork can deadlock a heavily-threaded process)."
+            ) from exc
+        raise
 
     labels = [job.label if job.label is not None else i for i, job in enumerate(jobs)]
     return ParallelResult(results, errors, labels, coordinate_name)

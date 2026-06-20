@@ -120,6 +120,43 @@ def test_run_parallel_empty_raises():
         run_parallel([])
 
 
+def test_main_is_importable_helper(monkeypatch, tmp_path):
+    """The spawn-safety probe: True only when __main__ is a real file."""
+    import sys, types
+    from uacpy.parallel import _main_is_importable
+    fake = types.ModuleType('__main__')
+    monkeypatch.setitem(sys.modules, '__main__', fake)
+    assert _main_is_importable() is False           # no __file__ (REPL/stdin)
+    f = tmp_path / "m.py"; f.write_text("")
+    fake.__file__ = str(f)
+    assert _main_is_importable() is True             # importable .py script
+
+
+def test_run_parallel_broken_pool_interactive_message(monkeypatch):
+    """A BrokenProcessPool from an interactive session (no importable __main__)
+    must be translated into a clear, actionable ConfigurationError; a genuine
+    crash (importable __main__) keeps the original BrokenProcessPool. Driven by
+    a fake pool so it's deterministic and needs no real subprocess/binary."""
+    import uacpy.parallel as P
+    from concurrent.futures.process import BrokenProcessPool
+
+    class _DeadPool:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def submit(self, *a, **k): raise BrokenProcessPool("pool died on bootstrap")
+    monkeypatch.setattr(P, 'ProcessPoolExecutor', _DeadPool)
+    job = Job(model=object(), env='e', source='s', receiver='r')
+
+    monkeypatch.setattr(P, '_main_is_importable', lambda: False)   # interactive
+    with pytest.raises(uacpy.ConfigurationError, match="interactive session"):
+        P.run_parallel([job], start_method='spawn')
+
+    monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
+    with pytest.raises(BrokenProcessPool):
+        P.run_parallel([job], start_method='spawn')
+
+
 def test_job_defaults():
     j = Job(model=uacpy.models.Bellhop(), env='e', source='s', receiver='r')
     assert j.run_mode is None and j.run_kwargs == {} and j.label is None
