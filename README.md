@@ -176,6 +176,8 @@ pip install -e .
 | `--bellhop cxx`           | Also build C++ Bellhop (CPU)                                |
 | `--bellhop cuda`          | Also build CUDA Bellhop (GPU, requires `nvcc`)              |
 | `--oases yes` / `no`      | Download + build OASES (or skip the prompt)                 |
+| `--data LIST`             | Download public datasets for the `uacpy.data` offline backend into `./data_cache` (gitignored). `LIST` is a comma list (`gebco`, `woa23`, `sediment`, `emodnet`, `coastline`, `globsed`, `crust1`, `diesing`, `seaice`) or `all`. See `./install.sh --help` for sizes/licences. |
+| `--no-models` / `--data-only` | Skip **all** native model builds (no compilers needed) — pure-Python install; pair with `--data` for an offline data-only setup |
 | `--force`                 | Skip incremental builds; do a full clean rebuild of every selected component |
 
 ---
