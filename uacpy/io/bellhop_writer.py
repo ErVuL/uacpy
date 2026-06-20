@@ -196,7 +196,7 @@ def write_bellhop_env_file(
         atten_unit = f"{atten_unit_char}{vol_atten_char}"
 
         # Position 5: Altimetry flag ('~' = read .ati file, ' ' = flat surface)
-        has_altimetry = getattr(env, 'altimetry', None) is not None and len(env.altimetry) > 1
+        has_altimetry = getattr(env, 'altimetry', None) is not None and env.altimetry.n_ranges > 1
         alti_char = '~' if has_altimetry else ' '
 
         # SSP option string (pad to 6 chars for Fortran compatibility)
@@ -212,7 +212,7 @@ def write_bellhop_env_file(
         # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
             ati_filepath = filepath.with_suffix(".ati")
-            ati_data = env.altimetry.copy()
+            ati_data = env.altimetry.to_pairs()
             ati_data[:, 1] = -ati_data[:, 1]
             write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
             log_message('bellhop_writer',
@@ -284,7 +284,7 @@ def write_bellhop_env_file(
         # positive-up, SSP z-axis positive-down).
         z_min = 0.0
         if has_altimetry:
-            max_alti_above_msl = env.altimetry[:, 1].max()
+            max_alti_above_msl = env.altimetry.heights.max()
             if max_alti_above_msl > 0:
                 z_min = -max_alti_above_msl - 0.5
 
@@ -295,7 +295,7 @@ def write_bellhop_env_file(
         z_max = float(f"{env.depth:.1f}")
 
         if env.ssp.is_range_dependent:
-            ssp_block = env.ssp.at(range=0.0).extend_to(z_max)
+            ssp_block = env.ssp.eval(range=0.0).extend_to(z_max)
         else:
             ssp_block = env.ssp.extend_to(z_max)
         ssp_data_extended = ssp_block.to_pairs()
@@ -325,12 +325,12 @@ def write_bellhop_env_file(
                 f"{alpha_i:.6f} 0.0 /\n"
             )
 
-        bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
+        bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
         bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
 
-        is_range_dependent_bathy = len(env.bathymetry) > 1
+        is_range_dependent_bathy = env.bathymetry.n_ranges > 1
 
-        hs = env.halfspace_at_range(0.0)
+        hs = env.bottom.halfspace_at(range=0.0)
         if is_range_dependent_bathy:
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
@@ -359,13 +359,13 @@ def write_bellhop_env_file(
         # Write halfspace parameters (for range-independent or as defaults)
         if bottom_type == "G":  # Grain size
             # Format: depth Mz (mean grain size in phi units)
-            hs = env.halfspace_at_range(0.0)
+            hs = env.bottom.halfspace_at(range=0.0)
             # Grain-size ('G') bottoms need a ϕ; fall back to 1.0 only if unset
             # (non-granular half-spaces carry ϕ=None).
             grain_size = hs.grain_size_phi if hs.grain_size_phi is not None else 1.0
             f.write(f" {env.depth:.2f}  {grain_size:.2f} /\n")
         elif bottom_type == "F":  # Reflection coefficient from file
-            hs = env.halfspace_at_range(0.0)
+            hs = env.bottom.halfspace_at(range=0.0)
             if hs.reflection_file:
                 import shutil
                 brc_source = Path(hs.reflection_file)
@@ -395,7 +395,7 @@ def write_bellhop_env_file(
             # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
             # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
             # on the preceding BOT line ('A' sigma).
-            hs = env.halfspace_at_range(0.0)
+            hs = env.bottom.halfspace_at(range=0.0)
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(

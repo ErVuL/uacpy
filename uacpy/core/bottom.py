@@ -192,10 +192,12 @@ class BoundaryProperties:
         ]
 
         if self.acoustic_type is None:
-            # Auto-infer from the supplied parameters. 'grain-size' and
-            # 'rigid' remain opt-in — they're physically distinct models,
-            # not just a parameter pattern.
-            if self.reflection_file is not None:
+            # Auto-infer from the supplied parameters. ``grain_size_phi`` is a
+            # grain-size-only knob, so it unambiguously implies 'grain-size';
+            # 'rigid' stays opt-in (a parameter-free physical model).
+            if self.grain_size_phi is not None:
+                self.acoustic_type = 'grain-size'
+            elif self.reflection_file is not None:
                 self.acoustic_type = 'file'
             elif half_space_offenders:
                 self.acoustic_type = 'half-space'
@@ -213,6 +215,8 @@ class BoundaryProperties:
             offenders = list(half_space_offenders)
             if self.reflection_file is not None:
                 offenders.append(f"reflection_file={self.reflection_file!r}")
+            if self.grain_size_phi is not None:
+                offenders.append(f"grain_size_phi={self.grain_size_phi:g}")
             if offenders:
                 raise ConfigurationError(
                     f"BoundaryProperties(acoustic_type={self.acoustic_type!r}) "
@@ -326,6 +330,38 @@ class SeabedColumn:
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m); 0 for a half-space."""
         return sum(layer.thickness for layer in self.layers)
+
+    def copy(self) -> 'SeabedColumn':
+        """Deep copy (symmetric with the other carriers)."""
+        return _copy.deepcopy(self)
+
+    def at(self, *, depth: float) -> BoundaryProperties:
+        """Material :class:`BoundaryProperties` at sub-bottom ``depth`` (m,
+        ``0`` = top of the column).
+
+        A step lookup — returns the containing layer's properties, or the deep
+        half-space below the last layer. Distinct materials are never blended,
+        so a `SeabedColumn` has no ``eval`` (same as `Bottom`). Positional
+        counterpart: :meth:`isel`.
+        """
+        z = float(depth)
+        cumulative = 0.0
+        for layer in self.layers:
+            cumulative += layer.thickness
+            if z <= cumulative:
+                return BoundaryProperties(
+                    acoustic_type='half-space',
+                    sound_speed=layer.sound_speed, density=layer.density,
+                    attenuation=layer.attenuation,
+                    shear_speed=layer.shear_speed,
+                    shear_attenuation=layer.shear_attenuation)
+        return _copy.deepcopy(self.halfspace)
+
+    def isel(self, *, layer: int) -> SedimentLayer:
+        """The :class:`SedimentLayer` at integer index ``layer`` — the
+        positional counterpart of :meth:`at`. (The deep half-space is
+        ``self.halfspace``.)"""
+        return self.layers[int(layer)]
 
     def layer_depths(self, seafloor_depth: float) -> List[Tuple[float, float]]:
         """``(top, bottom)`` depth pairs for each layer (empty for a
@@ -589,10 +625,21 @@ class Bottom:
             return 0
         return int(np.argmin(np.abs(self.ranges - float(range))))
 
-    def column_at(self, *, range: float) -> SeabedColumn:
-        """Nearest :class:`SeabedColumn` to ``range`` (m). Always nearest —
-        layer stacks cannot be linearly blended."""
+    def at(self, *, range: float) -> SeabedColumn:
+        """Nearest :class:`SeabedColumn` to ``range`` (m).
+
+        Always nearest — layer stacks cannot be linearly blended, so a `Bottom`
+        has no general ``eval`` (unlike ``SoundSpeedProfile``/``Field``). For
+        the one blendable quantity use :meth:`halfspace_at` (interpolates the
+        half-space when every column is a pure half-space). Positional
+        counterpart: :meth:`isel`.
+        """
         return self.columns[self._nearest_index(range)]
+
+    def isel(self, *, range: int) -> SeabedColumn:
+        """:class:`SeabedColumn` at integer position ``range`` — the positional
+        counterpart of :meth:`at`."""
+        return self.columns[int(range)]
 
     def halfspace_at(self, *, range: float,
                      interp: Optional[str] = None) -> BoundaryProperties:
@@ -603,7 +650,7 @@ class Bottom:
         if interp is None:
             interp = 'nearest' if self.is_layered else 'linear'
         if self.ranges is None or interp == 'nearest':
-            return _copy.deepcopy(self.column_at(range=range).halfspace)
+            return _copy.deepcopy(self.at(range=range).halfspace)
         if interp != 'linear':
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
@@ -718,6 +765,10 @@ class Bottom:
     def to_halfspace(self, range_method: str = 'r0') -> BoundaryProperties:
         """Collapse fully to a single ``BoundaryProperties``."""
         return self.select_range(range_method).columns[0].collapse('halfspace')
+
+    def copy(self) -> 'Bottom':
+        """Deep copy (symmetric with the other carriers)."""
+        return _copy.deepcopy(self)
 
     # ── factories (mirror SoundSpeedProfile.from_*) ─────────────────────────
     @classmethod

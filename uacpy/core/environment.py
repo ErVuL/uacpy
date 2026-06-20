@@ -10,14 +10,66 @@ import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing, _sanitize_title
+from uacpy.core._carrier_validate import _sanitize_title
 from uacpy.core.bottom import (
     SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
 )
 from uacpy.core.ssp import SoundSpeedProfile, generate_sea_surface
+from uacpy.core.bathymetry import Bathymetry
+from uacpy.core.altimetry import Altimetry
+from uacpy.core.surface import Surface
 
 if TYPE_CHECKING:
     from uacpy.core.absorption import Absorption  # noqa: F401
+
+
+def _coerce_coordinate(value, label):
+    """Validate a ``(lat, lon)`` pair (decimal degrees, WGS84) → ``(float,
+    float)``. Used for the optional geolocation an :class:`Environment`
+    carries (e.g. stamped by ``uacpy.data.fetch_environment``)."""
+    try:
+        lat, lon = float(value[0]), float(value[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        raise ConfigurationError(
+            f"Environment: {label} must be a (lat, lon) pair; got {value!r}.")
+    if not (np.isfinite(lat) and np.isfinite(lon)):
+        raise ConfigurationError(
+            f"Environment: {label} must be finite; got {value!r}.")
+    if not -90.0 <= lat <= 90.0:
+        raise ConfigurationError(
+            f"Environment: {label} latitude must be in [-90, 90]; got {lat}.")
+    return (lat, lon)
+
+
+def _transect_midpoint(start, end):
+    """Midpoint ``(lat, lon)`` of a transect — simple mean, with a longitude
+    wrap so it stays correct across the antimeridian. Good enough as a
+    representative ``location`` label for the short transects acoustics uses."""
+    (la0, lo0), (la1, lo1) = start, end
+    if lo1 - lo0 > 180.0:
+        lo1 -= 360.0
+    elif lo1 - lo0 < -180.0:
+        lo1 += 360.0
+    lon = (0.5 * (lo0 + lo1) + 180.0) % 360.0 - 180.0
+    return (0.5 * (la0 + la1), lon)
+
+
+def _coerce_date(value):
+    """Validate the optional time the env represents → a ``datetime.date``
+    (ISO ``'YYYY-MM-DD'`` strings are parsed; ``None`` passes through)."""
+    import datetime as _dt
+    if value is None or isinstance(value, _dt.date):
+        return value
+    if isinstance(value, str):
+        try:
+            return _dt.date.fromisoformat(value)
+        except ValueError:
+            raise ConfigurationError(
+                f"Environment: date must be an ISO 'YYYY-MM-DD' string or a "
+                f"datetime.date; got {value!r}.")
+    raise ConfigurationError(
+        f"Environment: date must be a 'YYYY-MM-DD' string, a datetime.date, "
+        f"or None; got {type(value).__name__}.")
 
 
 class Environment:
@@ -112,6 +164,10 @@ class Environment:
         absorption: Optional['Absorption'] = None,
         *,
         name: str = 'unnamed',
+        location: Optional[Tuple[float, float]] = None,
+        transect: Optional[Tuple[Tuple[float, float],
+                                 Tuple[float, float]]] = None,
+        date=None,
     ):
         from uacpy.core.absorption import Absorption
         if absorption is not None and not isinstance(absorption, Absorption):
@@ -123,42 +179,36 @@ class Environment:
         self.absorption = absorption
         self.name = _sanitize_title(name)
 
-        if np.ndim(bathymetry) == 0:   # scalar or 0-D ndarray
-            water_depth = float(bathymetry)
-            if not np.isfinite(water_depth) or water_depth <= 0:
-                raise ConfigurationError(
-                    f"Environment: bathymetry depth must be finite and positive "
-                    f"(m); got {water_depth}"
-                )
-            self.bathymetry = np.array([[0.0, water_depth]], dtype=np.float64)
+        # Optional geolocation (WGS84 decimal degrees) and the time the env
+        # represents. ``transect`` is the ((lat, lon) start, (lat, lon) end)
+        # great-circle path for a range-dependent env; ``location`` is the
+        # representative site point — an explicit value if given, else the
+        # transect midpoint. Stamped by ``uacpy.data.fetch_environment``;
+        # ``None`` for a hand-built env. All survive ``env.copy()`` (deepcopy).
+        if transect is None:
+            self.transect = None
         else:
-            self.bathymetry = np.array(bathymetry, dtype=np.float64)
-            if self.bathymetry.ndim != 2 or self.bathymetry.shape[1] != 2:
+            try:
+                start, end = transect
+            except (TypeError, ValueError):
                 raise ConfigurationError(
-                    f"Environment: bathymetry must be a positive scalar or shape "
-                    f"(N, 2) as [(range, depth), ...]; got shape "
-                    f"{self.bathymetry.shape} (example: [(0, 100), (5000, 200)])"
-                )
-            if not np.all(np.isfinite(self.bathymetry)):
-                raise ConfigurationError(
-                    f"Environment: bathymetry must be finite; got "
-                    f"{self.bathymetry.tolist()}"
-                )
-            if np.any(self.bathymetry[:, 0] < 0):
-                raise ConfigurationError(
-                    f"Environment: bathymetry ranges must be non-negative (m); "
-                    f"got {self.bathymetry[:, 0].tolist()}"
-                )
-            if np.any(self.bathymetry[:, 1] <= 0):
-                raise ConfigurationError(
-                    f"Environment: bathymetry depths must be positive (m); "
-                    f"got {self.bathymetry[:, 1].tolist()}"
-                )
-            _require_strictly_increasing(
-                self.bathymetry[:, 0], "Environment.bathymetry ranges",
-            )
+                    "Environment: transect must be a ((lat, lon) start, "
+                    f"(lat, lon) end) pair; got {transect!r}.")
+            self.transect = (_coerce_coordinate(start, "transect start"),
+                             _coerce_coordinate(end, "transect end"))
+        if location is not None:
+            self.location = _coerce_coordinate(location, "location")
+        elif self.transect is not None:
+            self.location = _transect_midpoint(*self.transect)
+        else:
+            self.location = None
+        self.date = _coerce_date(date)
 
-        max_bathy_depth = float(np.max(self.bathymetry[:, 1]))
+        # Bathymetry is a first-class carrier (seafloor depth vs range),
+        # mirroring env.ssp; it validates in its own __post_init__.
+        self.bathymetry = Bathymetry.coerce(bathymetry)
+
+        max_bathy_depth = self.bathymetry.depth
 
         # Carrier instances (ssp / surface / bottom) are stored by reference,
         # not deep-copied: every model copies the whole env (``env.copy()``)
@@ -183,26 +233,17 @@ class Environment:
                 f"{type(ssp).__name__}"
             )
 
-        if altimetry is not None:
-            self.altimetry = np.array(altimetry, dtype=np.float64)
-            if self.altimetry.ndim != 2 or self.altimetry.shape[1] != 2:
-                raise ConfigurationError(
-                    f"Environment: altimetry must have shape (N, 2) as "
-                    f"(range, height_m); got shape {self.altimetry.shape}"
-                )
-            _require_strictly_increasing(
-                self.altimetry[:, 0], "Environment.altimetry ranges",
-            )
-        else:
-            self.altimetry = None
+        # Altimetry is a first-class carrier (surface height vs range), the
+        # top-surface analogue of env.bathymetry; ``None`` = flat z = 0.
+        self.altimetry = Altimetry.coerce(altimetry)
 
         if max_bathy_depth > self.ssp.depths[-1]:
             self.ssp = self.ssp.extend_to(max_bathy_depth)
 
-        if surface is None:
-            self.surface = BoundaryProperties(acoustic_type='vacuum')
-        else:
-            self.surface = surface
+        # Surface is a first-class carrier (top boundary vs range), the
+        # top-properties analogue of env.bottom; a single BoundaryProperties
+        # is coerced to a uniform one-node Surface.
+        self.surface = Surface.coerce(surface)
 
         self.bottom = self._coerce_bottom(bottom)
 
@@ -234,7 +275,7 @@ class Environment:
     @property
     def depth(self) -> float:
         """Maximum water depth in metres (derived from bathymetry)."""
-        return float(np.max(self.bathymetry[:, 1]))
+        return self.bathymetry.depth
 
     @property
     def max_range(self) -> float:
@@ -246,55 +287,32 @@ class Environment:
         transect this equals the transect's great-circle length, so it sizes a
         receiver range grid without recomputing the geodesic.
         """
-        extent = float(np.max(self.bathymetry[:, 0]))
+        extent = self.bathymetry.range_max
         if self.ssp.is_range_dependent:
             extent = max(extent, float(self.ssp.ranges[-1]))
         if self.bottom.is_range_dependent:
             extent = max(extent, float(self.bottom.ranges[-1]))
+        if self.surface.is_range_dependent:
+            extent = max(extent, self.surface.range_max)
         return extent
 
     def get_sound_speed(
         self, depth: Union[float, np.ndarray], range: float = 0.0
     ) -> np.ndarray:
         """Sound speed at given depth(s), at ``range`` for 2-D profiles."""
-        slice_1d = (self.ssp.at(range=range)
+        slice_1d = (self.ssp.eval(range=range)
                     if self.ssp.is_range_dependent else self.ssp)
         return np.interp(np.atleast_1d(depth), slice_1d.depths,
                          slice_1d.data[:, 0])
-
-    def bathymetry_at_range(self, range: Union[float, np.ndarray]) -> np.ndarray:
-        """Bathymetry depth at the requested range(s). ``range`` can be
-        a scalar or array; ``env.bathymetry`` is a plain ``(N, 2)``
-        ndarray, so this helper carries the interpolation logic."""
-        range = np.atleast_1d(range)
-        if len(self.bathymetry) == 1:
-            # dtype=float so an int range query doesn't truncate a
-            # fractional seafloor depth (the interp branch returns float).
-            return np.full_like(range, self.bathymetry[0, 1], dtype=float)
-        return np.interp(range, self.bathymetry[:, 0], self.bathymetry[:, 1])
-
-    def halfspace_at_range(self, range: float) -> 'BoundaryProperties':
-        """The half-space :class:`BoundaryProperties` at ``range`` (m): the
-        properties beneath all sediment layers, linearly interpolated for an
-        all-half-space range-dependent bottom and nearest-neighbour when the
-        bottom is layered. Used by env-file writers that emit a single bottom
-        row."""
-        return self.bottom.halfspace_at(range=range)
-
-    def bottom_at_range(self, range: float) -> 'SeabedColumn':
-        """The :class:`SeabedColumn` (layers + half-space) nearest ``range``."""
-        return self.bottom.column_at(range=range)
 
     def has_range_dependent_bathymetry(self) -> bool:
         """``True`` iff the seafloor depth actually varies with range.
 
         A multi-point bathymetry whose depths are all equal (flat) counts as
-        range-independent.
+        range-independent. (Seafloor depth at a range: ``env.bathymetry.at`` /
+        ``eval`` / ``isel``.)
         """
-        if len(self.bathymetry) <= 1:
-            return False
-        depths = self.bathymetry[:, 1]
-        return not bool(np.allclose(depths, depths[0]))
+        return self.bathymetry.is_range_dependent
 
     def has_range_dependent_ssp(self) -> bool:
         return self.ssp.is_range_dependent
@@ -316,9 +334,8 @@ class Environment:
         return self.bottom.is_elastic
 
     def has_elastic_surface(self) -> bool:
-        """``True`` iff ``self.surface`` carries non-zero shear."""
-        return (self.surface is not None
-                and getattr(self.surface, 'shear_speed', 0.0) > 0)
+        """``True`` iff the surface carries non-zero shear at any range."""
+        return self.surface is not None and self.surface.is_elastic
 
     @property
     def is_range_dependent(self) -> bool:
@@ -326,12 +343,21 @@ class Environment:
             self.has_range_dependent_bathymetry()
             or self.ssp.is_range_dependent
             or self.bottom.is_range_dependent
+            or self.surface.is_range_dependent
         )
 
     def __repr__(self) -> str:
         range_dep = "range-dep" if self.is_range_dependent else "range-indep"
+        geo = ""
+        if self.transect is not None:
+            (la0, lo0), (la1, lo1) = self.transect
+            geo = f", transect=({la0:.3f},{lo0:.3f})→({la1:.3f},{lo1:.3f})"
+        elif self.location is not None:
+            geo = f", location=({self.location[0]:.3f},{self.location[1]:.3f})"
+        if self.date is not None:
+            geo += f", date={self.date.isoformat()}"
         return (f"Environment(name='{self.name}', depth={self.depth:.1f}m, "
-                f"ssp='{self.ssp.shape}', {range_dep})")
+                f"ssp='{self.ssp.shape}', {range_dep}{geo})")
 
     def get_representative_depth(self, method: str = 'max') -> float:
         """
@@ -367,7 +393,7 @@ class Environment:
         >>> env.get_representative_depth('initial')
         100.0
         """
-        depths = self.bathymetry[:, 1]
+        depths = self.bathymetry.depths
 
         if method == 'median':
             return float(np.median(depths))
@@ -398,5 +424,6 @@ class Environment:
 __all__ = [
     'Environment',
     'SedimentLayer', 'BoundaryProperties', 'SeabedColumn', 'Bottom',
-    'SoundSpeedProfile', 'generate_sea_surface',
+    'SoundSpeedProfile', 'generate_sea_surface', 'Bathymetry', 'Altimetry',
+    'Surface',
 ]

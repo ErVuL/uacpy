@@ -12,7 +12,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
     BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE, _blend,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_data_credit, _draw_sea_ice
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_data_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
 
@@ -283,6 +283,10 @@ def plot_environment(
     concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
     e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
     """
+    if not isinstance(env, Environment):
+        raise ConfigurationError(
+            f"plot_environment: expected an Environment, got "
+            f"{type(env).__name__}.")
     if ax is None:
         fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
     else:
@@ -297,7 +301,7 @@ def plot_environment(
     # Falls back to (0, 1) only when nothing carries a range vector.
     candidate_rmaxes = []
     if env.has_range_dependent_bathymetry():
-        candidate_rmaxes.append(float(env.bathymetry[-1, 0]) / 1000.0)
+        candidate_rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
     if bottom.is_range_dependent:
         candidate_rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
     if (receiver is not None and getattr(receiver, 'ranges', None) is not None
@@ -309,8 +313,8 @@ def plot_environment(
     x_max = max(candidate_rmaxes) if candidate_rmaxes else 1.0
 
     if env.has_range_dependent_bathymetry():
-        r_km = env.bathymetry[:, 0] / 1000.0
-        seafloor = env.bathymetry[:, 1]
+        r_km = env.bathymetry.ranges / 1000.0
+        seafloor = env.bathymetry.depths
     else:
         r_km = np.array([0.0, x_max])
         seafloor = np.array([env.depth, env.depth])
@@ -502,6 +506,11 @@ def plot_environment(
     ax_bathy.set_ylabel('Depth (m)')
     ax_bathy.invert_yaxis()
     ax_bathy.grid(True, alpha=0.3)
+    # Read the surface carriers directly: altimetry = surface shape (rough /
+    # sloped surface), surface = top boundary properties (ice cover), both
+    # range-dependent-aware. ``sea_ice`` stays an explicit concentration overlay.
+    _draw_altimetry(ax_bathy, env)
+    _draw_surface_boundary(ax_bathy, env)
     if sea_ice is not None:
         _draw_sea_ice(ax_bathy, sea_ice)
     ax_bathy.set_title(f"Bottom — {type(env.bottom).__name__}",
@@ -601,7 +610,7 @@ def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
         below = z >= seafloor_r[j]
         if not np.any(below):
             continue
-        col = bottom.column_at(range=r_m)
+        col = bottom.at(range=r_m)
         grid[below, j] = _layered_property_at_depths(
             col, prop, seafloor_r[j], z[below])
     return grid
@@ -629,15 +638,15 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
 
     rmaxes = []
     if env.has_range_dependent_bathymetry():
-        rmaxes.append(float(env.bathymetry[-1, 0]) / 1000.0)
+        rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
     if bottom.is_range_dependent:
         rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
     x_max = max(rmaxes) if rmaxes else 1.0
     r_km = np.linspace(0.0, x_max, n_range)
 
     if env.has_range_dependent_bathymetry():
-        bz = env.bathymetry
-        seafloor_r = np.interp(r_km * 1000.0, bz[:, 0], bz[:, 1])
+        b = env.bathymetry
+        seafloor_r = np.interp(r_km * 1000.0, b.ranges, b.depths)
     else:
         seafloor_r = np.full(r_km.shape, float(env.depth))
 

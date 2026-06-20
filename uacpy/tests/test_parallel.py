@@ -91,6 +91,12 @@ def test_parallelresult_collect_and_stack():
     assert len(stack) == 2
     assert np.array_equal(stack.coordinate, np.array([10.0, 30.0]))  # labels
 
+    # isel: positional slab selection, parity with stack[i] and at().
+    assert stack.isel(depth=0) is stack[0]
+    assert stack.isel(depth=1) is stack.at(depth=30.0)   # label 30 → index 1
+    with pytest.raises(uacpy.ConfigurationError):
+        stack.isel(range=0)                              # wrong (non-stacking) axis
+
 
 def test_parallelresult_stack_all_failed_raises():
     sr = ParallelResult(

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 
 import uacpy._stack  # noqa: F401 — side-effect: raise RLIMIT_STACK
-from uacpy.core.environment import Environment
+from uacpy.core.environment import Environment, Bathymetry
 from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
@@ -70,6 +70,7 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
     'bottom_range': 'r0',
     'bottom_layers': 'halfspace',
     'altimetry': 'drop',
+    'surface': 'r0',
     'elastic': 'fluid',
 }
 
@@ -82,6 +83,7 @@ VALID_COLLAPSE_METHODS: Dict[str, frozenset] = {
     'bottom_range':      frozenset({'r0', 'rmax', 'mean', 'median'}),
     'bottom_layers':     frozenset({'halfspace', 'top_layer', 'volume_average'}),
     'altimetry':         frozenset({'drop'}),
+    'surface':           frozenset({'r0', 'rmax', 'mean', 'median'}),
     'elastic':           frozenset({'fluid', 'vacuum'}),
 }
 # Dev invariants on the collapse-policy constants (raise, not assert, so they
@@ -192,6 +194,7 @@ class PropagationModel(ABC):
         # interp scheme, volume-attenuation formula) belong in run()-time
         # asserts, not here.
         self._supports_altimetry: bool = False
+        self._supports_range_dependent_surface: bool = False
         self._supports_range_dependent_bathymetry: bool = False
         self._supports_range_dependent_ssp: bool = False
         self._supports_range_dependent_bottom: bool = False
@@ -675,6 +678,22 @@ class PropagationModel(ABC):
         if np.any(source.depths < 0):
             raise ConfigurationError("Source depths must be non-negative")
 
+        # A source exactly at z = 0 sits on the pressure-release sea surface,
+        # where the boundary forces p ≈ 0: a field run then returns a
+        # degenerate result (a null / saturated-TL sentinel, or — in RAM — an
+        # unphysical normalisation) that a valid-looking ``Source(depths=0)``
+        # hides. Reflection coefficients and mode shapes don't propagate a
+        # source field, so the warning doesn't apply to those.
+        if (run_mode not in (RunMode.REFLECTION, RunMode.MODES)
+                and np.any(np.asarray(source.depths) == 0.0)):
+            warnings.warn(
+                f"{self.model_name}: a source at depth 0 m is on the "
+                f"pressure-release sea surface, where the field is ~0 — the "
+                f"result is degenerate (null / saturated TL, model-dependent). "
+                f"Use a small positive depth (e.g. 1 m).",
+                UserWarning, stacklevel=3,
+            )
+
         if receiver.depth_min < 0:
             raise ConfigurationError("Receiver depths must be non-negative")
 
@@ -725,7 +744,7 @@ class PropagationModel(ABC):
             return
         depths = np.atleast_1d(receiver.depths).astype(float)
         ranges = np.atleast_1d(receiver.ranges).astype(float)
-        seafloor = np.asarray(env.bathymetry_at_range(ranges), dtype=float)
+        seafloor = np.asarray(env.bathymetry.eval(range=ranges), dtype=float)
 
         if receiver.receiver_type == 'line':
             mask = depths > seafloor
@@ -774,13 +793,13 @@ class PropagationModel(ABC):
                 )
 
         if env.has_range_dependent_bathymetry():
-            _check("env.bathymetry", float(env.bathymetry[-1, 0]))
+            _check("env.bathymetry", float(env.bathymetry.ranges[-1]))
         if env.ssp.is_range_dependent:
             _check("env.ssp.ranges", float(env.ssp.ranges[-1]))
         if env.bottom.is_range_dependent:
             _check("env.bottom.ranges", float(env.bottom.ranges[-1]))
-        if env.altimetry is not None and len(env.altimetry) > 1:
-            _check("env.altimetry ranges", float(env.altimetry[-1, 0]))
+        if env.altimetry is not None and env.altimetry.n_ranges > 1:
+            _check("env.altimetry ranges", float(env.altimetry.ranges[-1]))
 
     def compute_tl(
         self,
@@ -953,6 +972,15 @@ class PropagationModel(ABC):
                 "normal mode computation",
                 alternatives=['Kraken']
             )
+
+        if n_modes is not None and not isinstance(
+                n_modes, (int, float, np.integer, np.floating)):
+            raise ConfigurationError(
+                f"compute_modes: n_modes must be an int or None; got "
+                f"{type(n_modes).__name__}. Unlike the other compute_* "
+                f"wrappers, compute_modes takes no receiver (normal modes are "
+                f"receiver-independent) — its third argument is n_modes. Pass "
+                f"it by keyword: compute_modes(env, source, n_modes=...).")
 
         if env.is_range_dependent:
             # Mode solvers (the Kraken backends) collapse the environment via
@@ -1295,9 +1323,10 @@ class PropagationModel(ABC):
         """True if ``boundary`` carries any non-zero shear speed. Accepts a
         :class:`Bottom` or a surface :class:`BoundaryProperties`."""
         from uacpy.core.bottom import Bottom
+        from uacpy.core.surface import Surface
         if boundary is None:
             return False
-        if isinstance(boundary, Bottom):
+        if isinstance(boundary, (Bottom, Surface)):
             return boundary.is_elastic
         return getattr(boundary, 'shear_speed', 0.0) > 0
 
@@ -1312,6 +1341,7 @@ class PropagationModel(ABC):
         surface :class:`BoundaryProperties`, returning the same kind.
         """
         from uacpy.core.bottom import BoundaryProperties, Bottom
+        from uacpy.core.surface import Surface
 
         def _zero_shear(b):
             if hasattr(b, 'shear_speed'):
@@ -1333,6 +1363,14 @@ class PropagationModel(ABC):
                 for layer in col.layers:
                     _zero_shear(layer)
                 _zero_shear(col.halfspace)
+            return b
+        if isinstance(boundary, Surface):
+            if method == 'vacuum':
+                return Surface(properties=[
+                    BoundaryProperties(acoustic_type='vacuum')])
+            b = _copy.deepcopy(boundary)
+            for p in b.properties:
+                _zero_shear(p)
             return b
         if method == 'vacuum':
             return BoundaryProperties(acoustic_type='vacuum')
@@ -1364,12 +1402,23 @@ class PropagationModel(ABC):
                 UserWarning, stacklevel=3,
             )
 
+        if e.surface.is_range_dependent and not self._supports_range_dependent_surface:
+            method = self._collapse["surface"]
+            e.surface = e.surface.collapse(method)
+            warnings.warn(
+                f"{self.model_name} does not support range-dependent surface "
+                f"properties (e.g. a marginal ice zone); collapsed to a single "
+                f"boundary (collapse['surface']={method!r}).",
+                UserWarning, stacklevel=3,
+            )
+
         if e.has_range_dependent_bathymetry() and not self._supports_range_dependent_bathymetry:
             method = self._collapse["bathymetry"]
             new_depth = e.get_representative_depth(method)
-            min_d = float(e.bathymetry[:, 1].min())
-            max_d = float(e.bathymetry[:, 1].max())
-            e.bathymetry = np.array([[0.0, new_depth]], dtype=np.float64)
+            min_d = float(e.bathymetry.depths.min())
+            max_d = float(e.bathymetry.depths.max())
+            e.bathymetry = Bathymetry(
+                ranges=np.array([0.0]), depths=np.array([new_depth]))
             if e.ssp.depths[-1] < new_depth:
                 e.ssp = e.ssp.extend_to(new_depth)
             warnings.warn(

@@ -382,7 +382,7 @@ def resolve_phase_speed_bounds(
         return float(c_low), float(c_high)
     ssp_pairs = env.ssp.to_pairs()
     c_min = float(ssp_pairs[:, 1].min())
-    hs_c = env.halfspace_at_range(0.0).sound_speed
+    hs_c = env.bottom.halfspace_at(range=0.0).sound_speed
     c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
     return (
         float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
@@ -554,7 +554,7 @@ def write_bottom_section(
         ``'F'``. Phase-velocity sampling bounds (m/s) and angle-resolution
         range (m) for the model that reads the ``.brc`` table.
     """
-    hs = env.halfspace_at_range(0.0)
+    hs = env.bottom.halfspace_at(range=0.0)
     if bottom_type is None:
         bottom_type = parse_boundary_type(hs.acoustic_type)
 
@@ -566,7 +566,7 @@ def write_bottom_section(
     bottom_code = bottom_type.to_acoustics_toolbox_code()
     sigma = getattr(hs, 'roughness', 0.0)
 
-    if len(env.bathymetry) > 1:
+    if env.bathymetry.n_ranges > 1:
         f.write(f"'{bottom_code}~' {sigma:.1f}\n")
     else:
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
@@ -763,7 +763,7 @@ def write_multi_profile_env(
                 )
             else:
                 surface_type = BoundaryType.VACUUM
-            bottom_type = parse_boundary_type(env_seg.halfspace_at_range(0.0).acoustic_type)
+            bottom_type = parse_boundary_type(env_seg.bottom.halfspace_at(range=0.0).acoustic_type)
 
             n_media_this = _n_media(env_seg)
             n_media_write = max_n_media
@@ -786,10 +786,10 @@ def write_multi_profile_env(
             # --- Sediment layers (media 2..n_media_this) ---
             # Collect real layers with their depths, then write
             # them together with any needed extensions.
-            # ``halfspace_at_range`` digs into the column's ``halfspace`` so
+            # ``bottom.halfspace_at`` digs into the column's ``halfspace`` so
             # a per-segment layered column still exposes a flat halfspace for
             # the padding-layer fields below.
-            hs = env_seg.halfspace_at_range(0.0)
+            hs = env_seg.bottom.halfspace_at(range=0.0)
             seafloor = float(f"{env_seg.depth:.1f}")
             current_depth = seafloor
             real_layers = []
@@ -1379,7 +1379,7 @@ def write_sparc_env_file(
 
         # Bottom section (SPARC only supports V and R — no halfspace params).
         bottom_code = bottom_type.to_acoustics_toolbox_code()
-        sigma = getattr(env.halfspace_at_range(0.0), 'roughness', 0.0)
+        sigma = getattr(env.bottom.halfspace_at(range=0.0), 'roughness', 0.0)
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
 
         write_phase_speed_and_rmax(

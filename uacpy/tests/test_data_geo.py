@@ -30,6 +30,29 @@ def test_as_coordinate_rejects_non_pairs(bad):
         as_coordinate(bad)
 
 
+@pytest.mark.parametrize('bad', [
+    (float('nan'), 0.0), (0.0, float('nan')),
+    (float('inf'), 0.0), (0.0, float('-inf')),
+])
+def test_as_coordinate_rejects_non_finite(bad):
+    # NaN/inf used to slip through float() and only blow up later as a raw
+    # "cannot convert float NaN to integer" in a fetcher's grid-index maths.
+    with pytest.raises(ConfigurationError, match='finite'):
+        as_coordinate(bad)
+
+
+@pytest.mark.parametrize('lat', [95.0, -91.0, 90.001])
+def test_as_coordinate_rejects_out_of_range_latitude(lat):
+    with pytest.raises(ConfigurationError, match=r'\[-90, 90\]'):
+        as_coordinate((lat, 0.0))
+
+
+def test_as_coordinate_allows_unwrapped_longitude():
+    # Longitude is cyclic and normalized downstream, so it is left as-is here.
+    assert as_coordinate((0.0, 200.0)) == (0.0, 200.0)
+    assert as_coordinate((-89.9, -181.0)) == (-89.9, -181.0)
+
+
 def test_parse_date_accepts_iso_and_objects():
     import datetime as dt
     from uacpy.data._time import parse_date

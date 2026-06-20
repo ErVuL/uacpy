@@ -307,7 +307,7 @@ def test_ssp_eval_interpolates_off_grid_range():
         matrix=np.array([[1500.0, 1490.0, 1480.0],
                          [1480.0, 1470.0, 1460.0]])
     )
-    sliced = ssp.at(range=2_000.0)
+    sliced = ssp.eval(range=2_000.0)
     assert sliced.data[0, 0] == pytest.approx(1495.0)
     assert sliced.data[1, 0] == pytest.approx(1475.0)
 
@@ -318,7 +318,7 @@ def test_ssp_eval_clamps_beyond_last_range():
         ranges=np.array([0.0, 4_000.0]),
         matrix=np.array([[1500.0, 1490.0], [1480.0, 1470.0]])
     )
-    sliced = ssp.at(range=10_000.0)
+    sliced = ssp.eval(range=10_000.0)
     assert sliced.data[0, 0] == pytest.approx(1490.0)
     assert sliced.data[1, 0] == pytest.approx(1470.0)
 
@@ -336,11 +336,11 @@ def test_rd_bottom_eval_interpolates_off_grid_range():
     assert bp.density == pytest.approx(1.7)
 
 
-def test_bathymetry_at_range_interpolates_off_grid():
+def test_bathymetry_eval_interpolates_off_grid():
     env = Environment(bathymetry=[(0.0, 100.0), (10_000.0, 200.0)])
-    assert env.bathymetry_at_range(5_000.0)[0] == pytest.approx(150.0)
+    assert env.bathymetry.eval(range=5_000.0) == pytest.approx(150.0)
     # Constant extrapolation past the last range.
-    assert env.bathymetry_at_range(20_000.0)[0] == pytest.approx(200.0)
+    assert env.bathymetry.eval(range=20_000.0) == pytest.approx(200.0)
 
 
 def test_independent_bathy_ssp_bottom_ranges_compose_ok():
@@ -363,8 +363,8 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     )
     env = Environment(bathymetry=bathy, ssp=ssp, bottom=rd_bot)
     assert env.is_range_dependent
-    assert env.bathymetry_at_range(4_000.0)[0] == pytest.approx(140.0)
-    assert env.ssp.at(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
+    assert env.bathymetry.eval(range=4_000.0) == pytest.approx(140.0)
+    assert env.ssp.eval(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
     assert env.bottom.halfspace_at(range=4_500.0).sound_speed == pytest.approx(1675.0)
 
 
@@ -610,3 +610,36 @@ def test_run_rejects_unknown_kwarg(model_cls):
     model = model_cls()
     with pytest.raises(TypeError, match=r"unexpected keyword argument"):
         model.run(env, src, rcv, totally_bogus_kwarg=1)
+
+
+def test_generate_sea_surface_rejects_nonpositive_range():
+    from uacpy import generate_sea_surface
+    for bad in (0.0, -100.0):
+        with pytest.raises(ConfigurationError, match="max_range"):
+            generate_sea_surface(bad)
+
+
+@pytest.mark.parametrize("bad", ['deep', object(), {'a': 1}])
+def test_bathymetry_nonnumeric_is_typed(bad):
+    with pytest.raises(ConfigurationError):
+        uacpy.Environment(bathymetry=bad, ssp=1500.0)
+
+
+def test_altimetry_nonnumeric_is_typed():
+    with pytest.raises(ConfigurationError):
+        uacpy.Environment(bathymetry=100.0, ssp=1500.0, altimetry='wavy')
+
+
+def test_surface_source_warns_for_field_runs():
+    """A source at z=0 sits on the pressure-release surface (field ~0) — a
+    field run warns; a positive depth does not."""
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                        attenuation=0.5))
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[2000.0])
+    with pytest.warns(UserWarning, match="pressure-release sea surface"):
+        Bellhop().compute_tl(env, uacpy.Source(depths=0.0, frequencies=200.0), rcv)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        Bellhop().compute_tl(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)

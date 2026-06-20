@@ -18,7 +18,7 @@ OBJECTIVE:
 
 FEATURES DEMONSTRATED:
     ✓ uacpy.data.fetch_bathy_grid (regional bathymetry, land → NaN)
-    ✓ uacpy.data.fetch_environment (range-dependent bathymetry + SSP + bottom)
+    ✓ uacpy.data.fetch_environment (range-dependent bathymetry + SSP + bottom + ice surface)
     ✓ uacpy.plot.plot_overview (map · transmission loss · environment, one call)
     ✓ Offline cache (./install.sh --data all): GEBCO, WOA23, grain-size,
       EMODnet, GlobSed, CRUST1.0 and the Natural Earth coastline backdrop
@@ -149,8 +149,8 @@ def _fetch_env():
 
 def _run_tl(env):
     """Coherent TL plus the source/receiver geometry it was computed on."""
-    zmax = float(np.max(np.asarray(env.bathymetry)[:, 1]))
-    rmax = float(np.max(np.asarray(env.bathymetry)[:, 0]))
+    zmax = env.bathymetry.depth
+    rmax = env.bathymetry.range_max
     source = uacpy.Source(depths=SOURCE_DEPTH, frequencies=FREQ_HZ)
     receiver = uacpy.Receiver(depths=np.linspace(1, zmax, 150),
                               ranges=np.linspace(100.0, rmax, 350))
@@ -223,7 +223,13 @@ def _sea_ice_overview(plt):
             bathymetry_sources=BATHY_SOURCE,
             range_dependent_ssp=True, ssp_n_points=SSP_POINTS,
             range_dependent_bottom=True, bottom_sources='local',
-            bottom_n_points=BOTTOM_POINTS)
+            bottom_n_points=BOTTOM_POINTS,
+            # The sea-ice canopy is fetched along the transect too, so the
+            # marginal ice zone rides on env.surface (a range-dependent
+            # Surface) and is drawn on the environment panel. The solvers carry
+            # a single global top boundary, so the TL run collapses it to one
+            # boundary (with a warning) — the carrier is for the visualisation.
+            range_dependent_surface=True, surface_n_points=BOTTOM_POINTS)
         tl, source, receiver = _run_tl(env)
         rng_m, conc = seaice_local.fetch_sea_ice_concentration_transect(
             A, B, month=month, n_points=BOTTOM_POINTS)
@@ -296,8 +302,8 @@ def _rdlb_overview(env, grid, plt):
     env_rdlb = uacpy.Environment(name="Range-dependent layered seabed",
                                  bathymetry=env.bathymetry, ssp=env.ssp,
                                  bottom=_fluid_rdlb_from_grain(grain))
-    zmax = float(np.max(np.asarray(env.bathymetry)[:, 1]))
-    rmax = float(np.max(np.asarray(env.bathymetry)[:, 0]))
+    zmax = env.bathymetry.depth
+    rmax = env.bathymetry.range_max
     source = uacpy.Source(depths=SOURCE_DEPTH, frequencies=RDLB_FREQ_HZ)
     receiver = uacpy.Receiver(depths=np.linspace(1, zmax, 100),
                               ranges=np.linspace(100.0, rmax, 200))

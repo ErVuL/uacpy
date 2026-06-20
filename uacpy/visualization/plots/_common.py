@@ -123,8 +123,8 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     ax.set_xlim(x_lo, x_hi)
 
     if env.has_range_dependent_bathymetry():
-        r_km = env.bathymetry[:, 0] / 1000.0
-        z = env.bathymetry[:, 1]
+        r_km = env.bathymetry.ranges / 1000.0
+        z = env.bathymetry.depths
         if r_km.size >= 2 and (r_km.min() < x_lo or r_km.max() > x_hi):
             mask = (r_km >= x_lo) & (r_km <= x_hi)
             r_clip = list(r_km[mask])
@@ -256,3 +256,70 @@ def _draw_sea_ice(ax, sea_ice):
     ax.add_collection(lc)
     ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right', va='top',
             fontsize=8, style='italic', color='#5b1a8b', zorder=ZORDER_SOURCE)
+
+
+def _draw_surface_boundary(ax, env):
+    """Draw the top boundary from ``env.surface`` (a :class:`Surface` carrier).
+
+    An elastic or non-vacuum half-space surface (e.g. an ice cover) rides the
+    water surface as a hatched solid band; a vacuum / pressure-release surface
+    leaves the plain free surface untouched. A range-dependent surface (a
+    marginal ice zone) is drawn as per-range zones, mirroring the bottom.
+    """
+    surface = getattr(env, 'surface', None)
+    props = getattr(surface, 'properties', None)
+    if not props:
+        return
+
+    def _is_solid(bp):
+        at = getattr(bp, 'acoustic_type', None)
+        return (getattr(bp, 'shear_speed', 0.0) or 0.0) > 0 or \
+            at in ('half-space', 'grain-size')
+
+    x0, x1 = ax.get_xlim()
+    ranges = getattr(surface, 'ranges', None)
+    if ranges is None or len(props) == 1:
+        zones = [(x0, x1, props[0])]
+    else:
+        rk = np.asarray(ranges, dtype=float) / 1000.0
+        bnds = [x0] + [0.5 * (rk[i] + rk[i + 1]) for i in range(len(rk) - 1)] + [x1]
+        zones = [(bnds[i], bnds[i + 1], props[i]) for i in range(len(props))]
+
+    lo, hi = ax.get_ylim()                  # inverted: hi = surface (depth 0)
+    band = 0.045 * abs(lo - hi)
+    drew = False
+    for r_lo, r_hi, bp in zones:
+        if not _is_solid(bp):
+            continue
+        ax.fill_between([r_lo, r_hi], hi, hi - band, color='#cfe6f2',
+                        hatch='xx', edgecolor='#3a6e8f', linewidth=0.5,
+                        zorder=ZORDER_SURFACE)
+        drew = True
+    if drew:
+        ax.set_ylim(lo, hi - 1.25 * band)   # headroom above the surface
+        ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right',
+                va='top', fontsize=8, style='italic', color='#3a6e8f',
+                zorder=ZORDER_SOURCE)
+
+
+def _draw_altimetry(ax, env):
+    """Draw the sea-surface *shape* from ``env.altimetry`` (an
+    :class:`Altimetry` carrier): the height profile riding mean sea level
+    (heights positive up → above z = 0). A flat / absent altimetry leaves the
+    plain free surface.
+    """
+    alti = getattr(env, 'altimetry', None)
+    ranges = getattr(alti, 'ranges', None)
+    heights = getattr(alti, 'heights', None)
+    if ranges is None or heights is None or np.asarray(ranges).size < 2:
+        return
+    r_km = np.asarray(ranges, dtype=float) / 1000.0
+    z = -np.asarray(heights, dtype=float)          # positive up → negative depth
+    if not np.any(np.abs(z) > 0):
+        return
+    ax.plot(r_km, z, color='#1f6f9f', lw=1.6, zorder=ZORDER_SURFACE)
+    ax.fill_between(r_km, 0.0, z, color='#1f6f9f', alpha=0.15,
+                    zorder=ZORDER_SURFACE - 1)
+    lo, hi = ax.get_ylim()
+    if float(np.min(z)) < hi:                       # crest above z=0 → headroom
+        ax.set_ylim(lo, float(np.min(z)) * 1.2)

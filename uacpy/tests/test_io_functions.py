@@ -91,9 +91,9 @@ class TestEnvironmentIO:
             )
 
             assert env.is_range_dependent
-            assert len(env.bathymetry) == 3
-            assert env.bathymetry[0, 1] == 80
-            assert env.bathymetry[-1, 1] == 120
+            assert env.bathymetry.n_ranges == 3
+            assert env.bathymetry.depths[0] == 80
+            assert env.bathymetry.depths[-1] == 120
 
         finally:
             Path(bathy_file).unlink()

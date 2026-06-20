@@ -4,6 +4,7 @@ they construct it)."""
 
 from __future__ import annotations
 
+import copy as _copy
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
@@ -11,6 +12,12 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.results._base import Result, _complex_to_db
+
+# Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
+# too-high sample_rate (or a too-fine frequency grid) can silently demand a
+# multi-GB buffer and OOM the process. Cap the *auto* size at 2**26 ≈ 67 M
+# samples (~1 GB complex) and raise instead; an explicit ``nfft=`` bypasses it.
+_MAX_SYNTHESIS_NFFT = 1 << 26
 
 
 class Field(Result):
@@ -301,6 +308,46 @@ class Field(Result):
         self._check_axes(kwargs)
         return self._slice({name: int(i) for name, i in kwargs.items()})
 
+    def eval(self, **kwargs) -> "Field":
+        """Interpolated slice — the interpolating counterpart of :meth:`at`.
+
+        Each kwarg names a coord axis and a value; the data is interpolated
+        along that axis (constant extrapolation past the ends) and the axis
+        collapsed into :attr:`pinned`. ``method=`` picks the scheme —
+        ``'linear'`` (default), ``'nearest'``, or ``'cubic'``. Use :meth:`at`
+        for the nearest stored sample when you must not fabricate values. Note
+        that interpolating a real **TL (dB)** field happens in dB and smooths
+        sharp interference nulls; slice complex pressure (or use ``at``) for
+        null-critical work.
+        """
+        from uacpy.core._grid import collapse_axis
+        method = kwargs.pop('method', 'linear')
+        self._check_axes(kwargs)
+        data = self.data
+        coords = dict(self.coords)
+        pinned = dict(self.pinned)
+        order = list(self.coords)
+        for name, value in kwargs.items():
+            ax = order.index(name)
+            data, vq = collapse_axis(data, coords[name], value, method, axis=ax)
+            pinned[name] = vq
+            del coords[name]
+            order.remove(name)
+        pinned_now = set(kwargs)
+        new_frequencies = (
+            np.array([pinned['frequency']], dtype=float)
+            if 'frequency' in pinned_now else self.frequencies)
+        new_source_depths = (
+            np.array([pinned['source_depth']], dtype=float)
+            if 'source_depth' in pinned_now else self.source_depths)
+        if coords:
+            id_kwargs = self.id_kwargs()
+            id_kwargs['frequencies'] = new_frequencies
+            id_kwargs['source_depths'] = new_source_depths
+            return Field(data=data, coords=coords, pinned=pinned, **id_kwargs)
+        return self._spawn_scalar(
+            data, pinned, new_frequencies, new_source_depths)
+
     def max(self) -> "Field":
         """Slice at the global argmax of ``|data|``.
 
@@ -432,9 +479,11 @@ class Field(Result):
                 "Field.mask_below_seafloor: requires canonical "
                 f"['depth', 'range'] coords; got {list(self.coords)}"
             )
-        from uacpy.core.environment import Environment
+        from uacpy.core.environment import Environment, Bathymetry
         if isinstance(bathymetry, Environment):
             bathymetry = bathymetry.bathymetry
+        if isinstance(bathymetry, Bathymetry):
+            bathymetry = bathymetry.to_pairs()
         bathy = np.asarray(bathymetry, dtype=float)
         if bathy.ndim != 2 or bathy.shape[1] != 2:
             raise ConfigurationError(
@@ -737,6 +786,10 @@ class ResultStack:
     def __len__(self) -> int:
         return self.n_slabs
 
+    def copy(self) -> "ResultStack":
+        """Deep copy (symmetric with :class:`Result` and the carriers)."""
+        return _copy.deepcopy(self)
+
     def __getitem__(self, index: int) -> Result:
         return self.slabs[int(index)]
 
@@ -759,6 +812,20 @@ class ResultStack:
         target = float(kwargs[self.coordinate_name])
         idx = int(np.argmin(np.abs(self.coordinate - target)))
         return self.slabs[idx]
+
+    def isel(self, **kwargs) -> Result:
+        """Select a slab by integer position on the stacking axis.
+
+        Pass exactly the stacking-axis keyword (``<coordinate_name>=<index>``);
+        the positional counterpart of :meth:`at` (and of ``stack[index]``),
+        mirroring :meth:`Field.isel`.
+        """
+        if len(kwargs) != 1 or self.coordinate_name not in kwargs:
+            raise ConfigurationError(
+                f"ResultStack.isel(): pass exactly the stacking-axis "
+                f"keyword ({self.coordinate_name}=<index>); got {list(kwargs)}"
+            )
+        return self.slabs[int(kwargs[self.coordinate_name])]
 
     @property
     def tl(self) -> np.ndarray:
@@ -868,6 +935,17 @@ def _ifft_to_trace(
         nfft = 1
         while nfft < nfft_target:
             nfft *= 2
+        if nfft > _MAX_SYNTHESIS_NFFT:
+            raise ConfigurationError(
+                f"synthesize_time_series: the requested grid implies an "
+                f"{nfft:,}-sample output (~{nfft * 16 / 1e9:.1f} GB), above the "
+                f"{_MAX_SYNTHESIS_NFFT:,}-sample safety cap. This is driven by "
+                f"sample_rate={sample_rate!r} Hz against a frequency resolution "
+                f"df={df:.4g} Hz (length ~ sample_rate/df). Lower sample_rate, "
+                f"widen df (coarser frequency grid / shorter window), or pass an "
+                f"explicit nfft= if you really need an output this large.",
+                remediation="A typical fix is a smaller sample_rate.",
+            )
 
     if window == 'hann':
         win = np.hanning(n_freq)

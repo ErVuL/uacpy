@@ -59,6 +59,7 @@ from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
     C_LOW_FACTOR_KRAKEN,
+    PRESSURE_FLOOR,
 )
 import shutil
 from uacpy.core.exceptions import (
@@ -240,7 +241,7 @@ class _KrakenBase(PropagationModel):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
+        bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
         bottom_type = parse_boundary_type(bottom_acoustic_type)
 
         # Top reflection coefficient file (.trc): override surface BC to 'F'
@@ -301,7 +302,7 @@ class _KrakenBase(PropagationModel):
         hang. Elastic half-spaces and elastic-over-elastic stacks are fine."""
         if not env.bottom.is_layered:
             return
-        col = env.bottom.column_at(range=0)
+        col = env.bottom.at(range=0)
         has_elastic_layer = any(
             (getattr(layer, 'shear_speed', 0) or 0) > 0 for layer in col.layers
         )
@@ -313,6 +314,26 @@ class _KrakenBase(PropagationModel):
                 "(solid-over-liquid bottom interface) — krakenc.exe does not "
                 "converge on it",
                 alternatives=['Scooter', 'OAST'],
+            )
+
+    def _reject_elastic_surface(self, env: Environment) -> None:
+        """krakenc.exe heap-corrupts (``free(): invalid pointer``) computing the
+        interfacial (Scholte) modes of an elastic *top* half-space — a
+        solid-over-liquid surface such as an ice canopy. (An elastic *bottom*
+        half-space is fine.) Reject it up front with a clear typed error rather
+        than the opaque SIGABRT. Checks the surface as the writer will see it:
+        a range-dependent surface is first reduced by the configured
+        ``collapse['surface']`` method (Kraken carries a single global top)."""
+        surface = env.surface
+        if surface.is_range_dependent:
+            surface = surface.collapse(self._collapse['surface'])
+        if surface.is_elastic:
+            raise UnsupportedFeatureError(
+                self.model_name,
+                "an elastic (shear) sea-surface half-space such as an ice "
+                "canopy — krakenc.exe aborts on the interfacial modes of a "
+                "solid-over-liquid top interface",
+                alternatives=['Bellhop'],
             )
 
     def _run_kraken_executable(self, base_name: str, work_dir: Path, exe=None):
@@ -645,6 +666,11 @@ class Kraken(_KrakenBase):
             RunMode.TIME_SERIES,
         ]
         self._supports_altimetry = False
+        # The Kraken range-dependent .env carries one global top/bottom boundary
+        # (only the SSP profile varies per range), so — exactly like the bottom
+        # (_supports_range_dependent_bottom = False) — a range-dependent surface
+        # is collapsed, not honoured.
+        self._supports_range_dependent_surface = False
         self._supports_range_dependent_bathymetry = True
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = False
@@ -840,6 +866,7 @@ class Kraken(_KrakenBase):
             ``len(source_waveform)/sample_rate``.
         """
         self._reject_elastic_over_fluid_halfspace(env)
+        self._reject_elastic_surface(env)
 
         # Early gate: coupled-mode field calculations cannot be
         # combined with incoherent mode addition. AT's field.f90
@@ -933,10 +960,10 @@ class Kraken(_KrakenBase):
             bottom = bottom.select_range('r0')
         return Environment(
             name=env.name,
-            bathymetry=float(env.bathymetry_at_range(0.0)[0]),
+            bathymetry=float(env.bathymetry.eval(range=0.0)),
             ssp=ssp,
             bottom=bottom,
-            surface=env.surface,
+            surface=env.surface.collapse('r0'),
             absorption=env.absorption,
         )
 
@@ -944,6 +971,7 @@ class Kraken(_KrakenBase):
         """Run the modes binary only (kraken.exe / krakenc.exe by ``backend=``
         / elasticity) and return a :class:`Modes` result — no field.exe."""
         self._reject_elastic_over_fluid_halfspace(env)
+        self._reject_elastic_surface(env)
         kraken_exe = self._select_kraken_exe(env)
         env = self._project_environment(self._modes_single_profile(env))
         self.validate_inputs(env, source, receiver, run_mode=RunMode.MODES)
@@ -1124,7 +1152,7 @@ class Kraken(_KrakenBase):
                     if seg.bottom is not None:
                         # Walk the column via env helper — handles both
                         # halfspace and stratified columns.
-                        all_c.append(seg.halfspace_at_range(0.0).sound_speed)
+                        all_c.append(seg.bottom.halfspace_at(range=0.0).sound_speed)
                 min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
                 n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
 
@@ -1304,6 +1332,23 @@ class Kraken(_KrakenBase):
                 ))
                 field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
                 field.metadata['n_profiles'] = n_profiles
+
+            # No-propagation guard: an all-floor field means the modal sum was
+            # empty — Kraken found 0 trapped modes (frequency below the
+            # waveguide's modal cutoff, or c_high too low). field.exe still
+            # emits a uniform no-signal sentinel; flag it rather than return a
+            # silent all-max-TL field (compute_modes raises on the same case).
+            fd = np.asarray(field.data)
+            finite = np.isfinite(fd)
+            if finite.any() and not np.any(np.abs(fd[finite]) > PRESSURE_FLOOR):
+                warnings.warn(
+                    f"{self.model_name}: no propagating field — the modal sum "
+                    f"is empty (0 trapped modes: the frequency is below the "
+                    f"waveguide's modal cutoff, or c_high is too low). The "
+                    f"returned TL is a uniform no-signal sentinel, not a "
+                    f"physical result; raise the frequency or c_high.",
+                    UserWarning, stacklevel=2,
+                )
 
             self._attach_output_paths(
                 field, fm.work_dir, base_name,

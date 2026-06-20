@@ -155,6 +155,8 @@ def fetch_environment(
     ssp_n_points: int = 6,
     range_dependent_bottom: bool = False,
     bottom_n_points: int = 6,
+    range_dependent_surface: bool = False,
+    surface_n_points: int = 6,
     with_absorption: bool = False,
     formula: str = 'unesco',
     resolution: str = '1.00',
@@ -242,6 +244,17 @@ def fetch_environment(
     bottom_n_points : int, optional
         Number of EMODnet samples along the transect when
         ``range_dependent_bottom``. Default 6.
+    range_dependent_surface : bool, optional
+        If ``True`` (requires ``transect_to``), the sea-ice canopy is sampled
+        along the transect → a range-dependent ``Surface`` sharing the range
+        axis (a marginal ice zone: open water ↔ pack ice). Implies the
+        ``'seaice'`` source, so ``surface_sources`` need not be set. The
+        solvers carry a single global top boundary, so every model collapses it
+        to one boundary (with a warning) — the range-dependent surface is for
+        inspecting / plotting the zone. Default ``False``.
+    surface_n_points : int, optional
+        Number of sea-ice samples along the transect when
+        ``range_dependent_surface``. Default 6.
     surface : BoundaryProperties, optional
         A **literal** top-boundary override supplied directly (e.g. a custom ice
         canopy). If ``surface_sources`` is *also* given, the source is fetched
@@ -432,10 +445,12 @@ def fetch_environment(
     # The only fetchable surface is NSIDC sea ice; a point classified as open
     # water returns no boundary (the default free surface), with no provenance.
     surface_props, surface_src = None, None
-    if surface_sources is not None:
+    # range_dependent_surface implies the sea-ice source, mirroring how
+    # range_dependent_ssp / _bottom auto-fetch their axis along the transect.
+    if surface_sources is not None or range_dependent_surface:
         # The only surface source is the cached sea-ice climatology, so 'auto'
-        # and 'local' are identical here.
-        srcs = (('seaice',) if surface_sources in ('auto', 'local')
+        # and 'local' (and the implied default) are identical here.
+        srcs = (('seaice',) if surface_sources in ('auto', 'local', None)
                 else _as_source_tuple(surface_sources))
         for s in srcs:
             if s != 'seaice':
@@ -449,11 +464,27 @@ def fetch_environment(
                 "pick the climatological sea-ice month.",
                 remediation="Pass date='YYYY-MM-DD', or supply surface= / drop it.",
             )
+        if range_dependent_surface and transect_to is None:
+            raise ConfigurationError(
+                "fetch_environment: range_dependent_surface=True requires "
+                "transect_to=.",
+                remediation="Pass transect_to=(lat, lon), or leave "
+                            "range_dependent_surface=False for a single surface.",
+            )
         try:
-            from uacpy.data.seaice_local import fetch_sea_ice_surface
-            fetched = fetch_sea_ice_surface(point, date)
-            if fetched is not None:                     # None = open water
-                surface_props, surface_src = fetched, 'seaice'
+            if range_dependent_surface:
+                from uacpy.data.seaice_local import sea_ice_surface_transect
+                fetched = sea_ice_surface_transect(
+                    point, transect_to, date=date, n_points=surface_n_points)
+                # A transect that is open water everywhere → leave the default
+                # free surface (no provenance), matching the point case.
+                if fetched.is_elastic:
+                    surface_props, surface_src = fetched, 'seaice'
+            else:
+                from uacpy.data.seaice_local import fetch_sea_ice_surface
+                fetched = fetch_sea_ice_surface(point, date)
+                if fetched is not None:                 # None = open water
+                    surface_props, surface_src = fetched, 'seaice'
         except (DataFetchError, ConfigurationError):
             if surface is None:
                 raise
@@ -478,6 +509,14 @@ def fetch_environment(
         name=name or f"{lat:.3f}, {lon:.3f}",
         bathymetry=bathymetry,
         ssp=ssp,
+        # Stamp the geolocation + time so the fetched env carries its
+        # provenance (survives env.copy()): the great-circle transect endpoints
+        # when one was requested (``location`` then defaults to the midpoint),
+        # else the single site point.
+        location=(lat, lon) if transect_to is None else None,
+        transect=((lat, lon), as_coordinate(transect_to))
+        if transect_to is not None else None,
+        date=date,
     )
     if bottom_props is not None:
         kwargs['bottom'] = bottom_props

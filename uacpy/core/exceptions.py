@@ -16,6 +16,20 @@ __all__ = [
 ]
 
 
+def _rebuild_exc(cls, args, kwargs):
+    """Reconstruct an exception from its original constructor arguments.
+
+    The subclasses below override ``__init__`` with multi-positional /
+    keyword-only signatures but store only the formatted message in
+    ``self.args``; the default ``BaseException.__reduce__`` would then unpickle
+    via ``cls(*self.args)`` and fail. Each provides ``__reduce__`` pointing here
+    so the exception round-trips through ``pickle`` — required for
+    ``run_parallel`` to return real per-job errors instead of a
+    ``BrokenProcessPool``.
+    """
+    return cls(*args, **kwargs)
+
+
 class UACPYError(Exception):
     """Base exception for all UACPY errors."""
 
@@ -50,6 +64,12 @@ class ExecutableNotFoundError(UACPYError):
         super().__init__(message, remediation)
         self.model_name = model_name
         self.executable = executable
+        self.search_paths = search_paths
+
+    def __reduce__(self):
+        return (_rebuild_exc, (ExecutableNotFoundError,
+                               (self.model_name, self.executable,
+                                self.search_paths), {}))
 
 
 class ModelExecutionError(UACPYError):
@@ -79,6 +99,11 @@ class ModelExecutionError(UACPYError):
         self.stdout = stdout
         self.stderr = stderr
 
+    def __reduce__(self):
+        return (_rebuild_exc, (ModelExecutionError,
+                               (self.model_name, self.return_code,
+                                self.stdout, self.stderr), {}))
+
 
 class InvalidDepthError(UACPYError):
     """Raised when a source or receiver depth exceeds the depth a model can
@@ -93,6 +118,10 @@ class InvalidDepthError(UACPYError):
         self.depth = depth
         self.max_depth = max_depth
         self.context = context
+
+    def __reduce__(self):
+        return (_rebuild_exc, (InvalidDepthError,
+                               (self.depth, self.max_depth, self.context), {}))
 
 
 class UnsupportedFeatureError(UACPYError):
@@ -125,6 +154,12 @@ class UnsupportedFeatureError(UACPYError):
         self.feature = feature
         self.alternatives = alternatives
         self.alternatives_label = alternatives_label
+
+    def __reduce__(self):
+        return (_rebuild_exc, (UnsupportedFeatureError,
+                               (self.model_name, self.feature,
+                                self.alternatives),
+                               {'alternatives_label': self.alternatives_label}))
 
 
 class ConfigurationError(UACPYError):

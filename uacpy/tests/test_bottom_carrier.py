@@ -62,6 +62,33 @@ class TestBottomQueries:
             Bottom.from_columns([SeabedColumn([], _hs())] * 2, ranges=[5, 5])
 
 
+class TestSeabedColumnAccessors:
+    """``SeabedColumn.at(depth=)`` → material at sub-bottom depth (step
+    lookup); ``isel(layer=i)`` → the SedimentLayer; no ``eval`` (distinct
+    materials can't blend)."""
+
+    def _col(self):
+        # layer0: 0-10 m cp1600 · layer1: 10-30 m cp1700 · half-space cp2200
+        return SeabedColumn(layers=_layers(), halfspace=_hs(cp=2200.0))
+
+    def test_at_depth_step_lookup(self):
+        c = self._col()
+        assert c.at(depth=5).sound_speed == 1600
+        assert c.at(depth=25).sound_speed == 1700
+        assert c.at(depth=100).sound_speed == 2200       # below layers → hs
+        assert c.at(depth=10).sound_speed == 1600        # boundary → upper layer
+
+    def test_isel_layer(self):
+        c = self._col()
+        assert c.isel(layer=0).sound_speed == 1600
+        assert isinstance(c.isel(layer=1), SedimentLayer)
+        with pytest.raises(IndexError):
+            c.isel(layer=9)
+
+    def test_no_eval(self):
+        assert not hasattr(SeabedColumn, 'eval')
+
+
 # ─── half-space column ──────────────────────────────────────────────────────
 
 class TestHalfspaceColumn:
@@ -142,11 +169,18 @@ class TestRDLayered:
         far = SeabedColumn([SedimentLayer(5, 1650, 1.8, 0.3)], _hs(cp=2200))
         return Bottom.from_columns([near, far], ranges=[0, 10000])
 
-    def test_column_at_nearest(self):
+    def test_at_nearest_column(self):
         b = self._b()
-        assert b.column_at(range=0).halfspace.sound_speed == 1900
-        assert b.column_at(range=4000).halfspace.sound_speed == 1900   # nearer 0
-        assert b.column_at(range=7000).halfspace.sound_speed == 2200   # nearer 10000
+        assert b.at(range=0).halfspace.sound_speed == 1900
+        assert b.at(range=4000).halfspace.sound_speed == 1900   # nearer 0
+        assert b.at(range=7000).halfspace.sound_speed == 2200   # nearer 10000
+
+    def test_isel_positional_column(self):
+        b = self._b()
+        assert b.isel(range=0).halfspace.sound_speed == 1900
+        assert b.isel(range=1).halfspace.sound_speed == 2200
+        with pytest.raises(IndexError):
+            b.isel(range=9)
 
     def test_halfspace_at_is_nearest_when_layered(self):
         b = self._b()
@@ -186,3 +220,17 @@ class TestCollapse:
     def test_to_halfspace(self):
         b = Bottom.from_column(SeabedColumn(_layers(), _hs(cp=1800)))
         assert b.to_halfspace().sound_speed == 1800
+
+
+def test_grain_size_phi_infers_grain_size():
+    from uacpy.core.surface import Surface
+    assert BoundaryProperties(grain_size_phi=2.0).acoustic_type == 'grain-size'
+    with pytest.raises(ConfigurationError):
+        BoundaryProperties(acoustic_type='vacuum', grain_size_phi=2.0)
+    with pytest.raises(ConfigurationError, match="seabed"):
+        Surface.coerce(BoundaryProperties(grain_size_phi=2.0))
+
+
+def test_seabedcolumn_copy_is_deep():
+    c = SeabedColumn([], BoundaryProperties())
+    assert c.copy() is not c and type(c.copy()) is SeabedColumn

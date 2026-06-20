@@ -155,7 +155,7 @@ def create_example_report(example_num: int, title: str, description: str,
     print(f"  Depth: {env.depth}m")
     print(f"  SSP shape: {env.ssp.shape}")
     if env.is_range_dependent:
-        print(f"  Range-dependent: YES (bathymetry points: {len(env.bathymetry)})")
+        print(f"  Range-dependent: YES (bathymetry points: {env.bathymetry.n_ranges})")
     else:
         print("  Range-dependent: NO")
     print("\nSource:")

@@ -24,7 +24,7 @@ from uacpy._log import install_warning_formatter as _install_warning_formatter
 from uacpy.core.source import Source
 from uacpy.core.environment import (
     Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
-    SoundSpeedProfile, generate_sea_surface,
+    SoundSpeedProfile, generate_sea_surface, Bathymetry, Altimetry, Surface,
 )
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
@@ -82,7 +82,7 @@ __all__ = [
     'SedimentLayer',
     'SeabedColumn',
     'Bottom',
-    'SoundSpeedProfile', 'generate_sea_surface',
+    'SoundSpeedProfile', 'generate_sea_surface', 'Bathymetry', 'Altimetry', 'Surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',

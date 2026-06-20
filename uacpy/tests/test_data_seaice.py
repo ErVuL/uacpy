@@ -78,6 +78,17 @@ def test_transect(synthetic_model):
     assert r.shape == (3,) and c.shape == (3,)
 
 
+def test_sea_ice_surface_transect(synthetic_model):
+    # March pixel reads 0.7 ≥ threshold along the whole transect → an elastic
+    # Surface carrier with one node per waypoint.
+    from uacpy.core.surface import Surface
+    surf = seaice_local.sea_ice_surface_transect(
+        (85.0, 0.0), (85.5, 0.0), month=3, n_points=4)
+    assert isinstance(surf, Surface)
+    assert surf.n_ranges == 4 and surf.is_elastic
+    assert surf.at(range=0).acoustic_type == 'half-space'
+
+
 def test_sea_ice_surface_gates_on_threshold():
     # Below the 15 % ice-edge → open water (no surface override).
     assert seaice_local.sea_ice_surface(0.10) is None

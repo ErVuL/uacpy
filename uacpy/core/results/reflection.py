@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-from typing import Optional
 
 from uacpy.core.exceptions import ConfigurationError
 
@@ -87,44 +86,89 @@ class ReflectionCoefficient(Result):
         kind = 'broadband' if self.is_broadband else 'narrowband'
         return f"n_θ={self.n_angles}, {kind}"
 
-    def at(
-        self,
-        *,
-        angle: Optional[float] = None,
-        frequency: Optional[float] = None,
-    ) -> "ReflectionCoefficient":
-        """Label-based slice along the angle and/or frequency axis.
+    def at(self, **kwargs) -> "ReflectionCoefficient":
+        """Nearest-sample slice along the ``angle`` and/or ``frequency`` axis.
 
-        Either kwarg picks the nearest grid sample. ``frequency=`` is
-        valid only for broadband (2-D) reflection coefficients; passing
-        it on a narrowband instance raises ``ConfigurationError``.
-        """
+        The generic ``Field.at``-style form: each kwarg names an axis and gives
+        a value; the nearest stored sample is selected (never fabricated) and
+        that axis collapsed. Axes are ``angle`` (a.k.a. ``theta`` — the
+        abscissa) and ``frequency``; ``frequency=`` is valid only for broadband
+        (2-D) coefficients. See :meth:`eval` (interpolate) and :meth:`isel`
+        (positional index)."""
+        angle, frequency = self._resolve_axes(kwargs, 'at')
+        return self._select(angle, frequency, method='nearest')
+
+    def isel(self, **kwargs) -> "ReflectionCoefficient":
+        """Integer-index slice — the positional counterpart of :meth:`at`."""
+        angle, frequency = self._resolve_axes(kwargs, 'isel')
+        return self._index_select(angle, frequency)
+
+    def eval(self, **kwargs) -> "ReflectionCoefficient":
+        """Interpolated slice — the interpolating counterpart of :meth:`at`.
+
+        ``method=`` picks the scheme (``'linear'`` default, ``'nearest'``,
+        ``'cubic'``); constant extrapolation past the ends."""
+        method = kwargs.pop('method', 'linear')
+        angle, frequency = self._resolve_axes(kwargs, 'eval')
+        return self._select(angle, frequency, method=method)
+
+    def _resolve_axes(self, kwargs, who):
+        valid = {'angle', 'theta', 'frequency'}
+        unknown = sorted(set(kwargs) - valid)
+        if unknown:
+            raise ConfigurationError(
+                f"ReflectionCoefficient.{who}: unknown axis {unknown}; "
+                f"available: ['angle' (a.k.a. 'theta'), 'frequency']"
+            )
+        if 'angle' in kwargs and 'theta' in kwargs:
+            raise ConfigurationError(
+                f"ReflectionCoefficient.{who}: 'angle' and 'theta' are "
+                f"synonyms; pass only one."
+            )
+        angle = kwargs.get('angle', kwargs.get('theta'))
+        frequency = kwargs.get('frequency')
         if frequency is not None and not self.is_broadband:
             raise ConfigurationError(
-                "ReflectionCoefficient.at: frequency= requires a broadband "
-                "(2-D) reflection coefficient"
+                f"ReflectionCoefficient.{who}: frequency= requires a broadband "
+                f"(2-D) reflection coefficient"
             )
-        R = self.R
-        phi = self.phi
-        theta = self.theta
-        freqs = self.frequencies
-        if angle is not None:
-            ai = int(np.argmin(np.abs(self.theta - angle)))
-            theta = self.theta[ai:ai + 1]
-            R = R[ai:ai + 1, ...] if R.ndim == 2 else R[ai:ai + 1]
-            phi = phi[ai:ai + 1, ...] if phi.ndim == 2 else phi[ai:ai + 1]
-        if frequency is not None:
-            fi = int(np.argmin(np.abs(self.frequencies - frequency)))
-            R = R[:, fi]
-            phi = phi[:, fi]
-            freqs = float(self.frequencies[fi])
+        return angle, frequency
+
+    def _build(self, theta, R, phi, freqs) -> "ReflectionCoefficient":
         return ReflectionCoefficient(
             theta=theta, R=R, phi=phi,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=freqs,
-            metadata=dict(self.metadata),
+            frequencies=freqs, metadata=dict(self.metadata),
         )
+
+    def _select(self, angle, frequency, *, method) -> "ReflectionCoefficient":
+        from uacpy.core._grid import collapse_axis
+        R, phi, theta = self.R, self.phi, self.theta
+        freqs = self.frequencies
+        if angle is not None:
+            R, av = collapse_axis(R, self.theta, angle, method, axis=0)
+            phi, _ = collapse_axis(phi, self.theta, angle, method, axis=0)
+            R, phi, theta = R[None, ...], phi[None, ...], np.array([av])
+        if frequency is not None:
+            R, fv = collapse_axis(R, self.frequencies, frequency, method, axis=1)
+            phi, _ = collapse_axis(phi, self.frequencies, frequency, method, axis=1)
+            freqs = float(fv)
+        return self._build(theta, R, phi, freqs)
+
+    def _index_select(self, angle, frequency) -> "ReflectionCoefficient":
+        R, phi, theta = self.R, self.phi, self.theta
+        freqs = self.frequencies
+        if angle is not None:
+            ai = int(angle)
+            theta = self.theta[[ai]]                 # raises IndexError if OOB
+            R = R[[ai], ...] if R.ndim == 2 else R[[ai]]
+            phi = phi[[ai], ...] if phi.ndim == 2 else phi[[ai]]
+        if frequency is not None:
+            fi = int(frequency)
+            R, phi = R[:, fi], phi[:, fi]
+            freqs = float(self.frequencies[fi])
+        return self._build(theta, R, phi, freqs)
 
     @property
     def data(self) -> np.ndarray:

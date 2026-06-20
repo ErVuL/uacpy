@@ -3,6 +3,7 @@ by every result type. Split out of the former single ``core/results.py``."""
 
 from __future__ import annotations
 
+import copy as _copy
 from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union
@@ -405,6 +406,11 @@ class Result:
         if self.frequencies is None or len(self.frequencies) == 0:
             return None
         return float(self.frequencies[0])
+
+    def copy(self):
+        """Deep copy of the result (symmetric with the carriers / Source /
+        Receiver / Environment)."""
+        return _copy.deepcopy(self)
 
     def __repr__(self) -> str:
         cls = type(self).__name__

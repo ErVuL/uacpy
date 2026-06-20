@@ -421,7 +421,7 @@ def write_oast_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.halfspace_at_range(0.0)
+    bottom = env.bottom.halfspace_at(range=0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -669,7 +669,7 @@ def write_oasn_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.halfspace_at_range(0.0)
+    bottom = env.bottom.halfspace_at(range=0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -901,7 +901,7 @@ def write_oasp_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.halfspace_at_range(0.0)
+    bottom = env.bottom.halfspace_at(range=0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
@@ -1128,7 +1128,7 @@ def write_oasr_input(
     depth = env.depth
 
     # Bottom properties
-    bottom = env.halfspace_at_range(0.0)
+    bottom = env.bottom.halfspace_at(range=0.0)
     _bp = _extract_bottom_props(bottom)
     rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
     alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']

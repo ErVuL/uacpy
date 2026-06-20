@@ -231,3 +231,13 @@ class TestKrakenMergedSurface:
         # modes again after the field run — no shared-state regression
         modes2 = kr.compute_modes(env, src)
         assert len(modes2.k) == len(modes.k)
+
+
+def test_kraken_zero_modes_warns():
+    env = Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=BoundaryProperties(sound_speed=1600.0, density=1.5, attenuation=0.5))
+    rcv = Receiver(depths=np.linspace(5, 95, 10), ranges=np.linspace(100, 8000, 15))
+    # 1 Hz in a 100 m guide is far below the modal cutoff → 0 trapped modes
+    with pytest.warns(UserWarning, match="no propagating field|0 trapped modes"):
+        Kraken().compute_tl(env, Source(depths=50.0, frequencies=1.0), rcv)

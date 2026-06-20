@@ -776,7 +776,7 @@ class SPARC(PropagationModel):
         ``.halfspace`` (per range when range-dependent), not on the outer
         container; the walk flips it everywhere.
         """
-        hs = env.halfspace_at_range(0.0)
+        hs = env.bottom.halfspace_at(range=0.0)
         kind = (hs.acoustic_type or '').lower()
         if kind not in ('half-space', 'halfspace', 'a'):
             return env
@@ -823,7 +823,7 @@ class SPARC(PropagationModel):
         ssp_code = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 
-        hs = env.halfspace_at_range(0.0)
+        hs = env.bottom.halfspace_at(range=0.0)
         bottom_acoustic_type = hs.acoustic_type.lower()
         if bottom_acoustic_type == 'vacuum':
             bottom_type = BoundaryType.VACUUM

@@ -538,3 +538,21 @@ class TestRamPekerisReference:
         self._assert_window_agreement(
             ram_field, ref_field, tol_db=4.5, label='ramsurf1.5',
         )
+
+
+def test_rams_elastic_no_negative_tl():
+    """rams0.5 (Collins elastic PE) diverges for fast shear; the wrapper must
+    surface that (warn + clamp) rather than return physically-impossible
+    negative TL (field gain)."""
+    import uacpy
+    el = uacpy.BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                  attenuation=0.1, shear_speed=800.0,
+                                  shear_attenuation=0.2)
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0,
+                            bottom=uacpy.Bottom([uacpy.SeabedColumn([], el)]))
+    src = Source(depths=50.0, frequencies=100.0)
+    rcv = Receiver(depths=np.linspace(10, 190, 8), ranges=np.linspace(500, 6000, 20))
+    with pytest.warns(UserWarning, match="unphysically negative|OAST"):
+        tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).tl)
+    finite = np.isfinite(tl)
+    assert (tl[finite] >= 0).all(), "TL must be >= 0 (no field gain)"

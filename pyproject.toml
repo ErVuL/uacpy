@@ -95,6 +95,12 @@ testpaths = ["uacpy/tests"]
 # Run them explicitly with ``pytest -m requires_network`` (a command-line
 # ``-m`` overrides this one) — CI does so in a dedicated job.
 addopts = "-n logical --dist=worksteal -m 'not requires_network'"
+# Silence warnings in the test report — uacpy emits many intentional
+# UserWarnings (capability collapse, RAM grid caps, degenerate-input notes)
+# that the suite asserts on via ``pytest.warns`` / ``recwarn`` but that are
+# just noise in the summary. ``pytest.warns`` and ``catch_warnings`` still
+# capture them locally; this only hides them from pytest's output.
+filterwarnings = ["ignore"]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",

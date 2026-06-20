@@ -32,9 +32,9 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.is_range_dependent
-        assert len(env.bathymetry) == 21
-        assert env.bathymetry[0, 1] == 80.0
-        assert env.bathymetry[-1, 1] == 120.0
+        assert env.bathymetry.n_ranges == 21
+        assert env.bathymetry.depths[0] == 80.0
+        assert env.bathymetry.depths[-1] == 120.0
 
     def test_range_dependent_bottom_properties(self):
         """Test range-dependent bottom properties."""
@@ -60,7 +60,7 @@ class TestRangeDependentEnvironment:
         assert len(env.bottom.ranges) == 3
 
         # Test getting bottom at specific range
-        bottom_at_2km = env.halfspace_at_range(2000)
+        bottom_at_2km = env.bottom.halfspace_at(range=2000)
         assert bottom_at_2km.sound_speed > 1600
         assert bottom_at_2km.sound_speed < 1650
 
@@ -339,8 +339,8 @@ class TestRangeDependentConsistency:
             bottom=bottom_rd
         )
 
-        bottom_at_2_5km = env.halfspace_at_range(2500)
-        depth_at_2_5km = float(env.bathymetry_at_range(2500)[0])
+        bottom_at_2_5km = env.bottom.halfspace_at(range=2500)
+        depth_at_2_5km = float(env.bathymetry.eval(range=2500))
 
         assert 1600 < bottom_at_2_5km.sound_speed < 1650
         assert 100 < depth_at_2_5km < 110
@@ -520,9 +520,9 @@ class TestRangeDependentLayeredBottom:
         assert not env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
         assert env.is_range_dependent
-        assert len(env.bathymetry) == 2
-        assert env.bathymetry[0, 1] == 100
-        assert env.bathymetry[1, 1] == 300
+        assert env.bathymetry.n_ranges == 2
+        assert env.bathymetry.depths[0] == 100
+        assert env.bathymetry.depths[1] == 300
 
     @pytest.mark.requires_binary
     @pytest.mark.filterwarnings("ignore:.*below the local seafloor.*:UserWarning")

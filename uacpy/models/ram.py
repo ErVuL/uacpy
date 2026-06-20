@@ -77,6 +77,8 @@ def _mask_below_seafloor(data, depths, ranges, bathymetry):
     axis broadcasts). RAM computes valid fields inside the sediment, but uacpy
     returns NaN below the seafloor for consistency with the other models.
     """
+    if hasattr(bathymetry, 'to_pairs'):        # Bathymetry carrier → (N, 2)
+        bathymetry = bathymetry.to_pairs()
     bathy = np.asarray(bathymetry, dtype=float)
     depths = np.asarray(depths, dtype=float)
     seafloor = np.interp(np.asarray(ranges, dtype=float), bathy[:, 0], bathy[:, 1])
@@ -694,7 +696,7 @@ class RAM(PropagationModel):
         """
         bth_filename = 'bathy.dat'
 
-        bathy = env.bathymetry.copy()
+        bathy = env.bathymetry.to_pairs()
         if bathy[0, 0] > 0.0:
             bathy = np.vstack([[0.0, bathy[0, 1]], bathy])
         if bathy[-1, 0] < rmax:
@@ -722,7 +724,7 @@ class RAM(PropagationModel):
         if env.has_range_dependent_ssp():
             if range is None:
                 range = 0.0
-            ssp = env.ssp.at(range=range).to_pairs()
+            ssp = env.ssp.eval(range=range).to_pairs()
         else:
             ssp = env.ssp.to_pairs()
         return float(np.interp(depth, ssp[:, 0], ssp[:, 1]))
@@ -769,10 +771,10 @@ class RAM(PropagationModel):
                 attn_samp[-1] = lb.halfspace.attenuation
 
                 seafloor_i = float(np.asarray(
-                    env.bathymetry_at_range(rdl.ranges[i])
+                    env.bathymetry.eval(range=rdl.ranges[i])
                 ).flat[0])
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp.at(range=rdl.ranges[i]).to_pairs()
+                    ssp_at_range = env.ssp.eval(range=rdl.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -843,9 +845,9 @@ class RAM(PropagationModel):
             attn_view = bottom_rd.halfspace_attenuation
             for i in range(n_ranges):
                 cb = cp_arr[i]
-                seafloor_i = float(env.bathymetry_at_range(bottom_rd.ranges[i])[0])
+                seafloor_i = float(env.bathymetry.eval(range=bottom_rd.ranges[i]))
                 if env.has_range_dependent_ssp():
-                    ssp_at_range = env.ssp.at(range=bottom_rd.ranges[i]).to_pairs()
+                    ssp_at_range = env.ssp.eval(range=bottom_rd.ranges[i]).to_pairs()
                     cwg_local = float(np.interp(seafloor_i,
                                                 ssp_at_range[:, 0], ssp_at_range[:, 1]))
                 else:
@@ -880,7 +882,7 @@ class RAM(PropagationModel):
         attn_val = 0.5
 
         if env.bottom is not None:
-            hs = env.halfspace_at_range(0.0)
+            hs = env.bottom.halfspace_at(range=0.0)
             cb_val = float(getattr(hs, 'sound_speed', 1600.0) or 1600.0)
             rho_val = float(getattr(hs, 'density', 1.2) or 1.2)
             attn_val = float(getattr(hs, 'attenuation', 0.5) or 0.5)
@@ -1198,17 +1200,31 @@ class RAM(PropagationModel):
             theta=self._theta_for_freq(fc)
         )
 
-        n_nonfinite = int(np.count_nonzero(~np.isfinite(raw['tl'])))
-        if n_nonfinite > 0:
-            # expected; not in filterwarnings — emerges to user
+        # Invalid samples = NaN/inf OR an unphysically negative TL. A negative
+        # TL implies |p/p0| > 1 (field gain), impossible for a passive medium,
+        # so it is rotated-Padé elastic divergence (rams0.5 on a fast-shear
+        # seabed), not a real value — fold it into the same clamp-and-warn path
+        # so the failure is visible instead of a plausible-but-wrong number.
+        # A tiny negative near the source (|TL| < NEG_TL_TOL) is just numerical
+        # noise around 0 and is clamped up to 0, not flagged.
+        NEG_TL_TOL = 1.0  # dB
+        tl_raw = np.asarray(raw['tl'], dtype=float)
+        invalid = ~np.isfinite(tl_raw) | (tl_raw < -NEG_TL_TOL)
+        n_invalid = int(np.count_nonzero(invalid))
+        if n_invalid > 0:
+            note = ""
+            if env.bottom.is_elastic and kind == 'rams':
+                note = (" The Collins rams0.5 elastic PE is numerically "
+                        "unstable for fast shear speeds; use OAST / Scooter "
+                        "for an elastic seabed.")
             warnings.warn(
-                f"RAM:{kind}: {n_nonfinite}/{raw['tl'].size} TL samples "
-                f"are NaN/inf (Padé instability or PE divergence) and "
-                f"have been clamped to {TL_MAX_DB} dB. Try a smaller dr "
-                f"or larger np_pade.",
+                f"RAM:{kind}: {n_invalid}/{tl_raw.size} TL samples are NaN/inf "
+                f"or unphysically negative (Padé instability or PE divergence) "
+                f"and have been clamped to {TL_MAX_DB} dB. Try a smaller dr or "
+                f"larger np_pade.{note}",
                 UserWarning, stacklevel=3
             )
-        tl_clamped = np.where(np.isfinite(raw['tl']), raw['tl'], TL_MAX_DB)
+        tl_clamped = np.where(invalid, TL_MAX_DB, np.maximum(tl_raw, 0.0))
         # Receivers outside the PE output grid get NaN so pcolormesh and
         # downstream consumers render them transparent rather than as a
         # saturated edge band. Use ``fill_value=TL_MAX_DB`` only inside
@@ -1324,7 +1340,7 @@ class RAM(PropagationModel):
         ndr = max(1, int(np.floor((max_range / dr) / 1000.0)) or 1)
         ndz = max(1, int(self.depth_decimation))
 
-        bathymetry = [(float(r), float(d)) for r, d in env.bathymetry.tolist()]
+        bathymetry = [(float(r), float(d)) for r, d in env.bathymetry.to_pairs().tolist()]
         if bathymetry[-1][0] < max_range:
             bathymetry.append((float(max_range), bathymetry[-1][1]))
 
@@ -1342,8 +1358,8 @@ class RAM(PropagationModel):
             # So negate, then clamp wave crests (height > 0 → would imply
             # zsrf < 0) to 0 with a warning — ramsurf only models surface
             # depressions / ice keels, not crests above z=0.
-            zsrf = [(float(r), -float(z)) for r, z in env.altimetry]
-            crests = [(r, h) for r, h in env.altimetry if float(h) > 0]
+            zsrf = [(float(r), -float(z)) for r, z in env.altimetry.to_pairs()]
+            crests = [(r, h) for r, h in env.altimetry.to_pairs() if float(h) > 0]
             if crests:
                 warnings.warn(
                     f"ramsurf1.5 only models pressure-release surfaces at or "
@@ -1643,8 +1659,8 @@ class RAM(PropagationModel):
 
         segments = []
         for rng in ranges:
-            seafloor = float(np.asarray(env.bathymetry_at_range(rng)).flat[0])
-            col = b.column_at(range=rng)
+            seafloor = float(np.asarray(env.bathymetry.eval(range=rng)).flat[0])
+            col = b.at(range=rng)
             # The Collins PE update needs a sediment layer above the half-space,
             # so a pure half-space column is wrapped as one synthetic layer.
             if not col.is_layered:
@@ -1655,7 +1671,7 @@ class RAM(PropagationModel):
                 seafloor_depth=seafloor, zmax=zmax, properties=properties
             )
             ssp_pairs = (
-                env.ssp.at(range=rng).to_pairs()
+                env.ssp.eval(range=rng).to_pairs()
                 if env.has_range_dependent_ssp() else env.ssp.to_pairs()
             )
             seg = dict(
@@ -1862,8 +1878,8 @@ class RAM(PropagationModel):
         # Snap dz to a depth-grid-aligned value so the seafloor lands on
         # a node (PE accuracy degrades sharply otherwise).
         bathy = getattr(env, 'bathymetry', None)
-        if bathy is not None and len(bathy) > 0:
-            h = float(np.min(np.asarray(bathy)[:, 1]))
+        if bathy is not None and bathy.n_ranges > 0:
+            h = float(np.min(bathy.depths))
         else:
             h = float(getattr(env, 'depth', None) or 0.0)
         if h > 0:
@@ -1992,8 +2008,8 @@ class RAM(PropagationModel):
         # then have the seafloor between grid points by at most one
         # dz, which is small relative to their thicker water columns.
         bathy = getattr(env, 'bathymetry', None)
-        if bathy is not None and len(bathy) > 0:
-            h = float(np.min(np.asarray(bathy)[:, 1]))
+        if bathy is not None and bathy.n_ranges > 0:
+            h = float(np.min(bathy.depths))
         else:
             h = float(getattr(env, 'depth', None) or 0.0)
         if h > 0:

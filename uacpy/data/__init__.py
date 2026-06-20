@@ -71,7 +71,7 @@ from uacpy.data.diesing_local import (
 from uacpy.data.seaice_local import (
     download_seaice_db, fetch_sea_ice_concentration,
     fetch_sea_ice_concentration_transect, sea_ice_grid, sea_ice_pixel,
-    sea_ice_surface, fetch_sea_ice_surface,
+    sea_ice_surface, fetch_sea_ice_surface, sea_ice_surface_transect,
 )
 from uacpy.data.environment import fetch_environment
 from uacpy.data.sources import DataSource, SOURCES, citations
@@ -125,7 +125,7 @@ __all__ = [
     'sea_ice_grid',
     'sea_ice_pixel',
     'sea_ice_surface',
-    'fetch_sea_ice_surface',
+    'fetch_sea_ice_surface', 'sea_ice_surface_transect',
     # capstone
     'fetch_environment',
     # provenance / licensing

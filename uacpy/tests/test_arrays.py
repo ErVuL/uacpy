@@ -85,3 +85,16 @@ class TestTaper:
         w = shading_taper(16, "hann")
         assert w.size == 16
         assert np.mean(w) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("true_deg", [15.0, -30.0, 45.0])
+def test_beamform_resolves_true_angle_not_mirror(true_deg):
+    """beamform must resolve a source at +theta (not the mirror -theta) —
+    consistent with bartlett/mvdr/music (the steering vector is conjugated)."""
+    from uacpy.acoustic_signal import beamform, steering_vectors
+    c, f = 1500.0, 1500.0
+    pos = np.arange(16) * (c / f / 2.0)
+    ang = np.linspace(-60, 60, 241)
+    a = steering_vectors(pos, [true_deg], f, c)[0]
+    snr, angles, _ = beamform(a[:, None], pos, f, angles=ang, SL=0, NL=0)
+    assert abs(angles[np.argmax(snr[:, 0])] - true_deg) < 1.0

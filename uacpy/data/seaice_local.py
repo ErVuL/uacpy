@@ -279,3 +279,30 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
         except DataFetchError:
             out.append(np.nan)                  # land along the transect
     return np.asarray(ranges_m), np.asarray(out)
+
+
+def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
+                             date=None, month: Optional[int] = None,
+                             n_points: int = 6,
+                             threshold: float = SEA_ICE_EDGE_CONCENTRATION):
+    """Range-dependent ice surface along ``start`` → ``end`` as a ``Surface``.
+
+    Each waypoint becomes the elastic ice canopy where the concentration is
+    ≥ ``threshold`` (see :func:`sea_ice_surface`), else open water (a vacuum
+    boundary). The resulting :class:`~uacpy.core.surface.Surface` carries the
+    marginal ice zone (open water → pack → open water) for inspection and
+    plotting. The propagation solvers all carry a single global top boundary,
+    so every model collapses a range-dependent surface to one boundary (with a
+    ``UserWarning``); use the carrier to study / visualise the zone.
+    """
+    from uacpy.core.surface import Surface
+    from uacpy.core.bottom import BoundaryProperties
+    ranges_m, conc = fetch_sea_ice_concentration_transect(
+        start, end, date=date, month=month, n_points=n_points)
+    nodes = []
+    for r, c in zip(ranges_m, conc):
+        c = 0.0 if not np.isfinite(c) else float(c)
+        bp = sea_ice_surface(c, threshold=threshold) \
+            or BoundaryProperties(acoustic_type='vacuum')
+        nodes.append((float(r), bp))
+    return Surface.coerce(nodes)

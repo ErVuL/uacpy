@@ -102,6 +102,7 @@ Each model declares which **env shapes** it consumes natively:
 
 ```python
 self._supports_altimetry                       = False
+self._supports_range_dependent_surface         = False
 self._supports_range_dependent_bathymetry      = True
 self._supports_range_dependent_ssp             = True
 self._supports_range_dependent_bottom          = True
@@ -110,6 +111,12 @@ self._supports_range_dependent_layered_bottom  = False
 self._supports_elastic_media                   = False
 self._supports_multi_source_depth              = False
 ```
+
+`_supports_range_dependent_surface` is `False` for **every** model: the AT
+solvers carry a single global top boundary (only the SSP varies with range),
+so — exactly like a range-dependent *bottom* in Kraken — a range-dependent
+`Surface` is collapsed, not honoured. The `Surface` carrier still exists to
+build / fetch / plot a marginal ice zone.
 
 Flip True for each axis the model handles natively. Anything left False
 that appears in `env` on `run()` is **collapsed** by
@@ -132,6 +139,7 @@ default reduction method:
 'bottom_range'      : 'r0'
 'bottom_layers'     : 'halfspace'
 'altimetry'         : 'drop'
+'surface'           : 'r0'      # r0 / rmax / mean / median (single boundary type)
 'elastic'           : 'fluid'
 ```
 
@@ -260,10 +268,24 @@ utils.py                            misc reader/writer-shared utilities
 
 These are the physics-agnostic primitives every model consumes:
 
-- `environment.py` — `Environment`, `BoundaryProperties`,
-  `SedimentLayer`, `SeabedColumn`, `Bottom`, `SoundSpeedProfile`.
+- `environment.py` — `Environment` (re-exports the carriers below for stable
+  import paths). The shape/property carriers live in their own modules:
+  `ssp.py` (`SoundSpeedProfile`, `generate_sea_surface`), `bathymetry.py`
+  (`Bathymetry`), `altimetry.py` (`Altimetry`), `bottom.py`
+  (`SedimentLayer`, `SeabedColumn`, `Bottom`, `BoundaryProperties`),
+  `surface.py` (`Surface`). `env.bathymetry` / `ssp` / `altimetry` / `bottom`
+  / `surface` are always these carriers — a scalar / pairs / single
+  `BoundaryProperties` is coerced at construction.
+  - **Grid-library contract** (`core/_grid.py`): the gridded carriers share
+    `at(...)` (nearest, never fabricates), `isel(...)` (positional), and
+    `eval(..., method=)` (interpolate: `linear`/`nearest`/`cubic`). *Shape*
+    carriers (`Bathymetry`, `Altimetry`, `SoundSpeedProfile`) interpolate;
+    *property* carriers (`Bottom`, `SeabedColumn`, `Surface`) are select-only
+    (`at`/`isel` — boundary/material types cannot be blended, so no `eval`).
+    A uniform `Surface` delegates `BoundaryProperties` attribute reads to its
+    one node, so it stands in for a single boundary everywhere.
 - `source.py` / `receiver.py` — `Source(depths, frequencies)`,
-  `Receiver(depths, ranges)`.
+  `Receiver(depths, ranges)` (input param carriers; no grid-library slicing).
 - `results.py` — `Result` base + `Field`, `Arrivals`, `Rays`, `Modes`,
   `Covariance`, `Replicas`, `ReflectionCoefficient`, plus
   `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /

@@ -571,6 +571,10 @@ def compare_models(
         raise ConfigurationError("compare_models: empty fields list")
     if labels is None:
         labels = [getattr(f, 'model', '') or f"#{i}" for i, f in enumerate(fields)]
+    elif len(labels) != n:
+        raise ConfigurationError(
+            f"compare_models: got {len(labels)} labels for {n} fields — they "
+            f"must match (panels are labelled by zipping the two).")
     if ncols is None:
         ncols = n
     nrows = int(np.ceil(n / ncols))

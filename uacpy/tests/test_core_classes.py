@@ -36,16 +36,16 @@ class TestEnvironment:
     def test_range_dependent_environment(self, range_dependent_env):
         """Test range-dependent environment."""
         assert range_dependent_env.is_range_dependent
-        assert len(range_dependent_env.bathymetry) == 11
-        assert range_dependent_env.bathymetry[0, 1] == 80.0
-        assert range_dependent_env.bathymetry[-1, 1] == 120.0
+        assert range_dependent_env.bathymetry.n_ranges == 11
+        assert range_dependent_env.bathymetry.depths[0] == 80.0
+        assert range_dependent_env.bathymetry.depths[-1] == 120.0
 
     def test_max_range(self, simple_env, range_dependent_env):
         """max_range is the range extent (0 when range-independent), symmetric
         with depth and matching the bathymetry range axis."""
         assert simple_env.max_range == 0.0
         assert range_dependent_env.max_range == pytest.approx(
-            float(range_dependent_env.bathymetry[:, 0].max()))
+            float(range_dependent_env.bathymetry.ranges.max()))
 
     def test_ssp_pairs_shape(self, simple_env, parabolic_ssp_env):
         """SSP pairs view always has shape (N, 2)."""
@@ -573,11 +573,52 @@ class TestReflectionCoefficientChainAccessors:
         with pytest.raises(ConfigurationError, match="broadband"):
             rc.at(frequency=100.0)
 
+    def test_at_theta_is_synonym_for_angle(self):
+        rc = self._broadband_rc()
+        by_angle = rc.at(angle=45.0)
+        by_theta = rc.at(theta=45.0)
+        assert by_theta.theta.shape == (1,)
+        assert np.array_equal(by_theta.theta, by_angle.theta)
+
+    def test_at_unknown_axis_raises(self):
+        # Generic Field.at-style form rejects axes it doesn't have.
+        rc = self._broadband_rc()
+        with pytest.raises(ConfigurationError, match="unknown axis"):
+            rc.at(depth=5.0)
+
+    def test_at_angle_and_theta_together_raises(self):
+        rc = self._broadband_rc()
+        with pytest.raises(ConfigurationError, match="synonyms"):
+            rc.at(angle=45.0, theta=45.0)
+
+    def test_isel_positional_angle(self):
+        rc = self._broadband_rc()
+        s = rc.isel(angle=2)
+        assert s.theta.shape == (1,) and s.theta[0] == rc.theta[2]
+        assert s.R.shape == (1, 3)
+
+    def test_isel_oob_raises_indexerror(self):
+        with pytest.raises(IndexError):
+            self._broadband_rc().isel(angle=999)
+
+    def test_eval_interpolates_off_grid_angle(self):
+        rc = self._broadband_rc()              # 1° grid → 30.5° is off-grid
+        s = rc.eval(angle=30.5)
+        assert s.theta[0] == pytest.approx(30.5)
+        expect = 0.5 * (np.cos(np.deg2rad(30)) ** 2
+                        + np.cos(np.deg2rad(31)) ** 2)   # linear of cos^2
+        assert s.R[0, 0] == pytest.approx(expect, abs=1e-6)
+
+    def test_eval_method_cubic(self):
+        rc = self._broadband_rc()
+        s = rc.eval(angle=30.5, method='cubic')
+        assert s.R[0, 0] == pytest.approx(np.cos(np.deg2rad(30.5)) ** 2, abs=1e-3)
+
 
 class TestSoundSpeedProfileNearestVsInterp:
-    """``SoundSpeedProfile.at(...)`` is **nearest**;
-    ``SoundSpeedProfile.interp(...)`` is **linear** — invariant for the
-    whole grid library: ``at`` never fabricates values."""
+    """``SoundSpeedProfile.at(...)`` is **nearest** (never fabricates),
+    ``.eval(...)`` is **linear**, ``.isel(...)`` is **positional** — the
+    grid-library invariant shared with ``Field`` et al."""
 
     def _ssp(self):
         from uacpy.core.environment import SoundSpeedProfile
@@ -586,19 +627,26 @@ class TestSoundSpeedProfileNearestVsInterp:
             data=np.array([[1500.0], [1490.0], [1480.0]])
         )
 
-    def test_eval_nearest_picks_nearest_depth(self):
+    def test_at_picks_nearest_depth(self):
         ssp = self._ssp()
         # depth=51 is closer to 100 than to 0 → returns the 100m sample
-        sliced = ssp.at(depth=51.0, interp='nearest')
+        sliced = ssp.at(depth=51.0)
         assert sliced.depths[0] == 100.0
         assert sliced.value == 1490.0
 
-    def test_interp_linear(self):
+    def test_eval_interpolates_linear(self):
         ssp = self._ssp()
         # depth=50 is halfway between (0, 1500) and (100, 1490) → 1495
-        sliced = ssp.at(depth=50.0, interp='linear')
+        sliced = ssp.eval(depth=50.0)
         assert sliced.depths[0] == 50.0
         assert sliced.value == pytest.approx(1495.0)
+
+    def test_isel_positional_depth(self):
+        ssp = self._ssp()
+        sliced = ssp.isel(depth=1)
+        assert sliced.depths[0] == 100.0 and sliced.value == 1490.0
+        with pytest.raises(IndexError):
+            ssp.isel(depth=9)
 
 
 class TestSoundSpeedProfileExtendTo:
@@ -686,6 +734,34 @@ class TestFieldSlicing:
         f = self._full_grid(complex_data=True)
         assert f.tl.shape == f.data.shape == (4, 5)
         assert f.p.shape == f.data.shape
+
+    def test_eval_interpolates_and_differs_from_neighbours(self):
+        f = self._full_grid(complex_data=False)
+        # on-grid eval matches at; off-grid midpoint differs from both neighbours
+        assert np.allclose(f.eval(depth=10.0).data, f.at(depth=10.0).data)
+        d0, d1 = float(f.coords['depth'][0]), float(f.coords['depth'][1])
+        mid = f.eval(depth=(d0 + d1) / 2)
+        assert not np.allclose(mid.data, f.isel(depth=0).data)
+        assert not np.allclose(mid.data, f.isel(depth=1).data)
+
+    def test_eval_method_nearest_matches_at(self):
+        f = self._full_grid(complex_data=False)
+        d0, d1 = float(f.coords['depth'][0]), float(f.coords['depth'][1])
+        mid = (d0 + d1) / 2
+        assert np.allclose(f.eval(depth=mid, method='nearest').data,
+                           f.at(depth=mid).data)
+
+    def test_eval_two_axes_to_scalar(self):
+        f = self._full_grid(complex_data=False)
+        s = f.eval(depth=55.0, range=550.0)
+        assert s.data.shape == () and set(s.pinned) == {'depth', 'range'}
+
+    def test_eval_bad_method_and_unknown_axis_raise(self):
+        f = self._full_grid(complex_data=False)
+        with pytest.raises(ConfigurationError):
+            f.eval(depth=50.0, method='spline')
+        with pytest.raises(ConfigurationError, match='unknown axis'):
+            f.eval(frequency=200.0)
 
     def test_p_raises_on_real_data(self):
         f = self._full_grid(complex_data=False)
@@ -892,3 +968,66 @@ class TestResultStackInvariants:
         with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
                         coordinate_name='wind_speed')
+
+
+class TestCopyAndGeolocation:
+    """`.copy()` is universal across carriers + results; Environment carries
+    optional geolocation/date provenance that survives copy."""
+
+    def test_copy_symmetry_across_carriers_and_io(self):
+        import uacpy
+        from uacpy import (Bathymetry, Altimetry, Surface, Bottom,
+                           SoundSpeedProfile, BoundaryProperties)
+        objs = [
+            Bathymetry(ranges=[0, 1000.], depths=[100, 90.]),
+            Altimetry(ranges=[0, 1000.], heights=[0, -2.]),
+            Surface.coerce(BoundaryProperties(acoustic_type='vacuum')),
+            Bottom.from_halfspace(BoundaryProperties()),
+            SoundSpeedProfile.from_pairs([(0, 1500), (100, 1490.)]),
+            uacpy.Source(depths=50., frequencies=120.),
+            uacpy.Receiver(depths=[100.], ranges=[2000.]),
+            uacpy.Environment(bathymetry=200., ssp=1500.),
+        ]
+        for o in objs:
+            c = o.copy()
+            assert type(c) is type(o) and c is not o
+
+    def test_result_copy_is_independent(self):
+        import uacpy
+        env = uacpy.Environment(bathymetry=300., ssp=1500.)
+        f = uacpy.Bellhop().compute_tl(
+            env, uacpy.Source(depths=50., frequencies=150.),
+            uacpy.Receiver(depths=[100., 200.], ranges=[2000., 4000.]))
+        c = f.copy()
+        assert type(c) is type(f) and c is not f
+
+    def test_environment_geolocation_and_date(self):
+        import datetime
+        import uacpy
+        e = uacpy.Environment(bathymetry=200., ssp=1500.,
+                              location=(75., 12.5), date='2026-03-15')
+        assert e.location == (75., 12.5)
+        assert e.date == datetime.date(2026, 3, 15)
+        assert e.transect is None
+        # transect → location defaults to the midpoint; explicit overrides it
+        t = uacpy.Environment(bathymetry=[(0, 200), (10000, 300)], ssp=1500.,
+                              transect=((75., 0.), (77., 40.)))
+        assert t.location == (76.0, 20.0)
+        o = uacpy.Environment(bathymetry=200., ssp=1500., location=(75., 0.),
+                              transect=((75., 0.), (77., 40.)))
+        assert o.location == (75., 0.)
+        # survives a deep copy
+        c = t.copy()
+        assert c.location == (76., 20.) and c.transect == ((75., 0.), (77., 40.))
+        # hand-built env carries none of it
+        plain = uacpy.Environment(bathymetry=100., ssp=1500.)
+        assert plain.location is None and plain.transect is None and plain.date is None
+
+    @pytest.mark.parametrize("bad", [(91.0, 0.0), ('a', 'b'), 'not-a-date'])
+    def test_environment_geolocation_typed_errors(self, bad):
+        import uacpy
+        with pytest.raises(ConfigurationError):
+            if isinstance(bad, str):
+                uacpy.Environment(bathymetry=100., ssp=1500., date=bad)
+            else:
+                uacpy.Environment(bathymetry=100., ssp=1500., location=bad)

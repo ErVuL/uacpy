@@ -163,7 +163,7 @@ def beamform(
         **Per-element, wideband** noise level in dB at the receiver
         (i.e. dB re 1 µPa², already integrated over the signal
         bandwidth). The unit-normalised steering vector already folds
-        the array gain ``10·log10(N)`` into ``|e @ pressure|``, so do
+        the array gain ``10·log10(N)`` into ``|e.conj() @ pressure|``, so do
         not pre-correct ``NL`` for the number of elements. For a PSD
         in dB re 1 µPa²/Hz, multiply by the integration bandwidth in
         Hz before passing. Default 0.0.
@@ -183,7 +183,7 @@ def beamform(
     -----
     The beamformer computes::
 
-        snr = 20·log10(|e @ pressure|) + SL - NL
+        snr = 20·log10(|e.conj() @ pressure|) + SL - NL
 
     where ``e`` is the unit-normalised steering-vector matrix from
     :func:`steering_vectors`. Pass ``NL=0`` to recover the receive
@@ -196,7 +196,10 @@ def beamform(
     if angles is None:
         angles = np.arange(-90, 91, 1)
     e = steering_vectors(phone_coords, angles, freq, c)
-    beamformed = e @ pressure
+    # Conjugate the steering vector (matched filter), consistent with
+    # bartlett/mvdr/music_spectrum; ``e @ pressure`` (no conjugate) resolves
+    # the mirror angle -theta for a source at +theta.
+    beamformed = e.conj() @ pressure
     snr = 20 * np.log10(np.abs(beamformed)) + SL - NL
     peak_snr = np.max(snr)
 

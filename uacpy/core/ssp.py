@@ -3,6 +3,7 @@ Split out of :mod:`uacpy.core.environment`; re-exported from there for stable
 import paths.
 """
 
+import copy as _copy
 import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
@@ -124,81 +125,84 @@ class SoundSpeedProfile:
         """Return ``(N, 2)`` ``(depth, c)`` view of the 1-D form.
 
         For range-dependent profiles, returns the range-0 column. Use
-        ``at_range`` for an explicit slice or ``collapse`` for a chosen
-        reduction.
+        ``at(range=)`` / ``eval(range=)`` for an explicit slice or
+        ``collapse`` for a chosen reduction.
         """
         return np.column_stack([self.depths, self.data[:, 0]])
 
     def at(
-        self,
-        *,
-        depth: Optional[float] = None,
-        range: Optional[float] = None,
-        interp: str = 'linear',
+        self, *, depth: Optional[float] = None, range: Optional[float] = None,
     ) -> 'SoundSpeedProfile':
-        """Slice the SSP at the requested depth and/or range.
+        """Nearest-sample slice at the requested depth and/or range.
 
-        ``interp='linear'`` (default) interpolates along range and depth,
-        with constant extrapolation outside ``[ranges[0], ranges[-1]]``.
-        ``interp='nearest'`` returns the closest stored grid sample on
-        each axis without interpolation.
+        Returns the closest stored grid sample on each axis — **never
+        fabricates** a value (the grid-library invariant shared with
+        ``Field.at`` et al.). For interpolated evaluation use :meth:`eval`;
+        for an integer-index slice use :meth:`isel`.
         """
-        if interp not in ('linear', 'nearest'):
-            raise ConfigurationError(
-                f"SoundSpeedProfile.at: interp must be 'linear' or "
-                f"'nearest'; got {interp!r}"
-            )
+        return self._slice(depth=depth, range=range, interp='nearest')
 
-        if range is None:
-            sliced = self
-        elif not self.is_range_dependent:
+    def eval(
+        self, *, depth: Optional[float] = None, range: Optional[float] = None,
+        method: str = 'linear',
+    ) -> 'SoundSpeedProfile':
+        """Interpolated slice at the requested depth and/or range.
+
+        ``method`` is the interpolation scheme — ``'linear'`` (default),
+        ``'nearest'``, or ``'cubic'`` — with constant extrapolation outside
+        ``[ranges[0], ranges[-1]]``. The interpolating counterpart of
+        :meth:`at` (which is always nearest).
+        """
+        return self._slice(depth=depth, range=range, interp=method)
+
+    def isel(
+        self, *, depth: Optional[int] = None, range: Optional[int] = None,
+    ) -> 'SoundSpeedProfile':
+        """Integer-index slice on the depth and/or range axis — the positional
+        counterpart of :meth:`at`."""
+        sliced = self
+        if range is not None:
+            ridx = int(range)
+            if not -self.data.shape[1] <= ridx < self.data.shape[1]:
+                raise IndexError(
+                    f"SoundSpeedProfile.isel: range index {ridx} out of range "
+                    f"for {self.data.shape[1]} column(s)")
             sliced = SoundSpeedProfile(
                 depths=self.depths.copy(),
-                data=self.data[:, :1].copy(),
-                ranges=None,
-                shape=self.shape,
-            )
-        elif interp == 'nearest':
-            r_idx = int(np.argmin(np.abs(self.ranges - range)))
+                data=self.data[:, [ridx]].copy(), ranges=None, shape=self.shape)
+        if depth is not None:
+            didx = int(depth)
+            if not -sliced.depths.size <= didx < sliced.depths.size:
+                raise IndexError(
+                    f"SoundSpeedProfile.isel: depth index {didx} out of range "
+                    f"for {sliced.depths.size} depth(s)")
             sliced = SoundSpeedProfile(
-                depths=self.depths.copy(),
-                data=self.data[:, r_idx:r_idx + 1].copy(),
-                ranges=None,
-                shape=self.shape,
-            )
-        else:
-            if range <= self.ranges[0]:
-                col = self.data[:, 0].copy()
-            elif range >= self.ranges[-1]:
-                col = self.data[:, -1].copy()
+                depths=np.array([float(sliced.depths[didx])]),
+                data=sliced.data[[didx], :].copy(), ranges=None,
+                shape=sliced.shape)
+        return sliced
+
+    def _slice(
+        self, *, depth: Optional[float], range: Optional[float], interp: str,
+    ) -> 'SoundSpeedProfile':
+        from uacpy.core._grid import collapse_axis
+        data = self.data
+        if range is not None:
+            if not self.is_range_dependent:
+                col = data[:, 0]
             else:
-                col = np.array([
-                    np.interp(range, self.ranges, row)
-                    for row in self.data
-                ])
-            sliced = SoundSpeedProfile(
-                depths=self.depths.copy(),
-                data=col.reshape(-1, 1),
-                ranges=None,
-                shape=self.shape,
-            )
+                col, _ = collapse_axis(data, self.ranges, range, interp, axis=1)
+            data = col.reshape(-1, 1)
         if depth is None:
-            return sliced
-        if interp == 'nearest':
-            d_idx = int(np.argmin(np.abs(sliced.depths - depth)))
+            if range is None:
+                return self
             return SoundSpeedProfile(
-                depths=np.array([float(sliced.depths[d_idx])]),
-                data=sliced.data[d_idx:d_idx + 1, :].copy(),
-                ranges=None,
-                shape=sliced.shape,
-            )
-        c = float(np.interp(depth, sliced.depths, sliced.data[:, 0]))
+                depths=self.depths.copy(), data=data.copy(),
+                ranges=None, shape=self.shape)
+        c, dv = collapse_axis(data[:, 0], self.depths, depth, interp, axis=0)
         return SoundSpeedProfile(
-            depths=np.array([float(depth)]),
-            data=np.array([[c]]),
-            ranges=None,
-            shape=sliced.shape,
-        )
+            depths=np.array([float(dv)]), data=np.array([[float(c)]]),
+            ranges=None, shape=self.shape)
 
     @property
     def value(self) -> float:
@@ -213,6 +217,10 @@ class SoundSpeedProfile:
                 f"{self.data.shape}); slice with at(depth=, range=) first"
             )
         return float(self.data.flat[0])
+
+    def copy(self) -> 'SoundSpeedProfile':
+        """Deep copy (symmetric with the other carriers)."""
+        return _copy.deepcopy(self)
 
     def collapse(self, method: str = 'r0') -> 'SoundSpeedProfile':
         """Collapse a 2-D profile to 1-D using ``method``.
@@ -427,6 +435,11 @@ def generate_sea_surface(
         Column 0: range (m), Column 1: surface height (m, positive up).
         Suitable for passing directly to ``Environment(altimetry=...)``.
     """
+    if not np.isfinite(max_range) or max_range <= 0:
+        raise ConfigurationError(
+            f"generate_sea_surface: max_range must be a positive distance (m); "
+            f"got {max_range}."
+        )
     if not np.isfinite(wind_speed_ms) or wind_speed_ms <= 0:
         raise ConfigurationError(
             f"generate_sea_surface: wind_speed_ms must be a positive m/s value; "

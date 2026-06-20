@@ -458,7 +458,7 @@ class Bounce(PropagationModel):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
+        bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
         frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
         c_water = float(env.ssp.to_pairs()[0, 1])

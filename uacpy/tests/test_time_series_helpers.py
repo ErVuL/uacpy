@@ -283,6 +283,44 @@ class TestDFTWraparoundWarning:
             tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
 
 
+class TestSynthesisSizeCap:
+    """``Field.synthesize_time_series`` caps the *auto* IFFT length so a
+    too-high sample_rate cannot silently allocate a multi-GB buffer / OOM;
+    an explicit ``nfft=`` is the user's opt-in and bypasses the cap."""
+
+    @staticmethod
+    def _tf():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)
+        H = np.ones((1, 1, len(freqs)), dtype=complex)
+        return Field(
+            data=H,
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs, phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    def _wf(self):
+        wf = np.zeros(64); wf[:8] = 1.0
+        return wf
+
+    def test_huge_sample_rate_raises(self):
+        with pytest.raises(ConfigurationError, match="safety cap"):
+            self._tf().synthesize_time_series(
+                source_waveform=self._wf(), sample_rate=1e9)
+
+    def test_normal_sample_rate_ok(self):
+        ts = self._tf().synthesize_time_series(
+            source_waveform=self._wf(), sample_rate=1e4)
+        assert ts.kind == 'time_series'
+        assert ts.data.shape[-1] <= (1 << 26)
+
+    def test_explicit_nfft_bypasses_cap(self):
+        ts = self._tf().synthesize_time_series(
+            source_waveform=self._wf(), sample_rate=1e9, nfft=4096)
+        assert ts.data.shape[-1] == 4096
+
+
 class TestSynthesisAbsoluteAmplitude:
     """A flat ``H ≡ 1`` must reproduce the source waveform's amplitude,
     independent of ``nfft`` (Fourier synthesis is a Riemann sum of the

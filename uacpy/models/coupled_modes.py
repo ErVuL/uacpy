@@ -41,7 +41,7 @@ def segment_environment_by_range(
     if not env.is_range_dependent:
         return [(0.0, env)]
 
-    bathy_ranges_m = env.bathymetry[:, 0]
+    bathy_ranges_m = env.bathymetry.ranges
     max_range_m = float(bathy_ranges_m[-1])
 
     if env.ssp.is_range_dependent:
@@ -82,10 +82,10 @@ def segment_environment_by_range(
 
     segments = []
     for r in segment_ranges_m:
-        depth_at_range = float(np.asarray(env.bathymetry_at_range(r)).flat[0])
+        depth_at_range = float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
 
-        bottom_segment = env.bottom_at_range(r)
-        ssp_at_range = env.ssp.at(range=r).to_pairs()
+        bottom_segment = env.bottom.at(range=r)
+        ssp_at_range = env.ssp.eval(range=r).to_pairs()
 
         # Kraken .env writer uses .1f for the bottom depth on the mesh
         # line, so the deepest SSP point must match that rounded value.

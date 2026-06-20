@@ -119,9 +119,9 @@ class TestSPARCRigidifyLayered:
         assert len(rigidify_msgs) == 1
         # Inner halfspace acoustic_type flipped
         assert out.bottom.columns[0].halfspace.acoustic_type == 'rigid'
-        # The downstream writer dispatches on halfspace_at_range — must
+        # The downstream writer dispatches on bottom.halfspace_at — must
         # now report 'rigid'.
-        assert out.halfspace_at_range(0.0).acoustic_type == 'rigid'
+        assert out.bottom.halfspace_at(range=0.0).acoustic_type == 'rigid'
         # Original env left intact (copy semantics)
         assert env.bottom.columns[0].halfspace.acoustic_type == 'half-space'
 

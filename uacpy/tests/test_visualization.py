@@ -416,3 +416,14 @@ class TestSeaIce:
         fig, ax = plots.plot_environment(env, sea_ice=0.8)
         assert len(ax.collections) > n0                    # ice band added at surface
         plt.close(fig)
+
+
+def test_compare_models_label_length_validation(tl_field):
+    with pytest.raises(ConfigurationError, match="match"):
+        uacpy.plot.compare_models([tl_field, tl_field, tl_field],
+                                  labels=['only-one'])
+
+
+def test_plot_environment_rejects_non_environment():
+    with pytest.raises(ConfigurationError, match="Environment"):
+        uacpy.plot_environment("not an environment")

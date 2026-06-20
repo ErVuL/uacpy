@@ -24,18 +24,32 @@ def as_coordinate(point) -> Coordinate:
     """Validate and unpack a ``(lat, lon)`` coordinate pair as floats.
 
     The data layer takes a single ``point`` tuple everywhere, so this is the
-    shared guard against the easy mistake of passing two bare scalars or a
-    single number — it turns a cryptic unpack ``TypeError`` into a typed,
-    actionable :class:`ConfigurationError`.
+    shared guard against the easy mistakes of passing two bare scalars / a
+    single number, a non-finite (``NaN`` / ``inf``) coordinate, or a latitude
+    outside ``[-90, 90]`` — each turns into a typed, actionable
+    :class:`ConfigurationError` here rather than a cryptic unpack ``TypeError``
+    or a downstream ``"cannot convert float NaN to integer"`` deeper in a
+    fetcher's grid-index maths.
     """
     try:
         lat, lon = point
-        return float(lat), float(lon)
+        lat, lon = float(lat), float(lon)
     except (TypeError, ValueError):
         raise ConfigurationError(
             f"expected a (lat, lon) coordinate pair; got {point!r}.",
             remediation="Pass a 2-tuple of degrees, e.g. (43.2, 7.5).",
         ) from None
+    if not (np.isfinite(lat) and np.isfinite(lon)):
+        raise ConfigurationError(
+            f"coordinate must be finite; got (lat={lat}, lon={lon}).",
+            remediation="Pass finite degrees, e.g. (43.2, 7.5).",
+        )
+    if not -90.0 <= lat <= 90.0:
+        raise ConfigurationError(
+            f"latitude must be in [-90, 90] degrees; got {lat}.",
+            remediation="Pass a latitude within [-90, 90] (longitude wraps).",
+        )
+    return lat, lon
 
 
 def normalize_lon(lon: float) -> float:

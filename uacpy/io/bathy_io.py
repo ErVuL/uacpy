@@ -401,7 +401,9 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}S"
 
-    bathy_km = bathymetry.copy()
+    if hasattr(bathymetry, "to_pairs"):
+        bathymetry = bathymetry.to_pairs()
+    bathy_km = np.asarray(bathymetry, dtype=float).copy()
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
 
     n_pts = bathy_km.shape[0]
@@ -463,7 +465,9 @@ def write_bty_long_format(
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}L"
 
-    bathy_km = bathymetry.copy()
+    if hasattr(bathymetry, "to_pairs"):
+        bathymetry = bathymetry.to_pairs()
+    bathy_km = np.asarray(bathymetry, dtype=float).copy()
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
     n_pts = bathy_km.shape[0]
 
@@ -522,7 +526,9 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}S"
 
-    alti_km = altimetry.copy()
+    if hasattr(altimetry, "to_pairs"):
+        altimetry = altimetry.to_pairs()
+    alti_km = np.asarray(altimetry, dtype=float).copy()
     alti_km[:, 0] = m_to_km(alti_km[:, 0])
 
     n_pts = alti_km.shape[0]

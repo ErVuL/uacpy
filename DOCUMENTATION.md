@@ -308,6 +308,45 @@ surf = generate_sea_surface(max_range=10_000, wind_speed_ms=10, seed=0)
 env = Environment(bathymetry=100, altimetry=surf)
 ```
 
+`env.bathymetry` and `env.altimetry` are **carriers** (`Bathymetry` / `Altimetry`),
+the seafloor- and surface-*shape* analogues of `SoundSpeedProfile`. They expose the
+same grid-library trio — `at(range=)` (nearest), `isel(range=)` (positional),
+`eval(range=, method=)` (interpolate) — returning the depth / height there:
+
+```python
+env.bathymetry.eval(range=4_000)     # interpolated seafloor depth (m)
+env.altimetry.at(range=4_000)        # nearest surface height (m, up)
+```
+
+### Surface boundary (uniform or range-dependent)
+
+`surface=` is the top *boundary* (a `BoundaryProperties`: vacuum / pressure-release
+by default, or an elastic ice half-space). `env.surface` is a `Surface` carrier —
+the top-properties analogue of `env.bottom` — and a single `BoundaryProperties` is
+coerced to a uniform one. A **range-dependent** surface (e.g. a marginal ice zone,
+open water → pack ice → open water) is built from `(range, BoundaryProperties)`
+nodes and selected with `at`/`isel` (no `eval` — boundary types can't blend, just
+like `Bottom`):
+
+```python
+from uacpy import Surface, BoundaryProperties
+ice  = BoundaryProperties(acoustic_type='half-space', sound_speed=3500,
+                          density=0.9, shear_speed=1800)
+surf = Surface.coerce([(0, BoundaryProperties(acoustic_type='vacuum')),
+                       (5_000, ice)])               # open water → ice at 5 km
+env = Environment(bathymetry=200, ssp=1500, surface=surf)
+```
+
+The propagation solvers each carry a **single global top boundary** (only the
+SSP varies with range), so — exactly like a range-dependent *bottom* — **no
+model honours range-dependent surface properties**: every model collapses it to
+one boundary with a `UserWarning` (`collapse={'surface': 'r0'|'rmax'|'mean'|'median'}`).
+The `Surface` carrier still lets you build, fetch, and **plot** the marginal ice
+zone (`plot_environment` draws it from `env.surface`). An elastic ice surface is
+best run with **Bellhop** (Kraken's `krakenc` aborts on an elastic top). The data
+layer can build a marginal-ice-zone surface straight from sea-ice climatology with
+`uacpy.data.sea_ice_surface_transect(start, end)`.
+
 ### Sound-speed profile
 
 The SSP **shape** (the profile data) lives on the environment; the
@@ -892,10 +931,18 @@ peak = H.max()                      # argmax of |data| → scalar Field, coords 
 peak.pinned                         # {'depth': 50.0, 'range': 3000.0, 'frequency': 59.6}
 ```
 
-`.at(**labels)` picks the nearest grid value; `.isel(**indices)` takes a
-positional index; `.max()` collapses every axis at the global `argmax(|data|)`.
-Slicing replaces the old per-shape result subclasses: you slice a `Field` down
-to 1-D/2-D, then hand it to one plotter.
+`.at(**labels)` picks the nearest grid value (never fabricates); `.isel(**indices)`
+takes a positional index; `.eval(**labels, method='linear')` *interpolates*
+(`'linear'` / `'nearest'` / `'cubic'`) when you want a value between samples;
+`.max()` collapses every axis at the global `argmax(|data|)`. Slicing replaces
+the old per-shape result subclasses: you slice a `Field` down to 1-D/2-D, then
+hand it to one plotter.
+
+This `at` / `isel` / `eval` trio is the **grid-library convention** shared
+across the whole API — `Field`, `ResultStack`, `ReflectionCoefficient`, and the
+input carriers `SoundSpeedProfile` and `Bottom` all use it (`at` = nearest,
+`isel` = positional, `eval` = interpolate). For example `env.ssp.at(depth=50)`
+is the nearest stored sample and `env.ssp.eval(depth=50)` interpolates.
 
 ### Metadata and output-file paths
 
@@ -988,18 +1035,25 @@ rc.at(angle=30, frequency=200)               # ReflectionCoefficient: nearest sa
 
 ### ResultStack
 
-When you vary one parameter (typically `source_depth`) and the result is not a
-single `Field`, you get a `ResultStack` of same-typed slabs:
+A `ResultStack` is a sequence of same-typed slabs that share every axis except a
+stacking coordinate. You get one two ways:
+
+* a **single run with a multi-source-depth `Source`** on a model that supports it
+  — `Bellhop` returns a `ResultStack` stacked over `source_depth`;
+* `run_parallel(...).stack(coordinate_name=...)` over a parameter sweep.
+
+Models that don't support multiple source depths (e.g. `Kraken`) raise a
+`ConfigurationError` for a multi-depth `Source` — loop one `Source` per depth.
 
 ```python
 for src_depth, slab in stack: ...     # iterate (coordinate, slab) pairs
-stack.at(source_depth=20)             # nearest-label slab
+stack.at(source_depth=20)             # nearest-label slab → a Field
 stack.tl                              # stacked TL, shape (n_slabs, *slab.tl.shape)
 stack.plot()                          # panel grid (Field slabs)
 ```
 
-For gridded multi-source results, prefer adding the axis to a single `Field`
-(`coords = {source_depth, depth, range}`) over a stack.
+Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
+`Field`).
 
 ## 9. Visualization
 
