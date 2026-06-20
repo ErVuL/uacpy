@@ -186,12 +186,15 @@ Collins backends loop in Python (one subprocess per frequency).
 ## ramgeo (RAMGEO — range-dependent layered fluid PE)
 
 Vendored at `third_party/ramgeo/` as a single source, `ramgeo1.5.f`
-(Collins' RAMGEO, version 1.5g). Sourced from the OALIB Acoustics Toolbox
-mirror of the NRL distribution.
+(Collins' RAMGEO, version 1.5g). Sourced from the **Acoustics Toolbox** `RAM/`
+bundle (Porter's AT, mirroring `oalib.hlsresearch.com/Modes/AcousticsToolbox/`);
+the vendored file is byte-for-byte that copy plus the two patches below.
 
-- **Licence:** U.S. Government work — **public domain**. Unlike the BSD-3
-  quiet-oceans `ramsurf/` port, RAMGEO carries no extra copyright or
-  redistribution clause, so it adds nothing to uacpy's licence surface.
+- **Licence:** **public domain** — a U.S. Government work (Collins, NRL). No
+  explicit licence accompanies the code (NRL/OALIB distribute it freely with no
+  copyright or licence notice). Obtained from the Acoustics Toolbox `RAM/`
+  bundle, which merely redistributes Collins' original; bundling does not
+  relicense it.
 - **What it is:** the split-step Padé PE [Collins, JASA 93, 1736 (1993)]
   with *"multiple sediment layers that parallel the bathymetry"* — i.e. a
   range-dependent **layered fluid** seabed. Reads `ramgeo.in`, writes

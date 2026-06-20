@@ -1015,6 +1015,7 @@ positional argument; `env=` adds overlays.** All are exposed at top level
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…)` | side-by-side heatmaps, one shared colourbar |
 | `plot_environment(env)` | SSP + seafloor cross-section, optional source/receiver markers |
+| `plot_ssp(env_or_ssp)` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
 | `plot_overview(env, map_args, tl=…)` | three-panel map + TL + environment composite |
 
 Slicing replaces specialised plotters: there is no separate "TL line" vs "TL

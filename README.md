@@ -120,7 +120,7 @@ What `install.sh` builds:
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
 | `python3`                | Driving `install.sh` and importing uacpy (always) |
-| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
+| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), ramgeo (`ramgeo1.5` layered fluid), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
 | `tar`                    | Submodule unpacking + OASES archive (always)      |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
@@ -403,6 +403,18 @@ distribution --- https://github.com/quiet-oceans/ramsurf
 - Collins, *Higher-order parabolic approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA, 1991 (RAMS / elastic)
 - Collins, *Generalization of the split-step Padé solution* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
 
+### ramgeo --- Collins RAM family (RAMGEO 1.5g, range-dependent layered fluid PE)
+
+Range-dependent layered-fluid parabolic-equation model by Michael D. Collins
+(Naval Research Laboratory). **Public domain** — a U.S. Government work; the
+source carries no copyright or licence notice. uacpy vendors it from the
+Acoustics Toolbox `RAM/` bundle (Porter's AT, mirroring
+http://oalib.hlsresearch.com/Modes/AcousticsToolbox/), which merely
+redistributes Collins' original.
+
+- Collins, *A split-step Padé solution for the parabolic equation method*, JASA 93, 1736–1742, 1993
+- Collins, *Users Guide for RAM versions 1.0 and 1.0p / RAMGeo*, NRL, 1999
+
 ### OASES --- OAST, OASN, OASR, OASP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
@@ -430,6 +442,7 @@ when redistributing or modifying UACPY or its outputs.
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
+| ramgeo (Collins, NRL)      | `third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 

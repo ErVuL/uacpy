@@ -5,11 +5,16 @@ Range-dependent Acoustic Model (split-step Padé parabolic equation) that
 *"handles multiple sediment layers that parallel the bathymetry"* — i.e. a
 **range-dependent layered fluid** seabed.
 
-- **Author / origin:** Michael D. Collins, U.S. Naval Research Laboratory
+- **Author / origin:** Michael D. Collins, Naval Research Laboratory
   (Washington, DC). Originally distributed via `ram.nrl.navy.mil`.
-- **Licence:** U.S. Government work — **public domain**. No usage restriction
-  and nothing extra to redistribute (cf. the BSD-3 quiet-oceans `ramsurf/`
-  port). Sourced from the OALIB Acoustics Toolbox mirror.
+- **Source:** the **Acoustics Toolbox** `RAM/` bundle (Porter's AT, mirroring
+  `oalib.hlsresearch.com/Modes/AcousticsToolbox/`); `ramgeo1.5.f` is byte-for-byte
+  that copy plus uacpy's two patches.
+- **Licence:** **public domain** — a U.S. Government work (Collins, NRL). No
+  explicit licence accompanies the code: NRL/OALIB distribute it freely as
+  "M. Collins, NRL, 1999" and the source carries no copyright or licence notice.
+  Porter merely bundles it in the Acoustics Toolbox; bundling does not
+  relicense it.
 - **uacpy patches:** two, both documented in `third_party/MODIFICATIONS.md`
   (the same pair `ramsurf1.5.f` carries): (1) enlarged array dimensions
   `(mr,mz,mp)` so uacpy's fine grids fit; (2) an `outpt` dump of the complex

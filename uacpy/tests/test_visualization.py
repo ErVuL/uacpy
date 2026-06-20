@@ -178,6 +178,46 @@ class TestPlotEnvironment:
         plt.close(fig)
 
 
+class TestPlotSSP:
+    def test_profile_input_depth_down_single_line(self):
+        ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1520), (100, 1490),
+                                                  (200, 1480)])
+        fig, ax = plots.plot_ssp(ssp)
+        assert ax.get_xlabel() == 'Sound speed (m/s)'
+        assert ax.get_ylabel() == 'Depth (m)'
+        assert ax.yaxis_inverted()          # depth positive down
+        assert len(ax.lines) == 1
+        plt.close(fig)
+
+    def test_environment_input(self, env):
+        fig, ax = plots.plot_ssp(env)        # isovelocity env
+        assert len(ax.lines) == 1
+        plt.close(fig)
+
+    def test_range_dependent_one_line_per_range(self):
+        ssp = uacpy.SoundSpeedProfile.from_2d(
+            depths=[0, 100, 200], ranges=[0, 5000, 10000],
+            matrix=np.array([[1520, 1510, 1500],
+                             [1500, 1495, 1490],
+                             [1480, 1478, 1475]]))
+        fig, ax = plots.plot_ssp(ssp)
+        assert len(ax.lines) == 3            # one per range column
+        assert len(fig.axes) > 1             # range colorbar
+        plt.close(fig)
+
+    def test_into_existing_axis_not_double_inverted(self):
+        fig, ax = plt.subplots()
+        ax.invert_yaxis()                    # already depth-down
+        ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1490)])
+        _, ax_out = plots.plot_ssp(ssp, ax=ax)
+        assert ax_out is ax and ax.yaxis_inverted()
+        plt.close(fig)
+
+    def test_bad_input_raises(self):
+        with pytest.raises(ConfigurationError):
+            plots.plot_ssp(42)
+
+
 class TestPlotBottomProperties:
     def _env(self, bottom, bathy=None):
         from uacpy.core import Environment

@@ -514,6 +514,56 @@ def plot_environment(
     return fig, ax_bathy
 
 
+def plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
+    """Plot the sound-speed profile ``c(z)`` as a depth-down line.
+
+    Accepts an :class:`~uacpy.core.environment.Environment` or a bare
+    :class:`~uacpy.core.environment.SoundSpeedProfile`. A range-independent
+    profile draws a single line; a range-dependent profile draws one line per
+    range column, coloured by range with a colorbar. Depth increases downward.
+    Pass ``ax=`` to draw into an existing axis; returns ``(fig, ax)``.
+    """
+    from uacpy.core.environment import Environment
+    from uacpy.core.ssp import SoundSpeedProfile
+
+    ssp = env_or_ssp.ssp if isinstance(env_or_ssp, Environment) else env_or_ssp
+    if not isinstance(ssp, SoundSpeedProfile):
+        raise ConfigurationError(
+            "plot_ssp: pass an Environment or a SoundSpeedProfile, got "
+            f"{type(env_or_ssp).__name__}."
+        )
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.figure
+
+    depths = np.asarray(ssp.depths, dtype=float)
+    data = np.asarray(ssp.data, dtype=float)           # (n_depth, n_range)
+
+    if ssp.is_range_dependent:
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        ranges_km = np.asarray(ssp.ranges, dtype=float) / 1000.0
+        cmap = plt.get_cmap('viridis')
+        norm = Normalize(vmin=float(ranges_km.min()),
+                         vmax=float(ranges_km.max()) or 1.0)
+        for j, r_km in enumerate(ranges_km):
+            ax.plot(data[:, j], depths, color=cmap(norm(r_km)), linewidth=1.2)
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label='Range (km)')
+    else:
+        ax.plot(data[:, 0], depths, color='C0', linewidth=1.5)
+
+    ax.set_xlabel('Sound speed (m/s)')
+    ax.set_ylabel('Depth (m)')
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()                               # depth positive down
+    ax.grid(True, alpha=0.3)
+    return fig, ax
+
+
 # Seabed geoacoustic properties shown by ``plot_bottom_properties`` —
 # (attribute, symbol, unit, colormap). cp / density are always present; the
 # rest are skipped when uniformly zero (e.g. shear for a fluid seabed).

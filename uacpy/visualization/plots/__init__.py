@@ -29,7 +29,7 @@ from uacpy.visualization.plots.rays_modes import (
     plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
-    plot_environment, plot_bottom_properties,
+    plot_environment, plot_bottom_properties, plot_ssp,
 )
 from uacpy.visualization.plots.maps import (
     plot_bathymetry_map, plot_overview, plot_sea_ice_map,
@@ -76,6 +76,7 @@ __all__ = [
     'plot_arrivals',
     'plot_environment',
     'plot_bottom_properties',
+    'plot_ssp',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',
