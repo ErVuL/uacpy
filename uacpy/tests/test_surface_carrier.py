@@ -133,8 +133,3 @@ class TestSurfaceValidation:
                                                         density=0.9, shear_speed=1800.0))])
         with pytest.raises(ConfigurationError, match="single boundary type"):
             s.collapse('mean')
-
-    def test_grain_size_surface_rejected(self):
-        with pytest.raises(ConfigurationError, match="seabed"):
-            Surface.coerce(BoundaryProperties(acoustic_type='grain-size',
-                                              grain_size_phi=4.0))

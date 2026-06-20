@@ -34,7 +34,9 @@ import numpy as np
 
 from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import Coordinate, as_coordinate
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, DEFAULT_MAX_TRANSECT_POINTS,
+)
 from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import fetch_ssp, fetch_ssp_transect
@@ -150,13 +152,14 @@ def fetch_environment(
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
     transect_to: Optional[Coordinate] = None,
-    n_points: int = 50,
+    n_points: Union[int, str] = 50,
+    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
     range_dependent_ssp: bool = False,
-    ssp_n_points: int = 6,
+    ssp_n_points: Union[int, str] = 'auto',
     range_dependent_bottom: bool = False,
-    bottom_n_points: int = 6,
+    bottom_n_points: Union[int, str] = 6,
     range_dependent_surface: bool = False,
-    surface_n_points: int = 6,
+    surface_n_points: Union[int, str] = 'auto',
     with_absorption: bool = False,
     formula: str = 'unesco',
     resolution: str = '1.00',
@@ -222,17 +225,25 @@ def fetch_environment(
     transect_to : (lat, lon), optional
         If given, bathymetry is sampled along the great-circle path from
         ``(lat, lon)`` to here (range-dependent); otherwise a single depth.
-    n_points : int, optional
+    n_points : int or 'auto', optional
         Bathymetry transect sample count (used only with ``transect_to``).
+        Default 50. ``'auto'`` targets GEBCO native resolution (bathymetry is
+        continuous, so it is not duplicate-collapsed), bounded by ``max_points``.
+    max_points : int, optional
+        Ceiling on the points sampled along a transect *before* the ``'auto'``
+        reduction — the fetch budget; the reduced grid is never larger. Default
+        1000. Applies to bathymetry, SSP, and bottom transects.
     range_dependent_ssp : bool, optional
         If ``True`` (requires ``transect_to``), the sound-speed profile is also
         sampled along the transect → a 2-D, range-dependent SSP sharing the
         transect's range axis. Default ``False`` (single profile at the start
-        point). WOA23 only. Each column is several requests, hence the separate
-        ``ssp_n_points``.
-    ssp_n_points : int, optional
-        Number of SSP columns along the transect when ``range_dependent_ssp``.
-        Default 6.
+        point). WOA23 only.
+    ssp_n_points : int or 'auto', optional
+        SSP columns along the transect when ``range_dependent_ssp``. Default
+        ``'auto'``: the transect is sampled at the **distinct WOA23 cells** it
+        crosses (one column per cell — WOA's native range resolution, found
+        analytically so no duplicate column is fetched), capped at
+        ``max_points``. Pass an int for exactly that many evenly-spaced columns.
     range_dependent_bottom : bool, optional
         If ``True`` (requires ``transect_to``), the seafloor is sampled along
         the transect → a range-dependent ``Bottom`` sharing the range axis, from
@@ -241,9 +252,12 @@ def fetch_environment(
         transect, so gaps outside its coverage forward-fill the nearest covered
         value — pass ``bottom_sources='grainsize'`` for a uniform worldwide
         (public-domain) source.
-    bottom_n_points : int, optional
-        Number of EMODnet samples along the transect when
-        ``range_dependent_bottom``. Default 6.
+    bottom_n_points : int or 'auto', optional
+        Seabed samples along the transect when ``range_dependent_bottom``.
+        Default 6 (explicit) — unlike SSP, the bottom sources expose no cheap
+        sample identity, so ``'auto'`` must *fetch* at every probe point (cheap
+        for the local sample DBs, but up to ``max_points`` live calls for the
+        EMODnet WFS). Opt into ``'auto'`` for native resolution on local sources.
     range_dependent_surface : bool, optional
         If ``True`` (requires ``transect_to``), the sea-ice canopy is sampled
         along the transect → a range-dependent ``Surface`` sharing the range
@@ -252,9 +266,12 @@ def fetch_environment(
         solvers carry a single global top boundary, so every model collapses it
         to one boundary (with a warning) — the range-dependent surface is for
         inspecting / plotting the zone. Default ``False``.
-    surface_n_points : int, optional
-        Number of sea-ice samples along the transect when
-        ``range_dependent_surface``. Default 6.
+    surface_n_points : int or 'auto', optional
+        Sea-ice samples along the transect when ``range_dependent_surface``.
+        Default ``'auto'``: probe the local NSIDC grid (cheap) and collapse
+        consecutive identical ice/open-water zones to one boundary each (the
+        marginal ice zone at native scale, no staircase), capped at
+        ``max_points``. Pass an int for exactly that many waypoints.
     surface : BoundaryProperties, optional
         A **literal** top-boundary override supplied directly (e.g. a custom ice
         canopy). If ``surface_sources`` is *also* given, the source is fetched
@@ -316,6 +333,7 @@ def fetch_environment(
                 return fetch_bathy(point, source=backend, timeout=timeout,
                                    verbose=verbose)
             return fetch_bathy_transect(point, transect_to, n_points=n_points,
+                                        max_points=max_points,
                                         source=backend, timeout=timeout,
                                         verbose=verbose)
 
@@ -365,7 +383,8 @@ def fetch_environment(
                     verbose=verbose)
             if src == 'woa23':
                 return fetch_ssp_transect(
-                    point, transect_to, n_points=ssp_n_points, date=date,
+                    point, transect_to, n_points=ssp_n_points,
+                    max_points=max_points, date=date,
                     formula=formula, resolution=resolution, source=backend,
                     timeout=timeout, verbose=verbose)
             if src == 'copernicus':
@@ -374,8 +393,11 @@ def fetch_environment(
                         "fetch_environment: ssp_sources='copernicus' requires date=.",
                     )
                 from uacpy.data.copernicus import fetch_ssp_transect_operational
+                # Copernicus has no 'auto' resolver (no cheap cell identity
+                # exposed here); fall back to a fixed column count, capped.
+                cop_n = ssp_n_points if isinstance(ssp_n_points, int) else 6
                 return fetch_ssp_transect_operational(
-                    point, transect_to, date, n_points=ssp_n_points,
+                    point, transect_to, date, n_points=min(cop_n, max_points),
                     formula=formula, timeout=timeout, verbose=verbose)
             raise ConfigurationError(
                 f"fetch_environment: range_dependent_ssp not supported for "
@@ -419,7 +441,8 @@ def fetch_environment(
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect_to, transect=True,
                     cache_only=bottom_cache_only, water_sound_speed=water_c,
-                    n_points=bottom_n_points, timeout=timeout, verbose=verbose,
+                    n_points=bottom_n_points, max_points=max_points,
+                    timeout=timeout, verbose=verbose,
                 )
             else:
                 bottom_props, bottom_kw = _fetch_bottom(
@@ -475,7 +498,8 @@ def fetch_environment(
             if range_dependent_surface:
                 from uacpy.data.seaice_local import sea_ice_surface_transect
                 fetched = sea_ice_surface_transect(
-                    point, transect_to, date=date, n_points=surface_n_points)
+                    point, transect_to, date=date,
+                    n_points=surface_n_points, max_points=max_points)
                 # A transect that is open water everywhere → leave the default
                 # free surface (no provenance), matching the point case.
                 if fetched.is_elastic:

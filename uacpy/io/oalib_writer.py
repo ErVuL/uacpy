@@ -45,7 +45,6 @@ _BOUNDARY_TYPE_MAP = {
     "vacuum": "V", "rigid": "R",
     "halfspace": "A", "half-space": "A",
     "file": "F", "precalc": "P",
-    "grain-size": "G", "grain_size": "G", "grain": "G",
 }
 
 # AT env files write layer depths at .1f precision, so a sediment layer thinner

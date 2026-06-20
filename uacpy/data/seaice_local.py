@@ -283,7 +283,7 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
 
 def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
                              date=None, month: Optional[int] = None,
-                             n_points: int = 6,
+                             n_points='auto', max_points=None,
                              threshold: float = SEA_ICE_EDGE_CONCENTRATION):
     """Range-dependent ice surface along ``start`` → ``end`` as a ``Surface``.
 
@@ -294,15 +294,35 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     plotting. The propagation solvers all carry a single global top boundary,
     so every model collapses a range-dependent surface to one boundary (with a
     ``UserWarning``); use the carrier to study / visualise the zone.
+
+    With ``n_points='auto'`` (default) the transect is probed at ``max_points``
+    points (cheap — the NSIDC climatology is a local cached grid) and
+    consecutive identical zones (ice canopy vs open water) collapse to one
+    boundary each, endpoints anchored — so the marginal ice zone is resolved at
+    the grid's native scale without an oversampled staircase. An integer
+    samples exactly that many evenly-spaced waypoints.
     """
     from uacpy.core.surface import Surface
     from uacpy.core.bottom import BoundaryProperties
+    from uacpy.data._geo import (
+        run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
+    )
+    if max_points is None:
+        max_points = DEFAULT_MAX_TRANSECT_POINTS
+    probe_n = (int(max_points) if n_points == 'auto'
+               else max(2, min(int(n_points), int(max_points))))
     ranges_m, conc = fetch_sea_ice_concentration_transect(
-        start, end, date=date, month=month, n_points=n_points)
+        start, end, date=date, month=month, n_points=probe_n)
     nodes = []
     for r, c in zip(ranges_m, conc):
         c = 0.0 if not np.isfinite(c) else float(c)
         bp = sea_ice_surface(c, threshold=threshold) \
             or BoundaryProperties(acoustic_type='vacuum')
         nodes.append((float(r), bp))
+    if n_points == 'auto':
+        # Identity = the boundary kind (homogeneous ice canopy vs open-water
+        # vacuum); collapse consecutive equal zones, anchoring the endpoints.
+        keys = [(bp.acoustic_type, bp.sound_speed, bp.shear_speed)
+                for _, bp in nodes]
+        nodes = [nodes[i] for i in run_representative_indices(keys)]
     return Surface.coerce(nodes)

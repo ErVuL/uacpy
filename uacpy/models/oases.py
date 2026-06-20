@@ -253,7 +253,7 @@ class OASES(PropagationModel):
         """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
         base_name = input_file if isinstance(input_file, str) else input_file.stem
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
-        self._run_and_attach_prt([str(self.executable)], work_dir, base_name, env=env)
+        self._run_and_attach_prt([str(self._exe)], work_dir, base_name, env=env)
 
 
 class OAST(OASES):
@@ -354,13 +354,18 @@ class OAST(OASES):
             'ssp': 'mean',
             'bottom_range': 'median',
         })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oast')
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oast')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OAST', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OAST', str(self._exe))
 
     def run(
         self,
@@ -699,13 +704,18 @@ class OASN(OASES):
             'ssp': 'mean',
             'bottom_range': 'median',
         })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasn2_bin')
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasn2_bin')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASN', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASN', str(self._exe))
 
     def _build_writer_kwargs(self) -> dict:
         """Materialise the writer's expected kwarg dict from ``self.*``.
@@ -1080,13 +1090,18 @@ class OASR(OASES):
         self._set_collapse_defaults({
             'bottom_range': 'median',
         })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasr')
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasr')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASR', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASR', str(self._exe))
 
     def run(
         self,
@@ -1378,13 +1393,18 @@ class OASP(OASES):
             'bottom_range': 'median',
         })
 
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasp')
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasp')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASP', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASP', str(self._exe))
 
     def run(
         self,
@@ -1440,6 +1460,19 @@ class OASP(OASES):
             run_mode, source, frequencies, source_waveform, sample_rate,
             output_duration,
         )
+
+        # COHERENT_TL is a single-frequency mode (validate_inputs rejects a
+        # multi-frequency Source for it). An explicit multi-element
+        # ``frequencies=`` would otherwise bypass that guard — OASP would run a
+        # full broadband sweep and silently return only the bin nearest the
+        # source frequency. Reject it the same way, pointing at BROADBAND.
+        if run_mode == RunMode.COHERENT_TL and frequencies is not None:
+            if np.atleast_1d(np.asarray(frequencies)).size > 1:
+                raise ConfigurationError(
+                    "OASP.run(run_mode=COHERENT_TL) takes a single frequency; "
+                    "got a multi-element frequencies= vector. For broadband "
+                    "H(f) use RunMode.BROADBAND."
+                )
 
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce

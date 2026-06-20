@@ -50,7 +50,7 @@ def test_environment_records_fetched_bottom_sources(monkeypatch, stub_fetchers):
     import uacpy.data.seabed as seabed_mod
     from uacpy.core.environment import BoundaryProperties as BP
     monkeypatch.setattr(seabed_mod, 'fetch_bottom',
-                        lambda point, **kw: BP(acoustic_type='grain-size',
+                        lambda point, **kw: BP(acoustic_type='half-space',
                                                   grain_size_phi=2.0, sound_speed=1650,
                                                   density=1.9))
     env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='emodnet')

@@ -124,7 +124,8 @@ def test_transect_chunks_large_requests(monkeypatch):
         return _ok([-1500.0] * count)
 
     monkeypatch.setattr(bathymetry, '_http_get_json', fake_get)
-    bathy = bathymetry.fetch_bathy_transect((0.0, 0.0), (2.0, 2.0), n_points=250)
+    bathy = bathymetry.fetch_bathy_transect((0.0, 0.0), (2.0, 2.0),
+                                            n_points=250, max_points=250)
     assert bathy.shape == (250, 2)
     assert calls['n'] == 3
 

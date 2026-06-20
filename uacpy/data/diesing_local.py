@@ -176,7 +176,8 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
 
 
 def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
-                                  n_points: int = 6, roughness: float = 0.0,
+                                  n_points=6, max_points=None,
+                                  roughness: float = 0.0,
                                   water_sound_speed: float = None,
                                   timeout=None, verbose: Union[bool, str] = False
                                   ) -> Bottom:
@@ -186,4 +187,5 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed),
         start, end, n_points, source_label='Diesing 2020',
+        max_points=max_points,
     )

@@ -227,16 +227,21 @@ class Scooter(PropagationModel):
         self._supports_range_dependent_layered_bottom = False
         self._supports_elastic_media = True
         self._supports_multi_source_depth = False
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'scooter.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Scooter',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('Scooter', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('Scooter', str(self._exe))
 
     def run(
         self,
@@ -468,4 +473,4 @@ class Scooter(PropagationModel):
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""
-        self._run_and_attach_prt([self.executable, base_name], work_dir, base_name)
+        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)

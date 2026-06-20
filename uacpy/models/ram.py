@@ -397,6 +397,8 @@ class RAM(PropagationModel):
             RunMode.BROADBAND,
             RunMode.TIME_SERIES,
         ]
+        # No _set_collapse_defaults override: RAM uses the base
+        # DEFAULT_COLLAPSE (bathymetry='max', ssp='r0', …) unchanged.
         # The dispatcher routes env.altimetry to the ramsurf1.5 backend,
         # so altimetry IS honoured (just not by mpiramS itself).
         self._supports_altimetry = True
@@ -417,15 +419,21 @@ class RAM(PropagationModel):
         self._supports_elastic_media = True
         self._supports_multi_source_depth = False
 
-        if executable is not None:
-            self.executable = Path(executable)
-        else:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved mpiramS
+        # path lives in ``self._exe``; the Collins binaries resolve per-run via
+        # ``_collins_binary``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS'
             )
+        else:
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('RAM:mpiramS', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('RAM:mpiramS', str(self._exe))
 
         if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
             raise ConfigurationError(
@@ -876,17 +884,14 @@ class RAM(PropagationModel):
             attn_arr = attn_profiles[:, 0].copy()
             return sedlayer, nzs, cs, rho_arr, attn_arr, 1, sed_filename
 
-        # Range-independent halfspace bottom
-        cs_offset = 200.0
-        rho_val = 1.2
-        attn_val = 0.5
-
-        if env.bottom is not None:
-            hs = env.bottom.halfspace_at(range=0.0)
-            cb_val = float(getattr(hs, 'sound_speed', 1600.0) or 1600.0)
-            rho_val = float(getattr(hs, 'density', 1.2) or 1.2)
-            attn_val = float(getattr(hs, 'attenuation', 0.5) or 0.5)
-            cs_offset = cb_val - cwg_bottom
+        # Range-independent halfspace bottom. ``env.bottom`` is always a
+        # coerced ``Bottom`` carrier (Environment defaults None → a half-space),
+        # so ``halfspace_at`` returns real geoacoustics — no fabricated fallback.
+        hs = env.bottom.halfspace_at(range=0.0)
+        cb_val = float(hs.sound_speed)
+        rho_val = float(hs.density)
+        attn_val = float(hs.attenuation)
+        cs_offset = cb_val - cwg_bottom
 
         cs = np.zeros(nzs)
         cs[2:] = cs_offset
@@ -968,6 +973,11 @@ class RAM(PropagationModel):
             source = Source(depths=source.depths, frequencies=freqs_arr)
 
         env = self._project_environment(env)
+        # Finish all env-shaping before validation so validate_inputs sees the
+        # final env. Surface shear is no backend's concern, and select_backend
+        # keys only on bottom elasticity / altimetry, so this reordering does
+        # not change dispatch.
+        env = self._drop_unsupported_surface_shear(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         self._warn_on_dropped_absorption(env)
 
@@ -979,7 +989,6 @@ class RAM(PropagationModel):
             f"(elastic_bottom={elastic}, altimetry={rough})"
         )
         self._warn_on_mpirams_only_overrides(backend)
-        env = self._drop_unsupported_surface_shear(env)
 
         if backend == 'mpiramS':
             if run_mode == RunMode.BROADBAND:
@@ -2390,13 +2399,13 @@ class RAM(PropagationModel):
             env['OMP_NUM_THREADS'] = str(os.cpu_count() or 1)
             omp_source = 'auto = os.cpu_count()'
         self._log(
-            f"Executing mpiramS: {self.executable} "
+            f"Executing mpiramS: {self._exe} "
             f"(cwd={work_dir}, OMP_NUM_THREADS={env['OMP_NUM_THREADS']} "
             f"{omp_source})"
         )
 
         result = self._run_subprocess(
-            [str(self.executable)],
+            [str(self._exe)],
             cwd=work_dir,
             timeout=self.timeout,
             env=env

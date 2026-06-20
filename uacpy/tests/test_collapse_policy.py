@@ -29,7 +29,7 @@ from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
 # (model class name, expected per-key overrides relative to DEFAULT_COLLAPSE)
 _PER_MODEL_DEFAULTS = [
     ('Bellhop',     {}),
-    ('Kraken',      {'bottom_range': 'median'}),
+    ('Kraken',      {'ssp': 'mean', 'bottom_range': 'median'}),
     ('Scooter',     {'ssp': 'mean', 'bottom_range': 'median'}),
     ('SPARC',       {'ssp': 'mean', 'bottom_range': 'median'}),
     ('OAST',        {'ssp': 'mean', 'bottom_range': 'median'}),

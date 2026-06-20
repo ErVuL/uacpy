@@ -30,6 +30,7 @@ from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
+    geodesic_waypoints, run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
 )
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
@@ -125,11 +126,53 @@ def fetch_ssp(
     return SoundSpeedProfile(depths=depths, data=c, shape='measured')
 
 
+def ssp_transect_plan(
+    start: Coordinate, end: Coordinate, *,
+    n_points: Union[int, str] = 'auto',
+    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    resolution: str = '1.00',
+) -> dict:
+    """Resolve *where* a WOA23 transect would sample, without fetching.
+
+    Returns ``{'n_points', 'lats', 'lons', 'ranges_m'}`` — the column
+    coordinates the transect fetch would use. With ``n_points='auto'`` the
+    plan reflects the **distinct WOA cells** the great-circle crosses (the
+    grid cell is the sample identity, computed analytically — no network), so
+    you can see how many independent columns are actually available before
+    paying to fetch them. ``max_points`` caps the probe (and thus the result).
+    """
+    if resolution not in _GRIDS:
+        raise ConfigurationError(
+            f"ssp_transect_plan: unknown resolution={resolution!r}.",
+            remediation=f"Use one of {sorted(_GRIDS)}.")
+    if n_points == 'auto':
+        probe_n = int(max_points)
+    else:
+        if int(n_points) < 2:
+            raise ConfigurationError(
+                f"ssp_transect_plan: n_points must be >= 2, got {n_points}.",
+                remediation="Pass n_points>=2 or 'auto'.")
+        probe_n = min(int(n_points), int(max_points))
+    lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
+    if n_points == 'auto':
+        # Identity = WOA grid cell (analytic, no fetch). Collapse runs that
+        # fall in the same cell so duplicates are never fetched.
+        keys = [_grid_index(la, lo, resolution)[:2]
+                for la, lo in zip(lats, lons)]
+        reps = run_representative_indices(keys)
+    else:
+        reps = list(range(probe_n))
+    idx = np.asarray(reps, dtype=int)
+    return {'n_points': int(idx.size), 'lats': lats[idx],
+            'lons': lons[idx], 'ranges_m': ranges_m[idx]}
+
+
 def fetch_ssp_transect(
     start: Coordinate,
     end: Coordinate,
     *,
-    n_points: int = 6,
+    n_points: Union[int, str] = 'auto',
+    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
     formula: str = 'unesco',
@@ -142,22 +185,25 @@ def fetch_ssp_transect(
 ) -> SoundSpeedProfile:
     """Range-dependent sound-speed profile along ``start`` → ``end``.
 
-    Samples ``n_points`` WOA23 columns evenly (in distance) along the
-    great-circle path and assembles them into a 2-D
-    :class:`~uacpy.core.environment.SoundSpeedProfile` whose ``ranges`` are
-    measured from ``start`` — ready for a range-dependent
-    ``Environment(ssp=...)``. Columns are placed on a common depth axis (the
-    deepest sampled column); shallower columns hold their deepest value below
-    their own seafloor (constant extrapolation, the usual SSP convention).
+    With ``n_points='auto'`` (default) the transect is sampled at the
+    **distinct WOA23 cells** the great-circle crosses: the grid cell is the
+    sample identity (computed analytically via ``_grid_index`` — no network),
+    consecutive waypoints in the same cell collapse, and one column is fetched
+    **per distinct cell** (no duplicate column is ever fetched). This matches
+    WOA's native range resolution — neither over- nor under-sampling. Pass an
+    integer to sample exactly that many evenly-spaced columns instead.
 
-    Each column costs a few HTTP requests, so ``n_points`` defaults to a
-    modest 6; pair it with a denser ``fetch_bathy_transect`` for the bathymetry.
+    ``max_points`` caps the number of waypoints probed *before* the reduction
+    (the fetch budget); the result is never larger.
 
-    Parameters mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
+    Columns are placed on a common depth axis (the deepest sampled column);
+    shallower columns hold their deepest value below their own seafloor
+    (constant extrapolation, the usual SSP convention). Parameters otherwise
+    mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     """
-    from uacpy.data._geo import geodesic_waypoints
-
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
+    plan = ssp_transect_plan(start, end, n_points=n_points,
+                             max_points=max_points, resolution=resolution)
+    lats, lons, ranges_m = plan['lats'], plan['lons'], plan['ranges_m']
     columns = [
         fetch_ssp((la, lo), date=date, month=month, formula=formula,
                   resolution=resolution, source=source, decade=decade,
@@ -165,7 +211,9 @@ def fetch_ssp_transect(
         for la, lo in zip(lats, lons)
     ]
     log_message(
-        'sound_speed', f"WOA23 range-dependent SSP: {n_points} columns over "
+        'sound_speed',
+        f"WOA23 range-dependent SSP: {len(columns)} columns "
+        f"({'auto' if n_points == 'auto' else n_points}) over "
         f"{ranges_m[-1] / 1000:.1f} km", verbose=verbose,
     )
     return assemble_range_dependent(columns, ranges_m)

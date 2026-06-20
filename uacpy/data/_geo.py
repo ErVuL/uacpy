@@ -10,8 +10,17 @@ from uacpy.core.exceptions import ConfigurationError
 __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
+    'run_representative_indices', 'DEFAULT_MAX_TRANSECT_POINTS',
     'depth_to_pressure_dbar',
 ]
+
+#: Default ceiling on the number of points sampled along a transect *before*
+#: the ``'auto'`` reduction step — i.e. the fetch budget. The reduced grid is
+#: never larger than this (and usually much smaller after collapsing
+#: duplicates). At OpenTopoData's ≤100 locations/request this is ≤10 requests
+#: for a full-native bathy transect. Override via ``max_points=`` on the
+#: fetchers / fetch_environment.
+DEFAULT_MAX_TRANSECT_POINTS = 1000
 
 Coordinate = Tuple[float, float]
 
@@ -114,6 +123,41 @@ def geodesic_waypoints(
 
     ranges_m = f * ang * EARTH_RADIUS_M
     return lats, lons, ranges_m
+
+
+def run_representative_indices(keys) -> 'list[int]':
+    """Indices of one representative per maximal run of consecutive-equal keys.
+
+    The reduction behind ``'auto'`` transect sampling: probe a source's
+    sample *identity* (e.g. the grid cell, or the nearest sample) at a fine set
+    of waypoints, then keep one waypoint per distinct run. ``keys`` must be
+    ``==``-comparable (tuples, scalars, or dataclasses); do not pass raw arrays.
+
+    Interior runs are represented by their **midpoint** (the centre of the
+    range interval that sample covers). The **first and last** runs are
+    anchored to the transect **endpoints** (indices ``0`` and ``n-1``) so the
+    reduced range axis explicitly spans the full transect ``[0, L]`` rather
+    than ``[first-cell-centre, last-cell-centre]``. A single run collapses to
+    one representative at the start (range-independent transect).
+    """
+    runs = []
+    i, n = 0, len(keys)
+    while i < n:
+        j = i
+        while j + 1 < n and keys[j + 1] == keys[i]:
+            j += 1
+        runs.append((i, j))
+        i = j + 1
+    last = len(runs) - 1
+    reps: list = []
+    for k, (i, j) in enumerate(runs):
+        if k == 0:
+            reps.append(0)            # anchor transect start (range 0)
+        elif k == last:
+            reps.append(n - 1)        # anchor transect end (range L)
+        else:
+            reps.append((i + j) // 2)  # interior cell centre
+    return reps
 
 
 def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:

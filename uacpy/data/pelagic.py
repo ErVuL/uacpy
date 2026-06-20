@@ -111,7 +111,8 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
 
 
 def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
-                                  n_points: int = 6, roughness: float = 0.0,
+                                  n_points=6, max_points=None,
+                                  roughness: float = 0.0,
                                   water_sound_speed: float = None,
                                   cache_only: bool = False, timeout=None,
                                   verbose: Union[bool, str] = False
@@ -123,4 +124,5 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
             water_sound_speed=water_sound_speed,
             cache_only=cache_only, timeout=timeout),
         start, end, n_points, source_label='pelagic model',
+        max_points=max_points,
     )

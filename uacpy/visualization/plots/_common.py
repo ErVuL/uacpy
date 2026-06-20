@@ -274,7 +274,7 @@ def _draw_surface_boundary(ax, env):
     def _is_solid(bp):
         at = getattr(bp, 'acoustic_type', None)
         return (getattr(bp, 'shear_speed', 0.0) or 0.0) > 0 or \
-            at in ('half-space', 'grain-size')
+            at == 'half-space'
 
     x0, x1 = ax.get_xlim()
     ranges = getattr(surface, 'ranges', None)

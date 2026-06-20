@@ -55,15 +55,6 @@ class Surface:
                 raise ConfigurationError(
                     f"Surface: every node must be a BoundaryProperties; got "
                     f"{type(p).__name__}")
-            # 'grain-size' is a seabed geo-acoustic model (sediment grain φ →
-            # cp/cs/ρ); it has no meaning at the air-water interface and the
-            # AT solvers have no grain-size *top* boundary.
-            if str(getattr(p, 'acoustic_type', '') or '').lower() in (
-                    'grain-size', 'grain_size', 'grain'):
-                raise ConfigurationError(
-                    "Surface: 'grain-size' models a seabed sediment and is not "
-                    "a valid sea-surface boundary; use 'vacuum', 'rigid', "
-                    "'half-space' (e.g. an ice canopy), or 'file'.")
         if self.ranges is not None:
             self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != len(self.properties):

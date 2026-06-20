@@ -357,14 +357,7 @@ def write_bellhop_env_file(
             f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
-        if bottom_type == "G":  # Grain size
-            # Format: depth Mz (mean grain size in phi units)
-            hs = env.bottom.halfspace_at(range=0.0)
-            # Grain-size ('G') bottoms need a ϕ; fall back to 1.0 only if unset
-            # (non-granular half-spaces carry ϕ=None).
-            grain_size = hs.grain_size_phi if hs.grain_size_phi is not None else 1.0
-            f.write(f" {env.depth:.2f}  {grain_size:.2f} /\n")
-        elif bottom_type == "F":  # Reflection coefficient from file
+        if bottom_type == "F":  # Reflection coefficient from file
             hs = env.bottom.halfspace_at(range=0.0)
             if hs.reflection_file:
                 import shutil

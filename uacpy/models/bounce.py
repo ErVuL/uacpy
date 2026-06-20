@@ -244,17 +244,22 @@ class Bounce(PropagationModel):
         self._supports_range_dependent_layered_bottom = False
         self._supports_elastic_media = True
         self._supports_multi_source_depth = False
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'bounce',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('Bounce', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('Bounce', str(self._exe))
 
     def run(
         self,
@@ -403,7 +408,7 @@ class Bounce(PropagationModel):
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
 
             from uacpy.core.results import ReflectionCoefficient
-            frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
+            frequency = float(source.frequencies[0])
 
             field = ReflectionCoefficient(
                 theta=result.get('theta', np.array([])),
@@ -460,7 +465,7 @@ class Bounce(PropagationModel):
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
-        frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
+        frequency = float(source.frequencies[0])
         c_water = float(env.ssp.to_pairs()[0, 1])
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
@@ -480,4 +485,4 @@ class Bounce(PropagationModel):
     def _execute(self, input_file: Path, work_dir: Path):
         """Execute BOUNCE binary via the shared binary-launch helper."""
         base_name = input_file.stem
-        self._run_and_attach_prt([str(self.executable), base_name], work_dir, base_name)
+        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)

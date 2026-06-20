@@ -350,16 +350,21 @@ class SPARC(PropagationModel):
             'bottom_range': 'median',
         })
 
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'sparc.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Scooter',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('SPARC', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('SPARC', str(self._exe))
 
     def run(
         self,
@@ -883,5 +888,5 @@ class SPARC(PropagationModel):
         easier diagnosis. Override via the ``timeout`` constructor kwarg.
         """
         self._run_and_attach_prt(
-            [str(self.executable), base_name], work_dir, base_name,
+            [str(self._exe), base_name], work_dir, base_name,
             timeout=self.timeout)

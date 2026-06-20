@@ -222,13 +222,17 @@ class TestCollapse:
         assert b.to_halfspace().sound_speed == 1800
 
 
-def test_grain_size_phi_infers_grain_size():
-    from uacpy.core.surface import Surface
-    assert BoundaryProperties(grain_size_phi=2.0).acoustic_type == 'grain-size'
-    with pytest.raises(ConfigurationError):
-        BoundaryProperties(acoustic_type='vacuum', grain_size_phi=2.0)
-    with pytest.raises(ConfigurationError, match="seabed"):
-        Surface.coerce(BoundaryProperties(grain_size_phi=2.0))
+def test_from_grain_size_builds_halfspace():
+    hs = BoundaryProperties.from_grain_size(2.0)
+    assert hs.acoustic_type == 'half-space'
+    assert hs.grain_size_phi == 2.0          # retained as metadata
+    assert hs.sound_speed > 1500.0           # sand is faster than water
+    # model= selects the conversion; the two differ.
+    assert (BoundaryProperties.from_grain_size(2.0, model='apl-uw').sound_speed
+            != pytest.approx(hs.sound_speed))
+    # Bottom-level convenience builds a range-independent half-space.
+    b = Bottom.from_grain_size(2.0)
+    assert b.halfspace_at(range=0.0).acoustic_type == 'half-space'
 
 
 def test_seabedcolumn_copy_is_deep():

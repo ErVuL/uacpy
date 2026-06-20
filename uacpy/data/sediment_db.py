@@ -260,7 +260,8 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
         phi, roughness=roughness, water_sound_speed=water_sound_speed)
 
 
-def fetch_bottom_local_transect(start, end, *, n_points=6, roughness=0.0,
+def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
+                                roughness=0.0,
                                 water_sound_speed=None,
                                 max_distance_km=DEFAULT_MAX_DISTANCE_KM,
                                 timeout=None, verbose=False):
@@ -271,4 +272,5 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, roughness=0.0,
             water_sound_speed=water_sound_speed,
             max_distance_km=max_distance_km),
         start, end, n_points, source_label='local sediment DB',
+        max_points=max_points,
     )

@@ -168,13 +168,13 @@ class _KrakenBase(PropagationModel):
         Returns the full mode set the reader produced; callers cap the
         count via :meth:`Modes.first_n` if they passed an ``n_modes``
         request. ``backend_exe`` records which modes binary ran
-        (kraken.exe vs krakenc.exe); defaults to ``self.executable``.
+        (kraken.exe vs krakenc.exe); defaults to the resolved kraken.exe.
         """
         k_arr = modes.get('k', np.array([]))
         phi_arr = modes.get('phi', np.array([]))
         z_arr = modes.get('z', np.array([]))
 
-        exe = backend_exe or self.executable
+        exe = backend_exe or self._exe
         result = Modes(
             k=k_arr,
             phi=phi_arr,
@@ -338,9 +338,9 @@ class _KrakenBase(PropagationModel):
 
     def _run_kraken_executable(self, base_name: str, work_dir: Path, exe=None):
         """Execute the modes binary (``exe`` selects kraken.exe vs krakenc.exe;
-        defaults to ``self.executable``) via the shared binary-launch helper."""
+        defaults to the resolved kraken.exe) via the shared binary-launch helper."""
         self._run_and_attach_prt(
-            [str(exe or self.executable), base_name], work_dir, base_name)
+            [str(exe or self._exe), base_name], work_dir, base_name)
 
     def _compute_modes_impl(self, env, source, n_modes):
         """Override base class: use a dense depth grid for mode sampling.
@@ -682,6 +682,7 @@ class Kraken(_KrakenBase):
         # bottom and RDLB axes still collapse. Median across range is
         # the representative single profile per segment.
         self._set_collapse_defaults({
+            'ssp': 'mean',
             'bottom_range': 'median',
         })
         if mode_coupling not in ('adiabatic', 'coupled'):
@@ -690,17 +691,23 @@ class Kraken(_KrakenBase):
                 f"got {mode_coupling!r}"
             )
 
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved kraken.exe
+        # path lives in ``self._exe``; ``_select_kraken_exe`` may swap in
+        # krakenc.exe per-env.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'kraken.exe',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError(self.model_name, str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError(self.model_name, str(self._exe))
 
         # field.exe is only needed for field-producing run modes (TL /
         # broadband / time-series), not for MODES. Store the user arg for
@@ -817,7 +824,7 @@ class Kraken(_KrakenBase):
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
-        return self.executable  # kraken.exe
+        return self._exe  # kraken.exe
 
     def run(
         self,
@@ -894,12 +901,22 @@ class Kraken(_KrakenBase):
         )
         run_mode = self._resolve_run_mode(run_mode, default=smart_default)
 
+        # Resolve the modes binary once, as a visible dispatch step (parity
+        # with RAM.select_backend): kraken.exe vs krakenc.exe is a
+        # deterministic function of env elasticity / leaky_modes — preserved
+        # through _project_environment — so the sub-paths receive it rather
+        # than each re-resolving. A forced backend incompatible with the env
+        # raises here.
+        kraken_exe = self._select_kraken_exe(env)
+        self._log(f"Dispatching to {kraken_exe.name} (modes binary)")
+
         if run_mode == RunMode.MODES:
             # Modes only need the modes binary, never field.exe. The elastic
             # sub-bottom receiver partition below is a field-evaluation concern
             # (and would emit a spurious NaN-receivers warning here), so it is
             # skipped entirely for the modes solve.
-            return self._run_modes(env, source, receiver, n_modes=n_modes)
+            return self._run_modes(
+                env, source, receiver, n_modes=n_modes, exe=kraken_exe)
 
         # field.exe cannot evaluate the field inside an elastic medium: its
         # Comp selector (field.f90:169 -> ReadModes.f90:315-324) has no
@@ -926,7 +943,7 @@ class Kraken(_KrakenBase):
             # _compute_broadband_field (per-frequency), not here.
             tf = self._compute_broadband_field(
                 env, source, rcv,
-                frequencies=frequencies, n_modes=n_modes,
+                frequencies=frequencies, n_modes=n_modes, exe=kraken_exe,
             )
             tf = self._reinsert_nan_depths(tf, receiver, keep)
             if run_mode == RunMode.TIME_SERIES:
@@ -939,7 +956,7 @@ class Kraken(_KrakenBase):
         env = self._project_environment(env)
         self.validate_inputs(env, source, rcv, run_mode=run_mode)
         field = self._compute_field_via_exe(
-            env, source, rcv, n_modes=n_modes,
+            env, source, rcv, n_modes=n_modes, exe=kraken_exe,
         )
         return self._reinsert_nan_depths(field, receiver, keep)
 
@@ -967,12 +984,14 @@ class Kraken(_KrakenBase):
             absorption=env.absorption,
         )
 
-    def _run_modes(self, env, source, receiver, *, n_modes):
+    def _run_modes(self, env, source, receiver, *, n_modes, exe=None):
         """Run the modes binary only (kraken.exe / krakenc.exe by ``backend=``
-        / elasticity) and return a :class:`Modes` result — no field.exe."""
+        / elasticity) and return a :class:`Modes` result — no field.exe.
+        ``exe`` is the run()-resolved binary; falls back to resolving from
+        ``env`` for direct callers."""
         self._reject_elastic_over_fluid_halfspace(env)
         self._reject_elastic_surface(env)
-        kraken_exe = self._select_kraken_exe(env)
+        kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
         env = self._project_environment(self._modes_single_profile(env))
         self.validate_inputs(env, source, receiver, run_mode=RunMode.MODES)
 
@@ -1058,7 +1077,7 @@ class Kraken(_KrakenBase):
 
     def _compute_field_via_exe(
         self, env, source, receiver,
-        return_pressure=False, n_modes=None, frequencies=None,
+        return_pressure=False, n_modes=None, frequencies=None, exe=None,
     ):
         """Compute field using kraken.exe → field.exe AT pipeline.
 
@@ -1188,7 +1207,7 @@ class Kraken(_KrakenBase):
                 )
 
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
-            kraken_exe = self._select_kraken_exe(env)
+            kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
             self._log(f"Running {kraken_exe.name}...")
             try:
                 self._run_subprocess(
@@ -1369,7 +1388,7 @@ class Kraken(_KrakenBase):
 
     def _compute_broadband_field(
         self, env, source, receiver,
-        frequencies=None, n_modes=None,
+        frequencies=None, n_modes=None, exe=None,
     ):
         """
         Compute broadband transfer function.
@@ -1398,4 +1417,5 @@ class Kraken(_KrakenBase):
             env, source, receiver,
             frequencies=frequencies,
             n_modes=n_modes,
+            exe=exe,
         )

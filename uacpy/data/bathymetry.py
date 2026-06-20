@@ -19,6 +19,7 @@ Bathymetry is static in time, so these fetches take coordinates only — the
 
 import json
 import urllib.parse
+import warnings
 from typing import List, Tuple, Union
 
 import numpy as np
@@ -27,7 +28,8 @@ from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon,
-    central_angle, geodesic_waypoints,
+    central_angle, geodesic_waypoints, EARTH_RADIUS_KM,
+    DEFAULT_MAX_TRANSECT_POINTS,
 )
 from uacpy.data._http import http_get
 from uacpy._log import log_message
@@ -37,6 +39,11 @@ __all__ = ['fetch_bathy', 'fetch_bathy_transect', 'fetch_bathy_grid',
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
 DEFAULT_DATASET = 'gebco2020'
+#: GEBCO_2020 native grid spacing (~15 arc-seconds ≈ 0.45 km). Used only to
+#: size the ``n_points='auto'`` transect — bathymetry is a *continuous*
+#: (bilinearly served) field with no duplicate samples to collapse, so 'auto'
+#: targets native resolution, bounded by ``max_points``.
+GEBCO_NATIVE_KM = 0.45
 MAX_LOCATIONS_PER_REQUEST = 100  # OpenTopoData public-host limit
 MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 points)
 
@@ -110,7 +117,8 @@ def fetch_bathy_transect(
     start: Coordinate,
     end: Coordinate,
     *,
-    n_points: int = 50,
+    n_points: Union[int, str] = 50,
+    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
     source: str = 'api',
     dataset: str = DEFAULT_DATASET,
     base_url: str = DEFAULT_BASE_URL,
@@ -146,15 +154,37 @@ def fetch_bathy_transect(
         The service fails, or any sampled point falls on land.
     """
     _check_source(source)
-    if n_points < 2:
-        raise ConfigurationError(
-            f"fetch_bathy_transect: n_points must be >= 2, got {n_points}.",
-            remediation="Pass n_points=2 or more to define a transect.",
-        )
+    length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    if n_points == 'auto':
+        # Bathymetry is a continuous (bilinearly served) field — no duplicate
+        # samples to collapse — so 'auto' targets native resolution, bounded
+        # by max_points.
+        native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
+        n = min(native, int(max_points))
+        if native > max_points:
+            warnings.warn(
+                f"fetch_bathy_transect: native GEBCO resolution over "
+                f"{length_km:.0f} km needs ~{native} points; capped to "
+                f"max_points={max_points} (~{length_km / max(max_points, 1):.1f}"
+                f" km spacing). Raise max_points, or use GMRT / a self-hosted "
+                f"OpenTopoData for finer sampling.",
+                UserWarning, stacklevel=2)
+    else:
+        if int(n_points) < 2:
+            raise ConfigurationError(
+                f"fetch_bathy_transect: n_points must be >= 2, got {n_points}.",
+                remediation="Pass n_points>=2 (or 'auto') to define a transect.",
+            )
+        n = min(int(n_points), int(max_points))
+        if int(n_points) > int(max_points):
+            warnings.warn(
+                f"fetch_bathy_transect: n_points={n_points} exceeds "
+                f"max_points={max_points}; sampling {max_points}.",
+                UserWarning, stacklevel=2)
 
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n)
     log_message(
-        'bathymetry', f"sampling {n_points} GEBCO depths along "
+        'bathymetry', f"sampling {n} GEBCO depths along "
         f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
     )
     if source == 'local':
@@ -169,6 +199,28 @@ def fetch_bathy_transect(
             timeout=timeout, verbose=verbose,
         )
     return np.column_stack([ranges_m, depths])
+
+
+def bathy_transect_plan(
+    start: Coordinate, end: Coordinate, *,
+    n_points: Union[int, str] = 'auto',
+    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+) -> dict:
+    """Resolve how many bathymetry samples a transect would take, and where,
+    without fetching. Returns ``{'n_points', 'lats', 'lons', 'ranges_m'}``.
+
+    Bathymetry is continuous, so ``'auto'`` targets GEBCO native resolution
+    (``length / GEBCO_NATIVE_KM``) bounded by ``max_points`` — there is no
+    duplicate-collapse step (cf. :func:`ssp_transect_plan`).
+    """
+    length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    if n_points == 'auto':
+        n = min(int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1, int(max_points))
+    else:
+        n = max(2, min(int(n_points), int(max_points)))
+    lats, lons, ranges_m = geodesic_waypoints(start, end, n)
+    return {'n_points': int(n), 'lats': lats, 'lons': lons,
+            'ranges_m': ranges_m}
 
 
 def fetch_bathy_grid(

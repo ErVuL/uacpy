@@ -142,7 +142,8 @@ def fetch_bottom(
 
 def fetch_bottom_transect(
     start: Coordinate, end: Coordinate, *,
-    n_points: int = 6,
+    n_points=6,
+    max_points=None,
     roughness: float = 0.0,
     water_sound_speed: float = None,
     layer: str = EMODNET_LAYER,
@@ -166,5 +167,5 @@ def fetch_bottom_transect(
                                     water_sound_speed=water_sound_speed,
                                     layer=layer, base_url=base_url,
                                     timeout=timeout, verbose=verbose),
-        start, end, n_points, source_label='EMODnet',
+        start, end, n_points, source_label='EMODnet', max_points=max_points,
     )

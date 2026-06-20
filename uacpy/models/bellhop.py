@@ -495,10 +495,16 @@ class Bellhop(PropagationModel):
             RunMode.BROADBAND,
             RunMode.TIME_SERIES,
         ]
+        # No _set_collapse_defaults override: Bellhop uses the base
+        # DEFAULT_COLLAPSE (bathymetry='max', ssp='r0', …) unchanged.
         self._supports_altimetry = True
         self._supports_range_dependent_bathymetry = True
-        # RD-SSP honoured when Bellhop(interp_ssp='quad'); other interp
-        # values trigger a warning and SSP-collapse in run().
+        # RD-SSP is honoured natively only on the default / 'quad' path (the
+        # external 2-D .ssp file). For any other interp_ssp the SSP is collapsed
+        # to 1-D by the manual branch in run() BEFORE _project_environment — so
+        # the flag stays True (the default path honours it) and the manual
+        # collapse, not _project_environment, handles the non-quad case. The two
+        # must never both fire; an assert in run() guards that invariant.
         self._supports_range_dependent_ssp = True
         self._supports_range_dependent_bottom = True
         self._supports_layered_bottom = False
@@ -875,6 +881,20 @@ class Bellhop(PropagationModel):
             )
             effective_interp = fallback
             interp_for_writer = fallback
+
+        # Invariant guard for the RD-SSP capability flag: any RD-SSP env still
+        # range-dependent at this point must be on the 'quad' path (the only
+        # interp Bellhop honours natively). _project_environment will NOT
+        # collapse SSP (the flag is True), so a non-quad RD-SSP reaching here
+        # would silently propagate uncollapsed — the manual branch above must
+        # already have collapsed it. Raise rather than emit a wrong field.
+        if env.has_range_dependent_ssp() and effective_interp != 'quad':
+            raise ConfigurationError(
+                "Bellhop: range-dependent SSP reached the writer with "
+                f"interp_ssp resolved to {effective_interp!r} (not 'quad'); the "
+                "manual SSP collapse should have run first. This is a uacpy "
+                "bug — please report it."
+            )
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)

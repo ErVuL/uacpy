@@ -83,16 +83,17 @@ class BoundaryType(Enum):
     VACUUM = 'vacuum'           # pressure-release (free surface)
     RIGID = 'rigid'
     HALF_SPACE = 'half-space'   # acousto-elastic half-space
-    GRAIN_SIZE = 'grain-size'   # sediment derived from grain size (phi)
     FILE = 'file'               # reflection coefficients from file
     PRECALC = 'precalc'         # pre-calculated reflection data
+    # NB: there is no grain-size type — a grain size is converted to an explicit
+    # half-space at construction (BoundaryProperties.from_grain_size).
 
     @classmethod
     def from_string(cls, value: str) -> 'BoundaryType':
         """
         Parse a string (or existing ``BoundaryType``) into a ``BoundaryType``.
 
-        Resolves common aliases such as 'halfspace', 'elastic', and 'grainsize'.
+        Resolves common aliases such as 'halfspace' and 'elastic'.
 
         Parameters
         ----------
@@ -110,12 +111,10 @@ class BoundaryType(Enum):
         value_lower = value.lower()
         if value_lower in ['halfspace', 'elastic', 'half-space']:
             return cls.HALF_SPACE
-        if value_lower in ['grain-size', 'grainsize', 'grain_size']:
-            return cls.GRAIN_SIZE
         # Single-letter Acoustics-Toolbox codes — the inverse of
-        # ``to_acoustics_toolbox_code``, symmetric across all six types.
+        # ``to_acoustics_toolbox_code``.
         at_codes = {'v': cls.VACUUM, 'r': cls.RIGID, 'a': cls.HALF_SPACE,
-                    'g': cls.GRAIN_SIZE, 'f': cls.FILE, 'p': cls.PRECALC}
+                    'f': cls.FILE, 'p': cls.PRECALC}
         if value_lower in at_codes:
             return at_codes[value_lower]
 
@@ -136,13 +135,12 @@ class BoundaryType(Enum):
         Returns
         -------
         str
-            One of 'V', 'R', 'A', 'G', 'F', or 'P'.
+            One of 'V', 'R', 'A', 'F', or 'P'.
         """
         mapping = {
             BoundaryType.VACUUM: 'V',
             BoundaryType.RIGID: 'R',
             BoundaryType.HALF_SPACE: 'A',
-            BoundaryType.GRAIN_SIZE: 'G',
             BoundaryType.FILE: 'F',
             BoundaryType.PRECALC: 'P',
         }
