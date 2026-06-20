@@ -263,10 +263,11 @@ def plot_environment(
     * range-dependent layered — one column per profile, each column
       drawing the layer stack at that range.
 
-    Everything is coloured by ``sound_speed`` (cp); for the seabed's other
-    geoacoustic properties (cs, ρ, αp, αs) use :func:`plot_bottom_properties`.
+    Everything is coloured by ``sound_speed`` (water ``c``, seabed ``cp``); for
+    the seabed's other geoacoustic properties (cs, ρ, αp, αs) use
+    :func:`plot_bottom_properties`.
 
-    Two colorbars: ``Water cp`` (Blues) and ``Bottom cp`` (earthy brown) — each
+    Two colorbars: ``Water c`` (Blues) and ``Bottom cp`` (earthy brown) — each
     on its own dynamic range so neither is washed out by the other.
 
     Pass ``ax=`` to draw into an existing axis (for composite figures); returns
@@ -443,15 +444,17 @@ def plot_environment(
         from matplotlib.ticker import MaxNLocator
         water_cax = ax_bathy.inset_axes([1.04, 0.54, 0.03, 0.45])
         bottom_cax = ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.45])
-        cbar_water = fig.colorbar(water_sm, cax=water_cax, label='Water cp')
-        cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax, label='Bottom cp')
+        cbar_water = fig.colorbar(water_sm, cax=water_cax,
+                                  label='Water c (m/s)')
+        cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax,
+                                   label='Bottom cp (m/s)')
         for cb in (cbar_water, cbar_bottom):
             cb.ax.tick_params(labelsize=6)
             cb.ax.yaxis.label.set_size(7)
             cb.ax.yaxis.set_major_locator(MaxNLocator(3))
     else:
         cbar_water = fig.colorbar(
-            water_sm, ax=ax_bathy, label='Water cp (m/s)', location='right',
+            water_sm, ax=ax_bathy, label='Water c (m/s)', location='right',
             fraction=0.046, pad=0.02,
         )
 
