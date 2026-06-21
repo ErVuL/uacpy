@@ -113,6 +113,11 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
 })
 
 
+# Source ``id``s already warned about this process, so a licence-restricted
+# engine (OASES) emits its one-time UserWarning once, not per instance.
+_WARNED_MODEL_SOURCES: set = set()
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """Declarative per-model metadata read by :class:`PropagationModel`.
@@ -145,7 +150,14 @@ class ModelSpec:
     collapse : dict
         Per-model collapse defaults overriding :data:`DEFAULT_COLLAPSE`.
 
-    Binary resolution is intentionally *not* here: nothing generic reads it,
+    Provenance/licence is intentionally *not* here: it is an orthogonal axis
+    (who wrote the engine, under what licence) from the run-behaviour fields
+    above, and the codebase already keeps dataset provenance in a separate
+    catalogue (:mod:`uacpy.data.sources`) rather than folding it into the
+    carriers. Models declare it the same way — a ``source`` class attribute
+    referencing :data:`uacpy.models.sources.MODEL_SOURCES`.
+
+    Binary resolution is intentionally *not* here either: nothing generic reads it,
     its shape differs per model (single name vs. list of search dirs vs. the
     OASES helper vs. Bellhop's backend dispatch), and multi-binary models
     (Kraken's krakenc, RAM's Collins backends) pick the real executable at
@@ -229,6 +241,14 @@ class PropagationModel(ABC):
     # validates it at class-definition time and applies it in ``__init__``.
     spec: Optional['ModelSpec'] = None
 
+    # Provenance/licence: ``id`` of this engine's entry in
+    # :data:`uacpy.models.sources.MODEL_SOURCES`. Kept off :class:`ModelSpec`
+    # (which is about run behaviour) because provenance is an orthogonal axis —
+    # the same separation the data layer keeps between its carriers and
+    # :mod:`uacpy.data.sources`. Surfaced via :attr:`provenance` / :attr:`citation`;
+    # a ``commercial_use=False`` engine (OASES) warns once at construction.
+    source: Optional[str] = None
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         spec = cls.__dict__.get('spec')
@@ -239,6 +259,13 @@ class PropagationModel(ABC):
                     f"{type(spec).__name__}."
                 )
             spec.validate(cls.__name__)
+        if cls.source is not None:
+            from uacpy.models.sources import MODEL_SOURCES
+            if cls.source not in MODEL_SOURCES:
+                raise ValueError(
+                    f"{cls.__name__}.source = {cls.source!r} is not a known "
+                    f"model source. Valid: {sorted(MODEL_SOURCES)}."
+                )
         run = cls.__dict__.get('run')
         if run is None:
             return
@@ -363,6 +390,40 @@ class PropagationModel(ABC):
         # rare instance-dependent capability.
         if self.spec is not None:
             self._apply_spec()
+        # Independent of spec: a model may declare ``source`` without one.
+        self._warn_restricted_source()
+
+    @property
+    def provenance(self):
+        """The engine's :class:`~uacpy.models.sources.ModelSource` (authorship
+        + licence + citation), or ``None`` if the class declares no
+        :attr:`source`."""
+        from uacpy.models.sources import model_source
+        return model_source(self.source)
+
+    @property
+    def citation(self) -> str:
+        """The engine's bibliographic citation string (``''`` if unknown)."""
+        src = self.provenance
+        return src.citation if src is not None else ''
+
+    def _warn_restricted_source(self) -> None:
+        """Emit a one-time ``UserWarning`` for a licence-restricted engine.
+
+        Mirrors the non-commercial fetch warning in ``data/`` (the audit's
+        CRUST1.0 fix): a ``commercial_use=False`` source — OASES — must never
+        be used silently. Deduplicated per source ``id`` per process so a
+        parameter sweep warns once, not on every instance.
+        """
+        src = self.provenance
+        if src is None or src.commercial_use or src.id in _WARNED_MODEL_SOURCES:
+            return
+        _WARNED_MODEL_SOURCES.add(src.id)
+        warnings.warn(
+            f"{self.model_name} uses {src.name} ({src.license}). {src.note} "
+            f"Cite: {src.citation}",
+            UserWarning, stacklevel=3,
+        )
 
     def _apply_spec(self) -> None:
         """Install :attr:`spec`'s metadata onto this instance.
@@ -1760,6 +1821,7 @@ class PropagationModel(ABC):
             )),
             frequencies=(np.atleast_1d(np.asarray(frequencies, dtype=float))
                          if frequencies is not None else None),
+            model_source=self.provenance,
             metadata=dict(extra),
         )
         if phase_reference is not None:
@@ -1777,7 +1839,8 @@ class PropagationModel(ABC):
         kw = self._result_kwargs(source, backend=backend,
                                  frequencies=frequencies,
                                  phase_reference=phase_reference)
-        for attr in ('model', 'backend', 'source_depths', 'frequencies'):
+        for attr in ('model', 'backend', 'source_depths', 'frequencies',
+                     'model_source'):
             setattr(result, attr, kw[attr])
         if phase_reference is not None:
             result.phase_reference = phase_reference

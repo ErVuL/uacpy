@@ -11,6 +11,7 @@ from dataclasses import dataclass, fields as dataclass_fields
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
+    _require_positive, _require_non_negative,
 )
 
 
@@ -45,22 +46,17 @@ class SedimentLayer:
     attenuation: float = 0.5
     shear_speed: float = 0.0
     shear_attenuation: float = 0.0
+    name: Optional[str] = None
 
     def __post_init__(self):
-        # isfinite first: NaN/inf pass every plain ``<= 0`` / ``< 0`` test.
-        if not np.isfinite(self.thickness) or self.thickness <= 0:
-            raise ConfigurationError(f"SedimentLayer: thickness must be finite and positive (m); got {self.thickness}")
-        if not np.isfinite(self.sound_speed) or self.sound_speed <= 0:
-            raise ConfigurationError(f"SedimentLayer: sound_speed must be finite and positive (m/s); got {self.sound_speed}")
-        if not np.isfinite(self.density) or self.density <= 0:
-            raise ConfigurationError(f"SedimentLayer: density must be finite and positive (g/cm^3); got {self.density}")
-        for name in ('attenuation', 'shear_speed', 'shear_attenuation'):
-            value = getattr(self, name)
-            if not np.isfinite(value) or value < 0:
-                raise ConfigurationError(
-                    f"SedimentLayer: {name} must be finite and non-negative; got {value}")
+        _require_positive(self.thickness, "SedimentLayer thickness", hint="m")
+        _require_positive(self.sound_speed, "SedimentLayer sound_speed", hint="m/s")
+        _require_positive(self.density, "SedimentLayer density", hint="g/cm^3")
+        for attr in ('attenuation', 'shear_speed', 'shear_attenuation'):
+            _require_non_negative(getattr(self, attr), f"SedimentLayer {attr}")
 
     def __repr__(self) -> str:
+        tag = f"{self.name!r}, " if self.name else ""
         bits = [
             f"thickness={self.thickness:g} m",
             f"cp={self.sound_speed:g} m/s",
@@ -69,7 +65,7 @@ class SedimentLayer:
         ]
         if self.shear_speed > 0:
             bits.append(f"cs={self.shear_speed:g} m/s")
-        return f"SedimentLayer({', '.join(bits)})"
+        return f"SedimentLayer({tag}{', '.join(bits)})"
 
     @classmethod
     def from_preset(cls, name: str, *, thickness: float, elastic: bool = False,
@@ -92,6 +88,7 @@ class SedimentLayer:
             attenuation=m['attenuation'],
             shear_speed=m['shear_speed'] if elastic else 0.0,
             shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
+            name=name,
         )
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -165,21 +162,15 @@ class BoundaryProperties:
     shear_attenuation: float = 0.0
     grain_size_phi: Optional[float] = None
     reflection_file: Optional[str] = None
+    name: Optional[str] = None
 
     def __post_init__(self):
-        # isfinite first: NaN/inf pass every plain ``<= 0`` / ``< 0`` test.
-        if not np.isfinite(self.density) or self.density <= 0:
-            raise ConfigurationError(
-                f"BoundaryProperties: density must be finite and positive (g/cm^3); got {self.density}"
-            )
+        # sound_speed is non-negative (0 ok for vacuum/rigid), unlike
+        # SedimentLayer.sound_speed which must be strictly positive.
+        _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
         for name in ('sound_speed', 'attenuation', 'shear_speed',
                      'shear_attenuation'):
-            value = getattr(self, name)
-            if not np.isfinite(value) or value < 0:
-                raise ConfigurationError(
-                    f"BoundaryProperties: {name} must be finite and "
-                    f"non-negative; got {value}"
-                )
+            _require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
 
         # Detect which acoustic params differ from their dataclass defaults
         # (read from the field definitions so a default change cannot
@@ -322,6 +313,7 @@ class BoundaryProperties:
             shear_speed=m['shear_speed'] if elastic else 0.0,
             shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
             roughness=m['roughness'],
+            name=name,
         )
         if m['grain_size_phi'] is not None:
             kwargs['grain_size_phi'] = m['grain_size_phi']

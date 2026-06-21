@@ -10,7 +10,7 @@ import matplotlib.collections as _mcoll
 from typing import Optional, Tuple
 
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _credit_attributions, _draw_data_credit, _draw_sea_ice
+from uacpy.visualization.plots._common import ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
@@ -136,7 +136,7 @@ def plot_bathymetry_map(
     if own_fig:
         credit = _credit_attributions(data_source)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
-        _draw_data_credit(fig, credit, reserve=False)
+        _draw_credit(fig, credit, reserve=False)
     return fig, ax
 
 
@@ -256,8 +256,9 @@ def plot_overview(
     if tl is not None:
         ax_env.set_xlim(ax_tl.get_xlim())
 
-    _draw_data_credit(fig, _credit_attributions(data_source, carrier=env),
-                      center_ax=ax_map)
+    _draw_credit(fig, _credit_attributions(data_source, carrier=env),
+                 model=_model_attribution(tl) if tl is not None else None,
+                 center_ax=ax_map)
 
     if suptitle:
         fig.suptitle(suptitle, fontsize=13, fontweight='bold')

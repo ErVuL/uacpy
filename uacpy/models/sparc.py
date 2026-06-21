@@ -211,6 +211,7 @@ class SPARC(PropagationModel):
         supports={'layered_bottom'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,

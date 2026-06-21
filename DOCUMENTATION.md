@@ -222,6 +222,25 @@ for dr in (1.0, 2.0, 4.0):
 For many independent runs, batch them with `uacpy.run_parallel` over
 `uacpy.Job` objects rather than looping in Python.
 
+### Model provenance & licence
+
+Every model wraps a third-party engine with its own authorship and licence.
+That metadata lives in a catalogue (`uacpy.models.sources.MODEL_SOURCES`) and
+is surfaced per instance:
+
+```python
+m = uacpy.Kraken()
+m.source            # 'acoustics_toolbox' — catalogue id (declared on the class)
+m.provenance.name   # 'Acoustics Toolbox'  (.authors / .license / .url / .note too)
+m.citation          # bibliographic string to cite in a write-up
+```
+
+The catalogue flags drive policy, mirroring the `uacpy.data` source catalogue:
+constructing an engine whose licence forbids commercial use — currently only
+**OASES** (academic, non-redistributable) — emits a one-time `UserWarning`, so
+a licence-restricted result is never produced silently. GPL / public-domain
+engines (Acoustics Toolbox; the Collins RAM family) stay quiet.
+
 ### Results
 
 Every `run()` returns a typed `Result` subclass chosen by the run mode:

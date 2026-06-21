@@ -187,7 +187,9 @@ def _closest_power_of_two(x):
     return 2 ** n
 
 
-def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray:
+def make_noise_waveform(
+    fc: float, BW: float, T: float, fs: float
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate bandpass-filtered Gaussian random noise waveform.
 
@@ -208,8 +210,11 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     Returns
     -------
     nts : ndarray
-        Noise time series, 1-D of length ``int(T*fs)`` (matching the other
-        :mod:`uacpy.acoustic_signal` generators, e.g. ``tone_burst``).
+        Noise time series, 1-D of length ``int(T*fs)``.
+    time : ndarray
+        Sample times (s), ``np.arange(N)/fs`` — same ``(signal, time)`` return
+        convention as the :mod:`uacpy.acoustic_signal` tonal generators
+        (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
 
     Notes
     -----
@@ -225,7 +230,7 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     Examples
     --------
     >>> # Generate 1 kHz noise, 200 Hz bandwidth, 1 second
-    >>> nts = make_noise_waveform(1000, 200, 1.0, 10000)
+    >>> nts, t = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
     """
     N = int(T * fs)  # number of samples
@@ -243,7 +248,8 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     nts = resample(nts, N)
 
     # Heterodyne with carrier
-    return np.sin(2 * np.pi * fc * time) * nts
+    nts = np.sin(2 * np.pi * fc * time) * nts
+    return nts, time
 
 
 def add_noise(
@@ -323,12 +329,12 @@ def add_noise(
     T = len(timeseries) / sample_rate
 
     if timeseries.ndim == 1:
-        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate) * A
+        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0] * A
         rts = timeseries * SL + noise_ts
     else:
         n_rcv = timeseries.shape[1]
         noise_block = np.column_stack([
-            make_bandlimited_noise(fc, bandwidth, T, sample_rate)
+            make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0]
             for _ in range(n_rcv)
         ]) * A
         rts = timeseries * SL + noise_block
@@ -341,7 +347,7 @@ def make_bandlimited_noise(
     bandwidth: float,
     duration: float,
     sample_rate: float
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate band-limited Gaussian noise.
 
@@ -360,8 +366,13 @@ def make_bandlimited_noise(
 
     Returns
     -------
-    ndarray
-        Band-limited noise time series
+    noise : ndarray
+        Band-limited, unit-RMS noise time series, 1-D of length
+        ``int(duration*sample_rate)``.
+    time : ndarray
+        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)``
+        return convention as the other :mod:`uacpy.acoustic_signal` generators
+        (``make_noise_waveform``, ``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
 
     Notes
     -----
@@ -370,11 +381,12 @@ def make_bandlimited_noise(
 
     Examples
     --------
-    >>> noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
+    >>> noise, t = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
     """
     from scipy.signal import butter, filtfilt
     n_samples = int(duration * sample_rate)
+    time = np.arange(n_samples) / sample_rate
     noise = np.random.randn(n_samples)
 
     # Design bandpass filter
@@ -404,7 +416,7 @@ def make_bandlimited_noise(
     if rms > 0:
         filtered_noise = filtered_noise / rms
 
-    return filtered_noise
+    return filtered_noise, time
 
 
 def fourier_synthesis(

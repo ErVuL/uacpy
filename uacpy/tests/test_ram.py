@@ -5,7 +5,9 @@ import numpy as np
 
 from uacpy.models import RAM
 from uacpy import Field
-from uacpy.core import Environment, Source, Receiver
+from uacpy.core import (
+    Environment, Source, Receiver, SoundSpeedProfile, BoundaryProperties,
+)
 
 pytestmark = pytest.mark.requires_binary
 
@@ -84,3 +86,67 @@ class TestRAMAdvancedParameters:
             ram.compute_tl(env=ram_env, source=ram_source, receiver=ram_receiver)
         assert captured['Q'] == 4.0
         assert captured['T'] == 20.0
+
+
+class TestRAMRangeDependentSSPShortRange:
+    """A range-dependent SSP over a SHORT receiver range must not crash mpiramS.
+
+    mpiramS's horizontal-interpolation branch sized its SSP resample grid as
+    ``nrp = nint(rmax/10000)`` (``third_party/mpiramS/src/peramx.f90:245``),
+    which rounds to 0 for any max receiver range below 5 km — a zero-length
+    allocation, an all-NaN field and a SIGABRT (exit -6); below 15 km it
+    silently mis-resampled to a single profile. uacpy now drives mpiramS with
+    ``ihorz=0`` so it steps directly between the per-range profiles it writes
+    itself.
+    """
+
+    _BOTTOM = BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1800.0,
+        density=1.8, attenuation=0.5,
+    )
+
+    def _rd_env(self):
+        """100 m channel, SSP varying from a near to a far column over 3 km."""
+        z = np.array([0.0, 100.0])
+        data = np.column_stack([[1500.0, 1490.0], [1520.0, 1480.0]])
+        ssp = SoundSpeedProfile(
+            depths=z, data=data, ranges=np.array([0.0, 3000.0]),
+        )
+        return Environment(bathymetry=100.0, ssp=ssp, bottom=self._BOTTOM)
+
+    @pytest.mark.parametrize('rmax', [1500.0, 2000.0, 2500.0, 4000.0])
+    def test_short_range_is_finite(self, rmax):
+        """rmax < 5 km used to give nrp=nint(rmax/10000)=0 -> SIGABRT."""
+        field = RAM(timeout=120).compute_tl(
+            env=self._rd_env(),
+            source=Source(depths=25.0, frequencies=50.0),
+            receiver=Receiver(depths=[50.0], ranges=[rmax]),
+        )
+        assert isinstance(field, Field)
+        data = np.asarray(field.data)
+        assert data.size and np.isfinite(data).all()
+        # A physical TL at ~rmax in a 100 m channel is well inside (0, 120) dB.
+        tl = -20.0 * np.log10(np.abs(data).clip(1e-12))
+        assert np.all((tl > 0.0) & (tl < 120.0))
+
+    def test_short_range_keeps_range_dependence(self):
+        """The fix must not silently collapse range dependence: a varying SSP
+        must give a different short-range field than a range-independent one."""
+        src = Source(depths=25.0, frequencies=50.0)
+        rcv = Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0])
+        z = np.array([0.0, 100.0])
+        ri = Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile(depths=z, data=np.array([[1500.0], [1490.0]])),
+            bottom=self._BOTTOM,
+        )
+
+        def tl(env):
+            d = np.asarray(RAM(timeout=120).compute_tl(
+                env=env, source=src, receiver=rcv).data).ravel()
+            return -20.0 * np.log10(np.abs(d).clip(1e-12))
+
+        tl_ri, tl_rd = tl(ri), tl(self._rd_env())
+        assert np.isfinite(tl_ri).all() and np.isfinite(tl_rd).all()
+        # Differing SSP columns must move the field by more than numerical noise.
+        assert not np.allclose(tl_ri, tl_rd, atol=0.5)

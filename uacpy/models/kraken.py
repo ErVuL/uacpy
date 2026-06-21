@@ -615,6 +615,7 @@ class Kraken(_KrakenBase):
         },
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,
@@ -1069,6 +1070,50 @@ class Kraken(_KrakenBase):
         d['coords'] = {**d['coords'], 'depth': full_depths}
         return Field.from_dict(d)
 
+    def _count_modes_at_freq(self, env, source, receiver, freq, exe) -> int:
+        """Number of trapped modes Kraken finds at a single ``freq`` (Hz).
+
+        ``0`` means the frequency is below the waveguide's modal cutoff — no
+        propagating modes (Computational Ocean Acoustics; Brekhovskikh &
+        Lysanov). Uses a single-frequency modes run: a multi-frequency ``.mod``
+        that contains a zero-mode record is itself unreadable (the record stride
+        breaks at ``M=0``), so the cutoff must be probed one frequency at a
+        time."""
+        from uacpy.core.source import Source as _Source
+        from uacpy.io.modes_reader import read_modes_bin
+        fm = self._setup_file_manager()
+        base = 'mcut'
+        try:
+            self._write_kraken_env(
+                fm.get_path(f'{base}.env'), env,
+                _Source(depths=source.depths, frequencies=float(freq)),
+                receiver_obj=receiver, receiver_depths=receiver.depths,
+            )
+            self._run_kraken_executable(base, fm.work_dir, exe=exe)
+            return int(read_modes_bin(str(fm.get_path(base)),
+                                      freq=float(freq)).get('M', 0))
+        except Exception:   # noqa: BLE001  (any failure == treat as no modes)
+            return 0
+
+    def _propagating_frequency_floor(self, env, source, receiver, freqs, exe):
+        """Index of the first frequency in (sorted, ascending) ``freqs`` that
+        has propagating modes — i.e. the end of the contiguous sub-cutoff band.
+
+        Mode count rises monotonically with frequency, so the zero-mode
+        frequencies are a prefix ``[0, floor)`` and ``floor`` can be found by
+        binary search in O(log N) single-frequency probes (bounded — not one
+        probe per frequency). Returns ``len(freqs)`` if none propagate."""
+        freqs = np.atleast_1d(freqs)
+        lo, hi = 0, len(freqs)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._count_modes_at_freq(
+                    env, source, receiver, float(freqs[mid]), exe) > 0:
+                hi = mid          # modes here → cutoff is at or below mid
+            else:
+                lo = mid + 1      # no modes here → cutoff is above mid
+        return lo
+
 # ── field.exe pipeline ──────────────────────────────────────────────
 
     def _compute_field_via_exe(
@@ -1281,6 +1326,22 @@ class Kraken(_KrakenBase):
             if broadband:
                 shd0 = read_shd_bin(str(shd_file))
                 freqs_read = np.asarray(shd0['freqVec'], dtype=float)
+                # A sub-cutoff (zero-mode) frequency corrupts the multi-frequency
+                # .mod: field.exe sometimes produces a .shd anyway but with a
+                # garbage (e.g. all-zero) frequency axis. Detect the mismatch and
+                # raise so the broadband caller recovers (drops the sub-cutoff
+                # band and zero-fills) instead of silently returning a zero field.
+                if (len(freqs_read) != len(freq_vec)
+                        or not np.allclose(np.sort(freqs_read),
+                                           np.sort(np.asarray(freq_vec, float)),
+                                           rtol=1e-3, atol=1e-6)):
+                    exc = ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=("field.exe returned a frequency axis that does "
+                                "not match the request — the modes file is "
+                                "corrupted by a sub-cutoff (zero-mode) frequency."))
+                    self._attach_prt_tail(exc, fm.work_dir, base_name)
+                    raise exc
                 # New layout: (n_d, n_r, n_f).
                 p_stack = np.zeros(
                     (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
@@ -1341,6 +1402,7 @@ class Kraken(_KrakenBase):
                 field.phase_reference = 'travelling_wave'
                 field.model = self.model_name
                 field.backend = 'field'
+                field.model_source = self.provenance
                 field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
                 field.frequencies = np.atleast_1d(np.asarray(
                     float(np.atleast_1d(source.frequencies)[0]), dtype=float,
@@ -1402,16 +1464,65 @@ class Kraken(_KrakenBase):
             pressure. Trailing-frequency convention matches
             Bellhop/RAM/Scooter broadband outputs.
         """
-        frequencies = self._resolve_broadband_frequencies(source, frequencies)
+        frequencies = np.atleast_1d(
+            self._resolve_broadband_frequencies(source, frequencies))
 
         self._log(f"Broadband: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=RunMode.BROADBAND)
-        return self._compute_field_via_exe(
-            env, source, receiver,
-            frequencies=frequencies,
-            n_modes=n_modes,
-            exe=exe,
-        )
+        kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
+
+        # Optimistic single run — no overhead in the common all-propagating case.
+        try:
+            return self._compute_field_via_exe(
+                env, source, receiver,
+                frequencies=frequencies, n_modes=n_modes, exe=kraken_exe,
+            )
+        except ModelExecutionError as exc:
+            # field.exe can crash (ReadModes.f90) when a frequency is below the
+            # waveguide's modal cutoff: kraken writes an empty mode record there
+            # which also corrupts the multi-frequency .mod. The field below
+            # cutoff is zero for a normal-mode model (Computational Ocean
+            # Acoustics §2; below-cutoff/continuous-spectrum propagation needs a
+            # wavenumber-integration model like Scooter), so compute the
+            # propagating subset and zero-fill the dropped bins — preserving the
+            # uniform frequency grid TIME_SERIES synthesis needs. The cutoff is
+            # probed (cheap single-frequency runs) only on this failure path.
+            floor = self._propagating_frequency_floor(
+                env, source, receiver, frequencies, kraken_exe)
+            if floor == 0:
+                raise   # every frequency propagates — failure was something else
+            if floor >= len(frequencies):
+                raise ConfigurationError(
+                    f"{self.model_name}: no propagating modes at any requested "
+                    f"frequency ({frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz) — "
+                    f"every frequency is below the waveguide's modal cutoff.",
+                    remediation="Raise the frequency band above the modal "
+                    "cutoff, or use a wavenumber-integration model (Scooter) "
+                    "for below-cutoff fields.",
+                ) from exc
+            warnings.warn(
+                f"{self.model_name}: {floor} broadband frequency(ies) <= "
+                f"{frequencies[floor - 1]:.2f} Hz are below the modal cutoff (no "
+                f"propagating modes); their field is zero for a normal-mode "
+                f"model. Computing the {len(frequencies) - floor} propagating "
+                f"frequencies and zero-filling the rest.",
+                UserWarning, stacklevel=2,
+            )
+            tf = self._compute_field_via_exe(
+                env, source, receiver,
+                frequencies=frequencies[floor:], n_modes=n_modes, exe=kraken_exe,
+            )
+            data_full = np.zeros(
+                tf.data.shape[:2] + (len(frequencies),), dtype=tf.data.dtype)
+            data_full[:, :, floor:] = tf.data        # zero-fill the sub-cutoff bins
+            id_kwargs = tf.id_kwargs()
+            id_kwargs['frequencies'] = frequencies
+            return Field(
+                data=data_full,
+                coords={'depth': receiver.depths, 'range': receiver.ranges,
+                        'frequency': frequencies},
+                **id_kwargs,
+            )

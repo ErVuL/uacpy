@@ -12,7 +12,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
     BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE, _blend,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_data_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
 
@@ -39,7 +39,10 @@ def _halfspace_cp(bottom) -> float | None:
 def _hatched_fill(facecolor) -> dict:
     """``fill_between`` kwargs: a solid ``facecolor`` under the half-space's
     diagonal hatch, so it still reads as the semi-infinite half-space."""
-    return {'color': facecolor, 'hatch': BOTTOM_FILL_HATCH,
+    # facecolor (NOT color): with ``color=`` set, mpl draws the hatch in the
+    # fill colour, making the '///' invisible. ``facecolor`` lets the hatch
+    # render in ``edgecolor``.
+    return {'facecolor': facecolor, 'hatch': BOTTOM_FILL_HATCH,
             'edgecolor': _blend('black', facecolor, 0.4), 'linewidth': 0.4}
 
 
@@ -519,7 +522,7 @@ def plot_environment(
     if ax is None:
         credit = _credit_attributions(data_source, carrier=env)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
-        _draw_data_credit(fig, credit, reserve=False)
+        _draw_credit(fig, credit, reserve=False)
     return fig, ax_bathy
 
 
@@ -708,7 +711,7 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
 
     fig.suptitle(f"Seabed properties — {type(bottom).__name__}",
                  fontweight='bold', fontsize=13)
-    _draw_data_credit(fig, _credit_attributions(data_source, carrier=env),
+    _draw_credit(fig, _credit_attributions(data_source, carrier=env),
                       reserve=False)
     return fig, axes
 

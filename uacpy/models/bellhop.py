@@ -350,6 +350,7 @@ class Bellhop(PropagationModel):
             'multi_source_depth',
         },
     )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,
@@ -1079,6 +1080,7 @@ class Bellhop(PropagationModel):
             for i, slab in enumerate(slabs_to_set):
                 slab.model = self.model_name
                 slab.backend = self.model_name.lower()
+                slab.model_source = self.provenance
                 if isinstance(result, ResultStack):
                     slab.source_depths = np.array(
                         [float(result.coordinate[i])], dtype=float,

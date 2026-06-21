@@ -8,7 +8,7 @@ from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError
 
 __all__ = [
-    'Coordinate', 'as_coordinate', 'normalize_lon',
+    'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
     'run_representative_indices', 'DEFAULT_MAX_TRANSECT_POINTS',
     'depth_to_pressure_dbar',
@@ -69,6 +69,22 @@ def normalize_lon(lon: float) -> float:
     same result regardless of convention (and dateline values stay in range).
     """
     return ((float(lon) + 180.0) % 360.0) - 180.0
+
+
+def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
+    """``n`` longitudes from ``lon0`` to ``lon1`` going **eastward**, wrapped to
+    ``[-180, 180)``.
+
+    A range whose end is west of its start (e.g. ``(179, -179)``) is taken to
+    cross the antimeridian eastward, so it samples the short strip over 180°
+    rather than sweeping the long way through 0°. This mirrors the great-circle
+    transect path; a non-crossing range (``lon1 >= lon0``) is a plain linspace.
+    """
+    lon0, lon1 = float(lon0), float(lon1)
+    if lon1 < lon0:
+        lon1 += 360.0
+    raw = np.linspace(lon0, lon1, int(n))
+    return ((raw + 180.0) % 360.0) - 180.0
 
 
 def central_angle(start: Coordinate, end: Coordinate) -> float:

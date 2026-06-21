@@ -433,6 +433,7 @@ class Field(Result):
             ),
             frequencies=frequencies,
             phase_reference=self.phase_reference,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )
         f.coords = {}
@@ -464,6 +465,7 @@ class Field(Result):
             source_depths=self.source_depths,
             frequencies=self.frequencies,
             phase_reference=self.phase_reference,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )
 

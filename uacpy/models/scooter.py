@@ -102,6 +102,7 @@ class Scooter(PropagationModel):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,

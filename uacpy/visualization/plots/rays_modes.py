@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.visualization.style import RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit
 
 
 def plot_rays(
@@ -36,7 +36,8 @@ def plot_rays(
     """
     if not isinstance(rays, Rays):
         raise TypeError(f"plot_rays: expected Rays, got {type(rays).__name__}")
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -137,6 +138,8 @@ def plot_rays(
     ax.set_ylabel('Depth (m)')
     ax.grid(True, alpha=0.3)
     ax.set_title(title or ('Eigenrays' if rays.is_eigen else 'Ray fan'))
+    if _owns_fig:
+        _draw_result_credit(fig, rays, env=env)
     return fig, ax
 
 
@@ -156,7 +159,8 @@ def plot_arrivals(
         raise TypeError(
             f"plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -196,6 +200,8 @@ def plot_arrivals(
                   framealpha=0.85)
     if title:
         ax.set_title(title)
+    if _owns_fig:
+        _draw_result_credit(fig, arrivals, env=None)
     return fig, ax
 
 
@@ -217,7 +223,8 @@ def plot_mode_functions(
         raise TypeError(
             f"plot_mode_functions: expected Modes, got {type(modes).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -234,6 +241,8 @@ def plot_mode_functions(
     if n_modes <= 12:
         ax.legend(fontsize=8, loc='best')
     ax.set_title(title or f"Mode functions (n={n_modes})")
+    if _owns_fig:
+        _draw_result_credit(fig, modes, env=None)
     return fig, ax
 
 
@@ -249,7 +258,8 @@ def plot_mode_wavenumbers(
         raise TypeError(
             f"plot_mode_wavenumbers: expected Modes, got {type(modes).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -264,6 +274,8 @@ def plot_mode_wavenumbers(
     ax.set_ylabel(r'$\mathrm{Re}(k_m)$ (1/m)')
     ax.grid(True, alpha=0.3)
     ax.set_title(title or 'Modal wavenumbers')
+    if _owns_fig:
+        _draw_result_credit(fig, modes, env=None)
     return fig, ax
 
 
@@ -288,7 +300,8 @@ def plot_modes_heatmap(
         raise TypeError(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -329,6 +342,8 @@ def plot_modes_heatmap(
     ax.set_title(
         title or f'Mode shapes — {n_plot} modes @ {f0:.1f} Hz',
     )
+    if _owns_fig:
+        _draw_result_credit(fig, modes, env=None)
     return fig, ax
 
 
@@ -355,7 +370,8 @@ def plot_reflection_coefficient(
             f"got {type(rc).__name__}"
         )
     if rc.is_broadband:
-        if ax is None:
+        _owns_fig = ax is None
+        if _owns_fig:
             fig, ax = plt.subplots(figsize=figsize)
         else:
             fig = ax.figure
@@ -367,9 +383,12 @@ def plot_reflection_coefficient(
         ax.set_xlabel('Frequency (kHz)')
         ax.set_ylabel('Grazing angle (°)')
         ax.set_title(title or 'Reflection coefficient |R(θ, f)|')
+        if _owns_fig:
+            _draw_result_credit(fig, rc, env=None)
         return fig, ax
 
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -385,6 +404,8 @@ def plot_reflection_coefficient(
         ax_phi.set_ylabel('Phase (°)', color='C1')
         ax_phi.tick_params(axis='y', labelcolor='C1')
     ax.set_title(title or 'Reflection coefficient')
+    if _owns_fig:
+        _draw_result_credit(fig, rc, env=None)
     return fig, ax
 
 
@@ -406,7 +427,8 @@ def plot_covariance(
         raise TypeError(
             f"plot_covariance: expected Covariance, got {type(cov).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -420,6 +442,8 @@ def plot_covariance(
         title = f"Covariance at {f_hz:.1f} Hz"
     if title:
         ax.set_title(title)
+    if _owns_fig:
+        _draw_result_credit(fig, cov, env=None)
     return fig, ax
 
 
@@ -437,7 +461,8 @@ def plot_replicas(
         raise TypeError(
             f"plot_replicas: expected Replicas, got {type(rep).__name__}"
         )
-    if ax is None:
+    _owns_fig = ax is None
+    if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -452,4 +477,6 @@ def plot_replicas(
     ax.invert_yaxis()
     if title:
         ax.set_title(title)
+    if _owns_fig:
+        _draw_result_credit(fig, rep, env=None)
     return fig, ax

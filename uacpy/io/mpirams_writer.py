@@ -251,6 +251,12 @@ def write_bth_file(
     """
     ranges_m = np.asarray(ranges_m)
     depths_m = np.asarray(depths_m)
+    if ranges_m.shape != depths_m.shape:
+        raise ConfigurationError(
+            f"write_bth_file: ranges_m ({ranges_m.size}) and depths_m "
+            f"({depths_m.size}) must have the same length; a mismatch would "
+            f"silently truncate the bathymetry."
+        )
     with open(filepath, 'w') as f:
         for r, d in zip(ranges_m, depths_m):
             f.write(f"{r} {d}\n")

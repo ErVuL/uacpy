@@ -86,14 +86,14 @@ from uacpy import data
 from uacpy.models import Bellhop, RunMode
 
 # 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
-#    WOA23 sound speed and NCEI seabed — across the Bay of Biscay continental
-#    slope into the deep Iberian abyssal plain (~4800 m).
-A, B = (45.0, -2.5), (45.5, -6.5)         # (lat, lon): shelf slope → abyssal plain
+#    WOA23 sound speed and NCEI seabed — across the North Sea shelf down into the
+#    Norwegian Trench.
+A, B = (61.0, 2.0), (58.0, 5.0)           # (lat, lon): North Sea shelf → Norwegian Trench
 env  = data.fetch_environment(A, transect_to=B, date='2026-01-15', bottom_sources='auto')
-grid = data.fetch_bathy_grid((43.0, 47.0), (-8.0, -1.0))     # (lats, lons, depth)
+grid = data.fetch_bathy_grid((56.5, 62.0), (-2.0, 9.0))      # (lats, lons, depth)
 
-# 2. Model transmission loss with Bellhop at 1000 Hz, out to the transect length.
-src = uacpy.Source(depths=100, frequencies=1000)
+# 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
+src = uacpy.Source(depths=100, frequencies=800)
 rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
                      ranges=np.linspace(100, env.max_range, 350))  # env range extent
 tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
@@ -101,8 +101,8 @@ tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 # 3. One call → the figure above: map · transmission loss · environment.
 #    The left map is pluggable (map_fn=); the default is the bathymetry map.
 uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver=rcv,
-                         map_title="Bay of Biscay — Iberian abyssal plain",
-                         tl_title="Transmission loss (1000 Hz)",
+                         map_title="North Sea — Norwegian Trench",
+                         tl_title="Transmission loss (800 Hz)",
                          env_title="Range-dependent environment",
                          map_kwargs=dict(contours=True, aspect=1))
 plt.show()

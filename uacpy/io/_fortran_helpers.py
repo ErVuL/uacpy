@@ -271,8 +271,25 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
         else:
             x = np.array([])
     else:
-        # Read explicit values
-        x = np.array(line.split()[:Nx], dtype=float)
+        # Read explicit values (no '/' terminator → the record should carry all
+        # Nx values; a short record is malformed). Warn + pad rather than
+        # silently returning a length-mismatched array (mirrors the '/' branch).
+        values = np.array(line.split(), dtype=float)
+        if values.size >= Nx:
+            x = values[:Nx]
+        else:
+            warnings.warn(
+                f"read_vector: explicit record had {values.size} value(s) "
+                f"(expected Nx={Nx}); padding to {Nx}.",
+                UserWarning, stacklevel=2,
+            )
+            if values.size == 0:
+                x = np.zeros(Nx)
+            elif values.size == 1:
+                x = np.full(Nx, values[0])
+            else:
+                x = np.concatenate(
+                    [values, np.full(Nx - values.size, values[-1])])
 
     # Ensure x is a 1D array
     x = np.atleast_1d(x)

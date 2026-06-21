@@ -216,23 +216,7 @@ class Environment:
         # before mutating any of them, so the env never mutates a caller's
         # carrier. Do not mutate ``env.ssp`` / ``env.bottom`` / ``env.surface``
         # in place without an ``env.copy()`` first.
-        if ssp is None:
-            # default isovelocity at 1500 m/s
-            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, 1500.0)
-        elif isinstance(ssp, SoundSpeedProfile):
-            self.ssp = ssp
-        elif isinstance(ssp, (int, float, np.integer, np.floating)):
-            # scalar → isovelocity at the given speed
-            self.ssp = SoundSpeedProfile.from_isovelocity(max_bathy_depth, float(ssp))
-        elif isinstance(ssp, (list, tuple, np.ndarray)):
-            # list of (z, c) pairs → from_pairs (linear interp)
-            self.ssp = SoundSpeedProfile.from_pairs(ssp)
-        else:
-            raise ConfigurationError(
-                f"Environment: ssp must be a scalar (m/s), a list of (depth, "
-                f"sound_speed) pairs, or a SoundSpeedProfile; got "
-                f"{type(ssp).__name__}"
-            )
+        self.ssp = SoundSpeedProfile.coerce(ssp, depth_max=max_bathy_depth)
 
         # Altimetry is a first-class carrier (surface height vs range), the
         # top-surface analogue of env.bathymetry; ``None`` = flat z = 0.

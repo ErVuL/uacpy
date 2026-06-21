@@ -155,11 +155,20 @@ def _blend(a, b, t):
 BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
 # Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
 BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
+# facecolor (NOT color): a ``color=`` entry makes mpl draw the hatch in the
+# fill colour, hiding the '///'; ``facecolor`` leaves the hatch in ``edgecolor``.
 BOTTOM_FILL_STYLE = {
-    'color': BOTTOM_FILL_COLOR,
+    'facecolor': BOTTOM_FILL_COLOR,
     'hatch': BOTTOM_FILL_HATCH,
     'edgecolor': BOTTOM_HATCH_COLOR,
     'linewidth': 0.4,
+}
+# Plain (un-hatched) seabed fill for TL / ray data overlays — the '///'
+# half-space hatch is reserved for the environment cross-section, where it
+# reads as the semi-infinite substrate; over a TL heatmap it just clutters.
+BOTTOM_FILL_STYLE_SOLID = {
+    'facecolor': BOTTOM_FILL_COLOR,
+    'edgecolor': 'none',
 }
 
 # "Ground" colormap used to shade the seabed by sound speed: light sandy tan

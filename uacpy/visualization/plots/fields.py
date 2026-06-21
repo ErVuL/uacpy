@@ -12,7 +12,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle
+from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit
 
 
 def plot_field(
@@ -85,29 +85,32 @@ def plot_field(
                 "plot_field(stacked=True): requires a 2-D field with a "
                 f"'time' axis; got coords {axes_present}"
             )
-        return _plot_field_stacked(
+        fig, ax_out = _plot_field_stacked(
             field, arr, axes_present, ax=ax, title=title,
             figsize=figsize, offset=stack_offset, **mpl_kw,
         )
-
-    if n_axes == 1:
-        return _plot_field_1d(
+    elif n_axes == 1:
+        fig, ax_out = _plot_field_1d(
             field, arr, value_label, axes_present[0],
             ax=ax, title=title, label=label, figsize=figsize, **mpl_kw,
         )
-    if n_axes == 2:
-        return _plot_field_2d(
+    elif n_axes == 2:
+        fig, ax_out = _plot_field_2d(
             field, arr, value_label, axes_present,
             ax=ax, env=env,
             vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
             figsize=figsize, show_colorbar=show_colorbar,
             contours=contours, **mpl_kw,
         )
-    raise ConfigurationError(
-        f"plot_field: cannot plot a {n_axes}-axis field (coords "
-        f"{axes_present}); slice it first with .at(...) / .isel(...) "
-        "so 1 or 2 axes remain."
-    )
+    else:
+        raise ConfigurationError(
+            f"plot_field: cannot plot a {n_axes}-axis field (coords "
+            f"{axes_present}); slice it first with .at(...) / .isel(...) "
+            "so 1 or 2 axes remain."
+        )
+    if ax is None:                       # credit only a figure we own
+        _draw_result_credit(fig, field, env=env)
+    return fig, ax_out
 
 
 def _plot_field_stacked(

@@ -11,7 +11,7 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate
+from uacpy.data._geo import as_coordinate, lon_linspace
 from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
@@ -37,8 +37,13 @@ class _GebcoGrid(NetcdfGrid):
         return elev
 
     def region(self, lat_range, lon_range, n_lat, n_lon):
-        lats = np.linspace(min(lat_range), max(lat_range), n_lat)
-        lons = np.linspace(min(lon_range), max(lon_range), n_lon)
+        # Preserve the caller's axis order (matching the api path), instead of
+        # min/max which silently re-sorts. Lat is bounded so it's a plain
+        # linspace; lon goes eastward so a range crossing the antimeridian
+        # (end west of start, e.g. (179, -179)) samples the short strip over
+        # 180°, not the long way through 0°.
+        lats = np.linspace(lat_range[0], lat_range[1], n_lat)
+        lons = lon_linspace(lon_range[0], lon_range[1], n_lon)
         rows = [self.row(v) for v in lats]
         cols = [self.col(v) for v in lons]
         block = np.asarray(self._elev[min(rows):max(rows) + 1,

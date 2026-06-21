@@ -28,7 +28,7 @@ import numpy as np
 from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
-    Coordinate, as_coordinate, normalize_lon,
+    Coordinate, as_coordinate, normalize_lon, lon_linspace,
     central_angle, geodesic_waypoints, EARTH_RADIUS_KM,
     DEFAULT_MAX_TRANSECT_POINTS,
 )
@@ -285,7 +285,7 @@ def fetch_bathy_grid(
             remediation="Use a coarser grid, or a self-hosted instance via base_url=.",
         )
     lats = np.linspace(lat_range[0], lat_range[1], n_lat)
-    lons = np.linspace(lon_range[0], lon_range[1], n_lon)
+    lons = lon_linspace(lon_range[0], lon_range[1], n_lon)   # eastward, dateline-safe
     lon_mesh, lat_mesh = np.meshgrid(lons, lats)
     coords = list(zip(lat_mesh.ravel(), lon_mesh.ravel()))
     log_message('bathymetry', f"GEBCO grid {n_lat}×{n_lon} over "

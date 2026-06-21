@@ -9,7 +9,9 @@ from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
+from uacpy.core._carrier_validate import (
+    _require_positive, _require_strictly_increasing,
+)
 
 
 _VALID_SSP_SHAPES = (
@@ -63,13 +65,7 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: data rows ({self.data.shape[0]}) must match "
                 f"depths length ({self.depths.size})"
             )
-        # Sound speeds must be finite and positive (NaN/inf fail every plain
-        # ``<= 0`` check, so guard with isfinite explicitly).
-        if not np.all(np.isfinite(self.data)) or np.any(self.data <= 0):
-            raise ConfigurationError(
-                "SoundSpeedProfile: sound speeds must be finite and positive; "
-                "got non-finite or non-positive values in data."
-            )
+        _require_positive(self.data, "SoundSpeedProfile sound speeds", hint="m/s")
         _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths")
         if self.ranges is not None:
             self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
@@ -293,6 +289,37 @@ class SoundSpeedProfile:
             data=new_data,
             ranges=(self.ranges.copy() if self.ranges is not None else None),
             shape=self.shape,
+        )
+
+    @classmethod
+    def coerce(
+        cls, value, *, depth_max: float,
+    ) -> 'SoundSpeedProfile':
+        """Coerce the user-facing ``ssp=`` shorthand into a profile.
+
+        Mirrors :meth:`Bathymetry.coerce` / :meth:`Altimetry.coerce` so
+        :class:`~uacpy.core.environment.Environment` delegates instead of
+        hand-rolling the dispatch:
+
+        * ``None`` — isovelocity 1500 m/s spanning ``0..depth_max``.
+        * scalar (m/s) — isovelocity at that speed spanning ``0..depth_max``.
+        * ``(depth, c)`` pairs — linear profile via :meth:`from_pairs`.
+        * a :class:`SoundSpeedProfile` — returned as-is (by reference).
+
+        ``depth_max`` (m) sets the column extent for the isovelocity cases.
+        """
+        if value is None:
+            return cls.from_isovelocity(depth_max, 1500.0)
+        if isinstance(value, SoundSpeedProfile):
+            return value
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return cls.from_isovelocity(depth_max, float(value))
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return cls.from_pairs(value)
+        raise ConfigurationError(
+            f"Environment: ssp must be a scalar (m/s), a list of (depth, "
+            f"sound_speed) pairs, or a SoundSpeedProfile; got "
+            f"{type(value).__name__}"
         )
 
     @classmethod

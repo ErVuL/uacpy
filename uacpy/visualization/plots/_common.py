@@ -9,7 +9,7 @@ from typing import Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
-from uacpy.visualization.style import BOTTOM_FILL_STYLE, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
+from uacpy.visualization.style import BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
 
 
 ZORDER_SEDIMENT = 2
@@ -142,7 +142,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(r_km, z, depth_max,
-                        zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE)
+                        zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID)
         ax.plot(r_km, z, zorder=ZORDER_SEDIMENT + 6, **BOTTOM_LINE_STYLE)
     else:
         depth_max = max(max(ax.get_ylim()), env.depth * 1.05)
@@ -150,7 +150,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(
             data_r_km, env.depth, depth_max,
-            zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE,
+            zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID,
         )
         ax.axhline(env.depth, zorder=ZORDER_SEDIMENT + 6,
                    **BOTTOM_LINE_STYLE_FLAT)
@@ -203,26 +203,75 @@ def _credit_attributions(data_source, *, carrier=None):
     return out
 
 
-def _draw_data_credit(fig, attributions, *, center_ax=None, reserve=True):
-    """Discreet grey data-source footnote along the figure bottom.
+def _model_attribution(result):
+    """One-line model credit ``"<model> — <author>, <engine>"`` from a result's
+    :class:`~uacpy.models.sources.ModelSource`, or ``None`` when the result
+    carries no model provenance. The model-side counterpart of the data-source
+    attributions resolved by :func:`_credit_attributions`."""
+    src = getattr(result, 'model_source', None)
+    if src is None:
+        return None
+    name = getattr(result, 'model', '') or src.name
+    return f"{name} — {src.attribution}"
 
-    The licence-**required attribution** for every source used — the way a
-    scientific figure or map credits its data. Centred under ``center_ax`` when
-    given (e.g. the map panel), else bottom-left. ``reserve`` adds bottom margin
-    (set ``False`` when the caller already reserved space via ``tight_layout``).
+
+def _credit_lines(data_attributions, model_attribution):
+    """Compose the footnote rows from data + model provenance.
+
+    One citation per line, stacked. Each group (``Data`` / ``Model``) is
+    labelled on its first line; further lines align under it. One harmonised
+    layout for environment plots (data only), result plots (model, plus data
+    when an env is supplied) and maps.
     """
-    if not attributions:
+    groups = []
+    if data_attributions:
+        groups.append(("Data:", list(data_attributions)))
+    if model_attribution:
+        groups.append(("Model:", [model_attribution]))
+    if not groups:
+        return []
+    width = max(len(label) for label, _ in groups)
+    indent = " " * (width + 1)
+    lines = []
+    for label, items in groups:
+        lines.append(f"{label.ljust(width)} {items[0]}")
+        lines.extend(f"{indent}{item}" for item in items[1:])
+    return lines
+
+
+def _draw_credit(fig, data_attributions=(), *, model=None,
+                 center_ax=None, reserve=True):
+    """Discreet grey provenance footnote along the figure bottom.
+
+    Draws the licence-**required attribution** for the data **and** the model
+    that produced the figure — the way a scientific figure credits its sources.
+    Centred under ``center_ax`` when given (e.g. the map panel), else
+    bottom-left. ``reserve`` adds bottom margin (set ``False`` when the caller
+    already reserved space via ``tight_layout``).
+    """
+    lines = _credit_lines(data_attributions, model)
+    if not lines:
         return
-    if reserve:                                        # one line reserved per source
-        fig.subplots_adjust(bottom=max(0.06 + 0.025 * len(attributions),
+    if reserve:                                        # one line reserved per row
+        fig.subplots_adjust(bottom=max(0.06 + 0.025 * len(lines),
                                        fig.subplotpars.bottom))
     if center_ax is not None:
         pos = center_ax.get_position()
         x, ha = pos.x0 + pos.width / 2.0, 'center'
     else:
         x, ha = 0.012, 'left'
-    fig.text(x, 0.012, "\n".join(attributions), ha=ha, va='bottom',
+    fig.text(x, 0.012, "\n".join(lines), ha=ha, va='bottom',
              fontsize=7, color='0.45', linespacing=1.5)
+
+
+def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):
+    """Unified provenance footnote for a *result* figure: the model that
+    produced it (always, when known) plus any data sources from ``env``.
+
+    The single call every result plotter makes — keeps data + model credit
+    rendering identical across :func:`plot_field`, :func:`plot_rays`, … ."""
+    data = _credit_attributions(data_source, carrier=env)
+    _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
 
 
 def _draw_sea_ice(ax, sea_ice):

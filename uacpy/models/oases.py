@@ -318,6 +318,7 @@ class OAST(OASES):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'oases'
 
     def __init__(
         self,
@@ -620,6 +621,7 @@ class OASN(OASES):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'oases'
 
     def __init__(
         self,
@@ -1020,6 +1022,7 @@ class OASR(OASES):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'bottom_range': 'median'},
     )
+    source = 'oases'
 
     def __init__(
         self,
@@ -1304,6 +1307,7 @@ class OASP(OASES):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
+    source = 'oases'
 
     def __init__(
         self,

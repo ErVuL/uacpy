@@ -507,11 +507,15 @@ def _read_modes_bin_impl(
                 iRecProfile = iRecProfile + 3 + M + (4 * (2 * M - 1)) // lrecl
         if modes is None:
             modes = np.arange(1, M + 1)
-        elif isinstance(modes, int):
-            modes = np.arange(1, min(modes, M) + 1)
+        elif isinstance(modes, (int, np.integer)):
+            modes = np.array([modes])      # single mode #N, matching read_modes (ASCII)
         else:
             modes = np.array(modes)
-            modes = modes[modes <= M]
+        # AT mode numbers are 1-based; keep only existing modes. read_modes_bin.m
+        # filters `<= M` only because MATLAB's 1-based indexing rejects negatives;
+        # the Python port must also guard the lower bound, else k[modes-1] silently
+        # wraps for a negative index (returning the wrong mode).
+        modes = modes[(modes >= 1) & (modes <= M)]
         # Top/Bot halfspace block sits at REC iRecProfile+1 per
         # kraken.f90:603 and read_modes_bin.m:130.
         fid.seek((iRecProfile + 1) * lrecl, 0)

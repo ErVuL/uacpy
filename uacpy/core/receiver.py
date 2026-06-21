@@ -6,11 +6,15 @@ import warnings
 
 import numpy as np
 from typing import Union, List, Optional
+from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
+from uacpy.core._carrier_validate import (
+    _require_non_negative, _require_strictly_increasing,
+)
 
 
+@dataclass
 class Receiver:
     """
     Acoustic receiver definition
@@ -69,20 +73,18 @@ class Receiver:
     ... )
     """
 
-    def __init__(
-        self,
-        depths: Union[float, List[float], np.ndarray],
-        ranges: Optional[Union[float, List[float], np.ndarray]] = None,
-        receiver_type: str = 'grid',
-    ):
+    depths: Union[float, List[float], np.ndarray]
+    ranges: Optional[Union[float, List[float], np.ndarray]] = None
+    receiver_type: str = 'grid'
+
+    def __post_init__(self):
         valid_types = ('grid', 'line')
-        if receiver_type not in valid_types:
+        if self.receiver_type not in valid_types:
             raise ConfigurationError(
                 f"receiver_type must be one of {list(valid_types)}, "
-                f"got {receiver_type!r}"
+                f"got {self.receiver_type!r}"
             )
-        self.receiver_type = receiver_type
-        if ranges is None:
+        if self.ranges is None:
             warnings.warn(
                 "Receiver: ranges not given, defaulting to a single point at "
                 "0 m (the source location), which is singular for TL/pressure "
@@ -90,10 +92,10 @@ class Receiver:
                 UserWarning,
                 stacklevel=2,
             )
-            ranges = 0.0
+            self.ranges = 0.0
 
-        self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
-        self.ranges = np.atleast_1d(np.array(ranges, dtype=np.float64))
+        self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
+        self.ranges = np.atleast_1d(np.array(self.ranges, dtype=np.float64))
 
         if self.depths.size < 1:
             raise ConfigurationError(
@@ -104,31 +106,12 @@ class Receiver:
                 "receiver ranges must contain at least one value, got empty array"
             )
 
-        if np.any(~np.isfinite(self.depths)):
-            raise ConfigurationError(
-                f"receiver depths must be finite (no NaN/inf), got "
-                f"{self.depths.tolist()}"
-            )
+        _require_non_negative(
+            self.depths, "receiver depths", hint="metres, positive down from surface")
+        _require_non_negative(
+            self.ranges, "receiver ranges", hint="metres, outward from source")
 
-        if np.any(~np.isfinite(self.ranges)):
-            raise ConfigurationError(
-                f"receiver ranges must be finite (no NaN/inf), got "
-                f"{self.ranges.tolist()}"
-            )
-
-        if np.any(self.depths < 0):
-            raise ConfigurationError(
-                f"receiver depths must be non-negative (down from surface), "
-                f"got {self.depths.tolist()}"
-            )
-
-        if np.any(self.ranges < 0):
-            raise ConfigurationError(
-                f"receiver ranges must be non-negative (outward from source), "
-                f"got {self.ranges.tolist()}"
-            )
-
-        if receiver_type == 'line':
+        if self.receiver_type == 'line':
             if len(self.depths) != len(self.ranges):
                 if len(self.ranges) == 1:
                     self.ranges = np.full_like(self.depths, self.ranges[0])

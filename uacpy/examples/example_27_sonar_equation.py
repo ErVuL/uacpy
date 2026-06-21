@@ -132,31 +132,40 @@ def main():
     print(f"  ✓ Saved: {out}")
 
     # ── Part 2: signal-excess map over a model TL grid ───────────────────
-    # The TL now comes from Bellhop on a 200 m waveguide at 2 kHz. Ray
-    # theory is valid here: D/λ ≈ 267, comfortably above the D/λ ≳ 100
-    # ray-regime rule of thumb (modes take over below D/λ ≈ 30; see the
-    # model-selection table in DOCUMENTATION.md §5). Incoherent TL is the
-    # standard basis for sonar-performance maps: it averages the multipath
-    # interference fringes a coherent field would imprint on the SE map.
-    # Budget: a 125 dB target against 75 dB/Hz shipping noise (passive),
-    # and a 190 dB / TS = 10 dB active sonar.
+    # The TL comes from Bellhop on a 200 m waveguide at 2 kHz. Ray theory is
+    # valid here: D/λ ≈ 267, comfortably above the D/λ ≳ 100 ray-regime rule
+    # of thumb (modes take over below D/λ ≈ 30; see DOCUMENTATION.md §5). A
+    # mild surface duct (sound-speed maximum near 30 m) traps the near-surface
+    # source energy and refracts the rest downward, so the SE map shows real
+    # propagation structure — a low-loss surface channel over a weaker
+    # sub-duct shadow — rather than plain spreading. (In a flat isovelocity
+    # column the incoherent field is genuinely near depth-uniform — correct,
+    # but a dull map; a refracting profile is what makes the paths visible.)
+    # Incoherent TL is the standard basis for sonar-performance maps: it keeps
+    # this ducting/shadow structure (a geometric, ray-density effect) while
+    # dropping the fine multipath interference fringes a coherent field would
+    # imprint. Budget: a 125 dB target against 75 dB/Hz shipping noise
+    # (passive), and a 190 dB / TS = 10 dB active sonar.
     print("\n  Part 2: Bellhop TL grid → signal-excess maps")
 
     env = uacpy.Environment(
         name="SE grid demo",
         bathymetry=200.0,
-        ssp=1500.0,
+        # mild surface duct: sound-speed maximum near 30 m, refracting below
+        ssp=[(0.0, 1500.0), (30.0, 1512.0), (120.0, 1496.0), (200.0, 1500.0)],
         bottom=uacpy.BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0, density=1.5, attenuation=0.5,
         ),
     )
-    src = uacpy.Source(depths=30.0, frequencies=freq)
+    src = uacpy.Source(depths=18.0, frequencies=freq)   # inside the duct
     rcv = uacpy.Receiver(
-        depths=np.linspace(0.0, 200.0, 101),
-        ranges=np.linspace(100.0, 20000.0, 300),
+        depths=np.linspace(0.0, 200.0, 201),
+        ranges=np.linspace(100.0, 20000.0, 350),
     )
-    tl_field = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
+    # geometric-hat beams with auto beam count / step (NBeams=0), the BELLHOP
+    # User Guide's recommendation for TL runs.
+    tl_field = Bellhop(beam_type='G', n_beams=0, alpha=(-80, 80)).run(
         env, src, rcv, run_mode=RunMode.INCOHERENT_TL,
     )
 

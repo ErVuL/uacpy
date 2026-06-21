@@ -374,10 +374,17 @@ class Result:
         source_depths: Optional[np.ndarray] = None,
         frequencies: Optional[Union[float, np.ndarray]] = None,
         phase_reference: Optional[str] = None,
+        model_source: Optional[Any] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
         self.model = model
         self.backend = backend if backend is not None else (model.lower() if model else "")
+        # Provenance of the engine that produced this result (a
+        # ``uacpy.models.sources.ModelSource`` or ``None``). Injected centrally
+        # by ``PropagationModel._result_kwargs``; rendered on plots alongside
+        # the data-source credit. Mirrors how ``env.data_sources`` carries
+        # dataset provenance.
+        self.model_source = model_source
         self.source_depths = (
             np.atleast_1d(np.asarray(source_depths, dtype=float))
             if source_depths is not None else np.array([], dtype=float)

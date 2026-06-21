@@ -57,13 +57,14 @@ def read_reflection_coefficient(
     ----------
     Based on BELLHOP/readrc.m
     """
-    # Add appropriate extension
-    if boundary.lower() == "top":
-        if not filename.endswith(".trc"):
-            filename = filename + ".trc"
-    else:
-        if not filename.endswith(".brc"):
-            filename = filename + ".brc"
+    # Use the path as given when it already exists (so a file written by
+    # write_reflection_coefficient with a literal path round-trips); otherwise
+    # apply the AT extension (.trc top / .brc bottom) so a bare base name still
+    # resolves to the conventional file.
+    if not Path(filename).exists():
+        ext = ".trc" if boundary.lower() == "top" else ".brc"
+        if not filename.endswith(ext):
+            filename = filename + ext
 
     try:
         with open(filename, "r") as fid:

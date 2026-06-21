@@ -85,21 +85,27 @@ class TestProcessing:
         assert np.var(y) > 0
 
     def test_make_bandlimited_noise_runs(self):
-        n = make_bandlimited_noise(
+        # Returns (signal, time) like the other generators.
+        fs, dur = 10_000.0, 0.1
+        n, t = make_bandlimited_noise(
             fc=1000.0, bandwidth=500.0,
-            duration=0.1, sample_rate=10_000.0,
+            duration=dur, sample_rate=fs,
         )
         assert len(n) > 0
+        assert n.shape == t.shape == (int(dur * fs),)
         assert np.all(np.isfinite(n))
+        assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
 
     def test_make_noise_waveform_is_1d_with_consistent_length(self):
         fs, T = 10_000.0, 0.1
-        n = make_noise_waveform(fc=1000.0, BW=500.0, T=T, fs=fs)
-        # 1-D (like every sibling generator), length int(T*fs), no carrier/noise
-        # length mismatch from arange-vs-int float drift.
+        n, t = make_noise_waveform(fc=1000.0, BW=500.0, T=T, fs=fs)
+        # Returns (signal, time) like the tonal generators (tone_burst, …);
+        # 1-D, length int(T*fs), with the time axis the same length (no
+        # carrier/noise mismatch from arange-vs-int float drift).
         assert n.ndim == 1
-        assert n.shape == (int(T * fs),)
+        assert n.shape == t.shape == (int(T * fs),)
         assert np.all(np.isfinite(n))
+        assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
 
 
 class TestDecidecadeBands:

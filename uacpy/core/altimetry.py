@@ -11,7 +11,9 @@ import numpy as np
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
+from uacpy.core._carrier_validate import (
+    _require_finite, _require_non_negative, _require_strictly_increasing,
+)
 
 
 @dataclass
@@ -44,15 +46,8 @@ class Altimetry:
                 f"({self.heights.size}) must have the same length.")
         if self.ranges.size == 0:
             raise ConfigurationError("Altimetry: needs at least one point.")
-        if not np.all(np.isfinite(self.ranges)) or \
-                not np.all(np.isfinite(self.heights)):
-            raise ConfigurationError(
-                f"Altimetry: ranges/heights must be finite; got ranges="
-                f"{self.ranges.tolist()}, heights={self.heights.tolist()}")
-        if np.any(self.ranges < 0):
-            raise ConfigurationError(
-                f"Altimetry: ranges must be non-negative (m); got "
-                f"{self.ranges.tolist()}")
+        _require_non_negative(self.ranges, "Altimetry ranges", hint="metres")
+        _require_finite(self.heights, "Altimetry heights", hint="metres, positive up")
         if self.ranges.size > 1:
             _require_strictly_increasing(self.ranges, "Altimetry.ranges")
 

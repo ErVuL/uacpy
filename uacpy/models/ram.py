@@ -285,6 +285,7 @@ class RAM(PropagationModel):
             'elastic_media',
         },
     )
+    source = 'collins_ram'
 
     def __init__(
         self,
@@ -2073,8 +2074,16 @@ class RAM(PropagationModel):
 
             rs = self.rs_stability if self.rs_stability is not None else rmax
 
-            # Only use horizontal interpolation for range-dependent SSPs
-            ihorz = 1 if env.has_range_dependent_ssp() else 0
+            # mpiramS's horizontal-interpolation branch (ihorz=1) resamples the
+            # SSP onto a uniform grid of nrp=nint(rmax/10000) points
+            # (peramx.f90:245). For rmax < 5 km that rounds to nrp=0 -> a
+            # zero-length allocate, an all-NaN sound-speed field, IEEE
+            # divide-by-zero and a SIGABRT (exit -6); for rmax < 15 km it
+            # collapses range dependence to 1-2 coarse 10-km samples. Always use
+            # ihorz=0 so mpiramS steps directly between the per-range profiles
+            # uacpy already builds in _prepare_ssp (at env.ssp.ranges) — both
+            # crash-free and more faithful than the buggy 10-km resample.
+            ihorz = 0
 
             write_inpe(
                 filepath=work_dir / 'in.pe',

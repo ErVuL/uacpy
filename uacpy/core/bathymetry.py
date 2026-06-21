@@ -10,7 +10,9 @@ import numpy as np
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
+from uacpy.core._carrier_validate import (
+    _require_positive, _require_non_negative, _require_strictly_increasing,
+)
 
 
 @dataclass
@@ -44,19 +46,8 @@ class Bathymetry:
                 f"({self.depths.size}) must have the same length.")
         if self.ranges.size == 0:
             raise ConfigurationError("Bathymetry: needs at least one point.")
-        if not np.all(np.isfinite(self.ranges)) or \
-                not np.all(np.isfinite(self.depths)):
-            raise ConfigurationError(
-                f"Bathymetry: ranges/depths must be finite; got ranges="
-                f"{self.ranges.tolist()}, depths={self.depths.tolist()}")
-        if np.any(self.ranges < 0):
-            raise ConfigurationError(
-                f"Bathymetry: ranges must be non-negative (m); got "
-                f"{self.ranges.tolist()}")
-        if np.any(self.depths <= 0):
-            raise ConfigurationError(
-                f"Bathymetry: depths must be positive (m, down); got "
-                f"{self.depths.tolist()}")
+        _require_non_negative(self.ranges, "Bathymetry ranges", hint="metres")
+        _require_positive(self.depths, "Bathymetry depths", hint="metres, down")
         if self.ranges.size > 1:
             _require_strictly_increasing(self.ranges, "Bathymetry.ranges")
 

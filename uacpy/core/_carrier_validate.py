@@ -25,6 +25,59 @@ def _validate_acoustic_type(value, label: str) -> None:
         ) from exc
 
 
+def _hint(hint: str) -> str:
+    """Render an optional unit/context note appended after the rule clause.
+
+    Kept separate from ``label`` so ``label`` ends immediately before
+    ``"must be"`` — callers (and tests) can match ``"<noun> must be"`` as a
+    contiguous phrase while the unit context still survives in the message.
+    """
+    return f" ({hint})" if hint else ""
+
+
+def _require_finite(values, label: str, *, hint: str = "") -> None:
+    """Raise ``ConfigurationError`` if any element is NaN or inf.
+
+    Accepts a scalar or any array-like. Shared by the carriers so the
+    "must be finite" guard reads identically everywhere instead of being
+    re-inlined per attribute.
+    """
+    arr = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(arr)):
+        raise ConfigurationError(
+            f"{label} must be finite (no NaN/inf){_hint(hint)}; "
+            f"got {arr.ravel().tolist()}")
+
+
+def _require_positive(values, label: str, *, hint: str = "") -> None:
+    """Raise ``ConfigurationError`` unless every element is finite and ``> 0``.
+
+    Finiteness is checked first (NaN/inf pass every plain ``<= 0`` test) and
+    reported separately, so the sign message stays the contiguous phrase
+    ``"<label> must be positive"`` that callers relied on.
+    """
+    arr = np.asarray(values, dtype=float)
+    _require_finite(arr, label, hint=hint)
+    if np.any(arr <= 0):
+        raise ConfigurationError(
+            f"{label} must be positive, > 0{_hint(hint)}; "
+            f"got {arr.ravel().tolist()}")
+
+
+def _require_non_negative(values, label: str, *, hint: str = "") -> None:
+    """Raise ``ConfigurationError`` unless every element is finite and ``>= 0``.
+
+    Finiteness is reported separately so the sign message stays the contiguous
+    phrase ``"<label> must be non-negative"``.
+    """
+    arr = np.asarray(values, dtype=float)
+    _require_finite(arr, label, hint=hint)
+    if np.any(arr < 0):
+        raise ConfigurationError(
+            f"{label} must be non-negative, >= 0{_hint(hint)}; "
+            f"got {arr.ravel().tolist()}")
+
+
 def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
     """Raise ``ConfigurationError`` if ``values`` is not strictly
     monotonically increasing. Used to guard every range / depth axis that

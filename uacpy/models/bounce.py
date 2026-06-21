@@ -174,6 +174,7 @@ class Bounce(PropagationModel):
         supports={'layered_bottom', 'elastic_media'},
         collapse={'bottom_range': 'median'},
     )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,

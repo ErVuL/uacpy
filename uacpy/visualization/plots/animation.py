@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field
+from uacpy.core.results import Field, ResultStack
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
 from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor
 
@@ -291,11 +291,20 @@ def plot_time_snapshots(
     matplotlib.figure.Figure, numpy.ndarray[matplotlib.axes.Axes]
         Figure and 2-D axes array (shape ``(n_models, n_times)``).
     """
-    # Accept dict or list-of-(name, field).
-    if hasattr(fields, 'items'):
+    # Accept the canonical multi-result container (ResultStack), a single
+    # Field, a sequence of Fields (auto-named by model), a {name: field} dict,
+    # or a sequence of (name, field) pairs.
+    if isinstance(fields, ResultStack):
+        rows = [(f"{fields.coordinate_name}={c:g}", slab) for c, slab in fields]
+    elif hasattr(fields, 'items'):
         rows = list(fields.items())
+    elif isinstance(fields, Field):
+        rows = [(fields.model or '', fields)]
     else:
-        rows = list(fields)
+        rows = [
+            (item.model or '', item) if isinstance(item, Field) else tuple(item)
+            for item in fields
+        ]
     n_models = len(rows)
     n_times = len(times_s)
     if n_models == 0 or n_times == 0:
