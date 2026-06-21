@@ -17,6 +17,8 @@ ISO 18405:2017, *Underwater acoustics — Terminology* (decidecade = 1/10 decade
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
@@ -60,20 +62,44 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
     centers, levels : numpy.ndarray
         Band centre frequencies [Hz] and band levels [dB re ``ref²``]; bands with
         no spectral support are ``nan``.
+
+    Notes
+    -----
+    A band straddling fewer than two PSD grid points is integrated by a
+    rectangular ``psd · bandwidth`` estimate (``np.trapezoid`` over a single
+    point is 0, which would silently ``NaN`` the band on a grid too coarse to
+    resolve it) and a one-time :class:`UserWarning` names how many bands were
+    under-resolved, so grid coarseness is visible rather than read as "no
+    energy".
     """
     psd = np.asarray(psd, dtype=float)
     freqs = np.asarray(freqs, dtype=float)
     pos = freqs > 0
     lower, centers, upper = decidecade_bands(freqs[pos].min(), freqs[pos].max())
     levels = np.full(centers.size, np.nan)
+    n_coarse = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         m = (freqs >= lo) & (freqs < hi)
-        # Need ≥2 samples: np.trapezoid over a single point is 0, which would
-        # silently NaN the band on a PSD grid too coarse to resolve it.
-        if np.count_nonzero(m) >= 2:
+        n = int(np.count_nonzero(m))
+        if n >= 2:
             power = np.trapezoid(psd[m], freqs[m])
-            if power > 0:
-                levels[i] = 10.0 * np.log10(power / ref ** 2)
+        elif n == 1:
+            # Coarse grid: trapezoid over one point is 0; fall back to a
+            # rectangular psd·bandwidth estimate so the band isn't lost.
+            n_coarse += 1
+            power = float(psd[m][0]) * (hi - lo)
+        else:
+            continue
+        if power > 0:
+            levels[i] = 10.0 * np.log10(power / ref ** 2)
+    if n_coarse:
+        warnings.warn(
+            f"decidecade_band_levels: {n_coarse} band(s) straddled only one PSD "
+            "grid point and were estimated rectangularly (psd·bandwidth); the "
+            "PSD grid is too coarse to resolve them. Use a finer-resolution PSD "
+            "for an integrated level.",
+            UserWarning, stacklevel=2,
+        )
     return centers, levels
 
 

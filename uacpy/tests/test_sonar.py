@@ -287,6 +287,17 @@ class TestBudgetKnobs:
                 140.0, 70.0, 60.0, directivity_index=15.0, array_gain=12.0,
             )
 
+    def test_array_gain_alone_uses_ag(self):
+        # directivity_index defaults to None ("not supplied"), so array_gain
+        # alone is accepted and applied — no spurious both-supplied rejection.
+        assert sonar.noise_background(60.0, array_gain=12.0) == pytest.approx(48.0)
+
+    def test_di_array_with_zero_plus_ag_still_raises(self):
+        # An explicit per-angle DI array containing a 0 is "supplied" — mixing
+        # it with array_gain is categorically an error (no 0.0 sentinel escape).
+        with pytest.raises(ConfigurationError):
+            sonar.noise_background(60.0, np.array([0.0, 10.0]), array_gain=12.0)
+
     def test_processing_loss_subtracts(self):
         base = sonar.passive_signal_excess(140.0, 70.0, 60.0,
                                            directivity_index=15.0)

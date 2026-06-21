@@ -41,7 +41,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -310,6 +310,15 @@ class OAST(OASES):
     >>> result = oast.run(env, source, receiver)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). OAST:
+    # range-independent wavenumber integration; multi-layer fluid + elastic
+    # bottom honoured. Single spectral solve → mean SSP / median bottom column.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -346,23 +355,9 @@ class OAST(OASES):
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
         self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
 
-        self._supported_modes = [RunMode.COHERENT_TL]
-        # OAST: range-independent wavenumber integration; multi-layer
-        # fluid + elastic bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Single spectral solve over the full wavenumber axis;
-        # median/mean samples represent the path the field describes.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path
@@ -617,6 +612,15 @@ class OASN(OASES):
     >>> # cov.covariance has shape (n_frequencies, n_rcv, n_rcv)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). OASN:
+    # range-independent covariance / replica field; multi-layer bottom
+    # honoured. Single spectral solve per frequency → mean SSP / median column.
+    spec = ModelSpec(
+        modes=(RunMode.COVARIANCE, RunMode.REPLICA),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -696,23 +700,9 @@ class OASN(OASES):
         self.vrec = float(vrec)
         self.offdb = float(offdb) if offdb is not None else None
 
-        self._supported_modes = [RunMode.COVARIANCE, RunMode.REPLICA]
-        # OASN: range-independent covariance / replica field; multi-layer
-        # bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Single spectral solve at each frequency; median/mean samples
-        # represent the path the array sees.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path
@@ -1021,6 +1011,16 @@ class OASR(OASES):
     >>> refl = oasr.run(env, source, receiver)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). OASR:
+    # range-independent reflection vs angle/freq; layered bottom honoured.
+    # Only the bottom stack matters — SSP collapse left at the global default
+    # ('r0'), as the SSP is essentially irrelevant to the reflection coeff.
+    spec = ModelSpec(
+        modes=(RunMode.REFLECTION,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -1083,22 +1083,9 @@ class OASR(OASES):
 
         # OASR is strictly a boundary-reflection solver; it does not produce
         # transmission loss. Declare that explicitly.
-        self._supported_modes = [RunMode.REFLECTION]
-        # OASR: range-independent reflection vs angle/freq; layered bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Pure boundary reflection — only the bottom stack matters.
-        # SSP collapse left at the global default ('r0') because the
-        # SSP is essentially irrelevant to the reflection coefficient.
-        self._set_collapse_defaults({
-            'bottom_range': 'median',
-        })
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path
@@ -1308,6 +1295,16 @@ class OASP(OASES):
     >>> result = oasp.run(env, source, receiver)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). OASP:
+    # range-independent broadband wavenumber integration / pulse synthesis;
+    # multi-layer fluid + elastic bottom honoured. Single spectral solve per
+    # frequency → mean SSP / median bottom column represent the path.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -1381,27 +1378,9 @@ class OASP(OASES):
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
 
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Range-independent broadband wavenumber-integration / pulse
-        # synthesis. Single spectral solve per frequency, transformed
-        # to range and time. Median/mean samples represent the path.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
-
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path

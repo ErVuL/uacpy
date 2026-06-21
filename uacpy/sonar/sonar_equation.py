@@ -38,28 +38,31 @@ def echo_level(source_level, tl, target_strength):
         + np.asarray(target_strength, float)
 
 
-def noise_background(noise_level, directivity_index=0.0, *, array_gain=None):
+def noise_background(noise_level, directivity_index=None, *, array_gain=None):
     """Noise masking background: ``NL - DI`` (dB), or ``NL - AG``.
 
     ``array_gain`` replaces the directivity index when given — AG is the
     measured/estimated gain of the receiver against the *actual* noise
     field (AG = DI only for isotropic noise; anisotropic noise or signal
-    coherence loss across the array makes AG < DI). Passing both a
-    non-zero ``directivity_index`` and ``array_gain`` raises — they are
-    alternative parametrisations of the same term.
+    coherence loss across the array makes AG < DI). ``directivity_index``
+    defaults to ``None`` (treated as 0 dB); passing both an explicit
+    ``directivity_index`` and ``array_gain`` raises — they are alternative
+    parametrisations of the same term. ``None`` distinguishes "not supplied"
+    from a legitimate per-angle DI array that happens to contain a 0.
     """
     if array_gain is not None:
-        if np.any(np.asarray(directivity_index, float) != 0.0):
+        if directivity_index is not None:
             raise ConfigurationError(
                 "noise_background: pass either directivity_index or "
                 "array_gain, not both — AG replaces DI."
             )
         return np.asarray(noise_level, float) - np.asarray(array_gain, float)
-    return np.asarray(noise_level, float) - np.asarray(directivity_index, float)
+    di = 0.0 if directivity_index is None else directivity_index
+    return np.asarray(noise_level, float) - np.asarray(di, float)
 
 
 def passive_signal_excess(
-    source_level, tl, noise_level, directivity_index=0.0,
+    source_level, tl, noise_level, directivity_index=None,
     detection_threshold=0.0, *, array_gain=None, processing_loss_db=0.0,
 ):
     """Passive signal excess ``SE = SL - TL - (NL - DI) - DT - L_sp`` (dB).
@@ -87,7 +90,7 @@ def active_signal_excess(
     target_strength,
     *,
     noise_level=None,
-    directivity_index=0.0,
+    directivity_index=None,
     reverberation_level=None,
     detection_threshold=0.0,
     array_gain=None,
@@ -131,7 +134,7 @@ def active_signal_excess(
 
 
 def figure_of_merit(
-    source_level, noise_level, directivity_index=0.0, detection_threshold=0.0,
+    source_level, noise_level, directivity_index=None, detection_threshold=0.0,
     *, array_gain=None, processing_loss_db=0.0,
 ):
     """Figure of merit ``FOM = SL - (NL - DI) - DT - L_sp`` (dB).
@@ -207,7 +210,7 @@ def passive_signal_excess_field(
     *,
     source_level,
     noise_level,
-    directivity_index=0.0,
+    directivity_index=None,
     detection_threshold=0.0,
     array_gain=None,
     processing_loss_db=0.0,
@@ -259,7 +262,7 @@ def passive_signal_excess_field(
         'mode': 'passive',
         'source_level': float(source_level),
         'noise_level': float(noise_level),
-        'directivity_index': float(directivity_index),
+        'directivity_index': 0.0 if directivity_index is None else float(directivity_index),
         'detection_threshold': float(detection_threshold),
         'processing_loss_db': float(processing_loss_db),
     }
@@ -275,7 +278,7 @@ def active_signal_excess_field(
     target_strength,
     noise_level=None,
     reverberation_level=None,
-    directivity_index=0.0,
+    directivity_index=None,
     detection_threshold=0.0,
     array_gain=None,
     processing_loss_db=0.0,
@@ -342,7 +345,7 @@ def active_signal_excess_field(
         'mode': 'active',
         'source_level': float(source_level),
         'target_strength': float(target_strength),
-        'directivity_index': float(directivity_index),
+        'directivity_index': 0.0 if directivity_index is None else float(directivity_index),
         'detection_threshold': float(detection_threshold),
         'processing_loss_db': float(processing_loss_db),
     }

@@ -27,7 +27,14 @@ class _GebcoGrid(NetcdfGrid):
         self._elev = self.var('elevation', 'z')
 
     def elevation(self, lat, lon):
-        return float(self._elev[self.row(lat), self.col(lon)])
+        elev = self.cell(self._elev, self.row(lat), self.col(lon))
+        if not np.isfinite(elev):
+            raise DataFetchError(
+                f"GEBCO has no elevation at ({lat:.4f}, {lon:.4f}) "
+                "(fill / masked cell).",
+                remediation="Pick a coordinate inside the GEBCO grid.",
+            )
+        return elev
 
     def region(self, lat_range, lon_range, n_lat, n_lon):
         lats = np.linspace(min(lat_range), max(lat_range), n_lat)

@@ -335,7 +335,8 @@ def read_modes_bin(
         raise
     except FileNotFoundError as e:
         raise FileFormatError(f"Mode file not found: {filename}") from e
-    except (IndexError, ValueError, struct.error, EOFError, OSError) as e:
+    except (IndexError, ValueError, struct.error, EOFError, OSError,
+            ZeroDivisionError, OverflowError) as e:
         raise FileFormatError(
             f"Malformed Kraken mode file {filename}: {e}"
         ) from e
@@ -431,6 +432,11 @@ def _read_modes_bin_impl(
         f8 = np.dtype(endian + 'f8')
         fid.seek(0, 0)
         lrecl = 4 * np.fromfile(fid, dtype=i4, count=1)[0]
+        if lrecl <= 0:
+            raise FileFormatError(
+                f"Invalid mode file: record length lrecl={lrecl} "
+                f"(first word must be a positive word-count): {filename}"
+            )
         fid.seek(4, 0)  # Skip 4 bytes
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
@@ -460,6 +466,11 @@ def _read_modes_bin_impl(
                     f"implausible for a {file_size}-byte file "
                     f"(max {max_items} 4-byte items)."
                 )
+        if Nfreq < 1:
+            raise FileFormatError(
+                f"Invalid mode file: Nfreq={Nfreq} (need at least one "
+                f"frequency block): {filename}"
+            )
 
         fid.seek(lrecl, 0)
         N = []

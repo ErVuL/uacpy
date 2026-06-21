@@ -201,6 +201,20 @@ def test_fetch_ssp_transect_builds_2d(annual_http):
     assert np.allclose(ssp.data[:, 0], ssp.data[:, -1])
 
 
+def test_assemble_range_dependent_reorders_unsorted_ranges():
+    z = np.array([0.0, 100.0])
+    cols = [SoundSpeedProfile(depths=z, data=np.array([[1500.0], [1510.0]])),
+            SoundSpeedProfile(depths=z, data=np.array([[1490.0], [1500.0]])),
+            SoundSpeedProfile(depths=z, data=np.array([[1480.0], [1490.0]]))]
+    # Ranges supplied out of order: the result must come back ascending, with
+    # each column following its range.
+    ssp = ss.assemble_range_dependent(cols, [2000.0, 0.0, 1000.0])
+    assert list(ssp.ranges) == [0.0, 1000.0, 2000.0]
+    assert ssp.data[0, 0] == 1490.0              # the 0 m column
+    assert ssp.data[0, 1] == 1480.0              # the 1000 m column
+    assert ssp.data[0, 2] == 1500.0              # the 2000 m column
+
+
 @pytest.mark.requires_network
 def test_live_woa23_profile():
     try:

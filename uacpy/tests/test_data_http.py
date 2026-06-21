@@ -67,3 +67,51 @@ def test_retry_after_parsing():
     assert _http._retry_after(err2) == 1.5                     # default
     err3 = urllib.error.HTTPError('http://x', 429, 'x', {'Retry-After': '999'}, None)
     assert _http._retry_after(err3) == _http._MAX_BACKOFF_S    # capped
+
+
+@pytest.mark.parametrize('url', ['file:///etc/passwd', 'ftp://h/x', '/etc/passwd'])
+def test_non_http_scheme_rejected_before_urlopen(url, monkeypatch):
+    # The guard must fire before urlopen is ever reached (no local-file read).
+    def boom(*a, **k):                       # pragma: no cover - must not run
+        raise AssertionError('urlopen should not be called')
+    monkeypatch.setattr(_http.urllib.request, 'urlopen', boom)
+    with pytest.raises(DataFetchError, match='http/https'):
+        _http.http_get(url)
+
+
+class _SizedResp(_FakeResp):
+    def __init__(self, body, content_length=None):
+        self._body = body
+        self.headers = {} if content_length is None else {
+            'Content-Length': str(content_length)}
+
+    def read(self, amt=-1):
+        return self._body[:amt] if amt and amt >= 0 else self._body
+
+
+def test_size_cap_rejects_oversize_body(monkeypatch):
+    monkeypatch.setattr(_http.urllib.request, 'urlopen',
+                        lambda req, timeout=None: _SizedResp(b'x' * 50))
+    with pytest.raises(DataFetchError, match='cap'):
+        _http.http_get('http://x', max_bytes=10)
+
+
+def test_size_cap_rejects_oversize_content_length(monkeypatch):
+    monkeypatch.setattr(_http.urllib.request, 'urlopen',
+                        lambda req, timeout=None: _SizedResp(b'x', content_length=10000))
+    with pytest.raises(DataFetchError, match='cap'):
+        _http.http_get('http://x', max_bytes=100)
+
+
+def test_size_cap_passes_within_limit(monkeypatch):
+    monkeypatch.setattr(_http.urllib.request, 'urlopen',
+                        lambda req, timeout=None: _SizedResp(b'hello'))
+    assert _http.http_get('http://x', max_bytes=100) == b'hello'
+
+
+def test_checked_member_size_caps_bomb():
+    assert _http.checked_member_size(100, 'a.tif', max_bytes=1000) == 100
+    with pytest.raises(DataFetchError, match='decompression bomb'):
+        _http.checked_member_size(2000, 'a.tif', max_bytes=1000)
+    with pytest.raises(DataFetchError, match='decompression bomb'):
+        _http.checked_member_size(-1, 'a.tif', max_bytes=1000)

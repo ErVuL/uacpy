@@ -77,6 +77,13 @@ class TestPlotField:
 
     def test_2d_heatmap_real_dB(self, tl_field, env):
         fig, ax = plots.plot_field(tl_field, env=env)
+        # Physical contract of the 2-D TL heatmap (not just "a fig came back"):
+        # depth increases downward, the y-label names depth, and the default TL
+        # colour scale is the fixed _TL_LIMITS so panels stay comparable.
+        assert ax.yaxis_inverted()
+        assert ax.get_ylabel() == 'Depth (m)'
+        mesh = ax.collections[0]
+        assert mesh.get_clim() == (20.0, 120.0)
         plt.close(fig)
 
     def test_1d_range_cut_via_at(self, tl_field):
@@ -334,11 +341,39 @@ class TestBathymetryMap:
     def test_plain_lonlat(self):
         lats, lons, depth = self._grid()
         fig, ax = plots.plot_bathymetry_map(
-            lats, lons, depth, basemap=None,
+            lats, lons, depth, basemap=False,
             transect=((42, 4), (38.3, 6)), title='t')
         assert fig is not None and ax.has_data()
         assert ax.get_xlabel().startswith('Longitude')
         plt.close(fig)
+
+    def test_relief_orientation_invariant_to_lat_order(self):
+        # The shaded-relief path uses imshow(origin='lower'), which assumes
+        # row 0 of the array is the southernmost. A descending lat axis must be
+        # flipped to that canonical order so the relief image matches the true
+        # geography (and the flat pcolormesh path) — not render upside down.
+        lons = np.linspace(0, 10, 10)
+        lats_up = np.linspace(36, 44, 8)            # ascending S→N
+        rng = np.random.default_rng(0)
+        depth_up = rng.uniform(500, 3000, (8, 10))
+        depth_up[-1, 0] = np.nan                    # land at the NORTH-WEST corner
+
+        def relief_rgba(lats, depth):
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, relief=True, graticule=None)
+            im = ax.get_images()[0]                 # the relief AxesImage
+            rgba = np.asarray(im.get_array())
+            plt.close(fig)
+            return rgba
+
+        up = relief_rgba(lats_up, depth_up)
+        # Same geography, lat axis reversed (descending N→S) and rows flipped
+        # to match — the rendered image must be identical.
+        down = relief_rgba(lats_up[::-1], depth_up[::-1, :])
+        assert np.array_equal(up, down, equal_nan=True)
+        # imshow(origin='lower') ⇒ display row -1 is the northern edge; the land
+        # cell sits there (top-left), transparent (alpha == 0).
+        assert up[-1, 0, 3] == 0.0
 
     def test_coastline_default(self, monkeypatch):
         # Default backdrop = Natural Earth coastlines (public domain); stub fetch.

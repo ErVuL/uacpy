@@ -93,6 +93,8 @@ class TestTimeFrequency:
         f0 = 300.0
         x = np.cos(2 * np.pi * f0 * np.arange(2000) / FS)
         inst = instantaneous_frequency(x, FS)
+        # np.gradient gives a centred, time-aligned estimate of length len(x).
+        assert inst.shape == x.shape
         assert np.median(inst[50:-50]) == pytest.approx(f0, abs=2.0)
 
     def test_wigner_ville_localises_tone(self):

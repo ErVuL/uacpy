@@ -14,7 +14,7 @@ from typing import Union
 from uacpy.core.exceptions import DataFetchError
 from uacpy._log import log_message
 
-__all__ = ['http_get']
+__all__ = ['http_get', 'checked_member_size', 'MAX_MEMBER_BYTES']
 
 # HTTP codes worth retrying (transient rate-limit / availability).
 _RETRY_CODES = (429, 503)
@@ -26,6 +26,11 @@ _ALLOWED_SCHEMES = ('http', 'https')
 # Ceiling on a single response body, so a malicious / misdirected host cannot
 # drive an unbounded allocation before the bytes ever reach a parser.
 _DEFAULT_MAX_BYTES = 512 * 1024 * 1024   # 512 MiB
+# Ceiling on a single uncompressed archive member, so a tar/zip "decompression
+# bomb" cannot exhaust memory when an install-time download extracts a member
+# into memory. The largest legitimate member is the Diesing raster (~hundreds of
+# MB uncompressed); the cap is generous but bounded.
+MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024   # 2 GiB
 
 
 def http_get(
@@ -125,6 +130,25 @@ def _read_capped(response, url: str, max_bytes: int) -> bytes:
                         "request, or point base_url= at a mirror.",
         )
     return data
+
+
+def checked_member_size(
+    declared_size: int, name: str, *, max_bytes: int = MAX_MEMBER_BYTES,
+) -> int:
+    """Validate an archive member's declared uncompressed size against a cap.
+
+    Tar/zip headers carry the uncompressed size, so a decompression bomb can be
+    rejected *before* it is read into memory. Returns the size on success;
+    raises :class:`DataFetchError` if it exceeds ``max_bytes`` or is negative.
+    """
+    if declared_size is None or declared_size < 0 or declared_size > max_bytes:
+        raise DataFetchError(
+            f"Archive member {name!r} declares {declared_size} uncompressed "
+            f"bytes, over the {max_bytes}-byte cap (possible decompression bomb).",
+            remediation="The upstream archive may be corrupt or hostile; verify "
+                        "the download source, or raise the cap if it is trusted.",
+        )
+    return declared_size
 
 
 def _retry_after(exc: urllib.error.HTTPError) -> float:

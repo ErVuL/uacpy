@@ -32,7 +32,11 @@ class Receiver:
         point-by-point, requiring ``len(depths) == len(ranges)``, e.g. a
         glider track or tilted array). Note: 'line' here is a coordinate-
         pairing rule and is unrelated to :class:`~uacpy.Source`'s
-        ``source_type='line'`` (a physical line-source geometry).
+        ``source_type='line'`` (a physical line-source geometry). Unlike
+        ``'grid'`` (whose axes must be strictly increasing), a ``'line'``
+        layout is a raw sampling list: ordering and uniqueness are the
+        caller's responsibility. Feeding a non-monotonic line into a reader
+        that interpolates on range/depth is undefined.
 
     Attributes
     ----------

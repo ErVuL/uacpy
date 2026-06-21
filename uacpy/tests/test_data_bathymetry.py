@@ -22,6 +22,15 @@ def _ok(elevations):
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_rate_limit(monkeypatch):
+    """Disable the OpenTopoData ≤1 req/s spacing so chunked tests run instantly.
+
+    The throttle itself is exercised explicitly in ``test_rate_limit_*``.
+    """
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 0.0)
+
+
 @pytest.fixture
 def stub_http(monkeypatch):
     """Patch the HTTP getter; returns a list capturing requested URLs.
@@ -156,6 +165,32 @@ def test_fetch_grid_allows_50x50(stub_http):
 def test_fetch_grid_too_many_requests_raises():
     with pytest.raises(ConfigurationError, match='requests'):
         bathymetry.fetch_bathy_grid((0, 10), (0, 10), n_lat=110, n_lon=110)
+
+
+def test_rate_limit_spaces_public_host_chunks(monkeypatch):
+    # Two chunks against the public host must be spaced by the throttle.
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 1.0)
+    monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
+    sleeps = []
+    monkeypatch.setattr(bathymetry.time, 'sleep', lambda s: sleeps.append(s))
+    monkeypatch.setattr(bathymetry, '_http_get_json',
+                        lambda url, *, timeout, verbose: _ok([-1500.0] * url.count('%2C')))
+    bathymetry.fetch_bathy_transect((0.0, 0.0), (2.0, 2.0),
+                                    n_points=150, max_points=150)  # 2 chunks
+    assert any(s > 0.0 for s in sleeps)
+
+
+def test_rate_limit_skipped_for_self_hosted(monkeypatch):
+    # A self-hosted base_url lifts the limit → no throttle sleep.
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 1.0)
+    monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
+    sleeps = []
+    monkeypatch.setattr(bathymetry.time, 'sleep', lambda s: sleeps.append(s))
+    monkeypatch.setattr(bathymetry, '_http_get_json',
+                        lambda url, *, timeout, verbose: _ok([-1500.0] * url.count('%2C')))
+    bathymetry.fetch_bathy_transect((0.0, 0.0), (2.0, 2.0), n_points=150,
+                                    max_points=150, base_url='http://localhost:5000/v1')
+    assert sleeps == []
 
 
 @pytest.mark.requires_network

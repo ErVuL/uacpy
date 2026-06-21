@@ -1555,7 +1555,7 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
 | `roughness` | m | `0.0` | Bottom RMS roughness. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme. |
-| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. |
+| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. **`'S'` is experimental: its absolute TL is uncalibrated (~30 dB offset vs Kraken/Scooter; emits a `UserWarning`) — use `'R'` or another model for absolute levels.** |
 | `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. |
 | `n_t_out` | count | `512` | Number of output time samples. |
 | `t_max` | s | `None` | Max time; `None` = auto (2.5 × travel time). |

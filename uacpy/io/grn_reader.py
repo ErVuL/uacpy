@@ -439,9 +439,10 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    # Steady-tone amplitude estimator 2·X_k/Σwin — the same one
-    # rts_to_pressure applies to the 'R'/'D' output modes, so both
-    # SPARC output paths agree on absolute |p|.
+    # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure for
+    # the 'R'/'D' modes). NOTE: the snapshot path's absolute level is still
+    # ~30 dB off the modal/FFP models (Kraken/Scooter) — experimental and
+    # uncalibrated; the field shape is indicative but the dB values are not.
     win = np.hanning(nt)
     G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)

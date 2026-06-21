@@ -224,13 +224,20 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
 
     The common depth axis is the deepest column's; shallower columns hold their
     deepest value below their own seafloor (``np.interp`` constant-edge fill).
-    Shared by the WOA23 and Copernicus transect fetchers.
+    Shared by the WOA23 and Copernicus transect fetchers. Columns are reordered
+    to strictly increasing range, so a caller that supplies them out of order
+    still gets a correctly-ordered range axis (the carriers assume ascending
+    range).
     """
+    ranges = np.asarray(ranges_m, dtype=float)
+    order = np.argsort(ranges, kind='stable')
+    ranges = ranges[order]
+    columns = [columns[i] for i in order]
     z = max(columns, key=lambda p: p.depths[-1]).depths
     data = np.column_stack([
         np.interp(z, col.depths, col.data[:, 0]) for col in columns
     ])
-    return SoundSpeedProfile(depths=z, data=data, ranges=np.asarray(ranges_m),
+    return SoundSpeedProfile(depths=z, data=data, ranges=ranges,
                              shape='measured')
 
 
@@ -299,7 +306,7 @@ def _resolve_period(date, month) -> int:
     """Map ``date``/``month`` to a WOA period code (0 annual, 1-12 monthly)."""
     if date is not None and month is not None:
         raise ConfigurationError(
-            "fetch_ssp: pass either date= or month=, not both.",
+            "WOA23: pass either date= or month=, not both.",
         )
     if date is not None:
         month = parse_date(date).month
@@ -307,7 +314,7 @@ def _resolve_period(date, month) -> int:
         return 0
     if not 1 <= int(month) <= 12:
         raise ConfigurationError(
-            f"fetch_ssp: month must be 1-12, got {month}.",
+            f"WOA23: month must be 1-12, got {month}.",
         )
     return int(month)
 

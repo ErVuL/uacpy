@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment, BoundaryProperties, Bottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -329,6 +329,28 @@ class Bellhop(PropagationModel):
     >>> bellhop_gpu = Bellhop(backend='cuda')
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). Bellhop is the
+    # ray engine: honours altimetry, range-dependent bathymetry/bottom,
+    # elastic media and a native multi-source-depth grid. No collapse
+    # override — uses the base DEFAULT_COLLAPSE unchanged. ``layered_bottom``
+    # is False (ray model takes a single half-space per column).
+    # ``range_dependent_ssp`` is *instance-dependent* (honoured only on the
+    # 'quad' interp), so it is set in __init__ below, not here.
+    spec = ModelSpec(
+        modes=(
+            RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
+            RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS,
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ),
+        supports={
+            'altimetry',
+            'range_dependent_bathymetry',
+            'range_dependent_bottom',
+            'elastic_media',
+            'multi_source_depth',
+        },
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -485,37 +507,21 @@ class Bellhop(PropagationModel):
             cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
 
-        # Declare supported modes for Bellhop
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.INCOHERENT_TL,
-            RunMode.SEMICOHERENT_TL,
-            RunMode.RAYS,
-            RunMode.EIGENRAYS,
-            RunMode.ARRIVALS,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        # No _set_collapse_defaults override: Bellhop uses the base
-        # DEFAULT_COLLAPSE (bathymetry='max', ssp='r0', …) unchanged.
-        self._supports_altimetry = True
-        self._supports_range_dependent_bathymetry = True
-        # RD-SSP is honoured natively only via the external 2-D .ssp file,
-        # which Bellhop reaches on the 'quad' interp. ``interp_ssp=None`` auto-
-        # picks 'quad' for a range-dependent SSP (oalib_writer.resolve_ssp_interp),
-        # so the default path honours it. A user who *pins* a non-quad interp
-        # ('linear', 'cubic', …) gets a 1-D collapse — so the flag must be
-        # False for that instance, and ``_project_environment`` does the
-        # collapse with the standard one-warning-per-feature. Keeping the flag
-        # honest means the advertised capability matches the run-time behaviour.
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Instance-dependent override: RD-SSP is honoured natively only via the
+        # external 2-D .ssp file, which Bellhop reaches on the 'quad' interp.
+        # ``interp_ssp=None`` auto-picks 'quad' for a range-dependent SSP
+        # (oalib_writer.resolve_ssp_interp), so the default path honours it. A
+        # user who *pins* a non-quad interp ('linear', 'cubic', …) gets a 1-D
+        # collapse — so the flag must be False for that instance, and
+        # ``_project_environment`` does the collapse with the standard
+        # one-warning-per-feature. Keeping the flag honest means the advertised
+        # capability matches the run-time behaviour.
         self._supports_range_dependent_ssp = (
             interp_ssp is None or str(interp_ssp).lower() == 'quad'
         )
-        self._supports_range_dependent_bottom = True
-        self._supports_layered_bottom = False
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = True
 
         if beam_type not in _VALID_BEAM_TYPES:
             raise ConfigurationError(

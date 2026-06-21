@@ -365,10 +365,18 @@ class SEL:
 
         window = _sig.windows.boxcar(nfft)
         f = np.fft.rfftfreq(nfft, d=1 / fs)
-        band_indices = []
-        for low, center, high in self.bands:
-            idx = np.logical_and(f >= low, f < high)
-            band_indices.append(idx)
+        # Assign each FFT bin to exactly one band via the (contiguous) band
+        # edges, instead of independent [low, high) masks. At coarse FFT
+        # resolution several sub-bin-wide low-frequency bands would otherwise
+        # map to the same 1-Hz bin (double-counted) or to none (dropped); a
+        # single digitize keeps every bin in exactly one band, so per-band
+        # levels and the total stay consistent.
+        edges = np.array([b[0] for b in self.bands] + [self.bands[-1][2]])
+        # np.digitize: bin index in [1, len(edges)-1] for f inside the band span,
+        # 0 below the first edge, len(edges) at/above the last. Map to band idx.
+        bin_band = np.digitize(f, edges) - 1
+        nb = len(self.bands)
+        band_bins = [np.where(bin_band == k)[0] for k in range(nb)]
         self.sel = np.zeros(len(self.bands))
 
         # Process data in chunks
@@ -387,7 +395,7 @@ class SEL:
             Sxx_sum = np.sum(Sxx, axis=1)
 
             # Accumulate SEL in each band
-            for k, idx in enumerate(band_indices):
+            for k, idx in enumerate(band_bins):
                 self.sel[k] += np.sum(Sxx_sum[idx])
 
         return self.sel, self.bands

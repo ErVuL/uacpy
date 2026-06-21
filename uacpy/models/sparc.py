@@ -27,7 +27,7 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_field
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
 from uacpy.io.oalib_writer import write_sparc_env_file
 
@@ -200,6 +200,18 @@ class SPARC(PropagationModel):
     >>> result = sparc.run(env, source, receiver)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). SPARC:
+    # range-independent time-marched FFP. Honours a multi-layer fluid
+    # bottom; elastic_media is False because run() auto-rigidifies a
+    # halfspace bottom, so we collapse to fluid up front (uniform warning
+    # rather than a silent rigidify). Single solve over the spectrum →
+    # mean SSP / median bottom column represent the path.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.TIME_SERIES),
+        supports={'layered_bottom'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -254,7 +266,10 @@ class SPARC(PropagationModel):
             ``'S'`` mode time-FFTs the snapshot's tout axis and picks the
             source-frequency bin (``uacpy.io.grn_reader.sparc_snapshot_to_field``);
             ``n_t_out`` must be large enough that the source frequency
-            stays below ``0.5/dt``.
+            stays below ``0.5/dt``. **Experimental:** the snapshot path's
+            absolute level is uncalibrated (~30 dB off Kraken/Scooter) and
+            emits a ``UserWarning`` — the field shape is indicative but use
+            ``'R'`` or another model for absolute transmission loss.
         pulse_type : str, optional
             Pulse type string. Default: 'PN+B'.
         n_t_out : int, optional
@@ -326,30 +341,9 @@ class SPARC(PropagationModel):
             float(sound_speed) if sound_speed is not None else None
         )
 
-        # Declare supported modes for SPARC
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.TIME_SERIES,
-        ]
-        # SPARC: range-independent time-marched FFP. Multi-layer fluid /
-        # SPARC's run() auto-converts halfspace bottoms to rigid (line ~650),
-        # so elastic_bottom flag is False — collapse to fluid up front so
-        # the user gets a uniform warning instead of a silent rigidify.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = False
-        self._supports_multi_source_depth = False
-        # Range-independent time-marched FFP — single solve over the
-        # whole spectrum. Median/mean samples represent the path.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
-
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path
@@ -735,15 +729,32 @@ class SPARC(PropagationModel):
                     raise exc
 
                 # Time-FFT along the snapshot's tout axis, pick the source
-                # frequency bin, then Hankel transform — recovers steady-state
-                # TL despite SPARC being natively a transient solver.
+                # frequency bin, then Hankel transform to range.
+                #
+                # KNOWN LIMITATION: the absolute level of this snapshot path is
+                # NOT calibrated — it is ~30 dB off the modal/FFP models
+                # (Kraken/Scooter agree with each other to <1 dB; SPARC 'S'
+                # does not). The field *shape* is indicative but the dB values
+                # are unreliable. Snapshot mode is experimental; use
+                # ``output_mode='R'`` (native range synthesis) or another model
+                # for absolute transmission loss.
+                warnings.warn(
+                    "SPARC output_mode='S' (snapshot) absolute transmission "
+                    "loss is uncalibrated (~30 dB offset vs Kraken/Scooter) and "
+                    "experimental. Use output_mode='R' or another model "
+                    "(Kraken/Scooter/RAM) for absolute TL.",
+                    UserWarning, stacklevel=2,
+                )
                 result = sparc_snapshot_to_field(
                     grn_data, receiver.ranges, frequency=freq,
                 )
                 self._stamp_result(result, source, backend='sparc',
                                    frequencies=freq, phase_reference='travelling_wave')
                 result.metadata['output_mode'] = 'S'
-                result.metadata['note'] = 'Snapshot mode: time-FFT then Hankel transform'
+                result.metadata['note'] = (
+                    'Snapshot mode (experimental): time-FFT then Hankel '
+                    'transform; absolute TL uncalibrated (~30 dB offset).')
+                result.metadata['absolute_tl_calibrated'] = False
 
             else:
                 raise ConfigurationError(

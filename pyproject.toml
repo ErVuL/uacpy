@@ -73,16 +73,12 @@ Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
 include = ["uacpy*"]
 exclude = ["uacpy.tests", "uacpy.tests.*"]
 
-[tool.setuptools.package-data]
-# OASES binaries are intentionally NOT listed here: OASES is academic-licensed
-# (not redistributable). It must remain a post-install user-side download via
-# `install.sh --oases yes`, never bundled into a wheel/sdist.
-uacpy = [
-    "bin/oalib/*",
-    "bin/bellhopcuda/*",
-    "bin/mpirams/*",
-    "bin/ramsurf/*",
-]
+# No native binaries are bundled as package-data. Every model binary
+# (OALIB/bellhopcuda/mpiramS/ramsurf/ramgeo, and the academic-licensed OASES)
+# is built post-install by `install.sh` into `uacpy/bin/` and is gitignored,
+# so it is never shipped in an sdist/wheel: binaries are machine-specific
+# (wrong-platform tags) and OASES is non-redistributable. Install flow is
+# `git clone … && pip install -e . && ./install.sh` (see README).
 
 [tool.pytest.ini_options]
 testpaths = ["uacpy/tests"]
@@ -100,7 +96,16 @@ addopts = "-n logical --dist=worksteal -m 'not requires_network'"
 # that the suite asserts on via ``pytest.warns`` / ``recwarn`` but that are
 # just noise in the summary. ``pytest.warns`` and ``catch_warnings`` still
 # capture them locally; this only hides them from pytest's output.
-filterwarnings = ["ignore"]
+# Ignore UserWarnings only: uacpy raises these intentionally as part of the
+# model contract (deliberate env-collapse, out-of-range extrapolation,
+# experimental-mode notices) and they would otherwise drown the suite. The
+# regression-relevant categories — RuntimeWarning (divide/overflow/invalid),
+# DeprecationWarning, FutureWarning from numpy/scipy/matplotlib — are left
+# visible so a new one surfaces instead of being silently swallowed (the old
+# blanket "ignore" hid them). A module-scoped UserWarning filter was avoided:
+# stacklevel attributes some uacpy warnings to the caller's frame, so they
+# leak past a `:uacpy.*` module match.
+filterwarnings = ["ignore::UserWarning"]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",

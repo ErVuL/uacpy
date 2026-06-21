@@ -7,6 +7,7 @@ import signal
 import subprocess
 import warnings
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -94,6 +95,95 @@ if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COL
     raise RuntimeError("DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS")
 
 
+# Capability-flag names a model may advertise. Each maps to a
+# ``_supports_<name>`` instance attribute consumed by ``_project_environment``;
+# the question each answers is "does this env *shape* work with this model?".
+# Keep in lockstep with the ``self._supports_*`` block in
+# ``PropagationModel.__init__``.
+_CAPABILITY_FLAGS: frozenset = frozenset({
+    'altimetry',
+    'range_dependent_surface',
+    'range_dependent_bathymetry',
+    'range_dependent_ssp',
+    'range_dependent_bottom',
+    'layered_bottom',
+    'range_dependent_layered_bottom',
+    'elastic_media',
+    'multi_source_depth',
+})
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Declarative per-model metadata read by :class:`PropagationModel`.
+
+    Consolidates the *static* facts about a model — the run modes it
+    emits, the environment shapes it handles natively, its physics-aware
+    collapse defaults, and how to locate its binary — into one block the
+    base class reads and **validates at class-definition time**, instead
+    of scattering them across ``__init__``. The model stays a
+    ``PropagationModel`` subclass, so all generic machinery (collapse
+    application, validation, file manager, subprocess, ``copy()``) is
+    inherited unchanged; the spec only supplies metadata.
+
+    Precedence is preserved: ``collapse`` here layers on top of
+    :data:`DEFAULT_COLLAPSE` but never overrides an explicit
+    ``Model(collapse={...})`` user value (same rule as
+    :meth:`PropagationModel._set_collapse_defaults`). A subclass may still
+    set an instance-dependent flag in ``__init__`` *after* ``super().__init__``
+    for the rare case a capability depends on a constructor argument.
+
+    Fields
+    ------
+    modes : sequence of RunMode
+        Run modes the model emits. Becomes ``self._supported_modes``; the
+        first entry is the default when ``run_mode=None``.
+    supports : iterable of str
+        Capability-flag names (subset of :data:`_CAPABILITY_FLAGS`) the
+        model honours natively. Every flag not listed defaults ``False``
+        and its env feature is collapsed by ``_project_environment``.
+    collapse : dict
+        Per-model collapse defaults overriding :data:`DEFAULT_COLLAPSE`.
+
+    Binary resolution is intentionally *not* here: nothing generic reads it,
+    its shape differs per model (single name vs. list of search dirs vs. the
+    OASES helper vs. Bellhop's backend dispatch), and multi-binary models
+    (Kraken's krakenc, RAM's Collins backends) pick the real executable at
+    ``run()`` time. Each model resolves ``self._exe`` in its own ``__init__``.
+    """
+
+    modes: tuple = ()
+    supports: frozenset = frozenset()
+    collapse: dict = field(default_factory=dict)
+
+    def validate(self, model_name: str) -> None:
+        """Fail loudly at class-definition time on a malformed spec."""
+        for m in self.modes:
+            if not isinstance(m, RunMode):
+                raise TypeError(
+                    f"{model_name}.spec.modes must contain RunMode members; "
+                    f"got {m!r}."
+                )
+        bad_flags = set(self.supports) - _CAPABILITY_FLAGS
+        if bad_flags:
+            raise ValueError(
+                f"{model_name}.spec.supports has unknown capability flags: "
+                f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
+            )
+        unknown = set(self.collapse) - set(DEFAULT_COLLAPSE)
+        if unknown:
+            raise ValueError(
+                f"{model_name}.spec.collapse has unknown keys: "
+                f"{sorted(unknown)}. Valid keys: {sorted(DEFAULT_COLLAPSE)}."
+            )
+        for key, value in self.collapse.items():
+            if value not in VALID_COLLAPSE_METHODS[key]:
+                raise ValueError(
+                    f"{model_name}.spec.collapse[{key!r}] = {value!r} is "
+                    f"invalid. Valid: {sorted(VALID_COLLAPSE_METHODS[key])}."
+                )
+
+
 class PropagationModel(ABC):
     """
     Abstract base class for acoustic propagation models.
@@ -133,8 +223,22 @@ class PropagationModel(ABC):
     # has to fail with TypeError at the call site, not be silently swallowed.
     _RUN_POSITIONAL = ('self', 'env', 'source', 'receiver', 'run_mode')
 
+    # Declarative metadata. ``None`` keeps the legacy path (subclass sets
+    # ``_supported_modes`` / ``_supports_*`` / collapse defaults by hand in
+    # ``__init__``). When a subclass declares a :class:`ModelSpec`, the base
+    # validates it at class-definition time and applies it in ``__init__``.
+    spec: Optional['ModelSpec'] = None
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        spec = cls.__dict__.get('spec')
+        if spec is not None:
+            if not isinstance(spec, ModelSpec):
+                raise TypeError(
+                    f"{cls.__name__}.spec must be a ModelSpec, got "
+                    f"{type(spec).__name__}."
+                )
+            spec.validate(cls.__name__)
         run = cls.__dict__.get('run')
         if run is None:
             return
@@ -251,6 +355,30 @@ class PropagationModel(ABC):
         # Bellhop is the only model that runs one source-depth grid in
         # a single binary call; everyone else loops in Python.
         self._supports_multi_source_depth: bool = False
+
+        # When the subclass declares a ModelSpec, apply it now (after the
+        # defaults above and after ``_user_collapse`` is populated, so the
+        # collapse precedence DEFAULT ← spec ← user override holds). A
+        # subclass may still override an individual flag afterward for the
+        # rare instance-dependent capability.
+        if self.spec is not None:
+            self._apply_spec()
+
+    def _apply_spec(self) -> None:
+        """Install :attr:`spec`'s metadata onto this instance.
+
+        Sets ``_supported_modes`` and every ``_supports_<flag>`` from the
+        declarative manifest and layers the spec's collapse defaults via
+        :meth:`_set_collapse_defaults` (so user overrides still win). The
+        spec is already validated in ``__init_subclass__``.
+        """
+        spec = self.spec
+        if spec.modes:
+            self._supported_modes = list(spec.modes)
+        for flag in _CAPABILITY_FLAGS:
+            setattr(self, f'_supports_{flag}', flag in spec.supports)
+        if spec.collapse:
+            self._set_collapse_defaults(spec.collapse)
 
     def _set_collapse_defaults(self, defaults: Dict[str, str]) -> None:
         """Subclass hook: install model-specific collapse defaults.
@@ -369,6 +497,11 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         run_mode: Optional['RunMode'] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """Run the propagation model.
 
@@ -410,6 +543,17 @@ class PropagationModel(ABC):
             Output type to compute. ``None`` selects the model's natural
             default (typically ``RunMode.COHERENT_TL``). Each wrapper's
             :attr:`supported_modes` lists what it accepts.
+        frequencies : array-like, optional
+            Keyword-only. Explicit broadband frequency grid (Hz), overriding
+            ``source.frequencies`` for models with a broadband path.
+        source_waveform : array-like, optional
+            Keyword-only. Source time series for ``RunMode.TIME_SERIES``
+            synthesis (consumed with ``sample_rate``).
+        sample_rate : float, optional
+            Keyword-only. Sample rate (Hz) of ``source_waveform``.
+        output_duration : float, optional
+            Keyword-only. Desired output time-window length (s); IFFT-based
+            wrappers zero-pad so ``Δf = 1/output_duration``.
 
         Returns
         -------

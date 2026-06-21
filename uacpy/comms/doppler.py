@@ -28,11 +28,11 @@ def doppler_from_speed(speed_mps, sound_speed_mps=DEFAULT_SOUND_SPEED):
 
 
 def compensate_doppler(signal, scale):
-    """Undo a Doppler dilation: resample ``signal`` by ``1/(1+scale)``.
+    """Undo a Doppler dilation: resample ``signal`` to ``(1+scale)*N`` samples.
 
     ``scale = a = v/c``. A closing geometry (``a > 0``) compresses the received
-    waveform; this stretches it back to the transmit time base. Returns the
-    resampled (complex) signal.
+    waveform; resampling to ``(1+a)*N`` samples stretches it back to the
+    transmit time base. Returns the resampled (complex) signal.
     """
     x = np.asarray(signal)
     a = float(scale)

@@ -29,6 +29,39 @@ from uacpy.io._fortran_helpers import (
 from uacpy.io.units import km_to_m
 
 
+def _bound_counts(filepath, file_size, min_item_bytes, **counts):
+    """Reject header counts that cannot be satisfied by ``file_size``.
+
+    Binary OASES readers size NumPy allocations directly off integer
+    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
+    hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
+    otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
+    validated. The smallest a single data item can occupy on disk is
+    ``min_item_bytes``, so no count — nor their product — can exceed
+    ``file_size // min_item_bytes``. Raise :class:`FileFormatError` on
+    overflow rather than attempting the allocation.
+    """
+    max_items = file_size // max(min_item_bytes, 1)
+    product = 1
+    for name, val in counts.items():
+        if val < 0:
+            raise FileFormatError(
+                f"{filepath}: negative header count {name}={val}."
+            )
+        if val > max_items:
+            raise FileFormatError(
+                f"{filepath}: header count {name}={val} is implausible for "
+                f"a {file_size}-byte file (max {max_items} items)."
+            )
+        product *= val
+    if product > max_items:
+        raise FileFormatError(
+            f"{filepath}: header counts {dict(counts)} imply {product} data "
+            f"items, implausible for a {file_size}-byte file "
+            f"(max {max_items})."
+        )
+
+
 def read_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
@@ -297,6 +330,13 @@ def read_oasn_covariance(
             f.seek(4 * recl)
             n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
 
+            # Bound the n_freq*n_rcv*n_rcv covariance allocation against the
+            # file size before the strided read / ljust below.
+            f.seek(0, 2)
+            file_size = f.tell()
+            _bound_counts(filepath, file_size, recl,
+                          n_rcv=n_rcv, n_freq=n_freq, n_rcv2=n_rcv)
+
             # Record 6: IZERO, IZERO (dummy)
             # Skip
 
@@ -446,6 +486,17 @@ def read_oasn_replicas(
             y_min, y_max, n_y = struct.unpack(endian + 'ffi', f.read(12))
             _read_fortran_record_marker(f, endian=endian)
 
+            # Bound every header count before the receiver / replica arrays
+            # are sized off them. Each replica record is 16 bytes on disk
+            # (2 markers + re + im); use that as the per-item floor for the
+            # (n_freq, n_z, n_x, n_y, n_rcv) product.
+            cur = f.tell()
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(cur)
+            _bound_counts(filepath, file_size, 16,
+                          n_freq=n_freq, n_z=n_z, n_x=n_x, n_y=n_y, n_rcv=n_rcv)
+
             # Read receiver positions and properties
             receiver_positions = np.zeros((n_rcv, 3))
             receiver_types = np.zeros(n_rcv, dtype=int)
@@ -460,11 +511,6 @@ def read_oasn_replicas(
                 receiver_positions[i] = [x, y, z]
                 receiver_types[i] = itype
                 receiver_gains[i] = gain
-
-            # Read replicas
-            replicas = np.zeros(
-                (n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64,
-            )
 
             # Each replica is a Fortran sequential record
             # ``[marker][re im][marker]`` (16 bytes), written contiguously in
@@ -673,6 +719,11 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 receiver_depths = np.array([rd])
 
         r0, rspace, nplots = _read_fortran_record(f, 'ffi', endian=endian)
+        cur = f.tell()
+        f.seek(0, 2)
+        _file_size = f.tell()
+        f.seek(cur)
+        _bound_counts(filepath, _file_size, 16, nplots=nplots)
         ranges = r0 + np.arange(nplots) * rspace
 
         nx, lx, mx, dt = _read_fortran_record(f, 'iiif', endian=endian)
@@ -734,6 +785,15 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 f"a single component (normal stress / pressure). Use a "
                 f"single-output OASP option string."
             )
+
+        # Bound the (nf, nplots, nrd) allocation against the file size before
+        # sizing it off these header-derived counts. Each data record holds
+        # 2*nout floats plus two 4-byte Fortran markers, so ≥ 16 bytes.
+        cur = f.tell()
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(cur)
+        _bound_counts(filepath, file_size, 16, nf=nf, nplots=nplots, nrd=nrd)
 
         transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
         for j in range(nf):

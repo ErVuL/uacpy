@@ -52,6 +52,19 @@ class NetcdfGrid:
                 return self.ds.variables[self.names[c.lower()]]
         raise KeyError(candidates)
 
+    @staticmethod
+    def cell(variable, row, col):
+        """Scalar at ``[row, col]`` with ``_FillValue``/masked → ``NaN``.
+
+        netCDF4 returns a masked array when ``_FillValue`` is set, and
+        ``float(masked)`` raises or yields garbage; map any masked / non-finite
+        cell to ``NaN`` so every reader handles no-data uniformly.
+        """
+        v = variable[row, col]
+        if v is None or np.ma.is_masked(v) or not np.isfinite(v):
+            return np.nan
+        return float(v)
+
     def row(self, lat):
         return int(np.clip(round((lat - self._lat0) / self._dlat),
                            0, self._nlat - 1))

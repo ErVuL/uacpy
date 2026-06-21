@@ -11,7 +11,7 @@ from uacpy.acoustic_signal.waveforms import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
 from uacpy.acoustic_signal.noise_synthesis import (
-    add_noise, make_bandlimited_noise,
+    add_noise, make_bandlimited_noise, make_noise_waveform,
 )
 
 
@@ -92,6 +92,15 @@ class TestProcessing:
         assert len(n) > 0
         assert np.all(np.isfinite(n))
 
+    def test_make_noise_waveform_is_1d_with_consistent_length(self):
+        fs, T = 10_000.0, 0.1
+        n = make_noise_waveform(fc=1000.0, BW=500.0, T=T, fs=fs)
+        # 1-D (like every sibling generator), length int(T*fs), no carrier/noise
+        # length mismatch from arange-vs-int float drift.
+        assert n.ndim == 1
+        assert n.shape == (int(T * fs),)
+        assert np.all(np.isfinite(n))
+
 
 class TestDecidecadeBands:
     def test_standard_iso_centre_frequencies_and_ratio(self):
@@ -117,6 +126,17 @@ class TestDecidecadeBands:
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError):
             decidecade_bands(1000, 100)
+
+    def test_coarse_grid_falls_back_not_nan(self):
+        # A coarse, log-spaced grid leaves low bands with one sample; instead of
+        # a silent NaN they get a rectangular estimate and a single warning.
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
+        f = np.logspace(np.log10(10), np.log10(2000), 25)
+        psd = np.ones_like(f) * 1e-12
+        with pytest.warns(UserWarning, match="too coarse"):
+            c, lv = decidecade_band_levels(psd, f)
+        # at least one low band that would have been NaN is now finite
+        assert np.any(np.isfinite(lv[c < 100]))
 
 
 def test_acoustic_signal_is_importable():
@@ -157,6 +177,18 @@ class TestSEL:
                      num_bands=240).compute(imp, fs, nfft=fs)
         # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
         assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
+
+    def test_coarse_bands_do_not_double_count_bins(self):
+        # 1-Hz FFT bins (nfft=fs) against sub-bin-wide low third-octave bands:
+        # each bin must contribute to exactly one band, so a flat tone's total
+        # exposure is conserved (no bin double-counted across overlapping bands).
+        from uacpy.acoustic_signal.analysis import SEL
+        fs = 1000
+        t = np.arange(fs) / fs
+        x = np.sin(2 * np.pi * 50.0 * t)
+        sel, _ = SEL(band_type='third_octave', fmin=8.9125, fmax=400).compute(
+            x, fs, nfft=fs)
+        assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
 
 class TestFRF:

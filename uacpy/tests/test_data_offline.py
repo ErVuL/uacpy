@@ -176,6 +176,29 @@ def test_gebco_region_grid_marks_land_nan(cache):
     assert np.nanmin(depth) == 1500.0
 
 
+def test_gebco_masked_cell_raises(tmp_path, monkeypatch):
+    # A _FillValue/masked GEBCO cell must raise DataFetchError, not coerce a
+    # fill sentinel into a depth.
+    root = tmp_path / 'masked_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    gebco_local._GRID.clear()
+    gdir = root / 'gebco'; gdir.mkdir(parents=True)
+    lat = np.arange(-90, 91, 1.0)
+    lon = np.arange(-180, 180, 1.0)
+    elev = np.full((lat.size, lon.size), -1500.0)
+    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
+    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    var = ds.createVariable('elevation', 'f4', ('lat', 'lon'),
+                            fill_value=_FILL)
+    var[:] = elev
+    var[120, 220] = _FILL                         # masked cell at (30, 40)
+    ds.close()
+    with pytest.raises(DataFetchError, match='fill / masked'):
+        gebco_local.point_depth((30.0, 40.0))
+
+
 def test_bathymetry_sources_local(cache):
     assert data.fetch_bathy((12.0, 34.0), source='local') == 1500.0
     t = data.fetch_bathy_transect((1.0, 1.0), (2.0, 2.0), n_points=4, source='local')

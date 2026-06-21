@@ -175,6 +175,15 @@ def test_wenznoise_rejects_invalid_kwargs(freqs):
         WenzNoise(freqs, wind_speed=10, rain_rate='monsoon')
 
 
+def test_wenznoise_rejects_dc_and_negative_frequencies():
+    # The empirical fits are all log10(f); a DC bin (common from a raw rfft
+    # grid) would otherwise produce log10(0) = -inf/NaN, not a clear error.
+    with pytest.raises(ConfigurationError, match='> 0 Hz'):
+        WenzNoise(np.array([0.0, 10.0, 100.0]), wind_speed=10)
+    with pytest.raises(ConfigurationError, match='> 0 Hz'):
+        WenzNoise(np.array([-5.0, 10.0]), wind_speed=10)
+
+
 def test_wenznoise_plot_returns_fig_ax(freqs):
     wenz = WenzNoise(freqs, wind_speed=15)
     fig, ax = wenz.plot()

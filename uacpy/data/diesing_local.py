@@ -20,7 +20,7 @@ Reading the GeoTIFF (LZW-compressed, Wagner IV equal-area projection) needs
 import io
 import zipfile
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -29,7 +29,7 @@ from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
 )
@@ -82,12 +82,14 @@ def download_diesing_db(cache_dir=None, *, timeout=300.0, verbose=False):
                     source='diesing')
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         try:
-            data = zf.read(RASTER_FILE)
+            info = zf.getinfo(RASTER_FILE)
         except KeyError as exc:
             raise DataFetchError(
                 "Diesing package did not contain the lithology raster.",
                 remediation="Retry; the upstream package layout may have changed.",
             ) from exc
+        checked_member_size(info.file_size, RASTER_FILE)
+        data = zf.read(RASTER_FILE)
     out = dest / RASTER_FILE
     out.write_bytes(data)
     _MODEL.clear()
@@ -154,7 +156,7 @@ def fetch_seafloor_lithology(point: Coordinate) -> dict:
 
 
 def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
-                         water_sound_speed: float = None,
+                         water_sound_speed: Optional[float] = None,
                          timeout=None, verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
@@ -178,7 +180,7 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
 def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
-                                  water_sound_speed: float = None,
+                                  water_sound_speed: Optional[float] = None,
                                   timeout=None, verbose: Union[bool, str] = False
                                   ) -> Bottom:
     """Range-dependent bottom from the Diesing 2020 map along a transect."""

@@ -50,7 +50,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Union
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -596,6 +596,26 @@ class Kraken(_KrakenBase):
     # Valid source types for field.exe option col 1 (AT field.f90:71-79).
     _ALLOWED_SOURCE_TYPE = ('R', 'X', 'S')
 
+    # Declarative metadata (see PropagationModel / ModelSpec). Kraken: normal
+    # modes. Segments RD-bathymetry / RD-SSP natively; the bottom (and the RDLB
+    # axis) and a range-dependent *surface* still collapse — the RD .env carries
+    # one global top/bottom boundary, only the SSP varies per range. Honours
+    # layered + elastic bottom. Median across range / mean SSP represent the
+    # per-segment profile.
+    spec = ModelSpec(
+        modes=(
+            RunMode.MODES, RunMode.COHERENT_TL,
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ),
+        supports={
+            'range_dependent_bathymetry',
+            'range_dependent_ssp',
+            'layered_bottom',
+            'elastic_media',
+        },
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         mode_points_per_meter: float = 1.5,
@@ -659,32 +679,8 @@ class Kraken(_KrakenBase):
                 f"Choose 'kraken', 'krakenc', or None for automatic dispatch."
             )
         self.backend = backend
-        self._supported_modes = [
-            RunMode.MODES,
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = False
-        # The Kraken range-dependent .env carries one global top/bottom boundary
-        # (only the SSP profile varies per range), so — exactly like the bottom
-        # (_supports_range_dependent_bottom = False) — a range-dependent surface
-        # is collapsed, not honoured.
-        self._supports_range_dependent_surface = False
-        self._supports_range_dependent_bathymetry = True
-        self._supports_range_dependent_ssp = True
-        self._supports_range_dependent_bottom = False
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Kraken segments RD-bathy / RD-SSP natively; only the
-        # bottom and RDLB axes still collapse. Median across range is
-        # the representative single profile per segment.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
         if mode_coupling not in ('adiabatic', 'coupled'):
             raise ConfigurationError(
                 f"mode_coupling must be 'adiabatic' or 'coupled', "

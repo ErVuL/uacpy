@@ -18,6 +18,7 @@ Bathymetry is static in time, so these fetches take coordinates only — the
 """
 
 import json
+import time
 import urllib.parse
 import warnings
 from typing import List, Tuple, Union
@@ -46,8 +47,16 @@ DEFAULT_DATASET = 'gebco2020'
 GEBCO_NATIVE_KM = 0.45
 MAX_LOCATIONS_PER_REQUEST = 100  # OpenTopoData public-host limit
 MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 points)
+#: Minimum spacing (s) between consecutive OpenTopoData calls, honouring the
+#: public host's documented ≤1 request/s limit so a multi-chunk grid/transect
+#: stays under the rate cap instead of bursting and tripping a 429 / IP block.
+#: Only applied to the public ``DEFAULT_BASE_URL``; a self-hosted ``base_url``
+#: lifts the limit (set to 0.0 there). Tests set it to 0.0 to run instantly.
+OPENTOPODATA_MIN_INTERVAL_S = 1.0
 
 BATHY_SOURCES = ('api', 'gmrt', 'local')
+
+_last_request_monotonic = 0.0    # wall-clock of the last public-host call
 
 
 def _check_source(source):
@@ -311,15 +320,34 @@ def _fetch_elevations(
     verbose: Union[bool, str],
 ) -> np.ndarray:
     """Raw GEBCO elevations (m, positive up) for ``coords``, chunked to the
-    OpenTopoData per-call cap. Land is positive; ocean negative."""
+    OpenTopoData per-call cap. Land is positive; ocean negative.
+
+    Consecutive chunks against the public host are spaced to honour its
+    ≤1 request/s limit (see :data:`OPENTOPODATA_MIN_INTERVAL_S`); a self-hosted
+    ``base_url`` lifts the limit and is not throttled."""
+    throttled = base_url.rstrip('/') == DEFAULT_BASE_URL.rstrip('/')
     elevations: List[float] = []
     for i in range(0, len(coords), MAX_LOCATIONS_PER_REQUEST):
+        if throttled:
+            _rate_limit(verbose=verbose)
         chunk = coords[i:i + MAX_LOCATIONS_PER_REQUEST]
         elevations.extend(
             _request_chunk(chunk, dataset=dataset, base_url=base_url,
                            timeout=timeout, verbose=verbose)
         )
     return np.asarray(elevations, dtype=float)
+
+
+def _rate_limit(*, verbose: Union[bool, str]) -> None:
+    """Block until at least ``OPENTOPODATA_MIN_INTERVAL_S`` has passed since the
+    last public-host call, so chunked fetches stay under the ≤1 req/s limit."""
+    global _last_request_monotonic
+    interval = OPENTOPODATA_MIN_INTERVAL_S
+    if interval > 0.0:
+        wait = interval - (time.monotonic() - _last_request_monotonic)
+        if wait > 0.0:
+            time.sleep(wait)
+    _last_request_monotonic = time.monotonic()
 
 
 def _fetch_depths(

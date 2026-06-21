@@ -82,6 +82,24 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
                 f"{frq.size}, rout.size={rout.size}."
             )
 
+        # ``nf`` and ``nr`` are now validated against the frq/rout records, but
+        # ``nzo`` is still a raw header field driving the (nzo, nf, nr) psif
+        # allocation. Each depth record holds 1 + 2*nf float64 (+ two Fortran
+        # length markers), so nzo*nr records cannot occupy more than the file;
+        # bound nzo against the remaining bytes before allocating to reject a
+        # corrupt/garbage header (e.g. nzo = 0x7fffffff) that would otherwise
+        # drive a multi-GB np.zeros.
+        if nzo < 0:
+            raise FileFormatError(f"{psif_file}: negative nzo={nzo}.")
+        rec_bytes = (1 + 2 * nf) * 8 + 8  # payload + two 4-byte markers
+        file_size = psif_file.stat().st_size
+        max_records = file_size // max(rec_bytes, 1)
+        if nr > 0 and nzo > max_records // nr:
+            raise FileFormatError(
+                f"{psif_file}: header counts (nzo={nzo}, nf={nf}, nr={nr}) "
+                f"imply more depth records than a {file_size}-byte file holds."
+            )
+
         # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
         zg = np.zeros(nzo, dtype=np.float64)
         psif = np.zeros((nzo, nf, nr), dtype=np.complex128)

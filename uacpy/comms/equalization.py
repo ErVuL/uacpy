@@ -135,6 +135,11 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
             w = w + step * ur * np.conj(e)
         if kp > 0:
             phi = np.angle(d_hat * np.conj(d))
+            # NCO-based 2nd-order PLL (Stojanovic-Proakis 1994): theta is the
+            # NCO phase accumulator, advanced each step by the proportional
+            # correction kp*phi plus the integral (frequency) state phase_acc.
+            # theta therefore tracks a constant CFO's ramping phase — it is the
+            # loop integrator, not a double integration of phi.
             phase_acc += ki * phi
             theta += kp * phi + phase_acc
         ufb = np.roll(ufb, 1)

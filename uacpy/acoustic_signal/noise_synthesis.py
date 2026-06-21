@@ -208,7 +208,8 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     Returns
     -------
     nts : ndarray
-        Noise time series (column vector)
+        Noise time series, 1-D of length ``int(T*fs)`` (matching the other
+        :mod:`uacpy.acoustic_signal` generators, e.g. ``tone_burst``).
 
     Notes
     -----
@@ -227,23 +228,22 @@ def make_noise_waveform(fc: float, BW: float, T: float, fs: float) -> np.ndarray
     >>> nts = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
     """
-    deltat = 1 / fs
-    N = int(T / deltat)  # number of samples
-    time = np.arange(0, T, deltat).reshape(-1, 1)  # column vector
-    deltat2 = 1 / BW
-    N2 = int(T / deltat2)
+    N = int(T * fs)  # number of samples
+    # Build the time axis from the same N used for resample so the carrier
+    # and the resampled noise always have matching length (np.arange(0, T,
+    # 1/fs) can yield N±1 samples from float accumulation).
+    time = np.arange(N) / fs
+    N2 = int(T * BW)
 
-    nts = np.random.randn(N2, 1)  # Gaussian white noise
+    nts = np.random.randn(N2)  # Gaussian white noise
 
     # Resample to fs rate
     from scipy.signal import resample
 
-    nts = resample(nts.flatten(), N).reshape(-1, 1)
+    nts = resample(nts, N)
 
     # Heterodyne with carrier
-    nts = np.sin(2 * np.pi * fc * time) * nts
-
-    return nts
+    return np.sin(2 * np.pi * fc * time) * nts
 
 
 def add_noise(

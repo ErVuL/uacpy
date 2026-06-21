@@ -26,7 +26,7 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
-from uacpy.data._http import http_get
+from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
 )
@@ -64,7 +64,15 @@ _SAMPLES = {}   # cache_root -> (tree, phi_array)
 
 def _tar_rows(tf, suffix):
     """All TSV rows from the member of ``tf`` whose name ends with ``suffix``."""
-    member = next(m for m in tf.getmembers() if m.name.endswith(suffix))
+    try:
+        member = next(m for m in tf.getmembers()
+                      if Path(m.name).name.endswith(suffix))
+    except StopIteration as exc:
+        raise DataFetchError(
+            f"NCEI grain-size archive did not contain a *{suffix} member.",
+            remediation="Retry; the upstream archive layout may have changed.",
+        ) from exc
+    checked_member_size(member.size, member.name)
     stream = io.TextIOWrapper(tf.extractfile(member), encoding='latin-1')
     return list(csv.DictReader(stream, delimiter='\t'))
 

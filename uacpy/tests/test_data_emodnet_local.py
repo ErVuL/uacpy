@@ -62,6 +62,18 @@ def test_transect_holds_and_varies(tmp_path, monkeypatch):
     assert (rdb.halfspace_sound_speed > 1500).all()
 
 
+def test_unknown_folk_class_refuses_default(tmp_path, monkeypatch):
+    # An out-of-range Folk-5 code must raise rather than fabricate a default
+    # 'mixed sediment' bottom.
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    emodnet_local._INDEX.clear()
+    feats = [_poly_feature(99, (-41, 30, -40, 31))]     # bogus class
+    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
+    emodnet_local.download_emodnet_db()
+    with pytest.raises(DataFetchError, match='unrecognised Folk-5'):
+        emodnet_local.fetch_bottom_local((30.5, -40.5))
+
+
 def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
     emodnet_local._INDEX.clear()

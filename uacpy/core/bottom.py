@@ -388,6 +388,24 @@ class SeabedColumn:
         """Deep copy (symmetric with the other carriers)."""
         return _copy.deepcopy(self)
 
+    def _layer_at(self, depth: float) -> Optional[SedimentLayer]:
+        """Internal: the :class:`SedimentLayer` containing sub-bottom ``depth``
+        (m, ``0`` = top of the column), or ``None`` for the deep half-space.
+
+        A private helper — the public accessors are the carrier contract
+        :meth:`at` (depth → material) and :meth:`isel` (index → layer); this
+        just single-sources the layer-boundary convention they share with
+        :meth:`sample_at_depths` (a depth exactly on an internal boundary maps
+        to the **upper** layer).
+        """
+        z = float(depth)
+        cumulative = 0.0
+        for layer in self.layers:
+            cumulative += layer.thickness
+            if z <= cumulative:
+                return layer
+        return None
+
     def at(self, *, depth: float) -> BoundaryProperties:
         """Material :class:`BoundaryProperties` at sub-bottom ``depth`` (m,
         ``0`` = top of the column).
@@ -397,18 +415,15 @@ class SeabedColumn:
         so a `SeabedColumn` has no ``eval`` (same as `Bottom`). Positional
         counterpart: :meth:`isel`.
         """
-        z = float(depth)
-        cumulative = 0.0
-        for layer in self.layers:
-            cumulative += layer.thickness
-            if z <= cumulative:
-                return BoundaryProperties(
-                    acoustic_type='half-space',
-                    sound_speed=layer.sound_speed, density=layer.density,
-                    attenuation=layer.attenuation,
-                    shear_speed=layer.shear_speed,
-                    shear_attenuation=layer.shear_attenuation)
-        return _copy.deepcopy(self.halfspace)
+        layer = self._layer_at(depth)
+        if layer is None:
+            return _copy.deepcopy(self.halfspace)
+        return BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=layer.sound_speed, density=layer.density,
+            attenuation=layer.attenuation,
+            shear_speed=layer.shear_speed,
+            shear_attenuation=layer.shear_attenuation)
 
     def isel(self, *, layer: int) -> SedimentLayer:
         """The :class:`SedimentLayer` at integer index ``layer`` — the
@@ -484,6 +499,7 @@ class SeabedColumn:
                 density=top.density, sound_speed=top.sound_speed,
                 attenuation=top.attenuation, shear_speed=top.shear_speed,
                 shear_attenuation=top.shear_attenuation,
+                roughness=self.halfspace.roughness,
             )
         if method == 'volume_average':
             # Thickness-weighted mean over the finite layers plus the
@@ -504,6 +520,7 @@ class SeabedColumn:
                 sound_speed=_avg('sound_speed'), density=_avg('density'),
                 attenuation=_avg('attenuation'), shear_speed=_avg('shear_speed'),
                 shear_attenuation=_avg('shear_attenuation'),
+                roughness=self.halfspace.roughness,
             )
         raise ConfigurationError(
             f"SeabedColumn.collapse: unknown method={method!r}; "
@@ -525,19 +542,10 @@ class SeabedColumn:
         rho = np.empty(n_points)
         attn = np.empty(n_points)
         for i, d in enumerate(sample_depths):
-            cumulative = 0.0
-            found = False
-            for layer in self.layers:
-                if d <= cumulative + layer.thickness:
-                    cs[i], rho[i], attn[i] = (layer.sound_speed, layer.density,
-                                              layer.attenuation)
-                    found = True
-                    break
-                cumulative += layer.thickness
-            if not found:
-                cs[i] = self.halfspace.sound_speed
-                rho[i] = self.halfspace.density
-                attn[i] = self.halfspace.attenuation
+            layer = self._layer_at(d)
+            src = layer if layer is not None else self.halfspace
+            cs[i], rho[i], attn[i] = (src.sound_speed, src.density,
+                                      src.attenuation)
         return cs, rho, attn
 
     @classmethod

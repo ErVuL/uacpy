@@ -17,7 +17,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -163,6 +163,18 @@ class Bounce(PropagationModel):
     - Acoustics Toolbox: http://oalib.hlsresearch.com/
     """
 
+    # Declarative metadata read and validated by PropagationModel. BOUNCE
+    # emits only plane-wave reflection coefficients; it consumes layered and
+    # elastic seabed columns natively (so those env shapes are *not*
+    # collapsed) but handles no range dependence. It produces ONE BRC used
+    # across the whole receiver-range axis, so a range-dependent bottom is
+    # reduced to its most-representative single column (median).
+    spec = ModelSpec(
+        modes=(RunMode.REFLECTION,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -209,13 +221,6 @@ class Bounce(PropagationModel):
         )
         self.interp_ssp = interp_ssp
 
-        # BOUNCE produces ONE BRC consumed across the whole range axis;
-        # the median sample is the most representative single profile.
-        # The layer stack is kept (BOUNCE handles layered columns natively).
-        self._set_collapse_defaults({
-            'bottom_range': 'median',
-        })
-
         self.c_low = c_low
         self.c_high = c_high
         self.rmax = rmax
@@ -234,16 +239,9 @@ class Bounce(PropagationModel):
                 f"c_low ({self.c_low})."
             )
 
-        # BOUNCE computes plane-wave reflection coefficients, not TL.
-        self._supported_modes = [RunMode.REFLECTION]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
+        # Run modes, capability flags and collapse defaults now come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path

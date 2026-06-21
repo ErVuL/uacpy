@@ -26,7 +26,7 @@ Provinces (dominant surficial lithology → representative mean grain size ϕ):
 * otherwise (above CCD)  → **calcareous ooze** — low-to-mid latitude
 """
 
-from typing import Union
+from typing import Optional, Union
 
 from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties, Bottom
@@ -84,8 +84,8 @@ def _water_depth(point, timeout, verbose, cache_only):
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
-                         water_sound_speed: float = None,
-                         depth: float = None, cache_only: bool = False,
+                         water_sound_speed: Optional[float] = None,
+                         depth: Optional[float] = None, cache_only: bool = False,
                          timeout=None,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
@@ -113,7 +113,7 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
 def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
-                                  water_sound_speed: float = None,
+                                  water_sound_speed: Optional[float] = None,
                                   cache_only: bool = False, timeout=None,
                                   verbose: Union[bool, str] = False
                                   ) -> Bottom:

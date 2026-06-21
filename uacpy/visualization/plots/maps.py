@@ -85,12 +85,12 @@ def plot_bathymetry_map(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
-    cm = plt.get_cmap(cmap).copy()
+    cm = plt.get_cmap(cmap)
     proj = (lambda la, lo: (lo, la))
 
     if basemap:
         rings = land_polygons(resolution=coastline_resolution)
-        cm.set_bad(alpha=0.0)
+        cm = cm.with_extremes(bad='none')                  # transparent: sea shows through
         ax.set_facecolor('#d7ebf7')                        # sea
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
         if rings is not None:                              # land OVER the depth: covers
@@ -103,7 +103,7 @@ def plot_bathymetry_map(
         ax.set_aspect(aspect if aspect is not None
                       else 1.0 / np.cos(np.radians(np.mean(lat_rng))))  # equirectangular
     else:
-        cm.set_bad('#d9cdb8')
+        cm = cm.with_extremes(bad='#d9cdb8')
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
         ax.set_xlabel("Longitude [°E]")
         ax.set_ylabel("Latitude [°N]")
@@ -288,8 +288,7 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
-    cm = plt.get_cmap(cmap).copy()
-    cm.set_bad('#b8a98f')                          # land / no-data
+    cm = plt.get_cmap(cmap).with_extremes(bad='#b8a98f')   # land / no-data
     im = ax.imshow(np.ma.masked_invalid(grid), cmap=cm, vmin=0.0, vmax=1.0,
                    origin='upper')
 

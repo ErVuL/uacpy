@@ -48,11 +48,11 @@ def envelope(x):
 def instantaneous_frequency(x, sample_rate: float):
     """Instantaneous frequency (Hz) from the analytic-signal phase derivative.
 
-    Returns an array of length ``len(x) - 1`` (centred differences of the
-    unwrapped phase).
+    Returns an array of length ``len(x)`` (centred differences of the unwrapped
+    phase via :func:`numpy.gradient`, so each sample is time-aligned with ``x``).
     """
     phase = np.unwrap(np.angle(analytic_signal(x)))
-    return np.diff(phase) / (2.0 * np.pi) * float(sample_rate)
+    return np.gradient(phase) / (2.0 * np.pi) * float(sample_rate)
 
 
 def _smoothing_window(spec, name):

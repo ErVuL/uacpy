@@ -246,6 +246,14 @@ class WenzNoise:
             )
 
         self.frequencies = np.asarray(frequencies, dtype=float).flatten()
+        # Every component is a log10(f) fit; a DC (0 Hz) or negative bin — common
+        # when a user passes a raw rfft grid — would yield log10(0)=-inf/NaN
+        # before the sentinel masks run. Reject it up front with a clear message.
+        if self.frequencies.size == 0 or np.any(self.frequencies <= 0):
+            raise ConfigurationError(
+                "WenzNoise: frequencies must be > 0 Hz (the empirical fits are "
+                "log10(f)); drop the DC bin, e.g. frequencies[frequencies > 0]."
+            )
         self.wind_speed = float(wind_speed)
         self.rain_rate = rain_rate
         self.water_depth = water_depth

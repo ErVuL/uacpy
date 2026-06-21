@@ -135,3 +135,29 @@ def test_bellhop_timeseries_requires_waveform(simple_env, source, receiver_small
         run_mode=RunMode.BROADBAND,
     )
     assert np.iscomplexobj(field.data)
+
+
+def test_abstract_run_encodes_fixed_keyword_contract():
+    """The abstract ``PropagationModel.run`` is the source of truth for the
+    fixed, no-``**kwargs`` signature documented in CLAUDE.md / DEV.md. It must
+    declare the keyword-only block (``frequencies``/``source_waveform``/
+    ``sample_rate``/``output_duration``) and accept no ``**kwargs`` sink, so the
+    contract is visible on the base class and not only in each subclass."""
+    import inspect
+
+    from uacpy.models.base import PropagationModel
+
+    sig = inspect.signature(PropagationModel.run)
+    params = sig.parameters
+    # positional-or-keyword core triple + optional run_mode
+    for name in ('env', 'source', 'receiver', 'run_mode'):
+        assert name in params, f"abstract run() must declare {name!r}"
+    # the keyword-only block the whole contract is built around
+    kw_only = {n for n, p in params.items()
+               if p.kind is inspect.Parameter.KEYWORD_ONLY}
+    assert kw_only == {
+        'frequencies', 'source_waveform', 'sample_rate', 'output_duration',
+    }
+    # no **kwargs sink anywhere
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in params.values())

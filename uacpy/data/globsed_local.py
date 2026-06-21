@@ -85,10 +85,7 @@ class _GlobSedGrid(NetcdfGrid):
             ) from exc
 
     def thickness(self, lat, lon):
-        v = self._z[self.row(lat), self.col(lon)]
-        if v is None or np.ma.is_masked(v) or not np.isfinite(v):
-            return np.nan
-        return float(v)
+        return self.cell(self._z, self.row(lat), self.col(lon))
 
 
 def _grid():

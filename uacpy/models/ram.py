@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Dict, Optional, List, Union
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.models._pe_phase import psi_to_travelling_wave
 from uacpy.core.environment import (
     Environment, SeabedColumn,
@@ -267,6 +267,25 @@ class RAM(PropagationModel):
     With ``verbose='info'`` the resolved Padé grid is logged per frequency.
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). RAM is the
+    # range-dependent PE engine: every range-dependence axis is honoured by
+    # some backend (mpiramS / rams0.5 / ramsurf1.5), so all flags except
+    # multi_source_depth are True. _validate_forced_backend rejects real
+    # per-backend mismatches at run() time. No collapse override — RAM uses
+    # the base DEFAULT_COLLAPSE.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={
+            'altimetry',
+            'range_dependent_bathymetry',
+            'range_dependent_ssp',
+            'range_dependent_bottom',
+            'layered_bottom',
+            'range_dependent_layered_bottom',
+            'elastic_media',
+        },
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -392,33 +411,9 @@ class RAM(PropagationModel):
             timeout=timeout, cleanup=cleanup, collapse=collapse
         )
 
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        # No _set_collapse_defaults override: RAM uses the base
-        # DEFAULT_COLLAPSE (bathymetry='max', ssp='r0', …) unchanged.
-        # The dispatcher routes env.altimetry to the ramsurf1.5 backend,
-        # so altimetry IS honoured (just not by mpiramS itself).
-        self._supports_altimetry = True
-        # Every range-dependence axis is honoured by some backend: mpiramS
-        # (fluid + flat surface) and the Collins backends rams0.5 / ramsurf1.5
-        # all read a piecewise range-dependent ram.in (one profile section per
-        # range break — see _collins_range_segments). Flag everything True at
-        # the dispatcher level; _validate_forced_backend rejects the real
-        # per-backend mismatches (elastic vs fluid, flat vs rough surface).
-        self._supports_range_dependent_bathymetry = True
-        self._supports_range_dependent_ssp = True
-        self._supports_range_dependent_bottom = True
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = True
-        # Elastic bottom auto-routes to rams0.5; surface elastic isn't
-        # supported by any backend. _drop_unsupported_surface_shear() in
-        # run() warns + zeros surface shear when present.
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved mpiramS

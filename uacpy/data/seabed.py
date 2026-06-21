@@ -19,7 +19,7 @@ materials, then converted with the calibrated relations in
 import json
 import math
 import urllib.parse
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import DataFetchError
@@ -108,7 +108,7 @@ def fetch_bottom(
     point: Coordinate,
     *,
     roughness: float = 0.0,
-    water_sound_speed: float = None,
+    water_sound_speed: Optional[float] = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -126,7 +126,16 @@ def fetch_bottom(
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
                                  timeout=timeout, verbose=verbose)
-    kind, value = _FOLK5_TO_BOTTOM.get(sub['folk_5cl'], ('phi', 3.0))
+    if sub['folk_5cl'] not in _FOLK5_TO_BOTTOM:
+        raise DataFetchError(
+            f"EMODnet returned an unrecognised Folk-5 class "
+            f"{sub['folk_5cl']!r} at {lat:.3f}, {lon:.3f}; "
+            "refusing to fabricate a default bottom.",
+            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
+                        "let the 'auto' bottom chain fall through to another "
+                        "source.",
+        )
+    kind, value = _FOLK5_TO_BOTTOM[sub['folk_5cl']]
     if kind == 'phi':
         bottom = bottom_from_grain_size(
             value, roughness=roughness, water_sound_speed=water_sound_speed)
@@ -145,7 +154,7 @@ def fetch_bottom_transect(
     n_points=6,
     max_points=None,
     roughness: float = 0.0,
-    water_sound_speed: float = None,
+    water_sound_speed: Optional[float] = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,

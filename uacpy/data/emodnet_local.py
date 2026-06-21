@@ -17,7 +17,7 @@ through to the global grain-size DB.
 import json
 import pickle
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -149,7 +149,7 @@ def fetch_seabed_local(point: Coordinate) -> dict:
 
 
 def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
-                       water_sound_speed: float = None,
+                       water_sound_speed: Optional[float] = None,
                        timeout=None, verbose: Union[bool, str] = False
                        ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
@@ -161,7 +161,16 @@ def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_local(point)
-    kind, value = _FOLK5_TO_BOTTOM.get(sub['folk_5cl'], ('phi', 3.0))
+    if sub['folk_5cl'] not in _FOLK5_TO_BOTTOM:
+        raise DataFetchError(
+            f"EMODnet returned an unrecognised Folk-5 class "
+            f"{sub['folk_5cl']!r} at {lat:.3f}, {lon:.3f}; "
+            "refusing to fabricate a default bottom.",
+            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
+                        "let the 'auto' bottom chain fall through to another "
+                        "source.",
+        )
+    kind, value = _FOLK5_TO_BOTTOM[sub['folk_5cl']]
     if kind == 'phi':
         bottom = bottom_from_grain_size(
             value, roughness=roughness, water_sound_speed=water_sound_speed)
@@ -178,7 +187,7 @@ def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
 def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
                                 n_points=6, max_points=None,
                                 roughness: float = 0.0,
-                                water_sound_speed: float = None,
+                                water_sound_speed: Optional[float] = None,
                                 timeout=None, verbose: Union[bool, str] = False
                                 ) -> Bottom:
     """Range-dependent bottom from the offline EMODnet polygons along a transect."""

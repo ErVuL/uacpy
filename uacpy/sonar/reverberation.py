@@ -130,5 +130,10 @@ def total_reverberation(*levels_db):
     if not levels_db:
         raise ConfigurationError("total_reverberation: need at least one level")
     arrs = [np.asarray(x, dtype=float) for x in levels_db]
+    if any(a.size == 0 for a in arrs):
+        raise ConfigurationError(
+            "total_reverberation: received a zero-length level array; "
+            "every component must carry at least one sample."
+        )
     stack = np.stack(np.broadcast_arrays(*arrs), axis=0)
     return 10.0 * np.log10(np.sum(10.0 ** (stack / 10.0), axis=0))

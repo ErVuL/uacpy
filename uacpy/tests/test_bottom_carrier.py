@@ -88,6 +88,17 @@ class TestSeabedColumnAccessors:
     def test_no_eval(self):
         assert not hasattr(SeabedColumn, 'eval')
 
+    def test_at_and_sample_agree_on_boundary_convention(self):
+        # at() and sample_at_depths() must share one layer-boundary rule:
+        # a depth exactly on an internal boundary maps to the UPPER layer.
+        c = self._col()                                  # 0-10:1600, 10-30:1700
+        cs, _, _ = c.sample_at_depths(n_points=4, max_thickness=30)
+        # sample depths 0, 10, 20, 30 → upper layer at the 10 m interface
+        assert cs[0] == c.at(depth=0).sound_speed == 1600
+        assert cs[1] == c.at(depth=10).sound_speed == 1600   # boundary → upper
+        assert cs[2] == c.at(depth=20).sound_speed == 1700
+        assert cs[3] == c.at(depth=30).sound_speed == 1700   # boundary → upper
+
 
 # ─── half-space column ──────────────────────────────────────────────────────
 
@@ -128,6 +139,16 @@ class TestLayeredColumn:
         # cp = (10*1600 + 20*1700 + 20*1800) / (10+20+20) = 86000/50 = 1720
         c = SeabedColumn(_layers(), _hs(cp=1800, rho=1.9, a=0.3)).collapse('volume_average')
         assert c.sound_speed == pytest.approx(1720.0)
+
+    def test_collapse_carries_halfspace_roughness(self):
+        # roughness is an interface property held by the half-space; the
+        # layer-derived collapses must preserve it, not reset to 0.
+        hs = _hs(cp=1800)
+        hs.roughness = 0.25
+        col = SeabedColumn(_layers(), hs)
+        assert col.collapse('top_layer').roughness == 0.25
+        assert col.collapse('volume_average').roughness == 0.25
+        assert col.collapse('halfspace').roughness == 0.25
 
 
 # ─── range-dependent half-space: linear blend + reductions ──────────────────

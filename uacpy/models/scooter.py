@@ -16,7 +16,7 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -91,6 +91,18 @@ class Scooter(PropagationModel):
     >>> result = scooter.run(env, source, receiver)
     """
 
+    # Declarative metadata (see PropagationModel / ModelSpec). Scooter:
+    # range-independent wavenumber integration. Honours multi-layer
+    # fluid/elastic bottom natively; range dependence in any form is
+    # collapsed to range-0. Single spectral solve → mean SSP / median
+    # bottom column are the representative single profile.
+    # INCOHERENT_TL is intentionally absent (no modal decomposition here).
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -164,14 +176,6 @@ class Scooter(PropagationModel):
             cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
 
-        # Range-independent FFP — single spectral solve over the full
-        # wavenumber axis, Hankel-transformed to range. Median/mean
-        # samples are the representative single profile.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom_range': 'median',
-        })
-
         self.c_low = c_low
         self.c_high = c_high
         self.interp_ssp = interp_ssp
@@ -207,26 +211,9 @@ class Scooter(PropagationModel):
             )
         self.field_interp = field_interp
 
-        # Declare supported modes for Scooter.
-        # INCOHERENT_TL is NOT implemented — Scooter computes the full
-        # coherent field; incoherent TL would require a modal decomposition
-        # we don't have here. See run() for the supported branches.
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        # Scooter: range-independent wavenumber integration. Honors
-        # multi-layer fluid/elastic bottom natively. Range dependence in
-        # any form is collapsed to range-0 with a warning.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
         # Keep the user's ``executable`` arg verbatim (``None`` when
         # auto-detected) so ``model.copy()`` re-resolves the binary instead of
         # re-pinning the already-resolved absolute path. The resolved path

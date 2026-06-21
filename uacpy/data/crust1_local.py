@@ -38,7 +38,7 @@ from uacpy.core.environment import (
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._http import http_get
+from uacpy.data._http import http_get, checked_member_size
 
 __all__ = ['download_crust1_db', 'fetch_crust1_profile', 'fetch_bottom_crust1',
            'fetch_bottom_crust1_transect']
@@ -93,6 +93,7 @@ def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
     for member in tf.getmembers():
         name = Path(member.name).name
         if name in _FILES and not Path(member.name).name.startswith('._'):
+            checked_member_size(member.size, name)
             (dest / name).write_bytes(tf.extractfile(member).read())
             written += 1
     if written < len(_FILES):
