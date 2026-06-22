@@ -183,7 +183,12 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
     4. Zero-padding to T_tot
 
     Chip rate is (fmax - fmin) / 2. Output is normalized to 0.95 of
-    full scale.
+    full scale and is exactly ``round(T_tot * fs)`` samples long.
+
+    Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``T_tot`` is
+    too short to hold the leader plus one full m-sequence period — a partial
+    period would lose the two-valued autocorrelation the probe exists for, so
+    increase ``T_tot`` or widen ``fmax - fmin`` to raise the chip rate.
 
     Translated from OALIB makemseq.m by mbp.
 
@@ -203,21 +208,30 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
     s_m = mseq(10)
     s = bpsk_modulate(s_m, fc, fs, chips_per_sec)
 
-    # Repeat m-sequence to fill time
-    Nreps = int(np.floor(T_tot * chips_per_sec / len(s_m)))
-    if Nreps < 1:
-        Nreps = 1
-    probe = np.tile(s, Nreps)
+    # Whole m-sequence periods that fit after the leader, counted in samples so
+    # the probe lands at exactly target_n. Counting the leader (the previous
+    # rep-count ignored it) is what keeps the probe inside T_tot; a period is
+    # never truncated, since a partial m-sequence loses the two-valued
+    # autocorrelation the probe exists for.
     leader = np.zeros(int(lead_time * fs))
+    target_n = int(round(T_tot * fs))
+    Nreps = (target_n - leader.size) // len(s)
+    if Nreps < 1:
+        raise ConfigurationError(
+            f"make_mseq_probe: T_tot={T_tot:g} s is too short for the "
+            f"{lead_time:g} s leader plus one m-sequence period "
+            f"({len(s) / fs:.3f} s at chip rate {chips_per_sec:g} chips/s). "
+            f"Increase T_tot, or widen (fmax - fmin) to raise the chip rate."
+        )
+    probe = np.tile(s, Nreps)
     probe_max = np.max(np.abs(probe))
     if probe_max > 0:
         probe = np.concatenate([leader, 0.95 * probe / probe_max])
     else:
         probe = np.concatenate([leader, probe])
 
-    # Zero-fill to total duration
-    n = len(probe)
-    if n < T_tot * fs:
-        probe = np.concatenate([probe, np.zeros(int(T_tot * fs - n))])
+    # Zero-fill to the exact total duration (leader + Nreps periods <= target_n).
+    if probe.size < target_n:
+        probe = np.concatenate([probe, np.zeros(target_n - probe.size)])
 
     return probe

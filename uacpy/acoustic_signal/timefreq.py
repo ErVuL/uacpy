@@ -357,7 +357,12 @@ def cepstrum(x, *, window=None, nfft=None, lifter=None):
 def complex_cepstrum(x):
     """Complex cepstrum ``ifft(log(fft(x)))`` with phase unwrapping.
 
-    Reversible via :func:`inverse_complex_cepstrum`.
+    Returns a **complex** array: phase unwrapping breaks the Hermitian
+    symmetry of ``log(fft(x))``, so the cepstrum carries information in its
+    imaginary part too. Keeping it (rather than taking the real part)
+    makes the homomorphic transform exactly reversible via
+    :func:`inverse_complex_cepstrum` — that imaginary part is what the
+    inverse needs to reconstruct ``x``.
     """
     xr = np.asarray(x, dtype=float)
     if xr.ndim != 1:
@@ -366,12 +371,16 @@ def complex_cepstrum(x):
     mag = np.abs(spectrum)
     mag = np.maximum(mag, np.finfo(float).tiny)
     log_spectrum = np.log(mag) + 1j * np.unwrap(np.angle(spectrum))
-    return np.real(np.fft.ifft(log_spectrum))
+    return np.fft.ifft(log_spectrum)
 
 
 def inverse_complex_cepstrum(c):
-    """Invert :func:`complex_cepstrum`: ``x = real(ifft(exp(fft(c))))``."""
-    cr = np.asarray(c, dtype=float)
+    """Invert :func:`complex_cepstrum`: ``x = real(ifft(exp(fft(c))))``.
+
+    Takes the complex cepstrum :func:`complex_cepstrum` returns (the
+    imaginary part is significant — see there) and reconstructs the real
+    signal ``x``."""
+    cr = np.asarray(c, dtype=complex)
     if cr.ndim != 1:
         raise ConfigurationError("inverse_complex_cepstrum: c must be 1-D")
     return np.real(np.fft.ifft(np.exp(np.fft.fft(cr))))
