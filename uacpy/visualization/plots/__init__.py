@@ -34,6 +34,21 @@ from uacpy.visualization.plots.environment import (
 from uacpy.visualization.plots.maps import (
     plot_bathymetry_map, plot_overview, plot_sea_ice_map,
 )
+from uacpy.visualization.plots.signal import (
+    draw_slowness_line, draw_sound_cone, plot_fk, plot_radon, plot_taup,
+    plot_psd, plot_ppsd, plot_sel,
+    plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
+    plot_band_levels, plot_angular_spectrum, plot_ambiguity,
+    plot_frf, plot_coherence, plot_impulse_response_info,
+)
+from uacpy.visualization.plots.comms import (
+    plot_channel, plot_doppler_ambiguity, plot_convergence, plot_sync_metric,
+    plot_subcarriers, plot_scatter, plot_constellation, plot_eye_diagram,
+    plot_ber_curve,
+)
+from uacpy.visualization.plots.noise import (
+    plot_wenz, plot_weighting, plot_source_level,
+)
 
 
 def plot_result(result, env: Optional[Environment] = None, **kwargs):
@@ -86,6 +101,36 @@ __all__ = [
     'plot_reflection_coefficient',
     'plot_covariance',
     'plot_replicas',
+    'plot_fk',
+    'plot_radon',
+    'plot_taup',
+    'draw_sound_cone',
+    'draw_slowness_line',
+    'plot_psd',
+    'plot_ppsd',
+    'plot_sel',
+    'plot_spectrogram',
+    'plot_cwt',
+    'plot_wigner_ville',
+    'plot_cepstrum',
+    'plot_band_levels',
+    'plot_angular_spectrum',
+    'plot_ambiguity',
+    'plot_frf',
+    'plot_coherence',
+    'plot_impulse_response_info',
+    'plot_channel',
+    'plot_doppler_ambiguity',
+    'plot_convergence',
+    'plot_sync_metric',
+    'plot_subcarriers',
+    'plot_scatter',
+    'plot_constellation',
+    'plot_eye_diagram',
+    'plot_ber_curve',
+    'plot_wenz',
+    'plot_weighting',
+    'plot_source_level',
     'animate_field',
     'save_animation',
     'plot_time_snapshots',

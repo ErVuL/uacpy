@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from scipy.signal import resample_poly  # noqa: E402
 
 from uacpy import comms  # noqa: E402
+from uacpy.visualization import plot_scatter  # noqa: E402
 from uacpy.comms.ofdm import schmidl_cox_sync, apply_cfo  # noqa: E402
 
 
@@ -132,7 +133,7 @@ def main():
     ax.set_title('[ofdm] per-subcarrier channel |H|', loc='left')
     ax.set_xlabel('Subcarrier'); ax.set_ylabel('|H| [dB]'); ax.grid(alpha=0.3)
 
-    comms.scatter(data_syms, ax=axes[1, 1],
+    plot_scatter(data_syms, ax=axes[1, 1],
                   title=f"recovered QPSK (CRC {'OK' if crc_ok else 'FAIL'})")
     axes[1, 1].scatter(cst.real, cst.imag, marker='x', s=80, color='k', zorder=5)
 

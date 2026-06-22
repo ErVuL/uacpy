@@ -1096,6 +1096,23 @@ positional argument; `env=` adds overlays.** All are exposed at top level
 | `plot_ssp(env_or_ssp)` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
 | `plot_overview(env, map_args, tl=…)` | three-panel map + TL + environment composite |
 
+**DSP / comms plotters.** All signal-processing and communications plotting also
+lives here (the `acoustic_signal` and `comms` modules are pure computation and
+import no matplotlib). Each takes the arrays a transform/estimator returns, the
+target `ax` as its second positional argument, and returns `(fig, ax)` — the same
+convention as `plot_field`:
+
+- **Spectra / levels:** `plot_psd`, `plot_ppsd`, `plot_sel`, `plot_spectrogram`,
+  `plot_band_levels`.
+- **Gather transforms:** `plot_fk`, `plot_radon`, `plot_taup` (+ `draw_sound_cone`,
+  `draw_slowness_line` overlays).
+- **Time-frequency:** `plot_cwt`, `plot_wigner_ville`, `plot_cepstrum`.
+- **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`,
+  `plot_frf`, `plot_coherence`, `plot_impulse_response_info`.
+- **Comms:** `plot_channel`, `plot_constellation`, `plot_scatter`,
+  `plot_eye_diagram`, `plot_ber_curve`, `plot_convergence`, `plot_sync_metric`,
+  `plot_doppler_ambiguity`, `plot_subcarriers`.
+
 Slicing replaces specialised plotters: there is no separate "TL line" vs "TL
 heatmap" function — you slice a `Field` to 1 or 2 axes and `plot_field`
 auto-selects the shape. Plotting a field with 3+ surviving axes raises and tells
@@ -1155,12 +1172,12 @@ use.
 | Waveforms | `lfm_chirp`, `hfm_chirp`, `tone_burst`, `gaussian_pulse`, `ricker_wavelet`, `sparc_pulse`, `nwave` |
 | Coded probes | `mseq`, `make_mseq_probe`, `bpsk_modulate` |
 | Noise synthesis | `make_noise_waveform`, `make_bandlimited_noise`, `synthesize_noise_from_psd`, `fourier_synthesis`, `add_noise` |
-| Spectral / levels | `PSD`, `PPSD`, `SEL` |
-| Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels`, `plot_band_levels` |
+| Spectral / levels | `psd`, `ppsd` (→ `PPSDResult`), `sel` |
+| Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
 | Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` |
-| Time-frequency | `Spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt` |
-| Gather transforms | `FK`, `TauP`, `Radon` (+ `inverse_*`) |
+| Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt` |
+| Gather transforms | `fk_transform`, `taup_transform`, `radon_transform` (+ `inverse_*`) |
 | System ID / channel | `FRF`, `impulse_response`, `simulate_reception` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
@@ -1331,7 +1348,10 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
   solution differs by the spreading factor `|G₃D/G₂D| = √(k/2πr)` — relevant
   only when comparing against closed-form 2-D references (see the ideal-wedge
   benchmark in `tests/test_benchmarks_analytic.py`).
-- `SEL`, `PSD`, `PPSD` and `Spectrogram` form levels through
+- `sel`, `psd`, `ppsd` and `spectrogram` are pure functions returning arrays;
+  their plots (`plot_sel`, `plot_psd`, `plot_ppsd`, `plot_spectrogram`, and the
+  gather/transform/comms plotters) live in `uacpy.visualization`, not in the
+  computation modules. Levels are formed through
   `core.acoustics.power_to_db` (`10·log₁₀(power/ref²)`), which floors `power` at
   `PRESSURE_FLOOR` before the log so a silent sample yields a finite, very
   negative level rather than `−inf`.

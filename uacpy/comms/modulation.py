@@ -105,40 +105,6 @@ class Modulator:
         bits = ((labels[:, None] >> np.arange(bps - 1, -1, -1)) & 1)
         return bits.ravel()
 
-    def scatter(self, symbols, ax=None, show_ideal=True, title=None, **kwargs):
-        """Scatter received ``symbols`` with the ideal constellation overlaid.
-
-        Convenience wrapper over :func:`uacpy.comms.scatter`. Returns ``(fig, ax)``.
-        """
-        from uacpy.comms.metrics import scatter as _scatter
-        fig, ax = _scatter(symbols, ax=ax,
-                           title=self.scheme if title is None else title, **kwargs)
-        if show_ideal:
-            ax.scatter(self.constellation.real, self.constellation.imag,
-                       marker="x", s=80, color="k", zorder=5, label="ideal")
-        return fig, ax
-
-    def plot_constellation(self, ax=None, annotate=True, **kwargs):
-        """Plot the ideal Gray-labeled constellation. Returns ``(fig, ax)``."""
-        import matplotlib.pyplot as plt
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(5, 5))
-        else:
-            fig = ax.figure
-        c = self.constellation
-        ax.scatter(c.real, c.imag, marker="o", s=60, **kwargs)
-        if annotate:
-            bps = self.bits_per_symbol
-            for label, pt in enumerate(c):
-                ax.annotate(format(label, f"0{bps}b"), (pt.real, pt.imag),
-                            textcoords="offset points", xytext=(6, 4), fontsize=8)
-        ax.axhline(0, color="k", lw=0.5); ax.axvline(0, color="k", lw=0.5)
-        ax.set_aspect("equal"); ax.grid(alpha=0.3)
-        ax.set_xlabel("In-phase"); ax.set_ylabel("Quadrature")
-        ax.set_title(f"[constellation] {self.scheme} (Gray-mapped)", loc="left")
-        return fig, ax
-
-
 def dpsk_modulate(bits, M: int = 2):
     """Differential M-PSK: encode phase *differences* (no carrier-phase reference).
 

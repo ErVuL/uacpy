@@ -80,24 +80,3 @@ def estimate_doppler_scale(rx, template, scales=None):
         peak[i] = float(matched_filter_metric(comp, t).max())
     best = float(scales[int(np.argmax(peak))])
     return best, scales, peak
-
-
-def plot_doppler_ambiguity(scales, peak_metric, ax=None, title="", **kwargs):
-    """Plot the Doppler-scale ambiguity curve (peak correlation vs scale).
-
-    Returns ``(fig, ax)``.
-    """
-    import matplotlib.pyplot as plt
-    s = np.asarray(scales, dtype=float)
-    p = np.asarray(peak_metric, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(7, 4))
-    else:
-        fig = ax.figure
-    ax.plot(s * 1e3, p / (p.max() + 1e-12), **kwargs)
-    best = s[int(np.argmax(p))] * 1e3
-    ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
-    ax.set_xlabel("Doppler scale a [×10⁻³]"); ax.set_ylabel("Norm. peak correlation")
-    ax.set_title(f"[doppler] ambiguity {title}", loc="left")
-    ax.grid(alpha=0.3); ax.legend()
-    return fig, ax

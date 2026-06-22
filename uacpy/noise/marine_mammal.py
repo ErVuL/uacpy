@@ -91,20 +91,3 @@ def weighted_level(psd_db, frequency, group):
     order = np.argsort(f)
     integral = np.trapezoid(10.0 ** (w[order] / 10.0), f[order])
     return float(10.0 * np.log10(max(float(integral), np.finfo(float).tiny)))
-
-
-def plot_weighting(group, frequency=None, ax=None, **kwargs):
-    """Plot the auditory weighting curve(s). ``group`` may be a name or list. Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    groups = [group] if isinstance(group, str) else list(group)
-    f = np.logspace(1, 5.5, 400) if frequency is None else np.asarray(frequency, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4))
-    else:
-        fig = ax.figure
-    for g in groups:
-        ax.semilogx(f, auditory_weighting(f, g), label=f"{g.upper()}", **kwargs)
-    ax.set_xlabel("Frequency [Hz]"); ax.set_ylabel("Weighting W(f) [dB]")
-    ax.set_title("[weighting] marine-mammal auditory", loc="left")
-    ax.set_ylim(-40, 5); ax.grid(which="both", alpha=0.3); ax.legend()
-    return fig, ax

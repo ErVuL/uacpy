@@ -155,7 +155,7 @@ def test_signal_symbols_resolve():
     import uacpy
     for name in ('lfm_chirp', 'hfm_chirp', 'tone_burst', 'gaussian_pulse',
                  'ricker_wavelet', 'add_noise', 'make_bandlimited_noise',
-                 'PPSD', 'Spectrogram'):
+                 'psd', 'ppsd', 'sel', 'spectrogram'):
         assert hasattr(uacpy.acoustic_signal, name), \
             f"uacpy.acoustic_signal.{name} missing"
 
@@ -166,21 +166,21 @@ class TestSEL:
     and an impulse at a segment boundary annihilated)."""
 
     def test_tone_exposure_is_parseval_exact(self):
-        from uacpy.acoustic_signal.analysis import SEL
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
         fs = 48000
         t = np.arange(fs) / fs
         x = 2.0 * np.sin(2 * np.pi * 1000.0 * t)   # exposure = A^2/2 * T = 2.0
-        sel, _ = SEL(band_type='third_octave', fmin=10, fmax=20000).compute(
-            x, fs, nfft=fs)
+        sel, _ = sel_fn(x, fs, band_type='third_octave', fmin=10, fmax=20000,
+                        nfft=fs)
         assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
     def test_impulse_not_annihilated(self):
-        from uacpy.acoustic_signal.analysis import SEL
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
         fs = 48000
         imp = np.zeros(fs)
         imp[0] = 10.0   # a Hann-windowed single segment would zero this out
-        sel, _ = SEL(band_type='linear', fmin=1.0, fmax=fs / 2,
-                     num_bands=240).compute(imp, fs, nfft=fs)
+        sel, _ = sel_fn(imp, fs, band_type='linear', fmin=1.0, fmax=fs / 2,
+                        num_bands=240, nfft=fs)
         # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
         assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
 
@@ -188,12 +188,12 @@ class TestSEL:
         # 1-Hz FFT bins (nfft=fs) against sub-bin-wide low third-octave bands:
         # each bin must contribute to exactly one band, so a flat tone's total
         # exposure is conserved (no bin double-counted across overlapping bands).
-        from uacpy.acoustic_signal.analysis import SEL
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
         fs = 1000
         t = np.arange(fs) / fs
         x = np.sin(2 * np.pi * 50.0 * t)
-        sel, _ = SEL(band_type='third_octave', fmin=8.9125, fmax=400).compute(
-            x, fs, nfft=fs)
+        sel, _ = sel_fn(x, fs, band_type='third_octave', fmin=8.9125, fmax=400,
+                        nfft=fs)
         assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
 

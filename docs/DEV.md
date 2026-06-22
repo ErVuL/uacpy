@@ -25,7 +25,7 @@ uacpy/
     ├── core/                Physics-agnostic dataclasses + invariants
     ├── models/              One PropagationModel subclass per engine
     ├── io/                  File-format readers/writers + FileManager
-    ├── acoustic_signal/     PPSD, PSD, SEL, FRF, FKTransform, Spectrogram
+    ├── acoustic_signal/     psd/ppsd/sel, fk_transform/taup/radon, spectrogram, FRF
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_rays / plot_modes / …
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
@@ -377,9 +377,13 @@ attach `.stdout` / `.stderr` / `.return_code` on
 These are orthogonal to the model layer. They consume `Result`
 objects (typically `Field`) or raw arrays.
 
-- `acoustic_signal/analysis.py` — `PPSD`, `Spectrogram`, `SEL` (sound
-  exposure level), `PSD`, `FRF` (frequency-response function),
-  `FKTransform`. Each has `compute(...)` + `plot(...)`.
+- `acoustic_signal/analysis.py` — `psd`, `ppsd` (→ `PPSDResult`), `sel` (sound
+  exposure level). Pure functions returning arrays; `system_id.py` keeps the
+  `FRF` class (it holds fitted state). Transforms (`fk_transform`,
+  `taup_transform`, `radon_transform`, `spectrogram`, `cwt`, `wigner_ville`,
+  `cepstrum`) are likewise functions with `inverse_*` where meaningful. **All
+  plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
+  `acoustic_signal`/`comms` modules import no matplotlib.
 - `acoustic_signal/processing.py` — beamforming, fourier synthesis,
   shift-to-max-correlation.
 - `acoustic_signal/generation.py` — source-waveform synthesis (Ricker,

@@ -86,22 +86,3 @@ def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=DEFAULT_S
     """
     return np.asarray(rnl_db, dtype=float) + lloyd_mirror_correction(
         frequency, source_depth, sound_speed)
-
-
-def plot_source_level(frequency, level_db, ax=None, title="", label="", **kwargs):
-    """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre). Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    f = np.asarray(frequency, dtype=float)
-    lv = np.asarray(level_db, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4))
-    else:
-        fig = ax.figure
-    ax.semilogx(f, lv, marker="o", label=label, **kwargs)
-    ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel("Source level [dB re 1 µPa·m]")
-    ax.set_title(f"[ship] radiated noise {title}", loc="left")
-    ax.grid(which="both", alpha=0.3)
-    if label:
-        ax.legend()
-    return fig, ax

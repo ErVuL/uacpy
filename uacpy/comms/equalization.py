@@ -147,20 +147,3 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
             ufb[0] = d
         out[k] = d_hat
     return out, mse
-
-
-def plot_convergence(mse, ax=None, title="", label="", **kwargs):
-    """Plot equalizer learning curve (MSE vs symbol index, dB). Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    m = np.asarray(mse, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(7, 4))
-    else:
-        fig = ax.figure
-    ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **kwargs)
-    ax.set_xlabel("Symbol index"); ax.set_ylabel("MSE [dB]")
-    ax.set_title(f"[equalizer] convergence {title}", loc="left")
-    ax.grid(alpha=0.3)
-    if label:
-        ax.legend()
-    return fig, ax

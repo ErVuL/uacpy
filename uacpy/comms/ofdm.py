@@ -140,19 +140,3 @@ def estimate_channel(rx_pilot_symbol, pilot_freq, n_subcarriers, cp_len):
     rxf = np.fft.fft(rx) / np.sqrt(nsc)
     pilot = np.asarray(pilot_freq, dtype=complex)
     return rxf / (pilot + 1e-12)
-
-
-def plot_subcarriers(channel, n_subcarriers, ax=None, title="", **kwargs):
-    """Plot the channel magnitude across the OFDM subcarriers. Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    nsc = int(n_subcarriers)
-    H = np.fft.fft(np.asarray(channel, dtype=complex), nsc)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 3.5))
-    else:
-        fig = ax.figure
-    ax.plot(np.arange(nsc), 20 * np.log10(np.abs(np.fft.fftshift(H)) + 1e-12), **kwargs)
-    ax.set_xlabel("Subcarrier index"); ax.set_ylabel("|H| [dB]")
-    ax.set_title(f"[ofdm] subcarrier response {title}", loc="left")
-    ax.grid(alpha=0.3)
-    return fig, ax

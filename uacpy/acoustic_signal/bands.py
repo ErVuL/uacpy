@@ -101,31 +101,3 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
             UserWarning, stacklevel=2,
         )
     return centers, levels
-
-
-def plot_band_levels(centers, levels, ax=None, title="", width=0.8,
-                     ref_label="1 µPa²", **kwargs):
-    """Bar plot of decidecade band levels vs centre frequency. Returns ``(fig, ax)``.
-
-    ``ref_label`` is the reference shown in the y-axis label; pass the reference
-    matching the ``ref`` used in :func:`decidecade_band_levels` (e.g. ``"20 µPa²"``
-    in air) so the units stay honest.
-    """
-    import matplotlib.pyplot as plt
-    c = np.asarray(centers, dtype=float)
-    lv = np.asarray(levels, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(9, 4))
-    else:
-        fig = ax.figure
-    x = np.log10(c)
-    bw = width * np.median(np.diff(x)) if c.size > 1 else 0.04
-    ax.bar(x, lv, width=bw, **kwargs)
-    ticks = x[:: max(1, c.size // 12)]
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
-    ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel(f"Band level [dB re {ref_label}]")
-    ax.set_title(f"[decidecade] band levels {title}", loc="left")
-    ax.grid(alpha=0.3, axis="y")
-    return fig, ax

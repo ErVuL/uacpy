@@ -18,12 +18,8 @@ import numpy as np
 from scipy.signal import hilbert
 from scipy.special import gamma
 import scipy.signal as _sig
-import matplotlib.pyplot as plt
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
-                                  REFERENCE_PRESSURE_WATER)
-from uacpy.core.acoustics import power_to_db
 
 
 def analytic_signal(x):
@@ -386,114 +382,8 @@ def inverse_complex_cepstrum(c):
     return np.real(np.fft.ifft(np.exp(np.fft.fft(cr))))
 
 
-class Spectrogram:
-    """Spectrogram computation and visualization."""
-
-    def __init__(self, ref=REFERENCE_PRESSURE_WATER, **kwargs):
-        """
-        Spectrogram computation and visualization class.
-
-        Parameters
-        ----------
-        ref : float
-            Reference level for dB scaling.
-        **kwargs
-            Additional arguments for scipy.signal.spectrogram.
-        """
-        self.ref = ref
-
-        # Default spectrogram parameters, overridden by kwargs if provided
-        self.spec_params = {
-            "nperseg": 8192,
-            "noverlap": 4096,
-            "window": "hann",
-        }
-        self.spec_params.update(kwargs)
-
-    def compute(self, data, fs):
-        """
-        Compute the spectrogram using scipy.signal.spectrogram.
-
-        Parameters
-        ----------
-        data : array_like
-            Input signal array (Pa).
-        fs : float
-            Sampling frequency of the signal (Hz).
-
-        Returns
-        -------
-        freqs : ndarray
-            Array of frequencies (Hz).
-        times : ndarray
-            Array of time points (s).
-        Sxx : ndarray
-            2D array of spectrogram values.
-        """
-        freqs, times, Sxx = _sig.spectrogram(
-            data, fs, scaling="density", mode="psd", **self.spec_params
-        )
-
-        self.frequencies = freqs
-        self.times = times
-        self.Sxx = Sxx
-
-        return freqs, times, Sxx
-
-    def plot(self, title="", ymin=1, ymax=None, vmin=0, vmax=200):
-        """
-        Plot the computed spectrogram as a colormap.
-
-        Parameters
-        ----------
-        title : str
-            Plot title.
-        ymin : float
-            Minimum frequency to display (Hz).
-        ymax : float
-            Maximum frequency to display (Hz).
-        vmin : float
-            Minimum value for color scaling (dB).
-        vmax : float
-            Maximum value for color scaling (dB).
-        """
-        if (
-            not hasattr(self, "frequencies")
-            or not hasattr(self, "times")
-            or not hasattr(self, "Sxx")
-        ):
-            raise ConfigurationError(
-                "Spectrogram.plot: compute() must be called before plotting"
-            )
-        Sxx_db = power_to_db(self.Sxx, self.ref)
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        pcm = ax.pcolormesh(
-            self.times,
-            self.frequencies,
-            Sxx_db,
-            cmap="jet",
-            shading="auto",
-            vmin=vmin,
-            vmax=vmax,
-        )
-        cbar = fig.colorbar(pcm, ax=ax)
-
-        if self.ref == REFERENCE_PRESSURE_WATER:
-            ref = "1µ"
-        elif self.ref == REFERENCE_PRESSURE_AIR:
-            ref = "20µ"
-        else:
-            ref = f"{self.ref:02e}"
-        cbar.set_label(f"Level [dB re {ref}Pa²/Hz]")
-        ax.set_title(f"[Spectrogram] {title}", loc="left")
-        ax.set_xlabel("Time [s]")
-        ax.set_ylabel("Frequency [Hz]")
-
-        if ymax is None:
-            ymax = self.frequencies[-1]
-
-        ax.set_ylim((ymin, ymax))
-        ax.grid(which="both", alpha=0.25, color="black")
-
-        return fig, ax
+def spectrogram(data, fs, *, window="hann", nperseg=8192,
+                noverlap=4096, scaling="density", mode="psd"):
+    """Short-time spectrogram. Returns ``(freqs, times, Sxx)`` (Pa²/Hz)."""
+    return _sig.spectrogram(data, fs, window=window, nperseg=nperseg,
+                            noverlap=noverlap, scaling=scaling, mode=mode)

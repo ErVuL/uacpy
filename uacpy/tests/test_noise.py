@@ -117,17 +117,19 @@ def test_wenznoise_default_attributes(freqs):
         assert not np.any(np.isnan(v)), f"{attr} contains NaN"
 
 
-def test_wenznoise_components_matrix_layout(freqs):
+def test_wenznoise_components_named(freqs):
     wenz = WenzNoise(freqs, wind_speed=10, shipping_level='medium',
                      rain_rate='moderate')
-    M = wenz.components
-    assert M.shape == (freqs.size, 6)
-    np.testing.assert_array_equal(M[:, 0], wenz.total)
-    np.testing.assert_array_equal(M[:, 1], wenz.shipping)
-    np.testing.assert_array_equal(M[:, 2], wenz.wind)
-    np.testing.assert_array_equal(M[:, 3], wenz.rain)
-    np.testing.assert_array_equal(M[:, 4], wenz.thermal)
-    np.testing.assert_array_equal(M[:, 5], wenz.turbulence)
+    c = wenz.components
+    assert c._fields == ('total', 'wind', 'shipping', 'rain',
+                         'thermal', 'turbulence')
+    assert len(c) == 6
+    np.testing.assert_array_equal(c.total, wenz.total)
+    np.testing.assert_array_equal(c.shipping, wenz.shipping)
+    np.testing.assert_array_equal(c.wind, wenz.wind)
+    np.testing.assert_array_equal(c.rain, wenz.rain)
+    np.testing.assert_array_equal(c.thermal, wenz.thermal)
+    np.testing.assert_array_equal(c.turbulence, wenz.turbulence)
 
 
 def test_wenznoise_total_geq_components(freqs):
@@ -186,7 +188,8 @@ def test_wenznoise_rejects_dc_and_negative_frequencies():
 
 def test_wenznoise_plot_returns_fig_ax(freqs):
     wenz = WenzNoise(freqs, wind_speed=15)
-    fig, ax = wenz.plot()
+    from uacpy.visualization import plot_wenz
+    fig, ax = plot_wenz(wenz)
     assert fig is not None and ax is not None
     import matplotlib.pyplot as plt
     plt.close(fig)
@@ -194,7 +197,8 @@ def test_wenznoise_plot_returns_fig_ax(freqs):
 
 def test_wenznoise_plot_total_only(freqs):
     wenz = WenzNoise(freqs, wind_speed=15)
-    fig, ax = wenz.plot(show_components=False)
+    from uacpy.visualization import plot_wenz
+    fig, ax = plot_wenz(wenz, show_components=False)
     assert fig is not None and ax is not None
     import matplotlib.pyplot as plt
     plt.close(fig)

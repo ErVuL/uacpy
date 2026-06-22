@@ -31,10 +31,11 @@ class TestModulation:
     def test_plot_helpers_return_fig_ax(self):
         import matplotlib
         matplotlib.use("Agg")
+        from uacpy.visualization import plot_constellation, plot_scatter
         mod = comms.Modulator("qpsk")
-        fig, ax = mod.plot_constellation()
+        fig, ax = plot_constellation(mod.constellation, scheme=mod.scheme)
         assert ax.has_data()
-        fig2, ax2 = mod.scatter(mod.constellation)
+        fig2, ax2 = plot_scatter(mod.constellation, ideal=mod.constellation)
         assert ax2.has_data()
 
     @pytest.mark.parametrize("M", [2, 4])
