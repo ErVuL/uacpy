@@ -69,7 +69,7 @@ def plot_field(
         ``2 × max|data|`` for visual separation.
     """
     if not isinstance(field, Field):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_field: expected Field, got {type(field).__name__}"
         )
 
@@ -317,7 +317,7 @@ def plot_signal_excess(
         Draw the SE = 0 dB detection-boundary contour. Default True.
     """
     if not isinstance(field, Field):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_signal_excess: expected Field, got {type(field).__name__}"
         )
     if field.is_complex:
@@ -413,7 +413,7 @@ def plot_detection_probability(
         ``P_D`` contour lines to draw. Default ``(0.1, 0.5, 0.9)``.
     """
     if not isinstance(field, Field):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_detection_probability: expected Field, got "
             f"{type(field).__name__}"
         )
@@ -503,7 +503,7 @@ def compare(
     x_label = None
     for f, lbl in zip(fields, labels):
         if not isinstance(f, Field):
-            raise TypeError(
+            raise ConfigurationError(
                 f"compare: expected Field, got {type(f).__name__}"
             )
         axes = list(f.coords)

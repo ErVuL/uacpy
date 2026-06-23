@@ -32,6 +32,18 @@ from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
 from uacpy.io.oalib_writer import write_sparc_env_file
 
 
+# CW transmission-loss extraction deconvolves the source pulse from the output
+# time series, so the output sampling must resolve the pulse band: its Nyquist
+# (fs/2) has to sit above ``f_max`` or the requested frequency aliases (and a
+# pulse shorter than one output sample vanishes entirely → S(f0)=0). These size
+# the output grid (``n_t_out``) for ``RunMode.COHERENT_TL`` when the user's value
+# would undersample. ``OVERSAMPLE`` is the factor above the Nyquist minimum;
+# ``MAX_N_T_OUT`` caps the auto-grow so a too-high CW request fails with a clear
+# message instead of timing out.
+_SPARC_CW_PULSE_OVERSAMPLE = 3.0
+_SPARC_MAX_N_T_OUT = 16384
+
+
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
 # Pos 1: pulse shape — the 10 letters accepted by sparc.f90's parser.
 # ``T`` and ``C`` exist in tslib/cans.f90 (the pulse evaluator) but
@@ -71,7 +83,7 @@ def _validate_pulse_type(pulse_type: str) -> str:
         ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
     """
     if not isinstance(pulse_type, str):
-        raise TypeError(
+        raise ConfigurationError(
             f"pulse_type must be a string, got {type(pulse_type).__name__}"
         )
     if len(pulse_type) > 4:
@@ -265,12 +277,19 @@ class SPARC(PropagationModel):
             'R' (horizontal array), 'D' (vertical array), 'S' (snapshot). Default: 'R'.
 
             ``'S'`` mode time-FFTs the snapshot's tout axis and picks the
-            source-frequency bin (``uacpy.io.grn_reader.sparc_snapshot_to_field``);
-            ``n_t_out`` must be large enough that the source frequency
-            stays below ``0.5/dt``. **Experimental:** the snapshot path's
-            absolute level is uncalibrated (~30 dB off Kraken/Scooter) and
-            emits a ``UserWarning`` — the field shape is indicative but use
-            ``'R'`` or another model for absolute transmission loss.
+            source-frequency bin (``uacpy.io.grn_reader.sparc_snapshot_to_field``).
+            All three modes recover absolute TL re 1 m by deconvolving the
+            known source spectrum ``S(omega0)`` from the time-domain field
+            (convolution theorem, Jensen COA Eq. 8.1). For ``COHERENT_TL`` the
+            output time grid is auto-sized so its Nyquist clears the pulse band
+            (see :meth:`_resolve_n_t_out`); the result is physical and
+            **grid-independent**. The default ``'R'`` (horizontal) field is
+            additionally divided by √(4π) to convert SPARC's native RTS
+            convention to Scooter/Kraken's bare-Hankel TL pressure, giving
+            ~1–4 dB agreement with Kraken on a Pekeris benchmark (the residual
+            is SPARC's experimental-FFP accuracy plus the un-modelled pulse
+            band-pass). ``'D'``/``'S'`` carry their own normalisation and are
+            calibrated less tightly; use Kraken/Scooter for precise absolute TL.
         pulse_type : str, optional
             Pulse type string. Default: 'PN+B'.
         n_t_out : int, optional
@@ -368,6 +387,7 @@ class SPARC(PropagationModel):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         *,
+        frequencies=None,
         source_waveform=None,
         sample_rate=None,
         output_duration=None,
@@ -464,322 +484,342 @@ class SPARC(PropagationModel):
             freq = source.frequencies[0]
 
             if self.output_mode == 'R':
-                # SPARC computes horizontal arrays (one depth at a time)
-                # For 2D fields, we need to run SPARC for each receiver depth
-
-                if len(receiver.depths) == 1:
-                    # Single depth - run once
-                    self._log(f"Computing at depth {receiver.depths[0]:.1f}m...")
-
-                    # Write environment file
-                    env_file = fm.get_path(f'{base_name}.env')
-                    self._write_sparc_env(env_file, env, source, receiver, run_mode)
-                    self._run_sparc(base_name, fm.work_dir)
-                    rts_file = fm.get_path(f'{base_name}.rts')
-                    if not rts_file.exists():
-                        exc = ModelExecutionError(
-                            self.model_name, return_code=0, stdout=None,
-                            stderr=f"SPARC did not produce {rts_file}",
-                        )
-                        self._attach_prt_tail(exc, fm.work_dir, base_name)
-                        raise exc
-
-                    rts_data = read_rts_file(rts_file)
-
-                    if run_mode == RunMode.TIME_SERIES:
-                        # rts_data['p'] is (nt, nr). New shape contract is
-                        # (n_d, n_r, n_t) so swap axes 0↔1 and add the
-                        # leading n_d=1 axis.
-                        p_3d = np.asarray(rts_data['p']).T[None, :, :]
-                        dt = rts_data['dt']
-                        time = rts_data['time']
-                        result = Field(
-                            data=p_3d,
-                            coords={
-                                'depth': receiver.depths,
-                                'range': rts_data['ranges'],
-                                'time': time,
-                            },
-                            **self._result_kwargs(
-                                source,
-                                backend='sparc',
-                                frequencies=freq,
-                                phase_reference='time_domain_native',
-                                dt=float(dt),
-                                fs=(1.0 / float(dt)) if dt else float('nan'),
-                                nt=int(rts_data['nt']),
-                                t_start=float(time[0]) if len(time) else 0.0,
-                            ),
-                        )
-                        self._log("simulation complete (time-series mode)")
-                        return result
-
-                    p_at_freq, ranges_out = rts_to_pressure(
-                        rts_data, freq, method='fft',
-                    )
-                    p_field = p_at_freq.reshape(1, -1)
-
-                else:
-                    # Multiple depths - run SPARC for each depth
-                    self._log(f"Computing for {len(receiver.depths)} depths (SPARC horizontal array mode)...")
-
-                    p_list = []
-                    ranges_out = receiver.ranges
-                    pressure_all = [] if run_mode == RunMode.TIME_SERIES else None
-                    time_grid = None  # captured from first run; SPARC's grid is depth-independent
-
-                    for idx, depth in enumerate(receiver.depths):
-                        # Create single-depth receiver
-                        single_receiver = Receiver(depths=np.array([depth]), ranges=receiver.ranges)
-
-                        # Write environment file for this depth
-                        depth_base = f'{base_name}_d{idx}'
-                        env_file = fm.get_path(f'{depth_base}.env')
-                        self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
-
-                        # Run SPARC for this depth
-                        if self.verbose:
-                            self._log(f"  Depth {idx+1}/{len(receiver.depths)}: {depth:.1f}m")
-                        self._run_sparc(depth_base, fm.work_dir)
-                        rts_file = fm.get_path(f'{depth_base}.rts')
-                        if not rts_file.exists():
-                            exc = ModelExecutionError(
-                                self.model_name, return_code=0, stdout=None,
-                                stderr=f"SPARC did not produce {rts_file}",
-                            )
-                            self._attach_prt_tail(exc, fm.work_dir, depth_base)
-                            raise exc
-
-                        rts_data = read_rts_file(rts_file)
-                        if time_grid is None:
-                            time_grid = {
-                                'time': rts_data['time'],
-                                'dt': rts_data['dt'],
-                                'nt': rts_data['nt'],
-                            }
-
-                        if run_mode == RunMode.TIME_SERIES:
-                            pressure_all.append(rts_data['p'])  # (nt, nr)
-                        else:
-                            p_single, ranges_out = rts_to_pressure(
-                                rts_data, freq, method='fft',
-                            )
-                            p_list.append(p_single)
-
-                    if run_mode == RunMode.TIME_SERIES:
-                        # Each pressure_all[i] is (nt, nr); stack into
-                        # (n_d, nt, nr) then transpose middle/last axes to
-                        # match the (n_d, n_r, n_t) contract.
-                        pressure_stack = np.moveaxis(
-                            np.stack(pressure_all, axis=0), 1, 2,
-                        )
-                        time = time_grid['time']
-                        dt = time_grid['dt']
-                        # The range axis is SPARC's actual output grid (identical
-                        # across depths), matching the single-depth path. Field
-                        # validates this length against the data shape.
-                        result = Field(
-                            data=pressure_stack,
-                            coords={
-                                'depth': receiver.depths,
-                                'range': rts_data['ranges'],
-                                'time': time,
-                            },
-                            **self._result_kwargs(
-                                source,
-                                backend='sparc',
-                                frequencies=freq,
-                                phase_reference='time_domain_native',
-                                dt=float(dt),
-                                fs=(1.0 / float(dt)) if dt else float('nan'),
-                                nt=int(time_grid['nt']),
-                                t_start=float(time[0]) if len(time) else 0.0,
-                            ),
-                        )
-                        self._log("simulation complete (time-series mode)")
-                        return result
-
-                    p_field = np.vstack(p_list)  # shape: (n_depths, n_ranges)
-
-                result = Field(
-                    data=p_field,
-                    coords={'depth': receiver.depths, 'range': ranges_out},
-                    **self._result_kwargs(
-                        source,
-                        backend='sparc',
-                        frequencies=freq,
-                        phase_reference='travelling_wave',
-                        conversion_method='fft',
-                        output_mode='R',
-                        n_depth_runs=len(receiver.depths),
-                    ),
-                )
-
+                return self._run_range_native(
+                    fm, env, source, receiver, run_mode, base_name, freq)
             elif self.output_mode == 'D':
-                # Vertical array mode: pressure vs depth at fixed ranges
-                # SPARC outputs .rts file with depth values
-                self._log(f"Computing vertical array at {len(receiver.ranges)} ranges...")
-
-                if len(receiver.ranges) == 1:
-                    # Single range - run once
-                    env_file = fm.get_path(f'{base_name}.env')
-                    self._write_sparc_env(env_file, env, source, receiver, run_mode)
-
-                    self._run_sparc(base_name, fm.work_dir)
-
-                    # Read vertical array output
-                    rts_file = fm.get_path(f'{base_name}.rts')
-                    if not rts_file.exists():
-                        exc = ModelExecutionError(
-                            self.model_name, return_code=0, stdout=None,
-                            stderr=f"SPARC did not produce {rts_file}",
-                        )
-                        self._attach_prt_tail(exc, fm.work_dir, base_name)
-                        raise exc
-
-                    rts_data = read_rts_file(rts_file)
-                    # In vertical mode, 'ranges' in RTS file actually contains depths
-                    depths_out = rts_data['ranges']  # These are actually depths
-                    p_at_freq, _ = rts_to_pressure(rts_data, freq, method='fft')
-                    # sparc.f90's 'D' branch writes Scale=1/√(π·r) where the
-                    # 'R' branch carries 1/√r — ×√π puts both modes on the
-                    # same ('R'-native) pressure convention.
-                    p_field = np.sqrt(np.pi) * p_at_freq.reshape(-1, 1)  # shape: (n_depths, 1)
-
-                else:
-                    p_list = []
-                    depths_out = receiver.depths
-
-                    for idx, range in enumerate(receiver.ranges):
-                        # Create single-range receiver
-                        single_receiver = Receiver(depths=receiver.depths, ranges=np.array([range]))
-
-                        range_base = f'{base_name}_r{idx}'
-                        env_file = fm.get_path(f'{range_base}.env')
-                        self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
-
-                        if self.verbose:
-                            self._log(f"  Range {idx+1}/{len(receiver.ranges)}: {range:.1f}m")
-                        self._run_sparc(range_base, fm.work_dir)
-
-                        rts_file = fm.get_path(f'{range_base}.rts')
-                        if not rts_file.exists():
-                            exc = ModelExecutionError(
-                                self.model_name, return_code=0, stdout=None,
-                                stderr=f"SPARC did not produce {rts_file}",
-                            )
-                            self._attach_prt_tail(exc, fm.work_dir, range_base)
-                            raise exc
-
-                        rts_data = read_rts_file(rts_file)
-                        p_single, _ = rts_to_pressure(rts_data, freq, method='fft')
-                        p_list.append(np.sqrt(np.pi) * p_single)
-
-                    p_field = np.column_stack(p_list)  # shape: (n_depths, n_ranges)
-
-                result = Field(
-                    data=p_field,
-                    coords={'depth': depths_out, 'range': receiver.ranges},
-                    **self._result_kwargs(
-                        source,
-                        backend='sparc',
-                        frequencies=freq,
-                        phase_reference='travelling_wave',
-                        conversion_method='fft',
-                        output_mode='D',
-                        n_range_runs=len(receiver.ranges),
-                    ),
-                )
-
+                return self._run_vertical(
+                    fm, env, source, receiver, run_mode, base_name, freq)
             elif self.output_mode == 'S':
-                # Snapshot mode: wavenumber-domain Green's function
-                # SPARC outputs .grn file holding G(itout, irz, ik). To
-                # extract steady-state TL at the source frequency we
-                # time-FFT then Hankel-transform (see grn_reader docstring).
-                self._log("Computing snapshot (wavenumber domain)...")
-
-                # Write environment file
-                env_file = fm.get_path(f'{base_name}.env')
-                self._write_sparc_env(env_file, env, source, receiver, run_mode)
-                self._run_sparc(base_name, fm.work_dir)
-
-                # Read Green's function file
-                grn_file = fm.get_path(f'{base_name}.grn')
-                if not grn_file.exists():
-                    exc = ModelExecutionError(
-                        self.model_name, return_code=0, stdout=None,
-                        stderr=(
-                            f"SPARC snapshot mode did not produce {grn_file}; "
-                            f"check {fm.work_dir}/{base_name}.prt for diagnostics."
-                        ),
-                    )
-                    self._attach_prt_tail(exc, fm.work_dir, base_name)
-                    raise exc
-
-                self._log("Reading snapshot Green's function and extracting source-freq TL...")
-                grn_data = read_grn_file(grn_file)
-                if not grn_data['is_sparc']:
-                    exc = ModelExecutionError(
-                        self.model_name, return_code=0, stdout=None,
-                        stderr=(
-                            "GRN title does not start with 'SPARC' — snapshot path "
-                            "expects a SPARC-produced file."
-                        ),
-                    )
-                    self._attach_prt_tail(exc, fm.work_dir, base_name)
-                    raise exc
-
-                # Time-FFT along the snapshot's tout axis, pick the source
-                # frequency bin, then Hankel transform to range.
-                #
-                # KNOWN LIMITATION: the absolute level of this snapshot path is
-                # NOT calibrated — it is ~30 dB off the modal/FFP models
-                # (Kraken/Scooter agree with each other to <1 dB; SPARC 'S'
-                # does not). The field *shape* is indicative but the dB values
-                # are unreliable. Snapshot mode is experimental; use
-                # ``output_mode='R'`` (native range synthesis) or another model
-                # for absolute transmission loss.
-                warnings.warn(
-                    "SPARC output_mode='S' (snapshot) absolute transmission "
-                    "loss is uncalibrated (~30 dB offset vs Kraken/Scooter) and "
-                    "experimental. Use output_mode='R' or another model "
-                    "(Kraken/Scooter/RAM) for absolute TL.",
-                    UserWarning, stacklevel=2,
-                )
-                result = sparc_snapshot_to_field(
-                    grn_data, receiver.ranges, frequency=freq,
-                )
-                self._stamp_result(result, source, backend='sparc',
-                                   frequencies=freq, phase_reference='travelling_wave')
-                result.metadata['output_mode'] = 'S'
-                result.metadata['note'] = (
-                    'Snapshot mode (experimental): time-FFT then Hankel '
-                    'transform; absolute TL uncalibrated (~30 dB offset).')
-                result.metadata['absolute_tl_calibrated'] = False
-
+                return self._run_snapshot(
+                    fm, env, source, receiver, run_mode, base_name, freq)
             else:
                 raise ConfigurationError(
                     f"Invalid output mode '{self.output_mode}'. "
                     f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
                 )
 
-            # output_mode='S' writes a snapshot .grn; 'R'/'D' write
-            # per-depth/per-range .rts files inside loops. Expose
-            # whatever exists at the wrapper base_name.
-            self._attach_output_paths(
-                result, fm.work_dir, base_name,
-                primary_files=(
-                    ('grn_file', '.grn'),
-                    ('rts_file', '.rts'),
-                ),
-            )
-
-            self._log("Simulation complete")
-            return result
-
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
+
+    def _finalize_sparc_result(self, result, fm, base_name):
+        """Attach output paths + finishing log; the shared R/D/S tail."""
+        # output_mode='S' writes a snapshot .grn; 'R'/'D' write
+        # per-depth/per-range .rts files inside loops. Expose
+        # whatever exists at the wrapper base_name.
+        self._attach_output_paths(
+            result, fm.work_dir, base_name,
+            primary_files=(
+                ('grn_file', '.grn'),
+                ('rts_file', '.rts'),
+            ),
+        )
+        self._log("Simulation complete")
+        return result
+
+    def _run_range_native(self, fm, env, source, receiver, run_mode,
+                          base_name, freq):
+        """output_mode='R': horizontal (range-native) array — one SPARC run per
+        receiver depth, assembling the native p(t) for TIME_SERIES."""
+        # SPARC computes horizontal arrays (one depth at a time)
+        # For 2D fields, we need to run SPARC for each receiver depth
+        if len(receiver.depths) == 1:
+            # Single depth - run once
+            self._log(f"Computing at depth {receiver.depths[0]:.1f}m...")
+
+            # Write environment file
+            env_file = fm.get_path(f'{base_name}.env')
+            self._write_sparc_env(env_file, env, source, receiver, run_mode)
+            self._run_sparc(base_name, fm.work_dir)
+            rts_file = fm.get_path(f'{base_name}.rts')
+            if not rts_file.exists():
+                exc = ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=f"SPARC did not produce {rts_file}",
+                )
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
+
+            rts_data = read_rts_file(rts_file)
+
+            if run_mode == RunMode.TIME_SERIES:
+                # rts_data['p'] is (nt, nr). New shape contract is
+                # (n_d, n_r, n_t) so swap axes 0↔1 and add the
+                # leading n_d=1 axis.
+                p_3d = np.asarray(rts_data['p']).T[None, :, :]
+                dt = rts_data['dt']
+                time = rts_data['time']
+                result = Field(
+                    data=p_3d,
+                    coords={
+                        'depth': receiver.depths,
+                        'range': rts_data['ranges'],
+                        'time': time,
+                    },
+                    **self._result_kwargs(
+                        source,
+                        backend='sparc',
+                        frequencies=freq,
+                        phase_reference='time_domain_native',
+                        dt=float(dt),
+                        fs=(1.0 / float(dt)) if dt else float('nan'),
+                        nt=int(rts_data['nt']),
+                        t_start=float(time[0]) if len(time) else 0.0,
+                    ),
+                )
+                self._log("simulation complete (time-series mode)")
+                return result
+
+            p_at_freq, ranges_out = rts_to_pressure(
+                rts_data, freq, method='fft', pulse_type=self.pulse_type,
+            )
+            p_field = p_at_freq.reshape(1, -1)
+
+        else:
+            # Multiple depths - run SPARC for each depth
+            self._log(f"Computing for {len(receiver.depths)} depths (SPARC horizontal array mode)...")
+
+            p_list = []
+            ranges_out = receiver.ranges
+            pressure_all = [] if run_mode == RunMode.TIME_SERIES else None
+            time_grid = None  # captured from first run; SPARC's grid is depth-independent
+
+            for idx, depth in enumerate(receiver.depths):
+                # Create single-depth receiver
+                single_receiver = Receiver(depths=np.array([depth]), ranges=receiver.ranges)
+
+                # Write environment file for this depth
+                depth_base = f'{base_name}_d{idx}'
+                env_file = fm.get_path(f'{depth_base}.env')
+                self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
+
+                # Run SPARC for this depth
+                self._log(f"  Depth {idx+1}/{len(receiver.depths)}: {depth:.1f}m")
+                self._run_sparc(depth_base, fm.work_dir)
+                rts_file = fm.get_path(f'{depth_base}.rts')
+                if not rts_file.exists():
+                    exc = ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=f"SPARC did not produce {rts_file}",
+                    )
+                    self._attach_prt_tail(exc, fm.work_dir, depth_base)
+                    raise exc
+
+                rts_data = read_rts_file(rts_file)
+                if time_grid is None:
+                    time_grid = {
+                        'time': rts_data['time'],
+                        'dt': rts_data['dt'],
+                        'nt': rts_data['nt'],
+                    }
+
+                if run_mode == RunMode.TIME_SERIES:
+                    pressure_all.append(rts_data['p'])  # (nt, nr)
+                else:
+                    p_single, ranges_out = rts_to_pressure(
+                        rts_data, freq, method='fft', pulse_type=self.pulse_type,
+                    )
+                    p_list.append(p_single)
+
+            if run_mode == RunMode.TIME_SERIES:
+                # Each pressure_all[i] is (nt, nr); stack into
+                # (n_d, nt, nr) then transpose middle/last axes to
+                # match the (n_d, n_r, n_t) contract.
+                pressure_stack = np.moveaxis(
+                    np.stack(pressure_all, axis=0), 1, 2,
+                )
+                time = time_grid['time']
+                dt = time_grid['dt']
+                # The range axis is SPARC's actual output grid (identical
+                # across depths), matching the single-depth path. Field
+                # validates this length against the data shape.
+                result = Field(
+                    data=pressure_stack,
+                    coords={
+                        'depth': receiver.depths,
+                        'range': rts_data['ranges'],
+                        'time': time,
+                    },
+                    **self._result_kwargs(
+                        source,
+                        backend='sparc',
+                        frequencies=freq,
+                        phase_reference='time_domain_native',
+                        dt=float(dt),
+                        fs=(1.0 / float(dt)) if dt else float('nan'),
+                        nt=int(time_grid['nt']),
+                        t_start=float(time[0]) if len(time) else 0.0,
+                    ),
+                )
+                self._log("simulation complete (time-series mode)")
+                return result
+
+            p_field = np.vstack(p_list)  # shape: (n_depths, n_ranges)
+
+        # SPARC's native 'R' (horizontal) RTS field is written unscaled
+        # (sparc.f90 KERNEL), so relative to Scooter/Kraken's TL pressure it
+        # carries an extra √(4π) — the asymptotic-Hankel spreading √π times a
+        # factor-2 wavenumber-integral convention. Divide by it so the CW field
+        # is in the bare-Hankel convention (|g(1 m)|≈1), matching Kraken to
+        # ~1-4 dB on a Pekeris benchmark. ('D'/'S' carry their own scale and
+        # are normalised in their own paths.)
+        p_field = p_field / np.sqrt(4.0 * np.pi)
+
+        result = Field(
+            data=p_field,
+            coords={'depth': receiver.depths, 'range': ranges_out},
+            **self._result_kwargs(
+                source,
+                backend='sparc',
+                frequencies=freq,
+                phase_reference='travelling_wave',
+                conversion_method='fft',
+                output_mode='R',
+                n_depth_runs=len(receiver.depths),
+            ),
+        )
+        return self._finalize_sparc_result(result, fm, base_name)
+
+    def _run_vertical(self, fm, env, source, receiver, run_mode,
+                      base_name, freq):
+        """output_mode='D': vertical array — pressure vs depth at fixed ranges."""
+        # Vertical array mode: pressure vs depth at fixed ranges
+        # SPARC outputs .rts file with depth values
+        self._log(f"Computing vertical array at {len(receiver.ranges)} ranges...")
+
+        if len(receiver.ranges) == 1:
+            # Single range - run once
+            env_file = fm.get_path(f'{base_name}.env')
+            self._write_sparc_env(env_file, env, source, receiver, run_mode)
+
+            self._run_sparc(base_name, fm.work_dir)
+
+            # Read vertical array output
+            rts_file = fm.get_path(f'{base_name}.rts')
+            if not rts_file.exists():
+                exc = ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=f"SPARC did not produce {rts_file}",
+                )
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
+
+            rts_data = read_rts_file(rts_file)
+            # In vertical mode, 'ranges' in RTS file actually contains depths
+            depths_out = rts_data['ranges']  # These are actually depths
+            p_at_freq, _ = rts_to_pressure(rts_data, freq, method='fft',
+                                           pulse_type=self.pulse_type)
+            # sparc.f90's 'D' branch writes Scale=1/√(π·r) where the
+            # 'R' branch carries 1/√r — ×√π puts both modes on the
+            # same ('R'-native) pressure convention.
+            p_field = np.sqrt(np.pi) * p_at_freq.reshape(-1, 1)  # shape: (n_depths, 1)
+
+        else:
+            p_list = []
+            depths_out = receiver.depths
+
+            for idx, range in enumerate(receiver.ranges):
+                # Create single-range receiver
+                single_receiver = Receiver(depths=receiver.depths, ranges=np.array([range]))
+
+                range_base = f'{base_name}_r{idx}'
+                env_file = fm.get_path(f'{range_base}.env')
+                self._write_sparc_env(env_file, env, source, single_receiver, run_mode)
+
+                self._log(f"  Range {idx+1}/{len(receiver.ranges)}: {range:.1f}m")
+                self._run_sparc(range_base, fm.work_dir)
+
+                rts_file = fm.get_path(f'{range_base}.rts')
+                if not rts_file.exists():
+                    exc = ModelExecutionError(
+                        self.model_name, return_code=0, stdout=None,
+                        stderr=f"SPARC did not produce {rts_file}",
+                    )
+                    self._attach_prt_tail(exc, fm.work_dir, range_base)
+                    raise exc
+
+                rts_data = read_rts_file(rts_file)
+                p_single, _ = rts_to_pressure(rts_data, freq, method='fft',
+                                              pulse_type=self.pulse_type)
+                p_list.append(np.sqrt(np.pi) * p_single)
+
+            p_field = np.column_stack(p_list)  # shape: (n_depths, n_ranges)
+
+        result = Field(
+            data=p_field,
+            coords={'depth': depths_out, 'range': receiver.ranges},
+            **self._result_kwargs(
+                source,
+                backend='sparc',
+                frequencies=freq,
+                phase_reference='travelling_wave',
+                conversion_method='fft',
+                output_mode='D',
+                n_range_runs=len(receiver.ranges),
+            ),
+        )
+        return self._finalize_sparc_result(result, fm, base_name)
+
+    def _run_snapshot(self, fm, env, source, receiver, run_mode,
+                      base_name, freq):
+        """output_mode='S': wavenumber-domain Green's-function snapshot,
+        source-spectrum-deconvolved to calibrated absolute TL re 1 m."""
+        # Snapshot mode: wavenumber-domain Green's function
+        # SPARC outputs .grn file holding G(itout, irz, ik). To
+        # extract steady-state TL at the source frequency we
+        # time-FFT then Hankel-transform (see grn_reader docstring).
+        self._log("Computing snapshot (wavenumber domain)...")
+
+        # Write environment file
+        env_file = fm.get_path(f'{base_name}.env')
+        self._write_sparc_env(env_file, env, source, receiver, run_mode)
+        self._run_sparc(base_name, fm.work_dir)
+
+        # Read Green's function file
+        grn_file = fm.get_path(f'{base_name}.grn')
+        if not grn_file.exists():
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(
+                    f"SPARC snapshot mode did not produce {grn_file}; "
+                    f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                ),
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+
+        self._log("Reading snapshot Green's function and extracting source-freq TL...")
+        grn_data = read_grn_file(grn_file)
+        if not grn_data['is_sparc']:
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(
+                    "GRN title does not start with 'SPARC' — snapshot path "
+                    "expects a SPARC-produced file."
+                ),
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+
+        # Time-FFT along the snapshot's tout axis, pick the source
+        # frequency bin, Hankel transform to range, then deconvolve the
+        # known source spectrum S(w0) (normalize='source') so the snapshot
+        # reports calibrated g = absolute TL re 1 m, comparable to
+        # Kraken/Scooter (Jensen, COA, Eq. 8.1). uacpy generated the pulse,
+        # so it knows S(w0) exactly; the only residual is any extra band-pass
+        # (fMin/fMax) that sparc_pulse does not replicate.
+        result = sparc_snapshot_to_field(
+            grn_data, receiver.ranges, frequency=freq,
+            pulse_type=self.pulse_type,
+        )
+        self._stamp_result(result, source, backend='sparc',
+                           frequencies=freq, phase_reference='travelling_wave')
+        result.metadata['output_mode'] = 'S'
+        result.metadata['note'] = (
+            'Snapshot mode: time-FFT then Hankel transform; source spectrum '
+            'S(w0) deconvolved for calibrated absolute TL re 1 m.')
+        result.metadata['absolute_tl_calibrated'] = True
+        return self._finalize_sparc_result(result, fm, base_name)
 
     def _max_receiver_depth(self, env: Environment) -> float:
         return self._total_media_depth(env)
@@ -872,6 +912,8 @@ class SPARC(PropagationModel):
         travel_time = rmax_m / c_water
         t_max = self.t_max if self.t_max is not None else travel_time * 2.5
 
+        n_t_out = self._resolve_n_t_out(run_mode, f_max, t_max)
+
         write_sparc_env_file(
             filepath, env, source, receiver,
             ssp_code=ssp_code,
@@ -884,10 +926,47 @@ class SPARC(PropagationModel):
             c_low=self.c_low, c_high=self.c_high,
             pulse_type=self.pulse_type,
             f_min=f_min, f_max=f_max,
-            n_t_out=self.n_t_out,
+            n_t_out=n_t_out,
             t_max=t_max,
             t_start=self.t_start, t_mult=self.t_mult,
         )
+
+    def _resolve_n_t_out(self, run_mode, f_max, t_max):
+        """Output time-sample count, grown if needed to resolve the pulse band.
+
+        ``RunMode.COHERENT_TL`` recovers the CW field by deconvolving the source
+        pulse from the output time series (all three ``output_mode``s), so the
+        output sampling ``fs = n_t_out / (t_max - t_start)`` must keep its
+        Nyquist above ``f_max`` — otherwise the requested frequency aliases, or
+        (pulse shorter than one sample) vanishes and the deconvolution divides
+        by zero. The fixed default ``n_t_out`` is sized for a multi-second
+        propagation window, which under-samples CW frequencies above a few tens
+        of Hz; grow it here. ``TIME_SERIES`` keeps the user's value verbatim (the
+        native ``p(t)`` sampling is theirs to choose).
+        """
+        if run_mode != RunMode.COHERENT_TL:
+            return self.n_t_out
+        window = t_max - self.t_start
+        fs_required = _SPARC_CW_PULSE_OVERSAMPLE * 2.0 * f_max
+        n_required = int(np.ceil(window * fs_required))
+        if n_required <= self.n_t_out:
+            return self.n_t_out
+        n_t_out = min(n_required, _SPARC_MAX_N_T_OUT)
+        if 0.5 * n_t_out / window < f_max:
+            raise ConfigurationError(
+                f"SPARC COHERENT_TL: resolving the {f_max:.0f} Hz pulse band "
+                f"over a {window:.1f} s output window needs n_t_out≈"
+                f"{n_required}, above the {_SPARC_MAX_N_T_OUT} cap — the output "
+                f"Nyquist would alias the CW frequency.",
+                remediation="Shorten the receiver range, or narrow the pulse "
+                "band via f_max=, to lower the required output sampling.",
+            )
+        self._log(
+            f"raising n_t_out {self.n_t_out}→{n_t_out} so the output Nyquist "
+            f"({0.5 * n_t_out / window:.0f} Hz) clears the pulse band f_max="
+            f"{f_max:.0f} Hz (required for CW deconvolution)."
+        )
+        return n_t_out
 
     def _run_sparc(self, base_name: str, work_dir: Path):
         """

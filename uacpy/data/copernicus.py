@@ -47,8 +47,8 @@ SALINITY_VAR = 'so'
 
 def fetch_ssp_operational(
     point: Coordinate,
-    date: Union[str, _dt.date],
     *,
+    date: Union[str, _dt.date],
     formula: str = 'unesco',
     dataset_id: str = DEFAULT_DATASET_ID,
     timeout: float = 120.0,
@@ -90,7 +90,7 @@ def fetch_ssp_operational(
         )
     lat, lon = as_coordinate(point)
     depths, temp, sal = fetch_ts_profile_operational(
-        point, date, dataset_id=dataset_id, timeout=timeout, verbose=verbose,
+        point, date=date, dataset_id=dataset_id, timeout=timeout, verbose=verbose,
     )
     pressure = depth_to_pressure_dbar(depths, lat)
     speed_fn = _FORMULAS[formula]
@@ -106,8 +106,8 @@ def fetch_ssp_operational(
 def fetch_ssp_transect_operational(
     start: Coordinate,
     end: Coordinate,
-    date: Union[str, _dt.date],
     *,
+    date: Union[str, _dt.date],
     n_points: int = 6,
     formula: str = 'unesco',
     dataset_id: str = DEFAULT_DATASET_ID,
@@ -162,8 +162,8 @@ def fetch_ssp_transect_operational(
 
 def fetch_ts_profile_operational(
     point: Coordinate,
-    date: Union[str, _dt.date],
     *,
+    date: Union[str, _dt.date],
     dataset_id: str = DEFAULT_DATASET_ID,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,

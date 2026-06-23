@@ -6,16 +6,19 @@ Each has a standalone inverse: forward -> filter coefficients -> inverse.
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 from scipy.signal import get_window
 
-from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
-                                  REFERENCE_PRESSURE_WATER)
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.acoustics import power_to_db
 
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
+
+RadonResult = namedtuple("RadonResult", "moveout taus panel")
+TauPResult = namedtuple("TauPResult", "slownesses taus panel")
+FKResult = namedtuple("FKResult", "frequencies wavenumbers power spectrum")
 
 
 def _taper(spec, n):
@@ -78,7 +81,7 @@ def _moveout_times(kind, taus, x, m):
     )
 
 
-def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
+def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
     """Forward Radon transform (slant stack) of a ``(nt, nx)`` gather.
 
     Sums the data along moveout curves ``t = t(tau, x)``:
@@ -91,7 +94,7 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
     ----------
     data : ndarray
         Gather, shape ``(nt, nx)`` (time down columns, offset across rows).
-    fs : float
+    sample_rate : float
         Temporal sample rate (Hz).
     dx : float
         Sensor spacing (m).
@@ -104,12 +107,9 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
 
     Returns
     -------
-    moveout : ndarray
-        The scanned moveout axis.
-    taus : ndarray
-        Intercept-time axis (s).
-    R : ndarray
-        Radon panel, shape ``(len(moveout), nt)``.
+    RadonResult
+        Namedtuple ``(moveout, taus, panel)``: the scanned moveout axis, the
+        intercept-time axis (s), and the Radon panel ``(len(moveout), nt)``.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
@@ -117,16 +117,16 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
     nt, nx = d.shape
     x = np.arange(nx) * float(dx) - float(x0)
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
-    taus = np.arange(nt) / float(fs)
+    taus = np.arange(nt) / float(sample_rate)
     R = np.zeros((moveout.size, nt))
     for i, m in enumerate(moveout):
         for ix in range(nx):
             tt = _moveout_times(kind, taus, x[ix], m)
             R[i] += np.interp(tt, taus, d[:, ix], left=0.0, right=0.0)
-    return moveout, taus, R
+    return RadonResult(moveout, taus, R)
 
 
-def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
+def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
     """Adjoint (back-projection) Radon transform: ``(n_moveout, nt) -> (nt, nx)``.
 
     Spreads each Radon sample back along its moveout curve. This is the matched
@@ -140,7 +140,7 @@ def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
     if moveout.size != nm:
         raise ConfigurationError("inverse_radon: moveout length must match R rows")
-    taus = np.arange(nt) / float(fs)
+    taus = np.arange(nt) / float(sample_rate)
     x = np.arange(int(nx)) * float(dx) - float(x0)
     out = np.zeros((nt, int(nx)))
     for i, m in enumerate(moveout):
@@ -150,12 +150,13 @@ def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
     return out
 
 
-def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None,
-                   *, window=None, nfft=None):
+def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
+                   p_max=None, *, window=None, nfft=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
-    Returns ``(slownesses, taus, taup)``: slowness axis (s/m), intercept-time
-    axis (s), and the panel ``(n_slowness, NT)``.
+    Returns a :class:`TauPResult` namedtuple ``(slownesses, taus, panel)``:
+    slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slowness,
+    NT)``.
 
     ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
     ``(name, *params)`` tuple) applied down each trace before the time FFT to
@@ -166,7 +167,7 @@ def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None,
     if d.ndim != 2:
         raise ConfigurationError("taup_transform: data must be 2-D (nt, nx)")
     nt, nx = d.shape
-    fs = float(fs)
+    fs = float(sample_rate)
     NT = nt if nfft is None else int(nfft)
     if NT < nt:
         raise ConfigurationError(
@@ -184,14 +185,15 @@ def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None,
     for i, p in enumerate(slownesses):
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
         taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
-    return slownesses, np.arange(NT) / fs, taup
+    return TauPResult(slownesses, np.arange(NT) / fs, taup)
 
 
-def inverse_taup(taup, slownesses, fs, dx, nx):
+def inverse_taup(taup, slownesses, sample_rate, dx, nx):
     """Adjoint slant stack ``(n_slowness, nt) -> (nt, nx)``.
 
     Standalone inverse — pass a tau-p panel you already have (e.g. a filtered
-    one) plus its slowness axis and geometry; no forward ``compute`` needed.
+    one) plus its slowness axis and geometry; no prior :func:`taup_transform`
+    call needed.
     """
     u = np.asarray(taup, dtype=float)
     if u.ndim != 2:
@@ -202,7 +204,7 @@ def inverse_taup(taup, slownesses, fs, dx, nx):
         raise ConfigurationError("inverse_taup: slownesses length must match taup rows")
     x = np.arange(int(nx)) * float(dx)
     U = np.fft.rfft(u, axis=1)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(fs))
+    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(sample_rate))
     D = np.zeros((omega.size, int(nx)), dtype=complex)
     for i, p in enumerate(slownesses):
         D += U[i][:, None] * np.exp(-1j * omega[:, None] * (p * x)[None, :])
@@ -212,26 +214,31 @@ def inverse_taup(taup, slownesses, fs, dx, nx):
 def inverse_fk(FK):
     """Inverse f-k transform: complex (fftshifted) spectrum -> real ``(nt, nx)``.
 
-    Pass the (possibly filtered/muted) complex spectrum — e.g. ``FK``'s
-    ``.FK`` attribute after applying an f-k mask. ``FK`` must be in the
-    ``fftshift``ed layout that ``fk_transform`` produces.
+    Pass the (possibly filtered/muted) complex spectrum — i.e. the ``spectrum``
+    returned by :func:`fk_transform` (single-segment), after any f-k mask. It
+    must be in the ``fftshift``ed layout that :func:`fk_transform` produces.
     """
     if FK is None:
         raise ConfigurationError(
             "inverse_fk: spectrum is None — an averaged f-k panel (nperseg<nt) "
             "has no phase and cannot be inverted. Re-run fk_transform with "
             "nperseg=None for an invertible spectrum.")
+    if isinstance(FK, tuple):
+        raise ConfigurationError(
+            "inverse_fk: pass the complex spectrum (the .spectrum field / 4th "
+            "element of fk_transform's result), not the whole FKResult tuple.")
     fk = np.asarray(FK)
     if fk.ndim != 2:
         raise ConfigurationError("inverse_fk: FK must be 2-D (nt, nx)")
     return np.real(np.fft.ifft2(np.fft.ifftshift(fk, axes=(0, 1))))
 
 
-def fk_transform(data, fs, dx, *, nperseg=None, noverlap=None,
+def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
                  window=None, nfft=None, normalize=False):
     """Frequency-wavenumber transform with optional Welch time-averaging.
 
-    Returns ``(freqs, wavenumbers, power, spectrum)``. ``power`` is the real
+    Returns an :class:`FKResult` namedtuple ``(frequencies, wavenumbers, power,
+    spectrum)``. ``power`` is the real
     ``|FK|^2`` panel (fftshifted). With ``nperseg=None`` the whole record is one
     segment and ``spectrum`` is the complex (fftshifted) panel for
     :func:`inverse_fk`. With ``nperseg < nt`` the time axis is split into
@@ -243,7 +250,7 @@ def fk_transform(data, fs, dx, *, nperseg=None, noverlap=None,
     ----------
     data : ndarray
         Gather ``(nt, nx)``.
-    fs : float
+    sample_rate : float
         Temporal sample rate (Hz).
     dx : float
         Sensor spacing (m).
@@ -260,7 +267,7 @@ def fk_transform(data, fs, dx, *, nperseg=None, noverlap=None,
     if d.ndim != 2:
         raise ConfigurationError("fk_transform: data must be 2-D (nt, nx)")
     nt, nx = d.shape
-    fs = float(fs)
+    fs = float(sample_rate)
     seg = nt if nperseg is None else int(nperseg)
     if seg > nt or seg < 1:
         raise ConfigurationError(
@@ -272,13 +279,14 @@ def fk_transform(data, fs, dx, *, nperseg=None, noverlap=None,
     wt, wx = _fk_tapers(window, seg, nx)
     NF, NX = _fk_nfft(nfft, seg, nx)
 
-    starts = list(range(0, nt - seg + 1, seg - ov)) or [0]
+    # Whole-segment starts only (trailing samples that don't fill a segment are
+    # dropped, as in scipy's Welch); each block is therefore exactly `seg` long.
+    starts = range(0, nt - seg + 1, seg - ov)
     power = np.zeros((NF, NX))
     last_spectrum = None
+    n_seg = 0
     for s0 in starts:
         block = d[s0:s0 + seg]
-        if block.shape[0] < seg:                       # pad final short block
-            block = np.pad(block, ((0, seg - block.shape[0]), (0, 0)))
         bw = block * wt[:, None] * wx[None, :]
         FKc = np.fft.fftshift(np.fft.fft2(bw, s=(NF, NX)), axes=(0, 1))
         last_spectrum = FKc
@@ -287,9 +295,10 @@ def fk_transform(data, fs, dx, *, nperseg=None, noverlap=None,
             s2 = float(np.sum(wt ** 2) * np.sum(wx ** 2))
             FKp = FKp * (float(dx) / (fs * s2))
         power += FKp
-    power /= len(starts)
+        n_seg += 1
+    power /= n_seg
 
     freqs = np.fft.fftshift(np.fft.fftfreq(NF, d=1.0 / fs))
     wavenumbers = np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
     spectrum = last_spectrum if nperseg is None else None
-    return freqs, wavenumbers, power, spectrum
+    return FKResult(freqs, wavenumbers, power, spectrum)

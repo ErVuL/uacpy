@@ -47,11 +47,12 @@ from .noise_synthesis import (
     make_noise_waveform,
     synthesize_noise_from_psd,
 )
-from .analysis import PPSDResult, ppsd, psd, sel
+from .analysis import PPSDResult, PSDResult, SELResult, ppsd, psd, sel
 from .system_id import FRF
 from .arrays import (
     bartlett_spectrum,
     beamform,
+    BeamformResult,
     music_spectrum,
     mvdr_spectrum,
     sample_covariance,
@@ -59,6 +60,7 @@ from .arrays import (
     shading_taper,
 )
 from .active import (
+    AmbiguityResult,
     ambiguity_function,
     matched_filter,
     processing_gain,
@@ -91,6 +93,16 @@ from .timefreq import (
     inverse_cwt,
     wigner_ville,
 )
+from .constant_q import (
+    constant_q_transform,
+    constant_q_psd,
+    constant_q_spectrogram,
+    probabilistic_constant_q,
+    CQTResult,
+    CQPSDResult,
+    CQSpectrogramResult,
+    CQPPSDResult,
+)
 
 from .bands import decidecade_bands, decidecade_band_levels
 
@@ -107,6 +119,7 @@ from . import (
     system_id,
     timefreq,
     transforms,
+    constant_q,
 )
 
 __all__ = [
@@ -116,15 +129,15 @@ __all__ = [
     "make_bandlimited_noise", "fourier_synthesis", "sparc_pulse", "nwave",
     "mseq", "make_mseq_probe", "make_noise_waveform",
     # spectral / level estimators
-    "psd", "ppsd", "PPSDResult", "sel",
+    "psd", "ppsd", "PPSDResult", "PSDResult", "SELResult", "sel",
     # system identification
     "FRF",
     # arrays
-    "steering_vectors", "beamform", "sample_covariance", "bartlett_spectrum",
+    "steering_vectors", "beamform", "BeamformResult", "sample_covariance", "bartlett_spectrum",
     "mvdr_spectrum", "music_spectrum", "shading_taper",
     # active
     "matched_filter", "pulse_compression", "processing_gain",
-    "ambiguity_function", "shift_to_max_correlation",
+    "ambiguity_function", "AmbiguityResult", "shift_to_max_correlation",
     # transforms (gather)
     "fk_transform", "inverse_fk",
     "taup_transform", "inverse_taup",
@@ -138,10 +151,14 @@ __all__ = [
     "spectrogram", "analytic_signal", "envelope", "instantaneous_frequency",
     "wigner_ville", "cwt", "inverse_cwt", "cepstrum", "complex_cepstrum",
     "inverse_complex_cepstrum",
+    # constant-Q (Brown 1991)
+    "constant_q_transform", "constant_q_psd", "constant_q_spectrogram",
+    "probabilistic_constant_q", "CQTResult", "CQPSDResult",
+    "CQSpectrogramResult", "CQPPSDResult",
     # decidecade bands (ISO 18405 / IEC 61260-1)
     "decidecade_bands", "decidecade_band_levels",
     # sub-modules
     "waveforms", "sequences", "noise_synthesis", "arrays", "active",
     "transforms", "timefreq", "analysis", "system_id", "channel", "modal",
-    "bands",
+    "bands", "constant_q",
 ]

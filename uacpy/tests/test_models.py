@@ -151,6 +151,25 @@ class TestBounce:
         assert len(result.R) > 0
         assert len(result.theta) > 0
 
+    def test_bounce_empty_table_raises(self, simple_env, source, tmp_path):
+        """A degenerate RMax (sub-metre receiver range) makes BOUNCE emit a
+        reflection table with no angle rows; the wrapper must raise a clear
+        ConfigurationError, not silently return an empty ReflectionCoefficient
+        (manual-test finding)."""
+        from uacpy.core import Environment, BoundaryProperties, Receiver
+        bottom = BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1600, shear_speed=400,
+            density=1.8, attenuation=0.2, shear_attenuation=0.5,
+        )
+        env_elastic = Environment(
+            name="elastic_test", bathymetry=simple_env.depth,
+            ssp=float(simple_env.ssp.data[0, 0]), bottom=bottom,
+        )
+        tiny = Receiver(depths=[50.0], ranges=[1.0])  # RMax = 1 m
+        with pytest.raises(ConfigurationError, match="empty reflection-coefficient"):
+            Bounce(verbose=False, work_dir=tmp_path).run(
+                env=env_elastic, source=source, receiver=tiny)
+
     def test_bounce_compute_reflection_helper(self, simple_env, source, receiver_small, tmp_path):
         """Verify the convenience method ``Bounce.compute_reflection`` runs."""
         from uacpy.core import Environment, BoundaryProperties

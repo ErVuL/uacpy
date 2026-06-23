@@ -37,9 +37,11 @@ class ReflectionCoefficient(Result):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.theta = np.atleast_1d(np.asarray(theta, dtype=float))
-        self.R = np.asarray(R, dtype=float)
-        self.phi = np.asarray(phi, dtype=float)
+        # Copy on ingest (small arrays) so caller-side mutation can't corrupt
+        # this result.
+        self.theta = np.atleast_1d(np.array(theta, dtype=float))
+        self.R = np.array(R, dtype=float)
+        self.phi = np.array(phi, dtype=float)
         if self.R.ndim == 1:
             self.R = self.R.reshape(-1)
             self.phi = self.phi.reshape(-1)
@@ -94,7 +96,16 @@ class ReflectionCoefficient(Result):
         that axis collapsed. Axes are ``angle`` (a.k.a. ``theta`` — the
         abscissa) and ``frequency``; ``frequency=`` is valid only for broadband
         (2-D) coefficients. See :meth:`eval` (interpolate) and :meth:`isel`
-        (positional index)."""
+        (positional index).
+
+        Collapse is deliberately asymmetric because ``theta`` is the permanent
+        abscissa of this type (a 1-D ``R`` is *by definition* indexed by
+        ``theta``): selecting one **frequency** removes the optional second
+        dimension and returns a narrowband ``R(theta)`` of shape
+        ``(n_angles,)``; selecting one **angle** keeps ``theta`` as a length-1
+        axis, so ``R`` stays 2-D ``(1, n_frequencies)``. This differs from
+        ``Field.at`` (which drops any sliced axis) precisely because a
+        reflection coefficient is anchored on its angle abscissa."""
         angle, frequency = self._resolve_axes(kwargs, 'at')
         return self._select(angle, frequency, method='nearest')
 

@@ -73,7 +73,7 @@ def test_extract_ts_truncates_at_seafloor():
 
 def test_fetch_ssp_operational_end_to_end(monkeypatch):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
-    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), '2020-06-15')
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
     assert isinstance(ssp, SoundSpeedProfile)
     assert ssp.depths.tolist() == _DEPTH
     assert np.all((1440 < ssp.data) & (ssp.data < 1560))
@@ -82,7 +82,7 @@ def test_fetch_ssp_operational_end_to_end(monkeypatch):
 def test_fetch_ssp_transect_operational(monkeypatch):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
     ssp = copernicus.fetch_ssp_transect_operational(
-        (30.0, -40.0), (31.0, -40.0), '2020-06-15', n_points=4)
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4)
     assert ssp.is_range_dependent
     assert ssp.data.shape == (len(_DEPTH), 4)
     assert ssp.ranges[0] == 0.0
@@ -92,7 +92,7 @@ def test_missing_toolbox_raises_helpful_error(monkeypatch):
     # Force the import to fail even if the package were present.
     monkeypatch.setitem(sys.modules, 'copernicusmarine', None)
     with pytest.raises(DataFetchError, match='copernicusmarine'):
-        copernicus.fetch_ts_profile_operational((0.0, 0.0), '2020-01-01')
+        copernicus.fetch_ts_profile_operational((0.0, 0.0), date='2020-01-01')
 
 
 def test_open_dataset_failure_wrapped(monkeypatch):
@@ -103,28 +103,28 @@ def test_open_dataset_failure_wrapped(monkeypatch):
     fake.open_dataset = boom
     monkeypatch.setitem(sys.modules, 'copernicusmarine', fake)
     with pytest.raises(DataFetchError, match='open_dataset failed'):
-        copernicus.fetch_ssp_operational((0.0, 0.0), '2020-01-01')
+        copernicus.fetch_ssp_operational((0.0, 0.0), date='2020-01-01')
 
 
 def test_bad_formula_raises():
     with pytest.raises(ConfigurationError, match='formula'):
-        copernicus.fetch_ssp_operational((0.0, 0.0), '2020-01-01', formula='x')
+        copernicus.fetch_ssp_operational((0.0, 0.0), date='2020-01-01', formula='x')
 
 
 def test_bad_date_raises(monkeypatch):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
     with pytest.raises(ConfigurationError, match='parse date'):
-        copernicus.fetch_ssp_operational((0.0, 0.0), 'not-a-date')
+        copernicus.fetch_ssp_operational((0.0, 0.0), date='not-a-date')
 
 
 def test_out_of_range_date_warns(monkeypatch):
     # Dataset's only time step is 2021; asking for 2030 snaps to the edge.
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
     with pytest.warns(UserWarning, match='outside the'):
-        copernicus.fetch_ssp_operational((30.0, -40.0), '2030-06-15')
+        copernicus.fetch_ssp_operational((30.0, -40.0), date='2030-06-15')
 
 
 def test_in_range_date_no_warn(monkeypatch, recwarn):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2020-06-15'))
-    copernicus.fetch_ssp_operational((30.0, -40.0), '2020-06-15')
+    copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
     assert not [w for w in recwarn if 'outside' in str(w.message)]

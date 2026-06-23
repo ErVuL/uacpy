@@ -1107,6 +1107,8 @@ convention as `plot_field`:
 - **Gather transforms:** `plot_fk`, `plot_radon`, `plot_taup` (+ `draw_sound_cone`,
   `draw_slowness_line` overlays).
 - **Time-frequency:** `plot_cwt`, `plot_wigner_ville`, `plot_cepstrum`.
+- **Constant-Q:** `plot_constant_q_spectrogram`, `plot_constant_q_psd`,
+  `plot_constant_q_ppsd`.
 - **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`,
   `plot_frf`, `plot_coherence`, `plot_impulse_response_info`.
 - **Comms:** `plot_channel`, `plot_constellation`, `plot_scatter`,
@@ -1163,9 +1165,10 @@ and use `uacpy.plot.compare([f.at(depth=50) for f in ...], labels=[...])`.
 
 A processing toolbox for the waveforms that propagation models emit or
 consume. Named `acoustic_signal` so it never shadows the stdlib `signal`.
-Most transforms ship as **both** a CapWords class (a reusable, configured
-estimator) and a lower-case function (one-shot on a single array) — pick by
-use.
+Transforms and estimators are **pure functions** returning arrays (or a small
+named tuple such as `PPSDResult`); `FRF` is the one retained class (it holds
+fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
+`plot_fk`, …), not in the computation modules.
 
 | Area | Public names |
 |------|--------------|
@@ -1177,6 +1180,7 @@ use.
 | Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt` |
+| Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_psd`, `constant_q_spectrogram`, `probabilistic_constant_q` (→ `CQTResult`/`CQPSDResult`/`CQSpectrogramResult`/`CQPPSDResult`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform` (+ `inverse_*`) |
 | System ID / channel | `FRF`, `impulse_response`, `simulate_reception` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
@@ -1274,7 +1278,7 @@ from uacpy.noise import WenzNoise
 f = np.logspace(0, 5, 500)
 wenz = WenzNoise(f, wind_speed=15, water_depth="deep",
                 shipping_level="medium", rain_rate="moderate")
-psd = wenz.as_psd(ref=1)        # linear Pa²/Hz; wenz.plot() for dB spectrum
+psd = wenz.as_psd(ref=1)        # linear Pa²/Hz; uacpy.plot_wenz(wenz) for the dB spectrum
 ```
 
 Hearing groups: `LF, HF, VHF, SI, PCW, OCW, PCA, OCA`. See examples 9, 35, 36.
@@ -1344,10 +1348,16 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
   `p₀(r) = e^{i k₀ r}/(4π r)`. Hence transmission loss is simply
   **`TL = −20·log₁₀|p|`** (`Field.tl`), in dB re 1 m. Real `data` is already in
   dB and returned as-is.
-- This is the 3-D point-source convention. A 2-D (line-source) analytic
-  solution differs by the spreading factor `|G₃D/G₂D| = √(k/2πr)` — relevant
-  only when comparing against closed-form 2-D references (see the ideal-wedge
-  benchmark in `tests/test_benchmarks_analytic.py`).
+- This is the 3-D point-source (**spherical-spreading**) convention, and it is
+  **the same for every model** (Bellhop, Kraken, Scooter, RAM, SPARC) so that
+  TL is directly comparable across them. Each native binary's own normalisation
+  is bridged to it at the `io` boundary: e.g. SPARC's `COHERENT_TL` `'R'` field
+  is divided by `√(4π)` to convert its native **cylindrical**-Hankel RTS output
+  into this spherical convention (SPARC `'D'`/`'S'` are experimental and keep
+  their native scale — see the SPARC parameter table in §18).
+- A 2-D (line-source) analytic solution differs by the spreading factor
+  `|G₃D/G₂D| = √(k/2πr)` — relevant only when comparing against closed-form 2-D
+  references (see the ideal-wedge benchmark in `tests/test_benchmarks_analytic.py`).
 - `sel`, `psd`, `ppsd` and `spectrogram` are pure functions returning arrays;
   their plots (`plot_sel`, `plot_psd`, `plot_ppsd`, `plot_spectrogram`, and the
   gather/transform/comms plotters) live in `uacpy.visualization`, not in the
@@ -1594,9 +1604,9 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
 | `roughness` | m | `0.0` | Bottom RMS roughness. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme. |
-| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. **`'S'` is experimental: its absolute TL is uncalibrated (~30 dB offset vs Kraken/Scooter; emits a `UserWarning`) — use `'R'` or another model for absolute levels.** |
-| `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. |
-| `n_t_out` | count | `512` | Number of output time samples. |
+| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. For `COHERENT_TL`, the default **`'R'`** is divided by `√(4π)` to convert SPARC's native cylindrical-Hankel RTS output into uacpy's shared **3-D point-source (spherical) TL** convention, agreeing with Kraken to ~1–4 dB on a Pekeris benchmark. **`'D'` and `'S'` keep SPARC's native normalisation (a `√(4π)` ≈ 11 dB higher level for `'D'`); they are experimental — use `'R'` (or Kraken/Scooter) for absolute levels.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run` for the convention. |
+| `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. The `'B'` band-pass is not modelled by the CW source-spectrum deconvolution, so it adds a few dB to the `'R'` absolute level; `'PN+N'` (no band-pass) calibrates tighter (~±1.5 dB vs Kraken). |
+| `n_t_out` | count | `512` | Number of output time samples. For `COHERENT_TL` this is **auto-raised** when needed so the output Nyquist clears the pulse band (else the requested CW frequency aliases); `TIME_SERIES` uses it verbatim. |
 | `t_max` | s | `None` | Max time; `None` = auto (2.5 × travel time). |
 | `t_start` | s | `-0.1` | Integration start time. |
 | `t_mult` | factor | `0.999` | Integration time multiplier. |

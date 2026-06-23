@@ -38,6 +38,7 @@ from uacpy.visualization.plots.signal import (
     draw_slowness_line, draw_sound_cone, plot_fk, plot_radon, plot_taup,
     plot_psd, plot_ppsd, plot_sel,
     plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
+    plot_constant_q_spectrogram, plot_constant_q_psd, plot_constant_q_ppsd,
     plot_band_levels, plot_angular_spectrum, plot_ambiguity,
     plot_frf, plot_coherence, plot_impulse_response_info,
 )
@@ -110,6 +111,9 @@ __all__ = [
     'plot_ppsd',
     'plot_sel',
     'plot_spectrogram',
+    'plot_constant_q_spectrogram',
+    'plot_constant_q_psd',
+    'plot_constant_q_ppsd',
     'plot_cwt',
     'plot_wigner_ville',
     'plot_cepstrum',

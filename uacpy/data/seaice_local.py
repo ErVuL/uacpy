@@ -167,7 +167,7 @@ def _concentration(lat, lon, month):
     return grid[row, col]
 
 
-def fetch_sea_ice_concentration(point: Coordinate, date=None, *,
+def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
                                 month: Optional[int] = None) -> float:
     """Climatological sea-ice concentration (0-1) at ``(lat, lon)`` for a month.
 
@@ -226,7 +226,7 @@ def sea_ice_surface(
 
 
 def fetch_sea_ice_surface(
-    point: Coordinate, date=None, *, month: Optional[int] = None,
+    point: Coordinate, *, date=None, month: Optional[int] = None,
     threshold: float = SEA_ICE_EDGE_CONCENTRATION,
 ) -> Optional[BoundaryProperties]:
     """Fetch the climatological ice concentration and convert it to a surface.
@@ -236,7 +236,7 @@ def fetch_sea_ice_surface(
     ice-covered (concentration ≥ ``threshold``) for the given month, or ``None``
     for open water. Used by ``fetch_environment(surface_sources='seaice')``.
     """
-    conc = fetch_sea_ice_concentration(point, date, month=month)
+    conc = fetch_sea_ice_concentration(point, date=date, month=month)
     return sea_ice_surface(conc, threshold=threshold)
 
 
@@ -279,7 +279,7 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
     out = []
     for la, lo in zip(lats, lons):
         try:
-            out.append(fetch_sea_ice_concentration((la, lo), date, month=month))
+            out.append(fetch_sea_ice_concentration((la, lo), date=date, month=month))
         except DataFetchError:
             out.append(np.nan)                  # land along the transect
     return np.asarray(ranges_m), np.asarray(out)

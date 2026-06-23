@@ -24,7 +24,7 @@ def raise_stack_limit() -> None:
         log_message('_stack',
                     f"could not raise RLIMIT_STACK ({exc!r}); "
                     "SPARC-class models may segfault on large allocations",
-                    level='debug')
+                    level='warning')
 
 
 raise_stack_limit()

@@ -14,7 +14,8 @@ Examples
 ...                  rain_rate='moderate')
 >>> from uacpy.visualization import plot_wenz
 >>> plot_wenz(wenz)
->>> psd_pa2_per_hz = wenz.as_psd(ref=1)            # linear, Pa²/Hz
+>>> psd_upa2_per_hz = wenz.as_psd()                # linear µPa²/Hz (10·log10 == .total)
+>>> psd_pa2_per_hz = wenz.as_psd(ref=1e-6)         # SI Pa²/Hz (ref = 1 µPa in Pa)
 """
 
 from uacpy.noise.noise import (

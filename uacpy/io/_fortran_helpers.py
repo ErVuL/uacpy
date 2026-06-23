@@ -12,7 +12,7 @@ from typing import Tuple
 
 import numpy as np
 
-from uacpy._log import log_message
+from uacpy.core.exceptions import FileFormatError
 
 
 _ENDIAN_WARN_EMITTED = False
@@ -24,10 +24,10 @@ def _warn_non_little_endian(detected: str, source: str) -> None:
     is unvalidated."""
     global _ENDIAN_WARN_EMITTED
     if detected == 'big' and not _ENDIAN_WARN_EMITTED:
-        log_message(
-            source,
-            "detected big-endian Fortran record framing; uacpy decodes it "
-            "correctly but this byte order is not validated by CI.",
+        warnings.warn(
+            f"{source}: detected big-endian Fortran record framing; uacpy "
+            "decodes it correctly but this byte order is not validated by CI.",
+            UserWarning, stacklevel=2,
         )
         _ENDIAN_WARN_EMITTED = True
 
@@ -45,7 +45,7 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
     """
     if len(first4) < 4:
-        raise OSError("detect_endian: need 4 bytes to probe.")
+        raise FileFormatError("detect_endian: need 4 bytes to probe.")
     little = struct.unpack('<i', first4)[0]
     big = struct.unpack('>i', first4)[0]
     cap = 1 << 28
@@ -58,7 +58,7 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     elif little_ok and big_ok:
         chosen = '<' if little <= big else '>'
     else:
-        raise OSError(
+        raise FileFormatError(
             f"detect_endian: cannot resolve byte order from first record "
             f"marker (little={little}, big={big}); file is probably corrupt."
         )
@@ -82,7 +82,7 @@ def read_fortran_record_marker(f, endian: str = '<') -> int:
     """
     marker_bytes = f.read(4)
     if len(marker_bytes) < 4:
-        raise OSError("Unexpected end of file while reading record marker")
+        raise FileFormatError("Unexpected end of file while reading record marker")
     return struct.unpack(endian + 'i', marker_bytes)[0]
 
 
@@ -94,7 +94,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         [4-byte length N][N bytes payload][4-byte length N]
 
     Both length markers must match; mismatch indicates file corruption or
-    wrong endianness and raises ``IOError``.
+    wrong endianness and raises :class:`~uacpy.core.exceptions.FileFormatError`.
 
     Parameters
     ----------
@@ -113,23 +113,23 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     """
     head = f.read(4)
     if len(head) < 4:
-        raise OSError("Unexpected EOF reading Fortran record head")
+        raise FileFormatError("Unexpected EOF reading Fortran record head")
     (nbytes,) = struct.unpack(endian + 'i', head)
     if nbytes < 0 or nbytes > (1 << 28):
-        raise OSError(
+        raise FileFormatError(
             f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
         )
     payload = f.read(nbytes)
     if len(payload) < nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Short read: expected {nbytes} bytes, got {len(payload)}"
         )
     tail = f.read(4)
     if len(tail) < 4:
-        raise OSError("Unexpected EOF reading Fortran record tail")
+        raise FileFormatError("Unexpected EOF reading Fortran record tail")
     (ntail,) = struct.unpack(endian + 'i', tail)
     if ntail != nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
             "(wrong endianness or truncated file)"
         )
@@ -137,7 +137,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         return payload
     expected = struct.calcsize(endian + fmt)
     if expected != nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
         )
     return struct.unpack(endian + fmt, payload)

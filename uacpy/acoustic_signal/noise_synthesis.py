@@ -10,13 +10,13 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
-                              n_fft=65536, fs=None, interp='linear'):
+                              n_fft=65536, sample_rate=None, interp='linear'):
     """
     Spectral Synthesis of Random Processes.
 
     Generate a time-domain noise realisation whose one-sided PSD matches a
     user-supplied target ``Pxx(Fxx)``. The target is resampled onto the
-    FFT-native frequency grid ``f_k = k * fs / n_fft`` before synthesis,
+    FFT-native frequency grid ``f_k = k * sample_rate / n_fft`` before synthesis,
     so ``Fxx`` may be uniform, log-spaced, or coarse (e.g. Wenz curves).
 
     Parameters
@@ -31,7 +31,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         Scale factor applied to the output signal.
     n_fft : int, optional
         IFFT chunk size (must be even, ≥ 4). Defaults to 65536.
-    fs : int, optional
+    sample_rate : int, optional
         Output sample rate in Hz. Defaults to 2*Fxx[-1]..
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
         How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
@@ -45,7 +45,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         Time array in seconds.
     x : ndarray
         Generated signal array.
-    fs : int
+    sample_rate : int
         Sampling frequency in Hz.
 
     Examples
@@ -53,8 +53,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     >>> import numpy as np
     >>> f = np.logspace(0, 4, 64)
     >>> Pxx = 1e-6 / (1 + (f / 100) ** 2)
-    >>> t, x, fs = synthesize_noise_from_psd(Pxx, f, duration=10,
-    ...                 n_fft=2**16, fs=40_000, interp='log')
+    >>> t, x, sample_rate = synthesize_noise_from_psd(Pxx, f, duration=10,
+    ...                 n_fft=2**16, sample_rate=40_000, interp='log')
     """
     MAX_NFFT = 262144
 
@@ -72,8 +72,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     if not np.all(np.diff(Fxx) > 0):
         raise ConfigurationError("synthesize_noise_from_psd: Fxx must be strictly increasing")
 
-    if fs is None:
-        fs = 2 * Fxx[-1]
+    if sample_rate is None:
+        sample_rate = 2 * Fxx[-1]
 
     if n_fft is None:
         n_fft = 65536
@@ -100,18 +100,18 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         n_fft = rounded
 
     N = n_fft // 2 - 1
-    dF = fs / n_fft
+    dF = sample_rate / n_fft
     f_grid = np.arange(1, N + 1) * dF
     Pxx_grid = _resample_psd(Pxx, Fxx, f_grid, interp)
     v = Pxx_grid * dF / 4
 
     chunk_size = n_fft
     overlap_size = chunk_size // 4
-    samples_needed = int(duration * fs)
+    samples_needed = int(duration * sample_rate)
     num_chunks = int(np.ceil(samples_needed / (chunk_size - overlap_size)))
 
     x_total = np.zeros(samples_needed)
-    t_total = np.arange(samples_needed) / fs
+    t_total = np.arange(samples_needed) / sample_rate
 
     for i in range(num_chunks):
         vi = np.random.randn(N)
@@ -137,7 +137,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
 
         x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * scale
 
-    return t_total, x_total, int(fs)
+    return t_total, x_total, int(sample_rate)
 
 
 def _resample_psd(Pxx, Fxx, f_target, method):
@@ -188,7 +188,7 @@ def _closest_power_of_two(x):
 
 
 def make_noise_waveform(
-    fc: float, BW: float, T: float, fs: float
+    fc: float, bandwidth_hz: float, T: float, sample_rate: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate bandpass-filtered Gaussian random noise waveform.
@@ -200,19 +200,19 @@ def make_noise_waveform(
     ----------
     fc : float
         Center frequency in Hz
-    BW : float
+    bandwidth_hz : float
         Bandwidth in Hz
     T : float
         Duration in seconds
-    fs : float
+    sample_rate : float
         Sample rate in Hz
 
     Returns
     -------
     nts : ndarray
-        Noise time series, 1-D of length ``int(T*fs)``.
+        Noise time series, 1-D of length ``int(T*sample_rate)``.
     time : ndarray
-        Sample times (s), ``np.arange(N)/fs`` — same ``(signal, time)`` return
+        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)`` return
         convention as the :mod:`uacpy.acoustic_signal` tonal generators
         (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
 
@@ -220,10 +220,10 @@ def make_noise_waveform(
     -----
     The algorithm:
     1. Generate Gaussian white noise at bandwidth rate
-    2. Resample to sampling rate fs
+    2. Resample to sampling rate sample_rate
     3. Heterodyne with carrier frequency fc
 
-    This creates bandpass noise centered at fc with bandwidth BW.
+    This creates bandpass noise centered at fc with the given bandwidth.
 
     Translated from OALIB makenoise.m by mbp (27 Sept 2007)
 
@@ -233,16 +233,16 @@ def make_noise_waveform(
     >>> nts, t = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
     """
-    N = int(T * fs)  # number of samples
+    N = int(T * sample_rate)  # number of samples
     # Build the time axis from the same N used for resample so the carrier
     # and the resampled noise always have matching length (np.arange(0, T,
-    # 1/fs) can yield N±1 samples from float accumulation).
-    time = np.arange(N) / fs
-    N2 = int(T * BW)
+    # 1/sample_rate) can yield N±1 samples from float accumulation).
+    time = np.arange(N) / sample_rate
+    N2 = int(T * bandwidth_hz)
 
     nts = np.random.randn(N2)  # Gaussian white noise
 
-    # Resample to fs rate
+    # Resample to sample_rate rate
     from scipy.signal import resample
 
     nts = resample(nts, N)
@@ -255,8 +255,8 @@ def make_noise_waveform(
 def add_noise(
     timeseries: np.ndarray,
     sample_rate: float,
-    source_level_db: float,
-    noise_level_db: float,
+    source_level: float,
+    noise_level: float,
     fc: float,
     bandwidth: float
 ) -> np.ndarray:
@@ -273,9 +273,9 @@ def add_noise(
         Shape: (n_samples,) or (n_samples, n_receivers)
     sample_rate : float
         Sample rate in Hz
-    source_level_db : float
+    source_level : float
         Source level in dB (total power)
-    noise_level_db : float
+    noise_level : float
         Noise amplitude in dB (power spectral density, not total power)
     fc : float
         Center frequency for band-limited noise in Hz
@@ -293,7 +293,7 @@ def add_noise(
     The noise is generated as filtered Gaussian random noise with:
     - Center frequency fc
     - Bandwidth BW
-    - Power spectral density specified by noise_level_db
+    - Power spectral density specified by noise_level
 
     Total noise power = PSD + 10*log10(BW)
 
@@ -310,9 +310,9 @@ def add_noise(
     ----------
     Original MATLAB code by mbp, 4/09
     """
-    SL = 10.0 ** (source_level_db / 20.0)
+    SL = 10.0 ** (source_level / 20.0)
 
-    # Target noise RMS for a one-sided PSD level ``noise_level_db`` (dB
+    # Target noise RMS for a one-sided PSD level ``noise_level`` (dB
     # re Pa²/Hz) over bandwidth ``bandwidth``:
     #     P_total = S_target · BW = 10^(L/10) · BW   (Pa²)
     #     RMS     = √P_total                          (Pa)
@@ -321,7 +321,7 @@ def add_noise(
     flow = fc - bandwidth / 2
     fhigh = fc + bandwidth / 2
     bw = fhigh - flow
-    A = np.sqrt(bw * 10.0 ** (noise_level_db / 10.0))
+    A = np.sqrt(bw * 10.0 ** (noise_level / 10.0))
 
     # Generate band-limited noise — independent realisation per receiver
     # so cross-channel correlation is zero (required for beamforming and
@@ -421,7 +421,7 @@ def make_bandlimited_noise(
 
 def fourier_synthesis(
     pressure_freq: np.ndarray,
-    freq_vec: np.ndarray,
+    frequencies: np.ndarray,
     source_spectrum: Optional[np.ndarray] = None,
     Tstart: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -440,10 +440,10 @@ def fourier_synthesis(
     pressure_freq : ndarray
         Frequency-domain pressure field
         Shape: (n_freq, n_depths, n_ranges) or (n_freq, n_receivers)
-    freq_vec : ndarray
+    frequencies : ndarray
         Frequency vector in Hz
     source_spectrum : ndarray, optional
-        Source spectrum (complex) at frequencies in freq_vec
+        Source spectrum (complex) at frequencies in frequencies
         If None, assumes unit spectrum (impulse response)
     Tstart : float, optional
         Starting time offset in seconds (default: 0.0)
@@ -465,7 +465,7 @@ def fourier_synthesis(
     4. Scale by 2 and take real part (conjugate symmetry)
 
     The time sampling is determined by the frequency spacing:
-    - deltaf = freq_vec[1] - freq_vec[0]
+    - deltaf = frequencies[1] - frequencies[0]
     - Tmax = 1 / deltaf
     - deltat = Tmax / Nfreq
 
@@ -487,7 +487,7 @@ def fourier_synthesis(
     Original MATLAB code: stack.m by mbp, 9/96
     Updated 2014 for compatibility with current file formats
     """
-    Nfreq = len(freq_vec)
+    Nfreq = len(frequencies)
     original_shape = pressure_freq.shape
 
     # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
@@ -501,10 +501,10 @@ def fourier_synthesis(
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
-                                      np.exp(1j * 2 * np.pi * Tstart * freq_vec))
-    elif len(freq_vec) > 0 and freq_vec[0] > 0:
+                                      np.exp(1j * 2 * np.pi * Tstart * frequencies))
+    elif len(frequencies) > 0 and frequencies[0] > 0:
         warnings.warn(
-            f"fourier_synthesis: freq_vec[0]={freq_vec[0]:.3g} Hz > 0 with "
+            f"fourier_synthesis: frequencies[0]={frequencies[0]:.3g} Hz > 0 with "
             "Tstart=0. The IFFT treats input as starting from DC, which "
             "introduces a phase ramp in the synthesised time series. Pass "
             "Tstart matching the physical arrival time (e.g. r/c0) to align "
@@ -530,7 +530,7 @@ def fourier_synthesis(
     else:
         new_shape = (Nfreq,) + original_shape[1:]
         rmod = rmod_work.reshape(new_shape)
-    deltaf = freq_vec[1] - freq_vec[0] if len(freq_vec) > 1 else 1.0
+    deltaf = frequencies[1] - frequencies[0] if len(frequencies) > 1 else 1.0
     Tmax = 1 / deltaf
     deltat = Tmax / Nfreq
     # Anchor the output time axis at ``Tstart`` so the IFFT trace lines

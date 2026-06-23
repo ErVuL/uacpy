@@ -98,3 +98,20 @@ def test_beamform_resolves_true_angle_not_mirror(true_deg):
     a = steering_vectors(pos, [true_deg], f, c)[0]
     snr, angles, _ = beamform(a[:, None], pos, f, angles=ang, SL=0, NL=0)
     assert abs(angles[np.argmax(snr[:, 0])] - true_deg) < 1.0
+
+
+def test_mvdr_music_no_divide_warning_and_music_peaks_at_source():
+    import warnings
+    pos = np.arange(6) * 0.75
+    angles = np.linspace(-60, 60, 121)
+    e = steering_vectors(pos, angles, 1000.0)
+    src = steering_vectors(pos, [10.0], 1000.0)[0]
+    R = np.eye(6, dtype=complex) + 8 * np.outer(src, src.conj())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)   # no spurious 1/denom warning
+        m = mvdr_spectrum(R, e)
+        mu = music_spectrum(R, e, 1)
+    assert np.all(np.isfinite(m))
+    # the sharp MUSIC peak at the source direction is the intended behaviour,
+    # preserved (not clamped) — it localises the source at 10 deg
+    assert abs(angles[np.argmax(mu)] - 10.0) < 2.0

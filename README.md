@@ -41,9 +41,34 @@ in their spare time. The goal is for this module to be truly
 community-driven.
 
 
-> **⚠️ Note:** UACPY is *not* production‑ready. Expect missing features,
-> inconsistencies, and the need for validation.
+> **⚠️ Notes**
 
+> UACPY is *not* production‑ready. Expect missing features,
+> inconsistencies, and the need for validation.
+> 
+> To user's of v0.3.x:
+> ====================
+> The changes between v0.3.x and v0.4.x are big, some of the API changed too..
+> This was done in order to clean up, harmonized and simplify the usage and 
+> maintainability. Moreover, it comes with its bag of new features, including:
+>   - RAMGeo
+>   - Last updated version of AT toolbox
+>   - Environment data fetching layer (based on GPS and date)
+>   - Basic map plot and overview
+>   - Basic SONAR performances
+>   - Constant-Q transform family
+>   - Ice support
+>   - API harmonization
+>
+> Use of LLM and definitive API
+> =============================
+> Project development will now focus on stabilization, bug fixes, and human review.
+> The development of new features and the automated use of LLMs will be scaled back in order
+> to focus on practical implementation, bug fixes, and validation. API changes will be 
+> limited but may still occur in beta. 
+> The code base is quite big, and covers a wide range of scientific fields. To review such a
+> technical work, it needs some community usage and feedback. At the end of this process, 
+> the beta tag will be removed.
 
 ## 🔍 What's in UACPY?
 
@@ -101,9 +126,9 @@ tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 # 3. One call → the figure above: map · transmission loss · environment.
 #    The left map is pluggable (map_fn=); the default is the bathymetry map.
 uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver=rcv,
-                         map_title="North Sea — Norwegian Trench",
-                         tl_title="Transmission loss (800 Hz)",
-                         env_title="Range-dependent environment",
+                         map_title="North Sea — Norwegian Trench (GEBCO)",
+                         tl_title="Transmission loss (Bellhop, 800 Hz)",
+                         env_title="Range-dependent environment A→B",
                          map_kwargs=dict(contours=True, aspect=1))
 plt.show()
 ```

@@ -163,8 +163,14 @@ class Arrivals(Result):
 
     @property
     def phases(self) -> np.ndarray:
-        """Phases (rad) of every arrival in the list."""
-        return np.asarray([a['phase'] for a in self.arrivals], dtype=float)
+        """Phases (rad) of every arrival in the list.
+
+        The Bellhop ``.arr`` file stores phase in **degrees** (``ArrMod.f90``
+        writes ``RadDeg * Phase``); this accessor converts to **radians** so the
+        values drop straight into ``exp(1j * phase)`` for phase-coherent
+        synthesis."""
+        return np.deg2rad(
+            np.asarray([a['phase'] for a in self.arrivals], dtype=float))
 
     # Filter / chain / sort --------------------------------------------------
 

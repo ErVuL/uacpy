@@ -113,7 +113,13 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
 
             jj += 1
 
-    return np.array(phi) if phi else np.array([])
+    if not phi:
+        raise FileFormatError(
+            "get_component: the modes set contains no readable modes (M=0) — "
+            "nothing to extract. The waveguide is likely below modal cutoff at "
+            "this frequency; check the .mod record before requesting a component."
+        )
+    return np.array(phi)
 
 
 def read_modes_asc(
@@ -322,7 +328,7 @@ def read_modes_asc(
 
 def read_modes_bin(
     filename: str,
-    freq: float = 0.0,
+    frequency: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """Read a KRAKEN binary ``.mod`` file, converting any malformed-file
@@ -330,7 +336,7 @@ def read_modes_bin(
     file otherwise surfaces as a bare ``IndexError`` / ``struct.error`` from
     the record reads)."""
     try:
-        return _read_modes_bin_impl(filename, freq=freq, modes=modes)
+        return _read_modes_bin_impl(filename, freq=frequency, modes=modes)
     except FileFormatError:
         raise
     except FileNotFoundError as e:
@@ -410,12 +416,12 @@ def _read_modes_bin_impl(
     Examples
     --------
     >>> # Read all modes at 100 Hz
-    >>> modes = read_modes_bin('pekeris', freq=100.0)
+    >>> modes = read_modes_bin('pekeris', frequency=100.0)
     >>> print(f"Number of modes: {modes['M']}")
     >>> print(f"Wavenumber of mode 1: {modes['k'][0]}")
 
     >>> # Read specific modes
-    >>> modes = read_modes_bin('pekeris', freq=100.0, modes=[1, 2, 3])
+    >>> modes = read_modes_bin('pekeris', frequency=100.0, modes=[1, 2, 3])
     >>> print(f"Mode shapes: {modes['phi'].shape}")
     """
     if not os.path.splitext(filename)[1]:
@@ -576,7 +582,7 @@ def _read_modes_bin_impl(
 
 def read_modes(
     filename: str,
-    freq: float = 0.0,
+    frequency: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """
@@ -592,7 +598,7 @@ def read_modes(
         Mode file path, with or without extension. Supported extensions:
         - '.mod': Binary format (default if no extension)
         - '.moa': ASCII format
-    freq : float, optional
+    frequency : float, optional
         Frequency in Hz to select from multi-frequency files (default: 0)
     modes : int, list, or ndarray, optional
         Mode indices to extract (1-indexed). If None, all modes are returned.
@@ -620,12 +626,12 @@ def read_modes(
     Examples
     --------
     >>> # Read binary mode file
-    >>> modes = read_modes('test.mod', freq=100.0)
+    >>> modes = read_modes('test.mod', frequency=100.0)
     >>> print(f"Number of modes: {modes['M']}")
     >>> print(f"Wavenumbers shape: {modes['k'].shape}")
 
     >>> # Read specific modes
-    >>> modes = read_modes('test.mod', freq=100.0, modes=[1, 2, 3])
+    >>> modes = read_modes('test.mod', frequency=100.0, modes=[1, 2, 3])
 
     >>> # ASCII format
     >>> modes = read_modes('test.moa')
@@ -639,9 +645,9 @@ def read_modes(
     filename = fileroot + ext
     if ext == ".mod":
         if modes is None:
-            Modes = read_modes_bin(filename, freq)
+            Modes = read_modes_bin(filename, frequency)
         else:
-            Modes = read_modes_bin(filename, freq, modes)
+            Modes = read_modes_bin(filename, frequency, modes)
 
     elif ext == ".moa":
         if modes is None:
@@ -651,7 +657,7 @@ def read_modes(
 
     else:
         raise ConfigurationError(f"read_modes: Unrecognized file extension {ext}")
-    freq_diff = np.abs(Modes["freqVec"] - freq)
+    freq_diff = np.abs(Modes["freqVec"] - frequency)
     freq_index = int(np.argmin(freq_diff))
     f_selected = float(Modes["freqVec"][freq_index])
     if Modes["M"] != 0:

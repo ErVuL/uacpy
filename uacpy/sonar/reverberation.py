@@ -45,7 +45,7 @@ def _resolve_tl(ranges_m: np.ndarray, tl_db) -> np.ndarray:
 
 def boundary_reverberation(
     ranges_m,
-    source_level_db: float,
+    source_level: float,
     scattering_strength_db,
     *,
     pulse_length_s: float,
@@ -59,7 +59,7 @@ def boundary_reverberation(
     ----------
     ranges_m : array
         Slant ranges to the scattering cell (m).
-    source_level_db : float
+    source_level : float
         Source level (dB re 1 uPa @ 1 m).
     scattering_strength_db : float or array
         Boundary scattering strength ``S_b`` (dB); scalar or per-range (e.g.
@@ -88,12 +88,12 @@ def boundary_reverberation(
     s = np.asarray(scattering_strength_db, dtype=float)
     cell = horizontal_beamwidth_rad * r * (sound_speed * pulse_length_s / 2.0)
     with np.errstate(divide="ignore"):
-        return source_level_db - 2.0 * tl + s + 10.0 * np.log10(cell)
+        return source_level - 2.0 * tl + s + 10.0 * np.log10(cell)
 
 
 def volume_reverberation(
     ranges_m,
-    source_level_db: float,
+    source_level: float,
     scattering_strength_db,
     *,
     pulse_length_s: float,
@@ -118,7 +118,7 @@ def volume_reverberation(
     s = np.asarray(scattering_strength_db, dtype=float)
     cell = solid_angle_beamwidth_sr * r ** 2 * (sound_speed * pulse_length_s / 2.0)
     with np.errstate(divide="ignore"):
-        return source_level_db - 2.0 * tl + s + 10.0 * np.log10(cell)
+        return source_level - 2.0 * tl + s + 10.0 * np.log10(cell)
 
 
 def total_reverberation(*levels_db):

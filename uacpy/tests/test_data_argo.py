@@ -28,7 +28,7 @@ _ROWS = [
 
 def test_fetch_profile_picks_nearest_and_filters_qc(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
-    prof = argo.fetch_argo_profile((30.0, -40.0), '2024-06-04')
+    prof = argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04')
     assert prof['platform'] == '4900001'           # nearest, not the far float
     assert prof['distance_km'] < 20
     assert prof['pres'].tolist() == [5.0, 100.0, 1000.0]   # bad-QC level dropped
@@ -37,7 +37,7 @@ def test_fetch_profile_picks_nearest_and_filters_qc(monkeypatch):
 
 def test_fetch_ssp_argo_builds_profile(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
-    ssp = argo.fetch_ssp_argo((30.0, -40.0), '2024-06-04')
+    ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04')
     assert isinstance(ssp, SoundSpeedProfile)
     assert ssp.n_depths == 3
     assert np.all((1450 < ssp.data) & (ssp.data < 1560))
@@ -47,19 +47,19 @@ def test_fetch_ssp_argo_builds_profile(monkeypatch):
 def test_no_profile_raises(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv([]))
     with pytest.raises(DataFetchError, match='No Argo profile'):
-        argo.fetch_argo_profile((0.0, -150.0), '2024-06-04')
+        argo.fetch_argo_profile((0.0, -150.0), date='2024-06-04')
 
 
 def test_too_far_raises(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
     with pytest.raises(DataFetchError, match='km away'):
-        argo.fetch_argo_profile((30.0, -40.0), '2024-06-04', max_distance_km=5)
+        argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04', max_distance_km=5)
 
 
 def test_bad_formula_raises(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
     with pytest.raises(ConfigurationError, match='formula'):
-        argo.fetch_ssp_argo((30.0, -40.0), '2024-06-04', formula='nope')
+        argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04', formula='nope')
 
 
 def test_pressure_to_depth_inverts():

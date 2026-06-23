@@ -500,7 +500,7 @@ def test_kraken_segmentation_unions_distinct_axes():
     """KrakenField builds its segment list from the union of bathy / SSP
     / bottom change-points, so a bathy with 3 ranges and an SSP with 5
     ranges should yield at least 5 segments."""
-    from uacpy.models.coupled_modes import segment_environment_by_range
+    from uacpy.models._segmentation import segment_environment_by_range
 
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 200.0]),

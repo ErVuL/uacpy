@@ -79,7 +79,7 @@ def main():
 
     # --- receive: downconvert + MF + timing recovery + sync + DFE/PLL + FEC ---
     dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
-    rxr = comms.Receiver("qpsk", code=code, equalizer=dfe, preamble=256)
+    rxr = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
     syms = rxr.from_passband(rx, fs, fc, sps=sps)
     start, sync_metric = comms.detect_preamble(syms, rxr.preamble, threshold=0.4)
     out_bits = rxr.receive(syms)

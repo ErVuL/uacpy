@@ -45,14 +45,14 @@ def decidecade_bands(f_low, f_high):
     return lower[keep], centers[keep], upper[keep]
 
 
-def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
+def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
     """Integrate a one-sided PSD into decidecade band levels.
 
     Parameters
     ----------
     psd : array_like
         One-sided power spectral density [pressure²/Hz, e.g. Pa²/Hz].
-    freqs : array_like
+    frequencies : array_like
         Frequencies [Hz] matching ``psd`` (monotonic, > 0).
     ref : float
         Reference pressure (default ``1e-6`` Pa = 1 µPa, the water standard).
@@ -73,16 +73,17 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
     energy".
     """
     psd = np.asarray(psd, dtype=float)
-    freqs = np.asarray(freqs, dtype=float)
-    pos = freqs > 0
-    lower, centers, upper = decidecade_bands(freqs[pos].min(), freqs[pos].max())
+    frequencies = np.asarray(frequencies, dtype=float)
+    pos = frequencies > 0
+    lower, centers, upper = decidecade_bands(frequencies[pos].min(),
+                                             frequencies[pos].max())
     levels = np.full(centers.size, np.nan)
     n_coarse = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
-        m = (freqs >= lo) & (freqs < hi)
+        m = (frequencies >= lo) & (frequencies < hi)
         n = int(np.count_nonzero(m))
         if n >= 2:
-            power = np.trapezoid(psd[m], freqs[m])
+            power = np.trapezoid(psd[m], frequencies[m])
         elif n == 1:
             # Coarse grid: trapezoid over one point is 0; fall back to a
             # rectangular psd·bandwidth estimate so the band isn't lost.

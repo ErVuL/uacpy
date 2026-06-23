@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from typing import Optional, Tuple
 
 from uacpy.core.environment import Environment
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.visualization.style import RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
 from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit
@@ -35,7 +36,7 @@ def plot_rays(
     ray in the same colour. The legend reports per-class ray counts.
     """
     if not isinstance(rays, Rays):
-        raise TypeError(f"plot_rays: expected Rays, got {type(rays).__name__}")
+        raise ConfigurationError(f"plot_rays: expected Rays, got {type(rays).__name__}")
     _owns_fig = ax is None
     if _owns_fig:
         fig, ax = plt.subplots(figsize=figsize)
@@ -156,7 +157,7 @@ def plot_arrivals(
     surface = green, bottom = blue, both = black. Each arrival is drawn
     as a vertical stem plus a head marker."""
     if not isinstance(arrivals, Arrivals):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
         )
     _owns_fig = ax is None
@@ -220,7 +221,7 @@ def plot_mode_functions(
 ):
     """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves."""
     if not isinstance(modes, Modes):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_mode_functions: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
@@ -255,7 +256,7 @@ def plot_mode_wavenumbers(
 ):
     """Scatter ``Re(k_m)`` vs mode index; overlay imaginary part if non-zero."""
     if not isinstance(modes, Modes):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_mode_wavenumbers: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
@@ -297,7 +298,7 @@ def plot_modes_heatmap(
     high-order modes don't disappear next to the dominant low-order ones.
     """
     if not isinstance(modes, Modes):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
@@ -365,7 +366,7 @@ def plot_reflection_coefficient(
     ``show_phase=True`` overlays the phase ``φ(θ)`` on a twin y-axis
     when the input is narrowband (single frequency)."""
     if not isinstance(rc, ReflectionCoefficient):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_reflection_coefficient: expected ReflectionCoefficient, "
             f"got {type(rc).__name__}"
         )
@@ -424,7 +425,7 @@ def plot_covariance(
 ):
     """Heatmap of one covariance slice ``|C[freq_idx, :, :]|``."""
     if not isinstance(cov, Covariance):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_covariance: expected Covariance, got {type(cov).__name__}"
         )
     _owns_fig = ax is None
@@ -458,7 +459,7 @@ def plot_replicas(
 ):
     """Magnitude of replica response across (z, x) at fixed y=0."""
     if not isinstance(rep, Replicas):
-        raise TypeError(
+        raise ConfigurationError(
             f"plot_replicas: expected Replicas, got {type(rep).__name__}"
         )
     _owns_fig = ax is None

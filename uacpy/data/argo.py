@@ -79,7 +79,7 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
 
 
 def fetch_argo_profile(
-    point: Coordinate, date, *,
+    point: Coordinate, *, date,
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     max_days: int = DEFAULT_MAX_DAYS,
     base_url: str = ARGO_ERDDAP_URL,
@@ -141,7 +141,7 @@ def fetch_argo_profile(
 
 
 def fetch_ssp_argo(
-    point: Coordinate, date, *,
+    point: Coordinate, *, date,
     formula: str = 'unesco',
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     max_days: int = DEFAULT_MAX_DAYS,
@@ -160,7 +160,7 @@ def fetch_ssp_argo(
             f"fetch_ssp_argo: unknown formula={formula!r}.",
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
-    prof = fetch_argo_profile(point, date, max_distance_km=max_distance_km,
+    prof = fetch_argo_profile(point, date=date, max_distance_km=max_distance_km,
                               max_days=max_days, base_url=base_url,
                               timeout=timeout, verbose=verbose)
     speed_fn = _FORMULAS[formula]

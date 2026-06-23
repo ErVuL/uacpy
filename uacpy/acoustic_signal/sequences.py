@@ -7,7 +7,7 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 def bpsk_modulate(
-    s_bipolar: np.ndarray, fc: float, fs: float, chips_per_sec: float
+    s_bipolar: np.ndarray, fc: float, sample_rate: float, chips_per_sec: float
 ) -> np.ndarray:
     """
     Encode binary sequence as Binary Phase Shift Keying (BPSK) signal.
@@ -18,7 +18,7 @@ def bpsk_modulate(
         Binary source sequence (+1/-1 values)
     fc : float
         Carrier frequency in Hz
-    fs : float
+    sample_rate : float
         Sample frequency in Hz
     chips_per_sec : float
         Chip rate (symbols per second)
@@ -40,21 +40,21 @@ def bpsk_modulate(
     >>>
     >>> # BPSK modulation
     >>> fc = 12000  # 12 kHz carrier
-    >>> fs = 48000  # 48 kHz sample rate
+    >>> sample_rate = 48000  # 48 kHz sample rate
     >>> chips_per_sec = 3000  # 3k chips/sec
-    >>> s = bpsk_modulate(bits, fc, fs, chips_per_sec)
+    >>> s = bpsk_modulate(bits, fc, sample_rate, chips_per_sec)
 
     References
     ----------
     Original MATLAB code by Michael B. Porter, April 2000
     """
-    samples_per_chip = int(fs / chips_per_sec)
+    samples_per_chip = int(sample_rate / chips_per_sec)
 
-    if fs / chips_per_sec != samples_per_chip:
+    if sample_rate / chips_per_sec != samples_per_chip:
         raise ConfigurationError("samples_per_chip must be an integer")
 
-    deltat = 1 / fs
-    t_chip = np.arange(0, samples_per_chip * deltat, deltat)
+    deltat = 1 / sample_rate
+    t_chip = np.arange(samples_per_chip) * deltat
     sinwave = np.sin(2 * np.pi * fc * t_chip)
 
     # Outer product: each column is one chip
@@ -150,7 +150,7 @@ def mseq(m: int) -> np.ndarray:
     return s
 
 
-def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.ndarray:
+def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) -> np.ndarray:
     """
     Generate an m-sequence probe signal with BPSK modulation.
 
@@ -163,7 +163,7 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
         Minimum frequency in Hz
     fmax : float
         Maximum frequency in Hz
-    fs : float
+    sample_rate : float
         Sampling rate in Hz
     T_tot : float
         Total duration in seconds
@@ -183,7 +183,7 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
     4. Zero-padding to T_tot
 
     Chip rate is (fmax - fmin) / 2. Output is normalized to 0.95 of
-    full scale and is exactly ``round(T_tot * fs)`` samples long.
+    full scale and is exactly ``round(T_tot * sample_rate)`` samples long.
 
     Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``T_tot`` is
     too short to hold the leader plus one full m-sequence period — a partial
@@ -206,21 +206,21 @@ def make_mseq_probe(fmin: float, fmax: float, fs: float, T_tot: float) -> np.nda
 
     # Generate base m-sequence (order 10 → length 1023)
     s_m = mseq(10)
-    s = bpsk_modulate(s_m, fc, fs, chips_per_sec)
+    s = bpsk_modulate(s_m, fc, sample_rate, chips_per_sec)
 
     # Whole m-sequence periods that fit after the leader, counted in samples so
     # the probe lands at exactly target_n. Counting the leader (the previous
     # rep-count ignored it) is what keeps the probe inside T_tot; a period is
     # never truncated, since a partial m-sequence loses the two-valued
     # autocorrelation the probe exists for.
-    leader = np.zeros(int(lead_time * fs))
-    target_n = int(round(T_tot * fs))
+    leader = np.zeros(int(lead_time * sample_rate))
+    target_n = int(round(T_tot * sample_rate))
     Nreps = (target_n - leader.size) // len(s)
     if Nreps < 1:
         raise ConfigurationError(
             f"make_mseq_probe: T_tot={T_tot:g} s is too short for the "
             f"{lead_time:g} s leader plus one m-sequence period "
-            f"({len(s) / fs:.3f} s at chip rate {chips_per_sec:g} chips/s). "
+            f"({len(s) / sample_rate:.3f} s at chip rate {chips_per_sec:g} chips/s). "
             f"Increase T_tot, or widen (fmax - fmin) to raise the chip rate."
         )
     probe = np.tile(s, Nreps)

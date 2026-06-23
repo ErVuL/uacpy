@@ -284,7 +284,7 @@ class TestTransceiver:
         rng = np.random.default_rng(25)
         bits = rng.integers(0, 2, 2000)
         tx = comms.Transmitter("qpsk", code=comms.ConvCode(interleave_depth=16))
-        rx = comms.Receiver("qpsk", code=comms.ConvCode(interleave_depth=16))
+        rx = comms.CommsReceiver("qpsk", code=comms.ConvCode(interleave_depth=16))
         out = rx.receive(tx.transmit(bits))
         assert np.array_equal(out[: bits.size], bits)
 
@@ -303,7 +303,7 @@ class TestTransceiver:
         rxsig = rxsig + np.sqrt(np.mean(rxsig ** 2) / 10 ** (22 / 10)) \
             * rng.standard_normal(rxsig.size)
         dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
-        rx = comms.Receiver("qpsk", code=code, equalizer=dfe, preamble=256)
+        rx = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
         payload, ok = comms.unpack_frame(rx.receive_passband(rxsig, fs, fc, sps=sps))
         assert ok and payload == message
 

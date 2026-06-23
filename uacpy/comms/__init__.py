@@ -62,7 +62,7 @@ from .phy import (
     symbol_sync,
     upconvert,
 )
-from .transceiver import OFDMReceiver, OFDMTransmitter, Receiver, Transmitter
+from .transceiver import OFDMReceiver, OFDMTransmitter, CommsReceiver, Transmitter
 from .janus import (
     JanusPacket,
     janus_decode,
@@ -126,7 +126,7 @@ __all__ = [
     "rrc_filter", "pulse_shape", "rrc_matched_filter", "upconvert",
     "downconvert", "symbol_sync",
     # transceiver
-    "Transmitter", "Receiver", "OFDMTransmitter", "OFDMReceiver",
+    "Transmitter", "CommsReceiver", "OFDMTransmitter", "OFDMReceiver",
     # JANUS (STANAG 4748)
     "JanusPacket", "janus_encode", "janus_decode", "janus_modulate",
     "janus_demodulate", "janus_detect",

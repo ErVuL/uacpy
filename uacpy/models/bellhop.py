@@ -625,7 +625,7 @@ class Bellhop(PropagationModel):
         if not self._exe.exists():
             raise ExecutableNotFoundError("Bellhop", str(self._exe))
 
-        if verbose and self.version != "custom":
+        if self.version != "custom":
             self._log(f"Using Bellhop {self.version}: {self._exe}")
 
     def _warn_on_ignored_cerveny_knobs(self) -> None:
@@ -690,6 +690,88 @@ class Bellhop(PropagationModel):
                 UserWarning, stacklevel=2,
             )
         return path
+
+    def _run_eigenrays_multi_depth(self, env, source, receiver, run_mode,
+                                   frequencies, source_waveform, sample_rate):
+        """EIGENRAYS with multiple source depths: Bellhop's eigenray search
+        reorders ``alpha`` and ``WriteRay2D`` leaves no per-source boundary in
+        the ``.ray`` file, so loop one run per source depth in Python and stack."""
+        slabs = []
+        for sd in source.depths:
+            single = Source(
+                depths=float(sd),
+                frequencies=source.frequencies,
+                source_type=source.source_type,
+            )
+            slabs.append(self.run(
+                env, single, receiver, run_mode=run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            ))
+        return ResultStack(
+            slabs=slabs, coordinate=source.depths,
+            coordinate_name='source_depth',
+        )
+
+    def _maybe_route_through_bounce(self, env, source, receiver, run_mode,
+                                    frequencies, source_waveform, sample_rate):
+        """Layered/elastic bottoms can't be represented by Bellhop's fluid ray
+        tracer natively. With ``auto_bounce`` (default) route through BOUNCE for
+        an exact reflection-coefficient table and return that Result; otherwise
+        warn that the reflection will be fluid-approximated and return ``None``
+        to continue the native run."""
+        is_layered = env.bottom.is_layered
+        is_elastic = env.has_elastic_bottom()
+        if not (is_layered or is_elastic):
+            return None
+        tag = ' (elastic)' if is_elastic else ''
+        kind = ('layered bottom' if is_layered else 'bottom') + tag
+        if self.auto_bounce:
+            warnings.warn(
+                f"{self.model_name}: env.bottom is {kind}; auto-routing "
+                f"through BOUNCE to derive a reflection-coefficient table. "
+                f"BOUNCE is range-independent — Bounce's collapse policy "
+                f"reduces the env (default: bottom_range='median', layer "
+                f"stack kept). "
+                f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
+                f"(Bellhop will then collapse the bottom via its own "
+                f"collapse policy and run with fluid-approximated physics).",
+                UserWarning, stacklevel=2,
+            )
+            return self.run_with_bounce(
+                env, source, receiver,
+                run_mode=run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            )
+        # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
+        # a halfspace by ``_project_environment`` (collapse policy). A pure
+        # ELASTIC halfspace is NOT collapsed — Bellhop sets
+        # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
+        # the ray tracer fluid-approximates the elastic reflection internally.
+        if is_layered:
+            detail = (
+                "collapsing the layered bottom to a halfspace via the "
+                "model's collapse policy and running with fluid ray-tracer "
+                "physics"
+            )
+        else:
+            detail = (
+                "writing the elastic halfspace directly (no collapse — "
+                "Bellhop supports elastic media); its reflection coefficient "
+                "is fluid-approximated by the ray tracer"
+            )
+        warnings.warn(
+            f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
+            f"{detail}. Reflection-coefficient accuracy near elastic / "
+            f"layered bottoms will be degraded. Set auto_bounce=True "
+            f"(default) or call run_with_bounce() for the elastic-correct "
+            f"path.",
+            UserWarning, stacklevel=2,
+        )
+        return None
 
     def run(
         self,
@@ -767,23 +849,9 @@ class Bellhop(PropagationModel):
             run_mode == RunMode.EIGENRAYS
             and len(np.atleast_1d(source.depths)) > 1
         ):
-            slabs = []
-            for sd in source.depths:
-                single = Source(
-                    depths=float(sd),
-                    frequencies=source.frequencies,
-                    source_type=source.source_type,
-                )
-                slabs.append(self.run(
-                    env, single, receiver, run_mode=run_mode,
-                    frequencies=frequencies,
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                ))
-            return ResultStack(
-                slabs=slabs, coordinate=source.depths,
-                coordinate_name='source_depth',
-            )
+            return self._run_eigenrays_multi_depth(
+                env, source, receiver, run_mode,
+                frequencies, source_waveform, sample_rate)
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
@@ -806,55 +874,11 @@ class Bellhop(PropagationModel):
         # Pass ``collapse={...}`` to Bellhop to override;
         # ``Bellhop.run_with_bounce(...)`` is the explicit form for
         # users who want to control the BOUNCE constructor.
-        is_layered = env.bottom.is_layered
-        is_elastic = env.has_elastic_bottom()
-        if is_layered or is_elastic:
-            tag = ' (elastic)' if is_elastic else ''
-            kind = ('layered bottom' if is_layered else 'bottom') + tag
-            if self.auto_bounce:
-                warnings.warn(
-                    f"{self.model_name}: env.bottom is {kind}; auto-routing "
-                    f"through BOUNCE to derive a reflection-coefficient table. "
-                    f"BOUNCE is range-independent — Bounce's collapse policy "
-                    f"reduces the env (default: bottom_range='median', layer "
-                    f"stack kept). "
-                    f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
-                    f"(Bellhop will then collapse the bottom via its own "
-                    f"collapse policy and run with fluid-approximated physics).",
-                    UserWarning, stacklevel=2,
-                )
-                return self.run_with_bounce(
-                    env, source, receiver,
-                    run_mode=run_mode,
-                    frequencies=frequencies,
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
-            # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
-            # a halfspace by ``_project_environment`` (collapse policy). A pure
-            # ELASTIC halfspace is NOT collapsed — Bellhop sets
-            # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
-            # the ray tracer fluid-approximates the elastic reflection internally.
-            if is_layered:
-                detail = (
-                    "collapsing the layered bottom to a halfspace via the "
-                    "model's collapse policy and running with fluid ray-tracer "
-                    "physics"
-                )
-            else:
-                detail = (
-                    "writing the elastic halfspace directly (no collapse — "
-                    "Bellhop supports elastic media); its reflection coefficient "
-                    "is fluid-approximated by the ray tracer"
-                )
-            warnings.warn(
-                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
-                f"{detail}. Reflection-coefficient accuracy near elastic / "
-                f"layered bottoms will be degraded. Set auto_bounce=True "
-                f"(default) or call run_with_bounce() for the elastic-correct "
-                f"path.",
-                UserWarning, stacklevel=2,
-            )
+        routed = self._maybe_route_through_bounce(
+            env, source, receiver, run_mode,
+            frequencies, source_waveform, sample_rate)
+        if routed is not None:
+            return routed
 
         from uacpy.io.oalib_writer import resolve_ssp_interp
         effective_interp = resolve_ssp_interp(env, self.interp_ssp)

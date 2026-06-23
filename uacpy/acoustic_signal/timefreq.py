@@ -13,6 +13,7 @@ Oppenheim & Schafer. *Discrete-Time Signal Processing* (cepstrum).
 from __future__ import annotations
 
 import math
+from collections import namedtuple
 
 import numpy as np
 from scipy.signal import hilbert
@@ -22,32 +23,38 @@ import scipy.signal as _sig
 from uacpy.core.exceptions import ConfigurationError
 
 
-def analytic_signal(x):
-    """Analytic signal ``x + j*Hilbert(x)`` of a real signal."""
-    xa = np.asarray(x)
+WignerVilleResult = namedtuple("WignerVilleResult",
+                               "times frequencies distribution")
+CWTResult = namedtuple("CWTResult", "frequencies coefficients")
+SpectrogramResult = namedtuple("SpectrogramResult", "frequencies times power")
+
+
+def analytic_signal(data):
+    """Analytic signal ``data + j*Hilbert(data)`` of a real signal."""
+    xa = np.asarray(data)
     if np.iscomplexobj(xa):
         raise ConfigurationError(
-            "analytic_signal: x must be real; the analytic/Hilbert representation "
-            "is only defined for a real signal (got complex input)."
+            "analytic_signal: data must be real; the analytic/Hilbert "
+            "representation is only defined for a real signal (got complex input)."
         )
     xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("analytic_signal: x must be 1-D")
+        raise ConfigurationError("analytic_signal: data must be 1-D")
     return hilbert(xr)
 
 
-def envelope(x):
-    """Instantaneous amplitude envelope ``|analytic_signal(x)|``."""
-    return np.abs(analytic_signal(x))
+def envelope(data):
+    """Instantaneous amplitude envelope ``|analytic_signal(data)|``."""
+    return np.abs(analytic_signal(data))
 
 
-def instantaneous_frequency(x, sample_rate: float):
+def instantaneous_frequency(data, sample_rate: float):
     """Instantaneous frequency (Hz) from the analytic-signal phase derivative.
 
-    Returns an array of length ``len(x)`` (centred differences of the unwrapped
-    phase via :func:`numpy.gradient`, so each sample is time-aligned with ``x``).
+    Returns an array of length ``len(data)`` (centred differences of the
+    unwrapped phase via :func:`numpy.gradient`, time-aligned with ``data``).
     """
-    phase = np.unwrap(np.angle(analytic_signal(x)))
+    phase = np.unwrap(np.angle(analytic_signal(data)))
     return np.gradient(phase) / (2.0 * np.pi) * float(sample_rate)
 
 
@@ -75,11 +82,12 @@ def _smoothing_window(spec, name):
     return w, w.size // 2
 
 
-def wigner_ville(x, sample_rate: float, *, analytic: bool = True,
+def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
                  freq_window=None, time_window=None, nfft=None):
     """Discrete (smoothed-pseudo-) Wigner-Ville distribution of a 1-D signal.
 
-    Returns ``(t, f, W)`` with ``W`` real, shape ``(NF, n)``; ``f`` spans
+    Returns a :class:`WignerVilleResult` ``(times, frequencies, distribution)``
+    with the distribution real, shape ``(NF, n)``; ``f`` spans
     ``[0, fs/2)``. The kernel ``z(t+tau)z*(t-tau)`` doubles the apparent
     frequency, so the physical frequency axis is ``k*fs/(2*NF)``.
 
@@ -88,7 +96,7 @@ def wigner_ville(x, sample_rate: float, *, analytic: bool = True,
 
     Parameters
     ----------
-    x : 1-D array
+    data : 1-D array
         Real or complex signal.
     sample_rate : float
         Sample rate (Hz).
@@ -111,12 +119,13 @@ def wigner_ville(x, sample_rate: float, *, analytic: bool = True,
 
     Returns
     -------
-    t, f, W : ndarray
-        Time axis (s), frequency axis (Hz), and the distribution ``(NF, n)``.
+    WignerVilleResult
+        ``(times, frequencies, distribution)``: time axis (s), frequency axis
+        (Hz), and the distribution ``(NF, n)``.
     """
-    xc = np.asarray(x)
+    xc = np.asarray(data)
     if xc.ndim != 1:
-        raise ConfigurationError("wigner_ville: x must be 1-D")
+        raise ConfigurationError("wigner_ville: data must be 1-D")
     if np.iscomplexobj(xc):
         z = xc
     elif analytic:
@@ -154,7 +163,7 @@ def wigner_ville(x, sample_rate: float, *, analytic: bool = True,
         W[:, ti] = np.real(np.fft.fft(kernel))
     f = np.arange(NF) * fs / (2.0 * NF)
     t = np.arange(n) / fs
-    return t, f, W
+    return WignerVilleResult(t, f, W)
 
 
 def _wavelet_fourier(wavelet, s, omega, w0, order):
@@ -184,8 +193,8 @@ def _wavelet_fourier(wavelet, s, omega, w0, order):
     return psi, factor
 
 
-def cwt(x, sample_rate, freqs=None, wavelet="morlet", *, w0=6.0, order=None,
-        n_freqs=64):
+def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
+        order=None, n_freqs=64):
     """Continuous wavelet transform with a selectable wavelet (FFT-based).
 
     At each scale the signal is filtered by the chosen analysing wavelet
@@ -195,11 +204,11 @@ def cwt(x, sample_rate, freqs=None, wavelet="morlet", *, w0=6.0, order=None,
 
     Parameters
     ----------
-    x : 1-D array
+    data : 1-D array
         Real signal.
     sample_rate : float
         Sample rate (Hz).
-    freqs : array, optional
+    frequencies : array, optional
         Frequencies (Hz) to analyse. Default: ``n_freqs`` log-spaced points
         from ``4*fs/N`` to ``fs/2``.
     wavelet : {'morlet', 'paul', 'dog'}
@@ -217,51 +226,58 @@ def cwt(x, sample_rate, freqs=None, wavelet="morlet", *, w0=6.0, order=None,
 
     Returns
     -------
-    freqs : ndarray
-        Analysis frequencies (Hz).
-    W : ndarray
-        Complex CWT coefficients, shape ``(n_freqs, len(x))``. ``abs(W)`` is the
-        scalogram.
+    CWTResult
+        ``(frequencies, coefficients)``: the analysis frequencies (Hz) and the
+        complex CWT coefficients, shape ``(n_freqs, len(data))``;
+        ``abs(coefficients)`` is the scalogram.
     """
-    xr = np.asarray(x, dtype=float)
+    xr = np.asarray(data, dtype=float)
     if xr.ndim != 1:
-        raise ConfigurationError("cwt: x must be 1-D")
+        raise ConfigurationError("cwt: data must be 1-D")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     n = xr.size
     fs = float(sample_rate)
-    if freqs is None:
-        freqs = np.logspace(np.log10(4.0 * fs / n), np.log10(fs / 2.0),
-                            int(n_freqs))
-    freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
-    if np.any(freqs <= 0):
-        raise ConfigurationError("cwt: freqs must be > 0")
+    if frequencies is None:
+        f_lo = 4.0 * fs / n
+        if f_lo >= fs / 2.0:
+            raise ConfigurationError(
+                f"cwt: signal too short (n={n}) for the default frequency "
+                f"range — the lowest analysis frequency {f_lo:.1f} Hz already "
+                f"exceeds Nyquist {fs / 2.0:.1f} Hz. Pass an explicit "
+                "`frequencies=` below Nyquist, or use a longer signal.")
+        frequencies = np.logspace(np.log10(f_lo), np.log10(fs / 2.0),
+                                  int(n_freqs))
+    frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    if np.any(frequencies <= 0):
+        raise ConfigurationError("cwt: frequencies must be > 0")
     omega = 2.0 * np.pi * np.fft.fftfreq(n)  # rad/sample
     Xf = np.fft.fft(xr)
     # One scale gives the factor; scales follow from f = factor*fs/s.
     _, factor = _wavelet_fourier(wavelet, 1.0, omega, w0, order)
-    scales = factor * fs / freqs  # scale in samples
-    W = np.empty((freqs.size, n), dtype=complex)
+    scales = factor * fs / frequencies  # scale in samples
+    W = np.empty((frequencies.size, n), dtype=complex)
     for i, s in enumerate(scales):
         psi_hat, _ = _wavelet_fourier(wavelet, s, omega, w0, order)
         psi_hat = np.sqrt(2.0 * np.pi * s) * psi_hat  # unit-energy per scale
         W[i] = np.fft.ifft(Xf * np.conj(psi_hat))
-    return freqs, W
+    return CWTResult(frequencies, W)
 
 
-def inverse_cwt(W, freqs, sample_rate, wavelet="morlet", *, w0=6.0, order=None):
+def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
+                order=None):
     """Approximate inverse CWT (Torrence & Compo 1998 reconstruction).
 
     Recovers the signal by summing ``Re(W)`` over scale. The waveform *shape* is
     recovered faithfully; absolute amplitude is approximate (it carries the
-    wavelet's reconstruction constant). Pass the same ``freqs`` / ``wavelet`` /
-    ``w0`` / ``order`` used in :func:`cwt`.
+    wavelet's reconstruction constant). Pass the same ``frequencies`` /
+    ``wavelet`` / ``w0`` / ``order`` used in :func:`cwt`.
 
     Parameters
     ----------
     W : ndarray
         CWT coefficients ``(n_freqs, n_time)`` from :func:`cwt`.
-    freqs : array
+    frequencies : array
         The analysis frequencies returned by :func:`cwt`.
     sample_rate : float
         Sample rate (Hz).
@@ -272,14 +288,15 @@ def inverse_cwt(W, freqs, sample_rate, wavelet="morlet", *, w0=6.0, order=None):
         Reconstructed 1-D signal.
     """
     Wc = np.asarray(W)
-    freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
-    if Wc.ndim != 2 or Wc.shape[0] != freqs.size:
-        raise ConfigurationError("inverse_cwt: W must be (n_freqs, n_time) matching freqs")
+    frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    if Wc.ndim != 2 or Wc.shape[0] != frequencies.size:
+        raise ConfigurationError(
+            "inverse_cwt: W must be (n_freqs, n_time) matching frequencies")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     fs = float(sample_rate)
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
-    scales = factor * fs / freqs
+    scales = factor * fs / frequencies
     dln = float(np.mean(np.abs(np.diff(np.log(scales))))) if scales.size > 1 else 1.0
     c_delta = {"morlet": 0.776, "paul": 1.132, "dog": 3.541}.get(wavelet, 1.0)
     return np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0) * dln / c_delta
@@ -311,15 +328,15 @@ def _apply_lifter(c, lifter):
     return c * w
 
 
-def cepstrum(x, *, window=None, nfft=None, lifter=None):
-    """Real cepstrum ``irfft(log|rfft(x)|)``.
+def cepstrum(data, *, window=None, nfft=None, lifter=None):
+    """Real cepstrum ``irfft(log|rfft(data)|)``.
 
     Not invertible: discards phase. Use :func:`complex_cepstrum` /
     :func:`inverse_complex_cepstrum` for a reversible homomorphic transform.
 
     Parameters
     ----------
-    x : 1-D array
+    data : 1-D array
         Real signal.
     window : None, str, or tuple
         :func:`scipy.signal.get_window` spec applied before the FFT to curb
@@ -332,9 +349,15 @@ def cepstrum(x, *, window=None, nfft=None, lifter=None):
         raw cepstrum; a positive int keeps low quefrencies (spectral envelope),
         a negative int keeps high quefrencies (pitch / echo structure).
     """
-    xr = np.asarray(x, dtype=float)
+    xa = np.asarray(data)
+    if np.iscomplexobj(xa):
+        raise ConfigurationError(
+            "cepstrum: data must be real (got complex input); the real cepstrum "
+            "irfft(log|rfft(x)|) is defined for a real signal. For a complex "
+            "spectrum use complex_cepstrum.")
+    xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("cepstrum: x must be 1-D")
+        raise ConfigurationError("cepstrum: data must be 1-D")
     n = xr.size
     NF = n if nfft is None else int(nfft)
     if NF < n:
@@ -350,19 +373,24 @@ def cepstrum(x, *, window=None, nfft=None, lifter=None):
     return c
 
 
-def complex_cepstrum(x):
-    """Complex cepstrum ``ifft(log(fft(x)))`` with phase unwrapping.
+def complex_cepstrum(data):
+    """Complex cepstrum ``ifft(log(fft(data)))`` with phase unwrapping.
 
     Returns a **complex** array: phase unwrapping breaks the Hermitian
     symmetry of ``log(fft(x))``, so the cepstrum carries information in its
     imaginary part too. Keeping it (rather than taking the real part)
     makes the homomorphic transform exactly reversible via
     :func:`inverse_complex_cepstrum` — that imaginary part is what the
-    inverse needs to reconstruct ``x``.
+    inverse needs to reconstruct ``data``.
     """
-    xr = np.asarray(x, dtype=float)
+    xa = np.asarray(data)
+    if np.iscomplexobj(xa):
+        raise ConfigurationError(
+            "complex_cepstrum: data must be real (got complex input); the "
+            "homomorphic cepstrum is defined for a real signal.")
+    xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("complex_cepstrum: x must be 1-D")
+        raise ConfigurationError("complex_cepstrum: data must be 1-D")
     spectrum = np.fft.fft(xr)
     mag = np.abs(spectrum)
     mag = np.maximum(mag, np.finfo(float).tiny)
@@ -382,8 +410,17 @@ def inverse_complex_cepstrum(c):
     return np.real(np.fft.ifft(np.exp(np.fft.fft(cr))))
 
 
-def spectrogram(data, fs, *, window="hann", nperseg=8192,
-                noverlap=4096, scaling="density", mode="psd"):
-    """Short-time spectrogram. Returns ``(freqs, times, Sxx)`` (Pa²/Hz)."""
-    return _sig.spectrogram(data, fs, window=window, nperseg=nperseg,
-                            noverlap=noverlap, scaling=scaling, mode=mode)
+def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,
+                noverlap=None, nfft=None, scaling="density", mode="psd"):
+    """Short-time spectrogram. Returns a :class:`SpectrogramResult`
+    ``(frequencies, times, power)`` (Pa²/Hz).
+
+    ``noverlap=None`` (default) lets scipy derive the overlap (``nperseg // 8``)
+    and clamp ``nperseg`` to the input length, so short signals don't raise; pass
+    an int to override. ``nfft`` (zero-pad length) mirrors
+    :func:`uacpy.acoustic_signal.psd`. For logarithmic / constant-Q frequency
+    resolution, see :func:`uacpy.acoustic_signal.constant_q_spectrogram`."""
+    f, t, Sxx = _sig.spectrogram(data, sample_rate, window=window,
+                                 nperseg=nperseg, noverlap=noverlap, nfft=nfft,
+                                 scaling=scaling, mode=mode)
+    return SpectrogramResult(f, t, Sxx)

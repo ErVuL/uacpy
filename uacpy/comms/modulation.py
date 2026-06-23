@@ -135,13 +135,13 @@ def dpsk_demodulate(symbols, M: int = 2):
     return bits.ravel()
 
 
-def fsk_modulate(bits, freqs_hz, symbol_dur_s: float, sample_rate: float):
-    """Binary/M-FSK waveform: each symbol is a tone from ``freqs_hz``.
+def fsk_modulate(bits, frequencies, symbol_dur_s: float, sample_rate: float):
+    """Binary/M-FSK waveform: each symbol is a tone from ``frequencies``.
 
-    ``len(freqs_hz)`` must be a power of two (M-ary). Returns the real passband
+    ``len(frequencies)`` must be a power of two (M-ary). Returns the real passband
     waveform (continuous-phase not enforced).
     """
-    f = np.atleast_1d(np.asarray(freqs_hz, dtype=float))
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size
     if M < 2 or (M & (M - 1)):
         raise ConfigurationError(
@@ -159,9 +159,9 @@ def fsk_modulate(bits, freqs_hz, symbol_dur_s: float, sample_rate: float):
     return np.concatenate([np.cos(2 * np.pi * f[int(s)] * t) for s in sym])
 
 
-def fsk_demodulate(signal, freqs_hz, symbol_dur_s: float, sample_rate: float):
+def fsk_demodulate(signal, frequencies, symbol_dur_s: float, sample_rate: float):
     """Non-coherent M-FSK detection (per-symbol max tone energy) -> bit array."""
-    f = np.atleast_1d(np.asarray(freqs_hz, dtype=float))
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size
     if M < 2 or (M & (M - 1)):
         raise ConfigurationError(

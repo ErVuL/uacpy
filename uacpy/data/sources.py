@@ -10,6 +10,8 @@ for an environment, a list of source ids, or the whole catalogue.
 from dataclasses import dataclass
 from typing import Dict, List
 
+from uacpy.core.exceptions import ConfigurationError
+
 __all__ = ['DataSource', 'SOURCES', 'citations']
 
 
@@ -182,7 +184,20 @@ def _resolve(obj) -> List[DataSource]:
         return list(SOURCES.values())
     if hasattr(obj, 'data_sources'):       # an Environment from fetch_environment
         return list(obj.data_sources)
-    return [s if isinstance(s, DataSource) else SOURCES[s] for s in obj]
+    if isinstance(obj, (str, DataSource)):  # a single id / source, not an iterable
+        obj = [obj]
+    resolved = []
+    for s in obj:
+        if isinstance(s, DataSource):
+            resolved.append(s)
+        elif s in SOURCES:
+            resolved.append(SOURCES[s])
+        else:
+            raise ConfigurationError(
+                f"citations: unknown source id {s!r}; valid ids: "
+                f"{sorted(SOURCES)}"
+            )
+    return resolved
 
 
 def citations(obj=None) -> str:

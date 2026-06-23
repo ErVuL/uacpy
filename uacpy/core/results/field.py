@@ -84,7 +84,10 @@ class Field(Result):
             normalised[name] = arr
         self.coords: Dict[str, np.ndarray] = normalised
 
-        data = np.asarray(data)
+        # Copy on ingest so the stored field never aliases the caller's (or a
+        # model's scratch) array — external mutation of the source must not
+        # silently corrupt the result.
+        data = np.array(data)
         expected = tuple(normalised[name].size for name in normalised)
         if data.shape != expected:
             raise ConfigurationError(
@@ -202,6 +205,21 @@ class Field(Result):
         return np.asarray(self.data, dtype=float)
 
     @property
+    def finite_tl(self) -> np.ndarray:
+        """:attr:`tl` with the AT "no data" sentinel masked to ``NaN``.
+
+        Bellhop fills cells that received no ray arrivals (the r=0 column and
+        honest shadow zones) with zero pressure, which reads as
+        ``NO_DATA_TL_DB`` (~600 dB). Reach for this accessor when *reducing*
+        TL — ``field.finite_tl.mean()``, ``np.nanmax(field.finite_tl)``,
+        colormaps — so the sentinel does not silently poison the statistic;
+        :attr:`tl` returns the raw values (including the sentinel) unchanged."""
+        from uacpy.core.constants import NO_DATA_TL_DB
+        tl = np.array(self.tl, dtype=float)
+        tl[tl >= NO_DATA_TL_DB - 1.0] = np.nan
+        return tl
+
+    @property
     def p(self) -> np.ndarray:
         """Complex pressure / transfer-function values.
 
@@ -210,7 +228,12 @@ class Field(Result):
             raise AttributeError(
                 "Field.p: data is real; complex pressure unavailable"
             )
-        return self.data
+        # Hand back a read-only view: callers must not mutate the field's
+        # internal pressure array in place (``p = field.p; p *= k`` would
+        # otherwise silently corrupt the result).
+        view = self.data.view()
+        view.flags.writeable = False
+        return view
 
     @property
     def magnitude(self) -> np.ndarray:
@@ -284,7 +307,7 @@ class Field(Result):
         return float(t[1] - t[0])
 
     @property
-    def fs(self) -> float:
+    def sample_rate(self) -> float:
         """Sampling rate in Hz (``1/dt``; ``0.0`` if not time-resolved)."""
         dt = self.dt
         return 1.0 / dt if dt > 0 else 0.0
@@ -600,6 +623,17 @@ class Field(Result):
                 "Field.synthesize_time_series: requires canonical "
                 "['depth', 'range', 'frequency'] coords; got "
                 f"{list(self.coords)}"
+            )
+        # Waveform generators (lfm_chirp, tone_burst, …) return a (t, x) pair;
+        # passing the whole pair would silently flatten/misuse it. Catch the
+        # common mistake with a clear hint.
+        if isinstance(source_waveform, tuple) or (
+            np.ndim(source_waveform) == 2 and 2 in np.shape(source_waveform)
+        ):
+            raise ConfigurationError(
+                "Field.synthesize_time_series: source_waveform must be the 1-D "
+                "waveform array, not a (time, signal) pair — pass the signal "
+                "only, e.g. lfm_chirp(...)[1]."
             )
         return _synthesize_time_series(
             self,
@@ -1119,5 +1153,5 @@ def _synthesize_time_series(
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
-        metadata={'source_waveform_fs': sample_rate, 'window': window},
+        metadata={'source_waveform_sample_rate': sample_rate, 'window': window},
     )

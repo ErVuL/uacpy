@@ -30,8 +30,6 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
 
-from uacpy.core.constants import REFERENCE_PRESSURE_WATER
-
 
 NoiseComponents = namedtuple(
     "NoiseComponents", "total wind shipping rain thermal turbulence")
@@ -42,14 +40,14 @@ NoiseComponents = namedtuple(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
+def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     """
     Wind-driven ambient noise level (dB re 1 µPa²/Hz), with the
     Piggott (1964) shallow-water adjustment.
 
     Parameters
     ----------
-    f : ndarray or float
+    frequencies : ndarray or float
         Frequencies in Hz (1-Hz band assumed for a scalar).
     u : float
         Wind speed in knots. Must be non-negative; ``u == 0`` silences
@@ -76,9 +74,9 @@ def compute_windnoise(f, u, water_depth='deep', band_integrate=False):
     Translated from the IDL implementation by Dan Hutt, rewritten by Vic
     Young, and packaged in Tollefsen & Pecknold (2018).
     """
-    # Normalise ``f`` up-front so scalars (the docstring promises they
-    # work) don't crash at ``.size`` / ``.flatten()`` below.
-    f = np.atleast_1d(np.asarray(f, dtype=float)).flatten()
+    # Normalise ``frequencies`` up-front so scalars (the docstring promises
+    # they work) don't crash at ``.size`` / ``.flatten()`` below.
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float)).flatten()
 
     u = float(u)
     if u < 0:
@@ -177,14 +175,14 @@ _RAIN_R3 = [0, 0.0335,  0.0277,  0.0251,  0.0277]
 # ── Component submodels (registry of swappable formulas) ────────────────────
 # Built-ins are the Canadian/DRDC composite (Tollefsen & Pecknold 2018;
 # DRDC-RDDC-2022-D051 "WenzCurves"). Each submodel takes the full parameter
-# bundle and ignores what it does not need via **_. Returns dB re 1 µPa²/Hz
-# with -inf for inactive bands (so the incoherent logaddexp sum drops it).
+# bundle and ignores what it does not need via **_. Returns dB re 1 µPa²/Hz —
+# the real (possibly sub-0-dB) spectral level at every band; -inf is reserved
+# for a source that is switched *off* (shipping/rain 'no', wind speed 0), which
+# the incoherent logaddexp sum then drops.
 
 def _thermal_mellen(frequencies, **_):
     """Thermal (Mellen 1952): ``-75 + 20·log10(f)``."""
-    out = -75.0 + 20.0 * np.log10(frequencies)
-    out[out <= 0] = -np.inf
-    return out
+    return -75.0 + 20.0 * np.log10(frequencies)
 
 
 def _wind_merklinger(frequencies, *, wind_speed, water_depth, **_):
@@ -198,10 +196,8 @@ def _wind_coates(frequencies, *, wind_speed, **_):
     ``w`` the wind speed in m/s (converted here from the knots input)."""
     fk = np.asarray(frequencies) / 1000.0
     w_ms = float(wind_speed) / 1.9438445          # knots → m/s
-    out = (50.0 + 7.5 * np.sqrt(w_ms) + 20.0 * np.log10(fk)
-           - 40.0 * np.log10(fk + 0.4))
-    out[out <= 0] = -np.inf
-    return out
+    return (50.0 + 7.5 * np.sqrt(w_ms) + 20.0 * np.log10(fk)
+            - 40.0 * np.log10(fk + 0.4))
 
 
 def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
@@ -211,9 +207,7 @@ def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
         return np.full_like(f, -np.inf)
     c1 = 30 if water_depth == 'deep' else 65
     c2 = _SHIPPING_C2[shipping_level]
-    out = 76 - 20 * (np.log10(f) - np.log10(c1)) ** 2 + 5 * (c2 - 4)
-    out[out <= 0] = -np.inf
-    return out
+    return 76 - 20 * (np.log10(f) - np.log10(c1)) ** 2 + 5 * (c2 - 4)
 
 
 _COATES_SHIP_ACTIVITY = {'no': None, 'low': 0.0, 'medium': 0.5, 'high': 1.0}
@@ -228,19 +222,15 @@ def _shipping_coates(frequencies, *, shipping_level, **_):
     fk = np.asarray(frequencies) / 1000.0
     if s is None:
         return np.full_like(fk, -np.inf)
-    out = (40.0 + 20.0 * (s - 0.5) + 26.0 * np.log10(fk)
-           - 60.0 * np.log10(fk + 0.03))
-    out[out <= 0] = -np.inf
-    return out
+    return (40.0 + 20.0 * (s - 0.5) + 26.0 * np.log10(fk)
+            - 60.0 * np.log10(fk + 0.03))
 
 
 def _turbulence_wenz(frequencies, **_):
     """Turbulence (Wenz 1962, canonical textbook form):
     ``N_t = 17 − 30·log10(f_kHz)`` = ``107 − 30·log10(f_Hz)`` (−30 dB/decade).
     This is the original Wenz turbulent-pressure curve."""
-    out = 17.0 - 30.0 * np.log10(np.asarray(frequencies) / 1000.0)
-    out[out <= 0] = -np.inf
-    return out
+    return 17.0 - 30.0 * np.log10(np.asarray(frequencies) / 1000.0)
 
 
 def _rain_torres_costa(frequencies, *, rain_rate, **_):
@@ -253,12 +243,16 @@ def _rain_torres_costa(frequencies, *, rain_rate, **_):
     out = (_RAIN_R0[ir] + _RAIN_R1[ir] * fk
            + _RAIN_R2[ir] * fk ** 2 + _RAIN_R3[ir] * fk ** 3)
     slope = -5.0 * (0.1 / np.log10(2))
-    idxs_below_7k = np.where(f < 7000)[0]
-    if idxs_below_7k.size and (f > 7000).any():
-        ind = int(idxs_below_7k[-1])
-        prop_const = 10 ** (out[ind] / 10) / f[ind] ** slope
-        out[f > 7000] = 10 * np.log10(prop_const * f[f > 7000] ** slope)
-    out[out <= 0] = -np.inf
+    above = f > 7000.0
+    if np.any(above):
+        # Anchor the −5 dB/octave roll-off at the cubic fit's value at its
+        # 7 kHz validity limit — independent of whether the frequency grid
+        # itself contains a sub-7 kHz sample (without an in-grid anchor the
+        # raw cubic would be extrapolated to physically impossible levels).
+        out7 = (_RAIN_R0[ir] + _RAIN_R1[ir] * 7.0
+                + _RAIN_R2[ir] * 7.0 ** 2 + _RAIN_R3[ir] * 7.0 ** 3)
+        prop_const = 10 ** (out7 / 10) / 7000.0 ** slope
+        out[above] = 10 * np.log10(prop_const * f[above] ** slope)
     return out
 
 
@@ -288,6 +282,27 @@ def _resolve_submodel(value, registry, default, label):
     raise ConfigurationError(
         f"{label} must be None, a name {sorted(registry)}, or a callable; "
         f"got {type(value).__name__}")
+
+
+def _eval_submodel(fn, label, f, params):
+    """Call a (built-in or user) submodel and validate its output.
+
+    Custom callables may omit ``**_`` or return a wrong-shaped array; turn both
+    into a typed :class:`ConfigurationError` instead of a raw ``TypeError`` /
+    broadcasting failure deep inside the incoherent sum.
+    """
+    try:
+        out = np.asarray(fn(f, **params), dtype=float)
+    except ConfigurationError:
+        raise
+    except Exception as e:
+        raise ConfigurationError(
+            f"{label} model failed: {type(e).__name__}: {e}") from e
+    if out.shape != f.shape:
+        raise ConfigurationError(
+            f"{label} model returned shape {out.shape}, expected {f.shape} "
+            f"(one spectral level per input frequency)")
+    return out
 
 
 class WenzNoise:
@@ -397,6 +412,12 @@ class WenzNoise:
                 "log10(f)); drop the DC bin, e.g. frequencies[frequencies > 0]."
             )
         self.wind_speed = float(wind_speed)
+        if self.wind_speed < 0:
+            raise ConfigurationError(
+                f"WenzNoise: wind_speed must be non-negative (knots), got "
+                f"{self.wind_speed:g}; the Coates wind model takes √(wind) and "
+                f"would otherwise return NaN."
+            )
         self.rain_rate = rain_rate
         self.water_depth = water_depth
         self.shipping_level = shipping_level
@@ -405,8 +426,8 @@ class WenzNoise:
 
         # Resolve each component to a submodel (None → registry default, str →
         # named registry model, callable → custom). Every component is a
-        # log10(f) fit returning dB re 1 µPa²/Hz with the -inf inactive-band
-        # convention, so the incoherent logaddexp sum drops silent sources.
+        # log10(f) fit returning dB re 1 µPa²/Hz; -inf marks a switched-off
+        # source, so the incoherent logaddexp sum drops only silent sources.
         params = dict(wind_speed=self.wind_speed, water_depth=water_depth,
                       shipping_level=shipping_level, rain_rate=rain_rate)
         wfn, wname = _resolve_submodel(wind_model, WIND_MODELS,
@@ -419,11 +440,11 @@ class WenzNoise:
                                        'mellen', 'thermal_model')
         ufn, uname = _resolve_submodel(turbulence_model, TURBULENCE_MODELS,
                                        'wenz', 'turbulence_model')
-        self.wind = wfn(f, **params)
-        self.shipping = sfn(f, **params)
-        self.rain = rfn(f, **params)
-        self.thermal = tfn(f, **params)
-        self.turbulence = ufn(f, **params)
+        self.wind = _eval_submodel(wfn, 'wind', f, params)
+        self.shipping = _eval_submodel(sfn, 'shipping', f, params)
+        self.rain = _eval_submodel(rfn, 'rain', f, params)
+        self.thermal = _eval_submodel(tfn, 'thermal', f, params)
+        self.turbulence = _eval_submodel(ufn, 'turbulence', f, params)
         self.models = {'wind': wname, 'shipping': sname, 'rain': rname,
                        'thermal': tname, 'turbulence': uname}
         # Sum incoherent dB sources via logsumexp to avoid 10**(x/10) overflow
@@ -444,15 +465,19 @@ class WenzNoise:
         return NoiseComponents(self.total, self.wind, self.shipping,
                                self.rain, self.thermal, self.turbulence)
 
-    def as_psd(self, ref=REFERENCE_PRESSURE_WATER):
-        """Linear total PSD in **Pa²/Hz**.
+    def as_psd(self, ref=1.0):
+        """Linear total PSD, by default in **µPa²/Hz** — the *same* 1 µPa
+        reference as :attr:`total` (dB re 1 µPa²/Hz), so the linear and dB
+        views stay harmonised::
 
-        ``self.total`` is in dB re ``ref²/Hz`` — by default
-        ``ref = 1e-6 Pa = 1 µPa``, matching the underwater-acoustics
-        convention used throughout :mod:`uacpy.noise`. The returned
-        array is the linear power-spectral density in Pa²/Hz, ready for
-        :func:`uacpy.acoustic_signal.synthesize_noise_from_psd` (which expects linear PSD in the
-        signal's own pressure units).
+            10 * np.log10(w.as_psd()) == w.total      # exactly
+
+        ``ref`` rescales the output to another pressure unit and is the value
+        of the dB reference (1 µPa) expressed in that unit, so ``ref=1e-6``
+        (1 µPa in Pa) returns SI **Pa²/Hz** — ready for
+        :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`, which expects
+        a linear PSD in the signal's own pressure units. For any ``ref``,
+        ``10 * np.log10(as_psd(ref) / ref**2) == total``.
         """
         return 10 ** (self.total / 10) * ref ** 2
 
@@ -465,5 +490,3 @@ class WenzNoise:
             f"rain={self.rain_rate!r}, "
             f"models={self.models})"
         )
-
-    # ── Plot ───────────────────────────────────────────────────────────

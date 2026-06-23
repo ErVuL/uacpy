@@ -221,7 +221,7 @@ class TestCWT:
     def test_shape_and_explicit_freqs(self):
         x = np.cos(2 * np.pi * 100 * np.arange(1024) / FS)
         freqs = np.array([50.0, 100.0, 200.0])
-        f, W = cwt(x, FS, freqs=freqs)
+        f, W = cwt(x, FS, frequencies=freqs)
         assert W.shape == (3, 1024)
         assert np.iscomplexobj(W)
 

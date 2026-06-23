@@ -165,7 +165,7 @@ def sparc_pulse(
     return s, pulse_title
 
 
-def ricker_wavelet(time: np.ndarray, F: float) -> np.ndarray:
+def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
     """
     Generate a Ricker wavelet (Mexican hat wavelet).
 
@@ -179,7 +179,7 @@ def ricker_wavelet(time: np.ndarray, F: float) -> np.ndarray:
     ----------
     time : ndarray
         Time vector
-    F : float
+    frequency : float
         Nominal source frequency in Hz
 
     Returns
@@ -189,7 +189,7 @@ def ricker_wavelet(time: np.ndarray, F: float) -> np.ndarray:
 
     Notes
     -----
-    Peak occurs at frequency F, with support approximately [0, 2F].
+    Peak occurs at ``frequency``, with support approximately [0, 2·frequency].
 
     Examples
     --------
@@ -200,7 +200,7 @@ def ricker_wavelet(time: np.ndarray, F: float) -> np.ndarray:
     ----------
     Original MATLAB code: Ricker.m
     """
-    u = 2 * np.pi * F * time - 8  # Dimensionless time
+    u = 2 * np.pi * frequency * time - 8  # Dimensionless time
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
     return s
 
@@ -243,12 +243,12 @@ def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarra
 
 
 def lfm_chirp(
-    fmin: float, fmax: float, T: float, sample_rate: float
+    fmin: float, fmax: float, duration: float, sample_rate: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a Linear Frequency Modulated (LFM) pulse (chirp).
 
-    Creates a signal that sweeps linearly from fmin to fmax over duration T.
+    Creates a signal that sweeps linearly from fmin to fmax over ``duration``.
 
     Parameters
     ----------
@@ -256,7 +256,7 @@ def lfm_chirp(
         Minimum frequency in Hz
     fmax : float
         Maximum frequency in Hz
-    T : float
+    duration : float
         Duration of time-series in seconds
     sample_rate : float
         Samples per second (Hz)
@@ -291,6 +291,7 @@ def lfm_chirp(
     ----------
     Original MATLAB code: lfm.m
     """
+    T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
         return np.array([]), np.array([])
@@ -345,6 +346,9 @@ def tone_burst(
     # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly
     # (the previous ``np.linspace(0, T, N)`` was endpoint-inclusive and
     # produced ``dt == T / (N - 1) != 1 / sample_rate``).
+    if frequency <= 0:
+        raise ConfigurationError(
+            f"tone_burst: frequency must be > 0; got {frequency}.")
     T = n_cycles / frequency
     N = int(round(T * sample_rate))
     time = np.arange(N) / float(sample_rate)
@@ -358,7 +362,7 @@ def tone_burst(
 
 
 def hfm_chirp(
-    fmin: float, fmax: float, T: float, sample_rate: float
+    fmin: float, fmax: float, duration: float, sample_rate: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a Hyperbolic Frequency Modulated (HFM) pulse.
@@ -372,7 +376,7 @@ def hfm_chirp(
         Minimum frequency in Hz
     fmax : float
         Maximum frequency in Hz
-    T : float
+    duration : float
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
@@ -400,6 +404,7 @@ def hfm_chirp(
     ----------
     Original MATLAB: hfm.m
     """
+    T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
         return np.array([]), np.array([])
@@ -413,7 +418,7 @@ def hfm_chirp(
     return s, time
 
 
-def nwave(time: np.ndarray, F: float) -> np.ndarray:
+def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
     """
     Generate an N-wave pulse.
 
@@ -424,13 +429,13 @@ def nwave(time: np.ndarray, F: float) -> np.ndarray:
     ----------
     time : ndarray
         Time vector
-    F : float
+    frequency : float
         Nominal source frequency in Hz
 
     Returns
     -------
     s : ndarray
-        N-wave signal, zero outside [0, 1/F]
+        N-wave signal, zero outside [0, 1/frequency]
 
     Notes
     -----
@@ -450,10 +455,10 @@ def nwave(time: np.ndarray, F: float) -> np.ndarray:
     >>> s = nwave(t, 100.0)
     >>> print(f"Non-zero samples: {np.sum(s != 0)}")
     """
-    omega = 2 * np.pi * F
+    omega = 2 * np.pi * frequency
     s = np.sin(omega * time) - 0.5 * np.sin(2 * omega * time)
 
-    # Zero outside [0, 1/F]
-    s[(time > 1 / F) | (time < 0)] = 0
+    # Zero outside [0, 1/frequency]
+    s[(time > 1 / frequency) | (time < 0)] = 0
 
     return s

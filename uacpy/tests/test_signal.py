@@ -26,19 +26,19 @@ class TestGenerators:
 
     def test_lfm_chirp_runs(self):
         fs = 10_000.0
-        t, s = lfm_chirp(fmin=100, fmax=2000, T=0.1, sample_rate=fs)
+        t, s = lfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
         assert len(t) == len(s)
         assert np.all(np.isfinite(s))
 
     def test_hfm_chirp_runs(self):
         fs = 10_000.0
-        t, s = hfm_chirp(fmin=100, fmax=2000, T=0.1, sample_rate=fs)
+        t, s = hfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
         assert len(t) == len(s)
         assert np.all(np.isfinite(s))
 
     def test_ricker_wavelet_runs(self):
         time = np.linspace(0, 0.1, 1024)
-        s = ricker_wavelet(time, F=200.0)
+        s = ricker_wavelet(time, frequency=200.0)
         assert len(s) == len(time)
         assert np.all(np.isfinite(s))
 
@@ -79,7 +79,7 @@ class TestProcessing:
         x = np.zeros(1024)
         y = add_noise(
             x, sample_rate=fs,
-            source_level_db=120.0, noise_level_db=80.0,
+            source_level=120.0, noise_level=80.0,
             fc=1000.0, bandwidth=200.0,
         )
         assert np.var(y) > 0
@@ -98,7 +98,7 @@ class TestProcessing:
 
     def test_make_noise_waveform_is_1d_with_consistent_length(self):
         fs, T = 10_000.0, 0.1
-        n, t = make_noise_waveform(fc=1000.0, BW=500.0, T=T, fs=fs)
+        n, t = make_noise_waveform(fc=1000.0, bandwidth_hz=500.0, T=T, sample_rate=fs)
         # Returns (signal, time) like the tonal generators (tone_burst, …);
         # 1-D, length int(T*fs), with the time axis the same length (no
         # carrier/noise mismatch from arange-vs-int float drift).
@@ -232,3 +232,20 @@ class TestFRF:
         _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m='CP')
         assert np.isfinite(tf).all()
         assert frf.m == order
+
+
+def test_degenerate_input_guards_raise_configurationerror():
+    """Pre-production robustness: degenerate inputs raise a typed
+    ConfigurationError, not a raw ValueError/ZeroDivisionError."""
+    import numpy as np
+    import pytest
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.acoustic_signal import sel, cwt, tone_burst
+    with pytest.raises(ConfigurationError):       # sel: empty data
+        sel(np.array([]), 48000.0)
+    with pytest.raises(ConfigurationError):       # sel: zero integration_time
+        sel(np.ones(2000), 48000.0, integration_time=0.0)
+    with pytest.raises(ConfigurationError):       # cwt: signal too short (n<8)
+        cwt(np.ones(5), 8000.0)
+    with pytest.raises(ConfigurationError):       # tone_burst: frequency 0
+        tone_burst(0.0, 5, 1000.0)

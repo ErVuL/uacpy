@@ -33,7 +33,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR,
+    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
 from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
@@ -700,7 +700,7 @@ def write_multi_profile_env(
     if n_mesh <= 0:
         freq = float(source.frequencies[0])
         max_depth = max(seg.depth for _, seg in segments)
-        n_mesh = max(500, int(max_depth * freq / 1500.0 * 20))
+        n_mesh = max(500, int(max_depth * freq / DEFAULT_SOUND_SPEED * 20))
 
     # Determine max NMedia across all segments so every profile
     # can be padded to the same number of media (=> same NTotal).

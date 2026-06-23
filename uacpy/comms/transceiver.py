@@ -1,4 +1,4 @@
-"""End-to-end Transmitter / Receiver for the single-carrier coherent link.
+"""End-to-end Transmitter / CommsReceiver for the single-carrier coherent link.
 
 Wraps the symbol-domain modem (FEC + modulation + preamble) and the passband
 physical layer (pulse shaping, up/down-conversion, timing recovery) into two
@@ -9,7 +9,7 @@ probe, a pause, and a data block which starts with a training sequence").
 
 Two link architectures are provided as separate, parallel pairs:
 
-* :class:`Transmitter` / :class:`Receiver` — single-carrier coherent (RRC +
+* :class:`Transmitter` / :class:`CommsReceiver` — single-carrier coherent (RRC +
   Gardner timing recovery + adaptive DFE/PLL).
 * :class:`OFDMTransmitter` / :class:`OFDMReceiver` — multicarrier (cyclic prefix
   + Schmidl-Cox sync + the practical resample-then-residual-CFO Doppler handling
@@ -67,7 +67,7 @@ class Transmitter:
         FEC codec applied before modulation.
     preamble : array_like or int, optional
         Known leading symbols for the receiver's sync + training. An int means
-        "generate this many" (matched by :class:`Receiver` with the same count).
+        "generate this many" (matched by :class:`CommsReceiver` with the same count).
     """
 
     def __init__(self, modulation: str, code: ConvCode = None, preamble=None):
@@ -86,18 +86,18 @@ class Transmitter:
         sym = self.modulator.modulate(b)
         return np.concatenate([self.preamble, sym])
 
-    def to_passband(self, symbols, fs, fc, sps=8, rolloff=0.25, span=8):
+    def to_passband(self, symbols, sample_rate, fc, sps=8, rolloff=0.25, span=8):
         """Pulse-shape and up-convert symbols to a real passband signal at ``fc``."""
-        if fc >= fs / 2:
-            raise ConfigurationError("to_passband: need fc < fs/2")
-        return upconvert(pulse_shape(symbols, sps, rolloff, span), fs, fc)
+        if fc >= sample_rate / 2:
+            raise ConfigurationError("to_passband: need fc < sample_rate/2")
+        return upconvert(pulse_shape(symbols, sps, rolloff, span), sample_rate, fc)
 
-    def transmit_passband(self, bits, fs, fc, sps=8, rolloff=0.25, span=8):
+    def transmit_passband(self, bits, sample_rate, fc, sps=8, rolloff=0.25, span=8):
         """Information bits straight to real passband samples (one call)."""
-        return self.to_passband(self.transmit(bits), fs, fc, sps, rolloff, span)
+        return self.to_passband(self.transmit(bits), sample_rate, fc, sps, rolloff, span)
 
 
-class Receiver:
+class CommsReceiver:
     """Recover information bits from symbols or real passband samples.
 
     Parameters mirror :class:`Transmitter`; ``equalizer`` is an optional
@@ -117,10 +117,10 @@ class Receiver:
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
 
-    def from_passband(self, samples, fs, fc, sps=8, rolloff=0.25, span=8,
+    def from_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
                       loop_bw=0.005):
         """Down-convert, matched-filter, and timing-recover to symbol-rate samples."""
-        bb = downconvert(np.asarray(samples, dtype=float), fs, fc)
+        bb = downconvert(np.asarray(samples, dtype=float), sample_rate, fc)
         mf = matched_filter(bb, sps, rolloff, span)
         return symbol_sync(mf, sps, loop_bw=loop_bw, start=span * sps)
 
@@ -152,10 +152,10 @@ class Receiver:
             bits = self.code.decode(bits)
         return bits
 
-    def receive_passband(self, samples, fs, fc, sps=8, rolloff=0.25, span=8,
+    def receive_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
                          loop_bw=0.005, threshold=0.4):
         """Real passband samples straight to information bits (one call)."""
-        syms = self.from_passband(samples, fs, fc, sps, rolloff, span, loop_bw)
+        syms = self.from_passband(samples, sample_rate, fc, sps, rolloff, span, loop_bw)
         return self.receive(syms, threshold=threshold)
 
 
@@ -205,24 +205,24 @@ class OFDMTransmitter:
         guard = np.zeros(nsc + self.cp_len, dtype=complex)   # protects the last block
         return np.concatenate([self.preamble, pilot] + data + [guard])
 
-    def to_passband(self, baseband, fs, fc, oversample=4):
+    def to_passband(self, baseband, sample_rate, fc, oversample=4):
         """Up-convert a baseband OFDM frame to real passband at carrier ``fc``.
 
         The baseband is interpolated by ``oversample`` so the OFDM band occupies
-        ``fs/oversample`` Hz around ``fc`` (leaving room in the passband and an
+        ``sample_rate/oversample`` Hz around ``fc`` (leaving room in the passband and an
         image gap the receiver's decimation filter rejects).
         """
         from scipy.signal import resample_poly
         os = int(oversample)
-        if fc - fs / (2 * os) <= 0 or fc + fs / (2 * os) >= fs / 2:
+        if fc - sample_rate / (2 * os) <= 0 or fc + sample_rate / (2 * os) >= sample_rate / 2:
             raise ConfigurationError(
-                "to_passband: OFDM band fc +/- fs/(2*oversample) must lie in (0, fs/2)")
+                "to_passband: OFDM band fc +/- sample_rate/(2*oversample) must lie in (0, sample_rate/2)")
         up = resample_poly(baseband, os, 1)
-        return upconvert(up, fs, fc)
+        return upconvert(up, sample_rate, fc)
 
-    def transmit_passband(self, bits, fs, fc, oversample=4):
+    def transmit_passband(self, bits, sample_rate, fc, oversample=4):
         """Information bits straight to real passband samples (one call)."""
-        return self.to_passband(self.transmit(bits), fs, fc, oversample)
+        return self.to_passband(self.transmit(bits), sample_rate, fc, oversample)
 
 
 class OFDMReceiver:
@@ -285,7 +285,7 @@ class OFDMReceiver:
             bits = self.code.decode(bits)
         return bits
 
-    def from_passband(self, samples, fs, fc, oversample=4, doppler_scale=None,
+    def from_passband(self, samples, sample_rate, fc, oversample=4, doppler_scale=None,
                       scales=None):
         """Resample for Doppler, down-convert, and decimate to a baseband frame.
 
@@ -298,16 +298,16 @@ class OFDMReceiver:
         os = int(oversample)
         pb = np.asarray(samples, dtype=float)
         if doppler_scale is None:
-            probe = upconvert(resample_poly(self.preamble, os, 1), fs, fc)
+            probe = upconvert(resample_poly(self.preamble, os, 1), sample_rate, fc)
             doppler_scale, _, _ = estimate_doppler_scale(pb, probe, scales)
         if abs(doppler_scale) > 1e-9:
             # doppler_scale is a = v/c; compensate_doppler(pb, a) removes it.
             pb = np.real(compensate_doppler(pb, doppler_scale))
-        bb = downconvert(pb, fs, fc)
+        bb = downconvert(pb, sample_rate, fc)
         return resample_poly(bb, 1, os)          # LPF + decimate removes 2*fc image
 
-    def receive_passband(self, samples, fs, fc, oversample=4, doppler_scale=None,
+    def receive_passband(self, samples, sample_rate, fc, oversample=4, doppler_scale=None,
                          scales=None):
         """Real passband samples straight to information bits (one call)."""
-        return self.receive(self.from_passband(samples, fs, fc, oversample,
+        return self.receive(self.from_passband(samples, sample_rate, fc, oversample,
                                                doppler_scale, scales))

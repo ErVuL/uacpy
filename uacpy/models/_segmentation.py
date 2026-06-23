@@ -1,8 +1,9 @@
 """
 Range-dependent environment segmentation for Kraken.
 
-Segments a range-dependent environment into range slices, each with a
-range-independent Environment, for use by AT's multi-profile .env format.
+A model-support helper (not a :class:`PropagationModel`): segments a
+range-dependent environment into range slices, each with a range-independent
+Environment, for use by AT's multi-profile .env format.
 """
 
 import numpy as np

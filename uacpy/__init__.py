@@ -52,7 +52,7 @@ from uacpy.core.exceptions import (
 )
 
 from uacpy import models
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.models import (
     Bellhop, Kraken, RAM, Scooter, SPARC, Bounce, OAST, OASN, OASR, OASP, OASES,
 )
@@ -101,6 +101,7 @@ __all__ = [
     'FileFormatError',
     'RunMode',
     'PropagationModel',
+    'ModelSpec',
     'Bellhop', 'Kraken', 'RAM', 'Scooter', 'SPARC', 'Bounce',
     'OAST', 'OASN', 'OASR', 'OASP', 'OASES',
     'run_parallel',

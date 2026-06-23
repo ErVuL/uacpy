@@ -264,7 +264,7 @@ def test_broadband_peak_times_agree_across_models():
 def test_synthesize_time_series_honors_user_sample_rate():
     """The :class:`Field` returned by
     :meth:`Field.synthesize_time_series` sits on the same
-    sampling grid as the source pulse — i.e. ``ts.fs == sample_rate``
+    sampling grid as the source pulse — i.e. ``ts.sample_rate == sample_rate``
     exactly."""
     env = _pekeris_env()
     src, rcv = _src_rcv()
@@ -272,6 +272,6 @@ def test_synthesize_time_series_honors_user_sample_rate():
     fs = 4096.0
     pulse = _gaussian_pulse(FC, fs)
     ts = tf.synthesize_time_series(pulse, sample_rate=fs)
-    assert ts.fs == pytest.approx(fs, rel=1e-6), (
-        f'expected fs={fs}, got {ts.fs}'
+    assert ts.sample_rate == pytest.approx(fs, rel=1e-6), (
+        f'expected sample_rate={fs}, got {ts.sample_rate}'
     )

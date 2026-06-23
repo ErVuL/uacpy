@@ -9,7 +9,18 @@ from typing import Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
+from uacpy.io.units import m_to_km
 from uacpy.visualization.style import BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
+
+
+def fig_ax(ax, figsize):
+    """Return ``(fig, ax)``: a fresh figure of ``figsize`` when ``ax is None``,
+    else the supplied axis and its parent figure. Shared by the DSP / comms /
+    noise plotters so they all honour the ``ax=None`` convention identically."""
+    import matplotlib.pyplot as plt
+    if ax is None:
+        return plt.subplots(figsize=figsize)
+    return ax.figure, ax
 
 
 ZORDER_SEDIMENT = 2
@@ -74,7 +85,7 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
     ``range`` axis from metres to km so 1-D cuts, 2-D heatmaps and ``compare``
     all share one x-scale."""
     if name == 'range':
-        return np.asarray(coord) / 1000.0, 'Range (km)'
+        return m_to_km(coord), 'Range (km)'
     return np.asarray(coord), _coord_label(name)
 
 
@@ -96,7 +107,7 @@ def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
     increasing downward). Assumes a uniform grid, which is ``imshow``'s own
     assumption anyway.
     """
-    r_km = np.asarray(ranges_m, dtype=float) / 1000.0
+    r_km = m_to_km(ranges_m)
     z = np.asarray(depths, dtype=float)
     dr = (r_km[1] - r_km[0]) / 2.0 if r_km.size > 1 else 0.5
     dz = (z[1] - z[0]) / 2.0 if z.size > 1 else 0.5
@@ -113,7 +124,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     the sediment fill stays visible."""
     if env is None:
         return
-    data_r_km = np.asarray(ranges_m, dtype=float) / 1000.0
+    data_r_km = m_to_km(ranges_m)
     if data_r_km.size:
         x_lo, x_hi = float(data_r_km.min()), float(data_r_km.max())
     else:
@@ -123,7 +134,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     ax.set_xlim(x_lo, x_hi)
 
     if env.has_range_dependent_bathymetry():
-        r_km = env.bathymetry.ranges / 1000.0
+        r_km = m_to_km(env.bathymetry.ranges)
         z = env.bathymetry.depths
         if r_km.size >= 2 and (r_km.min() < x_lo or r_km.max() > x_hi):
             mask = (r_km >= x_lo) & (r_km <= x_hi)
@@ -330,7 +341,7 @@ def _draw_surface_boundary(ax, env):
     if ranges is None or len(props) == 1:
         zones = [(x0, x1, props[0])]
     else:
-        rk = np.asarray(ranges, dtype=float) / 1000.0
+        rk = m_to_km(ranges)
         bnds = [x0] + [0.5 * (rk[i] + rk[i + 1]) for i in range(len(rk) - 1)] + [x1]
         zones = [(bnds[i], bnds[i + 1], props[i]) for i in range(len(props))]
 
@@ -362,7 +373,7 @@ def _draw_altimetry(ax, env):
     heights = getattr(alti, 'heights', None)
     if ranges is None or heights is None or np.asarray(ranges).size < 2:
         return
-    r_km = np.asarray(ranges, dtype=float) / 1000.0
+    r_km = m_to_km(ranges)
     z = -np.asarray(heights, dtype=float)          # positive up → negative depth
     if not np.any(np.abs(z) > 0):
         return

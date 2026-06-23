@@ -38,8 +38,8 @@ class Bathymetry:
     depths: np.ndarray
 
     def __post_init__(self):
-        self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
-        self.depths = np.asarray(self.depths, dtype=float).reshape(-1)
+        self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
+        self.depths = np.array(self.depths, dtype=float).reshape(-1)
         if self.ranges.size != self.depths.size:
             raise ConfigurationError(
                 f"Bathymetry: ranges ({self.ranges.size}) and depths "

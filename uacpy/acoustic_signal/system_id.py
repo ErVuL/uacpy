@@ -48,8 +48,6 @@ class FRF:
         the variable named ``Pxy``; the H1 expression
         ``conj(Pxy)/Pxx`` recovers the textbook ``Sxy/Sxx``.
         """
-        import numpy as np
-
         # Default parameters, overridden by kwargs if provided
         self.params = {
             "nperseg": 8192,
@@ -67,7 +65,7 @@ class FRF:
         self,
         x,
         y,
-        fs,
+        sample_rate,
         m=None,
         method=None,
         estimator=None,
@@ -87,7 +85,7 @@ class FRF:
             Input signal array (reference) as 1D (single measurement) or 2D (rows = measurements).
         y : array_like
             Output signal array as 1D (single measurement) or 2D (rows = measurements).
-        fs : float
+        sample_rate : float
             Sampling frequency (Hz).
         m : int or str, optional
             Impulse response length (for TF methods), or an automatic
@@ -149,17 +147,17 @@ class FRF:
             x_i = x[i, :].ravel()
             y_i = y[i, :].ravel()
             if self.method == "welch":
-                freqs_i, tf_i, coh_i = self.compute_welch(x_i, y_i, fs)
+                freqs_i, tf_i, coh_i = self.compute_welch(x_i, y_i, sample_rate)
                 coh_list.append(coh_i)
             elif self.method == "ls_fir":
                 freqs_i, tf_i, g_i = self.compute_lsfir(
-                    y_i, x_i, fs, self.m, len(x_i), m_max=m_max, stop_count=stop_count
+                    y_i, x_i, sample_rate, self.m, len(x_i), m_max=m_max, stop_count=stop_count
                 )
                 m_list.append(len(g_i))
             elif self.method == "etfe":
-                freqs_i, tf_i = self.compute_etfe(x_i, y_i, fs)
+                freqs_i, tf_i = self.compute_etfe(x_i, y_i, sample_rate)
             elif self.method == "p_etfe":
-                freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, fs)
+                freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, sample_rate)
             else:
                 raise ConfigurationError(
                     f"FRF.compute: unknown method={self.method!r}; "
@@ -191,7 +189,7 @@ class FRF:
 
         return freqs, tf
 
-    def compute_welch(self, x, y, fs):
+    def compute_welch(self, x, y, sample_rate):
         """
         Compute the Frequency Response Function (FRF) using Welch's method.
 
@@ -205,7 +203,7 @@ class FRF:
             Input signal array (reference).
         y : array_like
             Output signal array.
-        fs : float
+        sample_rate : float
             Sampling frequency of the signals (Hz).
 
         Returns
@@ -217,9 +215,9 @@ class FRF:
         coh : ndarray
             Array of coherence values.
         """
-        freqs, Pxx = _sig.welch(x, fs, scaling="density", **self.params)
-        _, Pyy = _sig.welch(y, fs, scaling="density", **self.params)
-        _, Pxy = _sig.csd(y, x, fs, scaling="density", **self.params)
+        freqs, Pxx = _sig.welch(x, sample_rate, scaling="density", **self.params)
+        _, Pyy = _sig.welch(y, sample_rate, scaling="density", **self.params)
+        _, Pxy = _sig.csd(y, x, sample_rate, scaling="density", **self.params)
         if self.estimator == "H2":
             tf = Pyy / Pxy
         else:  # Default to H1
@@ -228,7 +226,7 @@ class FRF:
 
         return freqs, tf, coh
 
-    def compute_periodic_etfe(self, x, y, fs, nperseg=None):
+    def compute_periodic_etfe(self, x, y, sample_rate, nperseg=None):
         """
         Compute ETFE for periodic data.
 
@@ -238,7 +236,7 @@ class FRF:
             Input signal.
         y : array_like
             Output signal.
-        fs : float
+        sample_rate : float
             Sampling frequency.
         nperseg : int, optional
             Segment length of period in samples.
@@ -278,13 +276,13 @@ class FRF:
         y_avg = np.mean(y_reshaped, axis=0)
         X = np.fft.rfft(x_avg) + np.finfo(float).eps
         Y = np.fft.rfft(y_avg) + np.finfo(float).eps
-        freqs = np.fft.rfftfreq(period, d=1 / fs)
+        freqs = np.fft.rfftfreq(period, d=1 / sample_rate)
         tf = np.zeros_like(X, dtype=complex)
         tf = Y / X
 
         return freqs, tf
 
-    def compute_etfe(self, x, y, fs):
+    def compute_etfe(self, x, y, sample_rate):
         """
         Compute the Empirical Transfer Function Estimate (ETFE).
 
@@ -297,7 +295,7 @@ class FRF:
             Input signal array (reference).
         y : array_like
             Output signal array.
-        fs : float
+        sample_rate : float
             Sampling frequency of the signals (Hz).
 
         Returns
@@ -317,13 +315,13 @@ class FRF:
 
         # Determine frequency grid based on n_freqs
         n_fft = min_len
-        freqs = np.fft.rfftfreq(n_fft, d=1 / fs)
+        freqs = np.fft.rfftfreq(n_fft, d=1 / sample_rate)
         tf = np.zeros_like(X, dtype=complex)
         tf = Y / X
 
         return freqs, tf
 
-    def compute_lsfir(self, y, u, fs, m, N, m_max=4096, stop_count=50, nperseg=None):
+    def compute_lsfir(self, y, u, sample_rate, m, N, m_max=4096, stop_count=50, nperseg=None):
         """
         Compute the finite impulse response estimation using an information matrix/vector method.
         Supports model order selection using AIC, BIC, FPE, or Mallows' Cp.
@@ -338,14 +336,14 @@ class FRF:
             Model order or selection criterion ('AIC', 'BIC', 'FPE', 'CP').
         N : int
             Number of data points to consider (N >= m).
-        fs : float
+        sample_rate : float
             Sampling rate in Hz.
         m_max : int
             Maximum model order for automatic selection.
         stop_count : int
             Stop search after stop_count consecutive steps with no improvement.
         nperseg : int, optional
-            Frequency axis will be nperseg/2+1 samples between 0 and fs/2.
+            Frequency axis will be nperseg/2+1 samples between 0 and sample_rate/2.
 
         Returns
         -------
@@ -516,6 +514,6 @@ class FRF:
 
         # Frequency response
         w_imp, h = _sig.freqz(g, worN=int(self.params["nperseg"] / 2 + 1))
-        freqs = w_imp * fs / (2 * np.pi)
+        freqs = w_imp * sample_rate / (2 * np.pi)
 
         return freqs, h, g

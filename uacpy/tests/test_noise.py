@@ -151,11 +151,13 @@ def test_wenznoise_shipping_levels_ordered(freqs):
 
 def test_wenznoise_as_psd_round_trip(freqs):
     wenz = WenzNoise(freqs, wind_speed=10)
-    # Default ref=1e-6 Pa (= 1 µPa) returns Pa²/Hz; converting back to
-    # dB re 1 µPa²/Hz must reproduce the .total attribute exactly.
-    pa2 = wenz.as_psd()
-    db_back = 10 * np.log10(pa2 / 1e-12)
-    np.testing.assert_allclose(db_back, wenz.total, rtol=0, atol=1e-9)
+    # Default returns µPa²/Hz — the same 1 µPa reference as .total
+    # (dB re 1 µPa²/Hz), so a plain 10·log10 reproduces .total exactly.
+    upa2 = wenz.as_psd()
+    np.testing.assert_allclose(10 * np.log10(upa2), wenz.total, rtol=0, atol=1e-9)
+    # An explicit SI request (ref = 1 µPa in Pa) returns Pa²/Hz.
+    pa2 = wenz.as_psd(ref=1e-6)
+    np.testing.assert_allclose(10 * np.log10(pa2 / 1e-12), wenz.total, rtol=0, atol=1e-9)
 
 
 def test_wenznoise_repr_contains_params(freqs):

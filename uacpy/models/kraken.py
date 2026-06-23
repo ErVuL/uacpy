@@ -70,7 +70,7 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
-from uacpy.models.coupled_modes import segment_environment_by_range
+from uacpy.models._segmentation import segment_environment_by_range
 
 
 class _KrakenBase(PropagationModel):
@@ -126,7 +126,8 @@ class _KrakenBase(PropagationModel):
     @property
     def _c_low_eff(self) -> float:
         """Resolved KRAKEN cLow: ``None`` → ``0.0`` (auto, computed by KRAKEN)."""
-        return C_LOW_FACTOR_KRAKEN * 1500.0 if self.c_low is None else float(self.c_low)
+        return (C_LOW_FACTOR_KRAKEN * DEFAULT_SOUND_SPEED
+                if self.c_low is None else float(self.c_low))
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
@@ -414,7 +415,7 @@ class _KrakenBase(PropagationModel):
         # present; ``read_modes_bin`` would otherwise fall back to
         # closest-frequency matching.
         try:
-            modes_data = read_modes_bin(basename, freq=0.0)
+            modes_data = read_modes_bin(basename, frequency=0.0)
         except IndexError as e:
             raise ModelExecutionError(
                 self.model_name, return_code=0, stdout=None,
@@ -536,7 +537,7 @@ class Kraken(_KrakenBase):
         coupled-incoherent path.
     n_segments : int, optional
         Range segments for RD scenarios. Default ``None`` lets
-        :func:`coupled_modes.segment_environment_by_range` pick segment
+        :func:`_segmentation.segment_environment_by_range` pick segment
         edges from the union of bathymetry / RD-SSP / RD-bottom
         change-points, inserting intermediates wherever the gap
         exceeds ``max_segment_length`` (2 km). Pass an explicit int
@@ -1092,7 +1093,14 @@ class Kraken(_KrakenBase):
             self._run_kraken_executable(base, fm.work_dir, exe=exe)
             return int(read_modes_bin(str(fm.get_path(base)),
                                       freq=float(freq)).get('M', 0))
-        except Exception:   # noqa: BLE001  (any failure == treat as no modes)
+        except Exception as e:   # noqa: BLE001
+            # Below cutoff the single-freq .mod is unreadable (zero-mode record),
+            # which legitimately means "no modes". Infrastructure failures
+            # (missing exe, subprocess crash, disk) also land here — log so they
+            # are not fully silent, then treat as below cutoff.
+            self._log(f"_count_modes_at_freq({float(freq):g} Hz) failed "
+                      f"({type(e).__name__}: {e}); treating as below cutoff.",
+                      level="debug")
             return 0
 
     def _propagating_frequency_floor(self, env, source, receiver, freqs, exe):
@@ -1115,6 +1123,239 @@ class Kraken(_KrakenBase):
         return lo
 
 # ── field.exe pipeline ──────────────────────────────────────────────
+
+    def _segment_env_for_field(self, env):
+        """Segment a range-dependent env into per-range profiles for the
+        multi-profile kraken field run.
+
+        Returns ``(segments, n_profiles, profile_ranges_m, max_total_depth)``.
+        ``max_total_depth`` accounts for ``write_multi_profile_env``'s NMedia
+        padding (profiles with fewer media get 0.1 m filler layers, which can
+        push the total past the deepest real profile).
+        """
+        segments = segment_environment_by_range(env, n_segments=self.n_segments)
+        n_profiles = len(segments)
+
+        def _n_media_seg(seg_env):
+            n = 1
+            if seg_env.has_layered_bottom():
+                n += len(seg_env.bottom.columns[0].layers)
+            return n
+
+        max_n_media = max(_n_media_seg(seg) for _, seg in segments)
+        if max_n_media < 2:
+            max_n_media = 2  # AT requires NMedia>=2 for RD
+        max_total_depth = max(
+            self._total_media_depth(seg_env) + 0.1 * (max_n_media - _n_media_seg(seg_env))
+            for _, seg_env in segments
+        )
+
+        profile_ranges_m = np.array([s[0] for s in segments])
+        self._log(f"Range-dependent: {n_profiles} profiles, "
+                  f"mode_coupling={self.mode_coupling}")
+        return segments, n_profiles, profile_ranges_m, max_total_depth
+
+    def _write_field_env(self, env, source, receiver, fm, base_name,
+                         segments, max_total_depth, broadband, freq_vec):
+        """Write the kraken ``.env`` for the field run — a multi-profile env for
+        a range-dependent (segmented) environment, else a single-profile env.
+        Mode depths span the full ocean + sediment; range-dependent broadband
+        is unsupported and raises."""
+        env_file = fm.get_path(f'{base_name}.env')
+
+        # Mode depths must cover the full ocean + sediment for all
+        # profiles. Use max total media depth across all segments.
+        n_mode_depths = max(100, int(max_total_depth * self.mode_points_per_meter))
+        mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
+        receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
+
+        if env.is_range_dependent and segments is not None:
+            # Honour a user-pinned rmax_m, else give the modal-sum
+            # interpolation the same 5 % headroom past the outermost
+            # receiver as the range-independent path (RD is narrowband
+            # only — broadband raises just below). Previously hard-coded
+            # to max(receiver.ranges), which put the last receiver on the
+            # interpolation edge and ignored self.rmax_m.
+            rmax_m = (
+                self.rmax_m
+                if self.rmax_m is not None
+                else self._compute_rmax_m(receiver, multiplier=1.05)
+            )
+
+            # Compute fixed mesh N for all profiles to ensure
+            # consistent .mod record length (LRecordLength must not
+            # increase between profiles — krakenc.f90 line 629).
+            # Use 20 pts/wavelength based on max depth, like AT convention.
+            freq = float(source.frequencies[0])
+            all_c = []
+            for _, seg in segments:
+                all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
+                if seg.bottom is not None:
+                    # Walk the column via env helper — handles both
+                    # halfspace and stratified columns.
+                    all_c.append(seg.bottom.halfspace_at(range=0.0).sound_speed)
+            min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
+            n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
+
+            if broadband:
+                # Multi-profile broadband not supported by
+                # write_multi_profile_env. Previous versions silently
+                # dropped the freq vector — that lost user output
+                # without signalling. Fail loudly instead.
+                raise ConfigurationError(
+                    "Kraken does not support range-dependent "
+                    "broadband runs. Pass a single frequency or make "
+                    "the environment range-independent."
+                )
+
+            write_multi_profile_env(
+                filepath=env_file,
+                segments=segments,
+                source=source,
+                receiver=receiver_for_modes,
+                interp_ssp=self.interp_ssp,
+                n_mesh=n_mesh_fixed,
+                roughness=self.roughness,
+                c_low=self._c_low_eff,
+                c_high=self.c_high,
+                rmax_m=rmax_m,
+            )
+        else:
+            self._write_kraken_env(
+                env_file, env, source,
+                receiver_obj=receiver_for_modes,
+                receiver_depths=mode_depths,
+                frequencies=freq_vec if broadband else None,
+            )
+
+    def _run_field_exe(self, fm, base_name, option):
+        """Run field.exe → ``.shd`` and return the output path. field.exe may
+        exit non-zero on a successful run (known Fortran teardown bug) — warn
+        and read the ``.shd`` anyway; a *missing* ``.shd`` is a real failure
+        and raises ``ModelExecutionError``."""
+        self._log(f"Running field.exe (option='{option}')...")
+        try:
+            self._run_subprocess(
+                [str(self._resolve_field_executable()), base_name],
+                cwd=fm.work_dir,
+            )
+        except ModelExecutionError as exc:
+            warnings.warn(
+                f"{self.model_name}: field.exe exited with non-zero "
+                f"status ({exc}); attempting to read the .shd output "
+                "anyway (known Fortran cleanup issue).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        shd_file = fm.get_path(f'{base_name}.shd')
+        if not shd_file.exists():
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(
+                    "field.exe did not produce a .shd file; check the "
+                    f".prt log at {fm.get_path(base_name + '.prt')}"
+                ),
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+        return shd_file
+
+    def _assemble_field_from_shd(self, shd_file, source, receiver, is_rd,
+                                 n_profiles, broadband, freq_vec, return_pressure,
+                                 fm, base_name):
+        """Build the result Field from field.exe's ``.shd``: native-broadband
+        ``(n_d, n_r, n_f)``, single-frequency complex pressure
+        (``return_pressure``), or TL. field.exe's modal sum differs from
+        Scooter's Hankel path by an overall -1, negated here so every branch
+        carries the ``'travelling_wave'`` phase reference."""
+        if broadband:
+            shd0 = read_shd_bin(str(shd_file))
+            freqs_read = np.asarray(shd0['freqVec'], dtype=float)
+            # A sub-cutoff (zero-mode) frequency corrupts the multi-frequency
+            # .mod: field.exe sometimes produces a .shd anyway but with a
+            # garbage (e.g. all-zero) frequency axis. Detect the mismatch and
+            # raise so the broadband caller recovers (drops the sub-cutoff
+            # band and zero-fills) instead of silently returning a zero field.
+            if (len(freqs_read) != len(freq_vec)
+                    or not np.allclose(np.sort(freqs_read),
+                                       np.sort(np.asarray(freq_vec, float)),
+                                       rtol=1e-3, atol=1e-6)):
+                exc = ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=("field.exe returned a frequency axis that does "
+                            "not match the request — the modes file is "
+                            "corrupted by a sub-cutoff (zero-mode) frequency."))
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
+            # New layout: (n_d, n_r, n_f).
+            p_stack = np.zeros(
+                (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
+                dtype=np.complex128,
+            )
+            for i_freq, fr in enumerate(freqs_read):
+                shd_i = read_shd_bin(str(shd_file), frequency=float(fr))
+                # field.exe (EvaluateMod.f90:34,42) emits the modal sum
+                # under the engineering carrier exp(-ikr) but with a
+                # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
+                # path produces -exp(iπ/4)/√(2πr). The two prefactors
+                # differ by an overall -1 (NOT a conjugation), so a
+                # plain negation aligns the two travelling-wave fields.
+                p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
+            field = Field(
+                data=p_stack,
+                coords={
+                    'depth': receiver.depths,
+                    'range': receiver.ranges,
+                    'frequency': freqs_read,
+                },
+                phase_reference='travelling_wave',
+                **self._result_kwargs(
+                    source,
+                    backend='field',
+                    frequencies=freqs_read,
+                    mode_coupling=self.mode_coupling if is_rd else 'none',
+                    n_profiles=n_profiles,
+                    native_broadband=True,
+                ),
+            )
+        elif return_pressure:
+            shd_data = read_shd_bin(str(shd_file))
+            p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
+            field = Field(
+                data=p,
+                coords={'depth': receiver.depths, 'range': receiver.ranges},
+                **self._result_kwargs(
+                    source,
+                    backend='field',
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
+                    mode_coupling=self.mode_coupling if is_rd else 'none',
+                    n_profiles=n_profiles,
+                ),
+            )
+            # Same negated-Hankel convention as the COHERENT_TL / broadband
+            # branches, so the complex pressure carries one phase reference.
+            field.phase_reference = 'travelling_wave'
+        else:
+            field = read_shd_file(shd_file)
+            # field.exe emits the modal sum with a prefactor that differs
+            # from Scooter's Hankel path by an overall -1 (see the broadband
+            # branch above). Negate here too and tag travelling_wave so the
+            # COHERENT_TL complex pressure carries the SAME phase convention
+            # as the broadband / return_pressure branches and as Scooter
+            # (|TL| is unchanged; this only fixes the complex phase).
+            field.data = -field.data
+            field.phase_reference = 'travelling_wave'
+            field.model = self.model_name
+            field.backend = 'field'
+            field.model_source = self.provenance
+            field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+            field.frequencies = np.atleast_1d(np.asarray(
+                float(np.atleast_1d(source.frequencies)[0]), dtype=float,
+            ))
+            field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
+            field.metadata['n_profiles'] = n_profiles
+        return field
 
     def _compute_field_via_exe(
         self, env, source, receiver,
@@ -1151,113 +1392,20 @@ class Kraken(_KrakenBase):
             n_profiles = 1
 
             if is_rd:
-                # Segment environment for multi-profile kraken run
-                segments = segment_environment_by_range(env, n_segments=self.n_segments)
-                n_profiles = len(segments)
-
-                # Max total depth must account for NMedia padding
-                # (write_multi_profile_env pads profiles with fewer
-                # media using 0.1 m layers, which can push total past
-                # the deepest real profile).
-                def _n_media_seg(seg_env):
-                    n = 1
-                    if seg_env.has_layered_bottom():
-                        n += len(seg_env.bottom.columns[0].layers)
-                    return n
-
-                max_n_media = max(_n_media_seg(seg) for _, seg in segments)
-                if max_n_media < 2:
-                    max_n_media = 2  # AT requires NMedia>=2 for RD
-                max_total_depth = max(
-                    self._total_media_depth(seg_env) + 0.1 * (max_n_media - _n_media_seg(seg_env))
-                    for _, seg_env in segments
-                )
-
-                profile_ranges_m = np.array([s[0] for s in segments])
-                self._log(f"Range-dependent: {n_profiles} profiles, "
-                          f"mode_coupling={self.mode_coupling}")
+                segments, n_profiles, profile_ranges_m, max_total_depth = \
+                    self._segment_env_for_field(env)
             else:
                 max_total_depth = self._total_media_depth(env)
 
-            # 1. Write .env file
-            env_file = fm.get_path(f'{base_name}.env')
-
-            # Mode depths must cover the full ocean + sediment for all
-            # profiles. Use max total media depth across all segments.
-            n_mode_depths = max(100, int(max_total_depth * self.mode_points_per_meter))
-            mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
-            receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
-
-            if is_rd and segments is not None:
-                # Honour a user-pinned rmax_m, else give the modal-sum
-                # interpolation the same 5 % headroom past the outermost
-                # receiver as the range-independent path (RD is narrowband
-                # only — broadband raises just below). Previously hard-coded
-                # to max(receiver.ranges), which put the last receiver on the
-                # interpolation edge and ignored self.rmax_m.
-                rmax_m = (
-                    self.rmax_m
-                    if self.rmax_m is not None
-                    else self._compute_rmax_m(receiver, multiplier=1.05)
-                )
-
-                # Compute fixed mesh N for all profiles to ensure
-                # consistent .mod record length (LRecordLength must not
-                # increase between profiles — krakenc.f90 line 629).
-                # Use 20 pts/wavelength based on max depth, like AT convention.
-                freq = float(source.frequencies[0])
-                all_c = []
-                for _, seg in segments:
-                    all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
-                    if seg.bottom is not None:
-                        # Walk the column via env helper — handles both
-                        # halfspace and stratified columns.
-                        all_c.append(seg.bottom.halfspace_at(range=0.0).sound_speed)
-                min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
-                n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
-
-                if broadband:
-                    # Multi-profile broadband not supported by
-                    # write_multi_profile_env. Previous versions silently
-                    # dropped the freq vector — that lost user output
-                    # without signalling. Fail loudly instead.
-                    raise ConfigurationError(
-                        "Kraken does not support range-dependent "
-                        "broadband runs. Pass a single frequency or make "
-                        "the environment range-independent."
-                    )
-
-                write_multi_profile_env(
-                    filepath=env_file,
-                    segments=segments,
-                    source=source,
-                    receiver=receiver_for_modes,
-                    interp_ssp=self.interp_ssp,
-                    n_mesh=n_mesh_fixed,
-                    roughness=self.roughness,
-                    c_low=self._c_low_eff,
-                    c_high=self.c_high,
-                    rmax_m=rmax_m,
-                )
-            else:
-                self._write_kraken_env(
-                    env_file, env, source,
-                    receiver_obj=receiver_for_modes,
-                    receiver_depths=mode_depths,
-                    frequencies=freq_vec if broadband else None,
-                )
+            self._write_field_env(
+                env, source, receiver, fm, base_name,
+                segments, max_total_depth, broadband, freq_vec)
 
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
             kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
             self._log(f"Running {kraken_exe.name}...")
-            try:
-                self._run_subprocess(
-                    [str(kraken_exe), base_name],
-                    cwd=fm.work_dir,
-                )
-            except ModelExecutionError as exc:
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise
+            self._run_and_attach_prt(
+                [str(kraken_exe), base_name], fm.work_dir, base_name)
 
             # 3. Write .flp file
             flp_file = fm.get_path(f'{base_name}.flp')
@@ -1288,127 +1436,11 @@ class Kraken(_KrakenBase):
                 shutil.copy(src, fm.get_path(f'{base_name}.sbp'))
 
             # 4. Run field.exe → .shd
-            # field.exe may exit non-zero on a successful run because of a
-            # known Fortran teardown bug; the .shd file is still valid.
-            # Catch only ``ModelExecutionError`` and warn so any wider
-            # failure (e.g. ``FileNotFoundError`` for the binary itself)
-            # still propagates.
-            self._log(f"Running field.exe (option='{option}')...")
-            try:
-                self._run_subprocess(
-                    [str(self._resolve_field_executable()), base_name],
-                    cwd=fm.work_dir,
-                )
-            except ModelExecutionError as exc:
-                warnings.warn(
-                    f"{self.model_name}: field.exe exited with non-zero "
-                    f"status ({exc}); attempting to read the .shd output "
-                    "anyway (known Fortran cleanup issue).",
-                    UserWarning,
-                    stacklevel=2,
-                )
+            shd_file = self._run_field_exe(fm, base_name, option)
 
-            # 5. Read .shd output
-            # field.exe may exit with non-zero (memory cleanup issues in
-            # Fortran) even when computation succeeds, so check for .shd first.
-            shd_file = fm.get_path(f'{base_name}.shd')
-            if not shd_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        "field.exe did not produce a .shd file; check the "
-                        f".prt log at {fm.get_path(base_name + '.prt')}"
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
-
-            if broadband:
-                shd0 = read_shd_bin(str(shd_file))
-                freqs_read = np.asarray(shd0['freqVec'], dtype=float)
-                # A sub-cutoff (zero-mode) frequency corrupts the multi-frequency
-                # .mod: field.exe sometimes produces a .shd anyway but with a
-                # garbage (e.g. all-zero) frequency axis. Detect the mismatch and
-                # raise so the broadband caller recovers (drops the sub-cutoff
-                # band and zero-fills) instead of silently returning a zero field.
-                if (len(freqs_read) != len(freq_vec)
-                        or not np.allclose(np.sort(freqs_read),
-                                           np.sort(np.asarray(freq_vec, float)),
-                                           rtol=1e-3, atol=1e-6)):
-                    exc = ModelExecutionError(
-                        self.model_name, return_code=0, stdout=None,
-                        stderr=("field.exe returned a frequency axis that does "
-                                "not match the request — the modes file is "
-                                "corrupted by a sub-cutoff (zero-mode) frequency."))
-                    self._attach_prt_tail(exc, fm.work_dir, base_name)
-                    raise exc
-                # New layout: (n_d, n_r, n_f).
-                p_stack = np.zeros(
-                    (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
-                    dtype=np.complex128,
-                )
-                for i_freq, fr in enumerate(freqs_read):
-                    shd_i = read_shd_bin(str(shd_file), freq=float(fr))
-                    # field.exe (EvaluateMod.f90:34,42) emits the modal sum
-                    # under the engineering carrier exp(-ikr) but with a
-                    # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
-                    # path produces -exp(iπ/4)/√(2πr). The two prefactors
-                    # differ by an overall -1 (NOT a conjugation), so a
-                    # plain negation aligns the two travelling-wave fields.
-                    p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
-                field = Field(
-                    data=p_stack,
-                    coords={
-                        'depth': receiver.depths,
-                        'range': receiver.ranges,
-                        'frequency': freqs_read,
-                    },
-                    phase_reference='travelling_wave',
-                    **self._result_kwargs(
-                        source,
-                        backend='field',
-                        frequencies=freqs_read,
-                        mode_coupling=self.mode_coupling if is_rd else 'none',
-                        n_profiles=n_profiles,
-                        native_broadband=True,
-                    ),
-                )
-            elif return_pressure:
-                shd_data = read_shd_bin(str(shd_file))
-                p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
-                field = Field(
-                    data=p,
-                    coords={'depth': receiver.depths, 'range': receiver.ranges},
-                    **self._result_kwargs(
-                        source,
-                        backend='field',
-                        frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                        mode_coupling=self.mode_coupling if is_rd else 'none',
-                        n_profiles=n_profiles,
-                    ),
-                )
-                # Same negated-Hankel convention as the COHERENT_TL / broadband
-                # branches, so the complex pressure carries one phase reference.
-                field.phase_reference = 'travelling_wave'
-            else:
-                field = read_shd_file(shd_file)
-                # field.exe emits the modal sum with a prefactor that differs
-                # from Scooter's Hankel path by an overall -1 (see the broadband
-                # branch above). Negate here too and tag travelling_wave so the
-                # COHERENT_TL complex pressure carries the SAME phase convention
-                # as the broadband / return_pressure branches and as Scooter
-                # (|TL| is unchanged; this only fixes the complex phase).
-                field.data = -field.data
-                field.phase_reference = 'travelling_wave'
-                field.model = self.model_name
-                field.backend = 'field'
-                field.model_source = self.provenance
-                field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
-                field.frequencies = np.atleast_1d(np.asarray(
-                    float(np.atleast_1d(source.frequencies)[0]), dtype=float,
-                ))
-                field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
-                field.metadata['n_profiles'] = n_profiles
+            field = self._assemble_field_from_shd(
+                shd_file, source, receiver, is_rd, n_profiles,
+                broadband, freq_vec, return_pressure, fm, base_name)
 
             # No-propagation guard: an all-floor field means the modal sum was
             # empty — Kraken found 0 trapped modes (frequency below the

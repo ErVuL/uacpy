@@ -34,6 +34,11 @@ def mmse_equalizer(rx, h, snr_linear):
 
     Frequency-domain ``W(f) = H*(f) / (|H(f)|^2 + 1/snr)``. ``snr_linear`` is the
     operating SNR; ``snr_linear -> inf`` gives the zero-forcing inverse.
+
+    Returns the equalized signal only (a single ndarray). Unlike the *adaptive*
+    :func:`lms_equalizer` / :func:`rls_equalizer`, which return
+    ``(equalized, mse)`` because they converge over symbols, this is a one-shot
+    block (Wiener) solution with no per-symbol learning curve.
     """
     r = np.asarray(rx, dtype=complex)
     H = np.fft.fft(np.asarray(h, dtype=complex), r.size)

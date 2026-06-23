@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-import uacpy
 from uacpy.acoustic_signal.transforms import fk_transform, inverse_fk
 from uacpy.core.exceptions import ConfigurationError
 
@@ -22,7 +21,7 @@ def test_fk_single_segment_matches_direct_fft():
     p0 = np.abs(FKc) ** 2
     f0 = np.fft.fftshift(np.fft.fftfreq(nt, d=1.0 / fs))
     k0 = np.fft.fftshift(np.fft.fftfreq(nx, d=dx))
-    f, k, power, spectrum = fk_transform(d, fs=fs, dx=dx)
+    f, k, power, spectrum = fk_transform(d, sample_rate=fs, dx=dx)
     assert np.allclose(f, f0) and np.allclose(k, k0)
     assert np.allclose(power, p0)
     assert spectrum is not None

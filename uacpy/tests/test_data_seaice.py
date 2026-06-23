@@ -47,7 +47,7 @@ def test_concentration_value(synthetic_model):
 
 def test_concentration_by_date(synthetic_model):
     assert seaice_local.fetch_sea_ice_concentration((85.0, 0.0),
-                                                    '2026-03-15') == pytest.approx(0.7)
+                                                    date='2026-03-15') == pytest.approx(0.7)
 
 
 def test_land_raises(synthetic_model):
@@ -64,7 +64,7 @@ def test_out_of_grid_is_ice_free(monkeypatch):
 
 def test_date_and_month_rejected(synthetic_model):
     with pytest.raises(ConfigurationError, match='not both'):
-        seaice_local.fetch_sea_ice_concentration((85.0, 0.0), '2026-03-01', month=3)
+        seaice_local.fetch_sea_ice_concentration((85.0, 0.0), date='2026-03-01', month=3)
 
 
 def test_requires_date_or_month(synthetic_model):

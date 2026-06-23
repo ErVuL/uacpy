@@ -88,7 +88,7 @@ def read_shd_bin(
     filename: str,
     xs: Optional[float] = None,
     ys: Optional[float] = None,
-    freq: Optional[float] = None,
+    frequency: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Read binary shade file (.shd) produced by acoustic models.
@@ -106,7 +106,7 @@ def read_shd_bin(
         for the source closest to (xs, ys). If None, reads first source.
     ys : float, optional
         Source y-coordinate in km. Required if xs is provided.
-    freq : float, optional
+    frequency : float, optional
         Frequency in Hz. If provided for broadband runs, selects closest
         frequency. If None, reads first frequency.
 
@@ -134,12 +134,12 @@ def read_shd_bin(
             frequency (``pressure_freq``), never a multi-frequency cube.
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
-            For a broadband file, pass ``freq=`` per frequency (or iterate
+            For a broadband file, pass ``frequency=`` per frequency (or iterate
             ``freqVec`` calling this once per entry) — do not treat
             ``pressure`` as spanning ``freqVec``.
         - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
-            cube was sliced at (``freq`` snapped to the nearest ``freqVec``
-            entry, or ``freqVec[0]`` when ``freq`` is None).
+            cube was sliced at (``frequency`` snapped to the nearest ``freqVec``
+            entry, or ``freqVec[0]`` when ``frequency`` is None).
 
     Notes
     -----
@@ -167,7 +167,7 @@ def read_shd_bin(
     >>> p = shd['pressure'][0, 0, 0, :]
 
     >>> # Read specific frequency for broadband run
-    >>> shd = read_shd_bin('broadband.shd', freq=100.0)
+    >>> shd = read_shd_bin('broadband.shd', frequency=100.0)
     """
     with open(filename, "rb") as fid:
         head = fid.read(4)
@@ -223,15 +223,15 @@ def read_shd_bin(
             Nrcvrs_per_range = Nrz
         # Select ONE frequency slice. The returned 'pressure' cube is always
         # single-frequency (the slice 'pressure_freq'); a broadband caller must
-        # pass freq= per frequency or iterate freqVec, never treat 'pressure' as
+        # pass frequency= per frequency or iterate freqVec, never treat 'pressure' as
         # a multi-frequency cube. NB: only the standard 2D path (xs is None)
-        # carries a frequency axis in the record stream (field.f90 stacks freq
+        # carries a frequency axis in the record stream (field.f90 stacks frequency
         # outermost). The 3D / irregular multi-source path (xs given) is written
         # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
         # so there is no frequency to select there.
         ifreq = 0
-        if freq is not None:
-            ifreq = int(np.argmin(np.abs(freqVec - freq)))
+        if frequency is not None:
+            ifreq = int(np.argmin(np.abs(freqVec - frequency)))
         if xs is None:
             if Nsx > 1 or Nsy > 1:
                 warnings.warn(
@@ -261,11 +261,11 @@ def read_shd_bin(
         else:
             if ys is None:
                 raise ConfigurationError("ys must be provided if xs is specified")
-            # 3D / irregular multi-source files are single-frequency (no freq
-            # stride in the record index), so freq= cannot select a slice here.
-            if freq is not None and len(freqVec) > 1:
+            # 3D / irregular multi-source files are single-frequency (no frequency
+            # stride in the record index), so frequency= cannot select a slice here.
+            if frequency is not None and len(freqVec) > 1:
                 warnings.warn(
-                    "read_shd_bin: frequency selection (freq=) is not supported "
+                    "read_shd_bin: frequency selection (frequency=) is not supported "
                     "for multi-source-position (3D/irregular) shade files, which "
                     "carry a single frequency; returning freqVec[0].",
                     UserWarning, stacklevel=2,
@@ -1370,12 +1370,13 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
 
 def rts_to_pressure(
-    rts_data: Dict[str, Any], freq: float, method: str = "fft",
+    rts_data: Dict[str, Any], frequency: float, method: str = "fft",
+    *, pulse_type: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Project SPARC time-series data onto complex pressure at one frequency.
 
-    ``method='fft'`` extracts the spectral bin nearest ``freq`` from a
+    ``method='fft'`` extracts the spectral bin nearest ``frequency`` from a
     Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
     single-bin DFT. Both return ``(p_at_freq, ranges)`` where
     ``p_at_freq`` is the model-native, source-normalised complex pressure
@@ -1391,14 +1392,39 @@ def rts_to_pressure(
 
     nt, nr = p.shape
 
+    if pulse_type is not None:
+        # Deconvolve the known source spectrum (convolution theorem): the range
+        # time-series r(t) = s(t) ⊛ h(t), so rfft(r)/rfft(s) = h(w0) — the CW
+        # transfer function ≈ absolute TL re 1 m (Jensen COA Eq. 8.1). uacpy
+        # generated the pulse, so s(t) is known. The estimate is physical and
+        # window/grid-independent once the output Nyquist clears the pulse band
+        # (the SPARC model sizes n_t_out for this), but SPARC's discretised
+        # pulse and band-pass leave a frequency-dependent bias of a few dB vs
+        # Kraken/Scooter — it is not a calibrated replacement for them.
+        # Use the RECTANGULAR DFT (no taper): a window breaks the convolution
+        # theorem and would null the transient source pulse (first few samples).
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        t = np.asarray(rts_data["time"], dtype=float)
+        s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
+        freqs = np.fft.rfftfreq(nt, dt)
+        f_idx = int(np.argmin(np.abs(freqs - frequency)))
+        S_at_f0 = np.fft.rfft(s_t)[f_idx]
+        if S_at_f0 == 0:
+            raise ConfigurationError(
+                "rts_to_pressure: source spectrum is zero at "
+                f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
+                "deconvolve (check pulse / frequency).")
+        p_freq = np.fft.rfft(p, axis=0)
+        return p_freq[f_idx, :] / S_at_f0, ranges
+
     if method == "fft":
         window = np.hanning(nt)
         p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
         freqs = np.fft.rfftfreq(nt, dt)
-        freq_idx = np.argmin(np.abs(freqs - freq))
+        freq_idx = np.argmin(np.abs(freqs - frequency))
         p_at_freq = 2.0 * p_freq[freq_idx, :] / np.sum(window)
     elif method == "goertzel":
-        omega = 2 * np.pi * freq
+        omega = 2 * np.pi * frequency
         coeff = 2 * np.cos(omega * dt)
         p_at_freq = np.zeros(nr, dtype=complex)
         for ir in range(nr):

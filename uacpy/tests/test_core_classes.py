@@ -433,6 +433,22 @@ class TestArrivalsFilterChain:
         a = self._arrivals()
         assert len(a) == 4    # 3 from cell0 + 1 from cell1
 
+    def test_phases_returns_radians_from_degree_store(self):
+        # The .arr file stores phase in degrees (ArrMod.f90 writes RadDeg*Phase);
+        # the public .phases accessor must return radians for exp(1j*phase).
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.1]), "amplitudes": np.array([1.0]),
+            "phases": np.array([90.0]),   # degrees as read from the file
+            "n_top_bounces": np.array([0], dtype=int),
+            "n_bot_bounces": np.array([0], dtype=int),
+            "src_angles": np.array([0.0]), "rcv_angles": np.array([0.0]),
+        }
+        a = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        assert a.phases[0] == pytest.approx(np.pi / 2)
+
     def test_filter_by_bounces_kind(self):
         a = self._arrivals()
         direct = a.filter_by_bounces(kind='direct')

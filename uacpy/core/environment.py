@@ -205,6 +205,12 @@ class Environment:
             self.location = None
         self.date = _coerce_date(date)
 
+        # Provenance: the data sources used to build this env. Empty for a
+        # hand-built env; ``uacpy.data.fetch_environment`` overwrites it with
+        # the catalogue entries it fetched. Declared here so ``env.data_sources``
+        # is always a valid (possibly empty) iterable — never an AttributeError.
+        self.data_sources = ()
+
         # Bathymetry is a first-class carrier (seafloor depth vs range),
         # mirroring env.ssp; it validates in its own __post_init__.
         self.bathymetry = Bathymetry.coerce(bathymetry)

@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics import power_to_db
+from uacpy.visualization.plots._common import fig_ax
 
 
 def _ref_label(ref):
@@ -22,10 +23,6 @@ def _ref_label(ref):
     return f"{ref:02e}"
 
 
-def _fig_ax(ax, figsize):
-    if ax is None:
-        return plt.subplots(figsize=figsize)
-    return ax.figure, ax
 
 
 # ── f-k / Radon / tau-p gather transforms ───────────────────────────────────
@@ -43,17 +40,17 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
                 va="top", ha="right")
 
 
-def plot_fk(freqs, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
+def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
             vmin=-60, vmax=20, cmap=None, sound_speed=None, title=None,
             figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Image an f-k power panel (dB). Consumes :func:`fk_transform` output."""
     fk_db = power_to_db(np.asarray(power), ref)
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(fk_db, extent=[wavenumbers[0], wavenumbers[-1],
-                   freqs[0], freqs[-1]], origin="lower", aspect="auto",
+                   frequencies[0], frequencies[-1]], origin="lower", aspect="auto",
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
-        draw_sound_cone(ax, freqs[-1], wavenumbers[-1], sound_speed)
+        draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], sound_speed)
     ax.set_title(title or "f–k spectrum", loc="left")
     ax.set_xlabel("Spatial frequency [cycles/m]")
     ax.set_ylabel("Frequency [Hz]")
@@ -80,7 +77,7 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
     m = np.asarray(moveout) * scale
     vmax = amp.max() if vmax is None else vmax
     vmin = 0.0 if vmin is None else vmin
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
                    extent=[m[0], m[-1], taus[-1], taus[0]],
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
@@ -112,7 +109,7 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
     amp = np.abs(np.asarray(taup))
     vmax = amp.max() if vmax is None else vmax
     vmin = 0.0 if vmin is None else vmin
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
                    extent=[p_skm[0], p_skm[-1], taus[-1], taus[0]],
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
@@ -128,18 +125,18 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
 
 # ── Spectral / level estimators (analysis) ──────────────────────────────────
 
-def plot_psd(freqs, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
+def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              label=None, ymin=0, ymax=150, title=None, figsize=(10, 6),
              **mpl_kw):
     """Line plot of a Welch PSD (dB). Consumes :func:`psd` output."""
     psd_db = power_to_db(np.asarray(psd_linear), ref)
-    fig, ax = _fig_ax(ax, figsize)
-    ax.semilogx(freqs, psd_db, label=label, **mpl_kw)
+    fig, ax = fig_ax(ax, figsize)
+    ax.semilogx(frequencies, psd_db, label=label, **mpl_kw)
     ax.set_title(title or "Power spectral density", loc="left")
     ax.set_xlabel("Frequency [Hz]")
     ax.set_ylabel(f"Level [dB re {_ref_label(ref)}Pa²/Hz]")
     ax.set_ylim((ymin, ymax))
-    ax.set_xlim((np.max((freqs[0], 1)), freqs[-1]))
+    ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -147,15 +144,16 @@ def plot_psd(freqs, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
 
 
 def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
-              cmap="jet", title=None, figsize=(10, 6), show_colorbar=True):
+              cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
+              **mpl_kw):
     """2-D histogram of PSD levels. Consumes a ``PPSDResult``."""
     if vmax is None:
         vmax = 1 / result.binwidth_db
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     align = result.binwidth_db / 2
-    pcm = ax.pcolormesh(result.frequencies, result.levels[:-1] + align,
+    pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
                         result.pdf, cmap=cmap, shading="auto",
-                        vmin=vmin, vmax=vmax)
+                        vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax,
                      label=f"Probability Density [{result.binwidth_db:.1f} dB/bin]")
@@ -178,7 +176,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              duration=None, band_type="third_octave", ylim=(0, 200),
              title=None, figsize=(10, 6), **mpl_kw):
     """Bar plot of SEL per band (dB). Consumes :func:`sel` output."""
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     Fedges = [low for low, _, _ in bands] + [bands[-1][2]]
     width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
     ax.bar(Fedges[:-1], power_to_db(np.asarray(sel_pa2s), ref), width=width,
@@ -196,33 +194,117 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
 
 # ── Time-frequency (timefreq) ───────────────────────────────────────────────
 
-def plot_spectrogram(freqs, times, Sxx, ax=None, *,
+def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
                      ref=REFERENCE_PRESSURE_WATER, ymin=1, ymax=None, vmin=0,
                      vmax=200, cmap="jet", title=None, figsize=(10, 6),
-                     show_colorbar=True):
+                     show_colorbar=True, **mpl_kw):
     """Spectrogram colormap (dB). Consumes :func:`spectrogram` output."""
     Sxx_db = power_to_db(np.asarray(Sxx), ref)
-    fig, ax = _fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(times, freqs, Sxx_db, cmap=cmap, shading="auto",
-                        vmin=vmin, vmax=vmax)
+    fig, ax = fig_ax(ax, figsize)
+    pcm = ax.pcolormesh(times, frequencies, Sxx_db, cmap=cmap, shading="auto",
+                        vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label=f"Level [dB re {_ref_label(ref)}Pa²/Hz]")
     ax.set_title(title or "Spectrogram", loc="left")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Frequency [Hz]")
-    ax.set_ylim((ymin, freqs[-1] if ymax is None else ymax))
+    ax.set_ylim((ymin, frequencies[-1] if ymax is None else ymax))
     ax.grid(which="both", alpha=0.25, color="black")
     return fig, ax
 
 
-def plot_cwt(freqs, W, sample_rate, ax=None, *, cmap="jet", title=None,
+# ── Constant-Q (Brown 1991) ─────────────────────────────────────────────────
+
+def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
+                                ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
+                                vmin=0, vmax=200, cmap="jet", title=None,
+                                figsize=(10, 6), show_colorbar=True, **mpl_kw):
+    """Constant-Q spectrogram colormap (dB, log frequency). Consumes
+    :func:`constant_q_spectrogram` output ``(frequencies, times, power)``. Pass
+    the same ``scaling`` used there so the unit reads ``Pa²`` (band power) or
+    ``Pa²/Hz`` (density)."""
+    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    power_db = power_to_db(np.asarray(power), ref)
+    fig, ax = fig_ax(ax, figsize)
+    pcm = ax.pcolormesh(times, frequencies, power_db, cmap=cmap, shading="auto",
+                        vmin=vmin, vmax=vmax, **mpl_kw)
+    if show_colorbar:
+        fig.colorbar(pcm, ax=ax, label=f"Level [dB re {unit}]")
+    ax.set_title(title or "Constant-Q spectrogram", loc="left")
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Frequency [Hz]")
+    ax.set_yscale("log")
+    ax.set_ylim((frequencies[0], frequencies[-1]))
+    ax.grid(which="both", alpha=0.25, color="black")
+    return fig, ax
+
+
+def plot_constant_q_psd(frequencies, power, ax=None, *,
+                        ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
+                        label=None, ymin=0, ymax=150, title=None,
+                        figsize=(10, 6), **mpl_kw):
+    """Line plot of constant-Q power (dB, log frequency). Consumes
+    :func:`constant_q_psd` output ``(frequencies, power)``. Pass the same
+    ``scaling`` used there: ``'spectrum'`` labels band power (``Pa²``),
+    ``'density'`` labels PSD (``Pa²/Hz``)."""
+    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    power_db = power_to_db(np.asarray(power), ref)
+    fig, ax = fig_ax(ax, figsize)
+    ax.semilogx(frequencies, power_db, label=label, **mpl_kw)
+    ax.set_title(title or ("Constant-Q PSD" if scaling == "density"
+                           else "Constant-Q band power"), loc="left")
+    ax.set_xlabel("Frequency [Hz]")
+    ax.set_ylabel(f"Level [dB re {unit}]")
+    ax.set_ylim((ymin, ymax))
+    ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax.grid(which="both", alpha=0.75)
+    if label:
+        ax.legend()
+    return fig, ax
+
+
+def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
+                         ymax=200, vmin=0, vmax=None, cmap="jet", title=None,
+                         figsize=(10, 6), show_colorbar=True, **mpl_kw):
+    """2-D histogram of constant-Q power levels. Consumes a ``CQPPSDResult``.
+    The dB reference is fixed at compute time by
+    :func:`probabilistic_constant_q` (default 1 µPa); pass the same ``scaling``
+    used there so the level axis reads ``dB re µPa²`` (band power) or
+    ``dB re µPa²/Hz`` (density)."""
+    unit = "µPa²" + ("/Hz" if scaling == "density" else "")
+    if vmax is None:
+        vmax = 1 / result.binwidth_db
+    fig, ax = fig_ax(ax, figsize)
+    align = result.binwidth_db / 2
+    pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
+                        result.pdf, cmap=cmap, shading="auto",
+                        vmin=vmin, vmax=vmax, **mpl_kw)
+    if show_colorbar:
+        fig.colorbar(pcm, ax=ax,
+                     label=f"Probability Density [{result.binwidth_db:.1f} dB/bin]")
+    ax.plot(result.frequencies, result.mean_db, "k-", label="Mean level", lw=1.5)
+    ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
+            label="Mean level ± STD")
+    ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
+    ax.set_title(title or "Constant-Q PPSD", loc="left")
+    ax.set_xlabel("Frequency [Hz]")
+    ax.set_ylabel(f"Level [dB re {unit}]")
+    ax.set_xscale("log")
+    ax.set_xlim((np.max((result.frequencies[0], 1)), result.frequencies[-1]))
+    ax.set_ylim((ymin, ymax))
+    ax.grid(which="both", alpha=0.5)
+    ax.legend(loc="upper right")
+    return fig, ax
+
+
+def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
              figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Scalogram ``|W|`` (time on x, frequency on y). Consumes :func:`cwt`
-    output ``(freqs, W)``."""
+    output ``(frequencies, W)``."""
     amp = np.abs(np.asarray(W))
     t = np.arange(amp.shape[1]) / float(sample_rate)
-    fig, ax = _fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(t, freqs, amp, cmap=cmap, shading="auto", **mpl_kw)
+    fig, ax = fig_ax(ax, figsize)
+    pcm = ax.pcolormesh(t, frequencies, amp, cmap=cmap, shading="auto", **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label="|W|")
     ax.set_title(title or "CWT scalogram", loc="left")
@@ -231,12 +313,12 @@ def plot_cwt(freqs, W, sample_rate, ax=None, *, cmap="jet", title=None,
     return fig, ax
 
 
-def plot_wigner_ville(times, freqs, W, ax=None, *, cmap="jet", title=None,
+def plot_wigner_ville(times, frequencies, W, ax=None, *, cmap="jet", title=None,
                       figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Wigner-Ville distribution image. Consumes :func:`wigner_ville` output
     ``(t, f, W)``."""
-    fig, ax = _fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(times, freqs, np.real(np.asarray(W)), cmap=cmap,
+    fig, ax = fig_ax(ax, figsize)
+    pcm = ax.pcolormesh(times, frequencies, np.real(np.asarray(W)), cmap=cmap,
                         shading="auto", **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label="WVD")
@@ -250,7 +332,7 @@ def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
                   **mpl_kw):
     """Line plot of a cepstrum vs quefrency. Consumes :func:`cepstrum` output."""
     c = np.real(np.asarray(c))
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     if sample_rate is not None:
         q = np.arange(c.size) / float(sample_rate)
         ax.plot(q, c, **mpl_kw)
@@ -272,7 +354,7 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
     :func:`decidecade_band_levels` output."""
     c = np.asarray(centers, dtype=float)
     lv = np.asarray(levels, dtype=float)
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     x = np.log10(c)
     bw = width * np.median(np.diff(x)) if c.size > 1 else 0.04
     ax.bar(x, lv, width=bw, **mpl_kw)
@@ -292,7 +374,7 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
     P = np.real(np.asarray(spectrum))
     if db:
         P = 10.0 * np.log10(P / np.max(P))
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     ax.plot(angles_deg, P, label=label, **mpl_kw)
     ax.set_xlabel("Angle [deg]")
     ax.set_ylabel("Power [dB]" if db else "Power")
@@ -308,7 +390,7 @@ def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, cmap="jet",
     """Range-Doppler ambiguity surface ``|chi|``. Consumes
     :func:`ambiguity_function` output."""
     amp = np.abs(np.asarray(chi))
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
                    extent=[delays_s[0] * 1e3, delays_s[-1] * 1e3,
                            doppler_hz[0], doppler_hz[-1]], cmap=cmap, **mpl_kw)
@@ -355,7 +437,7 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
 def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
                    figsize=(10, 4), **mpl_kw):
     """Coherence vs frequency. Consumes ``FRF`` ``(frequencies, coh)``."""
-    fig, ax = _fig_ax(ax, figsize)
+    fig, ax = fig_ax(ax, figsize)
     ax.plot(frequencies, coh, label=label, **mpl_kw)
     ax.set_xlabel("Frequency [Hz]")
     ax.set_ylabel("Coherence")

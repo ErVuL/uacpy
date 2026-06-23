@@ -93,7 +93,7 @@ jobs:
         run: |
           flake8 uacpy/ \
             --exclude=uacpy/third_party,uacpy/uacpy/third_party \
-            --count --select=E9,F63,F7,F82 \
+            --count --select=E9,F63,F7,F82,F401,F811 \
             --show-source --statistics
 
       # No `-W error::UserWarning` here on purpose: the project's

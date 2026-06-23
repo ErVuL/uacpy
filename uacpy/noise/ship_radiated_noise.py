@@ -75,7 +75,11 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_S
     kd = k * float(source_depth)
     num = 2.0 * kd ** 4 + 14.0 * kd ** 2
     den = 14.0 + 2.0 * kd ** 2 + kd ** 4
-    return -10.0 * np.log10(num / den)
+    # At kd→0 (surface-mounted source) num→0 and ΔL→+inf: the pressure-release
+    # image exactly cancels the source. That limit is physical, so allow it
+    # without polluting NumPy's warning state.
+    with np.errstate(divide='ignore'):
+        return -10.0 * np.log10(num / den)
 
 
 def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):

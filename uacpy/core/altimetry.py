@@ -38,8 +38,8 @@ class Altimetry:
     heights: np.ndarray
 
     def __post_init__(self):
-        self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
-        self.heights = np.asarray(self.heights, dtype=float).reshape(-1)
+        self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
+        self.heights = np.array(self.heights, dtype=float).reshape(-1)
         if self.ranges.size != self.heights.size:
             raise ConfigurationError(
                 f"Altimetry: ranges ({self.ranges.size}) and heights "

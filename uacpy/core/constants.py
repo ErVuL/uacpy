@@ -13,6 +13,10 @@ from uacpy.core.exceptions import ConfigurationError
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
+NO_DATA_TL_DB = 600.0         # dB — AT "no data" sentinel: cells with zero
+                              # pressure (no ray arrivals — the r=0 column and
+                              # honest shadow zones) read as ~600 dB TL. Mask
+                              # with Field.finite_tl before reducing TL.
 
 # Mean Earth radius (IUGG R1) for spherical great-circle geodesy when
 # sampling external geographic datasets (bathymetry transects, …).

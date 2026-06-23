@@ -138,3 +138,14 @@ class TestModalPropagationLoss:
             envelope = np.abs(pf.data[0]) * np.sqrt(ranges)  # remove geometric 1/√r
             assert envelope[-1] < envelope[0], (
                 f"field grew with range for k.imag sign {sign:+.0f}")
+
+
+def test_modal_propagation_loss_zero_modes_raises():
+    # 0 trapped modes (below cutoff) -> no propagating field; a clear error,
+    # not a raw column_stack ValueError.
+    m0 = Modes(k=np.zeros(0, complex), phi=np.zeros((10, 0)),
+               depths=np.linspace(0, 100, 10), model="T", frequencies=100.0)
+    with pytest.raises(ConfigurationError, match="0 trapped modes"):
+        m0.modal_propagation_loss(source_depth=50.0,
+                                  receiver_depths=np.array([50.0]),
+                                  ranges_m=np.array([1000.0]))

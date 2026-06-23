@@ -422,7 +422,7 @@ def fetch_environment(
                 # exposed here); fall back to a fixed column count, capped.
                 cop_n = ssp_n_points if isinstance(ssp_n_points, int) else 6
                 return fetch_ssp_transect_operational(
-                    point, transect_to, date, n_points=min(cop_n, max_points),
+                    point, transect_to, date=date, n_points=min(cop_n, max_points),
                     formula=formula, timeout=timeout, verbose=verbose)
             raise ConfigurationError(
                 f"fetch_environment: range_dependent_ssp not supported for "
@@ -518,7 +518,7 @@ def fetch_environment(
                     surface_props, surface_src = fetched, 'seaice'
             else:
                 from uacpy.data.seaice_local import fetch_sea_ice_surface
-                fetched = fetch_sea_ice_surface(point, date)
+                fetched = fetch_sea_ice_surface(point, date=date)
                 if fetched is not None:                 # None = open water
                     surface_props, surface_src = fetched, 'seaice'
         except (DataFetchError, ConfigurationError):
@@ -567,9 +567,15 @@ def fetch_environment(
         )
     env = Environment(**kwargs)
 
-    # Provenance: which catalogue sources this environment was built from.
-    # The resolved source names ('gebco'/'gmrt', 'woa23'/...) are the catalogue
-    # ids; a literal (un-fetched) axis contributes none.
+    _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface_src)
+    return env
+
+
+def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface_src):
+    """Stamp ``env.data_sources`` with the catalogue ids actually fetched and
+    warn on any non-commercial licence. The resolved source names
+    ('gebco'/'woa23'/…) are the catalogue ids; a literal (un-fetched) axis
+    contributes none."""
     used = [s for s in (bathy_src, ssp_src) if s is not None]
     if bottom_kw is not None:
         used.append(bottom_kw)   # source keyword == catalogue id
@@ -590,7 +596,6 @@ def fetch_environment(
                 f"permit commercial use without verification — see "
                 f"uacpy.data.citations(env) for its licence/attribution.",
                 UserWarning, stacklevel=2)
-    return env
 
 
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
@@ -613,10 +618,10 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     if ssp_source == 'copernicus':
         from uacpy.data.copernicus import fetch_ts_profile_operational
         depths, temp, sal = fetch_ts_profile_operational(
-            point, date, timeout=timeout, verbose=verbose)
+            point, date=date, timeout=timeout, verbose=verbose)
     elif ssp_source == 'argo':
         from uacpy.data.argo import fetch_argo_profile, _pressure_dbar_to_depth
-        prof = fetch_argo_profile(point, date, timeout=timeout, verbose=verbose)
+        prof = fetch_argo_profile(point, date=date, timeout=timeout, verbose=verbose)
         depths = _pressure_dbar_to_depth(prof['pres'], prof['lat'])
         temp, sal = prof['temp'], prof['psal']
     else:
@@ -642,7 +647,7 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
             )
         from uacpy.data.copernicus import fetch_ssp_operational
         return fetch_ssp_operational(
-            point, date, formula=formula, timeout=timeout, verbose=verbose,
+            point, date=date, formula=formula, timeout=timeout, verbose=verbose,
         )
     if ssp_source == 'argo':
         if date is None:
@@ -652,7 +657,7 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
             )
         from uacpy.data.argo import fetch_ssp_argo
         return fetch_ssp_argo(
-            point, date, formula=formula, timeout=timeout, verbose=verbose,
+            point, date=date, formula=formula, timeout=timeout, verbose=verbose,
         )
     raise ConfigurationError(
         f"fetch_environment: unknown ssp_source={ssp_source!r}.",

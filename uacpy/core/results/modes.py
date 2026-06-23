@@ -34,9 +34,11 @@ class Modes(Result):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.k = np.asarray(k)
-        self.phi = np.asarray(phi)
-        self.depths = np.atleast_1d(np.asarray(depths, dtype=float))
+        # Copy on ingest so a caller mutating their source array can't silently
+        # corrupt this result (mode arrays are small; the copy is cheap).
+        self.k = np.array(k)
+        self.phi = np.array(phi)
+        self.depths = np.atleast_1d(np.array(depths, dtype=float))
         if self.phi.shape != (len(self.depths), len(self.k)):
             raise ConfigurationError(
                 f"Modes.phi: shape {self.phi.shape} must equal "
@@ -290,6 +292,12 @@ class Modes(Result):
             Complex narrowband ``Field`` with
             ``coords={'depth': receiver_depths, 'range': ranges_m}``.
         """
+        if self.n_modes == 0:
+            raise ConfigurationError(
+                "Modes.modal_propagation_loss: the mode set is empty (0 trapped "
+                "modes). Below the waveguide's modal cutoff there is no "
+                "propagating field to sum — raise the frequency, deepen the "
+                "waveguide, or use a full-field model (Scooter/RAM).")
         z_s = float(source_depth)
         z_r = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
         r = np.atleast_1d(np.asarray(ranges_m, dtype=float))

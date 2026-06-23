@@ -489,6 +489,23 @@ class PropagationModel(ABC):
             )
         return run_mode
 
+    def _reject_unsupported_run_kwargs(self, **kwargs):
+        """Guard the optional ``run()`` keywords a model does not consume.
+
+        Every engine declares the full contract signature (``frequencies``,
+        ``source_waveform``, ``sample_rate``, ``output_duration``) so a
+        polymorphic ``model.run(...)`` never raises ``TypeError``. Frequency-
+        domain engines (Bounce, OAST, OASN) ignore the broadband/waveform
+        keywords — but ignoring them *silently* would hide a caller mistake, so
+        any of these passed a non-``None`` value raises here instead."""
+        supplied = sorted(name for name, value in kwargs.items() if value is not None)
+        if supplied:
+            raise UnsupportedFeatureError(
+                self.model_name,
+                f"run parameter(s): {', '.join(supplied)}",
+                alternatives_label='run parameters',
+            )
+
     @property
     def supported_modes(self) -> List[RunMode]:
         """List of run modes supported by this model."""
@@ -1794,7 +1811,7 @@ class PropagationModel(ABC):
         except ModelExecutionError as exc:
             self._attach_prt_tail(exc, work_dir, base_name)
             raise
-        if self.verbose and result.stdout:
+        if result.stdout:
             self._log(f"{self.model_name} output:\n{result.stdout}", level='debug')
         return result
 
@@ -1882,10 +1899,13 @@ class PropagationModel(ABC):
             Input receiver array
         media_depth : float
             Deepest modelled interface (m); see :meth:`_total_media_depth`.
-            Receivers below the semi-infinite halfspace boundary cannot be
-            resolved and are pulled up to ``media_depth - margin``.
+            Only receivers *below* this boundary lie inside the semi-infinite
+            halfspace, where the field is not resolved; those are pulled up to
+            ``media_depth - margin``. Receivers anywhere in the water column or
+            sediment layers (``depth <= media_depth``) are kept untouched.
         margin : float
-            Safety margin above the halfspace boundary (m). Default 3.0.
+            Landing margin above the halfspace boundary (m) for the receivers
+            that must be pulled out of the halfspace. Default 3.0.
 
         Returns
         -------
@@ -1893,16 +1913,19 @@ class PropagationModel(ABC):
             Receiver with clipped depths (unchanged if all depths are valid)
         """
         max_receiver_depth = receiver.depths.max()
-        if max_receiver_depth > media_depth - margin:
-            # When every depth exceeds the ceiling, np.clip(lo > hi)
-            # collapses the whole axis onto media_depth - margin (one
-            # unique value for grid receivers) — intended.
-            clipped = np.clip(
-                receiver.depths, receiver.depths.min(), media_depth - margin,
+        if max_receiver_depth > media_depth:
+            # Only the sub-halfspace receivers are unresolvable; pull just
+            # those up to a margin above the boundary and leave every
+            # in-medium receiver alone. A full-column receiver grid
+            # (depths up to env.depth) is therefore returned unchanged, so
+            # its depth axis matches the ray/normal-mode models rather than
+            # silently losing the deepest sample to a clip-and-dedup.
+            ceiling = media_depth - margin
+            clipped = np.where(
+                receiver.depths > media_depth, ceiling, receiver.depths,
             )
-            unique = np.unique(clipped)
             if receiver.receiver_type == 'grid':
-                new_depths = unique
+                new_depths = np.unique(clipped)
             else:
                 new_depths = clipped
             receiver = Receiver(
@@ -1911,12 +1934,11 @@ class PropagationModel(ABC):
                 receiver_type=receiver.receiver_type,
             )
             warnings.warn(
-                f"{self.model_name}: receiver depths below "
-                f"{media_depth - margin:.1f} m clipped to that depth "
-                f"(deepest modelled interface {media_depth:.1f} m; the "
-                f"field is not resolved inside the semi-infinite halfspace). "
-                f"Add sediment layers (a layered SeabedColumn) to place "
-                f"receivers below the seafloor.",
+                f"{self.model_name}: receiver depths below the deepest "
+                f"modelled interface ({media_depth:.1f} m) pulled up to "
+                f"{ceiling:.1f} m (the field is not resolved inside the "
+                f"semi-infinite halfspace). Add sediment layers (a layered "
+                f"SeabedColumn) to place receivers below the seafloor.",
                 UserWarning,
                 stacklevel=2,
             )

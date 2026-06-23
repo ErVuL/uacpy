@@ -81,11 +81,11 @@ def main():
         shipping_level=wenz_plot.shipping_level,
         rain_rate=wenz_plot.rain_rate,
     )
-    Pxx = wenz_ssrp.as_psd()                           # Pa² / Hz (linear)
+    Pxx = wenz_ssrp.as_psd(ref=UPA)                    # SI Pa²/Hz (linear)
 
     duration = 30.0                                    # seconds
     t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
-        Pxx, f_ssrp, fs=96000,
+        Pxx, f_ssrp, sample_rate=96000,
         duration=duration, scale=1.0, n_fft=n_fft)
     print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
@@ -150,7 +150,7 @@ def main():
     # incoherent (energy) sum across bands.
     sel_dur = len(x) / fs
     sel_vals, sel_bands = uacpy.acoustic_signal.sel(
-        x, fs, fmin=10.0, fmax=fs / 2.0, band_type='third_octave', ref=UPA,
+        x, fs, fmin=10.0, fmax=fs / 2.0, band_type='third_octave',
     )
     total_sel_db = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
     print(f"  SEL: broadband {total_sel_db:.1f} dB re 1 µPa²·s over "

@@ -228,17 +228,7 @@ class Bounce(PropagationModel):
         self.n_angles = n_angles
 
         # Validate phase velocity bounds up front
-        if self.c_low <= 0:
-            raise ConfigurationError(
-                f"Bounce requires c_low > 0 strictly (got {self.c_low}). "
-                "c_low is the smallest phase velocity on the tabulated grid; "
-                "0 would give an infinite wavenumber."
-            )
-        if self.c_high <= self.c_low:
-            raise ConfigurationError(
-                f"c_high ({self.c_high}) must be strictly greater than "
-                f"c_low ({self.c_low})."
-            )
+        self._validate_phase_speed_bounds()
 
         # Run modes, capability flags and collapse defaults now come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -260,12 +250,32 @@ class Bounce(PropagationModel):
         if not self._exe.exists():
             raise ExecutableNotFoundError('Bounce', str(self._exe))
 
+    def _validate_phase_speed_bounds(self) -> None:
+        """Phase-velocity bounds invariant, enforced at construction AND at
+        ``run()`` (a single source of truth for both call sites)."""
+        if self.c_low <= 0:
+            raise ConfigurationError(
+                f"Bounce requires c_low > 0 strictly (got {self.c_low}). "
+                "c_low is the smallest phase velocity on the tabulated grid; "
+                "0 would give an infinite wavenumber."
+            )
+        if self.c_high <= self.c_low:
+            raise ConfigurationError(
+                f"c_high ({self.c_high}) must be strictly greater than "
+                f"c_low ({self.c_low})."
+            )
+
     def run(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run BOUNCE reflection coefficient computation.
@@ -309,17 +319,11 @@ class Bounce(PropagationModel):
           ``BoundaryProperties(acoustic_type='file', reflection_file=…)``.
           ``.irc`` is consumed by Kraken (true normal modes).
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
-
-        if self.c_low <= 0:
-            raise ConfigurationError(
-                f"Bounce requires c_low > 0 strictly (got {self.c_low})."
-            )
-        if self.c_high <= self.c_low:
-            raise ConfigurationError(
-                f"c_high ({self.c_high}) must be strictly greater than "
-                f"c_low ({self.c_low})."
-            )
+        self._validate_phase_speed_bounds()
 
         # Per-call rmax. ``n_angles`` (below) overrides via the inverse of
         # bounce.f90:49  NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π)).
@@ -405,6 +409,17 @@ class Bounce(PropagationModel):
 
             self._log(f"Reading output: {brc_file}")
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
+
+            theta_out = np.atleast_1d(np.asarray(result.get('theta', []), dtype=float))
+            if theta_out.size == 0:
+                raise ConfigurationError(
+                    f"Bounce produced an empty reflection-coefficient table — "
+                    f"{brc_file.name} has no angle rows. This usually means RMax "
+                    f"(derived from receiver.ranges, here {rmax:g} m) is too small "
+                    f"for the wavenumber sweep to resolve any grazing angles. Pass a "
+                    f"receiver with a realistic max range (km-scale), or inspect "
+                    f"{brc_file.with_suffix('.prt').name} for BOUNCE diagnostics."
+                )
 
             from uacpy.core.results import ReflectionCoefficient
             frequency = float(source.frequencies[0])

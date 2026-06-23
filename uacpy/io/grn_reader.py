@@ -20,6 +20,8 @@ We detect SPARC by the ``'SPARC'`` prefix in the title (set at
 ``sparc.f90:84``).
 """
 
+import warnings
+
 import numpy as np
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
@@ -368,7 +370,7 @@ def grn_to_field(
 
     nsd = grn_data["nsd"]
     if not (0 <= source_depth_idx < nsd):
-        raise IndexError(
+        raise ConfigurationError(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
@@ -402,8 +404,23 @@ def sparc_snapshot_to_field(
     source_depth_idx: int = 0,
     cmin: Optional[float] = None,
     cmax: Optional[float] = None,
+    pulse_type: Optional[str] = None,
+    normalize: str = 'source',
 ) -> Field:
     """Extract steady-state complex pressure at ``frequency`` from a SPARC snapshot.
+
+    ``normalize`` (default ``'source'``): SPARC propagates the *actual* pulse, so
+    the snapshot is ``S(omega)*g`` — the source spectrum times the transfer
+    function — not the bare ``g`` that Kraken/Scooter report (Jensen,
+    *Computational Ocean Acoustics*, Eq. 8.1). ``'source'`` deconvolves the known
+    source spectrum: it runs the *same* steady-tone estimator on the pulse
+    ``sparc_pulse(tout, 2*pi*frequency, pulse_type)`` to get ``S(omega0)`` and
+    divides it out, recovering ``g`` — i.e. **absolute TL re 1 m**, directly
+    comparable to Kraken/Scooter. Requires ``pulse_type`` (the SPARC pulse
+    alphabet; the ``SPARC`` wrapper passes it). The window and ``2/Σwin`` factor
+    cancel exactly; a residual remains only if the run applied an extra band-pass
+    (``fMin``/``fMax``) that ``sparc_pulse`` does not replicate. ``'none'``
+    returns the raw (uncalibrated) field and warns.
 
     SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
     of the wavenumber-domain Green's function (``Green(itout, irz, ik)``,
@@ -423,9 +440,28 @@ def sparc_snapshot_to_field(
             f"{grn_data['title']!r} (no 'SPARC' prefix)."
         )
 
+    if normalize not in ('source', 'none'):
+        raise ConfigurationError(
+            "sparc_snapshot_to_field: normalize must be 'source' or 'none'; "
+            f"got {normalize!r}")
+    if normalize == 'source' and not pulse_type:
+        raise ConfigurationError(
+            "sparc_snapshot_to_field: normalize='source' needs pulse_type (the "
+            "SPARC pulse alphabet) to deconvolve the source spectrum. Pass it, "
+            "or use normalize='none' for the raw (uncalibrated) field.")
+    if normalize == 'none':
+        warnings.warn(
+            "sparc_snapshot_to_field: normalize='none' returns the RAW field "
+            "(S(omega)*g), whose absolute level is uncalibrated — a "
+            "pulse-dependent offset (tens of dB) above calibrated TL (Jensen, "
+            "Computational Ocean Acoustics, Eq. 8.1). Use normalize='source' "
+            "(with pulse_type) for calibrated absolute TL re 1 m, or treat only "
+            "the field SHAPE as indicative.",
+            UserWarning, stacklevel=2)
+
     nsd = grn_data["nsd"]
     if not (0 <= source_depth_idx < nsd):
-        raise IndexError(
+        raise ConfigurationError(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
@@ -440,9 +476,8 @@ def sparc_snapshot_to_field(
     dt = float(tout[1] - tout[0])
 
     # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure for
-    # the 'R'/'D' modes). NOTE: the snapshot path's absolute level is still
-    # ~30 dB off the modal/FFP models (Kraken/Scooter) — experimental and
-    # uncalibrated; the field shape is indicative but the dB values are not.
+    # the 'R'/'D' modes). This yields S(w0)·g; normalize='source' (default)
+    # divides out the source spectrum S(w0) below to recover calibrated g.
     win = np.hanning(nt)
     G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)
@@ -454,7 +489,26 @@ def sparc_snapshot_to_field(
             "shortening t_max."
         )
     f_idx = int(np.argmin(np.abs(fft_freqs - frequency)))
-    G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk)
+
+    if normalize == 'source':
+        # Convolution theorem: the snapshot G(t) = s(t) ⊛ h(t) (source pulse
+        # convolved with the medium response), so DFT(G)/DFT(s) = h(w0) — the
+        # unit-source wavenumber Green's function Scooter computes, absolute-
+        # calibrated (Jensen COA Eq. 8.1). Use the RECTANGULAR full DFT for
+        # both: a taper would break the convolution theorem and would null the
+        # transient source pulse (which lives in the first few samples, where a
+        # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
+        S_at_f0 = np.fft.fft(s_t)[f_idx]
+        if S_at_f0 == 0:
+            raise ConfigurationError(
+                "sparc_snapshot_to_field: source spectrum is zero at "
+                f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
+                "deconvolve (check pulse / frequency).")
+        G_at_f0 = np.fft.fft(G, axis=0)[f_idx, :, :] / S_at_f0
+    else:
+        G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk) = S·g
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)
@@ -468,11 +522,15 @@ def sparc_snapshot_to_field(
         G_at_f0, k, ranges,
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
-    # Align with sparc.exe's native 'R'-mode range synthesis
-    # (sparc.f90 EXTRACT: √2·Δk·√k·e^{i(−kr+π/4)}/√r) — the
-    # fieldsco-style Hankel above carries 1/√(2πr) and the Scooter −1
-    # prefactor instead, a constant factor −√(4π) between the two.
-    p_out = p_out * (-np.sqrt(4.0 * np.pi))
+    if normalize == 'none':
+        # Align the RAW field with sparc.exe's native 'R'-mode range synthesis
+        # (sparc.f90 EXTRACT: √2·Δk·√k·e^{i(−kr+π/4)}/√r) — the fieldsco-style
+        # Hankel above carries 1/√(2πr) and the Scooter −1 prefactor instead, a
+        # constant −√(4π) between the two. The calibrated path SKIPS this:
+        # after deconvolution G_at_f0 is the Scooter unit-source Green's
+        # function, so the bare Hankel (as in _grn_pressure_slice) already
+        # matches Scooter/Kraken — applying −√(4π) would add a spurious ~11 dB.
+        p_out = p_out * (-np.sqrt(4.0 * np.pi))
 
     return Field(
         data=p_out,
@@ -483,6 +541,8 @@ def sparc_snapshot_to_field(
         phase_reference='travelling_wave',
         metadata={
             "transform_method": "time_fft+hankel",
+            "normalize": normalize,
+            "absolute_tl_calibrated": normalize == 'source',
             "snapshot_freq_bin": float(fft_freqs[f_idx]),
             "snapshot_dt": dt,
             "snapshot_nt": nt,
@@ -511,7 +571,7 @@ def grn_to_transfer_function(
     nrd = grn_data["nrd"]
     nsd = grn_data["nsd"]
     if not (0 <= source_depth_idx < nsd):
-        raise IndexError(
+        raise ConfigurationError(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 

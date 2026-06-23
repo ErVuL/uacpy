@@ -56,7 +56,7 @@ class Surface:
                     f"Surface: every node must be a BoundaryProperties; got "
                     f"{type(p).__name__}")
         if self.ranges is not None:
-            self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
+            self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != len(self.properties):
                 raise ConfigurationError(
                     f"Surface: ranges ({self.ranges.size}) and properties "

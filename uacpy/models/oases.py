@@ -378,6 +378,11 @@ class OAST(OASES):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run OAST transmission loss computation
@@ -396,6 +401,9 @@ class OAST(OASES):
         result : Result
             Transmission loss field
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
 
         env = self._project_environment(env)
@@ -576,7 +584,7 @@ class OASN(OASES):
         ``env.depth - 10``.
     nz : int
         Number of replica grid points in depth. Default 20.
-    cmin, cmax : float, optional
+    c_low, c_high : float, optional
         Phase-speed bounds (m/s) for the wavenumber integrations,
         applied to both the noise and replica blocks; ``None`` →
         ``0.95 · min(c_water)`` and ``1e8``.
@@ -653,9 +661,9 @@ class OASN(OASES):
         # Phase-speed bounds for the wavenumber integrations (m/s).
         # Applied identically to OASN Block VIII (noise / discrete
         # sources) and Block X (replica generator). ``None`` → writer
-        # derives c_water_min * 0.95 (cmin) and 1e8 (cmax).
-        cmin: Optional[float] = None,
-        cmax: Optional[float] = None,
+        # derives c_water_min * 0.95 (c_low) and 1e8 (c_high).
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
         # Wavenumber-axis sampling & TL plot axes.
         integration_offset: float = 0.0,
         nw_samples: int = -1,
@@ -693,8 +701,8 @@ class OASN(OASES):
         self.zmin = zmin
         self.zmax = zmax
         self.nz = int(nz)
-        self.cmin = cmin
-        self.cmax = cmax
+        self.c_low = c_low
+        self.c_high = c_high
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
@@ -747,12 +755,12 @@ class OASN(OASES):
         # Phase-speed bounds applied identically to OASN's noise and
         # replica integrations (singular on the public API, plural-with-
         # suffix in the writer per OASES's CMINS/CMAXS variable names).
-        if self.cmin is not None:
-            kw['cmins_discrete'] = self.cmin
-            kw['cmins_replica'] = self.cmin
-        if self.cmax is not None:
-            kw['cmaxs_discrete'] = self.cmax
-            kw['cmaxs_replica'] = self.cmax
+        if self.c_low is not None:
+            kw['cmins_discrete'] = self.c_low
+            kw['cmins_replica'] = self.c_low
+        if self.c_high is not None:
+            kw['cmaxs_discrete'] = self.c_high
+            kw['cmaxs_replica'] = self.c_high
 
         # Replica grid x/y in km on disk; z in metres. nx/ny/nz always
         # forwarded so the writer reuses uacpy defaults rather than its
@@ -794,6 +802,11 @@ class OASN(OASES):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run OASN.
@@ -810,6 +823,9 @@ class OASN(OASES):
         -------
         Covariance or Replicas
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
 
         # OASN expresses the frequency axis as (fmin, fmax, N) like OASR

@@ -384,11 +384,16 @@ objects (typically `Field`) or raw arrays.
   `cepstrum`) are likewise functions with `inverse_*` where meaningful. **All
   plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
   `acoustic_signal`/`comms` modules import no matplotlib.
-- `acoustic_signal/processing.py` — beamforming, fourier synthesis,
-  shift-to-max-correlation.
-- `acoustic_signal/generation.py` — source-waveform synthesis (Ricker,
+- `acoustic_signal/arrays.py` — beamforming / steering vectors;
+  `active.py` — matched filter, pulse compression, ambiguity.
+- `acoustic_signal/waveforms.py` — source-waveform synthesis (Ricker,
   Gaussian, M-wave, Hann sine, …) — uses the same alphabet as AT
-  `cans.f90` where possible.
+  `cans.f90` where possible; `sequences.py` — m-sequences / coded probes.
+- `acoustic_signal/constant_q.py` — constant-Q transform family (Brown 1991:
+  transform / PSD / spectrogram / probabilistic), `spectrum`/`density` scaling.
+- `acoustic_signal/bands.py` — decidecade (ISO 18405) band levels;
+  `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
+  `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
 - `noise/noise.py` — `compute_windnoise`, Wenz curves, ship noise.
 - `visualization/plots.py` — single-entry `plot_result(result, env=…)`
   plus per-result-type helpers (`plot_field`, `plot_rays`,

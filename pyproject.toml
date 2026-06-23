@@ -46,6 +46,7 @@ dependencies = [
     "shapely>=2.0",
     "pyproj>=3.4",
     "tifffile>=2021.1",
+    "pillow>=9",
 ]
 
 [project.optional-dependencies]
@@ -105,12 +106,26 @@ addopts = "-n logical --dist=worksteal -m 'not requires_network'"
 # blanket "ignore" hid them). A module-scoped UserWarning filter was avoided:
 # stacklevel attributes some uacpy warnings to the caller's frame, so they
 # leak past a `:uacpy.*` module match.
-filterwarnings = ["ignore::UserWarning"]
+filterwarnings = [
+    "ignore::UserWarning",
+    # Deprecation gate: escalate any uacpy-originated DeprecationWarning /
+    # PendingDeprecationWarning / FutureWarning to a hard test failure. This is
+    # the earliest-possible signal that uacpy touches an API a dependency has
+    # begun to deprecate (e.g. after a numpy/scipy/matplotlib upgrade) — CI goes
+    # red on day one of the warning cycle, long before the API is removed.
+    # Scoped to the ``uacpy`` package so third-party libraries' own internal
+    # deprecations stay non-fatal; a deprecated *dependency* call made by uacpy
+    # is attributed to uacpy's frame via the warning stacklevel, so it is caught
+    # here too. (DeprecationWarning/FutureWarning are not UserWarning subclasses,
+    # so the ignore above does not mask them.)
+    "error::DeprecationWarning:uacpy",
+    "error::PendingDeprecationWarning:uacpy",
+    "error::FutureWarning:uacpy",
+]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
     "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
     "requires_network: hits a live external service (uacpy.data fetchers); auto-skipped offline",
-    "integration: end-to-end tests that exercise multiple subsystems",
     "benchmark: validates model output against a closed-form analytic / canonical reference",
 ]

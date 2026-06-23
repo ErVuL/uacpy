@@ -52,8 +52,8 @@ class SoundSpeedProfile:
     shape: str = 'measured'
 
     def __post_init__(self):
-        self.depths = np.asarray(self.depths, dtype=float).reshape(-1)
-        self.data = np.asarray(self.data, dtype=float)
+        self.depths = np.array(self.depths, dtype=float).reshape(-1)
+        self.data = np.array(self.data, dtype=float)
         if self.data.ndim == 1:
             self.data = self.data.reshape(-1, 1)
         if self.data.ndim != 2:
@@ -65,10 +65,14 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile: data rows ({self.data.shape[0]}) must match "
                 f"depths length ({self.depths.size})"
             )
+        if self.depths.size == 0:
+            raise ConfigurationError(
+                "SoundSpeedProfile: needs at least one depth/sound-speed sample"
+            )
         _require_positive(self.data, "SoundSpeedProfile sound speeds", hint="m/s")
         _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths")
         if self.ranges is not None:
-            self.ranges = np.asarray(self.ranges, dtype=float).reshape(-1)
+            self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != self.data.shape[1]:
                 raise ConfigurationError(
                     f"SoundSpeedProfile: ranges length ({self.ranges.size}) must "

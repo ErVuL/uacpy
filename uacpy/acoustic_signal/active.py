@@ -15,11 +15,16 @@ Richards, M.A. *Fundamentals of Radar Signal Processing* (matched filter,
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 import scipy.signal as _sig
 from scipy.signal import fftconvolve
 
 from uacpy.core.exceptions import ConfigurationError
+
+
+AmbiguityResult = namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")
 
 
 def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True):
@@ -99,12 +104,10 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
 
     Returns
     -------
-    lags_s : ndarray
-        Delay axis (s), length ``2*N-1``.
-    doppler_hz : ndarray
-        Doppler axis (Hz).
-    amplitude : ndarray
-        ``|chi|`` with shape ``(n_doppler, 2*N-1)``.
+    AmbiguityResult
+        Namedtuple ``(delays_s, doppler_hz, amplitude)``: the delay axis (s,
+        length ``2*N-1``), the Doppler axis (Hz), and ``|chi|`` with shape
+        ``(n_doppler, 2*N-1)``.
     """
     s = np.asarray(waveform, dtype=complex)
     if s.ndim != 1 or s.size == 0:
@@ -124,7 +127,7 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
         amp[i] = np.abs(fftconvolve(sd, rev, mode="full"))
     amp /= energy
     lags = (np.arange(2 * n - 1) - (n - 1)) / fs
-    return lags, doppler_hz, amp
+    return AmbiguityResult(lags, doppler_hz, amp)
 
 
 def shift_to_max_correlation(x, y):

@@ -15,16 +15,18 @@ def test_registries_have_defaults():
 
 
 def test_thermal_matches_formula():
+    # No 0-dB floor: the Mellen thermal PSD (4πKT(ρ/c)f², Abraham eq. 3.193) is
+    # strictly positive, so its level is legitimately negative below ~5.6 kHz.
     out = N.THERMAL_MODELS['mellen'](F)
     ref = -75.0 + 20.0 * np.log10(F)
-    ref[ref <= 0] = -np.inf
     assert np.array_equal(out, ref)
 
 
 def test_turbulence_is_canonical_wenz():
+    # Real (possibly sub-0-dB) levels are kept; turbulence crosses 0 dB at
+    # ~3.7 kHz and is genuinely negative above it.
     out = N.TURBULENCE_MODELS['wenz'](F)
     ref = 17.0 - 30.0 * np.log10(F / 1000.0)   # = 107 - 30*log10(f_Hz)
-    ref[ref <= 0] = -np.inf
     assert np.allclose(out, ref, equal_nan=True)
     # 1 Hz → 107 dB, the canonical Wenz turbulence intercept
     assert np.isclose(N.TURBULENCE_MODELS['wenz'](np.array([1.0]))[0], 107.0)
@@ -129,6 +131,31 @@ def test_coates_wind_plausible_and_differs():
     w1k = N.WIND_MODELS['coates'](np.array([1000.0]), wind_speed=19.4)[0]
     assert 60.0 < w1k < 75.0
     assert not np.array_equal(coates.wind, base.wind)   # genuinely different model
+
+
+def test_total_finite_when_wind_zero_midband():
+    # B1 regression: with wind=0 every component used to be floored to -inf in
+    # the 3.7–5.6 kHz gap (turbulence already negative, thermal still negative,
+    # shipping/rain off), driving the incoherent total to -inf. The real levels
+    # must now keep the total finite.
+    f = np.array([4000.0, 5000.0])
+    w = N.WenzNoise(f, wind_speed=0.0, shipping_level='no', rain_rate='no')
+    assert np.all(np.isfinite(w.total))
+
+
+def test_negative_wind_speed_rejected():
+    # N8: uniform guard so the Coates √(wind) model can't silently produce NaN.
+    with pytest.raises(ConfigurationError):
+        N.WenzNoise(F, wind_speed=-1.0)
+
+
+def test_custom_submodel_errors_are_typed():
+    # N9: a custom callable that raises, or returns a wrong-shaped array, is
+    # surfaced as a typed ConfigurationError, not a raw TypeError/broadcast error.
+    with pytest.raises(ConfigurationError):
+        N.WenzNoise(F, 15.0, wind_model=lambda f, **k: 1 / 0)
+    with pytest.raises(ConfigurationError):
+        N.WenzNoise(F, 15.0, wind_model=lambda f, **k: np.zeros(f.size + 1))
 
 
 def test_coates_shipping_silent_and_activity_order():
