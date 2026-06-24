@@ -545,6 +545,16 @@ Fetching is cache-first; an offline install (`install.sh --data`) lets
 `*_sources='local'` run with no network. See `help(data.fetch_environment)` and
 `example_37` for the long tail of options.
 
+**Provenance & citations.** Every fetched layer records where it came from. Each
+carrier carries `carrier.data_sources` — a tuple of `data.DataProvenance`
+records, each pairing the catalogue `.source` (`data.DataSource`: name, licence,
+attribution, citation) with the **actual** `data_date` and `data_point=(lat,
+lon)` returned (which may differ from what was requested — a climatology snaps to
+a grid cell, an Argo float is the nearest cast). `Environment` aggregates the
+union into `env.data_sources`. Render the required attribution text with
+`data.citations(env)` (or pass a carrier, a source id, or a `DataProvenance`);
+non-commercial sources also emit a `UserWarning` when fetched.
+
 ## 6. Source and Receiver
 
 `Source` and `Receiver` carry only **geometry and spectrum** — solver knobs

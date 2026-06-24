@@ -951,16 +951,21 @@ class SPARC(PropagationModel):
         n_required = int(np.ceil(window * fs_required))
         if n_required <= self.n_t_out:
             return self.n_t_out
-        n_t_out = min(n_required, _SPARC_MAX_N_T_OUT)
-        if 0.5 * n_t_out / window < f_max:
+        if n_required > _SPARC_MAX_N_T_OUT:
+            # Fail fast: clamping to the cap could not meet the sampling target,
+            # so the run would either alias the CW frequency or proceed
+            # under-resolved at a very large n_t_out whose wavenumber march
+            # exceeds the subprocess timeout. A 0-second actionable error beats
+            # a multi-minute wait that ends in a generic timeout.
             raise ConfigurationError(
                 f"SPARC COHERENT_TL: resolving the {f_max:.0f} Hz pulse band "
                 f"over a {window:.1f} s output window needs n_t_out≈"
-                f"{n_required}, above the {_SPARC_MAX_N_T_OUT} cap — the output "
-                f"Nyquist would alias the CW frequency.",
-                remediation="Shorten the receiver range, or narrow the pulse "
-                "band via f_max=, to lower the required output sampling.",
+                f"{n_required}, above the {_SPARC_MAX_N_T_OUT} cap — the run "
+                f"would alias the CW frequency or be impractically slow.",
+                remediation="Shorten the receiver range, narrow the pulse band "
+                "via f_max=, or use Kraken/Scooter for this frequency.",
             )
+        n_t_out = n_required
         self._log(
             f"raising n_t_out {self.n_t_out}→{n_t_out} so the output Nyquist "
             f"({0.5 * n_t_out / window:.0f} Hz) clears the pulse band f_max="

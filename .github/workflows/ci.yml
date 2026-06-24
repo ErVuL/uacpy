@@ -1,9 +1,10 @@
 # uacpy CI — minimal smoke test.
 #
-# Scope: Linux (ubuntu-latest), Python 3.12, --bellhop cxx, --oases yes.
+# Scope: Linux (ubuntu-latest), Python 3.13, --bellhop cxx, --oases yes.
 # What this DOES test: native Fortran/C builds + the python package against
-# the standard test markers.
-# What this does NOT test: macOS, Windows/WSL, Python 3.10/3.11/3.13, the
+# the standard test markers. 3.13 is the declared floor (pyproject
+# `requires-python = ">=3.13"`).
+# What this does NOT test: macOS, Windows/WSL, newer Python minors, the
 # CUDA build, the fortran-only Bellhop fallback, the no-OASES partial
 # install. Those configurations are advertised as supported but exercised
 # by users, not by this workflow. Expand this matrix if any of the above
@@ -57,7 +58,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install system build dependencies
         run: |

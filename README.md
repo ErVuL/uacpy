@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml"><img src="https://github.com/ErVuL/uacpy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python 3.12+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.13+-blue.svg" alt="Python 3.13+"></a>
   <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="GPLv3 License"></a>
   <a href="#"><img src="https://img.shields.io/badge/Status-Beta-yellow.svg" alt="Beta"></a>
   <a href="#"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(WSL)-lightgrey.svg" alt="Platform"></a>

@@ -13,6 +13,7 @@ import scipy.signal as _sig
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_db
+from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 
 PSDResult = namedtuple("PSDResult", "frequencies power")
@@ -37,6 +38,7 @@ def psd(data, sample_rate, *, window="hann", nperseg=8192, noverlap=None,
     Welch **detrends the constant (DC) component** of each segment, so the DC
     bin is suppressed; :func:`sel` keeps DC (no detrending) for an exact energy
     sum, so the two are not directly comparable at 0 Hz."""
+    data = require_finite_signal(data, "psd")
     freqs, Pxx = _sig.welch(data, sample_rate, window=window, nperseg=nperseg,
                             noverlap=noverlap, nfft=nfft, scaling=scaling)
     return PSDResult(freqs, Pxx)
@@ -183,6 +185,7 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     the summed PSD equals the band exposure exactly (Parseval); do not change
     this — a smoothing window would corrupt the energy identity.
     """
+    data = require_finite_signal(data, "sel")
     if integration_time is not None:
         data = data[:min(int(integration_time * sample_rate), len(data))]
 

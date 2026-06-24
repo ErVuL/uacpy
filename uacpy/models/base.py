@@ -1787,17 +1787,28 @@ class PropagationModel(ABC):
     def _attach_prt_tail(exc, work_dir, base_name, n_chars: int = 2000):
         """Append the tail of the binary's ``<base>.prt`` log to ``exc``.
 
-        Acoustics-Toolbox binaries dump fatal errors to ``.prt`` instead
-        of stderr; this surfaces them in the raised ``ModelExecutionError``
-        message.
+        Acoustics-Toolbox binaries dump fatal errors (``*** FATAL ERROR ***``)
+        to ``.prt`` instead of stderr; surface that tail on the raised
+        ``ModelExecutionError`` so the user sees the actual cause, not just a
+        "check the .prt file" pointer.
+
+        Updates ``exc.message`` (what ``UACPYError.__str__`` renders) **and**
+        ``exc.stderr`` (a constructor arg, so the tail survives the pickle
+        round-trip that ``run_parallel`` relies on — the rebuilt message is
+        re-derived from ``stderr``), keeping ``exc.args`` in sync.
         """
         from pathlib import Path as _Path
         tail = read_prt(_Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
         if tail is None:
             return
-        exc.args = (
-            f"{exc.args[0] if exc.args else exc}\n\n.prt tail:\n{tail}",
-        ) + exc.args[1:]
+        block = f"\n\n.prt tail:\n{tail}"
+        if getattr(exc, 'message', None) is not None:
+            exc.message += block
+        if hasattr(exc, 'stderr'):
+            exc.stderr = (exc.stderr + block) if exc.stderr else f".prt tail:\n{tail}"
+        head = getattr(exc, 'message', None) or (
+            f"{exc.args[0]}{block}" if exc.args else f"{exc}{block}")
+        exc.args = (head,) + exc.args[1:]
 
     def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
                             timeout: Optional[float] = None,

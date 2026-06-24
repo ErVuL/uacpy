@@ -21,6 +21,7 @@ from scipy.special import gamma
 import scipy.signal as _sig
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 
 WignerVilleResult = namedtuple("WignerVilleResult",
@@ -234,6 +235,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     xr = np.asarray(data, dtype=float)
     if xr.ndim != 1:
         raise ConfigurationError("cwt: data must be 1-D")
+    require_finite_signal(xr, "cwt")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     n = xr.size
@@ -358,6 +360,7 @@ def cepstrum(data, *, window=None, nfft=None, lifter=None):
     xr = xa.astype(float)
     if xr.ndim != 1:
         raise ConfigurationError("cepstrum: data must be 1-D")
+    require_finite_signal(xr, "cepstrum")
     n = xr.size
     NF = n if nfft is None else int(nfft)
     if NF < n:
@@ -391,6 +394,7 @@ def complex_cepstrum(data):
     xr = xa.astype(float)
     if xr.ndim != 1:
         raise ConfigurationError("complex_cepstrum: data must be 1-D")
+    require_finite_signal(xr, "complex_cepstrum")
     spectrum = np.fft.fft(xr)
     mag = np.abs(spectrum)
     mag = np.maximum(mag, np.finfo(float).tiny)
@@ -420,6 +424,7 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,
     an int to override. ``nfft`` (zero-pad length) mirrors
     :func:`uacpy.acoustic_signal.psd`. For logarithmic / constant-Q frequency
     resolution, see :func:`uacpy.acoustic_signal.constant_q_spectrogram`."""
+    data = require_finite_signal(data, "spectrogram")
     f, t, Sxx = _sig.spectrogram(data, sample_rate, window=window,
                                  nperseg=nperseg, noverlap=noverlap, nfft=nfft,
                                  scaling=scaling, mode=mode)

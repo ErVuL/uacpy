@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields as dataclass_fields
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
-    _require_positive, _require_non_negative,
+    _require_positive, _require_non_negative, _coerce_data_sources,
 )
 
 
@@ -166,7 +166,8 @@ class BoundaryProperties:
     data_sources: tuple = ()
 
     def __post_init__(self):
-        self.data_sources = tuple(self.data_sources)
+        self.data_sources = _coerce_data_sources(
+            self.data_sources, "BoundaryProperties")
         # sound_speed is non-negative (0 ok for vacuum/rigid), unlike
         # SedimentLayer.sound_speed which must be strictly positive.
         _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")

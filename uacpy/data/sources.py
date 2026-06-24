@@ -8,8 +8,9 @@ Two levels, one renderer — deliberately not three parallel classes:
   is the single source of truth; the README licensing table mirrors it. One
   ``DataSource`` is shared by every fetch that used that dataset.
 * :class:`DataProvenance` — one **fetch instance**: references a ``DataSource``
-  and adds the *actual* date/coordinates that fetch returned. Delegates the
-  ``DataSource`` attributes, so it is drop-in wherever a source is expected.
+  (``.source``) and adds the *actual* date/coordinates that fetch returned. The
+  two levels stay distinct — read the dataset's identity/licence/citation
+  through ``prov.source`` and this fetch's specifics off ``prov`` directly.
 
 Carriers and environments carry provenance **uniformly as a tuple of
 ``DataProvenance``** (``carrier.data_sources`` / ``env.data_sources``); an
@@ -85,7 +86,8 @@ class DataProvenance:
         if self.data_point is not None:
             la, lo = self.data_point
             off_km = self.offset_km
-            off = f", {off_km:.0f} km from requested" if off_km else ""
+            off = (f", {off_km:.0f} km from requested"
+                   if off_km is not None else "")
             bits.append(f"at {la:.3f}, {lo:.3f}{off}")
         return "  Fetched:     " + "; ".join(bits) if bits else None
 

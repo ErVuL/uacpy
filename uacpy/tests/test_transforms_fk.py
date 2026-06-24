@@ -20,7 +20,8 @@ def test_fk_single_segment_matches_direct_fft():
     FKc = np.fft.fftshift(np.fft.fft2(d), axes=(0, 1))
     p0 = np.abs(FKc) ** 2
     f0 = np.fft.fftshift(np.fft.fftfreq(nt, d=1.0 / fs))
-    k0 = np.fft.fftshift(np.fft.fftfreq(nx, d=dx))
+    # Angular wavenumber k = 2π·ν rad/m (fk_transform's convention; ν = fftfreq).
+    k0 = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(nx, d=dx))
     f, k, power, spectrum = fk_transform(d, sample_rate=fs, dx=dx)
     assert np.allclose(f, f0) and np.allclose(k, k0)
     assert np.allclose(power, p0)

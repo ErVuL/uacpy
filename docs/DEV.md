@@ -442,10 +442,28 @@ then:
   citation, `commercial_use`) and map the dispatch keyword to that id so
   provenance is recorded automatically.
 
-**Provenance.** `fetch_environment` records the catalogue sources it used on
-`env.data_sources`; `uacpy.data.citations(env)` renders the required
-attribution/citation. Non-commercial sources (Dutkiewicz) emit a runtime
-`UserWarning` whenever fetched, so they are never returned silently.
+**Provenance — two levels, one container type.** `sources.py` holds two frozen
+dataclasses: `DataSource` (the static **catalogue entry** — one per dataset,
+holding identity/licence/citation; `SOURCES` is the catalogue) and
+`DataProvenance` (one **fetch instance** — a reference to a `DataSource` via
+`.source`, plus the *actual* `data_date` and `data_point=(lat, lon)` that fetch
+returned, with `offset_km` derived from the requested point). Read the dataset's
+identity/citation through `prov.source`; there is **no** attribute delegation.
+
+Every carrier carries provenance **uniformly as a tuple of `DataProvenance`** in
+`carrier.data_sources` — leaf carriers (`SoundSpeedProfile`/`Bathymetry`/
+`BoundaryProperties`) as a validated field (`_coerce_data_sources` rejects a
+non-`DataProvenance`), container carriers (`Bottom`/`SeabedColumn`/`Surface`) as
+an aggregating property. A fetcher stamps its carrier with a real
+`DataProvenance` (e.g. WOA23 → snapped cell centre + climatology period; Argo →
+cast time + float position); `Environment` aggregates the union across its
+carriers (`_aggregate_data_sources`, dedup by `r.source.id`) into
+`env.data_sources`, and `fetch_environment`'s `_record_provenance` wraps any
+un-stamped layer's bare catalogue id in `DataProvenance(source=…)` so the tuple
+stays uniform. `uacpy.data.citations(env)` (or a carrier, id, `DataSource`, or
+`DataProvenance`) renders the licence/attribution/citation plus the fetched
+date/coords. Non-commercial sources (Dutkiewicz) emit a runtime `UserWarning`
+whenever fetched, so they are never returned silently.
 
 ---
 
@@ -476,10 +494,10 @@ flake8 uacpy/ --exclude=uacpy/third_party,uacpy/uacpy/third_party \
        --count --select=E9,F63,F7,F82 --show-source --statistics
 ```
 
-CI runs on Ubuntu + Python 3.12 + `--bellhop cxx --oases yes`. macOS,
-WSL, Python 3.10/3.11/3.13, the CUDA build, and the no-OASES partial
-install are advertised but not validated by CI — test locally before
-submitting patches that touch those paths.
+CI runs on Ubuntu + Python 3.13 (the `requires-python` floor) +
+`--bellhop cxx --oases yes`. macOS, WSL, newer Python minors, the CUDA
+build, and the no-OASES partial install are advertised but not validated
+by CI — test locally before submitting patches that touch those paths.
 
 ---
 

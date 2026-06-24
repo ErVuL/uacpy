@@ -29,14 +29,16 @@ def _ref_label(ref):
 
 def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
                     lw=1.1, alpha=0.85, label=True):
-    """Overlay the acoustic cone ``f = c * nu`` onto an f-k axis."""
+    """Overlay the acoustic cone ``f = c·k/2π`` onto an f-k axis whose abscissa
+    is the angular wavenumber ``k`` (rad/m), matching :func:`fk_transform`."""
     c = float(sound_speed)
-    nu = min(f_max / c, k_max)
-    f = nu * c
-    ax.plot([0, nu], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
-    ax.plot([0, -nu], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
+    two_pi = 2.0 * np.pi
+    k = min(two_pi * f_max / c, k_max)   # cone reaches f_max or the axis edge
+    f = c * k / two_pi
+    ax.plot([0, k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
+    ax.plot([0, -k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
     if label:
-        ax.text(nu, f, f" {c:.0f} m/s", color=color, fontsize=8,
+        ax.text(k, f, f" {c:.0f} m/s", color=color, fontsize=8,
                 va="top", ha="right")
 
 
@@ -52,7 +54,7 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
     if sound_speed is not None:
         draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], sound_speed)
     ax.set_title(title or "f–k spectrum", loc="left")
-    ax.set_xlabel("Spatial frequency [cycles/m]")
+    ax.set_xlabel("Wavenumber k [rad/m]")
     ax.set_ylabel("Frequency [Hz]")
     ax.grid(alpha=0.3)
     if show_colorbar:

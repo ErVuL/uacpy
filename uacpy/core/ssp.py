@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
-    _require_positive, _require_strictly_increasing,
+    _require_positive, _require_strictly_increasing, _coerce_data_sources,
 )
 
 
@@ -53,11 +53,12 @@ class SoundSpeedProfile:
     data_sources: tuple = ()
 
     def __post_init__(self):
-        # Provenance of a fetched profile (tuple of DataSource/DataProvenance);
-        # empty for a literal/hand-built one. Physics-agnostic metadata —
-        # transforms that return a new profile (extend_to/collapse/eval slices)
-        # carry it forward; the fresh-construction classmethods do not.
-        self.data_sources = tuple(self.data_sources)
+        # Provenance of a fetched profile (tuple of DataProvenance); empty for a
+        # literal/hand-built one. Physics-agnostic metadata — transforms that
+        # return a new profile (extend_to/collapse/eval slices) carry it
+        # forward; the fresh-construction classmethods do not.
+        self.data_sources = _coerce_data_sources(
+            self.data_sources, "SoundSpeedProfile")
         self.depths = np.array(self.depths, dtype=float).reshape(-1)
         self.data = np.array(self.data, dtype=float)
         if self.data.ndim == 1:

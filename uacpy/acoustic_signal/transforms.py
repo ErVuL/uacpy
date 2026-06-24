@@ -238,8 +238,12 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     """Frequency-wavenumber transform with optional Welch time-averaging.
 
     Returns an :class:`FKResult` namedtuple ``(frequencies, wavenumbers, power,
-    spectrum)``. ``power`` is the real
-    ``|FK|^2`` panel (fftshifted). With ``nperseg=None`` the whole record is one
+    spectrum)``. ``frequencies`` are in Hz; ``wavenumbers`` is the **angular**
+    wavenumber ``k = 2π·ν`` in **rad/m** (the package-wide ``k = ω/c``
+    convention), so a wave of speed ``c`` sits on the line ``ω = c·k``.
+    ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``normalize=True``
+    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. With
+    ``nperseg=None`` the whole record is one
     segment and ``spectrum`` is the complex (fftshifted) panel for
     :func:`inverse_fk`. With ``nperseg < nt`` the time axis is split into
     overlapping segments, ``|FK|^2`` is averaged across them (variance ~1/sqrt(N);
@@ -293,12 +297,17 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
         FKp = np.abs(FKc) ** 2
         if normalize:
             s2 = float(np.sum(wt ** 2) * np.sum(wx ** 2))
-            FKp = FKp * (float(dx) / (fs * s2))
+            # Density per (Hz · rad/m): the extra 2π converts the per-bin spatial
+            # width to rad/m so that ΣP·Δf·Δk = ⟨x²⟩ still holds with k in rad/m.
+            FKp = FKp * (float(dx) / (fs * s2 * 2.0 * np.pi))
         power += FKp
         n_seg += 1
     power /= n_seg
 
     freqs = np.fft.fftshift(np.fft.fftfreq(NF, d=1.0 / fs))
-    wavenumbers = np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
+    # Angular wavenumber k = 2π·ν in rad/m (ν = fftfreq is cycles/m), matching
+    # the package-wide convention k = ω/c used by the models: a wave of speed c
+    # lies on the line ω = c·k (i.e. f = c·k/2π — the acoustic "sound cone").
+    wavenumbers = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
     spectrum = last_spectrum if nperseg is None else None
     return FKResult(freqs, wavenumbers, power, spectrum)

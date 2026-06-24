@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
     _require_positive, _require_non_negative, _require_strictly_increasing,
+    _coerce_data_sources,
 )
 
 
@@ -41,7 +42,7 @@ class Bathymetry:
     def __post_init__(self):
         self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
         self.depths = np.array(self.depths, dtype=float).reshape(-1)
-        self.data_sources = tuple(self.data_sources)
+        self.data_sources = _coerce_data_sources(self.data_sources, "Bathymetry")
         if self.ranges.size != self.depths.size:
             raise ConfigurationError(
                 f"Bathymetry: ranges ({self.ranges.size}) and depths "

@@ -97,6 +97,29 @@ def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
         )
 
 
+def _coerce_data_sources(value, label: str) -> tuple:
+    """Validate and freeze a carrier's ``data_sources`` into a tuple of
+    provenance records, enforcing the harmonised invariant that every element
+    is a :class:`~uacpy.data.sources.DataProvenance` (carries a ``.source``).
+
+    Duck-typed so ``core`` keeps no import dependency on ``data``: a record is
+    accepted iff it exposes ``.source`` with an ``.id``. A bare ``DataSource``
+    (no ``.source``) or any other object is rejected with a typed error rather
+    than leaking downstream to crash ``env.data_sources`` aggregation or
+    ``citations()`` on ``r.source.id``.
+    """
+    records = tuple(value)
+    for r in records:
+        if not (hasattr(r, 'source') and hasattr(getattr(r, 'source'), 'id')):
+            raise ConfigurationError(
+                f"{label}: data_sources elements must be DataProvenance "
+                f"records (each carrying a .source); got {type(r).__name__}. "
+                f"Wrap a catalogue DataSource via "
+                f"uacpy.data.DataProvenance(source=...)."
+            )
+    return records
+
+
 def _sanitize_title(name: str) -> str:
     """Strip newlines/control chars and escape single quotes in a Fortran
     title field. Acoustics-Toolbox `.env` titles are quote-delimited and
