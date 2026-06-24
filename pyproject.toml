@@ -120,6 +120,16 @@ filterwarnings = [
     "error::DeprecationWarning:uacpy",
     "error::PendingDeprecationWarning:uacpy",
     "error::FutureWarning:uacpy",
+    # Third-party exception to the gate above. netCDF4's compiled Cython
+    # (`_netCDF4.pyx`) sets `.shape` on a NumPy array when writing a variable —
+    # an operation NumPy 2.5 deprecated. NumPy attributes the warning to the
+    # *calling* frame (a uacpy test writing a synthetic .nc cache via the
+    # standard `createVariable(...)[:] = data` idiom), so the `:uacpy` gate
+    # would escalate a deprecation that lives entirely inside netCDF4 and that
+    # uacpy cannot fix in its own code. Scoped to this exact message so every
+    # genuine uacpy-originated deprecation still fails CI. Remove once netCDF4
+    # ships a NumPy-2.5-compatible release.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
 ]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
