@@ -92,7 +92,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 - **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice).
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
-- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range.
+- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range, and matched-field source localization (KRAKEN replicas, Bartlett/MVDR).
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
 - **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
@@ -302,10 +302,11 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 37 example scripts numbered
-sequentially (`example_01_*.py` through `example_37_*.py`) — from a first TL
-field to communications modems, a standards-based noise-impact assessment, and a
-GPS-to-modelled-field real-world pipeline. See the
+Inside `uacpy/uacpy/examples/` you will find 38 example scripts numbered
+sequentially (`example_01_*.py` through `example_38_*.py`) — from a first TL
+field to communications modems, a standards-based noise-impact assessment, a
+GPS-to-modelled-field real-world pipeline, and matched-field source
+localization. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 

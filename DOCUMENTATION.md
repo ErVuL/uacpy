@@ -51,7 +51,7 @@ What it covers:
   wavenumber-integration (Scooter/OASES), parabolic equation (RAM),
   time-domain FDTD (SPARC), and plane-wave reflection (Bounce/OASR).
 - **DSP & sonar** (`acoustic_signal`, `sonar`) — waveforms, beamforming,
-  matched filtering, the sonar equation.
+  matched filtering, the sonar equation, matched-field localization.
 - **Communications** (`comms`) — modems including a bit-exact NATO JANUS.
 - **Ambient noise & metrics** (`noise`, `metrics`) — Wenz spectra, plus
   ISO/UNESCO/Southall standards-based metrics.
@@ -1225,6 +1225,7 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy` |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| Matched-field localization | `synthesize_replica`, `replica_bank`, `csdm`, `bartlett`, `mvdr` |
 
 ```python
 from uacpy.sonar import figure_of_merit, albersheim_snr
@@ -1235,7 +1236,33 @@ fom = figure_of_merit(source_level=180, noise_level=60,
 # fom is the max allowable one-way TL — cross it with a TL field for range.
 ```
 
-See example 27 (sonar equation, reverberation, detection-range maps).
+**Matched-field processing (MFP).** Localize a source in range and depth by
+correlating measured array data against *replicas* — the modeled pressure at
+the sensors for each candidate position. Replicas are synthesized directly
+from a KRAKEN `Modes` set (the far-field modal sum, validated against
+`field.exe` to a normalized correlation of 1.0), so the modes are computed once
+and every grid point is a cheap re-sum. This path is self-contained (KRAKEN +
+numpy); it does not require OASES/OASN.
+
+```python
+import numpy as np
+from uacpy.models import Kraken
+from uacpy.sonar import synthesize_replica, replica_bank, csdm, bartlett, mvdr
+
+modes = Kraken().compute_modes(env, source)     # eigenpairs (k_m, phi_m), once
+bank  = replica_bank(modes, array_depths, cand_depths, cand_ranges)  # (N, nz, nr)
+K     = csdm(snapshots)                          # (N, L) snapshots -> (N, N) CSDM
+amb_b = bartlett(K, bank)                        # robust, broad-lobed
+amb_m = mvdr(K, bank, loading=1e-2)              # Capon: sharp, mismatch-sensitive
+iz, ir = np.unravel_index(np.argmax(amb_m), amb_m.shape)   # localization peak
+```
+
+`mvdr`'s `loading` trades resolution for robustness: small values give sharp
+Capon peaks, larger values flatten the surface toward Bartlett under
+environmental mismatch — the dominant error source in MFP.
+
+See example 27 (sonar equation, reverberation, detection-range maps) and
+example 38 (matched-field localization with KRAKEN replicas).
 
 ## 12. Digital Communications
 
@@ -1443,7 +1470,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 
 ## 17. Examples Index
 
-All 37 runnable scripts live in `uacpy/examples/`.
+All 38 runnable scripts live in `uacpy/examples/`.
 
 | # | Topic |
 |---|-------|
@@ -1484,6 +1511,7 @@ All 37 runnable scripts live in `uacpy/examples/`.
 | 35 | Underwater noise impact assessment — standards chain |
 | 36 | Modeled noise impact — ship SL through a real TL field |
 | 37 | Real-world environment — map · transmission loss · section |
+| 38 | Matched-field source localization — KRAKEN replicas, Bartlett vs MVDR |
 
 ## 18. Parameter Reference
 

@@ -1,12 +1,22 @@
-"""System-level sonar performance: sonar equation, reverberation, detection.
+"""System-level sonar performance: sonar equation, reverberation, detection,
+and matched-field localization.
 
-Builds on uacpy's propagation outputs (TL fields) and noise spectra to assemble
-active/passive sonar performance: scattering-strength laws, cell-scattering
-reverberation, the sonar equation (signal excess, figure of merit, detection
-range), and detection-theory thresholds. The ``*_field`` helpers map the
-sonar equation over a model TL :class:`~uacpy.core.results.Field` —
-signal-excess and detection-probability maps over ``(depth, range)``, plus
-the per-depth detection-range profile.
+Builds on uacpy's propagation outputs (TL fields, normal modes) and noise
+spectra to assemble active/passive sonar performance: scattering-strength laws,
+cell-scattering reverberation, the sonar equation (signal excess, figure of
+merit, detection range), and detection-theory thresholds. The ``*_field``
+helpers map the sonar equation over a model TL
+:class:`~uacpy.core.results.Field` — signal-excess and detection-probability
+maps over ``(depth, range)``, plus the per-depth detection-range profile.
+
+``matched_field`` adds source localization by matched-field processing:
+replica vectors synthesized directly from a KRAKEN
+:class:`~uacpy.core.results.Modes` set (:func:`synthesize_replica`,
+:func:`replica_bank`) or assembled from the coherent pressure of *any* model
+run (:func:`replica_bank_from_field`), a cross-spectral density matrix from
+array snapshots (:func:`csdm`), and the Bartlett / MVDR ambiguity-surface
+processors (:func:`bartlett`, :func:`mvdr`). Self-contained — KRAKEN modes or a
+``Field``/``ResultStack`` plus numpy, no OASES dependency.
 """
 
 from .scattering import (
@@ -47,9 +57,18 @@ from .target_strength import (
     ts_plate,
     ts_sphere,
 )
+from .matched_field import (
+    synthesize_replica,
+    replica_bank,
+    replica_bank_from_field,
+    csdm,
+    bartlett,
+    mvdr,
+)
 
 from . import (
     scattering, reverberation, sonar_equation, detection, target_strength,
+    matched_field,
 )
 
 __all__ = [
@@ -81,9 +100,16 @@ __all__ = [
     "ts_ellipsoid",
     "ts_cylinder",
     "ts_plate",
+    "synthesize_replica",
+    "replica_bank",
+    "replica_bank_from_field",
+    "csdm",
+    "bartlett",
+    "mvdr",
     "scattering",
     "reverberation",
     "sonar_equation",
     "detection",
     "target_strength",
+    "matched_field",
 ]
