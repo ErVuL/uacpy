@@ -494,10 +494,10 @@ flake8 uacpy/ --exclude=uacpy/third_party,uacpy/uacpy/third_party \
        --count --select=E9,F63,F7,F82 --show-source --statistics
 ```
 
-CI runs on Ubuntu + Python 3.13 (the `requires-python` floor) +
-`--bellhop cxx --oases yes`. macOS, WSL, newer Python minors, the CUDA
-build, and the no-OASES partial install are advertised but not validated
-by CI — test locally before submitting patches that touch those paths.
+CI runs on Ubuntu + Python 3.12 + `--bellhop cxx --oases yes`. macOS,
+WSL, Python 3.10/3.11/3.13, the CUDA build, and the no-OASES partial
+install are advertised but not validated by CI — test locally before
+submitting patches that touch those paths.
 
 ---
 
