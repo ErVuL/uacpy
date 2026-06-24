@@ -55,6 +55,7 @@ from uacpy.visualization.plots import (
     plot_environment,
     plot_bottom_properties,
     plot_ssp,
+    plot_absorption,
     plot_bathymetry_map,
     plot_overview,
     plot_sea_ice_map,
@@ -97,6 +98,7 @@ from uacpy.visualization.plots import (
     plot_wenz,
     plot_weighting,
     plot_source_level,
+    plot_roc,
 )
 
 __all__ = [
@@ -114,6 +116,7 @@ __all__ = [
     'plot_environment',
     'plot_bottom_properties',
     'plot_ssp',
+    'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',
@@ -156,6 +159,7 @@ __all__ = [
     'plot_wenz',
     'plot_weighting',
     'plot_source_level',
+    'plot_roc',
     'style',
     'apply_professional_style',
 ]

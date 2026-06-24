@@ -44,6 +44,7 @@ from uacpy.models import Bellhop, RunMode  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_detection_probability,
     plot_signal_excess,
+    plot_roc,
 )
 
 
@@ -233,6 +234,19 @@ def main():
     plt.savefig(out2, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Saved: {out2}")
+
+    # Receiver operating characteristic (Pd vs Pfa) for a family of detector
+    # deflections d' (detection index d = d'^2), via uacpy.visualization.plot_roc
+    # (which consumes uacpy.sonar.roc_curve). The dashed line marks the
+    # Pfa = 1e-4 operating point used in the panels above.
+    fig, ax = plot_roc([1.0, 2.0, 3.0, 4.0, 5.0],
+                       title='ROC — Gaussian detector')
+    ax.axvline(1e-4, color='k', ls='--', lw=1, alpha=0.6)
+    ax.text(1.1e-4, 0.05, 'Pfa = 1e-4', fontsize=8)
+    out3 = OUTPUT_DIR / 'example_27_roc.png'
+    plt.savefig(out3, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved: {out3}")
     print("\n✓ Example 27 complete\n")
     return 0
 

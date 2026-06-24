@@ -716,6 +716,51 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
     return fig, axes
 
 
+def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
+                    label=None, title=None, figsize=(7.5, 4.5), **mpl_kw):
+    """Volume absorption (dB/km) versus frequency, on log-log axes.
+
+    Either pass pre-computed ``absorption`` (dB/km, same length as
+    ``frequencies`` in **Hz**), or a ``model`` to compute it from the
+    :mod:`uacpy.core.absorption` formulas: ``'thorp'`` or
+    ``'francois_garrison'`` (extra model parameters — ``temperature``,
+    ``salinity``, ``pH``, ``depth`` — go through ``model_kwargs``). Returns
+    ``(fig, ax)`` like the other plotters; call repeatedly with ``ax=`` to
+    overlay several models.
+    """
+    frequencies = np.asarray(frequencies, dtype=float)
+    if absorption is None:
+        if model is None:
+            raise ConfigurationError(
+                "plot_absorption: pass absorption= (dB/km) or model= "
+                "('thorp' / 'francois_garrison').")
+        mk = mpl_kw.pop('model_kwargs', {})
+        m = str(model).lower().replace('-', '_')
+        if m == 'thorp':
+            from uacpy.core.absorption import thorp_db_per_km
+            absorption = thorp_db_per_km(frequencies)
+        elif m in ('francois_garrison', 'fg'):
+            from uacpy.core.absorption import francois_garrison_db_per_km
+            absorption = francois_garrison_db_per_km(frequencies, **mk)
+        else:
+            raise ConfigurationError(
+                f"plot_absorption: unknown model={model!r}; use 'thorp' or "
+                "'francois_garrison'.")
+        if label is None:
+            label = m
+    absorption = np.asarray(absorption, dtype=float)
+    fig, ax = (plt.subplots(1, 1, figsize=figsize) if ax is None
+               else (ax.figure, ax))
+    ax.loglog(frequencies, absorption, label=label, **mpl_kw)
+    ax.set_xlabel("Frequency [Hz]")
+    ax.set_ylabel("Absorption [dB/km]")
+    ax.set_title(title or "Volume absorption", loc="left")
+    ax.grid(which="both", alpha=0.3)
+    if label is not None:
+        ax.legend(fontsize=8)
+    return fig, ax
+
+
 # Professional oceanographic depth ramp (shallow → deep): pale aqua through
 # teal and ocean blue to deep navy. A dependency-free stand-in for cmocean
 # 'deep', and the default for plot_bathymetry_map.

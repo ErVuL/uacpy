@@ -29,7 +29,7 @@ from uacpy.visualization.plots.rays_modes import (
     plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
-    plot_environment, plot_bottom_properties, plot_ssp,
+    plot_environment, plot_bottom_properties, plot_ssp, plot_absorption,
 )
 from uacpy.visualization.plots.maps import (
     plot_bathymetry_map, plot_overview, plot_sea_ice_map,
@@ -48,7 +48,7 @@ from uacpy.visualization.plots.comms import (
     plot_ber_curve,
 )
 from uacpy.visualization.plots.noise import (
-    plot_wenz, plot_weighting, plot_source_level,
+    plot_wenz, plot_weighting, plot_source_level, plot_roc,
 )
 
 
@@ -93,6 +93,7 @@ __all__ = [
     'plot_environment',
     'plot_bottom_properties',
     'plot_ssp',
+    'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',
@@ -135,6 +136,7 @@ __all__ = [
     'plot_wenz',
     'plot_weighting',
     'plot_source_level',
+    'plot_roc',
     'animate_field',
     'save_animation',
     'plot_time_snapshots',

@@ -520,10 +520,11 @@ users can point at their own mirror.
 | **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
 | **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
 
-> A fetched environment carries its provenance: `env.data_sources` lists the
-> sources used, and `uacpy.data.citations(env)` prints the required attribution
-> and citation text for exactly those sources (`uacpy.data.citations()` prints
-> the full catalogue below).
+> A fetched environment carries its provenance per layer: `env.data_sources` is
+> a tuple of `DataProvenance` records, each pairing the dataset (`.source`) with
+> the **actual date and coordinates** that fetch returned. `uacpy.data.citations(env)`
+> prints the required attribution/citation — plus the fetched date/location — for
+> exactly those sources (`uacpy.data.citations()` prints the full catalogue below).
 
 ## 📬 Contact
 

@@ -409,6 +409,28 @@ def scenario_c_unit_conversions():
     print("  ✓ Saved: output/example_12c_unit_conversions.png")
 
 
+def scenario_d_plot_absorption_feature():
+    """Demonstrate the dedicated ``uacpy.visualization.plot_absorption`` plotter,
+    which renders volume absorption (dB/km) vs frequency on log-log axes. It can
+    compute a model itself (``model='thorp'`` / ``'francois_garrison'``) or take
+    a pre-computed dB/km array; pass ``ax=`` to overlay curves."""
+    from uacpy.visualization import plot_absorption
+
+    print("\n[Scenario D] plot_absorption feature")
+    frequencies = np.logspace(1, 6, 500)             # 10 Hz – 1 MHz
+    # Compute-from-model API, overlaid on one axis.
+    fig, ax = plot_absorption(frequencies, model='thorp', label='Thorp')
+    plot_absorption(frequencies, model='francois_garrison', ax=ax,
+                    label='François–Garrison (10 °C, 35 PSU, 100 m)',
+                    model_kwargs=dict(temperature=10.0, salinity=35.0,
+                                      pH=8.0, depth=100.0))
+    ax.set_title('Volume absorption — plot_absorption()', loc='left')
+    plt.savefig(OUTPUT_DIR / 'example_12d_plot_absorption.png', dpi=150,
+                bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_12d_plot_absorption.png'}")
+
+
 def main():
     """
     Run all attenuation model demonstrations.
@@ -426,6 +448,7 @@ def main():
     scenario_a_model_comparison()
     scenario_b_environmental_sensitivity()
     scenario_c_unit_conversions()
+    scenario_d_plot_absorption_feature()
 
     # Summary
     print("\nKey Takeaways:")

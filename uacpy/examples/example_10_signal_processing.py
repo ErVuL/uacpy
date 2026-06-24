@@ -119,14 +119,21 @@ def main():
     # sweep traces a curve whose resolution scales with frequency.
     cqt = constant_q_spectrogram(lfm_sig, fs, fmin=80, fmax=2000,
                                  bins_per_octave=24)
+    # dB re 1 µPa: the chirp peaks near 116 dB, so a 60 dB window (vmin=60)
+    # shows the sweep hot while pushing the weak low-frequency constant-Q
+    # leakage (long windows at low fmin) down to the floor instead of
+    # saturating everything above 60 dB to one colour.
     plot_constant_q_spectrogram(cqt.frequencies, cqt.times, cqt.power,
-                                ax=axes[3, 0], show_colorbar=False, vmax=60)
+                                ax=axes[3, 0], show_colorbar=False,
+                                vmin=60, vmax=120)
+    axes[3, 0].set_title('', loc='left')   # drop the plotter's own left title
     axes[3, 0].set_title('LFM Constant-Q Spectrogram', fontweight='bold')
 
     # Time-averaged constant-Q band power per geometric bin.
     cqp = constant_q_psd(lfm_sig, fs, fmin=80, fmax=2000, bins_per_octave=24)
     plot_constant_q_psd(cqp.frequencies, cqp.power, ax=axes[3, 1], ymin=-20,
                         ymax=80)
+    axes[3, 1].set_title('', loc='left')   # drop the plotter's own left title
     axes[3, 1].set_title('LFM Constant-Q Band Power', fontweight='bold')
 
     plt.tight_layout()

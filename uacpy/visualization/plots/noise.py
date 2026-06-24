@@ -7,6 +7,7 @@ positional argument (a new figure is made when it is ``None``) and returns
 """
 import numpy as np
 from uacpy.visualization.plots._common import fig_ax
+from uacpy.core.exceptions import ConfigurationError
 
 
 
@@ -80,4 +81,40 @@ def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
     ax.grid(which="both", alpha=0.3)
     if label:
         ax.legend()
+    return fig, ax
+
+
+def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
+             label=None, title=None, figsize=(6.5, 5), **mpl_kw):
+    """Receiver Operating Characteristic — detection probability ``P_D`` vs
+    false-alarm probability ``P_F`` (log ``P_F`` axis).
+
+    Provide either a detector **deflection** ``d'`` — a scalar or sequence, one
+    ROC curve per value computed via :func:`uacpy.sonar.roc_curve` (the detection
+    index is ``d = d'^2``) — or pre-computed ``pfa``/``pd`` arrays. Consumes the
+    ``uacpy.sonar`` detection theory; returns ``(fig, ax)`` like the other
+    plotters."""
+    fig, ax = fig_ax(ax, figsize)
+    if pfa is not None and pd is not None:
+        ax.semilogx(np.asarray(pfa, float), np.asarray(pd, float),
+                    label=label, **mpl_kw)
+    elif deflection is not None:
+        from uacpy.sonar import roc_curve
+        defl = np.atleast_1d(np.asarray(deflection, dtype=float))
+        for d in defl:
+            pf, pdc = roc_curve(float(d), n_points=n_points)
+            lab = (label if (label and defl.size == 1)
+                   else f"d'={float(d):.2g} (d={float(d) ** 2:.1f})")
+            ax.semilogx(pf, pdc, label=lab, **mpl_kw)
+    else:
+        raise ConfigurationError(
+            "plot_roc: pass deflection= (d', scalar or sequence) or both "
+            "pfa= and pd= arrays.")
+    ax.set_xlabel("Probability of false alarm  $P_F$")
+    ax.set_ylabel("Probability of detection  $P_D$")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(title or "Receiver operating characteristic", loc="left")
+    ax.grid(which="both", alpha=0.3)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="lower right", fontsize=8)
     return fig, ax
