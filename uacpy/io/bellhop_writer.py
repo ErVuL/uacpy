@@ -393,7 +393,7 @@ def write_bellhop_env_file(
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
                 f" {env.depth:.2f}  {hs.sound_speed:.2f} "
-                f"{shear_speed:.1f} {hs.density:.1f} "
+                f"{shear_speed:.2f} {hs.density:.2f} "
                 f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )
 

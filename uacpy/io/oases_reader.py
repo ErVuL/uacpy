@@ -724,7 +724,10 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         _file_size = f.tell()
         f.seek(cur)
         _bound_counts(filepath, _file_size, 16, nplots=nplots)
-        ranges = r0 + np.arange(nplots) * rspace
+        # r0/rspace are on disk in km (OASES convention); convert to metres at
+        # the reader boundary so the Field carries ranges in metres — matching
+        # read_oast_tl and the package-wide ranges-in-metres invariant.
+        ranges = km_to_m(r0 + np.arange(nplots) * rspace)
 
         nx, lx, mx, dt = _read_fortran_record(f, 'iiif', endian=endian)
         (icdr,) = _read_fortran_record(f, 'i', endian=endian)

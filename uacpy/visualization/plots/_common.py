@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+import functools
 import numpy as np
 from typing import Tuple
 
@@ -11,6 +12,31 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.io.units import m_to_km
 from uacpy.visualization.style import BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
+
+
+def typed_plot_error(plotter):
+    """Decorator: surface a plotter's raw degenerate-input exceptions as a typed
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
+
+    Many plotters pass arrays straight to matplotlib (or index ``[0]``/``[-1]``
+    for axis limits, or reduce with ``.max()``), so empty / mismatched-length /
+    out-of-range / wrong-shape input leaks a bare ``IndexError``/``ValueError``
+    instead of the typed error the result-consuming plotters raise. This
+    converts those (and only those) into a clear ``ConfigurationError`` while
+    letting an already-typed ``ConfigurationError`` pass through unchanged.
+    ``TypeError`` is deliberately not caught — a genuine wrong-type call should
+    surface as itself, not be relabelled an input error."""
+    @functools.wraps(plotter)
+    def wrapper(*args, **kwargs):
+        try:
+            return plotter(*args, **kwargs)
+        except (IndexError, ValueError) as exc:
+            raise ConfigurationError(
+                f"{plotter.__name__}: invalid plot input "
+                f"({type(exc).__name__}: {exc}). Check the arrays are non-empty "
+                f"and their lengths/shapes match the plotter's expected inputs."
+            ) from exc
+    return wrapper
 
 
 def fig_ax(ax, figsize):

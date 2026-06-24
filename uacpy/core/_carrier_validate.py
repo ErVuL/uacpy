@@ -121,14 +121,20 @@ def _coerce_data_sources(value, label: str) -> tuple:
 
 
 def _sanitize_title(name: str) -> str:
-    """Strip newlines/control chars and escape single quotes in a Fortran
-    title field. Acoustics-Toolbox `.env` titles are quote-delimited and
-    column-sensitive; an unsanitized name with a newline silently corrupts
-    the file and the binary parses garbage downstream.
+    """Strip newlines/control chars and remove single quotes from a Fortran
+    title field. Acoustics-Toolbox `.env` titles are single-quote-delimited and
+    column-sensitive; an unsanitized name with a newline silently corrupts the
+    file and the binary parses garbage downstream.
+
+    Single quotes are **removed** (not doubled): the Fortran ``''`` escape that
+    LDIFile (Kraken/Scooter) accepts is rejected by the C++ bellhopcxx title
+    parser (the default Bellhop build), so a name like ``"O'Brien"`` would fail
+    every Bellhop run. The title is a cosmetic label, so dropping the apostrophe
+    is safe for every reader.
     """
     if name is None:
         return 'unnamed'
     s = str(name)
     s = ''.join(ch if (ord(ch) >= 32 and ch != '\x7f') else ' ' for ch in s)
-    s = s.replace("'", "''")
+    s = s.replace("'", "")
     return s.strip() or 'unnamed'

@@ -25,7 +25,8 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
-from uacpy.io._fortran_helpers import read_vector as _read_vector, detect_endian
+from uacpy.io._fortran_helpers import (
+    read_vector as _read_vector, detect_endian, typed_format_error)
 from uacpy.io.units import km_to_m
 
 
@@ -84,6 +85,7 @@ def read_shd_file(filepath: Union[str, Path]):
     )
 
 
+@typed_format_error
 def read_shd_bin(
     filename: str,
     xs: Optional[float] = None,
@@ -416,6 +418,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
+@typed_format_error
 def read_arr_file(filepath: Union[str, Path]):
     """
     Read arrivals file (.arr) from Bellhop
@@ -842,6 +845,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
     return rays
 
 
+@typed_format_error
 def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read 2D sound speed profile file used by BELLHOP.
@@ -1446,6 +1450,7 @@ def rts_to_pressure(
     return p_at_freq, ranges
 
 
+@typed_format_error
 def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read time-series file from acoustic models.

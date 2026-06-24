@@ -11,7 +11,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.visualization.style import RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit, typed_plot_error
 
 
 def plot_rays(
@@ -280,6 +280,7 @@ def plot_mode_wavenumbers(
     return fig, ax
 
 
+@typed_plot_error
 def plot_modes_heatmap(
     modes: Modes,
     n_modes: Optional[int] = None,
@@ -415,6 +416,7 @@ def plot_reflection_coefficient(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@typed_plot_error
 def plot_covariance(
     cov: Covariance,
     ax=None,
@@ -448,6 +450,7 @@ def plot_covariance(
     return fig, ax
 
 
+@typed_plot_error
 def plot_replicas(
     rep: Replicas,
     ax=None,

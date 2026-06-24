@@ -12,7 +12,26 @@ import matplotlib.pyplot as plt
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics import power_to_db
-from uacpy.visualization.plots._common import fig_ax
+from uacpy.core.exceptions import ConfigurationError
+from uacpy.visualization.plots._common import fig_ax, typed_plot_error
+
+
+def _require_image_grid(arr, n0, n1, caller, name0, name1):
+    """Guard an ``imshow`` panel against a coordinate/array mismatch.
+
+    ``imshow`` only reads the first/last coordinate for its ``extent`` and
+    stretches the whole array onto it, so a length mismatch yields a
+    plausible-but-wrong figure with no error (unlike the pcolormesh plotters,
+    which raise). Require the data array to be exactly ``(n0, n1)`` and raise a
+    typed error naming the mismatch otherwise."""
+    a = np.asarray(arr)
+    if a.ndim != 2 or a.shape != (n0, n1):
+        raise ConfigurationError(
+            f"{caller}: data array shape {a.shape} does not match the "
+            f"coordinate lengths ({name0}={n0}, {name1}={n1}). Pass the "
+            f"transform's own output unmodified — a mismatch would silently "
+            f"render a wrong image.")
+    return a
 
 
 def _ref_label(ref):
@@ -42,10 +61,13 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
                 va="top", ha="right")
 
 
+@typed_plot_error
 def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
             vmin=-60, vmax=20, cmap=None, sound_speed=None, title=None,
             figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Image an f-k power panel (dB). Consumes :func:`fk_transform` output."""
+    _require_image_grid(power, len(frequencies), len(wavenumbers),
+                        "plot_fk", "frequencies", "wavenumbers")
     fk_db = power_to_db(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(fk_db, extent=[wavenumbers[0], wavenumbers[-1],
@@ -69,12 +91,14 @@ _RADON_AXIS = {
 }
 
 
+@typed_plot_error
 def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
                vmax=None, cmap="jet", title=None, figsize=(8, 6),
                show_colorbar=True, **mpl_kw):
     """Image ``|R|`` (moveout on x, intercept time on y). Consumes
     :func:`radon_transform` output."""
-    amp = np.abs(np.asarray(R))
+    amp = _require_image_grid(np.abs(np.asarray(R)), len(moveout), len(taus),
+                              "plot_radon", "moveout", "taus")
     xlabel, scale = _RADON_AXIS.get(kind, ("Moveout", 1.0))
     m = np.asarray(moveout) * scale
     vmax = amp.max() if vmax is None else vmax
@@ -102,13 +126,15 @@ def draw_slowness_line(ax, tau_max, sound_speed, *, color="w", ls="--",
                 fontsize=8, va="bottom", ha="left")
 
 
+@typed_plot_error
 def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
               cmap="jet", sound_speed=None, title=None, figsize=(8, 6),
               show_colorbar=True, **mpl_kw):
     """Image a tau-p panel (slowness s/km on x, intercept time on y). Consumes
     :func:`taup_transform` output."""
     p_skm = np.asarray(slownesses) * 1000.0
-    amp = np.abs(np.asarray(taup))
+    amp = _require_image_grid(np.abs(np.asarray(taup)), len(slownesses),
+                              len(taus), "plot_taup", "slownesses", "taus")
     vmax = amp.max() if vmax is None else vmax
     vmin = 0.0 if vmin is None else vmin
     fig, ax = fig_ax(ax, figsize)
@@ -127,6 +153,7 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
 
 # ── Spectral / level estimators (analysis) ──────────────────────────────────
 
+@typed_plot_error
 def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              label=None, ymin=0, ymax=150, title=None, figsize=(10, 6),
              **mpl_kw):
@@ -174,6 +201,7 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              duration=None, band_type="third_octave", ylim=(0, 200),
              title=None, figsize=(10, 6), **mpl_kw):
@@ -196,6 +224,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
 
 # ── Time-frequency (timefreq) ───────────────────────────────────────────────
 
+@typed_plot_error
 def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
                      ref=REFERENCE_PRESSURE_WATER, ymin=1, ymax=None, vmin=0,
                      vmax=200, cmap="jet", title=None, figsize=(10, 6),
@@ -241,6 +270,7 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     return fig, ax
 
 
+@typed_plot_error
 def plot_constant_q_psd(frequencies, power, ax=None, *,
                         ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
                         label=None, ymin=0, ymax=150, title=None,
@@ -350,6 +380,7 @@ def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
 
 # ── Decidecade bands / array spectra / ambiguity ────────────────────────────
 
+@typed_plot_error
 def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
                      ref_label="1 µPa²", figsize=(9, 4), **mpl_kw):
     """Bar plot of decidecade band levels vs centre frequency. Consumes
@@ -370,6 +401,7 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
     return fig, ax
 
 
+@typed_plot_error
 def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
                           title=None, figsize=(8, 4), **mpl_kw):
     """Line plot of a beamformer angular spectrum (Bartlett/MVDR/MUSIC)."""
@@ -387,11 +419,14 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, cmap="jet",
                    title=None, figsize=(8, 6), show_colorbar=True, **mpl_kw):
     """Range-Doppler ambiguity surface ``|chi|``. Consumes
     :func:`ambiguity_function` output."""
-    amp = np.abs(np.asarray(chi))
+    amp = _require_image_grid(np.abs(np.asarray(chi)), len(doppler_hz),
+                              len(delays_s), "plot_ambiguity",
+                              "doppler_hz", "delays_s")
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
                    extent=[delays_s[0] * 1e3, delays_s[-1] * 1e3,
@@ -406,6 +441,7 @@ def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, cmap="jet",
 
 # ── System identification (FRF) ─────────────────────────────────────────────
 
+@typed_plot_error
 def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
              ymax=60, title=None, figsize=(10, 12), **mpl_kw):
     """Transfer-function magnitude (dB) + phase (deg). Consumes ``FRF`` output
@@ -436,6 +472,7 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
     return fig, (ax1, ax2)
 
 
+@typed_plot_error
 def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
                    figsize=(10, 4), **mpl_kw):
     """Coherence vs frequency. Consumes ``FRF`` ``(frequencies, coh)``."""

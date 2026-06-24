@@ -16,8 +16,10 @@ from typing import Dict, Union
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
 from uacpy.core.exceptions import FileFormatError
+from uacpy.io._fortran_helpers import typed_format_error
 
 
+@typed_format_error
 def read_reflection_coefficient(
     filename: str, boundary: str = "bottom"
 ) -> Dict[str, np.ndarray]:

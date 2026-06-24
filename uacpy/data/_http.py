@@ -5,6 +5,8 @@ so each data source (bathymetry, sound speed, …) parses bytes without
 re-implementing network error handling. No third-party HTTP dependency.
 """
 
+import http.client
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -16,9 +18,17 @@ from uacpy._log import log_message
 
 __all__ = ['http_get', 'checked_member_size', 'MAX_MEMBER_BYTES']
 
-# HTTP codes worth retrying (transient rate-limit / availability).
-_RETRY_CODES = (429, 503)
-_MAX_RETRIES = 2
+# HTTP status codes worth retrying (transient rate-limit / availability /
+# gateway hiccups — the urllib3/requests default transient set).
+_RETRY_CODES = (429, 500, 502, 503, 504)
+# Transport-level flakes worth retrying with backoff: connection reset, DNS/
+# socket timeout, a truncated body, a remote disconnect — the Python-side
+# equivalent of the HTTP/2 stream cancels that bite long curl downloads.
+_TRANSIENT_EXC = (
+    urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout,
+    http.client.IncompleteRead, http.client.RemoteDisconnected,
+)
+_MAX_RETRIES = 4
 _MAX_BACKOFF_S = 8.0
 # Only network schemes — never ``file://`` / ``ftp://`` (which urlopen honours),
 # so a user-supplied ``base_url=`` cannot turn into local-file disclosure / SSRF.
@@ -49,10 +59,13 @@ def http_get(
     capped at ``max_bytes`` so a hostile or misdirected host cannot drive an
     unbounded allocation before the bytes reach a parser.
 
-    Retries a bounded number of times on transient rate-limit / availability
-    responses (HTTP 429 / 503), honouring a ``Retry-After`` header when present
-    — so public hosts (e.g. the OpenTopoData ≤1 req/s limit) are handled
-    politely rather than failing the whole fetch.
+    Retries a bounded number of times (``_MAX_RETRIES``) on **both** transient
+    HTTP responses (429 / 500 / 502 / 503 / 504 — honouring a ``Retry-After``
+    header) and transient **transport** failures (connection reset, socket
+    timeout, truncated body, remote disconnect — with exponential backoff). So a
+    public host's rate limit (e.g. OpenTopoData ≤1 req/s) or a mid-stream network
+    hiccup is ridden out rather than failing the whole fetch. Permanent failures
+    (4xx other than 429, an over-size body, a blocked scheme) are not retried.
 
     Parameters
     ----------
@@ -98,9 +111,20 @@ def http_get(
                             "may be rate-limited — retry later or point at a "
                             "self-hosted instance via base_url=.",
             ) from exc
-        except urllib.error.URLError as exc:
+        except _TRANSIENT_EXC as exc:
+            # Connection reset / timeout / truncated body / remote disconnect —
+            # transient transport flakes (the Python-side analogue of an HTTP/2
+            # stream cancel). Retry with exponential backoff before giving up.
+            reason = getattr(exc, 'reason', None) or exc
+            if attempt < _MAX_RETRIES:
+                wait = min(_MAX_BACKOFF_S, 1.5 * (2 ** attempt))
+                log_message(source, f"transport error ({reason}); retrying in "
+                            f"{wait:.1f}s (attempt {attempt + 1}/{_MAX_RETRIES})",
+                            verbose=verbose, level='warning')
+                time.sleep(wait)
+                continue
             raise DataFetchError(
-                f"Could not reach {url}: {exc.reason}.",
+                f"Could not reach {url}: {reason} (after {_MAX_RETRIES} retries).",
                 remediation="Check network connectivity, or pass base_url= for "
                             "a reachable service instance.",
             ) from exc

@@ -139,10 +139,12 @@ def test_main_is_importable_helper(monkeypatch, tmp_path):
 
 
 def test_run_parallel_broken_pool_interactive_message(monkeypatch):
-    """A BrokenProcessPool from an interactive session (no importable __main__)
-    must be translated into a clear, actionable ConfigurationError; a genuine
-    crash (importable __main__) keeps the original BrokenProcessPool. Driven by
-    a fake pool so it's deterministic and needs no real subprocess/binary."""
+    """A BrokenProcessPool is always translated into a clear, typed
+    ConfigurationError: the interactive-session variant (no importable __main__)
+    points at the __main__ footgun, a genuine worker crash (importable __main__)
+    gets the 'died mid-run' message — and in both the original BrokenProcessPool
+    is preserved as ``__cause__`` so nothing is lost. Driven by a fake pool so
+    it's deterministic and needs no real subprocess/binary."""
     import uacpy.parallel as P
     from concurrent.futures.process import BrokenProcessPool
 
@@ -159,8 +161,9 @@ def test_run_parallel_broken_pool_interactive_message(monkeypatch):
         P.run_parallel([job], start_method='spawn')
 
     monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
-    with pytest.raises(BrokenProcessPool):
+    with pytest.raises(uacpy.ConfigurationError, match="died mid-run") as ei:
         P.run_parallel([job], start_method='spawn')
+    assert isinstance(ei.value.__cause__, BrokenProcessPool)       # original kept
 
 
 def test_job_defaults():

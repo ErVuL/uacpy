@@ -6,12 +6,13 @@ positional argument (a new figure is made when it is ``None``) and returns
 ``(fig, ax)`` — the same convention as :func:`plot_field`.
 """
 import numpy as np
-from uacpy.visualization.plots._common import fig_ax
+from uacpy.visualization.plots._common import fig_ax, typed_plot_error
 from uacpy.core.exceptions import ConfigurationError
 
 
 
 
+@typed_plot_error
 def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
               ymax=146, figsize=(8, 5), **mpl_kw):
     """Plot a Wenz ambient-noise spectrum. Consumes a :class:`WenzNoise`
@@ -68,6 +69,7 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
     """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre)."""
@@ -84,6 +86,7 @@ def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
              label=None, title=None, figsize=(6.5, 5), **mpl_kw):
     """Receiver Operating Characteristic — detection probability ``P_D`` vs

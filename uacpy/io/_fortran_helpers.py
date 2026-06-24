@@ -6,6 +6,7 @@ record-length-prefixed vectors, source/receiver depth blocks, bearing/angle
 arrays. They are private to ``uacpy.io`` and not part of the public surface.
 """
 
+import functools
 import struct
 import warnings
 from typing import Tuple
@@ -13,6 +14,35 @@ from typing import Tuple
 import numpy as np
 
 from uacpy.core.exceptions import FileFormatError
+
+
+def typed_format_error(reader):
+    """Decorator: surface a reader's raw parse/truncation exceptions as a typed
+    :class:`~uacpy.core.exceptions.FileFormatError`.
+
+    The file-format readers do ``int()``/``float()`` on tokens, ``next()`` on
+    line iterators, and index binary records — so a malformed or truncated file
+    leaks a bare ``ValueError``/``IndexError``/``StopIteration``/``struct.error``
+    instead of the typed, remediated error the rest of ``io`` raises. This
+    converts those (and only those) while letting an already-typed
+    ``FileFormatError``/``ConfigurationError`` pass through unchanged.
+    """
+    @functools.wraps(reader)
+    def wrapper(*args, **kwargs):
+        try:
+            return reader(*args, **kwargs)
+        except (ValueError, IndexError, KeyError, StopIteration,
+                struct.error) as exc:
+            target = args[0] if args else '<stream>'
+            raise FileFormatError(
+                f"{reader.__name__}: could not parse {target} — the file is "
+                f"malformed, truncated, or not the expected format "
+                f"({type(exc).__name__}: {exc}).",
+                remediation="Verify the file was produced by the matching "
+                            "model/writer and downloaded completely; a partial "
+                            "file or a wrong format triggers this.",
+            ) from exc
+    return wrapper
 
 
 _ENDIAN_WARN_EMITTED = False

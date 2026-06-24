@@ -184,8 +184,13 @@ def run_parallel(
     raise_on_error : bool, default True
         If True, the first failing job re-raises; jobs not yet started are
         cancelled, but jobs already running finish before the pool shuts down.
-        If False, failures are collected in ``ParallelResult.errors`` and the
-        other jobs still return.
+        If False, **clean** per-job failures (any ``Exception`` raised in a
+        worker — bad env, unsupported mode, a model that exits non-zero) are
+        collected in ``ParallelResult.errors`` and the other jobs still return.
+        A **hard** worker crash (a native binary segfaulting or being OOM-killed)
+        is different: it breaks the whole ``ProcessPoolExecutor``, so the
+        remaining jobs cannot complete — that case always raises a typed error
+        regardless of ``raise_on_error`` (it cannot be isolated to one slot).
     start_method : str, default 'spawn'
         Pool start method (``'spawn'`` / ``'forkserver'`` / ``'fork'``).
         Defaults to ``'spawn'``: ``'fork'`` is unsafe here because uacpy is
@@ -242,6 +247,13 @@ def run_parallel(
                 i = future_to_idx[future]
                 try:
                     results[i] = future.result()
+                except BrokenProcessPool:
+                    # A worker died hard (native segfault / OOM-kill) — the pool
+                    # is now broken and every outstanding job is unrecoverable.
+                    # Unlike a clean per-job exception this cannot be isolated to
+                    # one slot, so re-raise to the handler below instead of
+                    # quietly stuffing the opaque error into every errors[i].
+                    raise
                 except Exception as exc:  # noqa: BLE001 — surface or collect per policy
                     if raise_on_error:
                         for f in future_to_idx:
@@ -264,7 +276,17 @@ def run_parallel(
                 f"`if __name__ == '__main__':`), or pass start_method='fork' "
                 f"(note: fork can deadlock a heavily-threaded process)."
             ) from exc
-        raise
+        # Otherwise a worker died mid-run (a native binary segfaulted or was
+        # OOM-killed). ProcessPoolExecutor cannot isolate this — the whole pool
+        # is gone — so the batch aborts regardless of raise_on_error, with a
+        # clear typed error rather than an opaque BrokenProcessPool in every slot.
+        raise ConfigurationError(
+            "run_parallel: a worker process died mid-run — most likely a native "
+            "model binary segfaulted or was OOM-killed. This breaks the whole "
+            "pool, so the remaining jobs could not complete. Re-run the "
+            "suspect job on its own to see its error, lower n_workers if "
+            "memory-bound, or check that job's model inputs."
+        ) from exc
 
     labels = [job.label if job.label is not None else i for i, job in enumerate(jobs)]
     return ParallelResult(results, errors, labels, coordinate_name)

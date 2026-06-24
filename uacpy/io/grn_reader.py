@@ -27,10 +27,11 @@ from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import Field
-from uacpy.io._fortran_helpers import detect_endian
+from uacpy.io._fortran_helpers import detect_endian, typed_format_error
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
+@typed_format_error
 def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read a SCOOTER / SPARC Green's function file (``.grn``).

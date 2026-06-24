@@ -12,7 +12,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
     BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE, _blend,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, typed_plot_error
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
 
@@ -716,6 +716,7 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
     return fig, axes
 
 
+@typed_plot_error
 def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
                     label=None, title=None, figsize=(7.5, 4.5), **mpl_kw):
     """Volume absorption (dB/km) versus frequency, on log-log axes.

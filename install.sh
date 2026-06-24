@@ -607,6 +607,21 @@ check_curl() {
     fail_missing "curl" "$(hint_for curl curl curl curl)"
 }
 
+# One resilient-download policy shared by EVERY curl fetch (OASES + each data
+# grid). For multi-GB single streams this matters:
+#   --http1.1          HTTP/2 mid-stream CANCELs (curl exit 92) on long transfers
+#   -C -               resume a partial `-o` file across retries AND re-runs,
+#                      instead of restarting a 7.5 GB download from zero
+#   --retry-all-errors plain --retry ignores transport errors like exit 92; this
+#   --retry 8 / delay  retries them with a fixed backoff
+#   --connect-timeout  bound the connect phase so a dead host fails fast
+# Usage: robust_curl <url> <output-path> [extra curl args…]  (extras precede URL).
+robust_curl() {
+    local url="$1" out="$2"; shift 2
+    curl -fL --http1.1 --retry 8 --retry-delay 5 --retry-all-errors \
+         --connect-timeout 30 -C - -o "$out" "$@" "$url"
+}
+
 # tar (required only when extracting the OASES tarball)
 check_tar() {
     if command_exists tar; then
@@ -942,10 +957,11 @@ if [ ! -d "$OASES_DIR" ]; then
     OASES_TMP="$(mktemp -d)"
     OASES_TARBALL="$OASES_TMP/oases.tar.gz"
 
-    # --proto-redir =https blocks a redirect from downgrading to HTTP.
+    # --proto-redir =https blocks a redirect from downgrading to HTTP (kept as an
+    # extra arg through the shared resilient-download policy).
     set +e
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
-         -fSL "$OASES_URL" -o "$OASES_TARBALL"
+    robust_curl "$OASES_URL" "$OASES_TARBALL" \
+        --proto '=https' --proto-redir '=https' --tlsv1.2
     OASES_CURL_RC=$?
     set -e
 
@@ -1464,9 +1480,11 @@ download_gebco() {
     echo -e "${BLUE}Downloading GEBCO 2025 grid (~7.5 GB) — this is large...${NC}"
     # Download to a temp name and rename only on success (atomic; a partial file
     # never looks like a valid cached grid).
+    # Keep the partial ``.part`` on failure so a re-run resumes (robust_curl's
+    # ``-C -``) instead of restarting 7.5 GB from zero.
     local tmp="${dir}/GEBCO_2025.nc.part"
-    if ! curl -fL --retry 3 -o "$tmp" "$GEBCO_NC_URL"; then
-        echo -e "${RED}✗ GEBCO download failed${NC}"; rm -f "$tmp"
+    if ! robust_curl "$GEBCO_NC_URL" "$tmp"; then
+        echo -e "${RED}✗ GEBCO download failed — re-run --data gebco to resume from the partial file${NC}"
         NOTE_DATA="${NOTE_DATA} gebco:failed"; return 1
     fi
     mv -f "$tmp" "${dir}/GEBCO_2025.nc"
@@ -1484,7 +1502,7 @@ download_woa23() {
             fname="woa23_${WOA_DECADE}_${var}${p}_${WOA_CODE}.nc"
             if [[ "$FORCE" != "1" && -s "${dir}/${fname}" ]]; then continue; fi
             url="${base}/${folder}/netcdf/${WOA_DECADE}/${WOA_RESOLUTION}/${fname}"
-            if ! curl -fL --retry 3 -o "${dir}/${fname}" "$url"; then
+            if ! robust_curl "$url" "${dir}/${fname}"; then
                 echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}"; ok=0
             fi
         done
@@ -1569,7 +1587,7 @@ download_globsed() {
     # curl, not python: NCEI throttles urllib to a trickle but serves curl fast.
     echo -e "${BLUE}Downloading GlobSed v3 sediment thickness (~11 MB)...${NC}"
     local tmp="${dir}/GlobSed-v3.nc.part"
-    if ! curl -fL --retry 3 -o "$tmp" "$GLOBSED_NC_URL"; then
+    if ! robust_curl "$GLOBSED_NC_URL" "$tmp"; then
         echo -e "${RED}✗ GlobSed download failed${NC}"; rm -f "$tmp"
         NOTE_DATA="${NOTE_DATA} globsed:failed"; return 1
     fi

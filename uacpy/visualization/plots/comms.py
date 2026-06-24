@@ -9,11 +9,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from uacpy.comms.metrics import ber_theory
-from uacpy.visualization.plots._common import fig_ax
+from uacpy.visualization.plots._common import fig_ax, typed_plot_error
 
 
 
 
+@typed_plot_error
 def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
                  **mpl_kw):
     """Two-panel channel view: |h[n]| (delay) and |H(f)| (frequency response).
@@ -43,6 +44,7 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     return fig, ax
 
 
+@typed_plot_error
 def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
                            figsize=(7, 4), **mpl_kw):
     """Doppler-scale ambiguity curve (peak correlation vs scale)."""

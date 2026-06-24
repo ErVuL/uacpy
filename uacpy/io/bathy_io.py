@@ -21,7 +21,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.io.units import km_to_m, m_to_km
-from uacpy.io._fortran_helpers import read_vector
+from uacpy.io._fortran_helpers import read_vector, typed_format_error
 
 
 def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
@@ -143,6 +143,7 @@ def read_boundary_3d(
     return x_bot, y_bot, z_bot, n_x, n_y
 
 
+@typed_format_error
 def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read bathymetry data from BELLHOP .bty file.
@@ -249,6 +250,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     return bty, bty_type
 
 
+@typed_format_error
 def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read altimetry data from BELLHOP .ati file.
