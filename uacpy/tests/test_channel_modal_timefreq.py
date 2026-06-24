@@ -93,6 +93,8 @@ class TestTimeFrequency:
         f0 = 300.0
         x = np.cos(2 * np.pi * f0 * np.arange(2000) / FS)
         inst = instantaneous_frequency(x, FS)
+        # np.gradient gives a centred, time-aligned estimate of length len(x).
+        assert inst.shape == x.shape
         assert np.median(inst[50:-50]) == pytest.approx(f0, abs=2.0)
 
     def test_wigner_ville_localises_tone(self):
@@ -101,6 +103,62 @@ class TestTimeFrequency:
         t, f, W = wigner_ville(x, FS)
         peak_f = f[np.argmax(W.mean(axis=1))]
         assert peak_f == pytest.approx(f0, abs=FS / 256)
+
+    def test_wigner_ville_nfft_grows_frequency_axis(self):
+        x = np.cos(2 * np.pi * 250.0 * np.arange(256) / FS)
+        t, f, W = wigner_ville(x, FS, nfft=512)
+        assert W.shape == (512, 256) and f.size == 512
+        assert f[np.argmax(W.mean(axis=1))] == pytest.approx(250.0, abs=FS / 512)
+
+    def test_wigner_ville_smoothing_suppresses_cross_terms(self):
+        # Two tones produce a spurious cross-term midway between them in the
+        # plain WVD; smoothed-pseudo-WVD windows attenuate it.
+        nfft_n = 256
+        nn = np.arange(nfft_n)
+        x = np.cos(2 * np.pi * 150.0 * nn / FS) + np.cos(2 * np.pi * 400.0 * nn / FS)
+        _, f, W_plain = wigner_ville(x, FS)
+        _, _, W_smooth = wigner_ville(x, FS, freq_window=65, time_window=33)
+        mid = np.argmin(np.abs(f - 275.0))   # cross-term location
+        band = slice(mid - 2, mid + 3)
+        # Cross-terms oscillate in time, so use magnitude (not a time-mean that
+        # would cancel them); smoothing damps that oscillation.
+        cross_plain = np.abs(W_plain[band]).mean()
+        cross_smooth = np.abs(W_smooth[band]).mean()
+        assert cross_smooth < 0.5 * cross_plain
+
+    def test_wigner_ville_nfft_truncation_raises(self):
+        with pytest.raises(ConfigurationError):
+            wigner_ville(np.zeros(256), FS, nfft=128)
+
+    def test_wigner_ville_time_marginal_and_energy(self):
+        # Defining WVD property (convention-independent): sum_f W(t,f) is
+        # exactly proportional to the instantaneous power |z(t)|^2, and the
+        # total integrates to the signal energy — validates the normalisation.
+        n = 256
+        t = np.arange(n) / FS
+        x = np.cos(2 * np.pi * 0.1 * FS * t) * np.exp(-((t - t[n // 3]) / 0.04) ** 2)
+        power = np.abs(analytic_signal(x)) ** 2
+        _, _, W = wigner_ville(x, FS)
+        m = power > 1e-6 * power.max()
+        ratio = W.sum(axis=0)[m] / power[m]
+        assert np.allclose(ratio, n, rtol=1e-9)            # constant = N exactly
+        assert np.isclose(W.sum(), n * power.sum(), rtol=1e-9)   # energy
+
+    def test_spwvd_smoothing_preserves_invariants(self):
+        # Signal localised to the window centre so the time-smoothing window is
+        # never edge-clipped (its energy conservation is then exact).
+        n = 256
+        t = np.arange(n) / FS
+        x = np.cos(2 * np.pi * 0.12 * FS * t) * np.exp(-((t - t[n // 2]) / 0.0025) ** 2)
+        power = np.abs(analytic_signal(x)) ** 2
+        m = power > 1e-6 * power.max()
+        _, _, W = wigner_ville(x, FS)
+        # pseudo-WVD: the lag window has h(0)=1, so the time marginal is intact
+        _, _, Wp = wigner_ville(x, FS, freq_window=65)
+        assert np.allclose(Wp.sum(axis=0)[m] / power[m], n, rtol=1e-9)
+        # smoothed-pseudo-WVD: the (Σg-normalised) time window conserves energy
+        _, _, Ws = wigner_ville(x, FS, freq_window=65, time_window=33)
+        assert np.isclose(Ws.sum(), W.sum(), rtol=1e-9)
 
     def test_cepstrum_finite(self):
         rng = np.random.default_rng(0)
@@ -127,6 +185,30 @@ class TestTimeFrequency:
         lo, hi = 20, n // 2
         assert lo + np.argmax(c[lo:hi]) == pytest.approx(d, abs=1)
 
+    def test_cepstrum_window_nfft_lifter(self):
+        rng = np.random.default_rng(1)
+        n = 512
+        x = rng.standard_normal(n)
+        c = cepstrum(x, window="hann", nfft=1024)
+        assert c.size == 1024 and np.all(np.isfinite(c))
+        # Long-pass lifter zeros the low quefrencies (spectral envelope).
+        lifted = cepstrum(x, lifter=-10)
+        assert np.allclose(lifted[:10], 0.0) and lifted[0] == 0.0
+
+    def test_cepstrum_echo_survives_longpass_lifter(self):
+        rng = np.random.default_rng(0)
+        n = 2048
+        x = rng.standard_normal(n)
+        d = 120
+        x[d:] += 0.8 * x[:-d]
+        c = cepstrum(x, lifter=-30)  # remove smooth envelope, keep echo peak
+        lo, hi = 40, n // 2
+        assert lo + np.argmax(c[lo:hi]) == pytest.approx(d, abs=1)
+
+    def test_cepstrum_nfft_truncation_raises(self):
+        with pytest.raises(ConfigurationError):
+            cepstrum(np.zeros(512), nfft=256)
+
 
 class TestCWT:
     @pytest.mark.parametrize("wavelet", ["morlet", "paul", "dog"])
@@ -139,7 +221,7 @@ class TestCWT:
     def test_shape_and_explicit_freqs(self):
         x = np.cos(2 * np.pi * 100 * np.arange(1024) / FS)
         freqs = np.array([50.0, 100.0, 200.0])
-        f, W = cwt(x, FS, freqs=freqs)
+        f, W = cwt(x, FS, frequencies=freqs)
         assert W.shape == (3, 1024)
         assert np.iscomplexobj(W)
 

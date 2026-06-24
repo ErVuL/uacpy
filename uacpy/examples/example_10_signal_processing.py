@@ -7,6 +7,7 @@ OBJECTIVE: Demonstrate signal processing capabilities in UACPY
 
 FEATURES: ✓ Signal generation  ✓ Chirps and wavelets
           ✓ M-sequences  ✓ Basic waveforms
+          ✓ Constant-Q spectrogram & band power (Brown 1991)
 """
 
 import sys
@@ -18,9 +19,15 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from uacpy.acoustic_signal.generation import (  # noqa: E402
-    lfm_chirp, hfm_chirp, ricker_wavelet,
-    gaussian_pulse, mseq
+from uacpy.acoustic_signal.waveforms import (  # noqa: E402
+    lfm_chirp, hfm_chirp, ricker_wavelet, gaussian_pulse,
+)
+from uacpy.acoustic_signal.sequences import mseq  # noqa: E402
+from uacpy.acoustic_signal import (  # noqa: E402
+    constant_q_spectrogram, constant_q_psd,
+)
+from uacpy.visualization import (  # noqa: E402
+    plot_constant_q_spectrogram, plot_constant_q_psd,
 )
 
 
@@ -35,14 +42,14 @@ def main():
     # LFM chirp
     fs = 10000
     duration = 0.5
-    lfm_sig, t_lfm = lfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
+    lfm_sig, t_lfm = lfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
 
     # HFM chirp
-    hfm_sig, t_hfm = hfm_chirp(fmin=100, fmax=1000, T=duration, sample_rate=fs)
+    hfm_sig, t_hfm = hfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
 
     # Ricker wavelet
     t_ricker = np.linspace(0, duration, int(fs * duration))
-    ricker_sig = ricker_wavelet(t_ricker, F=500)
+    ricker_sig = ricker_wavelet(t_ricker, frequency=500)
 
     # Gaussian pulse
     t_gauss = np.linspace(0, duration, int(fs * duration))
@@ -54,7 +61,7 @@ def main():
     print("  ✓ Generated 5 signal types")
 
     # Plot results
-    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(4, 2, figsize=(14, 13))
 
     # LFM chirp
     ax = axes[0, 0]
@@ -107,6 +114,27 @@ def main():
     ax.grid(True, alpha=0.3)
     # Set xlim to show relevant frequency range (2x chirp bandwidth)
     ax.set_xlim([0, min(2000, freqs[-1])])
+
+    # Constant-Q spectrogram of the LFM chirp (log-frequency, Brown 1991): the
+    # sweep traces a curve whose resolution scales with frequency.
+    cqt = constant_q_spectrogram(lfm_sig, fs, fmin=80, fmax=2000,
+                                 bins_per_octave=24)
+    # dB re 1 µPa: the chirp peaks near 116 dB, so a 60 dB window (vmin=60)
+    # shows the sweep hot while pushing the weak low-frequency constant-Q
+    # leakage (long windows at low fmin) down to the floor instead of
+    # saturating everything above 60 dB to one colour.
+    plot_constant_q_spectrogram(cqt.frequencies, cqt.times, cqt.power,
+                                ax=axes[3, 0], show_colorbar=False,
+                                vmin=60, vmax=120)
+    axes[3, 0].set_title('', loc='left')   # drop the plotter's own left title
+    axes[3, 0].set_title('LFM Constant-Q Spectrogram', fontweight='bold')
+
+    # Time-averaged constant-Q band power per geometric bin.
+    cqp = constant_q_psd(lfm_sig, fs, fmin=80, fmax=2000, bins_per_octave=24)
+    plot_constant_q_psd(cqp.frequencies, cqp.power, ax=axes[3, 1], ymin=-20,
+                        ymax=80)
+    axes[3, 1].set_title('', loc='left')   # drop the plotter's own left title
+    axes[3, 1].set_title('LFM Constant-Q Band Power', fontweight='bold')
 
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / 'example_10_signal_processing.png', dpi=150, bbox_inches='tight')

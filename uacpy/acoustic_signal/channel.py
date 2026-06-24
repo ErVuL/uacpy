@@ -81,21 +81,21 @@ def simulate_reception(transmit, amplitudes, delays_s, sample_rate: float):
     return t, y
 
 
-def impulse_response_from_transfer_function(H, freqs_hz, sample_rate: float,
+def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
                                             n_samples: int = None):
     """Real impulse response from a one-sided transfer function ``H(f)``.
 
     Resamples ``H`` onto a uniform DFT grid ``[0, fs/2]`` and inverse-transforms.
-    ``freqs_hz`` must be non-negative and increasing.
+    ``frequencies`` must be non-negative and increasing.
 
     Returns ``(t, h)``.
     """
-    f = np.asarray(freqs_hz, dtype=float)
+    f = np.asarray(frequencies, dtype=float)
     Hc = np.asarray(H, dtype=complex)
     if f.ndim != 1 or f.shape != Hc.shape:
-        raise ConfigurationError("impulse_response_from_transfer_function: H and freqs_hz shapes differ")
+        raise ConfigurationError("impulse_response_from_transfer_function: H and frequencies shapes differ")
     if np.any(np.diff(f) <= 0) or f[0] < 0:
-        raise ConfigurationError("freqs_hz must be non-negative and strictly increasing")
+        raise ConfigurationError("frequencies must be non-negative and strictly increasing")
     fs = float(sample_rate)
     if n_samples is None:
         n_samples = 2 * (f.size - 1) if f.size > 1 else 2

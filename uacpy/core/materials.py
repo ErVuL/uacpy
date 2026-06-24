@@ -17,8 +17,8 @@ shear_attenuation
               Shear attenuation ``α_s`` (dB/λ_s).
 porosity      Volume fraction of pore water (%); ``None`` for rocks.
 grain_size_phi
-              Mean grain size on the Wentworth ϕ scale (used by
-              Bellhop/Kraken's ``acoustic_type='grain-size'`` bottom);
+              Mean grain size on the Wentworth ϕ scale (informational metadata,
+              and the input to ``BoundaryProperties.from_grain_size``);
               ``None`` for consolidated rocks where ϕ is not defined.
 roughness     RMS interface roughness (m); 0 unless overridden.
 ============= ================================================

@@ -19,15 +19,47 @@ from pathlib import Path
 from typing import Dict, Tuple, Union
 import numpy as np
 import struct
-import warnings
 
-from uacpy.core.exceptions import UnsupportedFeatureError
+from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
     read_fortran_record_marker as _read_fortran_record_marker,
     read_fortran_record as _read_fortran_record,
     detect_endian,
 )
 from uacpy.io.units import km_to_m
+
+
+def _bound_counts(filepath, file_size, min_item_bytes, **counts):
+    """Reject header counts that cannot be satisfied by ``file_size``.
+
+    Binary OASES readers size NumPy allocations directly off integer
+    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
+    hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
+    otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
+    validated. The smallest a single data item can occupy on disk is
+    ``min_item_bytes``, so no count — nor their product — can exceed
+    ``file_size // min_item_bytes``. Raise :class:`FileFormatError` on
+    overflow rather than attempting the allocation.
+    """
+    max_items = file_size // max(min_item_bytes, 1)
+    product = 1
+    for name, val in counts.items():
+        if val < 0:
+            raise FileFormatError(
+                f"{filepath}: negative header count {name}={val}."
+            )
+        if val > max_items:
+            raise FileFormatError(
+                f"{filepath}: header count {name}={val} is implausible for "
+                f"a {file_size}-byte file (max {max_items} items)."
+            )
+        product *= val
+    if product > max_items:
+        raise FileFormatError(
+            f"{filepath}: header counts {dict(counts)} imply {product} data "
+            f"items, implausible for a {file_size}-byte file "
+            f"(max {max_items})."
+        )
 
 
 def read_oast_tl(
@@ -107,7 +139,7 @@ def read_oast_tl(
     # without .plp we have no way to know what range each TL value
     # corresponds to. Raise rather than fabricate.
     if not plp_file.exists():
-        raise OSError(
+        raise FileFormatError(
             f"OAST .plp grid file not found: {plp_file}. "
             "Without it the native range grid cannot be reconstructed."
         )
@@ -132,22 +164,21 @@ def read_oast_tl(
     tl_values = np.array(tl_values)
 
     if len(tl_values) == 0:
-        raise OSError(f"No TL data found in {tl_data_file}")
+        raise FileFormatError(f"No TL data found in {tl_data_file}")
 
     # OAST outputs data as: all ranges for depth 1, all ranges for depth 2, etc.
     expected_total = n_depths_oast * n_ranges_oast
 
     if len(tl_values) < expected_total:
         missing = expected_total - len(tl_values)
-        warnings.warn(
+        raise FileFormatError(
             f"Truncated OAST output: got {len(tl_values)} TL values, "
             f"expected {expected_total} "
             f"(n_depths={n_depths_oast}, n_ranges={n_ranges_oast}); "
-            f"padding {missing} cells with the last sample. File: "
-            f"{tl_data_file}",
-            UserWarning, stacklevel=2,
+            f"{missing} cells missing. A truncated run (crash, disk-full, "
+            f"killed job) cannot be completed without fabricating TL. "
+            f"File: {tl_data_file}"
         )
-        tl_values = np.pad(tl_values, (0, missing), mode='edge')
 
     tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
 
@@ -206,7 +237,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
                     pass
 
         if n_ranges is None or xoff is None or dx is None:
-            raise ValueError(
+            raise FileFormatError(
                 f"Could not parse grid from .plp file: "
                 f"n_ranges={n_ranges}, xoff={xoff}, dx={dx}"
             )
@@ -220,8 +251,10 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
             'range_increment_km': dx
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to parse OAST .plp file: {e}") from e
+        raise FileFormatError(f"Failed to parse OAST .plp file: {e}") from e
 
 
 def read_oasn_covariance(
@@ -297,6 +330,13 @@ def read_oasn_covariance(
             f.seek(4 * recl)
             n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
 
+            # Bound the n_freq*n_rcv*n_rcv covariance allocation against the
+            # file size before the strided read / ljust below.
+            f.seek(0, 2)
+            file_size = f.tell()
+            _bound_counts(filepath, file_size, recl,
+                          n_rcv=n_rcv, n_freq=n_freq, n_rcv2=n_rcv)
+
             # Record 6: IZERO, IZERO (dummy)
             # Skip
 
@@ -332,7 +372,7 @@ def read_oasn_covariance(
             # still covers ``n_total`` records.
             buf = f.read(n_total * recl)
             if len(buf) < (n_total - 1) * recl + 8:
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: truncated covariance data — expected "
                     f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
                 )
@@ -354,8 +394,10 @@ def read_oasn_covariance(
             'covariance': covariance
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASN covariance file {filepath}: {e}") from e
+        raise FileFormatError(f"Failed to read OASN covariance file {filepath}: {e}") from e
 
 
 def read_oasn_replicas(
@@ -444,6 +486,17 @@ def read_oasn_replicas(
             y_min, y_max, n_y = struct.unpack(endian + 'ffi', f.read(12))
             _read_fortran_record_marker(f, endian=endian)
 
+            # Bound every header count before the receiver / replica arrays
+            # are sized off them. Each replica record is 16 bytes on disk
+            # (2 markers + re + im); use that as the per-item floor for the
+            # (n_freq, n_z, n_x, n_y, n_rcv) product.
+            cur = f.tell()
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(cur)
+            _bound_counts(filepath, file_size, 16,
+                          n_freq=n_freq, n_z=n_z, n_x=n_x, n_y=n_y, n_rcv=n_rcv)
+
             # Read receiver positions and properties
             receiver_positions = np.zeros((n_rcv, 3))
             receiver_types = np.zeros(n_rcv, dtype=int)
@@ -459,11 +512,6 @@ def read_oasn_replicas(
                 receiver_types[i] = itype
                 receiver_gains[i] = gain
 
-            # Read replicas
-            replicas = np.zeros(
-                (n_freq, n_z, n_x, n_y, n_rcv), dtype=np.complex64,
-            )
-
             # Each replica is a Fortran sequential record
             # ``[marker][re im][marker]`` (16 bytes), written contiguously in
             # (ifreq, iz, ix, iy, ircv) order with ircv innermost. Read the
@@ -477,12 +525,12 @@ def read_oasn_replicas(
             ])
             flat = np.fromfile(f, dtype=rep_dt, count=n_total)
             if flat.size < n_total:
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: truncated replica data — expected "
                     f"{n_total} records, got {flat.size}"
                 )
             if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
-                raise OSError(
+                raise FileFormatError(
                     f"{filepath}: unexpected replica record layout — "
                     "Fortran record markers are not the expected 8-byte "
                     "payload length"
@@ -512,8 +560,10 @@ def read_oasn_replicas(
             'replicas': replicas
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASN replica file {filepath}: {e}") from e
+        raise FileFormatError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
 def read_oasp_trf(
@@ -579,7 +629,7 @@ def read_oasp_trf(
         errors.append(('ascii', e))
 
     err_msg = '\n'.join(f"  {k}: {v}" for k, v in errors)
-    raise OSError(
+    raise FileFormatError(
         f"Failed to read OASP transfer function file {filepath}.\n{err_msg}"
     )
 
@@ -621,7 +671,7 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
     with open(filepath, 'rb') as f:
         probe = f.read(4)
         if len(probe) < 4:
-            raise OSError(
+            raise FileFormatError(
                 f"Cannot open {filepath} as Fortran-unformatted TRF: too short"
             )
         endian = detect_endian(probe, source=f'read_oasp_trf:{filepath}')
@@ -629,12 +679,12 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         try:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:
-            raise OSError(
+            raise FileFormatError(
                 f"Cannot open {filepath} as Fortran-unformatted TRF: {e}"
             ) from e
         fileid = fileid_raw.decode('ascii', errors='ignore').strip()
         if 'PULSETRF' not in fileid:
-            raise OSError(
+            raise FileFormatError(
                 f"Expected 'PULSETRF' in first record, got {fileid!r}"
             )
 
@@ -669,7 +719,15 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 receiver_depths = np.array([rd])
 
         r0, rspace, nplots = _read_fortran_record(f, 'ffi', endian=endian)
-        ranges = r0 + np.arange(nplots) * rspace
+        cur = f.tell()
+        f.seek(0, 2)
+        _file_size = f.tell()
+        f.seek(cur)
+        _bound_counts(filepath, _file_size, 16, nplots=nplots)
+        # r0/rspace are on disk in km (OASES convention); convert to metres at
+        # the reader boundary so the Field carries ranges in metres — matching
+        # read_oast_tl and the package-wide ranges-in-metres invariant.
+        ranges = km_to_m(r0 + np.arange(nplots) * rspace)
 
         nx, lx, mx, dt = _read_fortran_record(f, 'iiif', endian=endian)
         (icdr,) = _read_fortran_record(f, 'i', endian=endian)
@@ -703,7 +761,7 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 data_fmt = f'{2 * nout}d'      # double-precision COMPLEX*16
                 out_dtype = np.complex128
             elif rec_bytes != 2 * nout * 4:
-                raise OSError(
+                raise FileFormatError(
                     f"OASP .trf data record is {rec_bytes} bytes; expected "
                     f"{2 * nout * 4} (COMPLEX*8) or {2 * nout * 8} "
                     f"(COMPLEX*16) for nout={nout} (wrong endianness or "
@@ -711,15 +769,41 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                 )
         f.seek(pos)
 
+        # uacpy reads the axisymmetric, single-output-parameter OASP case.
+        # The writer nests DO IS=1,ISROW / DO M=1,MSUFT / DO JRH / DO JRV with
+        # NOUT components per record (oasiun23.f:305-311); for isrow>1, msuft>1
+        # or nout>1 the (nf, nplots, nrd)/first-component layout below would
+        # silently collapse slabs/parameters, so reject those rather than
+        # return wrong data.
+        if isrow != 1 or msuft != 1:
+            raise FileFormatError(
+                f"OASP .trf has isrow={isrow}, msuft={msuft}: multi-source-row "
+                f"or azimuthal (3D bearing) transfer functions are not "
+                f"supported — uacpy reads the axisymmetric single-slab case "
+                f"only."
+            )
+        if nout != 1:
+            raise FileFormatError(
+                f"OASP .trf carries nout={nout} output parameters; uacpy reads "
+                f"a single component (normal stress / pressure). Use a "
+                f"single-output OASP option string."
+            )
+
+        # Bound the (nf, nplots, nrd) allocation against the file size before
+        # sizing it off these header-derived counts. Each data record holds
+        # 2*nout floats plus two 4-byte Fortran markers, so ≥ 16 bytes.
+        cur = f.tell()
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(cur)
+        _bound_counts(filepath, file_size, 16, nf=nf, nplots=nplots, nrd=nrd)
+
         transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
         for j in range(nf):
-            for _is in range(max(1, isrow)):
-                for _m in range(max(1, msuft)):
-                    for jrh in range(nplots):
-                        for jrv in range(nrd):
-                            rec = _read_fortran_record(
-                                f, data_fmt, endian=endian)
-                            transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
+            for jrh in range(nplots):
+                for jrv in range(nrd):
+                    rec = _read_fortran_record(f, data_fmt, endian=endian)
+                    transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
     return {
         'title': title,
@@ -840,7 +924,7 @@ def read_oasr_reflection_coefficients(
 
                 sampling_type = format_type
             else:
-                raise ValueError(f"Invalid header format: {header_line}")
+                raise FileFormatError(f"Invalid header format: {header_line}")
 
             # Read data for each frequency
             frequencies = []
@@ -888,86 +972,7 @@ def read_oasr_reflection_coefficients(
             'phase': phase_list,
         }
 
+    except (FileFormatError, UnsupportedFeatureError):
+        raise
     except Exception as e:
-        raise OSError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
-
-
-def _trf_regression_selftest(tmp_path=None):
-    """Write a synthetic PULSETRF-style file and round-trip through the reader.
-
-    Produces a minimal single-frequency, single-depth, single-range file with
-    known complex payload and validates the reader returns matching values.
-    Used by the OASES reader test-suite and available as a quick sanity check::
-
-        from uacpy.io.oases_reader import _trf_regression_selftest
-        _trf_regression_selftest()
-    """
-    import tempfile
-    endian = '<'
-
-    def w(f, payload: bytes):
-        f.write(struct.pack(endian + 'i', len(payload)))
-        f.write(payload)
-        f.write(struct.pack(endian + 'i', len(payload)))
-
-    if tmp_path is None:
-        tmp_path = Path(tempfile.mkdtemp()) / 'synthetic.trf'
-    else:
-        tmp_path = Path(tmp_path)
-
-    # --- Build synthetic header matching the documented layout ---
-    title = 'synthetic-trf-test'
-    prognm = 'OASP17'
-    nout = 1
-    iparm = [1]
-    signn = '+'
-    freqs = 100.0
-    sd = 50.0
-    rd, rdlow, ir = 20.0, 20.0, 1   # single receiver depth
-    r0, rspace, nplots = 1000.0, 1000.0, 1  # single range
-    nx, lx, mx, dt = 4, 1, 1, 0.01       # NX=power of 2, single freq bin
-    icdr = 0
-    omegim = 0.0
-    msuft = 1
-    isrow = 1
-    inttyp = 0
-
-    test_real, test_imag = 0.75, -0.25
-
-    with open(tmp_path, 'wb') as f:
-        w(f, b'PULSETRF')
-        w(f, prognm.encode())
-        w(f, struct.pack(endian + 'i', nout))
-        w(f, struct.pack(endian + f'{nout}i', *iparm))
-        w(f, title.ljust(80).encode())
-        w(f, signn.encode())
-        w(f, struct.pack(endian + 'f', freqs))
-        w(f, struct.pack(endian + 'f', sd))
-        w(f, struct.pack(endian + 'ffi', rd, rdlow, ir))
-        w(f, struct.pack(endian + 'ffi', r0, rspace, nplots))
-        w(f, struct.pack(endian + 'iiif', nx, lx, mx, dt))
-        w(f, struct.pack(endian + 'i', icdr))
-        w(f, struct.pack(endian + 'f', omegim))
-        w(f, struct.pack(endian + 'i', msuft))
-        w(f, struct.pack(endian + 'i', isrow))
-        w(f, struct.pack(endian + 'i', inttyp))
-        for _ in range(2):
-            w(f, struct.pack(endian + 'i', 0))
-        for _ in range(5):
-            w(f, struct.pack(endian + 'f', 0.0))
-        # Data records: 1 freq * 1 isrow * 1 msuft * 1 nplots * 1 ir
-        w(f, struct.pack(endian + 'ff', test_real, test_imag))
-
-    data = _read_oasp_trf_binary(tmp_path)
-    tf = data['transfer_function']
-    assert tf.shape == (1, 1, 1), f"shape mismatch: {tf.shape}"
-    assert np.isclose(tf[0, 0, 0].real, test_real), tf[0, 0, 0]
-    assert np.isclose(tf[0, 0, 0].imag, test_imag), tf[0, 0, 0]
-    assert np.isclose(data['source_depth'], sd)
-    assert np.isclose(data['center_frequency'], freqs)
-    return True
-
-
-if __name__ == '__main__':
-    _trf_regression_selftest()
-    print('TRF regression self-test: OK')
+        raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e

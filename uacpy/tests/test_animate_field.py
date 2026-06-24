@@ -13,6 +13,7 @@ verifies the animation:
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 
 
@@ -119,7 +120,7 @@ def test_animate_field_rejects_non_timeseries():
         model='TL',
     )
     assert field.kind != 'time_series'
-    with pytest.raises(ValueError, match="kind='time_series'"):
+    with pytest.raises(ConfigurationError, match="kind=.time_series."):
         animate_field(field)
 
 
@@ -133,7 +134,7 @@ def test_animate_field_rejects_missing_axes():
         coords={'time': np.linspace(0, 1, 10)},
         model='Trace',
     )
-    with pytest.raises(ValueError, match="missing coord axes"):
+    with pytest.raises(ConfigurationError, match="missing coord axes"):
         animate_field(field)
 
 
@@ -191,7 +192,7 @@ def test_save_animation_rejects_unknown_suffix(tmp_path):
     from uacpy.visualization import save_animation
 
     field = _make_synthetic_field(n_t=10)
-    with pytest.raises(ValueError, match=r"cannot infer writer"):
+    with pytest.raises(ConfigurationError, match=r"cannot infer writer"):
         save_animation(field, tmp_path / 'pulse.xyz')
 
 
@@ -233,7 +234,7 @@ def test_plot_time_snapshots_grid_shape():
 def test_plot_time_snapshots_empty_raises():
     from uacpy.visualization import plot_time_snapshots
 
-    with pytest.raises(ValueError, match='empty'):
+    with pytest.raises(ConfigurationError, match='empty'):
         plot_time_snapshots({}, times_s=(0.1,))
 
 

@@ -23,9 +23,8 @@ from uacpy._log import install_warning_formatter as _install_warning_formatter
 
 from uacpy.core.source import Source
 from uacpy.core.environment import (
-    Environment, BoundaryProperties, RangeDependentBottom,
-    SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
-    SoundSpeedProfile,
+    Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
+    SoundSpeedProfile, generate_sea_surface, Bathymetry, Altimetry, Surface,
 )
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
@@ -48,17 +47,27 @@ from uacpy.core.exceptions import (
     InvalidDepthError,
     UnsupportedFeatureError,
     ConfigurationError,
+    DataFetchError,
+    FileFormatError,
 )
 
 from uacpy import models
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models import (
+    Bellhop, Kraken, RAM, Scooter, SPARC, Bounce, OAST, OASN, OASR, OASP, OASES,
+)
 from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
+from uacpy.visualization.plots import (
+    plot_result, plot_field, plot_overview, plot_environment, plot_ssp,
+    compare_models,
+)
 from uacpy import io
 from uacpy import acoustic_signal
 from uacpy import noise
 from uacpy import sonar
 from uacpy import comms
+from uacpy import data
 from uacpy.core import acoustics
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
@@ -70,11 +79,10 @@ __all__ = [
     'Source',
     'Environment',
     'BoundaryProperties',
-    'RangeDependentBottom',
     'SedimentLayer',
-    'LayeredBottom',
-    'RangeDependentLayeredBottom',
-    'SoundSpeedProfile',
+    'SeabedColumn',
+    'Bottom',
+    'SoundSpeedProfile', 'generate_sea_surface', 'Bathymetry', 'Altimetry', 'Surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
@@ -89,18 +97,26 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'DataFetchError',
+    'FileFormatError',
     'RunMode',
     'PropagationModel',
+    'ModelSpec',
+    'Bellhop', 'Kraken', 'RAM', 'Scooter', 'SPARC', 'Bounce',
+    'OAST', 'OASN', 'OASR', 'OASP', 'OASES',
     'run_parallel',
     'Job',
     'ParallelResult',
     'models',
     'plot',
+    'plot_result', 'plot_field', 'plot_overview', 'plot_environment',
+    'plot_ssp', 'compare_models',
     'io',
     'acoustic_signal',
     'noise',
     'sonar',
     'comms',
+    'data',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
     'metrics',

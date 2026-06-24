@@ -25,11 +25,11 @@ uacpy/
     ├── core/                Physics-agnostic dataclasses + invariants
     ├── models/              One PropagationModel subclass per engine
     ├── io/                  File-format readers/writers + FileManager
-    ├── acoustic_signal/     PPSD, PSD, SEL, FRF, FKTransform, Spectrogram
+    ├── acoustic_signal/     psd/ppsd/sel, fk_transform/taup/radon, spectrogram, FRF
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_rays / plot_modes / …
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
-    ├── examples/            36 numbered example scripts
+    ├── examples/            37 numbered example scripts (01–37)
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── parallel.py          run_parallel / Job — parallel batch runner
@@ -54,14 +54,14 @@ class enforces a tight API contract; bend it only when you must.
 ```python
 result = Model(...).run(env, source, receiver, run_mode=None, *,
                         frequencies=None, source_waveform=None,
-                        sample_rate=None)
+                        sample_rate=None, output_duration=None)
 ```
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site.
-The only sanctioned extensions are `n_modes=` on the Kraken family
-(Kraken, KrakenC, KrakenField) and `output_duration=` on the broadband
-synthesizers (Bellhop, BellhopCUDA, RAM, Scooter, KrakenField, OASP). Model configuration is
+The only sanctioned extensions are `n_modes=` on Kraken and
+`output_duration=` on the broadband
+synthesizers (Bellhop, RAM, Scooter, Kraken, OASP). Model configuration is
 **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter
@@ -102,6 +102,7 @@ Each model declares which **env shapes** it consumes natively:
 
 ```python
 self._supports_altimetry                       = False
+self._supports_range_dependent_surface         = False
 self._supports_range_dependent_bathymetry      = True
 self._supports_range_dependent_ssp             = True
 self._supports_range_dependent_bottom          = True
@@ -110,6 +111,12 @@ self._supports_range_dependent_layered_bottom  = False
 self._supports_elastic_media                   = False
 self._supports_multi_source_depth              = False
 ```
+
+`_supports_range_dependent_surface` is `False` for **every** model: the AT
+solvers carry a single global top boundary (only the SSP varies with range),
+so — exactly like a range-dependent *bottom* in Kraken — a range-dependent
+`Surface` is collapsed, not honoured. The `Surface` carrier still exists to
+build / fetch / plot a marginal ice zone.
 
 Flip True for each axis the model handles natively. Anything left False
 that appears in `env` on `run()` is **collapsed** by
@@ -129,11 +136,10 @@ default reduction method:
 ```
 'bathymetry'        : 'max'
 'ssp'               : 'r0'
-'bottom'            : 'r0'
-'layered'           : 'halfspace'
-'rd_layered_range'  : 'median'
-'rd_layered_layers' : 'halfspace'
+'bottom_range'      : 'r0'
+'bottom_layers'     : 'halfspace'
 'altimetry'         : 'drop'
+'surface'           : 'r0'      # r0 / rmax / mean / median (single boundary type)
 'elastic'           : 'fluid'
 ```
 
@@ -262,11 +268,24 @@ utils.py                            misc reader/writer-shared utilities
 
 These are the physics-agnostic primitives every model consumes:
 
-- `environment.py` — `Environment`, `BoundaryProperties`,
-  `SedimentLayer`, `LayeredBottom`, `RangeDependentBottom`,
-  `RangeDependentLayeredBottom`, `SoundSpeedProfile`.
+- `environment.py` — `Environment` (re-exports the carriers below for stable
+  import paths). The shape/property carriers live in their own modules:
+  `ssp.py` (`SoundSpeedProfile`, `generate_sea_surface`), `bathymetry.py`
+  (`Bathymetry`), `altimetry.py` (`Altimetry`), `bottom.py`
+  (`SedimentLayer`, `SeabedColumn`, `Bottom`, `BoundaryProperties`),
+  `surface.py` (`Surface`). `env.bathymetry` / `ssp` / `altimetry` / `bottom`
+  / `surface` are always these carriers — a scalar / pairs / single
+  `BoundaryProperties` is coerced at construction.
+  - **Grid-library contract** (`core/_grid.py`): the gridded carriers share
+    `at(...)` (nearest, never fabricates), `isel(...)` (positional), and
+    `eval(..., method=)` (interpolate: `linear`/`nearest`/`cubic`). *Shape*
+    carriers (`Bathymetry`, `Altimetry`, `SoundSpeedProfile`) interpolate;
+    *property* carriers (`Bottom`, `SeabedColumn`, `Surface`) are select-only
+    (`at`/`isel` — boundary/material types cannot be blended, so no `eval`).
+    A uniform `Surface` delegates `BoundaryProperties` attribute reads to its
+    one node, so it stands in for a single boundary everywhere.
 - `source.py` / `receiver.py` — `Source(depths, frequencies)`,
-  `Receiver(depths, ranges)`.
+  `Receiver(depths, ranges)` (input param carriers; no grid-library slicing).
 - `results.py` — `Result` base + `Field`, `Arrivals`, `Rays`, `Modes`,
   `Covariance`, `Replicas`, `ReflectionCoefficient`, plus
   `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /
@@ -279,8 +298,13 @@ These are the physics-agnostic primitives every model consumes:
   / SPL utilities. **Not** imported by the model wrappers; safe to
   use from notebooks. Some functions are arlpy-adapted; see
   `third_party/arlpy/NOTICE`.
-- `materials.py` — named-material presets (`SAND`, `MUD`, `BASALT`,
-  `ICE`, …) for `BoundaryProperties`.
+- `materials.py` — named-material presets for `BoundaryProperties`,
+  keyed (case-insensitively) in the `MATERIALS` dict and looked up via
+  `get_material(name)` / enumerated via `list_materials()`. Keys are
+  seafloor classes: `'clay'`, `'silt'`, `'sand'`, `'gravel'`, `'moraine'`,
+  `'chalk'`, `'limestone'`, `'basalt'`, `'granite'`. There are no
+  uppercase module-level constants and no `'mud'`/`'ice'` entries (sea-ice
+  lives as `SEA_ICE_*` constants in `constants.py`).
 - `metrics.py` — cross-model comparison helpers (TL bias, residual,
   band-averaged TL).
 - `constants.py` — `DEFAULT_SOUND_SPEED`, `TL_MAX_DB`, `PRESSURE_FLOOR`,
@@ -353,14 +377,23 @@ attach `.stdout` / `.stderr` / `.return_code` on
 These are orthogonal to the model layer. They consume `Result`
 objects (typically `Field`) or raw arrays.
 
-- `acoustic_signal/analysis.py` — `PPSD`, `Spectrogram`, `SEL` (sound
-  exposure level), `PSD`, `FRF` (frequency-response function),
-  `FKTransform`. Each has `compute(...)` + `plot(...)`.
-- `acoustic_signal/processing.py` — beamforming, fourier synthesis,
-  shift-to-max-correlation.
-- `acoustic_signal/generation.py` — source-waveform synthesis (Ricker,
+- `acoustic_signal/analysis.py` — `psd`, `ppsd` (→ `PPSDResult`), `sel` (sound
+  exposure level). Pure functions returning arrays; `system_id.py` keeps the
+  `FRF` class (it holds fitted state). Transforms (`fk_transform`,
+  `taup_transform`, `radon_transform`, `spectrogram`, `cwt`, `wigner_ville`,
+  `cepstrum`) are likewise functions with `inverse_*` where meaningful. **All
+  plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
+  `acoustic_signal`/`comms` modules import no matplotlib.
+- `acoustic_signal/arrays.py` — beamforming / steering vectors;
+  `active.py` — matched filter, pulse compression, ambiguity.
+- `acoustic_signal/waveforms.py` — source-waveform synthesis (Ricker,
   Gaussian, M-wave, Hann sine, …) — uses the same alphabet as AT
-  `cans.f90` where possible.
+  `cans.f90` where possible; `sequences.py` — m-sequences / coded probes.
+- `acoustic_signal/constant_q.py` — constant-Q transform family (Brown 1991:
+  transform / PSD / spectrogram / probabilistic), `spectrum`/`density` scaling.
+- `acoustic_signal/bands.py` — decidecade (ISO 18405) band levels;
+  `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
+  `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
 - `noise/noise.py` — `compute_windnoise`, Wenz curves, ship noise.
 - `visualization/plots.py` — single-entry `plot_result(result, env=…)`
   plus per-result-type helpers (`plot_field`, `plot_rays`,
@@ -371,6 +404,66 @@ objects (typically `Field`) or raw arrays.
 Convention: each result-type plotting function takes the `Result`
 positionally + an optional `env=` for seafloor / surface overlays +
 optional axis-control kwargs.
+
+### 7.1 On-demand data layer (`uacpy/data/`)
+
+Builds an `Environment` from GPS coordinates (+ date) by fetching from public
+ocean databases. Sits *upstream* of the models — it produces carrier inputs,
+never touches model internals. **Data is fetched on demand, never bundled or
+redistributed** (same rule as OASES, §9).
+
+Module map (one per concern):
+
+- `_http.py` — `http_get(url, …)`, the only network call (stdlib `urllib`),
+  wraps failures in `DataFetchError`. No third-party HTTP dep.
+- `bathymetry.py` — GEBCO via OpenTopoData (`fetch_bathy`, `fetch_bathy_transect`).
+- `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
+  + the shared `assemble_range_dependent(columns, ranges)` helper.
+- `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` core
+  dep, lazy-imported; needs a free Copernicus account + `copernicusmarine login`).
+- `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
+- `seabed.py` / `lithology.py` — EMODnet (CC-BY) and Dutkiewicz (CC-BY-NC) bottom.
+- `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
+- `environment.py` — `fetch_environment(...)`, the orchestrator + dispatch.
+
+Conventions: every fetcher shares the `(base_url, timeout, verbose)` trio,
+raises `DataFetchError`/`ConfigurationError` only, logs via `log_message`, and
+emits user notices via `warnings.warn`.
+
+**Adding a source.** Write a module exposing a fetcher with the standard trio,
+then:
+
+- *Sediment* → add one row to `environment._bottom_registry()`
+  (`id → (point_fetcher, transect_fetcher)`) and, to join `'auto'`, to
+  `_AUTO_BOTTOM_ORDER` / `_BOTTOM_SOURCE_KEYWORDS`.
+- *Sound speed* → add a branch to `environment._fetch_ssp` (and the
+  range-dependent block) keyed on `ssp_source`.
+- Add a `DataSource` row to `sources.SOURCES` (id, licence, attribution,
+  citation, `commercial_use`) and map the dispatch keyword to that id so
+  provenance is recorded automatically.
+
+**Provenance — two levels, one container type.** `sources.py` holds two frozen
+dataclasses: `DataSource` (the static **catalogue entry** — one per dataset,
+holding identity/licence/citation; `SOURCES` is the catalogue) and
+`DataProvenance` (one **fetch instance** — a reference to a `DataSource` via
+`.source`, plus the *actual* `data_date` and `data_point=(lat, lon)` that fetch
+returned, with `offset_km` derived from the requested point). Read the dataset's
+identity/citation through `prov.source`; there is **no** attribute delegation.
+
+Every carrier carries provenance **uniformly as a tuple of `DataProvenance`** in
+`carrier.data_sources` — leaf carriers (`SoundSpeedProfile`/`Bathymetry`/
+`BoundaryProperties`) as a validated field (`_coerce_data_sources` rejects a
+non-`DataProvenance`), container carriers (`Bottom`/`SeabedColumn`/`Surface`) as
+an aggregating property. A fetcher stamps its carrier with a real
+`DataProvenance` (e.g. WOA23 → snapped cell centre + climatology period; Argo →
+cast time + float position); `Environment` aggregates the union across its
+carriers (`_aggregate_data_sources`, dedup by `r.source.id`) into
+`env.data_sources`, and `fetch_environment`'s `_record_provenance` wraps any
+un-stamped layer's bare catalogue id in `DataProvenance(source=…)` so the tuple
+stays uniform. `uacpy.data.citations(env)` (or a carrier, id, `DataSource`, or
+`DataProvenance`) renders the licence/attribution/citation plus the fetched
+date/coords. Non-commercial sources (Dutkiewicz) emit a runtime `UserWarning`
+whenever fetched, so they are never returned silently.
 
 ---
 

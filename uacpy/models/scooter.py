@@ -16,7 +16,7 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -66,15 +66,14 @@ class Scooter(PropagationModel):
     Notes
     -----
     Range-independent FFP — single spectral solve over the full
-    wavenumber axis, Hankel-transformed to range. Supports
-    ``LayeredBottom`` and elastic bottoms natively. The Green's-function
+    wavenumber axis, Hankel-transformed to range. Supports layered
+    and elastic bottoms natively. The Green's-function
     ``.grn`` is converted to range-domain TL via the in-tree Python
     Hankel transform (``uacpy.io.grn_reader``).
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'`` (Scooter consumes
-    ``LayeredBottom`` natively).
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer
+    stack is kept since Scooter consumes layered seabed columns natively).
 
     Defaults auto-derived at ``run()`` time:
 
@@ -91,6 +90,19 @@ class Scooter(PropagationModel):
     >>> scooter = Scooter()
     >>> result = scooter.run(env, source, receiver)
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). Scooter:
+    # range-independent wavenumber integration. Honours multi-layer
+    # fluid/elastic bottom natively; range dependence in any form is
+    # collapsed to range-0. Single spectral solve → mean SSP / median
+    # bottom column are the representative single profile.
+    # INCOHERENT_TL is intentionally absent (no modal decomposition here).
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,
@@ -111,7 +123,6 @@ class Scooter(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -164,17 +175,7 @@ class Scooter(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
-
-        # Range-independent FFP — single spectral solve over the full
-        # wavenumber axis, Hankel-transformed to range. Median/mean
-        # samples are the representative single profile.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
 
         self.c_low = c_low
         self.c_high = c_high
@@ -211,36 +212,24 @@ class Scooter(PropagationModel):
             )
         self.field_interp = field_interp
 
-        # Declare supported modes for Scooter.
-        # INCOHERENT_TL is NOT implemented — Scooter computes the full
-        # coherent field; incoherent TL would require a modal decomposition
-        # we don't have here. See run() for the supported branches.
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        # Scooter: range-independent wavenumber integration. Honors
-        # multi-layer fluid/elastic bottom natively. Range dependence in
-        # any form is collapsed to range-0 with a warning.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'scooter.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Scooter',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('Scooter', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('Scooter', str(self._exe))
 
     def run(
         self,
@@ -294,12 +283,9 @@ class Scooter(PropagationModel):
             for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-        source_waveform = self._pad_waveform_to_duration(
-            source_waveform, sample_rate, output_duration,
-        )
-        frequencies = self._resolve_time_series_frequencies(
+        source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
+            output_duration,
         )
 
         env = self._project_environment(env)
@@ -383,12 +369,9 @@ class Scooter(PropagationModel):
                     grn_data, receiver.ranges, method='fft_hankel',
                     **transform_kwargs,
                 )
-            result.model = self.model_name
-            result.backend = 'scooter.exe'
-            result.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
-            result.frequencies = np.atleast_1d(np.asarray(freqs, dtype=float))
-            result.phase_reference = 'travelling_wave'
+            self._stamp_result(result, source, backend='scooter',
+                               frequencies=freqs, phase_reference='travelling_wave')
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,
@@ -447,7 +430,7 @@ class Scooter(PropagationModel):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
+        bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
         # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
         # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
@@ -477,14 +460,5 @@ class Scooter(PropagationModel):
         )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
-        """Execute Scooter via the shared ``_run_subprocess`` helper."""
-        try:
-            result = self._run_subprocess(
-                [self.executable, base_name],
-                cwd=work_dir,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"Scooter output:\n{result.stdout}", level='debug')
+        """Execute Scooter via the shared binary-launch helper."""
+        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)

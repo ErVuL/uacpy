@@ -38,8 +38,9 @@ def plot_model_statistics(results: Dict, source_depth: float):
     ``source_depth`` then reduced with NaN-aware stats (RAM masks
     below-seafloor cells with NaN).
 
-    The RMS matrix masks its diagonal so it gets the cmap's ``set_bad``
-    deep-green ``cmap(0.0)`` colour — i.e. a clean "zero error" tile,
+    The RMS matrix masks its diagonal so it gets the cmap's bad-value
+    (``with_extremes(bad=…)``) deep-green ``cmap(0.0)`` colour — i.e. a
+    clean "zero error" tile,
     not a white off-scale square.
     """
     results = {k: v for k, v in results.items() if v is not None}
@@ -96,8 +97,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
         vmax = (max(10, np.percentile(rms_matrix[rms_matrix > 0], 95))
                 if rms_max > 0 else 15)
         display = np.ma.array(rms_matrix, mask=np.eye(n, dtype=bool))
-        cmap = plt.get_cmap('RdYlGn_r').copy()
-        cmap.set_bad(color=cmap(0.0))
+        cmap = plt.get_cmap('RdYlGn_r')
+        cmap = cmap.with_extremes(bad=cmap(0.0))
         im = ax.imshow(display, cmap=cmap, vmin=0, vmax=vmax,
                        interpolation='none')
         plt.colorbar(im, ax=ax, label='RMS Error (dB)')
@@ -155,7 +156,7 @@ def create_example_report(example_num: int, title: str, description: str,
     print(f"  Depth: {env.depth}m")
     print(f"  SSP shape: {env.ssp.shape}")
     if env.is_range_dependent:
-        print(f"  Range-dependent: YES (bathymetry points: {len(env.bathymetry)})")
+        print(f"  Range-dependent: YES (bathymetry points: {env.bathymetry.n_ranges})")
     else:
         print("  Range-dependent: NO")
     print("\nSource:")

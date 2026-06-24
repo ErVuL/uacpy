@@ -31,6 +31,7 @@ from uacpy.io.oalib_reader import (
     read_ssp_2d, read_ssp_3d,
     read_flp, read_flp3d,
     read_rts_file, rts_to_pressure, read_ts,
+    read_prt,
 )
 from uacpy.io.oalib_writer import (
     write_ssp,
@@ -39,6 +40,8 @@ from uacpy.io.oalib_writer import (
     write_ssp_section, write_layer_sections, write_bottom_section,
     write_source_depths, write_receiver_depths, write_receiver_ranges,
     write_multi_profile_env,
+    write_kraken_env_file, write_scooter_env_file, write_sparc_env_file,
+    write_bounce_input_file,
     write_fieldflp, write_field3dflp,
     write_phase_speed_and_rmax,
     resolve_ssp_interp, resolve_ssp_topopt, resolve_phase_speed_bounds,
@@ -53,6 +56,7 @@ from uacpy.io.bathy_io import (
 from uacpy.io.refl_io import (
     read_reflection_coefficient, read_source_beam_pattern,
     write_reflection_coefficient, write_source_beam_pattern,
+    dedupe_reflection_file,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.grn_reader import (
@@ -86,10 +90,12 @@ __all__ = [
     "read_ssp_2d", "read_ssp_3d",
     "read_flp", "read_flp3d",
     "read_rts_file", "rts_to_pressure", "read_ts",
+    "read_prt",
     # Boundary auxiliary I/O
     "read_bathymetry", "read_altimetry", "read_boundary_3d",
     "read_reflection_coefficient",
     "read_source_beam_pattern",
+    "dedupe_reflection_file",
     # Mode readers (Kraken)
     "read_modes", "read_modes_bin", "read_modes_asc", "get_component",
     # Scooter / SPARC outputs
@@ -109,6 +115,8 @@ __all__ = [
     "write_ssp_section", "write_layer_sections", "write_bottom_section",
     "write_source_depths", "write_receiver_depths", "write_receiver_ranges",
     "write_multi_profile_env",
+    "write_kraken_env_file", "write_scooter_env_file", "write_sparc_env_file",
+    "write_bounce_input_file",
     "write_fieldflp", "write_field3dflp",
     "write_phase_speed_and_rmax",
     "resolve_ssp_interp", "resolve_ssp_topopt", "resolve_phase_speed_bounds",

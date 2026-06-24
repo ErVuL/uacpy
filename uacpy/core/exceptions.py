@@ -11,7 +11,23 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'DataFetchError',
+    'FileFormatError',
 ]
+
+
+def _rebuild_exc(cls, args, kwargs):
+    """Reconstruct an exception from its original constructor arguments.
+
+    The subclasses below override ``__init__`` with multi-positional /
+    keyword-only signatures but store only the formatted message in
+    ``self.args``; the default ``BaseException.__reduce__`` would then unpickle
+    via ``cls(*self.args)`` and fail. Each provides ``__reduce__`` pointing here
+    so the exception round-trips through ``pickle`` — required for
+    ``run_parallel`` to return real per-job errors instead of a
+    ``BrokenProcessPool``.
+    """
+    return cls(*args, **kwargs)
 
 
 class UACPYError(Exception):
@@ -48,6 +64,12 @@ class ExecutableNotFoundError(UACPYError):
         super().__init__(message, remediation)
         self.model_name = model_name
         self.executable = executable
+        self.search_paths = search_paths
+
+    def __reduce__(self):
+        return (_rebuild_exc, (ExecutableNotFoundError,
+                               (self.model_name, self.executable,
+                                self.search_paths), {}))
 
 
 class ModelExecutionError(UACPYError):
@@ -77,17 +99,29 @@ class ModelExecutionError(UACPYError):
         self.stdout = stdout
         self.stderr = stderr
 
+    def __reduce__(self):
+        return (_rebuild_exc, (ModelExecutionError,
+                               (self.model_name, self.return_code,
+                                self.stdout, self.stderr), {}))
+
 
 class InvalidDepthError(UACPYError):
-    """Raised when a source or receiver depth exceeds the environment depth."""
+    """Raised when a source or receiver depth exceeds the depth a model can
+    resolve. For most models that is the water depth; for spectral solvers
+    (Scooter/SPARC) it includes the sediment column, so the message says
+    "resolvable depth" rather than "environment depth"."""
 
     def __init__(self, depth: float, max_depth: float, context: str):
-        message = f"{context} depth ({depth:.1f}m) exceeds environment depth ({max_depth:.1f}m)"
+        message = f"{context} depth ({depth:.1f}m) exceeds resolvable depth ({max_depth:.1f}m)"
         remediation = f"Set {context.lower()} depth to ≤ {max_depth:.1f}m"
         super().__init__(message, remediation)
         self.depth = depth
         self.max_depth = max_depth
         self.context = context
+
+    def __reduce__(self):
+        return (_rebuild_exc, (InvalidDepthError,
+                               (self.depth, self.max_depth, self.context), {}))
 
 
 class UnsupportedFeatureError(UACPYError):
@@ -121,6 +155,12 @@ class UnsupportedFeatureError(UACPYError):
         self.alternatives = alternatives
         self.alternatives_label = alternatives_label
 
+    def __reduce__(self):
+        return (_rebuild_exc, (UnsupportedFeatureError,
+                               (self.model_name, self.feature,
+                                self.alternatives),
+                               {'alternatives_label': self.alternatives_label}))
+
 
 class ConfigurationError(UACPYError):
     """Raised when user-supplied inputs to a model wrapper or core class
@@ -128,4 +168,23 @@ class ConfigurationError(UACPYError):
     flags, missing required kwargs, malformed envs, etc.). The generic
     "bad inputs" exception across the package. Catch via
     ``except ConfigurationError`` or, more broadly, ``except UACPYError``."""
+    pass
+
+
+class DataFetchError(UACPYError):
+    """Raised when an on-demand external-data fetch (bathymetry, SSP,
+    sediment, …) fails: the remote service is unreachable, returns an
+    error or malformed payload, or has no valid data at the requested
+    location. Catch via ``except DataFetchError`` or, more broadly,
+    ``except UACPYError``."""
+    pass
+
+
+class FileFormatError(UACPYError):
+    """Raised when a model I/O file (``.shd``, ``.mod``, ``.grn``, …) is
+    malformed, truncated, or otherwise cannot be parsed — typically a sign
+    the model run produced corrupt/unexpected output. Distinct from
+    :class:`ConfigurationError` (bad user input) since the file is not
+    something the user supplied. Catch via ``except FileFormatError`` or,
+    more broadly, ``except UACPYError``."""
     pass

@@ -15,14 +15,13 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.models.bellhop import Bellhop
-from uacpy.models.kraken import Kraken
 from uacpy.models.ram import RAM
+from uacpy.models.scooter import Scooter
 from uacpy.core.environment import (
     BoundaryProperties,
     Environment,
-    LayeredBottom,
-    RangeDependentBottom,
-    RangeDependentLayeredBottom,
+    SeabedColumn,
+    Bottom,
     SedimentLayer,
     SoundSpeedProfile,
 )
@@ -52,8 +51,8 @@ def test_ssp_duplicate_depths_rejected():
 
 def test_rd_bottom_ranges_must_be_strictly_increasing():
     with pytest.raises(ConfigurationError, match="strictly increasing"):
-        RangeDependentBottom(
-            ranges=np.array([0.0, 5000.0, 3000.0]),
+        Bottom.from_halfspaces(
+            np.array([0.0, 5000.0, 3000.0]),
             sound_speed=np.array([1600.0, 1700.0, 1800.0]),
             density=np.array([1.5, 1.6, 1.7]),
             attenuation=np.array([0.3, 0.4, 0.5]),
@@ -61,16 +60,31 @@ def test_rd_bottom_ranges_must_be_strictly_increasing():
         )
 
 
+def test_rd_bottom_shear_array_length_validated():
+    # A mismatched explicit shear array must raise ConfigurationError at
+    # construction (not a bare numpy ValueError later inside at()).
+    with pytest.raises(ConfigurationError, match="shear_speed length"):
+        Bottom.from_halfspaces(
+            np.array([0.0, 1000.0, 2000.0]),
+            sound_speed=np.array([1600.0, 1700.0, 1800.0]),
+            density=np.array([1.5, 1.6, 1.7]),
+            attenuation=np.array([0.3, 0.4, 0.5]),
+            shear_speed=np.array([200.0, 300.0]),     # length 2 != 3
+        )
+
+
+def test_sediment_layer_rejects_negative_attenuation():
+    with pytest.raises(ConfigurationError, match="attenuation must be .*non-negative"):
+        SedimentLayer(thickness=5, sound_speed=1600, density=1.6, attenuation=-0.1)
+
+
 def test_rd_layered_bottom_ranges_must_be_strictly_increasing():
     layer = SedimentLayer(thickness=5, sound_speed=1600, density=1.6, attenuation=0.4)
     hs = BoundaryProperties(acoustic_type='half-space',
                             sound_speed=1800, density=2.0, attenuation=0.1)
-    lb = LayeredBottom(layers=[layer], halfspace=hs)
+    lb = SeabedColumn(layers=[layer], halfspace=hs)
     with pytest.raises(ConfigurationError, match="strictly increasing"):
-        RangeDependentLayeredBottom(
-            ranges=np.array([0.0, 1000.0, 500.0]),
-            profiles=[lb, lb, lb],
-        )
+        Bottom.from_columns([lb, lb, lb], ranges=np.array([0.0, 1000.0, 500.0]))
 
 
 def test_bathymetry_must_be_strictly_increasing():
@@ -115,8 +129,8 @@ def test_acoustic_type_typo_rejected():
 
 def test_rd_bottom_acoustic_type_validated():
     with pytest.raises(ConfigurationError, match="not recognized"):
-        RangeDependentBottom(
-            ranges=np.array([0.0, 1000.0]),
+        Bottom.from_halfspaces(
+            np.array([0.0, 1000.0]),
             sound_speed=np.array([1600.0, 1700.0]),
             density=np.array([1.5, 1.6]),
             attenuation=np.array([0.3, 0.4]),
@@ -201,12 +215,12 @@ def test_warn_when_receiver_overruns_ssp_ranges():
 # --- G2 RAM Collins RD-bottom warning --------------------------------------
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
-def test_ram_collins_warns_on_rd_bottom():
-    bp = BoundaryProperties(acoustic_type='half-space',
-                            sound_speed=1700, density=1.7,
-                            attenuation=0.5, shear_speed=400.0)
-    rd_bot = RangeDependentBottom(
-        ranges=np.array([0.0, 5_000.0]),
+def test_ram_collins_threads_rd_bottom():
+    """The Collins backends now emit one ``ram.in`` profile section per range
+    break, so a range-dependent bottom is *modelled* — not dropped with the
+    old 'range-0 bottom geoacoustics only' warning."""
+    rd_bot = Bottom.from_halfspaces(
+        np.array([0.0, 5_000.0]),
         sound_speed=np.array([1700.0, 1800.0]),
         density=np.array([1.7, 1.9]),
         attenuation=np.array([0.5, 0.4]),
@@ -227,9 +241,26 @@ def test_ram_collins_warns_on_rd_bottom():
         except Exception:
             pass
     msgs = [str(w.message) for w in caught]
-    assert any("range-0 bottom geoacoustics" in m for m in msgs)
-    # Use the unused halfspace to keep flake8 happy.
-    assert bp.sound_speed == 1700
+    assert not any("range-0" in m for m in msgs)
+
+
+def test_oalib_writer_drops_subresolution_layers():
+    """A sediment layer thinner than the .env's .1f depth resolution is dropped,
+    so the AT writer never emits a degenerate (top==bottom) zero-thickness
+    medium (which makes Kraken/Scooter/Bounce fail). Regression for a CRUST1
+    bare-rock column rescaled to a ~1e-5 m sliver."""
+    from uacpy.io.oalib_writer import _writable_layers, _MIN_LAYER_THICKNESS_M
+    hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                            density=2.0, attenuation=0.1)
+    lb = SeabedColumn(
+        layers=[SedimentLayer(thickness=1e-4, sound_speed=1600, density=1.6,
+                              attenuation=0.5),          # sub-resolution → dropped
+                SedimentLayer(thickness=20.0, sound_speed=1700, density=1.8,
+                              attenuation=0.4)],
+        halfspace=hs)
+    assert _MIN_LAYER_THICKNESS_M == 0.1
+    kept = _writable_layers(lb)
+    assert [round(lyr.thickness, 1) for lyr in kept] == [20.0]
 
 
 # --- G6 Bellhop .env range=0 SSP fallback ----------------------------------
@@ -293,23 +324,23 @@ def test_ssp_eval_clamps_beyond_last_range():
 
 
 def test_rd_bottom_eval_interpolates_off_grid_range():
-    rd = RangeDependentBottom(
-        ranges=np.array([0.0, 5_000.0]),
+    rd = Bottom.from_halfspaces(
+        np.array([0.0, 5_000.0]),
         sound_speed=np.array([1600.0, 1800.0]),
         density=np.array([1.5, 1.9]),
         attenuation=np.array([0.3, 0.5]),
         acoustic_type='half-space',
     )
-    bp = rd.eval(range=2_500.0)
+    bp = rd.halfspace_at(range=2_500.0)
     assert bp.sound_speed == pytest.approx(1700.0)
     assert bp.density == pytest.approx(1.7)
 
 
-def test_bathymetry_at_range_interpolates_off_grid():
+def test_bathymetry_eval_interpolates_off_grid():
     env = Environment(bathymetry=[(0.0, 100.0), (10_000.0, 200.0)])
-    assert env.bathymetry_at_range(5_000.0)[0] == pytest.approx(150.0)
+    assert env.bathymetry.eval(range=5_000.0) == pytest.approx(150.0)
     # Constant extrapolation past the last range.
-    assert env.bathymetry_at_range(20_000.0)[0] == pytest.approx(200.0)
+    assert env.bathymetry.eval(range=20_000.0) == pytest.approx(200.0)
 
 
 def test_independent_bathy_ssp_bottom_ranges_compose_ok():
@@ -323,8 +354,8 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
         matrix=np.array([[1500.0, 1495.0, 1490.0],
                          [1480.0, 1475.0, 1470.0]])
     )
-    rd_bot = RangeDependentBottom(
-        ranges=np.array([0.0, 3_000.0, 6_000.0, 9_000.0]),
+    rd_bot = Bottom.from_halfspaces(
+        np.array([0.0, 3_000.0, 6_000.0, 9_000.0]),
         sound_speed=np.array([1600.0, 1650.0, 1700.0, 1750.0]),
         density=np.array([1.5, 1.6, 1.7, 1.8]),
         attenuation=np.array([0.3, 0.35, 0.4, 0.45]),
@@ -332,9 +363,9 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     )
     env = Environment(bathymetry=bathy, ssp=ssp, bottom=rd_bot)
     assert env.is_range_dependent
-    assert env.bathymetry_at_range(4_000.0)[0] == pytest.approx(140.0)
+    assert env.bathymetry.eval(range=4_000.0) == pytest.approx(140.0)
     assert env.ssp.eval(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
-    assert env.bottom.eval(range=4_500.0).sound_speed == pytest.approx(1675.0)
+    assert env.bottom.halfspace_at(range=4_500.0).sound_speed == pytest.approx(1675.0)
 
 
 def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):
@@ -345,8 +376,8 @@ def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):
     bathy = np.array([[0.0, 100.0],
                       [3_000.0, 130.0],
                       [9_000.0, 200.0]])
-    rd_bot = RangeDependentBottom(
-        ranges=np.array([0.0, 6_000.0]),
+    rd_bot = Bottom.from_halfspaces(
+        np.array([0.0, 6_000.0]),
         sound_speed=np.array([1600.0, 1800.0]),
         density=np.array([1.5, 1.9]),
         attenuation=np.array([0.3, 0.5]),
@@ -373,7 +404,7 @@ def test_receiver_depth_accepted_across_models_harmonized():
     from uacpy.core.exceptions import InvalidDepthError
 
     ssp = SoundSpeedProfile.from_isovelocity(100.0, 1500.0)
-    bottom = LayeredBottom(
+    bottom = SeabedColumn(
         layers=[SedimentLayer(thickness=50.0, sound_speed=1600.0,
                               density=1.5, attenuation=0.5)],
         halfspace=BoundaryProperties(acoustic_type='half-space',
@@ -386,8 +417,8 @@ def test_receiver_depth_accepted_across_models_harmonized():
     # Solvers that mesh through the sediment (Scooter, the Kraken family)
     # resolve a 130 m receiver in the sediment (env.depth=100, media=150)
     # → accepted, no warning.
-    from uacpy.models.kraken import KrakenField
-    for model in (Scooter(), KrakenField()):
+    from uacpy.models.kraken import Kraken
+    for model in (Scooter(), Kraken()):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model.validate_inputs(
@@ -417,12 +448,14 @@ def test_receiver_depth_accepted_across_models_harmonized():
         )
 
 
-@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
-def test_kraken_collapses_rd_env_with_warning(simple_env):
-    """A model without RD support should collapse the env and emit one
-    warning per dropped axis — the env returned by _project_environment
-    must be range-independent regardless of the input shape."""
-    kraken = Kraken()
+@pytest.mark.requires_binary  # constructs Scooter (resolves its binary)
+def test_scooter_collapses_rd_env_with_warning(simple_env):
+    """A model without RD support (Scooter — range-independent FFP) should
+    collapse the env and emit one warning per dropped axis; the env returned
+    by _project_environment must be range-independent regardless of input
+    shape. (Kraken now segments RD natively via field.exe, so it is no
+    longer a valid vehicle for this collapse test.)"""
+    scooter = Scooter()
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
         ranges=np.array([0.0, 5_000.0]),
@@ -434,7 +467,7 @@ def test_kraken_collapses_rd_env_with_warning(simple_env):
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        projected = kraken._project_environment(env)
+        projected = scooter._project_environment(env)
     assert not projected.is_range_dependent
     text = " ".join(str(w.message) for w in caught)
     assert "range-dependent bathymetry" in text
@@ -467,7 +500,7 @@ def test_kraken_segmentation_unions_distinct_axes():
     """KrakenField builds its segment list from the union of bathy / SSP
     / bottom change-points, so a bathy with 3 ranges and an SSP with 5
     ranges should yield at least 5 segments."""
-    from uacpy.models.coupled_modes import segment_environment_by_range
+    from uacpy.models._segmentation import segment_environment_by_range
 
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 200.0]),
@@ -488,7 +521,9 @@ def test_kraken_segmentation_unions_distinct_axes():
 
 def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     """Bellhop should pass ssp.ranges/.data through verbatim to .ssp,
-    independent of bathymetry / receiver grids."""
+    independent of bathymetry / receiver grids — plus one prepended
+    negative-range guard column so back-scattered rays do not trip
+    bellhopcuda's BHC_ERR_OUTSIDE_SSP (x < Seg.r[0]) range-box check."""
     from uacpy.io.bellhop_writer import write_bellhop_env_file
 
     ssp = SoundSpeedProfile.from_2d(
@@ -509,17 +544,21 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     lines = ssp_path.read_text().splitlines()
     # AT/bellhopcuda LDIFile expects Npts and the range vector on
     # separate records (one line each), then one line per depth row.
-    assert lines[0].strip() == '3', (
+    # Npts == 3 real columns + 1 prepended guard column.
+    assert lines[0].strip() == '4', (
         f"line 1 must contain only Npts; got {lines[0]!r}"
     )
     ranges_km = list(map(float, lines[1].split()))
-    assert ranges_km == [0.0, 1.0, 5.0]
-    # Two depths -> two SSP rows
+    # r_box = 1.2 * 2000 m = 2400 m -> guard at -1.1 * r_box = -2.64 km.
+    assert ranges_km[0] < 0.0
+    assert ranges_km[1:] == [0.0, 1.0, 5.0]
+    # Two depths -> two SSP rows; the guard column duplicates the first
+    # real profile, the rest pass through verbatim.
     assert len(lines) >= 4
     row0 = list(map(float, lines[2].split()))
     row1 = list(map(float, lines[3].split()))
-    assert row0 == [1500.0, 1495.0, 1485.0]
-    assert row1 == [1480.0, 1475.0, 1465.0]
+    assert row0 == [1500.0, 1500.0, 1495.0, 1485.0]
+    assert row1 == [1480.0, 1480.0, 1475.0, 1465.0]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -532,16 +571,16 @@ _OASES_MODEL_NAMES = {'OAST', 'OASN', 'OASR', 'OASP'}
 
 
 def _all_concrete_model_params():
-    from uacpy.models.bellhop import Bellhop, BellhopCUDA
+    from uacpy.models.bellhop import Bellhop
     from uacpy.models.bounce import Bounce
-    from uacpy.models.kraken import Kraken, KrakenC, KrakenField
+    from uacpy.models.kraken import Kraken
     from uacpy.models.oases import OAST, OASN, OASR, OASP
     from uacpy.models.ram import RAM
     from uacpy.models.scooter import Scooter
     from uacpy.models.sparc import SPARC
     classes = [
-        Bellhop, BellhopCUDA, Bounce,
-        Kraken, KrakenC, KrakenField,
+        Bellhop, Bounce,
+        Kraken,
         OAST, OASN, OASR, OASP,
         RAM, Scooter, SPARC,
     ]
@@ -571,3 +610,60 @@ def test_run_rejects_unknown_kwarg(model_cls):
     model = model_cls()
     with pytest.raises(TypeError, match=r"unexpected keyword argument"):
         model.run(env, src, rcv, totally_bogus_kwarg=1)
+
+
+def test_generate_sea_surface_rejects_nonpositive_range():
+    from uacpy import generate_sea_surface
+    for bad in (0.0, -100.0):
+        with pytest.raises(ConfigurationError, match="max_range"):
+            generate_sea_surface(bad)
+
+
+@pytest.mark.parametrize("bad", ['deep', object(), {'a': 1}])
+def test_bathymetry_nonnumeric_is_typed(bad):
+    with pytest.raises(ConfigurationError):
+        uacpy.Environment(bathymetry=bad, ssp=1500.0)
+
+
+def test_altimetry_nonnumeric_is_typed():
+    with pytest.raises(ConfigurationError):
+        uacpy.Environment(bathymetry=100.0, ssp=1500.0, altimetry='wavy')
+
+
+def test_surface_source_warns_for_field_runs():
+    """A source at z=0 sits on the pressure-release surface (field ~0) — a
+    field run warns; a positive depth does not."""
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                        attenuation=0.5))
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[2000.0])
+    with pytest.warns(UserWarning, match="pressure-release sea surface"):
+        Bellhop().compute_tl(env, uacpy.Source(depths=0.0, frequencies=200.0), rcv)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        Bellhop().compute_tl(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)
+
+
+# --- C4/C6 manual-audit regression locks -----------------------------------
+def test_get_sound_speed_warns_on_extrapolation():
+    """Depths outside the (bathymetry-extended) SSP are constant-extrapolated
+    with a UserWarning, not silently."""
+    ssp = SoundSpeedProfile(depths=[0, 50, 100], data=[1500, 1490, 1480])
+    env = Environment(ssp=ssp, bathymetry=200.0)  # SSP extended to 200 m
+    with pytest.warns(UserWarning, match="constant-extrapolated"):
+        assert float(env.get_sound_speed(250)[0]) == 1480.0
+    with pytest.warns(UserWarning, match="constant-extrapolated"):
+        assert float(env.get_sound_speed(-10)[0]) == 1500.0
+    # in-range query must not warn
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        env.get_sound_speed(75)
+
+
+def test_francois_garrison_accepts_list_pH():
+    """pH as a Python list must not raise a bare TypeError (it is coerced)."""
+    from uacpy.core.absorption import francois_garrison_db_per_km
+    out = francois_garrison_db_per_km(10000, 10, 35, [8.0, 8.1], 100)
+    out = np.atleast_1d(np.asarray(out, dtype=float))
+    assert out.shape == (2,) and np.all(out > 0)

@@ -4,9 +4,8 @@ Core classes for underwater acoustics modeling
 
 from uacpy.core.source import Source
 from uacpy.core.environment import (
-    Environment, BoundaryProperties, RangeDependentBottom,
-    SedimentLayer, LayeredBottom, RangeDependentLayeredBottom,
-    SoundSpeedProfile, generate_sea_surface,
+    Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
+    SoundSpeedProfile, generate_sea_surface, Bathymetry, Altimetry, Surface,
 )
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
@@ -26,6 +25,8 @@ from uacpy.core.exceptions import (
     InvalidDepthError,
     UnsupportedFeatureError,
     ConfigurationError,
+    DataFetchError,
+    FileFormatError,
 )
 
 from uacpy.core import acoustics
@@ -40,12 +41,12 @@ __all__ = [
     'Source',
     'Environment',
     'BoundaryProperties',
-    'RangeDependentBottom',
     'SedimentLayer',
-    'LayeredBottom',
-    'RangeDependentLayeredBottom',
+    'SeabedColumn',
+    'Bottom',
     'SoundSpeedProfile',
     'generate_sea_surface',
+    'Bathymetry', 'Altimetry', 'Surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
@@ -59,6 +60,8 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'DataFetchError',
+    'FileFormatError',
     'acoustics',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
     'metrics',

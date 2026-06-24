@@ -9,7 +9,7 @@ import pytest
 import numpy as np
 
 import uacpy
-from uacpy.models import Kraken, KrakenField, Scooter, OAST
+from uacpy.models import Kraken, Scooter, OAST
 
 # All tests in this module spawn model binaries (Kraken, Scooter, OAST)
 pytestmark = pytest.mark.requires_binary
@@ -64,13 +64,9 @@ class TestModalModelAgreement:
 
     def test_kraken_modes_valid(self, simple_environment, simple_source):
         """Test that Kraken computes valid modes (wavenumbers non-zero)."""
-        # Create receiver grid for mode computation
-        mode_depths = np.linspace(0, simple_environment.depth * 0.999, 150)
-        receiver = uacpy.Receiver(depths=mode_depths, ranges=np.array([5000]))
-
-        # Compute modes
+        # Compute modes (compute_modes derives its own mode-depth grid)
         kraken = Kraken(verbose=False)
-        result = kraken.run(simple_environment, simple_source, receiver)
+        result = kraken.compute_modes(simple_environment, simple_source)
 
         k = result.k
 
@@ -92,7 +88,7 @@ class TestModalModelAgreement:
     ):
         """Test KrakenField vs Scooter at a single point."""
         # KrakenField
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
         kf_tl = kf_result.tl[0, 0]
 
@@ -115,7 +111,7 @@ class TestModalModelAgreement:
     ):
         """Test KrakenField vs Scooter across multiple ranges."""
         # KrakenField
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, multi_range_receiver)
         kf_tl = kf_result.tl[0, :]
 
@@ -140,12 +136,14 @@ class TestModalModelAgreement:
         )
 
     @pytest.mark.requires_oases
+    @pytest.mark.filterwarnings(
+        "ignore:OAST. receiver.ranges do not match:UserWarning")
     def test_all_modal_models_agreement(
         self, simple_environment, simple_source, single_receiver
     ):
         """Test that all modal models (Kraken, Scooter, OAST) agree."""
         # Run all models
-        kf = KrakenField(verbose=False)
+        kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
         kf_tl = kf_result.tl[0, 0]
 
@@ -177,19 +175,14 @@ class TestModalModelAgreement:
 
     def test_mode_count_consistency(self, simple_environment, simple_source):
         """Test that mode count is consistent for the environment."""
-        mode_depths = np.linspace(0, simple_environment.depth * 0.999, 150)
-        receiver = uacpy.Receiver(depths=mode_depths, ranges=np.array([5000]))
-
         # Compute modes with different resolutions
         resolutions = [100, 150, 200]
         mode_counts = []
 
         for n_points in resolutions:
             mode_depths = np.linspace(0, simple_environment.depth * 0.999, n_points)
-            receiver = uacpy.Receiver(depths=mode_depths, ranges=np.array([5000]))
-
-            kraken = Kraken(verbose=False)
-            result = kraken.run(simple_environment, simple_source, receiver)
+            kraken = Kraken(mode_depth_grid=mode_depths, verbose=False)
+            result = kraken.compute_modes(simple_environment, simple_source)
 
             k = result.k
             n_valid = sum(1 for k_val in k if np.abs(k_val) >= 1e-10 and np.imag(k_val) <= 0)

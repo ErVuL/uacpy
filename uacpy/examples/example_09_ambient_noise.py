@@ -1,12 +1,13 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 09: Ambient noise (Wenz) + ssrp synthesis + PPSD verification
+EXAMPLE 09: Ambient noise (Wenz) + PSD→time-series synthesis + PPSD verification
 ═══════════════════════════════════════════════════════════════════════════════
 
 Pipeline:
   1. Build a Wenz total ambient-noise PSD via :class:`uacpy.noise.WenzNoise`
      (deep water, Beaufort-6 wind, heavy shipping + rain).
-  2. Synthesise a time-domain realisation with :func:`uacpy.acoustic_signal.ssrp`
+  2. Synthesise a time-domain realisation with
+     :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`
      (spectral synthesis of random processes).
   3. Visualise the time–frequency content with
      :class:`uacpy.acoustic_signal.Spectrogram` — a stationary process should show
@@ -59,7 +60,8 @@ def main():
         shipping_level='high',
         rain_rate='heavy',
     )
-    fig, _ = wenz_plot.plot(
+    fig, _ = uacpy.visualization.plot_wenz(
+        wenz_plot,
         title=(f'{wenz_plot.wind_speed:g} kn / '
                f'{wenz_plot.shipping_level} shipping / '
                f'{wenz_plot.rain_rate} rain'),
@@ -79,12 +81,13 @@ def main():
         shipping_level=wenz_plot.shipping_level,
         rain_rate=wenz_plot.rain_rate,
     )
-    Pxx = wenz_ssrp.as_psd()                           # Pa² / Hz (linear)
+    Pxx = wenz_ssrp.as_psd(ref=UPA)                    # SI Pa²/Hz (linear)
 
     duration = 30.0                                    # seconds
-    t, x, fs = uacpy.acoustic_signal.ssrp(Pxx, f_ssrp, fs=96000,
-                                 duration=duration, scale=1.0, n_fft=n_fft)
-    print(f"  ssrp: synthesised {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
+    t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
+        Pxx, f_ssrp, sample_rate=96000,
+        duration=duration, scale=1.0, n_fft=n_fft)
+    print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
 
     # Snapshot of the waveform (first 0.2 s).
@@ -103,9 +106,10 @@ def main():
     print("  ✓ Saved: output/example_09_ssrp_timeseries.png")
 
     # ── 3. Spectrogram of the synthesised noise ─────────────────────────
-    spec = uacpy.acoustic_signal.Spectrogram(ref=UPA, nperseg=4096, noverlap=2048)
-    spec.compute(x, fs)
-    fig, ax = spec.plot(
+    sf, st, sSxx = uacpy.acoustic_signal.spectrogram(
+        x, fs, nperseg=4096, noverlap=2048)
+    fig, ax = uacpy.visualization.plot_spectrogram(
+        sf, st, sSxx, ref=UPA,
         title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
@@ -118,16 +122,12 @@ def main():
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
-    ppsd = uacpy.acoustic_signal.PPSD(
-        ref=UPA,
-        seg_duration=1.0,
-        overlap_pct=50,
-        ddB=1.0,
-        lvlmin=20,
-        lvlmax=140,
+    ppsd_result = uacpy.acoustic_signal.ppsd(
+        x, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+        lvlmin=20, lvlmax=140,
     )
-    ppsd.compute(x, fs)
-    fig, ax = ppsd.plot(
+    fig, ax = uacpy.visualization.plot_ppsd(
+        ppsd_result,
         title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
@@ -148,14 +148,16 @@ def main():
     # dose of the record. Computed here per third-octave band over the whole
     # 30 s realisation; each bar is dB re 1 µPa²·s. The broadband total is the
     # incoherent (energy) sum across bands.
-    sel = uacpy.acoustic_signal.SEL(
-        fmin=10.0, fmax=fs / 2.0, band_type='third_octave', ref=UPA,
+    sel_dur = len(x) / fs
+    sel_vals, sel_bands = uacpy.acoustic_signal.sel(
+        x, fs, fmin=10.0, fmax=fs / 2.0, band_type='third_octave',
     )
-    sel_vals, sel_bands = sel.compute(x, fs)
     total_sel_db = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
     print(f"  SEL: broadband {total_sel_db:.1f} dB re 1 µPa²·s over "
-          f"{sel.duration:.0f} s across {len(sel_bands)} third-octave bands")
-    fig, ax = sel.plot(
+          f"{sel_dur:.0f} s across {len(sel_bands)} third-octave bands")
+    fig, ax = uacpy.visualization.plot_sel(
+        sel_vals, sel_bands, ref=UPA, duration=sel_dur,
+        band_type='third_octave',
         title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),

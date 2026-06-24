@@ -37,7 +37,7 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy import Bottom  # noqa: E402
 from uacpy.models import Bellhop  # noqa: E402
 from uacpy.visualization.plots import plot_field, plot_environment, plot_rays  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
@@ -65,8 +65,7 @@ def main():
 
     # Range-dependent bottom: sand on shelf, hardpack on slope
     ranges = np.array([0.0, 10000.0, 20000.0, 30000.0])
-    bottom_rd = RangeDependentBottom(
-        ranges=ranges,
+    bottom_rd = Bottom.from_halfspaces(ranges,
         sound_speed=np.array([1600, 1650, 1700, 1750]),  # Hardening
         density=np.array([1.5, 1.7, 1.9, 2.1]),         # Increasing
         attenuation=np.array([0.8, 0.6, 0.4, 0.3]),     # Less lossy

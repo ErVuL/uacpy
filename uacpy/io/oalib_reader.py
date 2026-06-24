@@ -1,7 +1,7 @@
 """
 Acoustics Toolbox / OALIB output-file readers.
 
-One file per shared output format (Kraken, Scooter, SPARC, Bounce, KrakenField,
+One file per shared output format (Kraken, Scooter, SPARC, Bounce,
 Bellhop output formats; modes are kept in their own ``modes_reader.py``).
 
 Provides:
@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
-from uacpy.io._fortran_helpers import read_vector as _read_vector
+from uacpy.io._fortran_helpers import (
+    read_vector as _read_vector, detect_endian, typed_format_error)
 from uacpy.io.units import km_to_m
 
 
@@ -49,13 +51,13 @@ def read_shd_file(filepath: Union[str, Path]):
     freqs = np.asarray(shd['freqVec'], dtype=float)
     nfreq = len(freqs)
     if nfreq == 0:
-        raise ValueError(
+        raise FileFormatError(
             f"read_shd_file: {filepath} declares zero frequencies; the .shd "
             f"file is malformed (every Acoustics-Toolbox writer emits at "
             f"least one frequency record)."
         )
     if nfreq > 1:
-        raise ValueError(
+        raise FileFormatError(
             f"read_shd_file: {filepath} contains {nfreq} frequencies; "
             "use read_shd_bin(filepath) for the full broadband payload "
             "and construct a broadband Field from it."
@@ -83,11 +85,12 @@ def read_shd_file(filepath: Union[str, Path]):
     )
 
 
+@typed_format_error
 def read_shd_bin(
     filename: str,
     xs: Optional[float] = None,
     ys: Optional[float] = None,
-    freq: Optional[float] = None,
+    frequency: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Read binary shade file (.shd) produced by acoustic models.
@@ -105,7 +108,7 @@ def read_shd_bin(
         for the source closest to (xs, ys). If None, reads first source.
     ys : float, optional
         Source y-coordinate in km. Required if xs is provided.
-    freq : float, optional
+    frequency : float, optional
         Frequency in Hz. If provided for broadband runs, selects closest
         frequency. If None, reads first frequency.
 
@@ -133,12 +136,12 @@ def read_shd_bin(
             frequency (``pressure_freq``), never a multi-frequency cube.
             Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
             Shape (Ntheta, Nsz, 1, Nrr) for irregular
-            For a broadband file, pass ``freq=`` per frequency (or iterate
+            For a broadband file, pass ``frequency=`` per frequency (or iterate
             ``freqVec`` calling this once per entry) — do not treat
             ``pressure`` as spanning ``freqVec``.
         - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
-            cube was sliced at (``freq`` snapped to the nearest ``freqVec``
-            entry, or ``freqVec[0]`` when ``freq`` is None).
+            cube was sliced at (``frequency`` snapped to the nearest ``freqVec``
+            entry, or ``freqVec[0]`` when ``frequency`` is None).
 
     Notes
     -----
@@ -166,10 +169,9 @@ def read_shd_bin(
     >>> p = shd['pressure'][0, 0, 0, :]
 
     >>> # Read specific frequency for broadband run
-    >>> shd = read_shd_bin('broadband.shd', freq=100.0)
+    >>> shd = read_shd_bin('broadband.shd', frequency=100.0)
     """
     with open(filename, "rb") as fid:
-        from uacpy.io._fortran_helpers import detect_endian
         head = fid.read(4)
         fid.seek(0)
         endian = detect_endian(head, source=f'read_shd_bin:{filename}')
@@ -223,15 +225,15 @@ def read_shd_bin(
             Nrcvrs_per_range = Nrz
         # Select ONE frequency slice. The returned 'pressure' cube is always
         # single-frequency (the slice 'pressure_freq'); a broadband caller must
-        # pass freq= per frequency or iterate freqVec, never treat 'pressure' as
+        # pass frequency= per frequency or iterate freqVec, never treat 'pressure' as
         # a multi-frequency cube. NB: only the standard 2D path (xs is None)
-        # carries a frequency axis in the record stream (field.f90 stacks freq
+        # carries a frequency axis in the record stream (field.f90 stacks frequency
         # outermost). The 3D / irregular multi-source path (xs given) is written
         # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
         # so there is no frequency to select there.
         ifreq = 0
-        if freq is not None:
-            ifreq = int(np.argmin(np.abs(freqVec - freq)))
+        if frequency is not None:
+            ifreq = int(np.argmin(np.abs(freqVec - frequency)))
         if xs is None:
             if Nsx > 1 or Nsy > 1:
                 warnings.warn(
@@ -260,12 +262,12 @@ def read_shd_bin(
 
         else:
             if ys is None:
-                raise ValueError("ys must be provided if xs is specified")
-            # 3D / irregular multi-source files are single-frequency (no freq
-            # stride in the record index), so freq= cannot select a slice here.
-            if freq is not None and len(freqVec) > 1:
+                raise ConfigurationError("ys must be provided if xs is specified")
+            # 3D / irregular multi-source files are single-frequency (no frequency
+            # stride in the record index), so frequency= cannot select a slice here.
+            if frequency is not None and len(freqVec) > 1:
                 warnings.warn(
-                    "read_shd_bin: frequency selection (freq=) is not supported "
+                    "read_shd_bin: frequency selection (frequency=) is not supported "
                     "for multi-source-position (3D/irregular) shade files, which "
                     "carry a single frequency; returning freqVec[0].",
                     UserWarning, stacklevel=2,
@@ -358,15 +360,16 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     filepath = Path(filepath)
     try:
         fid = open(filepath, "r")
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise FileNotFoundError(
-            "No shade file with that name exists; you must run a model first"
-        )
+            f"ASCII shade file not found: {filepath}. Run a model first to "
+            "produce it."
+        ) from e
     title = fid.readline().strip()
     plot_type = fid.readline().strip()
 
     line = fid.readline()
-    vals = np.fromstring(line, sep=" ")
+    vals = np.array(line.split(), dtype=float)
     Nfreq = int(vals[0])
     Ntheta = int(vals[1])
     Nsd = int(vals[2])
@@ -374,7 +377,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     Nrr = int(vals[4])
 
     line = fid.readline()
-    vals = np.fromstring(line, sep=" ", count=2)
+    vals = np.array(line.split()[:2], dtype=float)
     freq0 = vals[0]
     atten = vals[1]
     freq_vec = np.zeros(Nfreq)
@@ -415,6 +418,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
+@typed_format_error
 def read_arr_file(filepath: Union[str, Path]):
     """
     Read arrivals file (.arr) from Bellhop
@@ -449,8 +453,10 @@ def read_arr_file(filepath: Union[str, Path]):
           measured from the horizontal (positive downward).
         - ``n_top_bounces``, ``n_bot_bounces`` : integer bounce counts.
 
-        Depths are in **m**, ranges in **m** (the reader converts from
-        km on disk), frequencies in **Hz**.
+        Depths are in **m**, ranges in **m** (already metres on disk — AT
+        converts km→m at env-read time, so ``Pos%Rr`` in the ``.arr`` is
+        metres and the reader applies no further conversion), frequencies
+        in **Hz**.
     """
     filepath = Path(filepath)
 
@@ -489,7 +495,7 @@ def read_arr_file(filepath: Union[str, Path]):
         elif "'3D'" in text_content:
             is_3d = True
         else:
-            raise ValueError(f"Not a valid arrivals file: {repr(text_content)}")
+            raise FileFormatError(f"Not a valid arrivals file: {repr(text_content)}")
 
         if not is_3d:
             f.close()
@@ -793,8 +799,6 @@ def _read_ray_file_binary(filepath: Path) -> list:
     """
     rays = []
 
-    from uacpy.io._fortran_helpers import detect_endian
-
     with open(filepath, "rb") as f:
         head = f.read(4)
         if len(head) < 4:
@@ -841,6 +845,7 @@ def _read_ray_file_binary(filepath: Path) -> list:
     return rays
 
 
+@typed_format_error
 def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read 2D sound speed profile file used by BELLHOP.
@@ -896,9 +901,9 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     # which mismatched the canonical AT files (e.g. tests/Munk/MunkB_geo_rot.ssp).
     with open(filepath, "r") as fid:
         n_prof = int(fid.readline().strip())
-        r_prof = np.fromstring(fid.readline(), sep=" ", count=n_prof)
+        r_prof = np.array(fid.readline().split()[:n_prof], dtype=float)
         if r_prof.size != n_prof:
-            raise ValueError(
+            raise FileFormatError(
                 f"SSP file {filepath}: expected {n_prof} range values on line 2, "
                 f"parsed {r_prof.size}"
             )
@@ -912,7 +917,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
                 continue
             row = [float(t) for t in tokens]
             if len(row) != n_prof:
-                raise ValueError(
+                raise FileFormatError(
                     f"SSP file {filepath}: expected {n_prof} values per row, "
                     f"got {len(row)}"
                 )
@@ -984,9 +989,9 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     # vector and each per-(z, y) SSP row with a single list-directed
     # READ statement — one Fortran record per vector / row.
     def _read_vec(fid, n):
-        vec = np.fromstring(fid.readline(), sep=" ", count=n)
+        vec = np.array(fid.readline().split()[:n], dtype=float)
         if vec.size != n:
-            raise ValueError(
+            raise FileFormatError(
                 f"3D SSP file {filepath}: expected {n} values on line, "
                 f"parsed {vec.size}"
             )
@@ -1327,12 +1332,12 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
             raw_tokens.extend(line.strip().split())
 
     if not raw_tokens:
-        raise ValueError(f"RTS file {filepath} appears empty after the title line")
+        raise FileFormatError(f"RTS file {filepath} appears empty after the title line")
 
     # First token is NRr/NRz, then exactly NRr range/depth floats.
     nr = int(raw_tokens[0])
     if len(raw_tokens) < 1 + nr:
-        raise ValueError(
+        raise FileFormatError(
             f"RTS file {filepath} truncated: expected {nr} range/depth values, "
             f"only {len(raw_tokens) - 1} tokens available after count."
         )
@@ -1369,12 +1374,13 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
 
 def rts_to_pressure(
-    rts_data: Dict[str, Any], freq: float, method: str = "fft",
+    rts_data: Dict[str, Any], frequency: float, method: str = "fft",
+    *, pulse_type: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Project SPARC time-series data onto complex pressure at one frequency.
 
-    ``method='fft'`` extracts the spectral bin nearest ``freq`` from a
+    ``method='fft'`` extracts the spectral bin nearest ``frequency`` from a
     Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
     single-bin DFT. Both return ``(p_at_freq, ranges)`` where
     ``p_at_freq`` is the model-native, source-normalised complex pressure
@@ -1390,14 +1396,39 @@ def rts_to_pressure(
 
     nt, nr = p.shape
 
+    if pulse_type is not None:
+        # Deconvolve the known source spectrum (convolution theorem): the range
+        # time-series r(t) = s(t) ⊛ h(t), so rfft(r)/rfft(s) = h(w0) — the CW
+        # transfer function ≈ absolute TL re 1 m (Jensen COA Eq. 8.1). uacpy
+        # generated the pulse, so s(t) is known. The estimate is physical and
+        # window/grid-independent once the output Nyquist clears the pulse band
+        # (the SPARC model sizes n_t_out for this), but SPARC's discretised
+        # pulse and band-pass leave a frequency-dependent bias of a few dB vs
+        # Kraken/Scooter — it is not a calibrated replacement for them.
+        # Use the RECTANGULAR DFT (no taper): a window breaks the convolution
+        # theorem and would null the transient source pulse (first few samples).
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        t = np.asarray(rts_data["time"], dtype=float)
+        s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
+        freqs = np.fft.rfftfreq(nt, dt)
+        f_idx = int(np.argmin(np.abs(freqs - frequency)))
+        S_at_f0 = np.fft.rfft(s_t)[f_idx]
+        if S_at_f0 == 0:
+            raise ConfigurationError(
+                "rts_to_pressure: source spectrum is zero at "
+                f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
+                "deconvolve (check pulse / frequency).")
+        p_freq = np.fft.rfft(p, axis=0)
+        return p_freq[f_idx, :] / S_at_f0, ranges
+
     if method == "fft":
         window = np.hanning(nt)
         p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
         freqs = np.fft.rfftfreq(nt, dt)
-        freq_idx = np.argmin(np.abs(freqs - freq))
+        freq_idx = np.argmin(np.abs(freqs - frequency))
         p_at_freq = 2.0 * p_freq[freq_idx, :] / np.sum(window)
     elif method == "goertzel":
-        omega = 2 * np.pi * freq
+        omega = 2 * np.pi * frequency
         coeff = 2 * np.cos(omega * dt)
         p_at_freq = np.zeros(nr, dtype=complex)
         for ir in range(nr):
@@ -1411,7 +1442,7 @@ def rts_to_pressure(
             p_at_freq[ir] = s0 - s1 * np.exp(-1j * omega * dt)
         p_at_freq = 2.0 * p_at_freq / nt
     else:
-        raise ValueError(
+        raise ConfigurationError(
             f"rts_to_pressure: unknown method {method!r}; "
             f"use 'fft' or 'goertzel'."
         )
@@ -1419,6 +1450,7 @@ def rts_to_pressure(
     return p_at_freq, ranges
 
 
+@typed_format_error
 def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read time-series file from acoustic models.
@@ -1488,7 +1520,7 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
         rd = np.array([float(x) for x in f.readline().strip().split()])
 
         if len(rd) != nrd:
-            raise ValueError(f"Expected {nrd} receiver depths, got {len(rd)}")
+            raise FileFormatError(f"Expected {nrd} receiver depths, got {len(rd)}")
         data = []
         for line in f:
             line = line.strip()

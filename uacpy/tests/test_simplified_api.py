@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import matplotlib.pyplot as plt
 
-from uacpy.models import Bellhop, Kraken, KrakenField
+from uacpy.models import Bellhop, Kraken
 from uacpy import Field
 from uacpy.core.results import Modes
 from uacpy.visualization import plots
@@ -33,20 +33,17 @@ class TestComputeAPI:
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
         assert isinstance(modes, Modes)
-        assert isinstance(modes, Modes)
         assert modes.k is not None
         assert modes.phi is not None
 
     def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""
         bellhop = Bellhop(verbose=False)
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
 
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
         result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
-        assert isinstance(result_bellhop, Field)
-        assert isinstance(result_kraken, Field)
         assert isinstance(result_bellhop, Field)
         assert isinstance(result_kraken, Field)
 
@@ -100,11 +97,11 @@ class TestPlottingAPI:
     def test_plot_comparison(self, simple_env, source, receiver_small):
         """Test Field.plot_comparison() static method."""
         bellhop = Bellhop(verbose=False)
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
 
         results = {
             'Bellhop': bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small),
-            'KrakenField': krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small),
+            'Kraken': krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small),
         }
 
         fig, axes = plots.compare_models(results, env=simple_env)

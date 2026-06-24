@@ -24,12 +24,9 @@ from .modulation import (
     fsk_modulate,
 )
 from .metrics import (
-    ber_curve,
     ber_theory,
     bit_error_rate,
     evm,
-    eye_diagram,
-    scatter,
     symbol_error_rate,
 )
 from .channel_models import (
@@ -38,26 +35,22 @@ from .channel_models import (
     awgn,
     fading_taps,
     multipath_channel,
-    plot_channel,
 )
 from .equalization import (
     DFE,
     lms_equalizer,
     mmse_equalizer,
-    plot_convergence,
     rls_equalizer,
 )
 from .doppler import (
     compensate_doppler,
     doppler_from_speed,
     estimate_doppler_scale,
-    plot_doppler_ambiguity,
 )
 from .sync import (
     detect_frames,
     detect_preamble,
     matched_filter_metric,
-    plot_sync_metric,
 )
 from .link import LinkResult, ber_sweep, simulate_link
 from .framing import bits_to_bytes, bytes_to_bits, pack_frame, unpack_frame
@@ -69,7 +62,7 @@ from .phy import (
     symbol_sync,
     upconvert,
 )
-from .transceiver import OFDMReceiver, OFDMTransmitter, Receiver, Transmitter
+from .transceiver import OFDMReceiver, OFDMTransmitter, CommsReceiver, Transmitter
 from .janus import (
     JanusPacket,
     janus_decode,
@@ -84,7 +77,6 @@ from .ofdm import (
     estimate_channel,
     ofdm_demodulate,
     ofdm_modulate,
-    plot_subcarriers,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )
@@ -120,18 +112,13 @@ __all__ = [
     "fsk_modulate", "fsk_demodulate",
     # metrics
     "bit_error_rate", "symbol_error_rate", "evm", "ber_theory",
-    "scatter", "eye_diagram", "ber_curve",
     # channel models
     "awgn", "multipath_channel", "apply_channel", "fading_taps",
-    "apply_fading_channel", "plot_channel",
-    # equalization
-    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", "plot_convergence",
-    # doppler
+    "apply_fading_channel", # equalization
+    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", # doppler
     "doppler_from_speed", "compensate_doppler", "estimate_doppler_scale",
-    "plot_doppler_ambiguity",
     # sync
-    "matched_filter_metric", "detect_preamble", "detect_frames", "plot_sync_metric",
-    # link
+    "matched_filter_metric", "detect_preamble", "detect_frames", # link
     "simulate_link", "ber_sweep", "LinkResult",
     # framing (real payloads)
     "bytes_to_bits", "bits_to_bytes", "pack_frame", "unpack_frame",
@@ -139,15 +126,14 @@ __all__ = [
     "rrc_filter", "pulse_shape", "rrc_matched_filter", "upconvert",
     "downconvert", "symbol_sync",
     # transceiver
-    "Transmitter", "Receiver", "OFDMTransmitter", "OFDMReceiver",
+    "Transmitter", "CommsReceiver", "OFDMTransmitter", "OFDMReceiver",
     # JANUS (STANAG 4748)
     "JanusPacket", "janus_encode", "janus_decode", "janus_modulate",
     "janus_demodulate", "janus_detect",
     # channel estimation
     "ls_estimate", "omp_estimate",
     # ofdm
-    "ofdm_modulate", "ofdm_demodulate", "plot_subcarriers",
-    "schmidl_cox_preamble", "schmidl_cox_sync", "apply_cfo", "estimate_channel",
+    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble", "schmidl_cox_sync", "apply_cfo", "estimate_channel",
     # coding
     "ConvCode", "conv_encode", "viterbi_decode", "interleave", "deinterleave",
     # spread

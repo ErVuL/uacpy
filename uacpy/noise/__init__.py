@@ -12,17 +12,21 @@ Examples
 >>> wenz = WenzNoise(f, wind_speed=15,
 ...                  water_depth='deep', shipping_level='medium',
 ...                  rain_rate='moderate')
->>> wenz.plot()
->>> psd_pa2_per_hz = wenz.as_psd(ref=1)            # linear, Pa²/Hz
+>>> from uacpy.visualization import plot_wenz
+>>> plot_wenz(wenz)
+>>> psd_upa2_per_hz = wenz.as_psd()                # linear µPa²/Hz (10·log10 == .total)
+>>> psd_pa2_per_hz = wenz.as_psd(ref=1e-6)         # SI Pa²/Hz (ref = 1 µPa in Pa)
 """
 
-from uacpy.noise.noise import compute_windnoise, WenzNoise
+from uacpy.noise.noise import (
+    compute_windnoise, WenzNoise, NoiseComponents,
+    WIND_MODELS, SHIPPING_MODELS, RAIN_MODELS, THERMAL_MODELS, TURBULENCE_MODELS,
+)
 from uacpy.noise.ship_radiated_noise import (
     RNL_UNCERTAINTY_DB,
     lloyd_mirror_correction,
     monopole_source_level,
     nominal_source_depth,
-    plot_source_level,
     radiated_noise_level,
 )
 from uacpy.noise.marine_mammal import (
@@ -30,7 +34,6 @@ from uacpy.noise.marine_mammal import (
     WEIGHTING_PARAMS,
     apply_weighting,
     auditory_weighting,
-    plot_weighting,
     weighted_level,
 )
 from uacpy.noise import marine_mammal, ship_radiated_noise
@@ -38,19 +41,20 @@ from uacpy.noise import marine_mammal, ship_radiated_noise
 __all__ = [
     'compute_windnoise',
     'WenzNoise',
+    'NoiseComponents',
+    'WIND_MODELS', 'SHIPPING_MODELS', 'RAIN_MODELS',
+    'THERMAL_MODELS', 'TURBULENCE_MODELS',
     # ship radiated noise (ISO 17208)
     'radiated_noise_level',
     'nominal_source_depth',
     'lloyd_mirror_correction',
     'monopole_source_level',
-    'plot_source_level',
     'RNL_UNCERTAINTY_DB',
     'ship_radiated_noise',
     # marine-mammal auditory weighting (Southall 2019)
     'auditory_weighting',
     'apply_weighting',
     'weighted_level',
-    'plot_weighting',
     'WEIGHTING_PARAMS',
     'HEARING_GROUPS',
     'marine_mammal',

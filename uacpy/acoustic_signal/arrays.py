@@ -13,16 +13,20 @@ Schmidt, R.O. (1986). Multiple emitter location and signal parameter estimation.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from collections import namedtuple
+from typing import Optional
 
 import numpy as np
 from scipy.signal import get_window
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy._log import log_message
+
+BeamformResult = namedtuple("BeamformResult", "snr angles peak_snr")
 
 
-def steering_vectors(positions_m, angles_deg, freq: float,
+def steering_vectors(positions_m, angles_deg, frequency: float,
                      c: float = DEFAULT_SOUND_SPEED):
     """Unit plane-wave steering vectors for a line array.
 
@@ -38,7 +42,7 @@ def steering_vectors(positions_m, angles_deg, freq: float,
     """
     z = np.asarray(positions_m, dtype=float)
     angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
-    k = 2.0 * np.pi * float(freq) / float(c)
+    k = 2.0 * np.pi * float(frequency) / float(c)
     phase = np.outer(np.sin(np.deg2rad(angles)), z)
     e = np.exp(1j * k * phase)
     return e / np.sqrt(z.size)
@@ -94,7 +98,12 @@ def mvdr_spectrum(R, steering, *, diagonal_loading: float = 1e-6):
     Rinv = np.linalg.inv(R)
     e = np.asarray(steering, dtype=complex)
     denom = np.real(np.einsum("ai,ij,aj->a", e.conj(), Rinv, e))
-    return 1.0 / denom
+    # With diagonal_loading > 0, R is positive-definite so denom > 0 and the
+    # output is finite. denom -> 0 only for a singular/rank-deficient R with no
+    # loading, where 1/denom -> +inf is the honest degenerate answer (a steering
+    # direction in R's null space); silence the spurious divide warning.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 1.0 / denom
 
 
 def music_spectrum(R, steering, n_sources: int):
@@ -116,10 +125,14 @@ def music_spectrum(R, steering, n_sources: int):
     e = np.asarray(steering, dtype=complex)
     proj = e.conj() @ noise
     denom = np.sum(np.abs(proj) ** 2, axis=1)
-    return 1.0 / denom
+    # denom -> 0 at a true source direction (steering orthogonal to the noise
+    # subspace) is the *intended* sharp MUSIC peak -> 1/denom -> +inf; do NOT
+    # clamp it, just silence the spurious divide warning.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 1.0 / denom
 
 
-def taper(n_elements: int, window: str = "hann"):
+def shading_taper(n_elements: int, window: str = "hann"):
     """Array-shading taper (amplitude weights), normalised to unit mean.
 
     ``window`` is any ``scipy.signal.get_window`` name (e.g. ``'hann'``,
@@ -132,12 +145,12 @@ def taper(n_elements: int, window: str = "hann"):
 def beamform(
     pressure: np.ndarray,
     phone_coords: np.ndarray,
-    freq: float,
+    frequency: float,
     angles: Optional[np.ndarray] = None,
     SL: float = 150.0,
     NL: float = 0.0,
     c: float = DEFAULT_SOUND_SPEED
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> BeamformResult:
     """
     Plane-wave beamformer — returns signal-to-noise ratio per look angle.
 
@@ -152,7 +165,7 @@ def beamform(
         Can be complex-valued.
     phone_coords : ndarray
         Hydrophone depth coordinates (m).
-    freq : float
+    frequency : float
         Frequency in Hz.
     angles : ndarray, optional
         Beam angles in degrees relative to broadside (default: -90 to 90 in
@@ -163,7 +176,7 @@ def beamform(
         **Per-element, wideband** noise level in dB at the receiver
         (i.e. dB re 1 µPa², already integrated over the signal
         bandwidth). The unit-normalised steering vector already folds
-        the array gain ``10·log10(N)`` into ``|e @ pressure|``, so do
+        the array gain ``10·log10(N)`` into ``|e.conj() @ pressure|``, so do
         not pre-correct ``NL`` for the number of elements. For a PSD
         in dB re 1 µPa²/Hz, multiply by the integration bandwidth in
         Hz before passing. Default 0.0.
@@ -183,7 +196,7 @@ def beamform(
     -----
     The beamformer computes::
 
-        snr = 20·log10(|e @ pressure|) + SL - NL
+        snr = 20·log10(|e.conj() @ pressure|) + SL - NL
 
     where ``e`` is the unit-normalised steering-vector matrix from
     :func:`steering_vectors`. Pass ``NL=0`` to recover the receive
@@ -195,11 +208,21 @@ def beamform(
     """
     if angles is None:
         angles = np.arange(-90, 91, 1)
-    e = steering_vectors(phone_coords, angles, freq, c)
-    beamformed = e @ pressure
-    snr = 20 * np.log10(np.abs(beamformed)) + SL - NL
+    e = steering_vectors(phone_coords, angles, frequency, c)
+    # Conjugate the steering vector (matched filter), consistent with
+    # bartlett/mvdr/music_spectrum; ``e @ pressure`` (no conjugate) resolves
+    # the mirror angle -theta for a source at +theta.
+    beamformed = e.conj() @ pressure
+    mag = np.abs(beamformed)
+    if not np.any(mag):
+        log_message(
+            "beamform",
+            "all beam outputs are zero (all-zero pressure?); SNR is -inf at "
+            "every angle — check the input pressure.",
+            level="warning",
+        )
+    with np.errstate(divide='ignore'):
+        snr = 20 * np.log10(mag) + SL - NL
     peak_snr = np.max(snr)
 
-    return snr, angles, peak_snr
-
-
+    return BeamformResult(snr, angles, peak_snr)

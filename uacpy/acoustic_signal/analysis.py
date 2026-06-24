@@ -1,545 +1,223 @@
-"""Spectral and level estimators: PSD, PPSD (Welch density-scaled) and
-SEL (band-integrated sound exposure level). dB references default to 1 uPa.
+"""Spectral and level estimators (pure functions): ``psd``, ``ppsd`` (Welch
+density-scaled) and ``sel`` (band-integrated sound exposure level). ``psd``/
+``sel`` are reference-free (linear); ``ppsd`` takes ``ref`` for its dB
+histogram. Plotting lives in :mod:`uacpy.visualization.plots.signal`.
 """
 
 import math
+from collections import namedtuple
 
 import numpy as np
 import scipy.signal as _sig
-import matplotlib.pyplot as plt
 
-from uacpy.core.constants import REFERENCE_PRESSURE_AIR, REFERENCE_PRESSURE_WATER
+from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+from uacpy.core.acoustics import power_to_db
+from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 
-class PPSD:
-    """Compute the probability density function of PSD levels.
+PSDResult = namedtuple("PSDResult", "frequencies power")
+SELResult = namedtuple("SELResult", "sel_pa2s bands")
+PPSDResult = namedtuple(
+    "PPSDResult",
+    "frequencies level_edges pdf mean_db std_db binwidth_db seg_duration")
 
-    Segments input signals, computes Welch PSD for each segment, and
-    builds a histogram (PDF) of spectral levels across time segments.
 
-    Parameters
-    ----------
-    ref : float
-        Reference pressure for dB conversion (default 1e-6 Pa for water).
-    seg_duration : float
-        Duration of each time segment in seconds.
-    overlap_pct : float
-        Overlap percentage between segments.
-    ddB : float
-        Bin width in dB for the level histogram.
-    lvlmin, lvlmax : float
-        Minimum and maximum dB levels for histogram range.
-    **kwargs
-        Additional keyword arguments passed to ``scipy.signal.welch``.
+def psd(data, sample_rate, *, window="hann", nperseg=8192, noverlap=None,
+        nfft=None, scaling="density"):
+    """Welch power spectral density. Returns ``PSDResult(frequencies, power)``
+    with ``power`` the linear PSD in Pa²/Hz.
+
+    Reference-free (linear). Convert to dB at plot time with
+    :func:`uacpy.visualization.plot_psd` (which takes ``ref=``). For
+    logarithmic / constant-Q frequency resolution, see
+    :func:`uacpy.acoustic_signal.constant_q_psd`.
+
+    ``noverlap=None`` (default) lets scipy derive ``nperseg // 2`` and clamp
+    ``nperseg`` to the input length, so short signals don't raise. Note scipy's
+    Welch **detrends the constant (DC) component** of each segment, so the DC
+    bin is suppressed; :func:`sel` keeps DC (no detrending) for an exact energy
+    sum, so the two are not directly comparable at 0 Hz."""
+    data = require_finite_signal(data, "psd")
+    freqs, Pxx = _sig.welch(data, sample_rate, window=window, nperseg=nperseg,
+                            noverlap=noverlap, nfft=nfft, scaling=scaling)
+    return PSDResult(freqs, Pxx)
+
+
+def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+         lvlmin=0, lvlmax=150, window="hann", nperseg=8192, noverlap=4096,
+         scaling="density", ref=REFERENCE_PRESSURE_WATER):
+    """Probability density of Welch PSD levels over time segments.
+
+    Segments the signal(s), computes a Welch PSD per segment and histograms the
+    dB levels per frequency. Returns a :class:`PPSDResult`. 2-D input uses the
+    longer axis as time; pass a list of 1-D arrays to be explicit. For a
+    constant-Q (geometric-frequency) PPSD, see
+    :func:`uacpy.acoustic_signal.probabilistic_constant_q`.
     """
-
-    def __init__(
-        self,
-        ref=REFERENCE_PRESSURE_WATER,
-        seg_duration=1,
-        overlap_pct=50,
-        ddB=1.0,
-        lvlmin=0,
-        lvlmax=150,
-        **kwargs,
-    ):
-        self.seg_duration = seg_duration
-        self.overlap_pct = overlap_pct
-        self.ref = ref
-        self.ddB = ddB
-        self.lvlmin = lvlmin
-        self.lvlmax = lvlmax
-
-        self.welch_params = {
-            "nperseg": 8192,
-            "noverlap": 4096,
-            "window": "hann",
-            "scaling": "density",
-        }
-        self.welch_params.update(kwargs)
-
-    def compute(self, data, fs):
-        """Compute PSD PDF from 1D, list, or 2D signals.
-
-        2-D input is interpreted with the *longer* axis as time: an
-        ``(n_signals, n_samples)`` array with more samples than signals
-        iterates rows, otherwise columns. For arrays where that
-        heuristic is wrong (more channels than samples), pass an
-        explicit list of 1-D signals instead.
-        """
-        # Normalize input
-        if isinstance(data, list):
-            signals = data
-        else:
-            data = np.asarray(data)
-            if data.ndim == 1:
-                signals = [data]
-            elif data.ndim == 2:
-                if data.shape[0] < data.shape[1]:
-                    signals = [data[i, :] for i in range(data.shape[0])]
-                else:
-                    signals = [data[:, i] for i in range(data.shape[1])]
+    if isinstance(data, list):
+        signals = data
+    else:
+        data = np.asarray(data)
+        if data.ndim == 1:
+            signals = [data]
+        elif data.ndim == 2:
+            if data.shape[0] < data.shape[1]:
+                signals = [data[i, :] for i in range(data.shape[0])]
             else:
-                raise ValueError(
-                    "PPSD.compute: data must be 1-D, 2-D, or a list of 1-D arrays; "
-                    f"got ndim={data.ndim}"
-                )
-
-        chunk_size = int(self.seg_duration * fs)
-        overlap_samples = int(chunk_size * self.overlap_pct / 100)
-        step = chunk_size - overlap_samples
-        if step <= 0:
-            raise ValueError(
-                f"PPSD.compute: overlap_pct ({self.overlap_pct}) too high — "
-                "chunks never advance; require overlap_pct < 100."
-            )
-
-        levels = np.arange(self.lvlmin, self.lvlmax + self.ddB, self.ddB)
-        psd_list = []
-
-        # --- Loop over signals ---
-        for sig in signals:
-            # Local per-signal Welch params: a short signal shrinks nperseg for
-            # itself only, without lowering resolution for later signals.
-            welch_params = dict(self.welch_params)
-            nperseg = welch_params.get("nperseg", 8192)
-            if chunk_size < nperseg:
-                welch_params["nperseg"] = chunk_size
-                welch_params["noverlap"] = int(chunk_size * self.overlap_pct / 100)
-
-            for i in range(0, len(sig) - chunk_size + 1, step):
-                chunk = sig[i: i + chunk_size]
-                freqs, psd = _sig.welch(chunk, fs, **welch_params)
-                psd_list.append(psd)
-
-        if len(psd_list) == 0:
-            raise ValueError(
-                f"PPSD.compute: no PSD segments computed; "
-                f"seg_duration={self.seg_duration}s vs signal length={len(sig)/fs:.2f}s"
-            )
-
-        psd_array = np.array(psd_list)
-
-        # Convert to dB once; mean/std/percentiles all live in dB-space so
-        # they line up with the histogram (and with how users read PPSD).
-        psd_segments_dB = 10 * np.log10(psd_array / self.ref**2)
-
-        self.mean_psd = np.mean(psd_segments_dB, axis=0)
-        self.std_psd = np.std(psd_segments_dB, axis=0)
-
-        pdf_matrix = np.zeros((len(levels)-1, len(freqs)))
-        for i in range(len(freqs)):
-            hist, _ = np.histogram(psd_segments_dB[:, i], bins=levels, density=True)
-            pdf_matrix[:, i] = hist
-        pdf_matrix[pdf_matrix == 0] = np.nan
-
-        self.binwidth_dB = self.ddB
-        self.frequencies = freqs
-        self.levels = levels          # dB bin edges, same unit compute() returns
-        self.pdf = pdf_matrix
-
-        return freqs, levels, pdf_matrix
-
-    def plot(self, title="", ymin=0, ymax=200, vmin=0, vmax=None):
-        """Plot the computed PSD PDF as a 2-D histogram over frequency/level."""
-        if vmax is None:
-            vmax = 1 / self.binwidth_dB
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        align_ybins = self.binwidth_dB / 2
-
-        pcm = ax.pcolormesh(
-            self.frequencies,
-            self.levels[:-1] + align_ybins,
-            self.pdf,
-            cmap="jet",
-            shading="auto",
-            vmin=vmin,
-            vmax=vmax
-        )
-
-        fig.colorbar(
-            pcm,
-            ax=ax,
-            label=f"Probability Density [{self.binwidth_dB:.1f} dB/bin]"
-        )
-
-        ax.plot(self.frequencies, self.mean_psd, "k-", label="Mean level", linewidth=1.5)
-        ax.plot(self.frequencies, self.mean_psd + self.std_psd, "k--", label="Mean level ± STD")
-        ax.plot(self.frequencies, self.mean_psd - self.std_psd, "k--")
-
-        ax.set_title(f"[PPSD {self.seg_duration}s] {title}", loc="left")
-        ax.set_xlabel("Frequency [Hz]")
-        ax.set_ylabel("Level [dB]")
-        ax.set_xscale("log")
-        ax.set_xlim((np.max((self.frequencies[0], 1)), self.frequencies[-1]))
-        ax.set_ylim((ymin, ymax))
-        ax.grid(which="both", alpha=0.5)
-        ax.legend(loc="upper right")
-        return fig, ax
-
-
-class SEL:
-    """Sound Exposure Level (SEL) computation in configurable frequency bands."""
-
-    def __init__(
-        self,
-        fmin=8.9125,
-        fmax=22387,
-        band_type="third_octave",
-        num_bands=30,
-        ref=REFERENCE_PRESSURE_WATER,
-        integration_time=None,
-    ):
-        """
-        Initialize SEL calculator.
-
-        Parameters
-        ----------
-        fmin : float
-            Minimum frequency in Hz.
-        fmax : float
-            Maximum frequency in Hz.
-        band_type : str
-            Type of frequency bands ('octave', 'third_octave', or 'linear').
-        num_bands : int
-            Number of bands for linear band_type.
-        ref : float
-            Reference pressure level in Pa.
-        integration_time : float or None
-            Integration time in seconds (if None, uses full signal length).
-        """
-        self.fmin = fmin
-        self.fmax = fmax
-        self.band_type = band_type
-        self.num_bands = num_bands
-        self.duration = None
-        self.ref = ref  # Store the reference level as an attribute
-        self.integration_time = integration_time
-
-    def _adjust_fmin_fmax(self, fs):
-        """
-        Snap the configured band edges to band boundaries for this ``fs``.
-
-        Returns the adjusted ``(fmin, fmax)`` without mutating the
-        configured ``self.fmin`` / ``self.fmax``, so ``compute()`` calls
-        with different sampling rates don't drift the configured band.
-        """
-        fmin, fmax = self.fmin, self.fmax
-        if self.band_type == "octave":
-            fmin = 2 ** np.floor(math.log2(fmin))
-            fmax = 2 ** np.ceil(math.log2(fmax))
-            if fmax > fs / 2:
-                fmax = 2 ** np.floor(math.log2(fmax))
-        elif self.band_type == "third_octave":
-            base = math.pow(2, 1 / 6)
-            fmin = base ** np.floor(math.log(fmin, base))
-            fmax = base ** np.ceil(math.log(fmax, base))
-            if fmax > fs / 2:
-                fmax = base ** np.floor(math.log(fmax, base))
-        return fmin, fmax
-
-    def _generate_frequency_bands(self, fs):
-        """
-        Generate frequency bands based on specified band_type.
-
-        Parameters
-        ----------
-        fs : float
-            Sampling frequency in Hz.
-
-        Returns
-        -------
-        bands : list of tuple
-            List of tuples containing (low, center, high) frequencies for each band.
-        """
-        if self.fmin <= 0 or self.fmax <= self.fmin:
-            raise ValueError(
-                f"SEL._generate_frequency_bands: require fmin > 0 and fmax > fmin; "
-                f"got fmin={self.fmin}, fmax={self.fmax}"
-            )
-
-        fmin, fmax = self.fmin, self.fmax
-        if self.band_type in ["octave", "third_octave"]:
-            fmin, fmax = self._adjust_fmin_fmax(fs)
-
-        bands = []
-
-        if self.band_type == "octave":
-            base = math.sqrt(2)
-            f_center = fmin
-            while f_center < fmax:
-                f_low = f_center / base
-                f_high = f_center * base
-                bands.append((f_low, f_center, f_high))
-                f_center *= 2
-            if bands and bands[-1][2] > fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
-
-        elif self.band_type == "third_octave":
-            base = math.pow(2, 1 / 6)
-            f_center = fmin
-            while f_center < fmax:
-                f_low = f_center / base
-                f_high = f_center * base
-                bands.append((f_low, f_center, f_high))
-                f_center *= math.pow(2, 1 / 3)
-            if bands and bands[-1][2] > fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
-
-        elif self.band_type == "linear":
-            if self.num_bands <= 0:
-                raise ValueError(
-                    f"SEL._generate_frequency_bands: num_bands must be a "
-                    f"positive integer for linear bands; got {self.num_bands}"
-                )
-            band_width = (fmax - fmin) / self.num_bands
-            f_low = fmin
-            for _ in range(self.num_bands):
-                f_high = f_low + band_width
-                f_center = (f_low + f_high) / 2
-                bands.append((f_low, f_center, f_high))
-                f_low = f_high
-            if bands and bands[-1][2] > fmax:
-                bands[-1] = (bands[-1][0], bands[-1][1], fmax)
-
+                signals = [data[:, i] for i in range(data.shape[1])]
         else:
-            raise ValueError(
-                f"SEL._generate_frequency_bands: unknown band_type={self.band_type!r}; "
-                "valid: 'octave', 'third_octave', 'linear'"
-            )
+            raise ConfigurationError(
+                "ppsd: data must be 1-D, 2-D, or a list of 1-D arrays; "
+                f"got ndim={data.ndim}")
 
-        return bands
+    chunk_size = int(seg_duration * sample_rate)
+    overlap_samples = int(chunk_size * overlap_pct / 100)
+    step = chunk_size - overlap_samples
+    if step <= 0:
+        raise ConfigurationError(
+            f"ppsd: overlap_pct ({overlap_pct}) too high — chunks never "
+            "advance; require overlap_pct < 100.")
 
-    def compute(self, data, fs, chunk_size=262144, nfft=None):
-        """
-        Compute Sound Exposure Level for each frequency band.
+    level_edges = np.arange(lvlmin, lvlmax + ddB, ddB)
+    psd_list = []
+    for sig in signals:
+        nps = nperseg
+        nov = noverlap
+        if chunk_size < nps:
+            nps = chunk_size
+            nov = int(chunk_size * overlap_pct / 100)
+        for i in range(0, len(sig) - chunk_size + 1, step):
+            chunk = sig[i: i + chunk_size]
+            freqs, p = _sig.welch(chunk, sample_rate, window=window,
+                                  nperseg=nps, noverlap=nov, scaling=scaling)
+            psd_list.append(p)
 
-        Parameters
-        ----------
-        data : array_like
-            Input time series data in Pa.
-        fs : float
-            Sampling frequency in Hz.
-        chunk_size : int
-            Number of samples per processing chunk.
-        nfft : int, optional
-            Number of FFT points.
+    if len(psd_list) == 0:
+        raise ConfigurationError(
+            "ppsd: no PSD segments computed; seg_duration="
+            f"{seg_duration}s vs signal length="
+            f"{len(signals[-1])/sample_rate:.2f}s")
 
-        Returns
-        -------
-        sel : ndarray
-            SEL values in Pa^2*s.
-        bands : list of tuple
-            Frequency bands as (low, center, high) tuples.
+    psd_array = np.array(psd_list)
+    psd_segments_dB = power_to_db(psd_array, ref)
+    mean_psd = np.mean(psd_segments_dB, axis=0)
+    std_psd = np.std(psd_segments_dB, axis=0)
 
-        Notes
-        -----
-        Each chunk is split into rectangular (boxcar) segments of length
-        ``nfft`` with ``noverlap=0`` and no detrending.
-        ``scipy.signal.spectrogram`` with ``scaling="density"`` returns the
-        PSD in Pa²/Hz; summing it over a band's bins gives that segment's
-        mean-square pressure (Parseval), and ``Δf·(nfft/fs)=1`` so the
-        summed PSD is directly the band exposure in Pa²·s. The total over
-        all bands equals the discrete ``∫p²dt`` to within FFT band-edge
-        leakage.
-        """
-        # Determine how much data to process based on integration_time
-        if self.integration_time is not None:
-            samples_to_process = min(int(self.integration_time * fs), len(data))
-            data = data[:samples_to_process]
+    pdf_matrix = np.zeros((len(level_edges) - 1, len(freqs)))
+    for i in range(len(freqs)):
+        hist, _ = np.histogram(psd_segments_dB[:, i], bins=level_edges,
+                               density=True)
+        pdf_matrix[:, i] = hist
+    pdf_matrix[pdf_matrix == 0] = np.nan
 
-        self.bands = self._generate_frequency_bands(fs)
-        self.duration = len(data) / fs
-        if chunk_size > len(data):
-            self.chunk_size = len(data)
-        else:
-            self.chunk_size = chunk_size
-
-        if nfft is None:
-            nfft = fs
-        nfft = int(nfft)
-
-        window = _sig.windows.boxcar(nfft)
-        f = np.fft.rfftfreq(nfft, d=1 / fs)
-        band_indices = []
-        for low, center, high in self.bands:
-            idx = np.logical_and(f >= low, f < high)
-            band_indices.append(idx)
-        self.sel = np.zeros(len(self.bands))
-
-        # Process data in chunks
-        for i in range(0, len(data), chunk_size):
-            chunk = data[i: min(i + chunk_size, len(data))]
-
-            # Pad to a whole number of segments so spectrogram keeps the remainder.
-            n_seg = max(1, -(-len(chunk) // nfft))
-            pad = n_seg * nfft - len(chunk)
-            if pad:
-                chunk = np.pad(chunk, (0, pad))
-            f, t, Sxx = _sig.spectrogram(
-                chunk, fs, window=window, noverlap=0, nfft=nfft,
-                detrend=False, scaling="density",
-            )
-            Sxx_sum = np.sum(Sxx, axis=1)
-
-            # Accumulate SEL in each band
-            for k, idx in enumerate(band_indices):
-                self.sel[k] += np.sum(Sxx_sum[idx])
-
-        return self.sel, self.bands
-
-    def plot(self, title="", ylim=(0, 200)):
-        """
-        Plot Sound Exposure Level spectrum.
-
-        Parameters
-        ----------
-        title : str
-            Plot title.
-        ylim : tuple
-            Y-axis limits as (min, max).
-
-        Returns
-        -------
-        fig : Figure
-            Matplotlib figure.
-        ax : Axes
-            Matplotlib axes.
-        """
-        fig, ax = plt.subplots(figsize=(10, 6))
-        Fedges = [low for low, _, _ in self.bands] + [self.bands[-1][2]]
-        width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
-        ax.bar(
-            Fedges[:-1],
-            10 * np.log10(self.sel / (self.ref**2)),
-            width=width,
-            align="edge",
-            edgecolor="black",
-        )
-
-        # If the duration is provided, include it in the title
-        ax.set_title(f"[SEL {self.duration}s] {title}", loc="left")
-
-        if self.ref == REFERENCE_PRESSURE_WATER:
-            ref = "1µ"
-        elif self.ref == REFERENCE_PRESSURE_AIR:
-            ref = "20µ"
-        else:
-            ref = f"{self.ref:02e}"
-        ax.set_ylabel(f"Level [dB re {ref}Pa²·s]")
-        if self.band_type != "linear":
-            ax.set_xscale("log")
-        ax.set_xlabel(f"Frequency ({self.band_type}) [Hz]")
-        ax.set_ylim(ylim)
-        ax.grid(which="both", alpha=0.75)
-        ax.set_axisbelow(True)
-        return fig, ax
+    return PPSDResult(freqs, level_edges, pdf_matrix, mean_psd, std_psd, ddB,
+                      seg_duration)
 
 
-class PSD:
-    """Power Spectral Density (PSD) computation and visualization.
+def _sel_adjust_fmin_fmax(fmin, fmax, band_type, sample_rate):
+    """Snap configured band edges to band boundaries for this ``sample_rate``."""
+    if band_type == "octave":
+        fmin = 2 ** np.floor(math.log2(fmin))
+        fmax = 2 ** np.ceil(math.log2(fmax))
+        if fmax > sample_rate / 2:
+            fmax = 2 ** np.floor(math.log2(fmax))
+    elif band_type == "third_octave":
+        base = math.pow(2, 1 / 6)
+        fmin = base ** np.floor(math.log(fmin, base))
+        fmax = base ** np.ceil(math.log(fmax, base))
+        if fmax > sample_rate / 2:
+            fmax = base ** np.floor(math.log(fmax, base))
+    return fmin, fmax
 
-    Parameters
-    ----------
-    ref : float
-        Reference pressure for dB conversion (default 1e-6 Pa for water).
-    **kwargs
-        Additional keyword arguments passed to ``scipy.signal.welch``
-        (e.g., nperseg, noverlap, window).
+
+def _sel_bands(fmin, fmax, band_type, num_bands, sample_rate):
+    """Generate ``(low, center, high)`` frequency bands."""
+    if fmin <= 0 or fmax <= fmin:
+        raise ConfigurationError(
+            f"sel: require fmin > 0 and fmax > fmin; got fmin={fmin}, fmax={fmax}")
+    if band_type in ("octave", "third_octave"):
+        fmin, fmax = _sel_adjust_fmin_fmax(fmin, fmax, band_type, sample_rate)
+    bands = []
+    if band_type == "octave":
+        base = math.sqrt(2)
+        f_center = fmin
+        while f_center < fmax:
+            bands.append((f_center / base, f_center, f_center * base))
+            f_center *= 2
+        if bands and bands[-1][2] > fmax:
+            bands[-1] = (bands[-1][0], bands[-1][1], fmax)
+    elif band_type == "third_octave":
+        base = math.pow(2, 1 / 6)
+        f_center = fmin
+        while f_center < fmax:
+            bands.append((f_center / base, f_center, f_center * base))
+            f_center *= math.pow(2, 1 / 3)
+        if bands and bands[-1][2] > fmax:
+            bands[-1] = (bands[-1][0], bands[-1][1], fmax)
+    elif band_type == "linear":
+        if num_bands <= 0:
+            raise ConfigurationError(
+                f"sel: num_bands must be positive for linear bands; got {num_bands}")
+        bw = (fmax - fmin) / num_bands
+        f_low = fmin
+        for _ in range(num_bands):
+            f_high = f_low + bw
+            bands.append((f_low, (f_low + f_high) / 2, f_high))
+            f_low = f_high
+        if bands and bands[-1][2] > fmax:
+            bands[-1] = (bands[-1][0], bands[-1][1], fmax)
+    else:
+        raise ConfigurationError(
+            f"sel: unknown band_type={band_type!r}; valid: 'octave', "
+            "'third_octave', 'linear'")
+    return bands
+
+
+def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
+        band_type="third_octave", num_bands=30, integration_time=None,
+        chunk_size=262144, nfft=None):
+    """Sound Exposure Level per frequency band. Returns ``(sel_pa2s, bands)``
+    in Pa²·s (reference-free; convert to dB with
+    :func:`uacpy.visualization.plot_sel`, which takes ``ref=``).
+
+    Uses a rectangular (boxcar) window with ``noverlap=0`` and no detrending so
+    the summed PSD equals the band exposure exactly (Parseval); do not change
+    this — a smoothing window would corrupt the energy identity.
     """
+    data = require_finite_signal(data, "sel")
+    if integration_time is not None:
+        data = data[:min(int(integration_time * sample_rate), len(data))]
 
-    def __init__(self, ref=REFERENCE_PRESSURE_WATER, **kwargs):
-        """Initialize PSD with reference level and Welch parameters."""
-        self.ref = ref
+    bands = _sel_bands(fmin, fmax, band_type, num_bands, sample_rate)
+    if chunk_size > len(data):
+        chunk_size = len(data)
+    if chunk_size <= 0:
+        raise ConfigurationError(
+            "sel: no samples to integrate (empty data, or integration_time "
+            "shorter than one sample). Provide a non-empty signal.")
+    if nfft is None:
+        nfft = sample_rate
+    nfft = int(nfft)
 
-        # Default Welch parameters, overridden by kwargs if provided
-        self.welch_params = {
-            "nperseg": 8192,
-            "noverlap": 4096,
-            "window": "hann",
-            "scaling": "density",
-        }
-        self.welch_params.update(kwargs)
+    window = _sig.windows.boxcar(nfft)
+    f = np.fft.rfftfreq(nfft, d=1 / sample_rate)
+    edges = np.array([b[0] for b in bands] + [bands[-1][2]])
+    bin_band = np.digitize(f, edges) - 1
+    band_bins = [np.where(bin_band == k)[0] for k in range(len(bands))]
+    out = np.zeros(len(bands))
 
-    def compute(self, data, fs):
-        """
-        Compute the Power Spectral Density using Welch's method.
+    for i in range(0, len(data), chunk_size):
+        chunk = data[i: min(i + chunk_size, len(data))]
+        n_seg = max(1, -(-len(chunk) // nfft))
+        pad = n_seg * nfft - len(chunk)
+        if pad:
+            chunk = np.pad(chunk, (0, pad))
+        _f, _t, Sxx = _sig.spectrogram(
+            chunk, sample_rate, window=window, noverlap=0, nfft=nfft,
+            detrend=False, scaling="density")
+        Sxx_sum = np.sum(Sxx, axis=1)
+        for k, idx in enumerate(band_bins):
+            out[k] += np.sum(Sxx_sum[idx])
 
-        Parameters
-        ----------
-        data : array_like
-            Input signal array (Pa).
-        fs : float
-            Sampling frequency in Hz.
-
-        Returns
-        -------
-        freqs : ndarray
-            Frequency array in Hz.
-        psd : ndarray
-            PSD values in linear scale (Pa^2/Hz).
-        """
-        freqs, Pxx = _sig.welch(data, fs, **self.welch_params)
-
-        # Store frequencies and PSD values
-        self.frequencies = freqs
-        self.psd = Pxx
-        return freqs, Pxx
-
-    def plot(self, title="", label="", ymin=0, ymax=150, **kwargs):
-        """
-        Plot the computed PSD as a line plot.
-
-        Parameters
-        ----------
-        title : str
-            Plot title.
-        label : str
-            Line label for legend.
-        ymin, ymax : float
-            Y-axis limits in dB.
-        **kwargs
-            Additional keyword arguments passed to ``ax.semilogx``.
-        """
-        if not hasattr(self, "frequencies") or not hasattr(self, "psd"):
-            raise RuntimeError("PSD.plot: compute() must be called before plotting")
-        psd_db = 10 * np.log10(self.psd / (self.ref**2))
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.semilogx(self.frequencies, psd_db, label=label, **kwargs)
-
-        # Customize plot appearance
-        ax.set_title(f"[PSD] {title}", loc="left")
-        ax.set_xlabel("Frequency [Hz]")
-        if self.ref == REFERENCE_PRESSURE_WATER:
-            ref = "1µ"
-        elif self.ref == REFERENCE_PRESSURE_AIR:
-            ref = "20µ"
-        else:
-            ref = f"{self.ref:02e}"
-        ax.set_ylabel(f"Level [dB re {ref}Pa²/Hz]")
-        ax.set_ylim((ymin, ymax))
-        ax.set_xlim((np.max((self.frequencies[0], 1)), self.frequencies[-1]))
-        ax.grid(which="both", alpha=0.75)
-        plt.tight_layout()
-        if label != "":
-            ax.legend()
-
-        return fig, ax
-
-    def add_to_plot(self, ax, Fxx=None, Pxx=None, ref=None, label="", **kwargs):
-        """Overlay a PSD curve on an existing axes (defaults to this instance's data)."""
-        if Fxx is None and Pxx is None:
-            Fxx = self.frequencies
-            Pxx = self.psd
-        if ref is None:
-            ref = self.ref
-
-        psd_db = 10 * np.log10(Pxx / (ref**2))
-        ax.plot(Fxx, psd_db, label=label, **kwargs)
-        if label != "":
-            ax.legend()
-
-        return ax
-
-
+    return SELResult(out, bands)

@@ -34,6 +34,11 @@ def mmse_equalizer(rx, h, snr_linear):
 
     Frequency-domain ``W(f) = H*(f) / (|H(f)|^2 + 1/snr)``. ``snr_linear`` is the
     operating SNR; ``snr_linear -> inf`` gives the zero-forcing inverse.
+
+    Returns the equalized signal only (a single ndarray). Unlike the *adaptive*
+    :func:`lms_equalizer` / :func:`rls_equalizer`, which return
+    ``(equalized, mse)`` because they converge over symbols, this is a one-shot
+    block (Wiener) solution with no per-symbol learning curve.
     """
     r = np.asarray(rx, dtype=complex)
     H = np.fft.fft(np.asarray(h, dtype=complex), r.size)
@@ -135,6 +140,11 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
             w = w + step * ur * np.conj(e)
         if kp > 0:
             phi = np.angle(d_hat * np.conj(d))
+            # NCO-based 2nd-order PLL (Stojanovic-Proakis 1994): theta is the
+            # NCO phase accumulator, advanced each step by the proportional
+            # correction kp*phi plus the integral (frequency) state phase_acc.
+            # theta therefore tracks a constant CFO's ramping phase — it is the
+            # loop integrator, not a double integration of phi.
             phase_acc += ki * phi
             theta += kp * phi + phase_acc
         ufb = np.roll(ufb, 1)
@@ -142,20 +152,3 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
             ufb[0] = d
         out[k] = d_hat
     return out, mse
-
-
-def plot_convergence(mse, ax=None, title="", label="", **kwargs):
-    """Plot equalizer learning curve (MSE vs symbol index, dB). Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    m = np.asarray(mse, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(7, 4))
-    else:
-        fig = ax.figure
-    ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **kwargs)
-    ax.set_xlabel("Symbol index"); ax.set_ylabel("MSE [dB]")
-    ax.set_title(f"[equalizer] convergence {title}", loc="left")
-    ax.grid(alpha=0.3)
-    if label:
-        ax.legend()
-    return fig, ax

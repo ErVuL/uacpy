@@ -1,14 +1,18 @@
 """
-Kraken Normal Mode Suite - Unified Architecture
+Kraken Normal Mode Suite - one model, backend dispatcher
 
-The Kraken suite provides normal mode modeling for underwater acoustics:
-- **Kraken**: Normal mode computation (real arithmetic)
-- **KrakenC**: Complex normal modes (elastic media, attenuation)
-- **KrakenField**: Field computation from modes (TL, pressure)
-- **KrakenField** with ``mode_coupling='coupled'``: Range-dependent coupled modes
+A single :class:`Kraken` wraps the AT Kraken pipeline, mirroring
+``RAM``'s ``backend=`` convention:
 
-This module follows the OASES architecture pattern where each executable
-is wrapped by a separate class inheriting from a common base.
+- ``backend=`` selects the modes binary — ``'kraken'`` (real arithmetic)
+  or ``'krakenc'`` (complex: elastic media / attenuation / leaky modes);
+  ``None`` (default) auto-picks krakenc when the env carries shear/leaky.
+- ``field.exe`` runs only when the requested run mode produces a field:
+  ``compute_modes`` stops after the modes binary; ``compute_tl`` /
+  ``compute_transfer_function`` / ``compute_time_series`` chain field.exe.
+- Range-dependence (bathy / SSP) is handled natively for field modes via
+  ``field.exe`` adiabatic / coupled modes (``mode_coupling=``); the
+  range-independent MODES path samples the r=0 profile.
 
 Note
 ----
@@ -17,30 +21,25 @@ modes with shear support using an FEM discretisation). It is bundled in
 ``uacpy/uacpy/bin/oalib/`` but NOT wrapped by uacpy at this time. Users
 who need elastic modes can either:
 
-* drive KrakenC (which handles elastic half-spaces via complex
-  wavenumbers), or
+* drive ``Kraken(backend='krakenc')`` (which handles elastic half-spaces
+  via complex wavenumbers), or
 * invoke ``krakel.exe`` manually with a Kraken-format .env file.
 
 Usage
 -----
 ```python
-from uacpy.models import Kraken, KrakenC, KrakenField
+from uacpy.models import Kraken, RunMode
 
-# Compute modes
 kraken = Kraken()
-modes = kraken.run(env, source, receiver)  # Returns Modes typed result
+modes = kraken.compute_modes(env, source, receiver)   # Modes (k, phi)
+tl    = kraken.compute_tl(env, source, receiver)       # Field (TL)
 
-# Compute TL field from modes
-field_model = KrakenField()
-result = field_model.run(env, source, receiver)  # Returns Field (narrowband pressure)
+# Complex modes for elastic bottom (auto, or force backend)
+modes = Kraken(backend='krakenc').compute_modes(env_elastic, source, receiver)
 
-# Complex modes for elastic bottom
-krakenc = KrakenC()
-modes = krakenc.run(env, source, receiver)
-
-# Range-dependent via coupled modes
-field_model = KrakenField(mode_coupling='coupled', n_segments=10)
-result = field_model.run(env, source, receiver)
+# Range-dependent field via coupled modes
+kraken = Kraken(mode_coupling='coupled', n_segments=10)
+tl = kraken.compute_tl(env_rd, source, receiver)
 ```
 """
 
@@ -51,8 +50,8 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Union
 
-from uacpy.models.base import PropagationModel, RunMode
-from uacpy.core.environment import Environment, LayeredBottom
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Modes, Field
@@ -60,6 +59,7 @@ from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
     C_LOW_FACTOR_KRAKEN,
+    PRESSURE_FLOOR,
 )
 import shutil
 from uacpy.core.exceptions import (
@@ -70,7 +70,7 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
-from uacpy.models.coupled_modes import segment_environment_by_range
+from uacpy.models._segmentation import segment_environment_by_range
 
 
 class _KrakenBase(PropagationModel):
@@ -98,9 +98,9 @@ class _KrakenBase(PropagationModel):
     roughness : float, optional
         Bottom roughness (m). Default: 0.0.
     leaky_modes : bool, optional
-        If True, override ``c_high`` to 1e9 so Kraken/KrakenC attempt to
+        If True, override ``c_high`` to 1e9 so Kraken attempt to
         compute leaky modes (trapped modes with phase speeds above the
-        halfspace P-wave speed). KrakenC is strongly recommended in this
+        halfspace P-wave speed). Kraken is strongly recommended in this
         mode because it handles complex wavenumbers. See the Kraken doc:
         "CHIGH will attempt to compute leaky modes...". Default: False.
 
@@ -117,73 +117,17 @@ class _KrakenBase(PropagationModel):
     With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
     """
 
-    def __init__(
-        self,
-        c_low: Optional[float] = None,
-        c_high: Optional[float] = None,
-        n_mesh: int = 0,
-        roughness: float = 0.0,
-        interp_ssp: Optional[str] = None,
-        leaky_modes: bool = False,
-        top_reflection_file: Optional[Path] = None,
-        rmax_m: Optional[float] = None,
-        mode_depth_grid: Optional[np.ndarray] = None,
-        use_tmpfs: bool = False,
-        verbose: Union[bool, str] = False,
-        work_dir: Optional[Path] = None,
-        cleanup: Optional[bool] = None,
-        timeout: float = 600.0,
-        collapse: Optional[Dict[str, str]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
-        )
-        self.interp_ssp = interp_ssp
-        # Modal-solver c_low default. C_LOW_FACTOR_KRAKEN = 0.0 → KRAKEN
-        # computes cLow automatically (kraken.htm, Phase Speed Limits). A
-        # positive c_low skips slower modes and excludes interfacial
-        # (Scholte / Stoneley) ones. Scooter's wavenumber-integration
-        # positive floor lives at core/constants.C_LOW_FACTOR.
-        self.c_low = (
-            C_LOW_FACTOR_KRAKEN * 1500.0 if c_low is None else float(c_low)
-        )
-        self.c_high = c_high
-        self.n_mesh = n_mesh
-        self.roughness = roughness
-        self.leaky_modes = leaky_modes
-        self.top_reflection_file = (
-            Path(top_reflection_file) if top_reflection_file is not None else None
-        )
-        # ``rmax_m`` caps the modal-solver phase-speed search range and
-        # field.exe's modal-sum interpolation window (Kraken/KrakenC
-        # ``RMax`` field). ``None`` → derive at ``run()`` from
-        # ``receiver.range_max``: 1.05× for narrowband COHERENT_TL,
-        # 3× for broadband / time-series so the outermost receivers
-        # sit well inside the interpolation band across the sweep.
-        # Fallback 100 km when no receiver range is available.
-        self.rmax_m = float(rmax_m) if rmax_m is not None else None
-        # ``mode_depth_grid`` overrides ``compute_modes``'s dense depth
-        # grid. ``None`` → sample at ``mode_points_per_meter`` density.
-        self.mode_depth_grid = (
-            np.asarray(mode_depth_grid, dtype=float)
-            if mode_depth_grid is not None else None
-        )
-
-        if leaky_modes:
-            # Override c_high so kraken/krakenc attempts leaky modes.
-            # See Kraken doc: "CHIGH will attempt to compute leaky modes..."
-            self.c_high = 1e9
-
-        # CLOW/CHIGH validation (Kraken doc: 0 <= cLow < cHigh)
-        self._validate_phase_speed_limits()
-
     def _max_receiver_depth(self, env) -> float:
         # The Kraken family meshes through fluid sediment layers, so it
         # resolves receivers down to the deepest interface, not just the
         # seafloor. Equals env.depth when there are no sediment layers.
         return self._total_media_depth(env)
+
+    @property
+    def _c_low_eff(self) -> float:
+        """Resolved KRAKEN cLow: ``None`` → ``0.0`` (auto, computed by KRAKEN)."""
+        return (C_LOW_FACTOR_KRAKEN * DEFAULT_SOUND_SPEED
+                if self.c_low is None else float(self.c_low))
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
@@ -213,30 +157,32 @@ class _KrakenBase(PropagationModel):
             return
         if str(self.interp_ssp).lower() in ('q', 'quad', 'quadratic'):
             raise ConfigurationError(
-                "Kraken/KrakenC/KrakenField do not support the 'quad' "
+                "Kraken do not support the 'quad' "
                 "SSP interpolation — it is Bellhop-only. Pick one of "
                 "'linear' (C-linear), 'n2linear', 'pchip', 'cubic' / "
                 "'spline'."
             )
 
-    def _build_modes_field(self, modes, n_modes, source):
+    def _build_modes_field(self, modes, n_modes, source, *, backend_exe=None):
         """Wrap a modes-reader payload as a :class:`Modes` Result.
 
         Returns the full mode set the reader produced; callers cap the
         count via :meth:`Modes.first_n` if they passed an ``n_modes``
-        request. Shared by Kraken.run and KrakenC.run.
+        request. ``backend_exe`` records which modes binary ran
+        (kraken.exe vs krakenc.exe); defaults to the resolved kraken.exe.
         """
         k_arr = modes.get('k', np.array([]))
         phi_arr = modes.get('phi', np.array([]))
         z_arr = modes.get('z', np.array([]))
 
+        exe = backend_exe or self._exe
         result = Modes(
             k=k_arr,
             phi=phi_arr,
             depths=z_arr,
             **self._result_kwargs(
                 source,
-                backend=Path(self.executable).name if self.executable else self.model_name.lower(),
+                backend=Path(exe).name if exe else self.model_name.lower(),
                 frequencies=float(source.frequencies[0]),
                 n_modes_requested=n_modes,
                 leaky_modes=self.leaky_modes,
@@ -296,7 +242,7 @@ class _KrakenBase(PropagationModel):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
+        bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
         bottom_type = parse_boundary_type(bottom_acoustic_type)
 
         # Top reflection coefficient file (.trc): override surface BC to 'F'
@@ -329,7 +275,7 @@ class _KrakenBase(PropagationModel):
         )
 
         from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-        cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+        cl, ch = resolve_phase_speed_bounds(env, self._c_low_eff, self.c_high)
         if self.c_high is None:
             self._log(
                 f"c_high auto-derived from env.ssp + bottom = {ch:.1f} m/s "
@@ -351,17 +297,17 @@ class _KrakenBase(PropagationModel):
 
     def _reject_elastic_over_fluid_halfspace(self, env: Environment) -> None:
         """krakenc.exe spins forever in setup on a solid-over-liquid bottom
-        interface: a ``LayeredBottom`` with an elastic layer (shear_speed > 0)
+        interface: a layered column with an elastic layer (shear_speed > 0)
         terminated by a fluid halfspace (shear_speed == 0). Reject it up front
         so the caller gets a fast typed error instead of a ``timeout``-long
         hang. Elastic half-spaces and elastic-over-elastic stacks are fine."""
-        bottom = env.bottom
-        if not isinstance(bottom, LayeredBottom):
+        if not env.bottom.is_layered:
             return
+        col = env.bottom.at(range=0)
         has_elastic_layer = any(
-            (getattr(layer, 'shear_speed', 0) or 0) > 0 for layer in bottom.layers
+            (getattr(layer, 'shear_speed', 0) or 0) > 0 for layer in col.layers
         )
-        halfspace_fluid = (getattr(bottom.halfspace, 'shear_speed', 0) or 0) == 0
+        halfspace_fluid = (getattr(col.halfspace, 'shear_speed', 0) or 0) == 0
         if has_elastic_layer and halfspace_fluid:
             raise UnsupportedFeatureError(
                 self.model_name,
@@ -371,16 +317,31 @@ class _KrakenBase(PropagationModel):
                 alternatives=['Scooter', 'OAST'],
             )
 
-    def _run_kraken_executable(self, base_name: str, work_dir: Path):
-        """Execute Kraken/KrakenC via base-class subprocess runner."""
-        try:
-            self._run_subprocess(
-                [str(self.executable), base_name],
-                cwd=work_dir,
+    def _reject_elastic_surface(self, env: Environment) -> None:
+        """krakenc.exe heap-corrupts (``free(): invalid pointer``) computing the
+        interfacial (Scholte) modes of an elastic *top* half-space — a
+        solid-over-liquid surface such as an ice canopy. (An elastic *bottom*
+        half-space is fine.) Reject it up front with a clear typed error rather
+        than the opaque SIGABRT. Checks the surface as the writer will see it:
+        a range-dependent surface is first reduced by the configured
+        ``collapse['surface']`` method (Kraken carries a single global top)."""
+        surface = env.surface
+        if surface.is_range_dependent:
+            surface = surface.collapse(self._collapse['surface'])
+        if surface.is_elastic:
+            raise UnsupportedFeatureError(
+                self.model_name,
+                "an elastic (shear) sea-surface half-space such as an ice "
+                "canopy — krakenc.exe aborts on the interfacial modes of a "
+                "solid-over-liquid top interface",
+                alternatives=['Bellhop'],
             )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
+
+    def _run_kraken_executable(self, base_name: str, work_dir: Path, exe=None):
+        """Execute the modes binary (``exe`` selects kraken.exe vs krakenc.exe;
+        defaults to the resolved kraken.exe) via the shared binary-launch helper."""
+        self._run_and_attach_prt(
+            [str(exe or self._exe), base_name], work_dir, base_name)
 
     def _compute_modes_impl(self, env, source, n_modes):
         """Override base class: use a dense depth grid for mode sampling.
@@ -408,7 +369,7 @@ class _KrakenBase(PropagationModel):
         else:
             total_depth = env.depth
             if env.has_layered_bottom():
-                for layer in env.bottom.layers:
+                for layer in env.bottom.columns[0].layers:
                     total_depth += layer.thickness
             ppm = float(getattr(self, 'mode_points_per_meter', 0.0) or 0.0)
             n_pts = max(100, int(round(float(total_depth) * ppm)))
@@ -448,13 +409,13 @@ class _KrakenBase(PropagationModel):
                 stderr=self._modes_error_message(basename),
             )
 
-        # Kraken/KrakenC emit a single-frequency ``.mod`` file (broadband
-        # is dispatched through KrakenField, which uses
+        # Kraken emit a single-frequency ``.mod`` file (broadband
+        # is dispatched through Kraken, which uses
         # ``read_field_grid``). ``freq=0.0`` selects the only bin
         # present; ``read_modes_bin`` would otherwise fall back to
         # closest-frequency matching.
         try:
-            modes_data = read_modes_bin(basename, freq=0.0)
+            modes_data = read_modes_bin(basename, frequency=0.0)
         except IndexError as e:
             raise ModelExecutionError(
                 self.model_name, return_code=0, stdout=None,
@@ -467,7 +428,7 @@ class _KrakenBase(PropagationModel):
     def _modes_error_message(basename, original_error=None):
         """Build error message for invalid mode files, checking .prt for clues.
 
-        Only suggest KrakenC when the PRT evidences an actual elastic
+        Only suggest Kraken when the PRT evidences an actual elastic
         configuration (acousto-elastic boundary or a non-zero shear speed
         in the halfspace summary) or when kraken reports it couldn't find
         modes at cLow — not on any stray 'elastic' token in the PRT.
@@ -513,14 +474,14 @@ class _KrakenBase(PropagationModel):
                     "finder is converging slowly to interfacial (Scholte / "
                     "Stoneley) modes. Set c_low to the minimum p-wave speed in "
                     "the problem to exclude those modes (kraken.htm, Phase "
-                    "Speed Limits), or use KrakenC."
+                    "Speed Limits), or use Kraken."
                 )
             elif has_acousto_elastic or has_nonzero_shear or modes_not_found:
                 error_msg += (
                     "Kraken (real arithmetic) failed. This is typical when "
                     "the environment has an acousto-elastic bottom "
                     "(non-zero shear speed) or when modes cannot be found "
-                    "at cLow. Try KrakenC (complex mode version) which "
+                    "at cLow. Try Kraken (complex mode version) which "
                     "handles shear and leaky modes. Alternatives: Bellhop, "
                     "RAM, Scooter, OAST."
                 )
@@ -535,335 +496,28 @@ class _KrakenBase(PropagationModel):
 
 class Kraken(_KrakenBase):
     """
-    Kraken - Normal Mode Computation (Real Arithmetic)
+    Kraken - Normal modes + field computation (multi-backend).
 
-    Computes normal modes for range-independent environments using real
-    arithmetic. Best for fluid media (water and sediment) without significant
-    attenuation or elastic effects.
+    One model over the AT Kraken pipeline, mirroring ``RAM``'s
+    ``backend=`` dispatcher. The modes binary is selected by ``backend=``
+    (``'kraken'`` real / ``'krakenc'`` complex, or ``None`` to auto-pick
+    krakenc for elastic / leaky media). ``field.exe`` runs only when the
+    requested run mode produces a field:
 
-    For elastic bottoms or complex attenuation, use KrakenC instead.
-    For field computation from modes, use KrakenField.
-    For range-dependent scenarios, use KrakenField(mode_coupling='coupled').
+    * ``RunMode.MODES`` (``compute_modes``) → runs the modes binary only,
+      returns a :class:`Modes` result (``k``, ``phi``).
+    * ``COHERENT_TL`` / ``BROADBAND`` / ``TIME_SERIES``
+      (``compute_tl`` / ``compute_transfer_function`` / ``compute_time_series``)
+      → modes binary → ``field.exe`` → ``.shd``, returns a :class:`Field`.
 
-    Parameters
-    ----------
-    executable : Path, optional
-        Path to ``kraken.exe``. Auto-detected if ``None``.
-    mode_points_per_meter : float, optional
-        Mode-grid sampling density. Default ``1.5``.
-    c_low, c_high : float, optional
-        Phase-speed bounds (m/s). ``c_low=None`` ⇒ ``0.0`` (KRAKEN computes
-        cLow automatically; the modal-solver default, not 0.95·min SSP). A
-        positive c_low excludes interfacial (Scholte / Stoneley) modes.
-        ``c_high=None`` ⇒ ``1.05 × max(SSP, bottom)``.
-    n_mesh : int, optional
-        Mesh points per medium. ``0`` ⇒ Kraken auto-picks. Default ``0``.
-    roughness : float, optional
-        Bottom RMS roughness (m). Default ``0``.
-    leaky_modes : bool, optional
-        Override ``c_high`` to ``1e9`` so kraken attempts leaky modes.
-        KrakenC is recommended in this mode (complex arithmetic).
-    top_reflection_file : Path, optional
-        Path to ``.trc`` — sets surface BC ``TopOpt(2)='F'``.
-    use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
-        Standard plumbing (see :class:`PropagationModel`).
-
-    Returns
-    -------
-    Modes
-        Typed modal result with ``k`` (complex wavenumbers, shape ``(M,)``),
-        ``phi`` (mode shapes ``(nz, M)``), ``depths``, ``frequencies``
-        (length-1), ``n_modes``.
-
-    Notes
-    -----
-    **No auto-route to KrakenC.** Real-arithmetic ``kraken.exe`` finds
-    only real eigenvalues for fluid bottoms. If the env carries elastic
-    media (``shear_speed > 0``) or ``leaky_modes=True`` is set, ``run()``
-    raises :class:`UnsupportedFeatureError` up front pointing at KrakenC
-    — instantiate ``KrakenC`` directly for elastic / leaky-mode
-    environments (its complex eigenvalues are a strict superset, so it
-    also handles fluid cases). Other numerical mode-finding failures on
-    fluid envs still surface as a PRT-aware ``ModelExecutionError`` that
-    likewise suggests KrakenC. (``KrakenField`` *does* auto-route its
-    modes-solve step internally because it owns it; ``Kraken`` is the
-    stand-alone modes solver and leaves the real-vs-complex choice to
-    the user.)
-
-    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Modes solve an eigenproblem of the whole water column — no
-    source-side. Per-model defaults: ``'ssp': 'mean'``,
-    ``'bottom': 'median'``. Other keys keep the global defaults.
-
-    Examples
-    --------
-    >>> kraken = Kraken()
-    >>> modes = kraken.run(env, source, receiver)
-    >>> print(f"Computed {len(modes.k)} modes")
-    """
-
-    def __init__(
-        self,
-        executable: Optional[Path] = None,
-        mode_points_per_meter: float = 1.5,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.mode_points_per_meter = float(mode_points_per_meter)
-        self._supported_modes = [RunMode.MODES]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        # True keeps the projection layer from collapsing shear; run()
-        # raises UnsupportedFeatureError (-> KrakenC) on elastic/leaky envs.
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Modes solve an eigenproblem over the whole water column —
-        # there is no "source-side" profile. Median/mean samples are
-        # representative of the path the modes describe.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-        })
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
-                'kraken.exe',
-                bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self.executable = Path(executable)
-
-        if not self.executable.exists():
-            raise ExecutableNotFoundError(self.model_name, str(self.executable))
-
-    def _requires_krakenc(self, env: Environment) -> bool:
-        """Real-arith ``kraken.exe`` finds only real eigenvalues for fluid
-        bottoms; elastic media (``shear_speed > 0``) and leaky modes both
-        need the complex eigenvalues that only ``KrakenC`` computes."""
-        return bool(self.leaky_modes) or env.has_elastic_bottom() or (
-            env.surface is not None and env.has_elastic_surface()
-        )
-
-    def run(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        run_mode: Optional[RunMode] = None,
-        *,
-        n_modes: Optional[int] = None,
-    ) -> Result:
-        """
-        Compute normal modes
-
-        Parameters
-        ----------
-        env : Environment
-            Must be range-independent
-        source : Source
-            Used for frequency
-        receiver : Receiver
-            Used for depth grid
-        n_modes : int, optional
-            Maximum number of modes to return. Kraken itself has no mode-
-            count cap (mode count is bounded by ``cHigh`` vs the halfspace
-            P-wave speed), but when ``n_modes`` is provided the returned
-            ``Field`` is clipped to at most that many modes. To reduce
-            Kraken's own work, lower ``c_high`` or set it just below the
-            halfspace P-wave speed. Use ``KrakenField.run(n_modes=N)`` to
-            apply ``MLimit`` in the FLP file during field reconstruction.
-
-        Returns
-        -------
-        Modes
-        """
-        run_mode = self._resolve_run_mode(run_mode)
-
-        self._reject_elastic_over_fluid_halfspace(env)
-        if self._requires_krakenc(env):
-            raise UnsupportedFeatureError(
-                self.model_name,
-                "elastic media (shear_speed > 0) or leaky modes — "
-                "real-arithmetic kraken.exe computes only real eigenvalues "
-                "for fluid bottoms",
-                alternatives=['KrakenC'],
-            )
-
-        env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver, run_mode=run_mode)
-
-        fm = self._setup_file_manager()
-        base_name = 'modes'
-
-        try:
-            env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}")
-            self._write_kraken_env(
-                env_file, env, source,
-                receiver_obj=receiver,
-                receiver_depths=receiver.depths,
-            )
-
-            self._log("Running Kraken...")
-            self._run_kraken_executable(base_name, fm.work_dir)
-
-            modes_file = fm.get_path(base_name)
-            self._log(f"Reading mode file: {modes_file}.mod")
-            modes = self._read_modes_file(modes_file)
-
-            self._log("Simulation complete")
-
-            field = self._build_modes_field(modes, n_modes, source)
-            self._attach_output_paths(
-                field, fm.work_dir, base_name,
-                primary_files=(('mod_file', '.mod'),),
-            )
-            return field
-
-        finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
-
-
-class KrakenC(_KrakenBase):
-    """
-    KrakenC - Complex Normal Modes
-
-    Computes normal modes using complex arithmetic for environments with:
-    - Elastic (solid) bottoms with shear waves
-    - Significant attenuation
-    - Range-dependent attenuation
-
-    Uses krakenc.exe which handles complex wavenumbers and mode shapes.
-
-    Parameters
-    ----------
-    Same as :class:`Kraken` (``executable``, ``mode_points_per_meter``,
-    ``c_low``, ``c_high``, ``n_mesh``, ``roughness``,
-    ``leaky_modes``, ``top_reflection_file`` plus standard plumbing).
-    The default ``executable`` resolves to ``krakenc.exe``.
-
-    Notes
-    -----
-    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Same rationale as :class:`Kraken`: ``'ssp': 'mean'``,
-    ``'bottom': 'median'``.
-
-    Examples
-    --------
-    >>> krakenc = KrakenC()
-    >>> modes = krakenc.run(env_with_elastic_bottom, source, receiver)
-    """
-
-    def __init__(
-        self,
-        executable: Optional[Path] = None,
-        mode_points_per_meter: float = 1.5,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.mode_points_per_meter = float(mode_points_per_meter)
-        self._supported_modes = [RunMode.MODES]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Modes solve an eigenproblem over the whole water column —
-        # there is no "source-side" profile. Median/mean samples are
-        # representative of the path the modes describe.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-        })
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
-                'krakenc.exe',
-                bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self.executable = Path(executable)
-
-        if not self.executable.exists():
-            raise ExecutableNotFoundError(self.model_name, str(self.executable))
-
-    def run(
-        self,
-        env: Environment,
-        source: Source,
-        receiver: Receiver,
-        run_mode: Optional[RunMode] = None,
-        *,
-        n_modes: Optional[int] = None,
-    ) -> Result:
-        """
-        Compute complex normal modes.
-
-        Uses complex arithmetic, required for environments with elastic
-        (solid) boundaries that support shear waves, or with significant
-        volume attenuation.
-
-        Returns
-        -------
-        Modes
-            Typed modal result with ``k``, ``phi``, ``z``, ``n_modes``.
-        """
-        run_mode = self._resolve_run_mode(run_mode)
-
-        self._reject_elastic_over_fluid_halfspace(env)
-        env = self._project_environment(env)
-        self.validate_inputs(env, source, receiver, run_mode=run_mode)
-
-        fm = self._setup_file_manager()
-        base_name = 'modes'
-
-        try:
-            env_file = fm.get_path(f'{base_name}.env')
-            self._log(f"Writing environment file: {env_file}")
-            self._write_kraken_env(
-                env_file, env, source,
-                receiver_obj=receiver,
-                receiver_depths=receiver.depths,
-            )
-
-            self._log("Running KrakenC...")
-            self._run_kraken_executable(base_name, fm.work_dir)
-
-            modes_file = fm.get_path(base_name)
-            self._log(f"Reading mode file: {modes_file}.mod")
-            modes = self._read_modes_file(modes_file)
-
-            self._log("Simulation complete")
-
-            field = self._build_modes_field(modes, n_modes, source)
-            self._attach_output_paths(
-                field, fm.work_dir, base_name,
-                primary_files=(('mod_file', '.mod'),),
-            )
-            return field
-
-        finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
-
-
-class KrakenField(_KrakenBase):
-    """
-    KrakenField - Field Computation from Normal Modes
-
-    Computes acoustic field (TL, pressure) using the AT pipeline:
-    kraken.exe (modes) → field.exe (field reconstruction) → .shd output.
+    Note that ``run()`` defaults to a field mode (``COHERENT_TL``, or
+    ``BROADBAND`` when a multi-frequency ``frequencies=`` is given) — use
+    ``compute_modes(...)`` (or ``run(run_mode=RunMode.MODES)``) for modes.
 
     Supports range-independent and range-dependent environments via
-    adiabatic or coupled mode theory (delegated to AT's field.exe).
+    adiabatic or coupled mode theory (delegated to AT's field.exe); the
+    MODES path is range-independent and samples the r=0 profile of any RD
+    environment (with a warning).
 
     Note
     ----
@@ -883,7 +537,7 @@ class KrakenField(_KrakenBase):
         coupled-incoherent path.
     n_segments : int, optional
         Range segments for RD scenarios. Default ``None`` lets
-        :func:`coupled_modes.segment_environment_by_range` pick segment
+        :func:`_segmentation.segment_environment_by_range` pick segment
         edges from the union of bathymetry / RD-SSP / RD-bottom
         change-points, inserting intermediates wherever the gap
         exceeds ``max_segment_length`` (2 km). Pass an explicit int
@@ -897,8 +551,14 @@ class KrakenField(_KrakenBase):
         Cartesian line | ``'S'`` scaled-cylindrical.
     executable, field_executable : Path, optional
         ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
+    backend : str, optional
+        Force the modes binary: ``'kraken'`` or ``'krakenc'``. ``None``
+        (default) auto-selects — ``krakenc.exe`` for elastic media / leaky
+        modes (complex eigenvalues), ``kraken.exe`` otherwise. Forcing
+        ``'kraken'`` where complex eigenvalues are required raises
+        ``ConfigurationError``.
     c_low, c_high, n_mesh, roughness, leaky_modes, top_reflection_file : optional
-        Inherited from :class:`_KrakenBase` — same semantics as :class:`Kraken`.
+        Inherited modal-solver knobs from :class:`_KrakenBase`.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -909,32 +569,54 @@ class KrakenField(_KrakenBase):
     elastic component selection (H/V/T/N) is not reachable through
     ``field.exe`` — an upstream Fortran limitation.
 
-    **Auto-route to KrakenC** when ``env`` carries shear (delegates the
-    modes step to ``krakenc.exe``).
+    **Auto-route to krakenc.exe** when ``env`` carries shear (delegates the
+    modes step to the complex-arithmetic binary).
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     RD bathymetry and RD-SSP are honoured natively (segments). Per-model
-    defaults: ``'bottom': 'median'`` (median over RD halfspace samples),
-    ``'rd_layered_layers': 'preserve'`` (KrakenField consumes
-    ``LayeredBottom`` natively, so RDLB collapses to the median range
-    with the layer stack kept).
+    default: ``'bottom_range': 'median'`` (median over RD halfspace
+    samples); the layer stack is kept since Kraken consumes layered
+    seabed columns natively, so a range-dependent layered bottom collapses
+    to the median range with its layers intact.
 
     Examples
     --------
-    >>> field_model = KrakenField()
-    >>> result = field_model.run(env, source, receiver)
+    >>> kraken = Kraken()
+    >>> tl = kraken.compute_tl(env, source, receiver)        # field via field.exe
+
+    >>> modes = kraken.compute_modes(env, source)            # modes only (no receiver)
+
+    >>> # Elastic bottom → complex modes (auto, or force backend='krakenc')
+    >>> modes = Kraken(backend='krakenc').compute_modes(env_elastic, source)
 
     >>> # Range-dependent with coupled modes
-    >>> field_model = KrakenField(mode_coupling='coupled', n_segments=20)
-    >>> result = field_model.run(env_rd, source, receiver)
-
-    >>> # Incoherent mode addition
-    >>> field_model = KrakenField(coherent=False)
-    >>> result = field_model.run(env, source, receiver)
+    >>> kraken = Kraken(mode_coupling='coupled', n_segments=20)
+    >>> tl = kraken.compute_tl(env_rd, source, receiver)
     """
 
     # Valid source types for field.exe option col 1 (AT field.f90:71-79).
     _ALLOWED_SOURCE_TYPE = ('R', 'X', 'S')
+
+    # Declarative metadata (see PropagationModel / ModelSpec). Kraken: normal
+    # modes. Segments RD-bathymetry / RD-SSP natively; the bottom (and the RDLB
+    # axis) and a range-dependent *surface* still collapse — the RD .env carries
+    # one global top/bottom boundary, only the SSP varies per range. Honours
+    # layered + elastic bottom. Median across range / mean SSP represent the
+    # per-segment profile.
+    spec = ModelSpec(
+        modes=(
+            RunMode.MODES, RunMode.COHERENT_TL,
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ),
+        supports={
+            'range_dependent_bathymetry',
+            'range_dependent_ssp',
+            'layered_bottom',
+            'elastic_media',
+        },
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,
@@ -946,60 +628,93 @@ class KrakenField(_KrakenBase):
         field_executable: Optional[Path] = None,
         source_beam_pattern_file: Optional[Path] = None,
         source_type: str = 'R',
-        **kwargs,
+        backend: Optional[str] = None,
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
+        n_mesh: int = 0,
+        roughness: float = 0.0,
+        interp_ssp: Optional[str] = None,
+        leaky_modes: bool = False,
+        top_reflection_file: Optional[Path] = None,
+        rmax_m: Optional[float] = None,
+        mode_depth_grid: Optional[np.ndarray] = None,
+        use_tmpfs: bool = False,
+        verbose: Union[bool, str] = False,
+        work_dir: Optional[Path] = None,
+        cleanup: Optional[bool] = None,
+        timeout: float = 600.0,
+        collapse: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(**kwargs)
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = True
-        self._supports_range_dependent_ssp = True
-        self._supports_range_dependent_bottom = False
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # KrakenField segments RD-bathy / RD-SSP natively; only the
-        # bottom and RDLB axes still collapse. Median across range is
-        # the representative single profile per segment.
-        self._set_collapse_defaults({
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
+        super().__init__(
+            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
+        )
+        # --- modal-solver knobs (shared methods live on _KrakenBase) ---
+        self.interp_ssp = interp_ssp
+        # c_low default 0.0 (C_LOW_FACTOR_KRAKEN) → KRAKEN computes cLow
+        # automatically; a positive c_low skips slower/interfacial (Scholte /
+        # Stoneley) modes. Stored raw (None preserved) so repr/copy stay clean;
+        # resolved via ``_c_low_eff`` at write time.
+        self.c_low = None if c_low is None else float(c_low)
+        self.c_high = c_high
+        self.n_mesh = n_mesh
+        self.roughness = roughness
+        self.leaky_modes = leaky_modes
+        self.top_reflection_file = (
+            Path(top_reflection_file) if top_reflection_file is not None else None
+        )
+        # rmax_m caps the modal phase-speed search + field.exe interpolation
+        # window; None → derive at run() from receiver.range_max.
+        self.rmax_m = float(rmax_m) if rmax_m is not None else None
+        # mode_depth_grid overrides compute_modes's dense grid; None → density.
+        self.mode_depth_grid = (
+            np.asarray(mode_depth_grid, dtype=float)
+            if mode_depth_grid is not None else None
+        )
+        if leaky_modes:
+            # CHIGH→∞ so kraken/krakenc attempts leaky modes (Kraken doc).
+            self.c_high = 1e9
+        self._validate_phase_speed_limits()
+        if backend is not None and backend not in ('kraken', 'krakenc'):
+            raise ConfigurationError(
+                f"Kraken(backend={backend!r}) is not a known backend. "
+                f"Choose 'kraken', 'krakenc', or None for automatic dispatch."
+            )
+        self.backend = backend
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
         if mode_coupling not in ('adiabatic', 'coupled'):
             raise ConfigurationError(
                 f"mode_coupling must be 'adiabatic' or 'coupled', "
                 f"got {mode_coupling!r}"
             )
 
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved kraken.exe
+        # path lives in ``self._exe``; ``_select_kraken_exe`` may swap in
+        # krakenc.exe per-env.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
                 'kraken.exe',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError(self.model_name, str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError(self.model_name, str(self._exe))
 
-        if field_executable is None:
-            self.field_executable = self._find_executable_in_paths(
-                'field.exe',
-                bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self.field_executable = Path(field_executable)
-
-        if not self.field_executable.exists():
-            raise ExecutableNotFoundError(
-                f"{self.model_name} (field.exe)", str(self.field_executable),
-            )
+        # field.exe is only needed for field-producing run modes (TL /
+        # broadband / time-series), not for MODES. Store the user arg for
+        # copy() round-tripping and resolve lazily on first field run so a
+        # MODES-only Kraken doesn't require field.exe to be installed.
+        self.field_executable = (
+            Path(field_executable) if field_executable is not None else None
+        )
+        self._field_exe: Optional[Path] = None
 
         self.mode_points_per_meter = mode_points_per_meter
         self.mode_coupling = mode_coupling
@@ -1051,21 +766,63 @@ class KrakenField(_KrakenBase):
         pos4 = 'C' if self.coherent else 'I'
         return f"{pos1}{pos2}{pos3}{pos4}"
 
+    def _resolve_field_executable(self) -> Path:
+        """Resolve ``field.exe`` lazily (only field-producing run modes need
+        it). Cached in ``self._field_exe`` after the first call."""
+        if self._field_exe is not None:
+            return self._field_exe
+        if self.field_executable is not None:
+            fx = self.field_executable
+        else:
+            fx = self._find_executable_in_paths(
+                'field.exe',
+                bin_subdirs='oalib',
+                dev_subdir='Acoustics-Toolbox/Kraken',
+            )
+        if not fx.exists():
+            raise ExecutableNotFoundError(
+                f"{self.model_name} (field.exe)", str(fx),
+            )
+        self._field_exe = fx
+        return fx
+
+    def select_backend(self, env, run_mode=None) -> str:
+        """Logical name of the modes backend that would run for ``env`` —
+        ``'kraken'`` or ``'krakenc'``. Round-trips with ``backend=`` and
+        mirrors ``RAM.select_backend`` (``run_mode`` accepted for signature
+        parity; it does not affect the modes-binary choice). Introspects the
+        dispatch without running anything."""
+        return 'krakenc' if self._select_kraken_exe(env).name.startswith(
+            'krakenc') else 'kraken'
+
     def _select_kraken_exe(self, env):
         """The modes binary for this env: ``krakenc.exe`` for elastic media
-        or leaky modes (complex eigenvalues), ``kraken.exe`` otherwise."""
+        or leaky modes (complex eigenvalues), ``kraken.exe`` otherwise.
+
+        A constructor ``backend=`` override forces the choice; forcing
+        ``'kraken'`` where complex eigenvalues are required (elastic media /
+        leaky modes) raises ``ConfigurationError`` rather than producing a
+        wrong field.
+        """
         needs_krakenc = (
             env.has_elastic_bottom()
             or env.has_elastic_surface()
             or getattr(self, 'leaky_modes', False)
         )
-        if needs_krakenc:
+        forced = getattr(self, 'backend', None)
+        if forced == 'kraken' and needs_krakenc:
+            raise ConfigurationError(
+                "Kraken(backend='kraken') cannot handle elastic media / "
+                "leaky modes (they need krakenc's complex eigenvalues). Use "
+                "backend='krakenc', or backend=None for automatic dispatch."
+            )
+        if forced == 'krakenc' or (forced is None and needs_krakenc):
             return self._find_executable_in_paths(
                 'krakenc.exe',
                 bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
             )
-        return self.executable  # kraken.exe
+        return self._exe  # kraken.exe
 
     def run(
         self,
@@ -1114,10 +871,11 @@ class KrakenField(_KrakenBase):
             ``len(source_waveform)/sample_rate``.
         """
         self._reject_elastic_over_fluid_halfspace(env)
+        self._reject_elastic_surface(env)
 
         # Early gate: coupled-mode field calculations cannot be
         # combined with incoherent mode addition. AT's field.f90
-        # (KrakenField/field.f90 around line 123-127) calls ERROUT
+        # (Kraken/field.f90 around line 123-127) calls ERROUT
         # on Opt(2:2)='C' + Opt(4:4)='I', which surfaces in Python
         # as an opaque "no .shd file" error. Fail loudly up front.
         if (
@@ -1126,11 +884,37 @@ class KrakenField(_KrakenBase):
             and not self.coherent
         ):
             raise ConfigurationError(
-                "KrakenField: coupled mode calculations do not support "
+                "Kraken: coupled mode calculations do not support "
                 "incoherent addition of modes. Use mode_coupling="
                 "'adiabatic' with coherent=False, or keep "
                 "mode_coupling='coupled' with coherent=True."
             )
+
+        # Default run mode: BROADBAND if a freq vector is provided,
+        # else single-frequency coherent TL.
+        smart_default = (
+            RunMode.BROADBAND
+            if frequencies is not None and len(np.atleast_1d(frequencies)) > 1
+            else RunMode.COHERENT_TL
+        )
+        run_mode = self._resolve_run_mode(run_mode, default=smart_default)
+
+        # Resolve the modes binary once, as a visible dispatch step (parity
+        # with RAM.select_backend): kraken.exe vs krakenc.exe is a
+        # deterministic function of env elasticity / leaky_modes — preserved
+        # through _project_environment — so the sub-paths receive it rather
+        # than each re-resolving. A forced backend incompatible with the env
+        # raises here.
+        kraken_exe = self._select_kraken_exe(env)
+        self._log(f"Dispatching to {kraken_exe.name} (modes binary)")
+
+        if run_mode == RunMode.MODES:
+            # Modes only need the modes binary, never field.exe. The elastic
+            # sub-bottom receiver partition below is a field-evaluation concern
+            # (and would emit a spurious NaN-receivers warning here), so it is
+            # skipped entirely for the modes solve.
+            return self._run_modes(
+                env, source, receiver, n_modes=n_modes, exe=kraken_exe)
 
         # field.exe cannot evaluate the field inside an elastic medium: its
         # Comp selector (field.f90:169 -> ReadModes.f90:315-324) has no
@@ -1143,31 +927,21 @@ class KrakenField(_KrakenBase):
             env.has_layered_bottom()
             and any(
                 (getattr(layer, 'shear_speed', 0) or 0) > 0
-                for layer in env.bottom.layers
+                for layer in env.bottom.columns[0].layers
             )
         )
         rcv, keep = self._partition_elastic_subbottom(env, receiver, elastic_subbottom)
 
-        # Default run mode: BROADBAND if a freq vector is provided,
-        # else single-frequency coherent TL.
-        smart_default = (
-            RunMode.BROADBAND
-            if frequencies is not None and len(np.atleast_1d(frequencies)) > 1
-            else RunMode.COHERENT_TL
-        )
-        run_mode = self._resolve_run_mode(run_mode, default=smart_default)
-
         if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
-            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-            source_waveform = self._pad_waveform_to_duration(
-                source_waveform, sample_rate, output_duration,
-            )
-            frequencies = self._resolve_time_series_frequencies(
+            source_waveform, frequencies = self._prepare_timeseries(
                 run_mode, source, frequencies, source_waveform, sample_rate,
+                output_duration,
             )
+            # _project_environment + validate_inputs run inside
+            # _compute_broadband_field (per-frequency), not here.
             tf = self._compute_broadband_field(
                 env, source, rcv,
-                frequencies=frequencies, n_modes=n_modes,
+                frequencies=frequencies, n_modes=n_modes, exe=kraken_exe,
             )
             tf = self._reinsert_nan_depths(tf, receiver, keep)
             if run_mode == RunMode.TIME_SERIES:
@@ -1180,9 +954,73 @@ class KrakenField(_KrakenBase):
         env = self._project_environment(env)
         self.validate_inputs(env, source, rcv, run_mode=run_mode)
         field = self._compute_field_via_exe(
-            env, source, rcv, n_modes=n_modes,
+            env, source, rcv, n_modes=n_modes, exe=kraken_exe,
         )
         return self._reinsert_nan_depths(field, receiver, keep)
+
+    def _modes_single_profile(self, env: Environment) -> Environment:
+        """Normal modes are range-independent; reduce any range-dependent env
+        to its r=0 profile (a run()-time numerical requirement — the field
+        path segments RD natively, the modes solve cannot)."""
+        if not env.is_range_dependent:
+            return env
+        warnings.warn(
+            f"{self.model_name}: normal modes are range-independent; sampling "
+            f"the r=0 profile of the range-dependent environment.",
+            UserWarning, stacklevel=2,
+        )
+        ssp = env.ssp.collapse('r0') if env.has_range_dependent_ssp() else env.ssp
+        bottom = env.bottom
+        if bottom is not None and bottom.is_range_dependent:
+            bottom = bottom.select_range('r0')
+        return Environment(
+            name=env.name,
+            bathymetry=float(env.bathymetry.eval(range=0.0)),
+            ssp=ssp,
+            bottom=bottom,
+            surface=env.surface.collapse('r0'),
+            absorption=env.absorption,
+        )
+
+    def _run_modes(self, env, source, receiver, *, n_modes, exe=None):
+        """Run the modes binary only (kraken.exe / krakenc.exe by ``backend=``
+        / elasticity) and return a :class:`Modes` result — no field.exe.
+        ``exe`` is the run()-resolved binary; falls back to resolving from
+        ``env`` for direct callers."""
+        self._reject_elastic_over_fluid_halfspace(env)
+        self._reject_elastic_surface(env)
+        kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
+        env = self._project_environment(self._modes_single_profile(env))
+        self.validate_inputs(env, source, receiver, run_mode=RunMode.MODES)
+
+        fm = self._setup_file_manager()
+        base_name = 'modes'
+        try:
+            env_file = fm.get_path(f'{base_name}.env')
+            self._log(f"Writing environment file: {env_file}")
+            self._write_kraken_env(
+                env_file, env, source,
+                receiver_obj=receiver,
+                receiver_depths=receiver.depths,
+            )
+            self._log(f"Running {kraken_exe.name} (modes)...")
+            self._run_kraken_executable(base_name, fm.work_dir, exe=kraken_exe)
+
+            modes_file = fm.get_path(base_name)
+            self._log(f"Reading mode file: {modes_file}.mod")
+            modes = self._read_modes_file(modes_file)
+
+            field = self._build_modes_field(
+                modes, n_modes, source, backend_exe=kraken_exe,
+            )
+            self._attach_output_paths(
+                field, fm.work_dir, base_name,
+                primary_files=(('mod_file', '.mod'),),
+            )
+            return field
+        finally:
+            if fm.cleanup:
+                fm.cleanup_work_dir()
 
     def _partition_elastic_subbottom(self, env, receiver, elastic_subbottom):
         """Split receivers into the water column (field.exe can evaluate) and
@@ -1233,11 +1071,295 @@ class KrakenField(_KrakenBase):
         d['coords'] = {**d['coords'], 'depth': full_depths}
         return Field.from_dict(d)
 
+    def _count_modes_at_freq(self, env, source, receiver, freq, exe) -> int:
+        """Number of trapped modes Kraken finds at a single ``freq`` (Hz).
+
+        ``0`` means the frequency is below the waveguide's modal cutoff — no
+        propagating modes (Computational Ocean Acoustics; Brekhovskikh &
+        Lysanov). Uses a single-frequency modes run: a multi-frequency ``.mod``
+        that contains a zero-mode record is itself unreadable (the record stride
+        breaks at ``M=0``), so the cutoff must be probed one frequency at a
+        time."""
+        from uacpy.core.source import Source as _Source
+        from uacpy.io.modes_reader import read_modes_bin
+        fm = self._setup_file_manager()
+        base = 'mcut'
+        try:
+            self._write_kraken_env(
+                fm.get_path(f'{base}.env'), env,
+                _Source(depths=source.depths, frequencies=float(freq)),
+                receiver_obj=receiver, receiver_depths=receiver.depths,
+            )
+            self._run_kraken_executable(base, fm.work_dir, exe=exe)
+            return int(read_modes_bin(str(fm.get_path(base)),
+                                      freq=float(freq)).get('M', 0))
+        except Exception as e:   # noqa: BLE001
+            # Below cutoff the single-freq .mod is unreadable (zero-mode record),
+            # which legitimately means "no modes". Infrastructure failures
+            # (missing exe, subprocess crash, disk) also land here — log so they
+            # are not fully silent, then treat as below cutoff.
+            self._log(f"_count_modes_at_freq({float(freq):g} Hz) failed "
+                      f"({type(e).__name__}: {e}); treating as below cutoff.",
+                      level="debug")
+            return 0
+
+    def _propagating_frequency_floor(self, env, source, receiver, freqs, exe):
+        """Index of the first frequency in (sorted, ascending) ``freqs`` that
+        has propagating modes — i.e. the end of the contiguous sub-cutoff band.
+
+        Mode count rises monotonically with frequency, so the zero-mode
+        frequencies are a prefix ``[0, floor)`` and ``floor`` can be found by
+        binary search in O(log N) single-frequency probes (bounded — not one
+        probe per frequency). Returns ``len(freqs)`` if none propagate."""
+        freqs = np.atleast_1d(freqs)
+        lo, hi = 0, len(freqs)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._count_modes_at_freq(
+                    env, source, receiver, float(freqs[mid]), exe) > 0:
+                hi = mid          # modes here → cutoff is at or below mid
+            else:
+                lo = mid + 1      # no modes here → cutoff is above mid
+        return lo
+
 # ── field.exe pipeline ──────────────────────────────────────────────
+
+    def _segment_env_for_field(self, env):
+        """Segment a range-dependent env into per-range profiles for the
+        multi-profile kraken field run.
+
+        Returns ``(segments, n_profiles, profile_ranges_m, max_total_depth)``.
+        ``max_total_depth`` accounts for ``write_multi_profile_env``'s NMedia
+        padding (profiles with fewer media get 0.1 m filler layers, which can
+        push the total past the deepest real profile).
+        """
+        segments = segment_environment_by_range(env, n_segments=self.n_segments)
+        n_profiles = len(segments)
+
+        def _n_media_seg(seg_env):
+            n = 1
+            if seg_env.has_layered_bottom():
+                n += len(seg_env.bottom.columns[0].layers)
+            return n
+
+        max_n_media = max(_n_media_seg(seg) for _, seg in segments)
+        if max_n_media < 2:
+            max_n_media = 2  # AT requires NMedia>=2 for RD
+        max_total_depth = max(
+            self._total_media_depth(seg_env) + 0.1 * (max_n_media - _n_media_seg(seg_env))
+            for _, seg_env in segments
+        )
+
+        profile_ranges_m = np.array([s[0] for s in segments])
+        self._log(f"Range-dependent: {n_profiles} profiles, "
+                  f"mode_coupling={self.mode_coupling}")
+        return segments, n_profiles, profile_ranges_m, max_total_depth
+
+    def _write_field_env(self, env, source, receiver, fm, base_name,
+                         segments, max_total_depth, broadband, freq_vec):
+        """Write the kraken ``.env`` for the field run — a multi-profile env for
+        a range-dependent (segmented) environment, else a single-profile env.
+        Mode depths span the full ocean + sediment; range-dependent broadband
+        is unsupported and raises."""
+        env_file = fm.get_path(f'{base_name}.env')
+
+        # Mode depths must cover the full ocean + sediment for all
+        # profiles. Use max total media depth across all segments.
+        n_mode_depths = max(100, int(max_total_depth * self.mode_points_per_meter))
+        mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
+        receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
+
+        if env.is_range_dependent and segments is not None:
+            # Honour a user-pinned rmax_m, else give the modal-sum
+            # interpolation the same 5 % headroom past the outermost
+            # receiver as the range-independent path (RD is narrowband
+            # only — broadband raises just below). Previously hard-coded
+            # to max(receiver.ranges), which put the last receiver on the
+            # interpolation edge and ignored self.rmax_m.
+            rmax_m = (
+                self.rmax_m
+                if self.rmax_m is not None
+                else self._compute_rmax_m(receiver, multiplier=1.05)
+            )
+
+            # Compute fixed mesh N for all profiles to ensure
+            # consistent .mod record length (LRecordLength must not
+            # increase between profiles — krakenc.f90 line 629).
+            # Use 20 pts/wavelength based on max depth, like AT convention.
+            freq = float(source.frequencies[0])
+            all_c = []
+            for _, seg in segments:
+                all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
+                if seg.bottom is not None:
+                    # Walk the column via env helper — handles both
+                    # halfspace and stratified columns.
+                    all_c.append(seg.bottom.halfspace_at(range=0.0).sound_speed)
+            min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
+            n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
+
+            if broadband:
+                # Multi-profile broadband not supported by
+                # write_multi_profile_env. Previous versions silently
+                # dropped the freq vector — that lost user output
+                # without signalling. Fail loudly instead.
+                raise ConfigurationError(
+                    "Kraken does not support range-dependent "
+                    "broadband runs. Pass a single frequency or make "
+                    "the environment range-independent."
+                )
+
+            write_multi_profile_env(
+                filepath=env_file,
+                segments=segments,
+                source=source,
+                receiver=receiver_for_modes,
+                interp_ssp=self.interp_ssp,
+                n_mesh=n_mesh_fixed,
+                roughness=self.roughness,
+                c_low=self._c_low_eff,
+                c_high=self.c_high,
+                rmax_m=rmax_m,
+            )
+        else:
+            self._write_kraken_env(
+                env_file, env, source,
+                receiver_obj=receiver_for_modes,
+                receiver_depths=mode_depths,
+                frequencies=freq_vec if broadband else None,
+            )
+
+    def _run_field_exe(self, fm, base_name, option):
+        """Run field.exe → ``.shd`` and return the output path. field.exe may
+        exit non-zero on a successful run (known Fortran teardown bug) — warn
+        and read the ``.shd`` anyway; a *missing* ``.shd`` is a real failure
+        and raises ``ModelExecutionError``."""
+        self._log(f"Running field.exe (option='{option}')...")
+        try:
+            self._run_subprocess(
+                [str(self._resolve_field_executable()), base_name],
+                cwd=fm.work_dir,
+            )
+        except ModelExecutionError as exc:
+            warnings.warn(
+                f"{self.model_name}: field.exe exited with non-zero "
+                f"status ({exc}); attempting to read the .shd output "
+                "anyway (known Fortran cleanup issue).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        shd_file = fm.get_path(f'{base_name}.shd')
+        if not shd_file.exists():
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(
+                    "field.exe did not produce a .shd file; check the "
+                    f".prt log at {fm.get_path(base_name + '.prt')}"
+                ),
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+        return shd_file
+
+    def _assemble_field_from_shd(self, shd_file, source, receiver, is_rd,
+                                 n_profiles, broadband, freq_vec, return_pressure,
+                                 fm, base_name):
+        """Build the result Field from field.exe's ``.shd``: native-broadband
+        ``(n_d, n_r, n_f)``, single-frequency complex pressure
+        (``return_pressure``), or TL. field.exe's modal sum differs from
+        Scooter's Hankel path by an overall -1, negated here so every branch
+        carries the ``'travelling_wave'`` phase reference."""
+        if broadband:
+            shd0 = read_shd_bin(str(shd_file))
+            freqs_read = np.asarray(shd0['freqVec'], dtype=float)
+            # A sub-cutoff (zero-mode) frequency corrupts the multi-frequency
+            # .mod: field.exe sometimes produces a .shd anyway but with a
+            # garbage (e.g. all-zero) frequency axis. Detect the mismatch and
+            # raise so the broadband caller recovers (drops the sub-cutoff
+            # band and zero-fills) instead of silently returning a zero field.
+            if (len(freqs_read) != len(freq_vec)
+                    or not np.allclose(np.sort(freqs_read),
+                                       np.sort(np.asarray(freq_vec, float)),
+                                       rtol=1e-3, atol=1e-6)):
+                exc = ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=("field.exe returned a frequency axis that does "
+                            "not match the request — the modes file is "
+                            "corrupted by a sub-cutoff (zero-mode) frequency."))
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise exc
+            # New layout: (n_d, n_r, n_f).
+            p_stack = np.zeros(
+                (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
+                dtype=np.complex128,
+            )
+            for i_freq, fr in enumerate(freqs_read):
+                shd_i = read_shd_bin(str(shd_file), frequency=float(fr))
+                # field.exe (EvaluateMod.f90:34,42) emits the modal sum
+                # under the engineering carrier exp(-ikr) but with a
+                # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
+                # path produces -exp(iπ/4)/√(2πr). The two prefactors
+                # differ by an overall -1 (NOT a conjugation), so a
+                # plain negation aligns the two travelling-wave fields.
+                p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
+            field = Field(
+                data=p_stack,
+                coords={
+                    'depth': receiver.depths,
+                    'range': receiver.ranges,
+                    'frequency': freqs_read,
+                },
+                phase_reference='travelling_wave',
+                **self._result_kwargs(
+                    source,
+                    backend='field',
+                    frequencies=freqs_read,
+                    mode_coupling=self.mode_coupling if is_rd else 'none',
+                    n_profiles=n_profiles,
+                    native_broadband=True,
+                ),
+            )
+        elif return_pressure:
+            shd_data = read_shd_bin(str(shd_file))
+            p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
+            field = Field(
+                data=p,
+                coords={'depth': receiver.depths, 'range': receiver.ranges},
+                **self._result_kwargs(
+                    source,
+                    backend='field',
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
+                    mode_coupling=self.mode_coupling if is_rd else 'none',
+                    n_profiles=n_profiles,
+                ),
+            )
+            # Same negated-Hankel convention as the COHERENT_TL / broadband
+            # branches, so the complex pressure carries one phase reference.
+            field.phase_reference = 'travelling_wave'
+        else:
+            field = read_shd_file(shd_file)
+            # field.exe emits the modal sum with a prefactor that differs
+            # from Scooter's Hankel path by an overall -1 (see the broadband
+            # branch above). Negate here too and tag travelling_wave so the
+            # COHERENT_TL complex pressure carries the SAME phase convention
+            # as the broadband / return_pressure branches and as Scooter
+            # (|TL| is unchanged; this only fixes the complex phase).
+            field.data = -field.data
+            field.phase_reference = 'travelling_wave'
+            field.model = self.model_name
+            field.backend = 'field'
+            field.model_source = self.provenance
+            field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+            field.frequencies = np.atleast_1d(np.asarray(
+                float(np.atleast_1d(source.frequencies)[0]), dtype=float,
+            ))
+            field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
+            field.metadata['n_profiles'] = n_profiles
+        return field
 
     def _compute_field_via_exe(
         self, env, source, receiver,
-        return_pressure=False, n_modes=None, frequencies=None,
+        return_pressure=False, n_modes=None, frequencies=None, exe=None,
     ):
         """Compute field using kraken.exe → field.exe AT pipeline.
 
@@ -1270,103 +1392,20 @@ class KrakenField(_KrakenBase):
             n_profiles = 1
 
             if is_rd:
-                # Segment environment for multi-profile kraken run
-                segments = segment_environment_by_range(env, n_segments=self.n_segments)
-                n_profiles = len(segments)
-
-                # Max total depth must account for NMedia padding
-                # (write_multi_profile_env pads profiles with fewer
-                # media using 0.1 m layers, which can push total past
-                # the deepest real profile).
-                def _n_media_seg(seg_env):
-                    n = 1
-                    if seg_env.has_layered_bottom():
-                        n += len(seg_env.bottom.layers)
-                    return n
-
-                max_n_media = max(_n_media_seg(seg) for _, seg in segments)
-                if max_n_media < 2:
-                    max_n_media = 2  # AT requires NMedia>=2 for RD
-                max_total_depth = max(
-                    self._total_media_depth(seg_env) + 0.1 * (max_n_media - _n_media_seg(seg_env))
-                    for _, seg_env in segments
-                )
-
-                profile_ranges_m = np.array([s[0] for s in segments])
-                self._log(f"Range-dependent: {n_profiles} profiles, "
-                          f"mode_coupling={self.mode_coupling}")
+                segments, n_profiles, profile_ranges_m, max_total_depth = \
+                    self._segment_env_for_field(env)
             else:
                 max_total_depth = self._total_media_depth(env)
 
-            # 1. Write .env file
-            env_file = fm.get_path(f'{base_name}.env')
-
-            # Mode depths must cover the full ocean + sediment for all
-            # profiles. Use max total media depth across all segments.
-            n_mode_depths = max(100, int(max_total_depth * self.mode_points_per_meter))
-            mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
-            receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
-
-            if is_rd and segments is not None:
-                rmax_m = float(np.max(receiver.ranges))
-
-                # Compute fixed mesh N for all profiles to ensure
-                # consistent .mod record length (LRecordLength must not
-                # increase between profiles — krakenc.f90 line 629).
-                # Use 20 pts/wavelength based on max depth, like AT convention.
-                freq = float(source.frequencies[0])
-                all_c = []
-                for _, seg in segments:
-                    all_c.extend([float(c) for c in seg.ssp.data[:, 0]])
-                    if seg.bottom is not None:
-                        # Walk LayeredBottom via env helper — handles both
-                        # halfspace and stratified columns.
-                        all_c.append(seg.halfspace_at_range(0.0).sound_speed)
-                min_c = min(all_c) if all_c else DEFAULT_SOUND_SPEED
-                n_mesh_fixed = max(500, int(max_total_depth * freq / min_c * 20))
-
-                if broadband:
-                    # Multi-profile broadband not supported by
-                    # write_multi_profile_env. Previous versions silently
-                    # dropped the freq vector — that lost user output
-                    # without signalling. Fail loudly instead.
-                    raise ConfigurationError(
-                        "KrakenField does not support range-dependent "
-                        "broadband runs. Pass a single frequency or make "
-                        "the environment range-independent."
-                    )
-
-                write_multi_profile_env(
-                    filepath=env_file,
-                    segments=segments,
-                    source=source,
-                    receiver=receiver_for_modes,
-                    interp_ssp=self.interp_ssp,
-                    n_mesh=n_mesh_fixed,
-                    roughness=self.roughness,
-                    c_low=self.c_low,
-                    c_high=self.c_high,
-                    rmax_m=rmax_m,
-                )
-            else:
-                self._write_kraken_env(
-                    env_file, env, source,
-                    receiver_obj=receiver_for_modes,
-                    receiver_depths=mode_depths,
-                    frequencies=freq_vec if broadband else None,
-                )
+            self._write_field_env(
+                env, source, receiver, fm, base_name,
+                segments, max_total_depth, broadband, freq_vec)
 
             # 2. Run kraken.exe → .mod (using base-class subprocess helper)
-            kraken_exe = self._select_kraken_exe(env)
+            kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
             self._log(f"Running {kraken_exe.name}...")
-            try:
-                self._run_subprocess(
-                    [str(kraken_exe), base_name],
-                    cwd=fm.work_dir,
-                )
-            except ModelExecutionError as exc:
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise
+            self._run_and_attach_prt(
+                [str(kraken_exe), base_name], fm.work_dir, base_name)
 
             # 3. Write .flp file
             flp_file = fm.get_path(f'{base_name}.flp')
@@ -1378,9 +1417,7 @@ class KrakenField(_KrakenBase):
             flp_kwargs = dict(
                 title=getattr(env, 'name', ''),
                 n_profiles=n_profiles,
-                profile_ranges_km=(
-                    profile_ranges_m / 1000.0 if profile_ranges_m is not None else None
-                ),
+                profile_ranges_m=profile_ranges_m,
             )
             if n_modes is not None:
                 flp_kwargs['M_limit'] = int(n_modes)
@@ -1399,107 +1436,28 @@ class KrakenField(_KrakenBase):
                 shutil.copy(src, fm.get_path(f'{base_name}.sbp'))
 
             # 4. Run field.exe → .shd
-            # field.exe may exit non-zero on a successful run because of a
-            # known Fortran teardown bug; the .shd file is still valid.
-            # Catch only ``ModelExecutionError`` and warn so any wider
-            # failure (e.g. ``FileNotFoundError`` for the binary itself)
-            # still propagates.
-            self._log(f"Running field.exe (option='{option}')...")
-            try:
-                self._run_subprocess(
-                    [str(self.field_executable), base_name],
-                    cwd=fm.work_dir,
-                )
-            except ModelExecutionError as exc:
+            shd_file = self._run_field_exe(fm, base_name, option)
+
+            field = self._assemble_field_from_shd(
+                shd_file, source, receiver, is_rd, n_profiles,
+                broadband, freq_vec, return_pressure, fm, base_name)
+
+            # No-propagation guard: an all-floor field means the modal sum was
+            # empty — Kraken found 0 trapped modes (frequency below the
+            # waveguide's modal cutoff, or c_high too low). field.exe still
+            # emits a uniform no-signal sentinel; flag it rather than return a
+            # silent all-max-TL field (compute_modes raises on the same case).
+            fd = np.asarray(field.data)
+            finite = np.isfinite(fd)
+            if finite.any() and not np.any(np.abs(fd[finite]) > PRESSURE_FLOOR):
                 warnings.warn(
-                    f"{self.model_name}: field.exe exited with non-zero "
-                    f"status ({exc}); attempting to read the .shd output "
-                    "anyway (known Fortran cleanup issue).",
-                    UserWarning,
-                    stacklevel=2,
+                    f"{self.model_name}: no propagating field — the modal sum "
+                    f"is empty (0 trapped modes: the frequency is below the "
+                    f"waveguide's modal cutoff, or c_high is too low). The "
+                    f"returned TL is a uniform no-signal sentinel, not a "
+                    f"physical result; raise the frequency or c_high.",
+                    UserWarning, stacklevel=2,
                 )
-
-            # 5. Read .shd output
-            # field.exe may exit with non-zero (memory cleanup issues in
-            # Fortran) even when computation succeeds, so check for .shd first.
-            shd_file = fm.get_path(f'{base_name}.shd')
-            if not shd_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        "field.exe did not produce a .shd file; check the "
-                        f".prt log at {fm.get_path(base_name + '.prt')}"
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
-
-            if broadband:
-                shd0 = read_shd_bin(str(shd_file))
-                freqs_read = np.asarray(shd0['freqVec'], dtype=float)
-                # New layout: (n_d, n_r, n_f).
-                p_stack = np.zeros(
-                    (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
-                    dtype=np.complex128,
-                )
-                for i_freq, fr in enumerate(freqs_read):
-                    shd_i = read_shd_bin(str(shd_file), freq=float(fr))
-                    # field.exe (EvaluateMod.f90:34,42) emits the modal sum
-                    # under the engineering carrier exp(-ikr) but with a
-                    # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
-                    # path produces -exp(iπ/4)/√(2πr). The two prefactors
-                    # differ by an overall -1 (NOT a conjugation), so a
-                    # plain negation aligns the two travelling-wave fields.
-                    p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
-                field = Field(
-                    data=p_stack,
-                    coords={
-                        'depth': receiver.depths,
-                        'range': receiver.ranges,
-                        'frequency': freqs_read,
-                    },
-                    phase_reference='travelling_wave',
-                    **self._result_kwargs(
-                        source,
-                        backend='field.exe',
-                        frequencies=freqs_read,
-                        mode_coupling=self.mode_coupling if is_rd else 'none',
-                        n_profiles=n_profiles,
-                        native_broadband=True,
-                    ),
-                )
-            elif return_pressure:
-                shd_data = read_shd_bin(str(shd_file))
-                p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
-                field = Field(
-                    data=p,
-                    coords={'depth': receiver.depths, 'range': receiver.ranges},
-                    **self._result_kwargs(
-                        source,
-                        backend='field.exe',
-                        frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                        mode_coupling=self.mode_coupling if is_rd else 'none',
-                        n_profiles=n_profiles,
-                    ),
-                )
-            else:
-                field = read_shd_file(shd_file)
-                # field.exe emits the modal sum with a prefactor that differs
-                # from Scooter's Hankel path by an overall -1 (see the broadband
-                # branch above). Negate here too and tag travelling_wave so the
-                # COHERENT_TL complex pressure carries the SAME phase convention
-                # as the broadband / return_pressure branches and as Scooter
-                # (|TL| is unchanged; this only fixes the complex phase).
-                field.data = -field.data
-                field.phase_reference = 'travelling_wave'
-                field.model = self.model_name
-                field.backend = 'field.exe'
-                field.source_depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
-                field.frequencies = np.atleast_1d(np.asarray(
-                    float(np.atleast_1d(source.frequencies)[0]), dtype=float,
-                ))
-                field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
-                field.metadata['n_profiles'] = n_profiles
 
             self._attach_output_paths(
                 field, fm.work_dir, base_name,
@@ -1509,7 +1467,7 @@ class KrakenField(_KrakenBase):
                 ),
             )
 
-            self._log("KrakenField simulation complete")
+            self._log("Kraken simulation complete")
             return field
 
         finally:
@@ -1520,7 +1478,7 @@ class KrakenField(_KrakenBase):
 
     def _compute_broadband_field(
         self, env, source, receiver,
-        frequencies=None, n_modes=None,
+        frequencies=None, n_modes=None, exe=None,
     ):
         """
         Compute broadband transfer function.
@@ -1538,15 +1496,65 @@ class KrakenField(_KrakenBase):
             pressure. Trailing-frequency convention matches
             Bellhop/RAM/Scooter broadband outputs.
         """
-        frequencies = self._resolve_broadband_frequencies(source, frequencies)
+        frequencies = np.atleast_1d(
+            self._resolve_broadband_frequencies(source, frequencies))
 
         self._log(f"Broadband: {len(frequencies)} frequencies, "
                   f"{frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz")
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=RunMode.BROADBAND)
-        return self._compute_field_via_exe(
-            env, source, receiver,
-            frequencies=frequencies,
-            n_modes=n_modes,
-        )
+        kraken_exe = exe if exe is not None else self._select_kraken_exe(env)
+
+        # Optimistic single run — no overhead in the common all-propagating case.
+        try:
+            return self._compute_field_via_exe(
+                env, source, receiver,
+                frequencies=frequencies, n_modes=n_modes, exe=kraken_exe,
+            )
+        except ModelExecutionError as exc:
+            # field.exe can crash (ReadModes.f90) when a frequency is below the
+            # waveguide's modal cutoff: kraken writes an empty mode record there
+            # which also corrupts the multi-frequency .mod. The field below
+            # cutoff is zero for a normal-mode model (Computational Ocean
+            # Acoustics §2; below-cutoff/continuous-spectrum propagation needs a
+            # wavenumber-integration model like Scooter), so compute the
+            # propagating subset and zero-fill the dropped bins — preserving the
+            # uniform frequency grid TIME_SERIES synthesis needs. The cutoff is
+            # probed (cheap single-frequency runs) only on this failure path.
+            floor = self._propagating_frequency_floor(
+                env, source, receiver, frequencies, kraken_exe)
+            if floor == 0:
+                raise   # every frequency propagates — failure was something else
+            if floor >= len(frequencies):
+                raise ConfigurationError(
+                    f"{self.model_name}: no propagating modes at any requested "
+                    f"frequency ({frequencies[0]:.1f}-{frequencies[-1]:.1f} Hz) — "
+                    f"every frequency is below the waveguide's modal cutoff.",
+                    remediation="Raise the frequency band above the modal "
+                    "cutoff, or use a wavenumber-integration model (Scooter) "
+                    "for below-cutoff fields.",
+                ) from exc
+            warnings.warn(
+                f"{self.model_name}: {floor} broadband frequency(ies) <= "
+                f"{frequencies[floor - 1]:.2f} Hz are below the modal cutoff (no "
+                f"propagating modes); their field is zero for a normal-mode "
+                f"model. Computing the {len(frequencies) - floor} propagating "
+                f"frequencies and zero-filling the rest.",
+                UserWarning, stacklevel=2,
+            )
+            tf = self._compute_field_via_exe(
+                env, source, receiver,
+                frequencies=frequencies[floor:], n_modes=n_modes, exe=kraken_exe,
+            )
+            data_full = np.zeros(
+                tf.data.shape[:2] + (len(frequencies),), dtype=tf.data.dtype)
+            data_full[:, :, floor:] = tf.data        # zero-fill the sub-cutoff bins
+            id_kwargs = tf.id_kwargs()
+            id_kwargs['frequencies'] = frequencies
+            return Field(
+                data=data_full,
+                coords={'depth': receiver.depths, 'range': receiver.ranges,
+                        'frequency': frequencies},
+                **id_kwargs,
+            )

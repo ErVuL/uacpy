@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Tuple, Union
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import ModelExecutionError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError,
+)
 from uacpy.io.units import km_to_m, m_to_km
-from uacpy.io._fortran_helpers import read_vector
+from uacpy.io._fortran_helpers import read_vector, typed_format_error
 
 
 def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
@@ -90,7 +92,7 @@ def read_boundary_3d(
             if match:
                 bdry_type = match.group(1)
             else:
-                raise ValueError(f"Cannot parse boundary type from: {bdry_type_line}")
+                raise FileFormatError(f"Cannot parse boundary type from: {bdry_type_line}")
 
             if bdry_type == "R":
                 log_message('bathy_io',
@@ -101,7 +103,7 @@ def read_boundary_3d(
                             "Curvilinear approximation to boundary",
                             verbose=verbose)
             else:
-                raise ValueError(f"Unknown boundary type: {bdry_type}")
+                raise FileFormatError(f"Unknown boundary type: {bdry_type}")
 
             x_bot, n_x = read_vector(fid)
 
@@ -128,12 +130,11 @@ def read_boundary_3d(
             # each (bdry3DMod.f90: DO iy = 1, NbtyPts(2); READ Bot(:, iy)).
             z_bot = np.array(z_values).reshape(n_y, n_x)
 
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Boundary file not found: {filename}")
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Boundary file not found: {filename}") from e
     except Exception as e:
-        raise ModelExecutionError(
-            'Bellhop3D', return_code=0, stdout=None,
-            stderr=f"Error reading boundary file {filename}: {e}",
+        raise FileFormatError(
+            f"Malformed 3-D boundary file {filename}: {e}"
         ) from e
 
     x_bot = km_to_m(x_bot)
@@ -142,6 +143,7 @@ def read_boundary_3d(
     return x_bot, y_bot, z_bot, n_x, n_y
 
 
+@typed_format_error
 def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read bathymetry data from BELLHOP .bty file.
@@ -200,7 +202,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         bty_type = bty_type[:1].upper()
         if bty_type not in ["L", "C"]:
-            raise ValueError(
+            raise ConfigurationError(
                 f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
             )
 
@@ -248,6 +250,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     return bty, bty_type
 
 
+@typed_format_error
 def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
     Read altimetry data from BELLHOP .ati file.
@@ -303,7 +306,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         ati_type = ati_type[:1].upper()
         if ati_type not in ["L", "C"]:
-            raise ValueError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
+            raise ConfigurationError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
 
         if ati_type == "L":
             log_message('bathy_io',
@@ -359,7 +362,7 @@ def _validate_interp_type(interp_type: str) -> str:
     """
     t = str(interp_type).strip().upper()
     if t not in ("L", "C"):
-        raise ValueError(
+        raise FileFormatError(
             f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
         )
     return t
@@ -400,7 +403,9 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}S"
 
-    bathy_km = bathymetry.copy()
+    if hasattr(bathymetry, "to_pairs"):
+        bathymetry = bathymetry.to_pairs()
+    bathy_km = np.asarray(bathymetry, dtype=float).copy()
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
 
     n_pts = bathy_km.shape[0]
@@ -433,10 +438,11 @@ def write_bty_long_format(
         Output .bty path.
     bathymetry : ndarray
         Shape (N, 2): range (m), depth (m).
-    bottom_rd : RangeDependentBottom
-        Object carrying per-range geoacoustics with attributes
-        ``ranges`` (metres), ``sound_speed``, ``density``, ``attenuation``,
-        ``shear_speed``, ``shear_attenuation``.
+    bottom_rd : Bottom
+        Range-dependent ``Bottom`` carrying per-range halfspace geoacoustics:
+        ``ranges`` (metres) plus the ``halfspace_sound_speed`` /
+        ``halfspace_density`` / ``halfspace_attenuation`` /
+        ``halfspace_shear_speed`` / ``halfspace_shear_attenuation`` views.
     interp_type : str, optional
         'L' (linear, default) or 'C' (curvilinear).
 
@@ -461,21 +467,19 @@ def write_bty_long_format(
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}L"
 
-    bathy_km = bathymetry.copy()
+    if hasattr(bathymetry, "to_pairs"):
+        bathymetry = bathymetry.to_pairs()
+    bathy_km = np.asarray(bathymetry, dtype=float).copy()
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
     n_pts = bathy_km.shape[0]
 
     rd_r_km = m_to_km(bottom_rd.ranges)
-    cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.sound_speed)
-    rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.density)
-    alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.attenuation)
-    cs_arr = bottom_rd.shear_speed if bottom_rd.shear_speed is not None \
-        else np.zeros_like(rd_r_km)
-    cs = np.interp(bathy_km[:, 0], rd_r_km, cs_arr)
-    alpha_s_arr = getattr(bottom_rd, 'shear_attenuation', None)
-    if alpha_s_arr is None:
-        alpha_s_arr = np.zeros_like(rd_r_km)
-    alpha_s = np.interp(bathy_km[:, 0], rd_r_km, alpha_s_arr)
+    cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_sound_speed)
+    rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_density)
+    alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_attenuation)
+    cs = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_shear_speed)
+    alpha_s = np.interp(bathy_km[:, 0], rd_r_km,
+                        bottom_rd.halfspace_shear_attenuation)
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")
@@ -524,7 +528,9 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     interp_char = _validate_interp_type(interp_type)
     type_str = f"{interp_char}S"
 
-    alti_km = altimetry.copy()
+    if hasattr(altimetry, "to_pairs"):
+        altimetry = altimetry.to_pairs()
+    alti_km = np.asarray(altimetry, dtype=float).copy()
     alti_km[:, 0] = m_to_km(alti_km[:, 0])
 
     n_pts = alti_km.shape[0]
@@ -585,7 +591,7 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     filepath = Path(filepath)
 
     if interp_type not in ['R', 'C']:
-        raise ValueError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
+        raise ConfigurationError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
 
     depth = depth.copy()
     depth[np.isnan(depth)] = 0.0
@@ -594,7 +600,7 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     ny = len(Y)
 
     if depth.shape != (ny, nx):
-        raise ValueError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
+        raise ConfigurationError(f"Depth array shape {depth.shape} doesn't match (ny={ny}, nx={nx})")
 
     X_km = m_to_km(X)
     Y_km = m_to_km(Y)

@@ -4,10 +4,15 @@ Source class for defining acoustic sources in underwater environments
 
 import numpy as np
 from typing import Union, List
+from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import (
+    _require_positive, _require_non_negative, _require_strictly_increasing,
+)
 
 
+@dataclass
 class Source:
     """
     Acoustic source definition
@@ -49,14 +54,14 @@ class Source:
     >>> source = Source(depths=[10, 20, 30], frequencies=200)
     """
 
-    def __init__(
-        self,
-        depths: Union[float, List[float], np.ndarray],
-        frequencies: Union[float, List[float], np.ndarray],
-        source_type: str = 'point',
-    ):
-        self.depths = np.atleast_1d(np.array(depths, dtype=np.float64))
-        self.frequencies = np.atleast_1d(np.array(frequencies, dtype=np.float64))
+    depths: Union[float, List[float], np.ndarray]
+    frequencies: Union[float, List[float], np.ndarray]
+    source_type: str = 'point'
+
+    def __post_init__(self):
+        self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
+        self.frequencies = np.atleast_1d(
+            np.array(self.frequencies, dtype=np.float64))
 
         if self.depths.size == 0:
             raise ConfigurationError(
@@ -67,36 +72,19 @@ class Source:
                 "Source requires at least one frequency; got an empty array"
             )
 
-        if np.any(~np.isfinite(self.depths)):
-            raise ConfigurationError(
-                f"source depths must be finite (no NaN/inf), got "
-                f"{self.depths.tolist()}"
-            )
-
-        if np.any(~np.isfinite(self.frequencies)):
-            raise ConfigurationError(
-                f"source frequencies must be finite (no NaN/inf), got "
-                f"{self.frequencies.tolist()}"
-            )
-
-        if np.any(self.depths < 0):
-            raise ConfigurationError(
-                f"source depths must be non-negative (down from surface), "
-                f"got {self.depths.tolist()}"
-            )
-
-        if np.any(self.frequencies <= 0):
-            raise ConfigurationError(
-                f"source frequencies must be strictly positive (Hz), got "
-                f"{self.frequencies.tolist()}"
-            )
+        _require_non_negative(
+            self.depths, "source depths", hint="metres, positive down from surface")
+        # Strictly increasing, matching Receiver — outputs are indexed by source
+        # depth, so a defined order keeps result rows unambiguous across models.
+        _require_strictly_increasing(self.depths, "source depths")
+        _require_positive(self.frequencies, "source frequencies", hint="Hz")
 
         valid_types = ['point', 'line']
-        if source_type not in valid_types:
+        if self.source_type not in valid_types:
             raise ConfigurationError(
-                f"source_type must be one of {valid_types}; got {source_type!r}"
+                f"source_type must be one of {valid_types}; "
+                f"got {self.source_type!r}"
             )
-        self.source_type = source_type
 
     @property
     def n_sources(self) -> int:

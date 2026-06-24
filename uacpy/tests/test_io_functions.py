@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 
 import uacpy
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
@@ -90,9 +91,9 @@ class TestEnvironmentIO:
             )
 
             assert env.is_range_dependent
-            assert len(env.bathymetry) == 3
-            assert env.bathymetry[0, 1] == 80
-            assert env.bathymetry[-1, 1] == 120
+            assert env.bathymetry.n_ranges == 3
+            assert env.bathymetry.depths[0] == 80
+            assert env.bathymetry.depths[-1] == 120
 
         finally:
             Path(bathy_file).unlink()
@@ -203,9 +204,9 @@ class TestSSPReadWriteRoundtrip:
 
         c = np.zeros((3, 4))
         out = tmp_path / "bad.ssp"
-        with pytest.raises(ValueError, match="does not match"):
+        with pytest.raises(ConfigurationError, match="does not match"):
             write_ssp(out, np.array([0.0, 5.0]), c)
-        with pytest.raises(ValueError, match="2-D"):
+        with pytest.raises(ConfigurationError, match="2-D"):
             write_ssp(out, np.array([0.0, 5.0]), np.zeros(5))
 
     def test_read_ssp_3d_canonical_bellhop3d_file(self):
@@ -390,3 +391,77 @@ class TestRamsurfReaderDepthAxis:
         # rams: i = 1 + k*ndz, depth = (i-1)*dz -> first sample at z=dz.
         assert depths[0] == 2.0
         assert np.allclose(depths, np.array([2.0, 4.0, 6.0, 8.0, 10.0]))
+
+
+class TestReaderCorruptFileRaises:
+    """The io readers' failure path: a truncated / garbage binary must raise
+    the typed :class:`FileFormatError`, not a bare struct/EOF error or a
+    self-contradictory ModelExecutionError(return_code=0)."""
+
+    def test_corrupt_mode_file_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.modes_reader import read_modes_bin
+        from uacpy.core.exceptions import FileFormatError
+        bad = tmp_path / "garbage.mod"
+        bad.write_bytes(b"\x00\x01\x02not a real mode file\xff\xfe" * 4)
+        with pytest.raises(FileFormatError):
+            read_modes_bin(str(bad))
+
+    def test_corrupt_shd_file_raises(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_bin
+        bad = tmp_path / "garbage.shd"
+        bad.write_bytes(b"\x00" * 12)            # too short for a valid header
+        with pytest.raises(Exception):           # FileFormatError or EOF-derived
+            read_shd_bin(str(bad))
+
+
+class TestOASRFrequencyOverride:
+    """Audit H3: an explicit ``frequencies=`` override (passed by OASR.run as
+    freq_min/freq_max/n_frequencies) must win over a multi-element
+    ``source.frequencies``; previously the writer honoured the override only
+    for single-frequency sources, silently dropping it otherwise."""
+
+    def _freq_line(self, path):
+        # The OASR deck writes "<fmin> <fmax> <nfreq> <out_inc>" right after the
+        # source line; locate it by the 4-token float/int signature.
+        for ln in Path(path).read_text().splitlines():
+            toks = ln.split()
+            if len(toks) == 4:
+                try:
+                    return float(toks[0]), float(toks[1]), int(toks[2])
+                except ValueError:
+                    continue
+        raise AssertionError("no frequency line found in OASR deck")
+
+    def test_override_wins_over_multifreq_source(self, tmp_path):
+        from uacpy.io.oases_writer import write_oasr_input
+        from uacpy.core import Environment, Source, Receiver, BoundaryProperties
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='half-space',
+                                                    sound_speed=1600.0,
+                                                    density=1.8,
+                                                    attenuation=0.5))
+        # Multi-element source that previously hijacked the sweep.
+        src = Source(depths=50.0, frequencies=[50.0, 100.0, 150.0])
+        rcv = Receiver(depths=[50.0], ranges=[1000.0])
+        out = tmp_path / "oasr.dat"
+        write_oasr_input(str(out), env, src, rcv,
+                         angles=np.linspace(0, 90, 91),
+                         freq_min=200.0, freq_max=400.0, n_frequencies=5)
+        fmin, fmax, nfreq = self._freq_line(out)
+        assert (fmin, fmax, nfreq) == (200.0, 400.0, 5)
+
+    def test_source_drives_sweep_without_override(self, tmp_path):
+        from uacpy.io.oases_writer import write_oasr_input
+        from uacpy.core import Environment, Source, Receiver, BoundaryProperties
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='half-space',
+                                                    sound_speed=1600.0,
+                                                    density=1.8,
+                                                    attenuation=0.5))
+        src = Source(depths=50.0, frequencies=[50.0, 100.0, 150.0])
+        rcv = Receiver(depths=[50.0], ranges=[1000.0])
+        out = tmp_path / "oasr.dat"
+        write_oasr_input(str(out), env, src, rcv,
+                         angles=np.linspace(0, 90, 91))
+        fmin, fmax, nfreq = self._freq_line(out)
+        assert (fmin, fmax, nfreq) == (50.0, 150.0, 3)

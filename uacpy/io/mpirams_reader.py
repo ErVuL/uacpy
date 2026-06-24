@@ -21,6 +21,7 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Dict
 from scipy.io import FortranFile
+from uacpy.core.exceptions import FileFormatError
 
 
 def read_psif(work_dir: Union[str, Path]) -> Dict:
@@ -34,9 +35,14 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
 
     Returns
     -------
-    dict with keys:
-        Nsam, nf, nzo, nr  : ints / floats from the header
-        c0, cmin, fs, Q    : float scalars from the header
+    dict with keys (header scalars use the DEV.md §4.2 metadata schema —
+    the raw Fortran ``Nsam`` / ``cmin`` are renamed to ``n_samples`` /
+    ``c_min`` here so consumers forward them to ``Result.metadata``
+    verbatim):
+        n_samples, nf, nzo, nr : ints / floats from the header
+                                 (``n_samples`` ← Fortran ``Nsam``)
+        c0, c_min, fs, Q       : float scalars from the header
+                                 (``c_min`` ← Fortran ``cmin``)
         rout : ndarray, shape (nr,)        — output ranges (m)
         frq  : ndarray, shape (nf,)        — frequency vector (Hz)
         zg   : ndarray, shape (nzo,)       — output depth grid (m)
@@ -48,10 +54,15 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     if not psif_file.exists():
         raise FileNotFoundError(f"mpiramS output not found: {psif_file}")
 
+    # ``psif.dat`` is written by mpiramS on this host during the same run, so
+    # its byte order is the host's; ``FortranFile`` reads native endianness,
+    # which is therefore correct here. (Unlike the vendored/cross-host binaries
+    # read elsewhere, this is never a foreign-endian file — so it does not go
+    # through ``_fortran_helpers.detect_endian``.)
     with FortranFile(str(psif_file), 'r') as f:
         header = f.read_reals(dtype=np.float64)
         if header.size != 8:
-            raise ValueError(
+            raise FileFormatError(
                 f"{psif_file}: header has {header.size} reals, expected 8."
             )
         Nsam = float(header[0])
@@ -66,9 +77,27 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
         frq = f.read_reals(dtype=np.float64).copy()
         rout = f.read_reals(dtype=np.float64).copy()
         if frq.size != nf or rout.size != nr:
-            raise ValueError(
+            raise FileFormatError(
                 f"{psif_file}: header says nf={nf}, nr={nr}; got frq.size="
                 f"{frq.size}, rout.size={rout.size}."
+            )
+
+        # ``nf`` and ``nr`` are now validated against the frq/rout records, but
+        # ``nzo`` is still a raw header field driving the (nzo, nf, nr) psif
+        # allocation. Each depth record holds 1 + 2*nf float64 (+ two Fortran
+        # length markers), so nzo*nr records cannot occupy more than the file;
+        # bound nzo against the remaining bytes before allocating to reject a
+        # corrupt/garbage header (e.g. nzo = 0x7fffffff) that would otherwise
+        # drive a multi-GB np.zeros.
+        if nzo < 0:
+            raise FileFormatError(f"{psif_file}: negative nzo={nzo}.")
+        rec_bytes = (1 + 2 * nf) * 8 + 8  # payload + two 4-byte markers
+        file_size = psif_file.stat().st_size
+        max_records = file_size // max(rec_bytes, 1)
+        if nr > 0 and nzo > max_records // nr:
+            raise FileFormatError(
+                f"{psif_file}: header counts (nzo={nzo}, nf={nf}, nr={nr}) "
+                f"imply more depth records than a {file_size}-byte file holds."
             )
 
         # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
@@ -82,13 +111,13 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
                 psif[ii, :, ir] = rec[1::2][:nf] + 1j * rec[2::2][:nf]
 
     return {
-        'Nsam': Nsam,
+        'n_samples': Nsam,
         'nf': nf,
         'nzo': nzo,
         'nr': nr,
         'rout': rout,
         'c0': c0,
-        'cmin': cmin,
+        'c_min': cmin,
         'fs': fs,
         'Q': Q,
         'frq': frq,

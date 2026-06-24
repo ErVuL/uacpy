@@ -9,7 +9,7 @@ from uacpy.models.base import _collect_init_params
 from uacpy.parallel import Job, ParallelResult, run_parallel
 
 CONCRETE_MODELS = [
-    'Bellhop', 'BellhopCUDA', 'Bounce', 'Kraken', 'KrakenC', 'KrakenField',
+    'Bellhop', 'Bounce', 'Kraken',
     'OASN', 'OASP', 'OASR', 'OAST', 'RAM', 'SPARC', 'Scooter',
 ]
 
@@ -91,6 +91,12 @@ def test_parallelresult_collect_and_stack():
     assert len(stack) == 2
     assert np.array_equal(stack.coordinate, np.array([10.0, 30.0]))  # labels
 
+    # isel: positional slab selection, parity with stack[i] and at().
+    assert stack.isel(depth=0) is stack[0]
+    assert stack.isel(depth=1) is stack.at(depth=30.0)   # label 30 → index 1
+    with pytest.raises(uacpy.ConfigurationError):
+        stack.isel(range=0)                              # wrong (non-stacking) axis
+
 
 def test_parallelresult_stack_all_failed_raises():
     sr = ParallelResult(
@@ -118,6 +124,46 @@ def pekeris_env():
 def test_run_parallel_empty_raises():
     with pytest.raises(uacpy.ConfigurationError):
         run_parallel([])
+
+
+def test_main_is_importable_helper(monkeypatch, tmp_path):
+    """The spawn-safety probe: True only when __main__ is a real file."""
+    import sys, types
+    from uacpy.parallel import _main_is_importable
+    fake = types.ModuleType('__main__')
+    monkeypatch.setitem(sys.modules, '__main__', fake)
+    assert _main_is_importable() is False           # no __file__ (REPL/stdin)
+    f = tmp_path / "m.py"; f.write_text("")
+    fake.__file__ = str(f)
+    assert _main_is_importable() is True             # importable .py script
+
+
+def test_run_parallel_broken_pool_interactive_message(monkeypatch):
+    """A BrokenProcessPool is always translated into a clear, typed
+    ConfigurationError: the interactive-session variant (no importable __main__)
+    points at the __main__ footgun, a genuine worker crash (importable __main__)
+    gets the 'died mid-run' message — and in both the original BrokenProcessPool
+    is preserved as ``__cause__`` so nothing is lost. Driven by a fake pool so
+    it's deterministic and needs no real subprocess/binary."""
+    import uacpy.parallel as P
+    from concurrent.futures.process import BrokenProcessPool
+
+    class _DeadPool:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def submit(self, *a, **k): raise BrokenProcessPool("pool died on bootstrap")
+    monkeypatch.setattr(P, 'ProcessPoolExecutor', _DeadPool)
+    job = Job(model=object(), env='e', source='s', receiver='r')
+
+    monkeypatch.setattr(P, '_main_is_importable', lambda: False)   # interactive
+    with pytest.raises(uacpy.ConfigurationError, match="interactive session"):
+        P.run_parallel([job], start_method='spawn')
+
+    monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
+    with pytest.raises(uacpy.ConfigurationError, match="died mid-run") as ei:
+        P.run_parallel([job], start_method='spawn')
+    assert isinstance(ei.value.__cause__, BrokenProcessPool)       # original kept
 
 
 def test_job_defaults():
@@ -173,7 +219,7 @@ def test_run_parallel_cross_model(pekeris_env):
     jobs = [
         Job(uacpy.models.Bellhop(n_beams=800), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='bellhop'),
-        Job(uacpy.models.KrakenField(), pekeris_env, src, rcv,
+        Job(uacpy.models.Kraken(), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='kraken'),
         Job(uacpy.models.RAM(), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label='ram'),

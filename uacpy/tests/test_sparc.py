@@ -10,7 +10,7 @@ from uacpy.models import SPARC
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver, BoundaryProperties
 from uacpy.core.environment import (
-    LayeredBottom, RangeDependentLayeredBottom, SedimentLayer,
+    SeabedColumn, Bottom, SedimentLayer,
 )
 
 pytestmark = pytest.mark.requires_binary
@@ -31,8 +31,8 @@ class TestSPARCBasic:
         )
         source = Source(depths=50.0, frequencies=50.0)
         receiver = Receiver(
-            depths=np.linspace(10, 90, 9),
-            ranges=np.linspace(100, 5000, 11)
+            depths=np.linspace(10, 90, 5),
+            ranges=np.linspace(100, 3000, 6)
         )
 
         sparc = SPARC(verbose=False)
@@ -55,10 +55,12 @@ class TestSPARCTimeSeries:
             ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='rigid'),
         )
-        source = Source(depths=50.0, frequencies=50.0)
+        # Smoke test (type/shape/finite only). SPARC time-marching cost grows
+        # steeply with frequency and range, so keep both modest here.
+        source = Source(depths=50.0, frequencies=30.0)
         receiver = Receiver(
-            depths=np.linspace(10, 90, 5),
-            ranges=np.linspace(500, 5000, 6),
+            depths=np.linspace(10, 90, 3),
+            ranges=np.linspace(500, 2500, 4),
         )
 
         sparc = SPARC(verbose=False)
@@ -79,8 +81,8 @@ class TestSPARCTimeSeries:
 
 
 # ---------------------------------------------------------------------
-# Auto-rigidify walks the inner halfspace of LayeredBottom /
-# RangeDependentLayeredBottom and flips its acoustic_type.
+# Auto-rigidify walks the inner halfspace of SeabedColumn /
+# Bottom and flips its acoustic_type.
 # ---------------------------------------------------------------------
 
 class TestSPARCRigidifyLayered:
@@ -93,10 +95,10 @@ class TestSPARCRigidifyLayered:
         )
 
     def test_rigidify_layered_bottom_walks_to_halfspace(self):
-        """``LayeredBottom`` has no top-level ``acoustic_type``; the
+        """``SeabedColumn`` has no top-level ``acoustic_type``; the
         rigid flag lives on its inner ``.halfspace`` and must be
         flipped there."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10.0, sound_speed=1600.0,
                               density=1.5, attenuation=0.2),
@@ -116,30 +118,27 @@ class TestSPARCRigidifyLayered:
                          if "auto-converting" in str(w.message)]
         assert len(rigidify_msgs) == 1
         # Inner halfspace acoustic_type flipped
-        assert out.bottom.halfspace.acoustic_type == 'rigid'
-        # The downstream writer dispatches on halfspace_at_range — must
+        assert out.bottom.columns[0].halfspace.acoustic_type == 'rigid'
+        # The downstream writer dispatches on bottom.halfspace_at — must
         # now report 'rigid'.
-        assert out.halfspace_at_range(0.0).acoustic_type == 'rigid'
+        assert out.bottom.halfspace_at(range=0.0).acoustic_type == 'rigid'
         # Original env left intact (copy semantics)
-        assert env.bottom.halfspace.acoustic_type == 'half-space'
+        assert env.bottom.columns[0].halfspace.acoustic_type == 'half-space'
 
     def test_rigidify_rd_layered_bottom_walks_each_profile(self):
-        """``RangeDependentLayeredBottom`` has a halfspace inside each
+        """``Bottom`` has a halfspace inside each
         per-range profile; every one must be flipped."""
-        profA = LayeredBottom(
+        profA = SeabedColumn(
             layers=[SedimentLayer(thickness=5.0, sound_speed=1550.0,
                                   density=1.3, attenuation=0.1)],
             halfspace=self._hs_halfspace(),
         )
-        profB = LayeredBottom(
+        profB = SeabedColumn(
             layers=[SedimentLayer(thickness=5.0, sound_speed=1700.0,
                                   density=1.7, attenuation=0.2)],
             halfspace=self._hs_halfspace(),
         )
-        rdl = RangeDependentLayeredBottom(
-            ranges=np.array([0.0, 10000.0]),
-            profiles=[profA, profB],
-        )
+        rdl = Bottom.from_columns([profA, profB], ranges=np.array([0.0, 10000.0]))
         env = Environment(
             name='sparc_rdl_rigid',
             bathymetry=100.0, ssp=1500.0, bottom=rdl,
@@ -151,16 +150,16 @@ class TestSPARCRigidifyLayered:
         rigidify_msgs = [w for w in caught
                          if "auto-converting" in str(w.message)]
         assert len(rigidify_msgs) == 1
-        for prof in out.bottom.profiles:
+        for prof in out.bottom.columns:
             assert prof.halfspace.acoustic_type == 'rigid'
         # Originals untouched
-        for prof in env.bottom.profiles:
+        for prof in env.bottom.columns:
             assert prof.halfspace.acoustic_type == 'half-space'
 
     def test_rigidify_vacuum_layered_is_passthrough(self):
-        """A LayeredBottom whose halfspace is already ``vacuum`` must
+        """A SeabedColumn whose halfspace is already ``vacuum`` must
         NOT trigger the warning and must remain ``vacuum``."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10.0, sound_speed=1600.0,
                               density=1.5, attenuation=0.2),
@@ -178,15 +177,15 @@ class TestSPARCRigidifyLayered:
         rigidify_msgs = [w for w in caught
                          if "auto-converting" in str(w.message)]
         assert len(rigidify_msgs) == 0
-        assert out.bottom.halfspace.acoustic_type == 'vacuum'
+        assert out.bottom.columns[0].halfspace.acoustic_type == 'vacuum'
 
     @pytest.mark.requires_binary
     def test_layered_bottom_runs_end_to_end(self, tmp_path):
-        """SPARC + LayeredBottom completes a binary run. The emitted
+        """SPARC + SeabedColumn completes a binary run. The emitted
         ``.env`` declares ``NMedia = 1 + n_sediment_layers`` so the
         Fortran reader consumes all medium blocks before parsing the
         bottom boundary marker."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10.0, sound_speed=1600.0,
                               density=1.5, attenuation=0.2),

@@ -58,21 +58,3 @@ def detect_frames(rx, preamble, threshold=0.5, min_gap=None):
         if all(abs(k - s) >= gap for s in starts):
             starts.append(int(k))
     return sorted(starts), metric
-
-
-def plot_sync_metric(metric, threshold=None, ax=None, title="", **kwargs):
-    """Plot the synchronization metric vs sample index. Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    m = np.asarray(metric, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 3.5))
-    else:
-        fig = ax.figure
-    ax.plot(m, **kwargs)
-    if threshold is not None:
-        ax.axhline(threshold, color="r", ls="--", lw=1, label=f"threshold {threshold:g}")
-        ax.legend()
-    ax.set_xlabel("Sample index"); ax.set_ylabel("Norm. correlation")
-    ax.set_title(f"[sync] preamble metric {title}", loc="left")
-    ax.grid(alpha=0.3)
-    return fig, ax

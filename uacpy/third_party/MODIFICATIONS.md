@@ -7,24 +7,34 @@ code shipped with uacpy, with exact diffs.
 
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
+Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
+`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). One source
+patch is applied:
+
 ### `KrakenField/field.f90` -- out-of-bounds sentinel fix
 
 `EvaluateADMod` and `EvaluateCMMod` both declare their `rProf` argument as
-`rProf(NProf + 1)` and use the extra element as a sentinel value.  However,
-`ReadVector` (in `misc/SourceReceiverPositions.f90`) only allocates
-`MAX(3, NProf)` elements.  When `NProf >= 3` the access to `rProf(NProf + 1)`
-reads past the end of the array.
+`rProf(NProf + 1)` and use the extra element as a sentinel value
+(`EvaluateAD` writes it; `EvaluateCM` reads it in loop guards — Fortran
+`.AND.` does not short-circuit).  However, `ReadVector` (in
+`misc/SourceReceiverPositions.f90`) only allocates `MAX(3, NProf)` elements,
+so for `NProf >= 3` the access to `rProf(NProf + 1)` goes past the end of
+the array.  Every range-dependent KrakenField run (coupled or adiabatic,
+`n_segments >= 3`) hits this.  Submitted upstream from the ErVuL fork as
+branch `fix-field-rprof-out-of-bounds`.
 
 **Fix:** after `ReadVector` returns, reallocate `rProf` with `NProf + 1`
 elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
 
 ```diff
-@@ -106,6 +106,16 @@
+@@ -106,6 +106,18 @@
    CALL ReadVector( NProf, RProf, 'Profile ranges, RProf', 'km' )
    RProf = RProf / 1000.0   ! convert m back to km (undoing what ReadVector did)
  
-+  ! EvaluateAD/EvaluateCM access rProf( NProf + 1 ) as a sentinel.
-+  ! ReadVector only allocates MAX(3, NProf) elements, so extend by one.
++  ! EvaluateAD and EvaluateCM declare their rProf dummy as rProf( NProf + 1 )
++  ! and use the extra element as a range sentinel (EvaluateAD writes it).
++  ! ReadVector only allocates MAX( 3, NProf ) elements, so for NProf >= 3 the
++  ! actual argument is one element too small; extend it and set the sentinel.
 +  BLOCK
 +    REAL (KIND=8), ALLOCATABLE :: rProfTmp( : )
 +    ALLOCATE( rProfTmp( NProf + 1 ) )
@@ -38,37 +48,14 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
-### Root `Makefile` -- strip baked `-march=native` and add vendoring header
+### Root `Makefile` -- intentionally unpatched
 
-The upstream root `Makefile` hard-codes `-march=native -mtune=native` in the
-default `FFLAGS` line. Baked architecture flags break wheel/sdist consumers
-(produced CPU-specific binaries) and macOS/ARM cross-compiles. uacpy's
-`install.sh` injects architecture flags via `FORTRAN_ARCH_FLAGS` on the
-make command line. The original Makefile is preserved as `Makefile.orig`
-alongside the modified one.
-
-```diff
-@@ -1,3 +1,7 @@
-+# This Makefile is vendored by uacpy. Compiler flags here are intentionally
-+# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
-+# FORTRAN_ARCH_FLAGS on the make command line. To build outside uacpy, pass
-+# your own flags (e.g. `make FFLAGS="-O3 -march=native ..."`).
- #
- # To install the Acoustics Toolbox:
- #
-@@ -114,7 +118,13 @@
- # export FFLAGS= -march=corei7 -Bstatic -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation        -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer
- # export FFLAGS= -march=native          -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wa,-q -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
- # Had a problem with -O2 in the KRAKENC root finder for at/tests/Noise/Sduct. Switching to O1 (4//25/2023)
--export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
-+# -march=native / -mtune=native baked-in flags commented out by uacpy: they
-+# produce CPU-specific binaries that break wheel/sdist consumers and macOS/ARM
-+# cross-compiles. install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS= on the
-+# command line; users invoking `make` directly should pass FFLAGS= explicitly
-+# if they want CPU tuning.
-+# export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
-+export FFLAGS= -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
-```
+The upstream root `Makefile` bakes a CPU-specific flag into its default
+`FFLAGS` (`-mcpu=apple-m2`), which does not compile on x86.  No source patch
+is needed: `install.sh` passes `FFLAGS=` as a *make command-line variable*
+(`make all FC=gfortran FFLAGS="..."`), which takes precedence over any
+Makefile-level `export FFLAGS=` assignment, including in the sub-makes.
+Building this tree outside uacpy requires passing `FFLAGS=` explicitly.
 
 ---
 
@@ -193,6 +180,74 @@ The RAM dispatcher (`uacpy.models.ram`) selects whichever binary matches
 the environment: elastic bottom → rams0.5; altimetry → ramsurf1.5;
 default fluid + flat surface → mpiramS for in-process Fortran broadband.
 Collins backends loop in Python (one subprocess per frequency).
+
+---
+
+## ramgeo (RAMGEO — range-dependent layered fluid PE)
+
+Vendored at `third_party/ramgeo/` as a single source, `ramgeo1.5.f`
+(Collins' RAMGEO, version 1.5g). Sourced from the **Acoustics Toolbox** `RAM/`
+bundle (Porter's AT, mirroring `oalib.hlsresearch.com/Modes/AcousticsToolbox/`);
+the vendored file is byte-for-byte that copy plus the two patches below.
+
+- **Licence:** **public domain** — a U.S. Government work (Collins, NRL). No
+  explicit licence accompanies the code (NRL/OALIB distribute it freely with no
+  copyright or licence notice). Obtained from the Acoustics Toolbox `RAM/`
+  bundle, which merely redistributes Collins' original; bundling does not
+  relicense it.
+- **What it is:** the split-step Padé PE [Collins, JASA 93, 1736 (1993)]
+  with *"multiple sediment layers that parallel the bathymetry"* — i.e. a
+  range-dependent **layered fluid** seabed. Reads `ramgeo.in`, writes
+  `tl.line` (text) and `tl.grid` (unformatted), the same output family as
+  `rams0.5` / `ramsurf1.5`. Built by a plain top-level `Makefile`
+  (mirrors `ramsurf/`: `gfortran -O2 -std=legacy -w`, single source →
+  `ramgeo` binary); `install.sh` installs it to `uacpy/bin/ramgeo/`.
+  `ramgeo.in` is the upstream sample, kept for a smoke test.
+
+Two patches give it full parity with the other Collins backends (the same
+two `ramsurf1.5.f` carries):
+
+### Enlarged array dimensions
+
+Stock RAMGEO dimensions `parameter (mr=100,mz=8000,mp=10)` are too small
+for uacpy's fine Lytaev range/depth grids (a few-hundred-Hz run can need
+>8000 depth points), causing a silent array overflow and an empty
+`tl.grid`. Enlarged to match the patched `ramsurf1.5.f`:
+
+```diff
+-      parameter (mr=100,mz=8000,mp=10)
++      parameter (mr=505,mz=20002,mp=10)
+```
+
+### `outpt` patch — complex-envelope dump
+
+Stock `outpt` writes only real TL to `tl.grid`, discarding the phase a
+broadband transfer function needs. Patched to also dump the complex PE
+envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
+`tl.grid`'s record geometry — **the identical envelope and convention as
+`ramsurf1.5.f`** (carrier `exp(+i k0 r)` factored out; the Python wrapper
+applies the same `'ramsurf'` correction in `psi_to_travelling_wave`). This
+is what lets a forced `RAM(backend='ramgeo')` serve `BROADBAND` /
+`TIME_SERIES`, not just `COHERENT_TL`.
+
+```diff
+       open(unit=3,status='unknown',file='tl.grid',form='unformatted')
++      open(unit=11,status='unknown',file='pcomplex.bin',
++     >  form='unformatted')
+...
+       write(3)lz
++      write(11)lz
+...
+       subroutine outpt(mz,mdr,ndr,ndz,iz,nzplt,lz,ir,dir,eps,r,f3,u,tlg)
+-      complex ur,u(mz)
++      complex ur,u(mz),urg(mz)
+...
+       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
++      urg(j)=ur/sqrt(r+eps)
+     1 continue
+       write(3)(tlg(j),j=1,lz)
++      write(11)(urg(j),j=1,lz)
+```
 
 ---
 

@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from scipy.signal import resample_poly  # noqa: E402
 
 from uacpy import comms  # noqa: E402
+from uacpy.visualization import plot_scatter, plot_convergence, plot_sync_metric  # noqa: E402
 
 
 def _write_wav(path, signal, fs):
@@ -78,7 +79,7 @@ def main():
 
     # --- receive: downconvert + MF + timing recovery + sync + DFE/PLL + FEC ---
     dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
-    rxr = comms.Receiver("qpsk", code=code, equalizer=dfe, preamble=256)
+    rxr = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
     syms = rxr.from_passband(rx, fs, fc, sps=sps)
     start, sync_metric = comms.detect_preamble(syms, rxr.preamble, threshold=0.4)
     out_bits = rxr.receive(syms)
@@ -105,14 +106,14 @@ def main():
     ax.set_title('[modem] received passband spectrogram', loc='left')
     ax.set_xlabel('Time [s]'); ax.set_ylabel('Frequency [Hz]'); ax.set_ylim(0, fs / 2)
 
-    comms.scatter(payload_syms[200:], ax=axes[0, 1],
+    plot_scatter(payload_syms[200:], ax=axes[0, 1],
                   title=f"recovered QPSK (CRC {'OK' if crc_ok else 'FAIL'})")
     axes[0, 1].scatter(rxr.modulator.constellation.real,
                        rxr.modulator.constellation.imag, marker='x', s=80,
                        color='k', zorder=5)
 
-    comms.plot_sync_metric(sync_metric, threshold=0.4, ax=axes[1, 0])
-    comms.plot_convergence(mse, ax=axes[1, 1], title='(DFE + carrier PLL)')
+    plot_sync_metric(sync_metric, threshold=0.4, ax=axes[1, 0])
+    plot_convergence(mse, ax=axes[1, 1], title='(DFE + carrier PLL)')
 
     out_path = OUTPUT_DIR / "example_32_realdata_modem.png"
     fig.savefig(out_path, dpi=120)

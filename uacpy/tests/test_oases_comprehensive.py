@@ -21,6 +21,14 @@ from uacpy.core.results import Field, ReflectionCoefficient
 pytestmark = pytest.mark.requires_oases
 
 
+# The TL tests below use receiver ranges that do not land on OAST's internal
+# FFT grid, so the dB-interpolation warning fires incidentally; it is asserted
+# directly in test_oases_warnings.py, so silence it here. (The leading '.'
+# matches the literal colon in "OAST:", which is the filter-spec separator.)
+_OAST_INTERP_FILTER = "ignore:OAST. receiver.ranges do not match:UserWarning"
+
+
+@pytest.mark.filterwarnings(_OAST_INTERP_FILTER)
 class TestOAST:
     """Tests for OAST (transmission loss via wavenumber integration)."""
 
@@ -228,11 +236,9 @@ class TestOASR:
     @pytest.mark.requires_binary
     def test_oasr_reflection_coefficients(self, oasr_env, source, receiver):
         """OASR populates the typed ReflectionCoefficient attributes."""
-        from uacpy import ReflectionCoefficient
         oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 91))
         result = oasr.run(env=oasr_env, source=source, receiver=receiver)
 
-        assert isinstance(result, ReflectionCoefficient)
         assert isinstance(result, ReflectionCoefficient)
         assert result.theta.shape == (91,)
         assert result.R.shape == result.phi.shape
@@ -289,9 +295,12 @@ class TestOASP:
 
     @pytest.fixture
     def receiver(self):
+        # OASP cost is set by the spectral RMax (receiver range max → wavenumber
+        # FFT size); these tests assert a Field is produced, not numerics, so a
+        # shorter range keeps them cheap.
         return Receiver(
-            depths=np.linspace(10, 90, 9),
-            ranges=np.linspace(100, 10000, 11)
+            depths=np.linspace(10, 90, 5),
+            ranges=np.linspace(100, 3000, 6)
         )
 
     @pytest.mark.requires_binary
@@ -343,18 +352,19 @@ class TestOASP:
 
 
 class TestOASESFactory:
-    """Tests for the OASES() factory function."""
+    """Tests for the OASES.for_mode() factory function."""
 
     @pytest.mark.requires_binary
     def test_default_returns_oast(self):
-        """OASES() with no run_mode defaults to OAST."""
-        m = OASES(verbose=False)
+        """OASES.for_mode() with no run_mode defaults to OAST."""
+        m = OASES.for_mode(verbose=False)
         assert isinstance(m, OAST)
         assert m.model_name == 'OAST'
 
     @pytest.mark.requires_binary
+    @pytest.mark.filterwarnings(_OAST_INTERP_FILTER)
     def test_factory_compute_tl(self):
-        """OASES() returns an OAST that handles compute_tl."""
+        """OASES.for_mode() returns an OAST that handles compute_tl."""
         env = Environment(
             name="oases_test", bathymetry=100.0, ssp=1500.0,
         )
@@ -362,34 +372,34 @@ class TestOASESFactory:
         receiver = Receiver(
             depths=[25.0, 50.0, 75.0], ranges=[1000.0, 3000.0],
         )
-        m = OASES(verbose=False)
+        m = OASES.for_mode(verbose=False)
         result = m.compute_tl(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
 
     def test_routes_covariance_to_oasn(self):
-        assert isinstance(OASES(run_mode=RunMode.COVARIANCE), OASN)
+        assert isinstance(OASES.for_mode(run_mode=RunMode.COVARIANCE), OASN)
 
     def test_routes_replica_to_oasn(self):
-        assert isinstance(OASES(run_mode=RunMode.REPLICA), OASN)
+        assert isinstance(OASES.for_mode(run_mode=RunMode.REPLICA), OASN)
 
     def test_routes_reflection_to_oasr(self):
-        assert isinstance(OASES(run_mode=RunMode.REFLECTION), OASR)
+        assert isinstance(OASES.for_mode(run_mode=RunMode.REFLECTION), OASR)
 
     def test_routes_broadband_to_oasp(self):
-        assert isinstance(OASES(run_mode=RunMode.BROADBAND), OASP)
+        assert isinstance(OASES.for_mode(run_mode=RunMode.BROADBAND), OASP)
 
     def test_routes_time_series_to_oasp(self):
-        assert isinstance(OASES(run_mode=RunMode.TIME_SERIES), OASP)
+        assert isinstance(OASES.for_mode(run_mode=RunMode.TIME_SERIES), OASP)
 
     def test_coherent_tl_broadband_routes_to_oasp(self):
-        assert isinstance(OASES(broadband=True), OASP)
+        assert isinstance(OASES.for_mode(broadband=True), OASP)
 
     def test_subclass_specific_kwarg_raises_when_irrelevant(self):
-        """OASES() forwards kwargs verbatim to the chosen sub-class.
+        """OASES.for_mode() forwards kwargs verbatim to the chosen sub-class.
         ``angles=`` belongs to OASR; routing to OAST must raise
         ``TypeError`` so a typo or wrong-class kwarg surfaces."""
         with pytest.raises(TypeError):
-            OASES(
+            OASES.for_mode(
                 run_mode=RunMode.COHERENT_TL, verbose=False,
                 angles=np.linspace(0, 90, 10),  # OASR-only
             )
@@ -398,7 +408,7 @@ class TestOASESFactory:
         """When the kwarg DOES belong to the chosen sub-class, the
         factory must forward it (not over-filter)."""
         angles = np.linspace(0, 90, 19)
-        m = OASES(
+        m = OASES.for_mode(
             run_mode=RunMode.REFLECTION, verbose=False, angles=angles,
         )
         assert isinstance(m, OASR)
@@ -408,18 +418,18 @@ class TestOASESFactory:
         """A kwarg that no class consumes must raise ``TypeError`` so
         typos do not silently change the run."""
         with pytest.raises(TypeError):
-            OASES(verbose=False, totally_made_up_kwarg=42)
+            OASES.for_mode(verbose=False, totally_made_up_kwarg=42)
 
     def test_factory_forwards_base_kwargs(self):
         """Base-class kwargs (verbose, timeout, collapse) must pass
         through the filter."""
-        m = OASES(
+        m = OASES.for_mode(
             run_mode=RunMode.REFLECTION, verbose=False,
-            timeout=42.0, collapse={'bottom': 'median'},
+            timeout=42.0, collapse={'bottom_range': 'median'},
         )
         assert isinstance(m, OASR)
         assert m.timeout == 42.0
-        assert m._collapse['bottom'] == 'median'
+        assert m._collapse['bottom_range'] == 'median'
 
     def test_env_absorption_does_not_pollute_options_string(self, tmp_path):
         """env.absorption choice (Thorp/F-G/Biological) must NOT be
@@ -440,7 +450,8 @@ class TestOASESFactory:
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(depths=[50.0], ranges=[1000.0])
         dat = tmp_path / 'oast.dat'
-        write_oast_input(dat, env, source, receiver)
+        with pytest.warns(UserWarning, match='OASES ignores env.absorption'):
+            write_oast_input(dat, env, source, receiver)
         opt_tokens = set(dat.read_text().splitlines()[1].split())
         assert 'F' not in opt_tokens, (
             f"absorption letter 'F' leaked into OAST options: {opt_tokens}"

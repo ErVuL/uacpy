@@ -18,20 +18,21 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import resample
 
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 
-def doppler_from_speed(speed_mps, sound_speed_mps=1500.0):
+def doppler_from_speed(speed_mps, sound_speed_mps=DEFAULT_SOUND_SPEED):
     """Doppler scale factor ``a = v/c`` (positive when range is closing)."""
     return float(speed_mps) / float(sound_speed_mps)
 
 
 def compensate_doppler(signal, scale):
-    """Undo a Doppler dilation: resample ``signal`` by ``1/(1+scale)``.
+    """Undo a Doppler dilation: resample ``signal`` to ``(1+scale)*N`` samples.
 
     ``scale = a = v/c``. A closing geometry (``a > 0``) compresses the received
-    waveform; this stretches it back to the transmit time base. Returns the
-    resampled (complex) signal.
+    waveform; resampling to ``(1+a)*N`` samples stretches it back to the
+    transmit time base. Returns the resampled (complex) signal.
     """
     x = np.asarray(signal)
     a = float(scale)
@@ -79,24 +80,3 @@ def estimate_doppler_scale(rx, template, scales=None):
         peak[i] = float(matched_filter_metric(comp, t).max())
     best = float(scales[int(np.argmax(peak))])
     return best, scales, peak
-
-
-def plot_doppler_ambiguity(scales, peak_metric, ax=None, title="", **kwargs):
-    """Plot the Doppler-scale ambiguity curve (peak correlation vs scale).
-
-    Returns ``(fig, ax)``.
-    """
-    import matplotlib.pyplot as plt
-    s = np.asarray(scales, dtype=float)
-    p = np.asarray(peak_metric, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(7, 4))
-    else:
-        fig = ax.figure
-    ax.plot(s * 1e3, p / (p.max() + 1e-12), **kwargs)
-    best = s[int(np.argmax(p))] * 1e3
-    ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
-    ax.set_xlabel("Doppler scale a [×10⁻³]"); ax.set_ylabel("Norm. peak correlation")
-    ax.set_title(f"[doppler] ambiguity {title}", loc="left")
-    ax.grid(alpha=0.3); ax.legend()
-    return fig, ax

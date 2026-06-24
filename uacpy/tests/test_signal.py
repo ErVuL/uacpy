@@ -7,11 +7,11 @@ Bare minimum that the public API is reachable and behaves on simple inputs.
 import numpy as np
 import pytest
 
-from uacpy.acoustic_signal.generation import (
+from uacpy.acoustic_signal.waveforms import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
-from uacpy.acoustic_signal.generation import (
-    add_noise, make_bandlimited_noise,
+from uacpy.acoustic_signal.noise_synthesis import (
+    add_noise, make_bandlimited_noise, make_noise_waveform,
 )
 
 
@@ -26,19 +26,19 @@ class TestGenerators:
 
     def test_lfm_chirp_runs(self):
         fs = 10_000.0
-        t, s = lfm_chirp(fmin=100, fmax=2000, T=0.1, sample_rate=fs)
+        t, s = lfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
         assert len(t) == len(s)
         assert np.all(np.isfinite(s))
 
     def test_hfm_chirp_runs(self):
         fs = 10_000.0
-        t, s = hfm_chirp(fmin=100, fmax=2000, T=0.1, sample_rate=fs)
+        t, s = hfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
         assert len(t) == len(s)
         assert np.all(np.isfinite(s))
 
     def test_ricker_wavelet_runs(self):
         time = np.linspace(0, 0.1, 1024)
-        s = ricker_wavelet(time, F=200.0)
+        s = ricker_wavelet(time, frequency=200.0)
         assert len(s) == len(time)
         assert np.all(np.isfinite(s))
 
@@ -79,18 +79,33 @@ class TestProcessing:
         x = np.zeros(1024)
         y = add_noise(
             x, sample_rate=fs,
-            source_level_db=120.0, noise_level_db=80.0,
+            source_level=120.0, noise_level=80.0,
             fc=1000.0, bandwidth=200.0,
         )
         assert np.var(y) > 0
 
     def test_make_bandlimited_noise_runs(self):
-        n = make_bandlimited_noise(
+        # Returns (signal, time) like the other generators.
+        fs, dur = 10_000.0, 0.1
+        n, t = make_bandlimited_noise(
             fc=1000.0, bandwidth=500.0,
-            duration=0.1, sample_rate=10_000.0,
+            duration=dur, sample_rate=fs,
         )
         assert len(n) > 0
+        assert n.shape == t.shape == (int(dur * fs),)
         assert np.all(np.isfinite(n))
+        assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
+
+    def test_make_noise_waveform_is_1d_with_consistent_length(self):
+        fs, T = 10_000.0, 0.1
+        n, t = make_noise_waveform(fc=1000.0, bandwidth_hz=500.0, T=T, sample_rate=fs)
+        # Returns (signal, time) like the tonal generators (tone_burst, …);
+        # 1-D, length int(T*fs), with the time axis the same length (no
+        # carrier/noise mismatch from arange-vs-int float drift).
+        assert n.ndim == 1
+        assert n.shape == t.shape == (int(T * fs),)
+        assert np.all(np.isfinite(n))
+        assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
 
 
 class TestDecidecadeBands:
@@ -118,6 +133,17 @@ class TestDecidecadeBands:
         with pytest.raises(ConfigurationError):
             decidecade_bands(1000, 100)
 
+    def test_coarse_grid_falls_back_not_nan(self):
+        # A coarse, log-spaced grid leaves low bands with one sample; instead of
+        # a silent NaN they get a rectangular estimate and a single warning.
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
+        f = np.logspace(np.log10(10), np.log10(2000), 25)
+        psd = np.ones_like(f) * 1e-12
+        with pytest.warns(UserWarning, match="too coarse"):
+            c, lv = decidecade_band_levels(psd, f)
+        # at least one low band that would have been NaN is now finite
+        assert np.any(np.isfinite(lv[c < 100]))
+
 
 def test_acoustic_signal_is_importable():
     import uacpy.acoustic_signal as sig
@@ -129,7 +155,7 @@ def test_signal_symbols_resolve():
     import uacpy
     for name in ('lfm_chirp', 'hfm_chirp', 'tone_burst', 'gaussian_pulse',
                  'ricker_wavelet', 'add_noise', 'make_bandlimited_noise',
-                 'PPSD', 'Spectrogram'):
+                 'psd', 'ppsd', 'sel', 'spectrogram'):
         assert hasattr(uacpy.acoustic_signal, name), \
             f"uacpy.acoustic_signal.{name} missing"
 
@@ -140,23 +166,35 @@ class TestSEL:
     and an impulse at a segment boundary annihilated)."""
 
     def test_tone_exposure_is_parseval_exact(self):
-        from uacpy.acoustic_signal.analysis import SEL
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
         fs = 48000
         t = np.arange(fs) / fs
         x = 2.0 * np.sin(2 * np.pi * 1000.0 * t)   # exposure = A^2/2 * T = 2.0
-        sel, _ = SEL(band_type='third_octave', fmin=10, fmax=20000).compute(
-            x, fs, nfft=fs)
+        sel, _ = sel_fn(x, fs, band_type='third_octave', fmin=10, fmax=20000,
+                        nfft=fs)
         assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
     def test_impulse_not_annihilated(self):
-        from uacpy.acoustic_signal.analysis import SEL
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
         fs = 48000
         imp = np.zeros(fs)
         imp[0] = 10.0   # a Hann-windowed single segment would zero this out
-        sel, _ = SEL(band_type='linear', fmin=1.0, fmax=fs / 2,
-                     num_bands=240).compute(imp, fs, nfft=fs)
+        sel, _ = sel_fn(imp, fs, band_type='linear', fmin=1.0, fmax=fs / 2,
+                        num_bands=240, nfft=fs)
         # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
         assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
+
+    def test_coarse_bands_do_not_double_count_bins(self):
+        # 1-Hz FFT bins (nfft=fs) against sub-bin-wide low third-octave bands:
+        # each bin must contribute to exactly one band, so a flat tone's total
+        # exposure is conserved (no bin double-counted across overlapping bands).
+        from uacpy.acoustic_signal.analysis import sel as sel_fn
+        fs = 1000
+        t = np.arange(fs) / fs
+        x = np.sin(2 * np.pi * 50.0 * t)
+        sel, _ = sel_fn(x, fs, band_type='third_octave', fmin=8.9125, fmax=400,
+                        nfft=fs)
+        assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
 
 class TestFRF:
@@ -194,3 +232,20 @@ class TestFRF:
         _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m='CP')
         assert np.isfinite(tf).all()
         assert frf.m == order
+
+
+def test_degenerate_input_guards_raise_configurationerror():
+    """Pre-production robustness: degenerate inputs raise a typed
+    ConfigurationError, not a raw ValueError/ZeroDivisionError."""
+    import numpy as np
+    import pytest
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.acoustic_signal import sel, cwt, tone_burst
+    with pytest.raises(ConfigurationError):       # sel: empty data
+        sel(np.array([]), 48000.0)
+    with pytest.raises(ConfigurationError):       # sel: zero integration_time
+        sel(np.ones(2000), 48000.0, integration_time=0.0)
+    with pytest.raises(ConfigurationError):       # cwt: signal too short (n<8)
+        cwt(np.ones(5), 8000.0)
+    with pytest.raises(ConfigurationError):       # tone_burst: frequency 0
+        tone_burst(0.0, 5, 1000.0)

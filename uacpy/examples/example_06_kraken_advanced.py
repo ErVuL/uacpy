@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-ADVANCED EXAMPLE: Kraken/KrakenField - Coupled Mode Theory
+ADVANCED EXAMPLE: Kraken/Kraken - Coupled Mode Theory
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -18,7 +18,7 @@ SCENARIO:
 
 FEATURES DEMONSTRATED:
     ✓ Kraken mode computation with volume attenuation
-    ✓ KrakenField with adiabatic mode theory
+    ✓ Kraken with adiabatic mode theory
     ✓ Range segmentation for coupled modes
     ✓ Range-dependent bottom in mode propagation
     ✓ Mode shape visualization
@@ -38,8 +38,8 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy import RangeDependentBottom  # noqa: E402
-from uacpy.models import Kraken, KrakenField, KrakenC  # noqa: E402
+from uacpy import Bottom  # noqa: E402
+from uacpy.models import Kraken  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_field,
     plot_mode_functions,
@@ -75,8 +75,7 @@ def main():
     # the seafloor shape (bathy) and the sediment-to-rock transition
     # (bottom properties) are set by different processes and don't have
     # to switch at the same ranges.
-    bottom_rd = RangeDependentBottom(
-        ranges=np.array([0.0, 6000.0, 12000.0, 18000.0]),
+    bottom_rd = Bottom.from_halfspaces(np.array([0.0, 6000.0, 12000.0, 18000.0]),
         sound_speed=np.array([1600, 1650, 1750, 1800]),  # Hardening
         density=np.array([1.5, 1.7, 2.0, 2.2]),          # Compacting
         attenuation=np.array([0.8, 0.5, 0.3, 0.2]),      # Less lossy
@@ -134,7 +133,7 @@ def main():
         ssp=SoundSpeedProfile.from_pairs(
             ssp_data[ssp_data[:, 0] <= 100],
         ),
-        bottom=bottom_rd.eval(range=0, interp='nearest'),
+        bottom=bottom_rd.halfspace_at(range=0, interp='nearest'),
         absorption=fg,
     )
 
@@ -147,12 +146,12 @@ def main():
         name="Slope (400m)",
         bathymetry=400.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data),
-        bottom=bottom_rd.eval(range=20000, interp='nearest'),
+        bottom=bottom_rd.halfspace_at(range=20000, interp='nearest'),
         absorption=fg,
     )
 
-    # Deep environment has shear_speed > 0 (rocky bottom); use KrakenC for complex modes.
-    krakenc_deep = KrakenC(
+    # Deep environment has shear_speed > 0 (rocky bottom); use krakenc for complex modes.
+    krakenc_deep = Kraken(backend='krakenc', 
         verbose=False,
     )
     modes_deep = krakenc_deep.compute_modes(env_deep, source)
@@ -160,32 +159,32 @@ def main():
     print(f"  ✓ Computed {n_modes_deep} modes for deep water")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 2: KrakenField with Adiabatic Mode Coupling
+    # RUN 2: Kraken with Adiabatic Mode Coupling
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/4] Running KrakenField with adiabatic mode coupling...")
+    print("[2/4] Running Kraken with adiabatic mode coupling...")
 
     try:
-        krakenfield = KrakenField(verbose=False, mode_coupling='adiabatic', n_segments=5)
+        krakenfield = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=5)
         result = krakenfield.run(
             env, source, receiver
         )
-        print(f"  ✓ KrakenField completed with {krakenfield.n_segments} segments")
+        print(f"  ✓ Kraken completed with {krakenfield.n_segments} segments")
         print(f"  ✓ TL range: {result.data.min():.1f} to {result.data.max():.1f} dB")
     except Exception as e:
-        print(f"  ✗ KrakenField error: {e}")
+        print(f"  ✗ Kraken error: {e}")
         import traceback
         traceback.print_exc()
         result = None
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 3: KrakenC - Complex Modes with Elastic Bottom
+    # RUN 3: krakenc - Complex Modes with Elastic Bottom
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[3/4] Computing complex modes with KrakenC (elastic bottom)...")
+    print("[3/4] Computing complex modes with krakenc (elastic bottom)...")
 
     try:
-        krakenc = KrakenC(
+        krakenc = Kraken(backend='krakenc', 
             verbose=False,
         )
 
@@ -195,7 +194,7 @@ def main():
         print(f"  ✓ Computed {n_complex} complex modes")
         print("  ✓ Supports elastic bottom with shear waves")
     except Exception as e:
-        print(f"  ✗ KrakenC error: {e}")
+        print(f"  ✗ krakenc error: {e}")
         modes_complex = None
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -227,9 +226,9 @@ def main():
         axes2[0].legend()
         axes2[0].grid(True, alpha=0.3)
 
-        # Deep water modes (KrakenC). The elastic bottom (shear_speed > 0
+        # Deep water modes (krakenc). The elastic bottom (shear_speed > 0
         # at the rocky slope) admits Scholte/interface waves whose phase
-        # velocity sits below the water sound speed — KrakenC numbers
+        # velocity sits below the water sound speed — krakenc numbers
         # those first (highest Re(k)). Filter to the trapped water-column
         # modes (c_phase between c_min(water) and c_p(bottom)) so the
         # plotted shapes are comparable to the shallow-water panel.
@@ -329,7 +328,7 @@ def main():
             result, env=env, contours=[70, 85, 100],  # Add labeled contours
             show_colorbar=True
         )
-        ax3.set_title('KrakenField: Adiabatic Mode Coupling\nContinental Shelf Transition\n' +
+        ax3.set_title('Kraken: Adiabatic Mode Coupling\nContinental Shelf Transition\n' +
                       '(auto TL limits + contour overlays)')
 
         # Add segment indicators

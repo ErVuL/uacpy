@@ -15,8 +15,11 @@ from typing import Dict, Union
 
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
+from uacpy.core.exceptions import FileFormatError
+from uacpy.io._fortran_helpers import typed_format_error
 
 
+@typed_format_error
 def read_reflection_coefficient(
     filename: str, boundary: str = "bottom"
 ) -> Dict[str, np.ndarray]:
@@ -56,13 +59,14 @@ def read_reflection_coefficient(
     ----------
     Based on BELLHOP/readrc.m
     """
-    # Add appropriate extension
-    if boundary.lower() == "top":
-        if not filename.endswith(".trc"):
-            filename = filename + ".trc"
-    else:
-        if not filename.endswith(".brc"):
-            filename = filename + ".brc"
+    # Use the path as given when it already exists (so a file written by
+    # write_reflection_coefficient with a literal path round-trips); otherwise
+    # apply the AT extension (.trc top / .brc bottom) so a bare base name still
+    # resolves to the conventional file.
+    if not Path(filename).exists():
+        ext = ".trc" if boundary.lower() == "top" else ".brc"
+        if not filename.endswith(ext):
+            filename = filename + ext
 
     try:
         with open(filename, "r") as fid:
@@ -86,7 +90,7 @@ def read_reflection_coefficient(
                 line = fid.readline().strip()
                 values = line.split()
                 if len(values) < 3:
-                    raise ValueError(
+                    raise FileFormatError(
                         f"Reflection coefficient file {filename}: "
                         f"line {i + 2} has fewer than 3 tokens "
                         f"({line!r}); expected 'theta magnitude phase'."
@@ -99,7 +103,11 @@ def read_reflection_coefficient(
 
             # Validate angles are non-decreasing
             if not np.all(np.diff(theta) >= 0):
-                raise ValueError("Angles must be non-decreasing")
+                raise FileFormatError(
+                    f"Reflection coefficient file {filename}: angles must be "
+                    f"non-decreasing (got a decreasing step in the theta "
+                    f"column). The file on disk is malformed."
+                )
 
             return {"theta": theta, "R": R, "phi": phi, "n_pts": n_pts}
 
@@ -133,16 +141,20 @@ def read_source_beam_pattern(
     beam_pattern : ndarray
         Beam pattern array, shape (N, 2):
         - Column 0: Angles in degrees
-        - Column 1: Power (linear scale, not dB)
+        - Column 1: amplitude (linear, = 10^(dB/20))
 
     Notes
     -----
     File format (.sbp):
     - Line 1: Number of points
-    - Subsequent lines: angle (degrees), power (dB)
+    - Subsequent lines: angle (degrees), level (dB)
 
-    Power values are converted from dB to linear scale on output:
-        power_linear = 10^(power_dB / 20)
+    Disk levels are converted from dB to a linear *amplitude* (field)
+    factor on output (the 1/20 exponent, matching ``bellhop.f90:132``):
+        amplitude = 10^(dB / 20)
+
+    This is an amplitude, not a power (``10^(dB/10)``) — squaring it to
+    "get amplitude" would double-apply the exponent.
 
     For omni-directional pattern, creates [-180°, 180°] with 0 dB (=1.0).
 
@@ -154,6 +166,12 @@ def read_source_beam_pattern(
 
         filepath = Path(filepath)
         sbp_file = str(filepath) + ".sbp"
+        if not Path(sbp_file).exists():
+            raise FileNotFoundError(
+                f"Source beam pattern file not found: {sbp_file}. "
+                "Provide the .sbp file next to the env, or pass "
+                "sbp_option='O' for an omni-directional source."
+            )
         with open(sbp_file, "r") as fid:
             line = fid.readline()
             NSBPPts = int(line.strip())
@@ -164,7 +182,7 @@ def read_source_beam_pattern(
             beam_pattern = np.zeros((NSBPPts, 2))
             for i in range(NSBPPts):
                 line = fid.readline()
-                vals = np.fromstring(line, sep=" ", count=2)
+                vals = np.array(line.split()[:2], dtype=float)
                 beam_pattern[i, :] = vals
             log_message(
                 'refl_io',
@@ -181,7 +199,7 @@ def read_source_beam_pattern(
         # Omni-directional pattern
         beam_pattern = np.array([[-180.0, 0.0], [180.0, 0.0]])
 
-    # Convert dB to linear scale
+    # Convert dB to linear amplitude (field) factor — /20, not /10.
     beam_pattern[:, 1] = 10.0 ** (beam_pattern[:, 1] / 20.0)
 
     return beam_pattern

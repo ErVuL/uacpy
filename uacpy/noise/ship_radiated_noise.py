@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 # Combined RNL measurement uncertainty by band (ISO 17208-2:2019 §5), in dB.
@@ -58,7 +59,7 @@ def nominal_source_depth(draught_m):
     return 0.7 * float(draught_m)
 
 
-def lloyd_mirror_correction(frequency, source_depth, sound_speed=1500.0):
+def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
     """ISO 17208-2 Formula 3 surface-image correction ``ΔL = L_s - L_RN`` [dB].
 
     Pressure-release sea surface (Lloyd's mirror), broadside aspect:
@@ -74,10 +75,14 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=1500.0):
     kd = k * float(source_depth)
     num = 2.0 * kd ** 4 + 14.0 * kd ** 2
     den = 14.0 + 2.0 * kd ** 2 + kd ** 4
-    return -10.0 * np.log10(num / den)
+    # At kd→0 (surface-mounted source) num→0 and ΔL→+inf: the pressure-release
+    # image exactly cancels the source. That limit is physical, so allow it
+    # without polluting NumPy's warning state.
+    with np.errstate(divide='ignore'):
+        return -10.0 * np.log10(num / den)
 
 
-def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=1500.0):
+def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
     """Equivalent Monopole Source Level ``L_s = L_RN + ΔL`` (ISO 17208-2 Formula 2).
 
     ``frequency`` is the decidecade band centre(s) [Hz]; ``source_depth`` the
@@ -85,22 +90,3 @@ def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=1500.0):
     """
     return np.asarray(rnl_db, dtype=float) + lloyd_mirror_correction(
         frequency, source_depth, sound_speed)
-
-
-def plot_source_level(frequency, level_db, ax=None, title="", label="", **kwargs):
-    """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre). Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    f = np.asarray(frequency, dtype=float)
-    lv = np.asarray(level_db, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4))
-    else:
-        fig = ax.figure
-    ax.semilogx(f, lv, marker="o", label=label, **kwargs)
-    ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel("Source level [dB re 1 µPa·m]")
-    ax.set_title(f"[ship] radiated noise {title}", loc="left")
-    ax.grid(which="both", alpha=0.3)
-    if label:
-        ax.legend()
-    return fig, ax

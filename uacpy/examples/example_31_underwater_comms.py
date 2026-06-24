@@ -32,6 +32,7 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy import comms  # noqa: E402
+from uacpy.visualization import plot_scatter, plot_ber_curve, plot_convergence, plot_doppler_ambiguity, plot_subcarriers, plot_sync_metric  # noqa: E402
 
 
 def main():
@@ -108,23 +109,23 @@ def main():
     # ----------------------------------------------------------------------
     fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
 
-    comms.ber_curve(ebn0, ber_qpsk, scheme="qpsk", ax=axes[0, 0],
+    plot_ber_curve(ebn0, ber_qpsk, scheme="qpsk", ax=axes[0, 0],
                     label="QPSK meas", title="AWGN link")
-    comms.ber_curve(ebn0, ber_qam, scheme="16qam", ax=axes[0, 0],
+    plot_ber_curve(ebn0, ber_qam, scheme="16qam", ax=axes[0, 0],
                     label="16QAM meas")
 
-    comms.scatter(eq.rx_symbols[2000:], ax=axes[0, 1],
+    plot_scatter(eq.rx_symbols[2000:], ax=axes[0, 1],
                   title=f"QPSK after DFE (BER {eq.ber:.1e})", color="C0")
     axes[0, 1].scatter(mod.constellation.real, mod.constellation.imag,
                        marker="x", s=80, color="k", zorder=5)
 
-    comms.plot_convergence(eq.mse, ax=axes[1, 0], title="(DFE, RLS)")
+    plot_convergence(eq.mse, ax=axes[1, 0], title="(DFE, RLS)")
 
-    comms.plot_sync_metric(sync_metric, threshold=0.5, ax=axes[1, 1])
+    plot_sync_metric(sync_metric, threshold=0.5, ax=axes[1, 1])
 
-    comms.plot_doppler_ambiguity(scales, peak, ax=axes[2, 0])
+    plot_doppler_ambiguity(scales, peak, ax=axes[2, 0])
 
-    comms.plot_subcarriers(ofdm_chan, 256, ax=axes[2, 1],
+    plot_subcarriers(ofdm_chan, 256, ax=axes[2, 1],
                            title=f"(ZF BER {ber_ofdm:.1e})")
 
     out_path = OUTPUT_DIR / "example_31_underwater_comms.png"

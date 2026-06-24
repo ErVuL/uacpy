@@ -111,6 +111,7 @@ def francois_garrison_db_per_km(
     T = np.asarray(temperature, dtype=float)
     S = np.asarray(salinity, dtype=float)
     z = np.asarray(depth, dtype=float)
+    pH = np.asarray(pH, dtype=float)
 
     c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z
 

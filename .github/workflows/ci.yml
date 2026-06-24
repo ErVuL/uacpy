@@ -8,6 +8,12 @@
 # install. Those configurations are advertised as supported but exercised
 # by users, not by this workflow. Expand this matrix if any of the above
 # becomes a recurring breakage source.
+#
+# Network policy: the test step runs `-m "not requires_network"`, so merges
+# never depend on third-party ocean services (OpenTopoData/GMRT/NCEI/EMODnet).
+# The data-layer logic is still covered here via synthetic on-disk caches
+# ($UACPY_DATA_CACHE). Run the live integration tests by hand with
+# `pytest -m requires_network` when verifying the external fetchers.
 
 name: CI
 
@@ -15,6 +21,12 @@ on:
   push:
     branches: [main, master]
   pull_request:
+
+# Least-privilege default token: the workflow only builds + tests (no PR
+# comments, releases, or pushes), so a read-only token caps the blast radius
+# if a build/test step is ever subverted by a malicious PR.
+permissions:
+  contents: read
 
 # Cancel superseded runs on the same branch / PR.
 concurrency:
@@ -29,6 +41,11 @@ jobs:
     # CI minutes on a stuck build.
     timeout-minutes: 30
 
+    # Actions below are pinned to floating major tags (e.g. @v5). For full
+    # supply-chain integrity they could be pinned to commit SHAs with a
+    # trailing version comment (uses: actions/checkout@<sha> # v5); these are
+    # first-party GitHub actions and the token is read-only (see permissions
+    # above), so the residual risk is low.
     steps:
       - name: Checkout (recursive submodules)
         # bellhopcuda is a git submodule pinned to BELLHOPCUDA_COMMIT_SHA
@@ -76,7 +93,7 @@ jobs:
         run: |
           flake8 uacpy/ \
             --exclude=uacpy/third_party,uacpy/uacpy/third_party \
-            --count --select=E9,F63,F7,F82 \
+            --count --select=E9,F63,F7,F82,F401,F811 \
             --show-source --statistics
 
       # No `-W error::UserWarning` here on purpose: the project's
@@ -88,4 +105,6 @@ jobs:
         env:
           # Avoid /dev/shm size limits on GH-hosted runners.
           TMPDIR: ${{ runner.temp }}
-        run: pytest -n logical --dist=worksteal uacpy/tests/
+        # Exclude live-service integration tests so CI is deterministic; the
+        # cache/data layer is still covered via synthetic $UACPY_DATA_CACHE.
+        run: pytest -n logical --dist=worksteal -m "not requires_network" uacpy/tests/

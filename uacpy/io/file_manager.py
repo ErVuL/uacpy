@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import Optional, Union
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 class FileManager:
     """
@@ -73,9 +75,13 @@ class FileManager:
             self.base_dir = Path(tempfile.gettempdir())
 
         if not self.base_dir.exists():
-            raise ValueError(f"Base directory does not exist: {self.base_dir}")
+            raise ConfigurationError(
+                f"Base directory does not exist: {self.base_dir}",
+                remediation="Create it, or pass a writable base_dir=.")
         if not os.access(self.base_dir, os.W_OK):
-            raise ValueError(f"Base directory not writable: {self.base_dir}")
+            raise ConfigurationError(
+                f"Base directory not writable: {self.base_dir}",
+                remediation="Pass a writable base_dir= (or fix its permissions).")
 
     @staticmethod
     def _tmpfs_available() -> bool:

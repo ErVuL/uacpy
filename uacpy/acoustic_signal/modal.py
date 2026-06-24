@@ -20,12 +20,12 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 
-def modal_group_velocity(freqs_hz, k_horizontal):
+def modal_group_velocity(frequencies, k_horizontal):
     """Group velocity ``v_g = d(omega)/d(k_r)`` per mode from the dispersion.
 
     Parameters
     ----------
-    freqs_hz : 1-D array
+    frequencies : 1-D array
         Frequencies (Hz), strictly increasing.
     k_horizontal : array
         Horizontal wavenumber (rad/m). Shape ``(n_freq,)`` for one mode or
@@ -36,10 +36,10 @@ def modal_group_velocity(freqs_hz, k_horizontal):
     ndarray
         Group velocity (m/s), same shape as ``k_horizontal``.
     """
-    f = np.asarray(freqs_hz, dtype=float)
+    f = np.asarray(frequencies, dtype=float)
     kr = np.asarray(k_horizontal, dtype=float)
     if f.ndim != 1 or np.any(np.diff(f) <= 0):
-        raise ConfigurationError("modal_group_velocity: freqs_hz must be 1-D increasing")
+        raise ConfigurationError("modal_group_velocity: frequencies must be 1-D increasing")
     omega = 2.0 * np.pi * f
     if kr.shape[0] != f.size:
         raise ConfigurationError("modal_group_velocity: k_horizontal axis 0 must match freqs")

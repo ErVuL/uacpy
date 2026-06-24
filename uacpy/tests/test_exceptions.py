@@ -1,11 +1,13 @@
 """Tests for exception handling and public exception types."""
 
+import pickle
+
 import pytest
 
 import uacpy
 from uacpy.core.exceptions import (
-    UACPYError, InvalidDepthError,
-    UnsupportedFeatureError, ConfigurationError,
+    UACPYError, InvalidDepthError, ExecutableNotFoundError,
+    ModelExecutionError, UnsupportedFeatureError, ConfigurationError,
 )
 from uacpy.models import Kraken
 
@@ -133,7 +135,7 @@ class TestValidationHelpers:
         from uacpy.models.base import PropagationModel
 
         Model = type('M', (PropagationModel,), {
-            'run': lambda self, *a, **kw: None,
+            'run': lambda self, env, source, receiver, run_mode=None: None,
         })
         m = Model()
         source_deep = uacpy.Source(depths=150, frequencies=100)
@@ -149,7 +151,7 @@ class TestValidationHelpers:
         from uacpy.models.base import PropagationModel
 
         Model = type('M', (PropagationModel,), {
-            'run': lambda self, *a, **kw: None,
+            'run': lambda self, env, source, receiver, run_mode=None: None,
         })
         m = Model()
         source = uacpy.Source(depths=50, frequencies=100)
@@ -159,3 +161,19 @@ class TestValidationHelpers:
             m.validate_inputs(simple_env, source, receiver_deep)
         assert any("below the model's resolvable depth" in str(w.message)
                    for w in caught)
+
+
+# Typed exceptions must survive pickling so run_parallel returns the real
+# per-job error instead of a BrokenProcessPool (these override __init__ with
+# multi-positional / keyword-only signatures and need __reduce__).
+@pytest.mark.parametrize("exc", [
+    InvalidDepthError(99999.0, 4482.0, "Source depth"),
+    ExecutableNotFoundError("Bellhop", "bellhop.exe", ["/a", "/b"]),
+    ModelExecutionError("Kraken", -6, stdout="o", stderr="e"),
+    UnsupportedFeatureError("Kraken", "elastic ice surface", ["Bellhop"]),
+    UnsupportedFeatureError("OASR", "freq override", ["OASP"],
+                            alternatives_label='run modes'),
+])
+def test_typed_exceptions_pickle_roundtrip(exc):
+    back = pickle.loads(pickle.dumps(exc))
+    assert type(back) is type(exc) and str(back) == str(exc)

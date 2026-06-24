@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union
+from uacpy.core.exceptions import ConfigurationError
 
 
 _TERM = "-1 -1\n"
@@ -31,7 +32,7 @@ def _write_block(
 ) -> None:
     """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator."""
     if not pairs:
-        raise ValueError("Cannot write empty profile block")
+        raise ConfigurationError("Cannot write empty profile block")
     for d, v in pairs:
         fh.write(f"{float(d):.6f} {float(v):.6f}\n")
     fh.write(_TERM)
@@ -70,11 +71,13 @@ def write_ramin(
     filepath : str
         Destination file path. Convention is ``ram.in`` in the working
         directory of the binary.
-    kind : {'rams', 'ramsurf'}
+    kind : {'rams', 'ramsurf', 'ramgeo'}
         Which binary the file is targeted at. ``'ramsurf'`` adds a
         surface block right after row 5; ``'rams'`` swaps row-5 from
         ``(ns, rs)`` to ``(irot, theta)`` and emits two extra profile
-        blocks per range (shear speed + shear attenuation).
+        blocks per range (shear speed + shear attenuation). ``'ramgeo'``
+        is the fluid, flat-surface form — row-5 ``(ns, rs)``, no surface
+        block, no shear blocks (i.e. ``'ramsurf'`` without the surface).
     fc, zs, zr_line : float
         Centre frequency (Hz), source depth (m), receiver depth (m) at
         which ``tl.line`` is written.
@@ -113,16 +116,16 @@ def write_ramin(
         Header line (row 1). Free text, ignored by the binary.
     """
     kind = kind.lower()
-    if kind not in ('rams', 'ramsurf'):
-        raise ValueError(
-            f"kind must be 'rams' or 'ramsurf'; got {kind!r}"
+    if kind not in ('rams', 'ramsurf', 'ramgeo'):
+        raise ConfigurationError(
+            f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}"
         )
     if kind == 'ramsurf' and not surface:
-        raise ValueError("kind='ramsurf' requires a surface profile")
+        raise ConfigurationError("kind='ramsurf' requires a surface profile")
     if kind == 'rams':
         for seg in range_segments:
             if 'bottom_cs' not in seg or 'bottom_attns' not in seg:
-                raise ValueError(
+                raise ConfigurationError(
                     "kind='rams' requires bottom_cs and bottom_attns "
                     "in every range segment"
                 )

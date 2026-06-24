@@ -34,8 +34,9 @@ from uacpy.core.acoustics import soundspeed_unesco  # noqa: E402
 from uacpy.acoustic_signal.bands import decidecade_bands  # noqa: E402
 from uacpy.noise import (  # noqa: E402
     radiated_noise_level, nominal_source_depth, monopole_source_level,
-    apply_weighting, plot_source_level, plot_weighting,
+    apply_weighting,
 )
+from uacpy.visualization import plot_source_level, plot_weighting  # noqa: E402
 
 
 def _thorp_db_per_km(f_hz):

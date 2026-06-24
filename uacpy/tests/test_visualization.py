@@ -14,6 +14,7 @@ import pytest  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
+from uacpy.core.exceptions import ConfigurationError  # noqa: E402
 from uacpy.core.results import (  # noqa: E402
     Field, Modes, Arrivals, Rays, ReflectionCoefficient,
 )
@@ -76,6 +77,13 @@ class TestPlotField:
 
     def test_2d_heatmap_real_dB(self, tl_field, env):
         fig, ax = plots.plot_field(tl_field, env=env)
+        # Physical contract of the 2-D TL heatmap (not just "a fig came back"):
+        # depth increases downward, the y-label names depth, and the default TL
+        # colour scale is the fixed _TL_LIMITS so panels stay comparable.
+        assert ax.yaxis_inverted()
+        assert ax.get_ylabel() == 'Depth (m)'
+        mesh = ax.collections[0]
+        assert mesh.get_clim() == (20.0, 120.0)
         plt.close(fig)
 
     def test_1d_range_cut_via_at(self, tl_field):
@@ -116,8 +124,12 @@ class TestCompare:
         plt.close(fig)
 
     def test_rejects_2d_input(self, tl_field):
-        with pytest.raises(ValueError, match="1 surviving axis"):
+        with pytest.raises(ConfigurationError, match="1 surviving axis"):
             plots.compare([tl_field, tl_field])
+
+    def test_rejects_empty_input(self):
+        with pytest.raises(ConfigurationError, match="empty fields list"):
+            plots.compare([])
 
 
 class TestCompareModels:
@@ -177,6 +189,87 @@ class TestPlotEnvironment:
         plt.close(fig)
 
 
+class TestPlotSSP:
+    def test_profile_input_depth_down_single_line(self):
+        ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1520), (100, 1490),
+                                                  (200, 1480)])
+        fig, ax = plots.plot_ssp(ssp)
+        assert ax.get_xlabel() == 'Sound speed (m/s)'
+        assert ax.get_ylabel() == 'Depth (m)'
+        assert ax.yaxis_inverted()          # depth positive down
+        assert len(ax.lines) == 1
+        plt.close(fig)
+
+    def test_environment_input(self, env):
+        fig, ax = plots.plot_ssp(env)        # isovelocity env
+        assert len(ax.lines) == 1
+        plt.close(fig)
+
+    def test_range_dependent_one_line_per_range(self):
+        ssp = uacpy.SoundSpeedProfile.from_2d(
+            depths=[0, 100, 200], ranges=[0, 5000, 10000],
+            matrix=np.array([[1520, 1510, 1500],
+                             [1500, 1495, 1490],
+                             [1480, 1478, 1475]]))
+        fig, ax = plots.plot_ssp(ssp)
+        assert len(ax.lines) == 3            # one per range column
+        assert len(fig.axes) > 1             # range colorbar
+        plt.close(fig)
+
+    def test_into_existing_axis_not_double_inverted(self):
+        fig, ax = plt.subplots()
+        ax.invert_yaxis()                    # already depth-down
+        ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1490)])
+        _, ax_out = plots.plot_ssp(ssp, ax=ax)
+        assert ax_out is ax and ax.yaxis_inverted()
+        plt.close(fig)
+
+    def test_bad_input_raises(self):
+        with pytest.raises(ConfigurationError):
+            plots.plot_ssp(42)
+
+
+class TestPlotBottomProperties:
+    def _env(self, bottom, bathy=None):
+        from uacpy.core import Environment
+        return Environment(name='bp', bathymetry=bathy or [(0, 100), (5000, 120)],
+                           ssp=[(0, 1500), (120, 1490)], bottom=bottom)
+
+    def test_elastic_layered_shows_five_panels(self):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        lay = SeabedColumn(
+            layers=[SedimentLayer(thickness=15, sound_speed=1650, density=1.6,
+                                  attenuation=0.4, shear_speed=300,
+                                  shear_attenuation=0.3)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=2000, density=2.0,
+                                         attenuation=0.2, shear_speed=600,
+                                         shear_attenuation=0.5))
+        fig, axes = plots.plot_bottom_properties(self._env(lay), data_source=None)
+        # cp, cs, ρ, αp, αs all present and non-zero → 5 visible panels.
+        assert sum(a.get_visible() for a in axes.ravel()) == 5
+        plt.close(fig)
+
+    def test_fluid_halfspace_skips_shear(self):
+        from uacpy.core import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                                density=1.8, attenuation=0.3)
+        fig, axes = plots.plot_bottom_properties(self._env(hs), data_source=None)
+        # No shear → cp, ρ, αp only.
+        assert sum(a.get_visible() for a in axes.ravel()) == 3
+        plt.close(fig)
+
+    def test_properties_filter(self):
+        from uacpy.core import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                                density=1.8, attenuation=0.3)
+        fig, axes = plots.plot_bottom_properties(
+            self._env(hs), properties=['cp'], data_source=None)
+        assert sum(a.get_visible() for a in axes.ravel()) == 1
+        plt.close(fig)
+
+
 class TestPlotModes:
     @pytest.fixture
     def modes(self):
@@ -226,21 +319,150 @@ class TestPlotReflectionCoefficient:
         plt.close(fig)
 
 
-class TestAutoTLLimits:
-    """The internal helper used by ``plot_field`` / ``compare_models`` clips
-    Bellhop's TL sentinel out of the auto-scale window."""
+class TestTLLimits:
+    """The fixed TL colour scale used everywhere TL is drawn."""
 
-    def test_sentinel_removed(self):
-        from uacpy.visualization.plots import _auto_tl_limits
+    def test_fixed_limits(self):
+        from uacpy.visualization.plots._common import _TL_LIMITS
+        assert _TL_LIMITS == (20.0, 120.0)
+
+
+class TestBathymetryMap:
+    """plot_bathymetry_map — plain, coastline (mocked), and unreachable paths."""
+
+    @staticmethod
+    def _grid():
+        lats = np.linspace(36, 44, 8)
+        lons = np.linspace(0, 10, 10)
+        depth = np.random.default_rng(0).uniform(500, 3000, (8, 10))
+        depth[0, 0] = np.nan                 # a land cell
+        return lats, lons, depth
+
+    def test_plain_lonlat(self):
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(
+            lats, lons, depth, basemap=False,
+            transect=((42, 4), (38.3, 6)), title='t')
+        assert fig is not None and ax.has_data()
+        assert ax.get_xlabel().startswith('Longitude')
+        plt.close(fig)
+
+    def test_relief_orientation_invariant_to_lat_order(self):
+        # The shaded-relief path uses imshow(origin='lower'), which assumes
+        # row 0 of the array is the southernmost. A descending lat axis must be
+        # flipped to that canonical order so the relief image matches the true
+        # geography (and the flat pcolormesh path) — not render upside down.
+        lons = np.linspace(0, 10, 10)
+        lats_up = np.linspace(36, 44, 8)            # ascending S→N
         rng = np.random.default_rng(0)
-        body = 50.0 + 10.0 * rng.standard_normal((30, 30))
-        data = np.full((40, 40), 600.0)
-        data[:30, :30] = body
-        vmin, vmax = _auto_tl_limits(data)
-        assert vmax < 200.0
-        assert vmin < vmax
+        depth_up = rng.uniform(500, 3000, (8, 10))
+        depth_up[-1, 0] = np.nan                    # land at the NORTH-WEST corner
 
-    def test_no_finite_falls_back_to_default(self):
-        from uacpy.visualization.plots import _auto_tl_limits
-        vmin, vmax = _auto_tl_limits(np.full((4, 4), np.nan))
-        assert (vmin, vmax) == (30.0, 80.0)
+        def relief_rgba(lats, depth):
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, relief=True, graticule=None)
+            im = ax.get_images()[0]                 # the relief AxesImage
+            rgba = np.asarray(im.get_array())
+            plt.close(fig)
+            return rgba
+
+        up = relief_rgba(lats_up, depth_up)
+        # Same geography, lat axis reversed (descending N→S) and rows flipped
+        # to match — the rendered image must be identical.
+        down = relief_rgba(lats_up[::-1], depth_up[::-1, :])
+        assert np.array_equal(up, down, equal_nan=True)
+        # imshow(origin='lower') ⇒ display row -1 is the northern edge; the land
+        # cell sits there (top-left), transparent (alpha == 0).
+        assert up[-1, 0, 3] == 0.0
+
+    def test_coastline_default(self, monkeypatch):
+        # Default backdrop = Natural Earth coastlines (public domain); stub fetch.
+        ring = np.array([[2, 40], [4, 40], [4, 42], [2, 42], [2, 40]], float)
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: [ring])
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth)   # default 'coastline'
+        assert any('°E' in t.get_text() for t in ax.get_xticklabels())
+        plt.close(fig)
+
+    def test_coastline_unreachable_still_draws(self, monkeypatch):
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth)   # sea only, no crash
+        assert ax.has_data()
+        plt.close(fig)
+
+    def test_coastline_with_transect(self, monkeypatch):
+        ring = np.array([[2, 40], [4, 40], [4, 42], [2, 42], [2, 40]], float)
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: [ring])
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(
+            lats, lons, depth, transect=((42, 4), (38.3, 6)))
+        assert ax.get_legend() is not None        # transect labelled
+        plt.close(fig)
+
+
+class TestOverview:
+    """plot_overview — the one-call map · TL · environment composite."""
+
+    @staticmethod
+    def _grid():
+        lats = np.linspace(36, 44, 8)
+        lons = np.linspace(0, 10, 10)
+        depth = np.random.default_rng(0).uniform(500, 3000, (8, 10))
+        return lats, lons, depth
+
+    def test_full_composite(self, env, tl_field):
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        fig, axes = plots.plot_overview(
+            env, self._grid(), transect=((42, 4), (38.3, 6)),
+            tl=tl_field, source=src, suptitle='ov')
+        assert fig is not None and len(axes) == 3
+        ax_map, ax_tl, ax_env = axes
+        assert ax_map.has_data() and ax_tl.has_data() and ax_env.has_data()
+        # accessible as a first-class library function
+        assert uacpy.plot.plot_overview is plots.plot_overview
+        plt.close(fig)
+
+    def test_without_tl_leaves_placeholder(self, env):
+        fig, (ax_map, ax_tl, ax_env) = plots.plot_overview(env, self._grid())
+        assert any('no TL' in t.get_text() for t in ax_tl.texts)
+        plt.close(fig)
+
+
+class TestSeaIce:
+    """plot_sea_ice_map (mirrors the depth map) + plot_environment(sea_ice=)."""
+
+    def test_sea_ice_map_notation(self, monkeypatch):
+        import uacpy.data.seaice_local as sil
+        # mock the reprojection so no cache/pyproj is needed
+        monkeypatch.setattr(sil, 'sea_ice_pixel', lambda pt, hemi='N': (2, 3))
+        grid = np.random.default_rng(0).uniform(0, 1, (8, 10))
+        grid[0, 0] = np.nan                            # land cell
+        fig, ax = plots.plot_sea_ice_map(
+            grid, transect=((88, 0), (79, -3)), source=(88, 0), title='ice')
+        assert ax.has_data()
+        assert ax.get_legend() is not None             # 'transect' legend, as on the map
+        assert uacpy.plot.plot_sea_ice_map is plots.plot_sea_ice_map
+        plt.close(fig)
+
+    def test_environment_shows_ice(self, env):
+        fig0, ax0 = plots.plot_environment(env)            # no ice
+        n0 = len(ax0.collections)
+        plt.close(fig0)
+        fig, ax = plots.plot_environment(env, sea_ice=0.8)
+        assert len(ax.collections) > n0                    # ice band added at surface
+        plt.close(fig)
+
+
+def test_compare_models_label_length_validation(tl_field):
+    with pytest.raises(ConfigurationError, match="match"):
+        uacpy.plot.compare_models([tl_field, tl_field, tl_field],
+                                  labels=['only-one'])
+
+
+def test_plot_environment_rejects_non_environment():
+    with pytest.raises(ConfigurationError, match="Environment"):
+        uacpy.plot_environment("not an environment")

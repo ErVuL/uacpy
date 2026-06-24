@@ -8,11 +8,14 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 """
 
 import os
+import struct
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
-from uacpy.core.exceptions import ModelExecutionError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError,
+)
 from uacpy.io._fortran_helpers import detect_endian
 
 
@@ -102,15 +105,21 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
                     elif comp == "N":
                         phi.append(phi_full[k + 3, :])
                     else:
-                        raise ValueError(f"Unknown component: {comp}")
+                        raise ConfigurationError(f"Unknown component: {comp}")
                 k += 4
 
             else:
-                raise ValueError(f"Unknown material type: {material}")
+                raise ConfigurationError(f"Unknown material type: {material}")
 
             jj += 1
 
-    return np.array(phi) if phi else np.array([])
+    if not phi:
+        raise FileFormatError(
+            "get_component: the modes set contains no readable modes (M=0) — "
+            "nothing to extract. The waveguide is likely below modal cutoff at "
+            "this frequency; check the .mod record before requesting a component."
+        )
+    return np.array(phi)
 
 
 def read_modes_asc(
@@ -216,7 +225,7 @@ def read_modes_asc(
                 while len(vals) < n:
                     line = fid.readline()
                     if not line:
-                        raise ValueError(
+                        raise FileFormatError(
                             f"Modes file {filename}: EOF while reading "
                             f"{n} floats (got {len(vals)})"
                         )
@@ -293,12 +302,11 @@ def read_modes_asc(
                     idx = modes_to_read.index(mode_num)
                     phi[:, idx] = phi_mode
 
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Mode file not found: {filename}")
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Mode file not found: {filename}") from e
     except Exception as e:
-        raise ModelExecutionError(
-            'Kraken', return_code=0, stdout=None,
-            stderr=f"Error reading mode file {filename}: {e}",
+        raise FileFormatError(
+            f"Malformed Kraken mode file {filename}: {e}"
         ) from e
     return {
         "pltitl": pltitl,
@@ -320,11 +328,33 @@ def read_modes_asc(
 
 def read_modes_bin(
     filename: str,
+    frequency: float = 0.0,
+    modes: Optional[Union[int, list, np.ndarray]] = None,
+) -> Dict[str, Any]:
+    """Read a KRAKEN binary ``.mod`` file, converting any malformed-file
+    parse error into a typed :class:`FileFormatError` (a truncated/garbage
+    file otherwise surfaces as a bare ``IndexError`` / ``struct.error`` from
+    the record reads)."""
+    try:
+        return _read_modes_bin_impl(filename, freq=frequency, modes=modes)
+    except FileFormatError:
+        raise
+    except FileNotFoundError as e:
+        raise FileFormatError(f"Mode file not found: {filename}") from e
+    except (IndexError, ValueError, struct.error, EOFError, OSError,
+            ZeroDivisionError, OverflowError) as e:
+        raise FileFormatError(
+            f"Malformed Kraken mode file {filename}: {e}"
+        ) from e
+
+
+def _read_modes_bin_impl(
+    filename: str,
     freq: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """
-    Read mode data from KRAKEN binary format (.moA file).
+    Read mode data from KRAKEN binary format (.mod file).
 
     This function reads normal mode data including eigenvalues (wavenumbers),
     eigenfunctions (mode shapes), and environmental parameters from KRAKEN
@@ -334,7 +364,7 @@ def read_modes_bin(
     ----------
     filename : str
         Mode file path. If no extension is given, ``.mod`` is appended
-        (this is the extension that Kraken/KrakenC actually emit per
+        (this is the extension that Kraken actually emit per
         ``Kraken/kraken.f90`` — ``OPEN(FILE=TRIM(FileRoot)//'.mod', ...)``).
     freq : float, optional
         Frequency in Hz for which to read modes. For broadband runs,
@@ -373,7 +403,7 @@ def read_modes_bin(
     Notes
     -----
     - The canonical extension is ``.mod`` (binary direct-access produced by
-      Kraken/KrakenC). Any explicit extension on ``filename`` is honoured;
+      Kraken). Any explicit extension on ``filename`` is honoured;
       otherwise ``.mod`` is appended.
     - Modes are stored in Fortran unformatted direct-access binary.
     - Record length (lrecl) is determined from first 4 bytes.
@@ -386,12 +416,12 @@ def read_modes_bin(
     Examples
     --------
     >>> # Read all modes at 100 Hz
-    >>> modes = read_modes_bin('pekeris', freq=100.0)
+    >>> modes = read_modes_bin('pekeris', frequency=100.0)
     >>> print(f"Number of modes: {modes['M']}")
     >>> print(f"Wavenumber of mode 1: {modes['k'][0]}")
 
     >>> # Read specific modes
-    >>> modes = read_modes_bin('pekeris', freq=100.0, modes=[1, 2, 3])
+    >>> modes = read_modes_bin('pekeris', frequency=100.0, modes=[1, 2, 3])
     >>> print(f"Mode shapes: {modes['phi'].shape}")
     """
     if not os.path.splitext(filename)[1]:
@@ -400,7 +430,7 @@ def read_modes_bin(
     with open(filename, "rb") as fid:
         head = fid.read(4)
         if len(head) < 4:
-            raise ValueError(f"Invalid mode file (truncated header): {filename}")
+            raise FileFormatError(f"Invalid mode file (truncated header): {filename}")
         endian = detect_endian(
             head, source=f'read_modes_bin:{os.path.basename(filename)}')
         i4 = np.dtype(endian + 'i4')
@@ -408,6 +438,11 @@ def read_modes_bin(
         f8 = np.dtype(endian + 'f8')
         fid.seek(0, 0)
         lrecl = 4 * np.fromfile(fid, dtype=i4, count=1)[0]
+        if lrecl <= 0:
+            raise FileFormatError(
+                f"Invalid mode file: record length lrecl={lrecl} "
+                f"(first word must be a positive word-count): {filename}"
+            )
         fid.seek(4, 0)  # Skip 4 bytes
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
@@ -418,7 +453,31 @@ def read_modes_bin(
         NMat = np.fromfile(fid, dtype=i4, count=1)[0]
 
         if Ntot < 0:
-            raise ValueError("Invalid mode file: Ntot < 0")
+            raise FileFormatError("Invalid mode file: Ntot < 0")
+
+        # File-size-aware sanity bound on the header counts before any
+        # array is sized off them. A corrupt/hostile header (e.g.
+        # NMat=0x7fffffff) would otherwise drive a multi-GB np.zeros below.
+        # The smallest a single sample can occupy on disk is 4 bytes
+        # (float32 / int32), so no count of 4-byte items can exceed the
+        # remaining file size; use that as a generous upper bound.
+        fid.seek(0, 2)
+        file_size = fid.tell()
+        max_items = file_size // 4
+        for _name, _val in (("Nfreq", Nfreq), ("Nmedia", Nmedia),
+                            ("Ntot", Ntot), ("NMat", NMat)):
+            if _val < 0 or _val > max_items:
+                raise FileFormatError(
+                    f"Invalid mode file: header count {_name}={_val} is "
+                    f"implausible for a {file_size}-byte file "
+                    f"(max {max_items} 4-byte items)."
+                )
+        if Nfreq < 1:
+            raise FileFormatError(
+                f"Invalid mode file: Nfreq={Nfreq} (need at least one "
+                f"frequency block): {filename}"
+            )
+
         fid.seek(lrecl, 0)
         N = []
         Mater = []
@@ -454,11 +513,15 @@ def read_modes_bin(
                 iRecProfile = iRecProfile + 3 + M + (4 * (2 * M - 1)) // lrecl
         if modes is None:
             modes = np.arange(1, M + 1)
-        elif isinstance(modes, int):
-            modes = np.arange(1, min(modes, M) + 1)
+        elif isinstance(modes, (int, np.integer)):
+            modes = np.array([modes])      # single mode #N, matching read_modes (ASCII)
         else:
             modes = np.array(modes)
-            modes = modes[modes <= M]
+        # AT mode numbers are 1-based; keep only existing modes. read_modes_bin.m
+        # filters `<= M` only because MATLAB's 1-based indexing rejects negatives;
+        # the Python port must also guard the lower bound, else k[modes-1] silently
+        # wraps for a negative index (returning the wrong mode).
+        modes = modes[(modes >= 1) & (modes <= M)]
         # Top/Bot halfspace block sits at REC iRecProfile+1 per
         # kraken.f90:603 and read_modes_bin.m:130.
         fid.seek((iRecProfile + 1) * lrecl, 0)
@@ -519,7 +582,7 @@ def read_modes_bin(
 
 def read_modes(
     filename: str,
-    freq: float = 0.0,
+    frequency: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """
@@ -535,7 +598,7 @@ def read_modes(
         Mode file path, with or without extension. Supported extensions:
         - '.mod': Binary format (default if no extension)
         - '.moa': ASCII format
-    freq : float, optional
+    frequency : float, optional
         Frequency in Hz to select from multi-frequency files (default: 0)
     modes : int, list, or ndarray, optional
         Mode indices to extract (1-indexed). If None, all modes are returned.
@@ -563,17 +626,16 @@ def read_modes(
     Examples
     --------
     >>> # Read binary mode file
-    >>> modes = read_modes('test.mod', freq=100.0)
+    >>> modes = read_modes('test.mod', frequency=100.0)
     >>> print(f"Number of modes: {modes['M']}")
     >>> print(f"Wavenumbers shape: {modes['k'].shape}")
 
     >>> # Read specific modes
-    >>> modes = read_modes('test.mod', freq=100.0, modes=[1, 2, 3])
+    >>> modes = read_modes('test.mod', frequency=100.0, modes=[1, 2, 3])
 
     >>> # ASCII format
     >>> modes = read_modes('test.moa')
     """
-    import os
     from uacpy.core.acoustics import pekeris_root
     fileroot, ext = os.path.splitext(filename)
 
@@ -583,9 +645,9 @@ def read_modes(
     filename = fileroot + ext
     if ext == ".mod":
         if modes is None:
-            Modes = read_modes_bin(filename, freq)
+            Modes = read_modes_bin(filename, frequency)
         else:
-            Modes = read_modes_bin(filename, freq, modes)
+            Modes = read_modes_bin(filename, frequency, modes)
 
     elif ext == ".moa":
         if modes is None:
@@ -594,8 +656,8 @@ def read_modes(
             Modes = read_modes_asc(filename, modes)
 
     else:
-        raise ValueError(f"read_modes: Unrecognized file extension {ext}")
-    freq_diff = np.abs(Modes["freqVec"] - freq)
+        raise ConfigurationError(f"read_modes: Unrecognized file extension {ext}")
+    freq_diff = np.abs(Modes["freqVec"] - frequency)
     freq_index = int(np.argmin(freq_diff))
     f_selected = float(Modes["freqVec"][freq_index])
     if Modes["M"] != 0:

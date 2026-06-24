@@ -11,7 +11,7 @@ from uacpy.acoustic_signal import (
     mvdr_spectrum,
     sample_covariance,
     steering_vectors,
-    taper,
+    shading_taper,
 )
 from uacpy.core.exceptions import ConfigurationError
 
@@ -82,6 +82,36 @@ class TestBeamformers:
 
 class TestTaper:
     def test_mean_normalised(self):
-        w = taper(16, "hann")
+        w = shading_taper(16, "hann")
         assert w.size == 16
         assert np.mean(w) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("true_deg", [15.0, -30.0, 45.0])
+def test_beamform_resolves_true_angle_not_mirror(true_deg):
+    """beamform must resolve a source at +theta (not the mirror -theta) —
+    consistent with bartlett/mvdr/music (the steering vector is conjugated)."""
+    from uacpy.acoustic_signal import beamform, steering_vectors
+    c, f = 1500.0, 1500.0
+    pos = np.arange(16) * (c / f / 2.0)
+    ang = np.linspace(-60, 60, 241)
+    a = steering_vectors(pos, [true_deg], f, c)[0]
+    snr, angles, _ = beamform(a[:, None], pos, f, angles=ang, SL=0, NL=0)
+    assert abs(angles[np.argmax(snr[:, 0])] - true_deg) < 1.0
+
+
+def test_mvdr_music_no_divide_warning_and_music_peaks_at_source():
+    import warnings
+    pos = np.arange(6) * 0.75
+    angles = np.linspace(-60, 60, 121)
+    e = steering_vectors(pos, angles, 1000.0)
+    src = steering_vectors(pos, [10.0], 1000.0)[0]
+    R = np.eye(6, dtype=complex) + 8 * np.outer(src, src.conj())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)   # no spurious 1/denom warning
+        m = mvdr_spectrum(R, e)
+        mu = music_spectrum(R, e, 1)
+    assert np.all(np.isfinite(m))
+    # the sharp MUSIC peak at the source direction is the intended behaviour,
+    # preserved (not clamped) — it localises the source at 10 deg
+    assert abs(angles[np.argmax(mu)] - 10.0) < 2.0

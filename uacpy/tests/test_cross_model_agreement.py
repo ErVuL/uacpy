@@ -28,12 +28,12 @@ import pytest
 
 import uacpy
 from uacpy.core.environment import (
-    BoundaryProperties, Environment, LayeredBottom, SedimentLayer,
+    BoundaryProperties, Environment, SeabedColumn, SedimentLayer,
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.models import (
-    Bellhop, KrakenField, RAM, RunMode, Scooter,
+    Bellhop, Kraken, RAM, RunMode, Scooter,
 )
 
 
@@ -87,7 +87,7 @@ class Scenario:
 
 def _kraken_field_tl(env, src, rcv):
     """KrakenField.run → COHERENT_TL Field."""
-    return KrakenField(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+    return Kraken(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
 def _scooter_tl(env, src, rcv):
@@ -157,7 +157,7 @@ def _pekeris_elastic() -> Scenario:
     RMSE against KrakenField (which auto-routes to KrakenC for elastic)
     is ~1.5 dB over the 1-8 km window and TL @ 5 km matches within 0.1 dB.
     """
-    elastic_layered = LayeredBottom(
+    elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
             thickness=10.0, sound_speed=1700.0, density=1.8,
             attenuation=0.2, shear_speed=400.0, shear_attenuation=0.5,
@@ -308,7 +308,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     theta sensitivity vs. frequency; the centre-frequency agreement is
     the meaningful regression anchor.
     """
-    elastic_layered = LayeredBottom(
+    elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
             thickness=10.0, sound_speed=1700.0, density=1.8,
             attenuation=0.2, shear_speed=400.0, shear_attenuation=0.5,
@@ -337,7 +337,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     )
 
     def reference(env_unused, src_, rcv_):
-        kf = KrakenField(verbose=False).run(
+        kf = Kraken(verbose=False).run(
             env_halfspace, src_, rcv_,
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
@@ -345,8 +345,12 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         return kf.at(frequency=50.0).to_tl()
 
     def rams_bb(env_unused, src_, rcv_):
+        # Only the fc=50 Hz slice is asserted, and each band frequency is an
+        # independent PE solve — so sample the band coarsely (Δf=1/T=5 Hz) while
+        # keeping fc exactly on the grid (offset to fc = fc·T/Q = 5, integer).
+        # 101 → 11 PE marches (~10× faster); the fc-slice TL is unchanged.
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  rams_theta=45.0, Q=2.0, T=2.0)
+                  rams_theta=45.0, Q=2.0, T=0.2)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=50.0).to_tl()
 
@@ -400,8 +404,11 @@ def _altimetry_broadband_at_fc() -> Scenario:
         return bh
 
     def ramsurf_bb(env_, src_, rcv_):
+        # Only the fc=200 Hz slice is asserted; sample the band coarsely
+        # (Δf=1/T=5 Hz) while keeping fc on the grid (offset = fc·T/Q = 20).
+        # 401 → 41 PE marches (~10× faster); the fc-slice TL is unchanged.
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  Q=2.0, T=2.0)
+                  Q=2.0, T=0.2)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=200.0).to_tl()
 

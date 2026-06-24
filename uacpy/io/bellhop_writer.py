@@ -2,8 +2,8 @@
 Bellhop environment-file writer.
 
 ``write_bellhop_env_file`` writes the full ``.env`` (plus auxiliary ``.bty``,
-``.ati``, ``.ssp``, ``.brc``/``.trc``, ``.sbp`` files) for a Bellhop or
-BellhopCUDA run. Handles SSP interpolation types, range-dependent
+``.ati``, ``.ssp``, ``.brc``/``.trc``, ``.sbp`` files) for a Bellhop run
+(any backend). Handles SSP interpolation types, range-dependent
 bathymetry/altimetry, surface/bottom boundary conditions, source/receiver
 specifications, and run-type / beam-parameter configuration.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Union
 
 from uacpy._log import log_message
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -56,7 +57,7 @@ def write_bellhop_env_file(
     Write Bellhop environment file (.env)
 
     This method generates a properly formatted Acoustics Toolbox environment file
-    for Bellhop/BellhopCUDA ray tracing models.
+    for the Bellhop ray tracing model (any backend).
 
     Parameters
     ----------
@@ -135,7 +136,7 @@ def write_bellhop_env_file(
 
     Notes
     -----
-    This is a shared method used by both Bellhop and BellhopCUDA classes.
+    This is a shared method used across all Bellhop backends.
     It handles all the complexity of the Acoustics Toolbox .env format.
 
     For range-dependent bathymetry, automatically generates a .bty file.
@@ -172,12 +173,12 @@ def write_bellhop_env_file(
         bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
         ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
         if bty_code is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"interp_bathymetry must be 'linear' or 'curvilinear'; "
                 f"got {interp_bathymetry!r}"
             )
         if ati_code is None:
-            raise ValueError(
+            raise ConfigurationError(
                 f"interp_altimetry must be 'linear' or 'curvilinear'; "
                 f"got {interp_altimetry!r}"
             )
@@ -195,7 +196,7 @@ def write_bellhop_env_file(
         atten_unit = f"{atten_unit_char}{vol_atten_char}"
 
         # Position 5: Altimetry flag ('~' = read .ati file, ' ' = flat surface)
-        has_altimetry = getattr(env, 'altimetry', None) is not None and len(env.altimetry) > 1
+        has_altimetry = getattr(env, 'altimetry', None) is not None and env.altimetry.n_ranges > 1
         alti_char = '~' if has_altimetry else ' '
 
         # SSP option string (pad to 6 chars for Fortran compatibility)
@@ -211,7 +212,7 @@ def write_bellhop_env_file(
         # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
             ati_filepath = filepath.with_suffix(".ati")
-            ati_data = env.altimetry.copy()
+            ati_data = env.altimetry.to_pairs()
             ati_data[:, 1] = -ati_data[:, 1]
             write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
             log_message('bellhop_writer',
@@ -264,6 +265,15 @@ def write_bellhop_env_file(
                 )
                 ssp_ranges = np.append(ssp_ranges, 1.1 * r_box)
                 ssp_data = np.column_stack([ssp_data, ssp_data[:, -1]])
+            # The source sits at range 0 == Seg.r[0]; a ray back-scattered off
+            # a steep up-slope can step to negative range, which Quad's box
+            # check (x < Seg.r[0]) flags as BHC_ERR_OUTSIDE_SSP under
+            # bellhopcuda. Prepend a guard column at -1.1·r_box holding the
+            # first profile constant so the box brackets that excursion (no
+            # warning: negative range is not a user-controllable axis).
+            if ssp_ranges.size and ssp_ranges.min() >= 0.0:
+                ssp_ranges = np.insert(ssp_ranges, 0, -1.1 * r_box)
+                ssp_data = np.column_stack([ssp_data[:, 0], ssp_data])
             # write_ssp (.ssp file format) expects ranges in km.
             write_ssp(ssp_file, m_to_km(ssp_ranges), ssp_data)
             log_message('bellhop_writer',
@@ -274,7 +284,7 @@ def write_bellhop_env_file(
         # positive-up, SSP z-axis positive-down).
         z_min = 0.0
         if has_altimetry:
-            max_alti_above_msl = env.altimetry[:, 1].max()
+            max_alti_above_msl = env.altimetry.heights.max()
             if max_alti_above_msl > 0:
                 z_min = -max_alti_above_msl - 0.5
 
@@ -315,20 +325,19 @@ def write_bellhop_env_file(
                 f"{alpha_i:.6f} 0.0 /\n"
             )
 
-        bottom_acoustic_type = env.halfspace_at_range(0.0).acoustic_type
+        bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
         bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
 
-        is_range_dependent_bathy = len(env.bathymetry) > 1
+        is_range_dependent_bathy = env.bathymetry.n_ranges > 1
 
-        from uacpy.core.environment import RangeDependentBottom
-        hs = env.halfspace_at_range(0.0)
+        hs = env.bottom.halfspace_at(range=0.0)
         if is_range_dependent_bathy:
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
             # auto-selected by the writer: write_bty_long_format emits
             # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. The first char
             # is the interpolation chosen via ``interp_bathymetry``.
-            if isinstance(env.bottom, RangeDependentBottom) and len(env.bottom.ranges) > 0:
+            if env.bottom.is_range_dependent and len(env.bottom.ranges) > 0:
                 write_bty_long_format(
                     bty_filepath, env.bathymetry, env.bottom,
                     interp_type=bty_code,
@@ -348,13 +357,8 @@ def write_bellhop_env_file(
             f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
-        if bottom_type == "G":  # Grain size
-            # Format: depth Mz (mean grain size in phi units)
-            hs = env.halfspace_at_range(0.0)
-            grain_size = getattr(hs, 'grain_size_phi', 1.0)
-            f.write(f" {env.depth:.2f}  {grain_size:.2f} /\n")
-        elif bottom_type == "F":  # Reflection coefficient from file
-            hs = env.halfspace_at_range(0.0)
+        if bottom_type == "F":  # Reflection coefficient from file
+            hs = env.bottom.halfspace_at(range=0.0)
             if hs.reflection_file:
                 import shutil
                 brc_source = Path(hs.reflection_file)
@@ -371,7 +375,7 @@ def write_bellhop_env_file(
                         f"generate it via BOUNCE or OASR first."
                     )
             else:
-                raise ValueError(
+                raise ConfigurationError(
                     "bellhop_writer: acoustic_type='file' requires reflection_file= "
                     "on the bottom BoundaryProperties (path to a .brc file)."
                 )
@@ -384,12 +388,12 @@ def write_bellhop_env_file(
             # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
             # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
             # on the preceding BOT line ('A' sigma).
-            hs = env.halfspace_at_range(0.0)
+            hs = env.bottom.halfspace_at(range=0.0)
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
                 f" {env.depth:.2f}  {hs.sound_speed:.2f} "
-                f"{shear_speed:.1f} {hs.density:.1f} "
+                f"{shear_speed:.2f} {hs.density:.2f} "
                 f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )
 
@@ -420,8 +424,8 @@ def write_bellhop_env_file(
         position_5 = grid_type.upper()
         # Position 6: dimensionality. Hardcoded to '2' (2D Bellhop).
         # 3D support (BELLHOP3D) would set this to '3' and plug into
-        # BellhopCUDA._build_command / a future Bellhop3D class; 3D also
-        # changes several downstream blocks (bearings, 3D bty, beam fan).
+        # the ``--3D`` _build_command path; 3D also changes several
+        # downstream blocks (bearings, 3D bty, beam fan).
         position_6 = '2'
         # Position 7: 'S' for beam shift, otherwise blank.
         position_7 = 'S' if beam_shift else ' '

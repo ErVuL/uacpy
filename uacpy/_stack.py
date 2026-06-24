@@ -16,8 +16,15 @@ def raise_stack_limit() -> None:
             if hard == resource.RLIM_INFINITY else hard
         )
         resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
-    except (ImportError, ValueError, OSError):
-        pass
+    except (ImportError, ValueError, OSError) as exc:
+        # A hardened container may forbid raising RLIMIT_STACK; leave the
+        # default in place but leave a breadcrumb, otherwise a later SPARC
+        # stack overflow surfaces as an opaque subprocess segfault.
+        from uacpy._log import log_message
+        log_message('_stack',
+                    f"could not raise RLIMIT_STACK ({exc!r}); "
+                    "SPARC-class models may segfault on large allocations",
+                    level='warning')
 
 
 raise_stack_limit()

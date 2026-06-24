@@ -30,8 +30,8 @@ EXAMPLES_DIR = Path(uacpy.__file__).parent / "examples"
 # Model classes whose ``.run(...)`` spawns one of the OALIB / RAM
 # Fortran/C++ binaries shipped by ``install.sh``.
 _BINARY_MODEL_CLASSES = frozenset({
-    "Bellhop", "BellhopCUDA",
-    "Kraken", "KrakenC", "KrakenField",
+    "Bellhop",
+    "Kraken",
     "Scooter", "SPARC", "Bounce",
     "RAM",
 })
@@ -43,23 +43,51 @@ _OASES_MODEL_CLASSES = frozenset({
 })
 
 # Examples that need a noticeably longer subprocess timeout (deep-ocean /
-# multi-model / Lytaev-grid runs may take several minutes each).
+# multi-model / Lytaev-grid / live-fetch runs may take several minutes each).
 _LONG_TIMEOUT_STEMS = {
     "example_02_sound_speed_profiles",
     "example_17_boundary_conditions_layered",
     "example_19_broadband_comparison",
     "example_22_ram_lytaev_grid",
+    "example_37_realworld_environment",
 }
 
-# Examples that are interactive / demo-only: too slow or output-heavy
-# (large GIFs) to run on every test session. Run them by hand.
-_SKIP_STEMS = {
+# Encoding five per-solver GIFs is the heaviest example by far — give it lots
+# of headroom so a slow runner doesn't time out mid-render.
+_EXTRA_LONG_TIMEOUT_STEMS = {
     "example_26_wave_propagation",
 }
 
+# Examples that source live ocean databases. These are *cache-first*: with the
+# install-time cache (``install.sh --data all``) they run fully offline, so they
+# only need the network as a fallback when the cache is absent. ``_example_marks``
+# therefore tags them ``requires_network`` ONLY when the cache cannot satisfy
+# them; with the cache present they run in the default suite, offline.
+_NETWORK_STEMS = {
+    "example_37_realworld_environment",
+}
+
+# Datasets example_37 needs to assemble its environment offline (GEBCO bathy,
+# WOA23 SSP, EMODnet seabed for the North Sea transect).
+_EXAMPLE_37_DATASETS = ("gebco", "woa23", "emodnet")
+
+
+def _offline_cache_ready(datasets):
+    """True when every named dataset is present in the install-time cache."""
+    try:
+        from uacpy.data import _cache
+        for ds in datasets:
+            _cache.require(ds)
+        return True
+    except Exception:
+        return False
+
+# Every example runs — no example is silently excluded from the suite. The
+# marks below gate WHEN each runs (binary/oases/network availability, slow
+# path), not WHETHER it exists as a test.
 ALL_EXAMPLES = sorted(
     p for p in EXAMPLES_DIR.glob("example_*.py")
-    if p.name != "example_helpers.py" and p.stem not in _SKIP_STEMS
+    if p.name != "example_helpers.py"
 )
 
 
@@ -83,11 +111,21 @@ def _example_marks(example: Path):
     imported = _imported_names(example)
     needs_oases = bool(imported & _OASES_MODEL_CLASSES)
     needs_binary = needs_oases or bool(imported & _BINARY_MODEL_CLASSES)
-    marks = []
+    # Every example is an end-to-end integration test that spawns a full
+    # Python + matplotlib subprocess, so all are ``slow`` — otherwise the
+    # pure-Python compute-heavy examples (noise / signal / comms, which import
+    # no binary model) leak into the fast ``-m "not slow"`` feedback subset.
+    marks = [pytest.mark.slow]
     if needs_binary:
-        marks.extend([pytest.mark.requires_binary, pytest.mark.slow])
+        marks.append(pytest.mark.requires_binary)
     if needs_oases:
         marks.append(pytest.mark.requires_oases)
+    if example.stem in _NETWORK_STEMS and not _offline_cache_ready(
+        _EXAMPLE_37_DATASETS
+    ):
+        # No usable cache → the example would fall back to the live services,
+        # so it genuinely needs the network here.
+        marks.append(pytest.mark.requires_network)
     return marks
 
 
@@ -144,7 +182,12 @@ def _check_pngs_well_formed(example_dir: Path) -> None:
 @pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
 def test_example_runs(example, tmp_path):
     """Run an example end-to-end, verify clean exit + any PNG output."""
-    timeout = 360 if example.stem in _LONG_TIMEOUT_STEMS else 120
+    if example.stem in _EXTRA_LONG_TIMEOUT_STEMS:
+        timeout = 900
+    elif example.stem in _LONG_TIMEOUT_STEMS:
+        timeout = 360
+    else:
+        timeout = 120
     # Run inside a per-test scratch dir so PNG droppings stay isolated
     # and we can assert on them without polluting examples/.
     workdir = tmp_path / example.stem

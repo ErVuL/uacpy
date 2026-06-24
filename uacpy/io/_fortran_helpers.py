@@ -6,27 +6,58 @@ record-length-prefixed vectors, source/receiver depth blocks, bearing/angle
 arrays. They are private to ``uacpy.io`` and not part of the public surface.
 """
 
+import functools
 import struct
 import warnings
 from typing import Tuple
 
 import numpy as np
 
+from uacpy.core.exceptions import FileFormatError
+
+
+def typed_format_error(reader):
+    """Decorator: surface a reader's raw parse/truncation exceptions as a typed
+    :class:`~uacpy.core.exceptions.FileFormatError`.
+
+    The file-format readers do ``int()``/``float()`` on tokens, ``next()`` on
+    line iterators, and index binary records — so a malformed or truncated file
+    leaks a bare ``ValueError``/``IndexError``/``StopIteration``/``struct.error``
+    instead of the typed, remediated error the rest of ``io`` raises. This
+    converts those (and only those) while letting an already-typed
+    ``FileFormatError``/``ConfigurationError`` pass through unchanged.
+    """
+    @functools.wraps(reader)
+    def wrapper(*args, **kwargs):
+        try:
+            return reader(*args, **kwargs)
+        except (ValueError, IndexError, KeyError, StopIteration,
+                struct.error) as exc:
+            target = args[0] if args else '<stream>'
+            raise FileFormatError(
+                f"{reader.__name__}: could not parse {target} — the file is "
+                f"malformed, truncated, or not the expected format "
+                f"({type(exc).__name__}: {exc}).",
+                remediation="Verify the file was produced by the matching "
+                            "model/writer and downloaded completely; a partial "
+                            "file or a wrong format triggers this.",
+            ) from exc
+    return wrapper
+
 
 _ENDIAN_WARN_EMITTED = False
 
 
 def _warn_non_little_endian(detected: str, source: str) -> None:
-    """Emit a one-shot warning the first time we decode a non-little-endian
+    """Log a one-shot notice the first time we decode a non-little-endian
     Fortran file. uacpy CI runs little-endian; big-endian decode works but
     is unvalidated."""
     global _ENDIAN_WARN_EMITTED
     if detected == 'big' and not _ENDIAN_WARN_EMITTED:
         warnings.warn(
-            f"{source}: detected big-endian Fortran record framing; "
-            "uacpy decodes it correctly but this byte order is not "
-            "validated by CI.",
-            UserWarning, stacklevel=3,
+            f"{source}: detected big-endian Fortran record framing; uacpy "
+            "decodes it correctly but this byte order is not validated by CI.",
+            UserWarning, stacklevel=2,
         )
         _ENDIAN_WARN_EMITTED = True
 
@@ -38,12 +69,13 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     every record. On a well-formed file that integer is much smaller than
     ``2**31`` in the correct endianness and absurdly large in the wrong
     one. We pick the byte order that yields the smaller positive integer
-    (with a sanity cap of ``2**28``) and warn once if it isn't little-endian.
+    (with a sanity cap of ``2**28``) and log a one-shot notice if it isn't
+    little-endian.
 
     Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
     """
     if len(first4) < 4:
-        raise OSError("detect_endian: need 4 bytes to probe.")
+        raise FileFormatError("detect_endian: need 4 bytes to probe.")
     little = struct.unpack('<i', first4)[0]
     big = struct.unpack('>i', first4)[0]
     cap = 1 << 28
@@ -56,7 +88,7 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     elif little_ok and big_ok:
         chosen = '<' if little <= big else '>'
     else:
-        raise OSError(
+        raise FileFormatError(
             f"detect_endian: cannot resolve byte order from first record "
             f"marker (little={little}, big={big}); file is probably corrupt."
         )
@@ -80,7 +112,7 @@ def read_fortran_record_marker(f, endian: str = '<') -> int:
     """
     marker_bytes = f.read(4)
     if len(marker_bytes) < 4:
-        raise OSError("Unexpected end of file while reading record marker")
+        raise FileFormatError("Unexpected end of file while reading record marker")
     return struct.unpack(endian + 'i', marker_bytes)[0]
 
 
@@ -92,7 +124,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         [4-byte length N][N bytes payload][4-byte length N]
 
     Both length markers must match; mismatch indicates file corruption or
-    wrong endianness and raises ``IOError``.
+    wrong endianness and raises :class:`~uacpy.core.exceptions.FileFormatError`.
 
     Parameters
     ----------
@@ -111,23 +143,23 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     """
     head = f.read(4)
     if len(head) < 4:
-        raise OSError("Unexpected EOF reading Fortran record head")
+        raise FileFormatError("Unexpected EOF reading Fortran record head")
     (nbytes,) = struct.unpack(endian + 'i', head)
     if nbytes < 0 or nbytes > (1 << 28):
-        raise OSError(
+        raise FileFormatError(
             f"Unreasonable Fortran record length: {nbytes} (wrong endianness?)"
         )
     payload = f.read(nbytes)
     if len(payload) < nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Short read: expected {nbytes} bytes, got {len(payload)}"
         )
     tail = f.read(4)
     if len(tail) < 4:
-        raise OSError("Unexpected EOF reading Fortran record tail")
+        raise FileFormatError("Unexpected EOF reading Fortran record tail")
     (ntail,) = struct.unpack(endian + 'i', tail)
     if ntail != nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Fortran record marker mismatch: head={nbytes} tail={ntail} "
             "(wrong endianness or truncated file)"
         )
@@ -135,7 +167,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         return payload
     expected = struct.calcsize(endian + fmt)
     if expected != nbytes:
-        raise OSError(
+        raise FileFormatError(
             f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
         )
     return struct.unpack(endian + fmt, payload)
@@ -208,7 +240,7 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
         # Extract numbers before '/'
         nums_str = line.split("/")[0].strip()
         if nums_str:
-            values = np.fromstring(nums_str, sep=" ")
+            values = np.array(nums_str.split(), dtype=float)
         else:
             values = np.array([])
 
@@ -269,8 +301,25 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
         else:
             x = np.array([])
     else:
-        # Read explicit values
-        x = np.fromstring(line, sep=" ", count=Nx)
+        # Read explicit values (no '/' terminator → the record should carry all
+        # Nx values; a short record is malformed). Warn + pad rather than
+        # silently returning a length-mismatched array (mirrors the '/' branch).
+        values = np.array(line.split(), dtype=float)
+        if values.size >= Nx:
+            x = values[:Nx]
+        else:
+            warnings.warn(
+                f"read_vector: explicit record had {values.size} value(s) "
+                f"(expected Nx={Nx}); padding to {Nx}.",
+                UserWarning, stacklevel=2,
+            )
+            if values.size == 0:
+                x = np.zeros(Nx)
+            elif values.size == 1:
+                x = np.full(Nx, values[0])
+            else:
+                x = np.concatenate(
+                    [values, np.full(Nx - values.size, values[-1])])
 
     # Ensure x is a 1D array
     x = np.atleast_1d(x)

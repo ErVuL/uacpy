@@ -41,7 +41,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -189,6 +189,15 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     ``base_name`` is the stem of the input file (no extension).
     """
     import os
+    import re
+    # ``base_name`` is interpolated straight into the FORnnn filenames the
+    # OASES csh wrappers open; a value with a path separator or ``..`` would
+    # become a traversal. It is a hard-coded literal in every caller today —
+    # keep it that way by rejecting anything that isn't a plain stem.
+    if not re.fullmatch(r'[A-Za-z0-9_]+', base_name):
+        raise ConfigurationError(
+            f"OASES base_name must match [A-Za-z0-9_]+; got {base_name!r}"
+        )
     env = os.environ.copy()
     env['FOR001'] = f'{base_name}.dat'
     env['FOR019'] = f'{base_name}.plp'
@@ -201,7 +210,62 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     return env
 
 
-class OAST(PropagationModel):
+class OASES(PropagationModel):
+    """Public base + factory for the OASES sub-models (OAST/OASN/OASR/OASP).
+
+    Each sub-model wraps one OASES binary and differs only in its per-binary
+    ``FORnnn`` unit-number map (``_FOR_FILES``) and its run modes; all share the
+    one ``_execute`` below. They subclass ``OASES``, so ``isinstance(model,
+    OASES)`` is True for any of them. ``OASES`` itself is abstract — instantiate
+    a sub-model directly, or use :meth:`OASES.for_mode` to pick one by
+    ``RunMode``."""
+
+    _FOR_FILES: dict = {}
+
+    def __new__(cls, *args, **kwargs):
+        if cls is OASES:
+            raise ConfigurationError(
+                "OASES is the abstract base for OAST/OASN/OASR/OASP. "
+                "Instantiate a sub-model directly, or use "
+                "OASES.for_mode(run_mode=...) to pick one by RunMode."
+            )
+        return super().__new__(cls)
+
+    @classmethod
+    def for_mode(cls, run_mode: RunMode = RunMode.COHERENT_TL, *,
+                 broadband: bool = False, **kwargs) -> PropagationModel:
+        """Instantiate the OASES sub-model that handles ``run_mode``.
+
+        ``COHERENT_TL`` → ``OAST`` (``OASP`` when ``broadband=True``);
+        ``COVARIANCE``/``REPLICA`` → ``OASN``; ``REFLECTION`` → ``OASR``;
+        ``BROADBAND``/``TIME_SERIES`` → ``OASP``. ``**kwargs`` forward to the
+        chosen sub-model (a kwarg it doesn't accept raises ``TypeError``).
+        """
+        dispatch = {
+            RunMode.COHERENT_TL: OASP if broadband else OAST,
+            RunMode.COVARIANCE: OASN,
+            RunMode.REPLICA: OASN,
+            RunMode.REFLECTION: OASR,
+            RunMode.BROADBAND: OASP,
+            RunMode.TIME_SERIES: OASP,
+        }
+        target = dispatch.get(run_mode)
+        if target is None:
+            raise UnsupportedFeatureError(
+                'OASES', str(run_mode),
+                alternatives=[str(m) for m in dispatch],
+                alternatives_label='run modes',
+            )
+        return target(**kwargs)
+
+    def _execute(self, input_file, work_dir: Path):
+        """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
+        base_name = input_file if isinstance(input_file, str) else input_file.stem
+        env = _oases_subprocess_env(base_name, **self._FOR_FILES)
+        self._run_and_attach_prt([str(self._exe)], work_dir, base_name, env=env)
+
+
+class OAST(OASES):
     """
     OAST - OASES Transmission Loss Model
 
@@ -234,10 +298,10 @@ class OAST(PropagationModel):
 
     Notes
     -----
-    Range-independent wavenumber integration; consumes ``LayeredBottom``
-    natively. **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Range-independent wavenumber integration; consumes layered seabed
+    columns natively. **Collapse defaults (overrides of
+    :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'``,
+    ``'bottom_range': 'median'`` (the layer stack is kept).
 
     Examples
     --------
@@ -245,6 +309,16 @@ class OAST(PropagationModel):
     >>> oast = OAST()
     >>> result = oast.run(env, source, receiver)
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). OAST:
+    # range-independent wavenumber integration; multi-layer fluid + elastic
+    # bottom honoured. Single spectral solve → mean SSP / median bottom column.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'oases'
 
     def __init__(
         self,
@@ -263,12 +337,10 @@ class OAST(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
         self.compute_contour = bool(compute_contour)
         self.compute_depth_average = bool(compute_depth_average)
@@ -284,31 +356,21 @@ class OAST(PropagationModel):
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
         self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
 
-        self._supported_modes = [RunMode.COHERENT_TL]
-        # OAST: range-independent wavenumber integration; multi-layer
-        # fluid + elastic bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Single spectral solve over the full wavenumber axis;
-        # median/mean samples represent the path the field describes.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oast')
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oast')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OAST', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OAST', str(self._exe))
 
     def run(
         self,
@@ -316,6 +378,11 @@ class OAST(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run OAST transmission loss computation
@@ -334,6 +401,9 @@ class OAST(PropagationModel):
         result : Result
             Transmission loss field
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
 
         env = self._project_environment(env)
@@ -431,6 +501,15 @@ class OAST(PropagationModel):
                 # neighbours reads back ≈ −50 dB). Align receiver.ranges to the
                 # OAST native FFT grid (ranges_match) to avoid the smoothing,
                 # or use OASP (.trf complex pressure) when null depth matters.
+                warnings.warn(
+                    "OAST: receiver.ranges do not match the OAST native FFT "
+                    "range grid, so TL is linearly interpolated IN dB. This "
+                    "smears sharp interference minima (a true −80 dB null "
+                    "between −40 dB neighbours reads back ≈ −50 dB). Align "
+                    "receiver.ranges to the native grid, or use OASP (.trf "
+                    "complex pressure) when null depth matters.",
+                    UserWarning, stacklevel=2,
+                )
                 result = native.resample_to(receiver_ranges, receiver_depths)
                 result.metadata['oast_native_ranges'] = native_ranges
                 result.metadata['interpolated'] = True
@@ -447,25 +526,13 @@ class OAST(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OAST binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',  # Source file
-            FOR023='trc',  # Optional reflection-coef table
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR002': 'src',  # Source file
+        'FOR023': 'trc',  # Optional reflection-coef table
+    }
 
 
-class OASN(PropagationModel):
+class OASN(OASES):
     """
     OASN — OASES Noise, Covariance Matrices and Signal Replicas.
 
@@ -478,8 +545,7 @@ class OASN(PropagationModel):
     - **Replica fields** (option ``R`` → ``.rpo``): array response per
       candidate source position per frequency. Used as MFP templates.
 
-    For depth-eigenfunction normal modes use :class:`Kraken` or
-    :class:`KrakenC`.
+    For depth-eigenfunction normal modes use :class:`Kraken`.
 
     Parameters
     ----------
@@ -518,7 +584,7 @@ class OASN(PropagationModel):
         ``env.depth - 10``.
     nz : int
         Number of replica grid points in depth. Default 20.
-    cmin, cmax : float, optional
+    c_low, c_high : float, optional
         Phase-speed bounds (m/s) for the wavenumber integrations,
         applied to both the noise and replica blocks; ``None`` →
         ``0.95 · min(c_water)`` and ``1e8``.
@@ -544,8 +610,8 @@ class OASN(PropagationModel):
     these.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
+    layer stack is kept).
 
     Examples
     --------
@@ -554,6 +620,16 @@ class OASN(PropagationModel):
     >>> cov = oasn.compute_covariance(env, source, receiver)
     >>> # cov.covariance has shape (n_frequencies, n_rcv, n_rcv)
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). OASN:
+    # range-independent covariance / replica field; multi-layer bottom
+    # honoured. Single spectral solve per frequency → mean SSP / median column.
+    spec = ModelSpec(
+        modes=(RunMode.COVARIANCE, RunMode.REPLICA),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'oases'
 
     def __init__(
         self,
@@ -585,9 +661,9 @@ class OASN(PropagationModel):
         # Phase-speed bounds for the wavenumber integrations (m/s).
         # Applied identically to OASN Block VIII (noise / discrete
         # sources) and Block X (replica generator). ``None`` → writer
-        # derives c_water_min * 0.95 (cmin) and 1e8 (cmax).
-        cmin: Optional[float] = None,
-        cmax: Optional[float] = None,
+        # derives c_water_min * 0.95 (c_low) and 1e8 (c_high).
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
         # Wavenumber-axis sampling & TL plot axes.
         integration_offset: float = 0.0,
         nw_samples: int = -1,
@@ -603,11 +679,10 @@ class OASN(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.options = options
         self.surface_noise_level = float(surface_noise_level)
@@ -626,8 +701,8 @@ class OASN(PropagationModel):
         self.zmin = zmin
         self.zmax = zmax
         self.nz = int(nz)
-        self.cmin = cmin
-        self.cmax = cmax
+        self.c_low = c_low
+        self.c_high = c_high
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
@@ -635,33 +710,23 @@ class OASN(PropagationModel):
         self.vrec = float(vrec)
         self.offdb = float(offdb) if offdb is not None else None
 
-        self._supported_modes = [RunMode.COVARIANCE, RunMode.REPLICA]
-        # OASN: range-independent covariance / replica field; multi-layer
-        # bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Single spectral solve at each frequency; median/mean samples
-        # represent the path the array sees.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasn2_bin')
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasn2_bin')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASN', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASN', str(self._exe))
 
-    def _build_writer_kwargs(self, run_mode: 'RunMode') -> dict:
+    def _build_writer_kwargs(self) -> dict:
         """Materialise the writer's expected kwarg dict from ``self.*``.
 
         Translates uacpy's public API (singular names, metres) to the
@@ -690,12 +755,12 @@ class OASN(PropagationModel):
         # Phase-speed bounds applied identically to OASN's noise and
         # replica integrations (singular on the public API, plural-with-
         # suffix in the writer per OASES's CMINS/CMAXS variable names).
-        if self.cmin is not None:
-            kw['cmins_discrete'] = self.cmin
-            kw['cmins_replica'] = self.cmin
-        if self.cmax is not None:
-            kw['cmaxs_discrete'] = self.cmax
-            kw['cmaxs_replica'] = self.cmax
+        if self.c_low is not None:
+            kw['cmins_discrete'] = self.c_low
+            kw['cmins_replica'] = self.c_low
+        if self.c_high is not None:
+            kw['cmaxs_discrete'] = self.c_high
+            kw['cmaxs_replica'] = self.c_high
 
         # Replica grid x/y in km on disk; z in metres. nx/ny/nz always
         # forwarded so the writer reuses uacpy defaults rather than its
@@ -737,6 +802,11 @@ class OASN(PropagationModel):
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run OASN.
@@ -753,6 +823,9 @@ class OASN(PropagationModel):
         -------
         Covariance or Replicas
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
 
         # OASN expresses the frequency axis as (fmin, fmax, N) like OASR
@@ -777,7 +850,7 @@ class OASN(PropagationModel):
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-        writer_kwargs = self._build_writer_kwargs(run_mode)
+        writer_kwargs = self._build_writer_kwargs()
 
         # The OASN options block must include the file output the run
         # mode produces. The user-supplied options (or default 'J') win
@@ -907,26 +980,14 @@ class OASN(PropagationModel):
     # ``compute_covariance`` / ``compute_replicas`` come from the base class
     # (RunMode.COVARIANCE / RunMode.REPLICA dispatch).
 
-    def _execute(self, base_name: str, work_dir: Path):
-        """Execute OASN binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            base_name,
-            FOR014='rpo',  # Replica vectors (unit 14)
-            FOR016='xsm',  # Covariance matrix (unit 16)
-            FOR026='chk',  # Checkpoint file (per oasn wrapper)
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR014': 'rpo',  # Replica vectors (unit 14)
+        'FOR016': 'xsm',  # Covariance matrix (unit 16)
+        'FOR026': 'chk',  # Checkpoint file (per oasn wrapper)
+    }
 
 
-class OASR(PropagationModel):
+class OASR(OASES):
     """
     OASR - OASES Reflection Coefficients Model
 
@@ -956,8 +1017,8 @@ class OASR(PropagationModel):
     ``freq_max``, ``n_frequencies`` on ``run()`` for a broadband sweep.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'bottom': 'median'``, ``'rd_layered_layers':
-    'preserve'``. SSP collapse left at the global ``'r0'`` because the
+    Per-model: ``'bottom_range': 'median'`` (the layer stack is
+    kept). SSP collapse left at the global ``'r0'`` because the
     SSP boundary speed is essentially irrelevant to the reflection
     coefficient.
 
@@ -967,6 +1028,17 @@ class OASR(PropagationModel):
     >>> oasr = OASR(angles=np.linspace(0, 90, 100))
     >>> refl = oasr.run(env, source, receiver)
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). OASR:
+    # range-independent reflection vs angle/freq; layered bottom honoured.
+    # Only the bottom stack matters — SSP collapse left at the global default
+    # ('r0'), as the SSP is essentially irrelevant to the reflection coeff.
+    spec = ModelSpec(
+        modes=(RunMode.REFLECTION,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'bottom_range': 'median'},
+    )
+    source = 'oases'
 
     def __init__(
         self,
@@ -983,7 +1055,6 @@ class OASR(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -1013,7 +1084,7 @@ class OASR(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.angles = (
             np.asarray(angles, dtype=float) if angles is not None else None
@@ -1031,30 +1102,21 @@ class OASR(PropagationModel):
 
         # OASR is strictly a boundary-reflection solver; it does not produce
         # transmission loss. Declare that explicitly.
-        self._supported_modes = [RunMode.REFLECTION]
-        # OASR: range-independent reflection vs angle/freq; layered bottom honored.
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Pure boundary reflection — only the bottom stack matters.
-        # SSP collapse left at the global default ('r0') because the
-        # SSP is essentially irrelevant to the reflection coefficient.
-        self._set_collapse_defaults({
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasr')
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasr')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASR', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASR', str(self._exe))
 
     def run(
         self,
@@ -1101,6 +1163,15 @@ class OASR(PropagationModel):
             writer_kwargs['freq_min'] = fmin
             writer_kwargs['freq_max'] = fmax
             writer_kwargs['n_frequencies'] = n_freq
+        else:
+            # OASR expresses the frequency axis as (fmin, fmax, N), so a
+            # non-equispaced source.frequencies vector would be silently
+            # regridded by the writer. Warn (and resample) here so the user
+            # sees it — mirrors OASN/OASP.
+            source_freqs = np.atleast_1d(
+                np.asarray(source.frequencies, dtype=float))
+            if source_freqs.size > 1:
+                _oases_resample_frequencies(source_freqs, 'OASR')
 
         if self.options is not None:
             writer_kwargs['options'] = self.options
@@ -1194,27 +1265,15 @@ class OASR(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OASR binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',
-            FOR004='trf',
-            FOR022='rco',  # Reflection-coef table (slowness)
-            FOR023='trc',  # Reflection-coef table (angle)
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
+    _FOR_FILES = {
+        'FOR002': 'src',
+        'FOR004': 'trf',
+        'FOR022': 'rco',  # Reflection-coef table (slowness)
+        'FOR023': 'trc',  # Reflection-coef table (angle)
+    }
 
 
-class OASP(PropagationModel):
+class OASP(OASES):
     """
     OASP - OASES Pulse / Broadband Transfer-Function Model
 
@@ -1245,8 +1304,8 @@ class OASP(PropagationModel):
     problems, RAM is recommended.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'``.
+    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
+    layer stack is kept).
 
     Examples
     --------
@@ -1254,6 +1313,17 @@ class OASP(PropagationModel):
     >>> oasp = OASP(n_time_samples=256, freq_max=120)
     >>> result = oasp.run(env, source, receiver)
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). OASP:
+    # range-independent broadband wavenumber integration / pulse synthesis;
+    # multi-layer fluid + elastic bottom honoured. Single spectral solve per
+    # frequency → mean SSP / median bottom column represent the path.
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'oases'
 
     def __init__(
         self,
@@ -1273,7 +1343,6 @@ class OASP(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -1298,7 +1367,8 @@ class OASP(PropagationModel):
             ``max(1, n_frequencies // 10)``.
         options : str, optional
             Raw OASES option string. ``None`` defers to the writer's
-            default (``'N'``).
+            default (``'N J'``); the ``'J'`` forces a real frequency axis
+            (OMEGIM=0) so the broadband ``.trf`` synthesis stays valid.
         range_start : float, optional
             First receiver range (m). ``None`` defaults to
             ``receiver.ranges.min()``.
@@ -1310,7 +1380,6 @@ class OASP(PropagationModel):
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
-            **kwargs,
         )
         self.n_time_samples = int(n_time_samples)
         self.freq_max = float(freq_max) if freq_max is not None else None
@@ -1329,35 +1398,21 @@ class OASP(PropagationModel):
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
 
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        # Range-independent broadband wavenumber-integration / pulse
-        # synthesis. Single spectral solve per frequency, transformed
-        # to range and time. Median/mean samples represent the path.
-        self._set_collapse_defaults({
-            'ssp': 'mean',
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
-
-        if executable is None:
-            self.executable = _oases_find_executable(self, 'oasp')
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = _oases_find_executable(self, 'oasp')
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('OASP', str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('OASP', str(self._exe))
 
     def run(
         self,
@@ -1409,13 +1464,23 @@ class OASP(PropagationModel):
         freq_max = self.freq_max
 
         run_mode = self._resolve_run_mode(run_mode)
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
-        source_waveform = self._pad_waveform_to_duration(
-            source_waveform, sample_rate, output_duration,
-        )
-        frequencies = self._resolve_time_series_frequencies(
+        source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
+            output_duration,
         )
+
+        # COHERENT_TL is a single-frequency mode (validate_inputs rejects a
+        # multi-frequency Source for it). An explicit multi-element
+        # ``frequencies=`` would otherwise bypass that guard — OASP would run a
+        # full broadband sweep and silently return only the bin nearest the
+        # source frequency. Reject it the same way, pointing at BROADBAND.
+        if run_mode == RunMode.COHERENT_TL and frequencies is not None:
+            if np.atleast_1d(np.asarray(frequencies)).size > 1:
+                raise ConfigurationError(
+                    "OASP.run(run_mode=COHERENT_TL) takes a single frequency; "
+                    "got a multi-element frequencies= vector. For broadband "
+                    "H(f) use RunMode.BROADBAND."
+                )
 
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce
@@ -1635,70 +1700,6 @@ class OASP(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute OASP binary. FOR005 stays as stdin per OASES docs."""
-        env = _oases_subprocess_env(
-            input_file.stem,
-            FOR002='src',
-        )
-        try:
-            result = self._run_subprocess(
-                [str(self.executable)], cwd=work_dir, env=env,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, input_file.stem)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"OASES output:\n{result.stdout}", level='debug')
-
-
-def OASES(
-    run_mode: RunMode = RunMode.COHERENT_TL,
-    *,
-    broadband: bool = False,
-    **kwargs,
-) -> PropagationModel:
-    """Factory: instantiate the OASES sub-class that handles ``run_mode``.
-
-    Returns an ``OAST``/``OASN``/``OASR``/``OASP`` instance configured with
-    ``**kwargs``. Kwargs not accepted by the chosen sub-class raise
-    ``TypeError`` — pick the right sub-class directly if you need
-    sub-class-specific options.
-
-    Parameters
-    ----------
-    run_mode : RunMode, optional
-        Selects the sub-class:
-        ``COHERENT_TL`` → ``OAST`` (or ``OASP`` when ``broadband=True``);
-        ``COVARIANCE`` / ``REPLICA`` → ``OASN``;
-        ``REFLECTION`` → ``OASR``;
-        ``BROADBAND`` / ``TIME_SERIES`` → ``OASP``.
-    broadband : bool, optional
-        When True with ``COHERENT_TL``, route to ``OASP`` (broadband
-        transfer function) instead of ``OAST``. Both kernels are
-        range-independent; use RAM for genuinely range-dependent
-        problems.
-    **kwargs
-        Forwarded verbatim to the sub-class constructor.
-
-    Returns
-    -------
-    PropagationModel
-        ``OAST``/``OASN``/``OASR``/``OASP`` instance ready to ``.run(...)``.
-    """
-    dispatch = {
-        RunMode.COHERENT_TL: OASP if broadband else OAST,
-        RunMode.COVARIANCE: OASN,
-        RunMode.REPLICA: OASN,
-        RunMode.REFLECTION: OASR,
-        RunMode.BROADBAND: OASP,
-        RunMode.TIME_SERIES: OASP,
+    _FOR_FILES = {
+        'FOR002': 'src',
     }
-    cls = dispatch.get(run_mode)
-    if cls is None:
-        raise UnsupportedFeatureError(
-            'OASES', str(run_mode),
-            alternatives=[str(m) for m in dispatch],
-            alternatives_label='run modes',
-        )
-    return cls(**kwargs)

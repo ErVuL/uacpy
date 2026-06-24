@@ -64,18 +64,18 @@ def matched_filter(samples, sps, rolloff=0.25, span=8):
                        rrc_filter(sps, rolloff, span))
 
 
-def upconvert(baseband, fs, fc):
+def upconvert(baseband, sample_rate, fc):
     """Mix complex baseband up to a real passband signal at carrier ``fc``."""
     x = np.asarray(baseband, dtype=complex)
     n = np.arange(x.size)
-    return np.real(x * np.exp(2j * np.pi * fc * n / fs))
+    return np.real(x * np.exp(2j * np.pi * fc * n / sample_rate))
 
 
-def downconvert(passband, fs, fc):
+def downconvert(passband, sample_rate, fc):
     """Mix a real passband signal down to complex baseband (image left for the LPF/MF)."""
     x = np.asarray(passband, dtype=float)
     n = np.arange(x.size)
-    return 2.0 * x * np.exp(-2j * np.pi * fc * n / fs)
+    return 2.0 * x * np.exp(-2j * np.pi * fc * n / sample_rate)
 
 
 def _interp(x, idx):

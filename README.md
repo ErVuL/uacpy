@@ -41,9 +41,34 @@ in their spare time. The goal is for this module to be truly
 community-driven.
 
 
-> **⚠️ Note:** UACPY is *not* production‑ready. Expect missing features,
+> ### **⚠️ Notes**
+> 
+> UACPY is *not* production‑ready. Expect missing features,
 > inconsistencies, and the need for validation.
-
+> 
+> #### To user's of v0.3.x:
+> 
+> The changes between v0.3.x and v0.4.x are big, some of the API changed too..
+> This was done in order to clean up, harmonized and simplify the usage and 
+> maintainability. You will have to fully reinstall to compile RAMGeo, update
+> AT and fetch data if you want to. Moreover, it comes with its bag of new
+> features, including:
+>   - RAMGeo
+>   - Last updated version of AT toolbox
+>   - Environment data fetching layer (based on GPS and date)
+>   - Basic map plot and overview
+>   - Basic SONAR performances
+>   - Constant-Q transform family
+>   - Ice support
+>   - API harmonization
+>
+> #### Use of LLM and definitive API
+> 
+> Project development will now focus on stabilization, bug fixes, and human review.
+> The development of new features and the automated use of LLMs will be scaled back,
+> API changes will be limited but may still occur in beta.
+> The code base is quite big, and covers a wide range of scientific fields. To review such a
+> technical work, it needs some community usage and feedback. 
 
 ## 🔍 What's in UACPY?
 
@@ -65,12 +90,48 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 **Toolkits** — first‑class modules, not just glue around the models:
 
-- **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering / pulse compression, conventional & adaptive beamforming, time‑frequency & invertible transforms (f‑k, τ‑p/Radon, wavelet, Wigner–Ville, cepstrum), channel simulation, modal warping, spectra.
-- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering laws, reverberation, detection theory & range.
-- **Communications** (`uacpy.comms`) — PSK/QAM/DPSK/FSK, adaptive DFE/LMS/RLS + carrier PLL, Doppler, OFDM, Viterbi FEC, DSSS, end‑to‑end real‑data `.wav` modems, and the open **NATO JANUS** standard (STANAG 4748).
-- **Ambient noise** (`uacpy.noise`) — Wenz curves (wind / shipping / rain / thermal).
-- **Standards & metrics** — UNESCO/Del Grosso sound speed, ISO 18405 decidecade bands, ISO 17208 ship source level, Southall 2019 marine‑mammal weighting.
+- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor and sea‑ice data from public ocean databases (GEBCO, GMRT multibeam, World Ocean Atlas, Copernicus, EMODnet, NCEI/GlobSed/CRUST1 seabed, NSIDC sea ice).
+- **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
+- **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range.
+- **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
+- **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
+- **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
+
+<div align="center">
+  <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
+</div>
+
+**Simplest example — from GPS to a modelled field, the code that produces the figure above:**
+
+``` python
+import numpy as np, matplotlib.pyplot as plt
+import uacpy
+from uacpy import data
+from uacpy.models import Bellhop, RunMode
+
+# 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
+#    WOA23 sound speed and NCEI seabed — across the North Sea shelf down into the
+#    Norwegian Trench.
+A, B = (61.0, 2.0), (58.0, 5.0)           # (lat, lon): North Sea shelf → Norwegian Trench
+env  = data.fetch_environment(A, transect_to=B, date='2026-01-15', bottom_sources='auto')
+grid = data.fetch_bathy_grid((56.5, 62.0), (-2.0, 9.0))      # (lats, lons, depth)
+
+# 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
+src = uacpy.Source(depths=100, frequencies=800)
+rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
+                     ranges=np.linspace(100, env.max_range, 350))  # env range extent
+tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+
+# 3. One call → the figure above: map · transmission loss · environment.
+#    The left map is pluggable (map_fn=); the default is the bathymetry map.
+uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver=rcv,
+                         map_title="North Sea — Norwegian Trench (GEBCO)",
+                         tl_title="Transmission loss (Bellhop, 800 Hz)",
+                         env_title="Range-dependent environment A→B",
+                         map_kwargs=dict(contours=True, aspect=1))
+plt.show()
+```
 
 ## 📦 Installation
 
@@ -83,7 +144,7 @@ What `install.sh` builds:
 | Tool                     | Required for                                      |
 |--------------------------|---------------------------------------------------|
 | `python3`                | Driving `install.sh` and importing uacpy (always) |
-| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), OASES (Fortran models — always) |
+| `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), ramgeo (`ramgeo1.5` layered fluid), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
 | `tar`                    | Submodule unpacking + OASES archive (always)      |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
@@ -139,6 +200,8 @@ pip install -e .
 | `--bellhop cxx`           | Also build C++ Bellhop (CPU)                                |
 | `--bellhop cuda`          | Also build CUDA Bellhop (GPU, requires `nvcc`)              |
 | `--oases yes` / `no`      | Download + build OASES (or skip the prompt)                 |
+| `--data LIST`             | Download public datasets for the `uacpy.data` offline backend into `./data_cache` (gitignored). `LIST` is a comma list (`gebco`, `woa23`, `sediment`, `emodnet`, `coastline`, `globsed`, `crust1`, `diesing`, `seaice`) or `all`. See `./install.sh --help` for sizes/licences. |
+| `--no-models` / `--data-only` | Skip **all** native model builds (no compilers needed) — pure-Python install; pair with `--data` for an offline data-only setup |
 | `--force`                 | Skip incremental builds; do a full clean rebuild of every selected component |
 
 ---
@@ -206,12 +269,24 @@ cd uacpy
 python3 -m venv uacpy_venv
 source uacpy_venv/bin/activate
 pip install -e .
-./install.sh -y
+./install.sh
 ```
 
 > **Tip:** clone into the WSL filesystem (`~/uacpy`), **not** into
 > `/mnt/c/...`. Cross-filesystem I/O is 10–20× slower and the
 > Acoustics-Toolbox build does a lot of small file writes.
+
+### Update
+
+```bash
+cd uacpy
+git pull
+source uacpy_venv/bin/activate
+pip install -e .
+rm -rf uacpy/bin   # Optional (Required for v0.3.x -> v0.4.x)
+rm -rf data_cache  # Optional
+./install.sh       # Optional (Required for v0.3.x -> v0.4.x) 
+```
 
 ### Uninstall
 
@@ -220,58 +295,6 @@ pip uninstall uacpy
 rm -rf uacpy
 ```
 
-## ▶ Simplest example
-
-A Pekeris waveguide — isovelocity water over a fluid half-space — at
-1 kHz, plotted as a transmission-loss field.
-
-``` python
-import numpy as np
-import matplotlib.pyplot as plt
-
-import uacpy
-from uacpy.models import Bellhop, RunMode
-from uacpy.visualization import plot_field
-
-# 1. Environment — isovelocity water over a fluid half-space bottom
-env = uacpy.Environment(
-    name="Pekeris Waveguide",
-    bathymetry=100.0,
-    ssp=1500.0,
-    bottom=uacpy.BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=1600.0,
-        density=1.5,
-        attenuation=0.5,
-    ),
-)
-
-# 2. Source — 1000 Hz, mid water column
-source = uacpy.Source(depths=50.0, frequencies=1000.0)
-
-# 3. Receiver grid — 200 depths × 500 ranges out to 5 km
-#    Start ranges at the step size; r=0 has no ray data (Bellhop sentinel).
-receiver = uacpy.Receiver(
-    depths=np.linspace(0, 100, 200),
-    ranges=np.linspace(10, 5000, 500),
-)
-
-# 4. Run Bellhop in coherent-TL mode
-result = Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
-    env, source, receiver, run_mode=RunMode.COHERENT_TL,
-)
-
-# 5. Plot the TL field
-fig, ax = plt.subplots(figsize=(8, 4))
-plot_field(result, env=env, ax=ax)
-plt.tight_layout()
-plt.show()
-```
-
-<p align="center">
-  <img src="./docs/readme_tl.png" alt="Pekeris waveguide TL field at 1 kHz" width="720">
-</p>
-
 ## 📚 Documentation & Examples
 
 The full API reference lives in a single file:
@@ -279,10 +302,10 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 36 example scripts numbered
-sequentially (`example_01_*.py` through `example_36_*.py`) — from a first
-TL field to communications modems and a standards-based noise-impact
-assessment. See the
+Inside `uacpy/uacpy/examples/` you will find 37 example scripts numbered
+sequentially (`example_01_*.py` through `example_37_*.py`) — from a first TL
+field to communications modems, a standards-based noise-impact assessment, and a
+GPS-to-modelled-field real-world pipeline. See the
 [examples index](./DOCUMENTATION.md#12-examples-index) for a description
 of each one.
 
@@ -320,6 +343,8 @@ Tests use custom markers to allow selective execution:
 - `slow` -- Long-running tests (broadband, large grids, slow examples)
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
+- `requires_network` -- Tests that hit a live external service (the `uacpy.data`
+  fetchers); **auto-skipped when offline**
 
 ``` bash
 
@@ -331,6 +356,9 @@ pytest uacpy/tests/ -m "not requires_binary"
 
 # Skip OASES tests (if OASES is not installed)
 pytest uacpy/tests/ -m "not requires_oases"
+
+# Skip all internet-dependent tests (also auto-skipped offline)
+pytest uacpy/tests/ -m "not requires_network"
 
 ```
 
@@ -358,8 +386,7 @@ live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 ### 🔮 Future scope
 
 - **Model features** — coverage of every native model option, GPU acceleration for more models, full 3‑D propagation.
-- **Environmental data** — global bathymetry (GEBCO, SRTM), NOAA / IOOS / CMEMS oceanographic fields, on‑the‑fly extraction / caching / mesh generation.
-- **Framework** — scenario‑based batch simulations, reproducible experiment containers, interactive TL / mode dashboards.
+- **GUI** — scenario‑based simulations, interactive TL / mode / noise level / ...,  dashboards.
 
 
 ## 🙏 Acknowledgments
@@ -372,7 +399,7 @@ is summarised in the [licensing table](#-licensing); full diffs for
 modified sources live in
 [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 
-### Acoustics Toolbox --- Bellhop, Kraken, KrakenField, Scooter, SPARC, Bounce
+### Acoustics Toolbox --- Bellhop, Kraken, Scooter, SPARC, Bounce
 
 Michael B. Porter --- http://oalib.hlsresearch.com/AcousticsToolbox/
 - Porter, *The BELLHOP Manual and User's Guide*, 2011
@@ -402,6 +429,18 @@ distribution --- https://github.com/quiet-oceans/ramsurf
 - Collins, *Higher-order parabolic approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA, 1991 (RAMS / elastic)
 - Collins, *Generalization of the split-step Padé solution* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
 
+### ramgeo --- Collins RAM family (RAMGEO 1.5g, range-dependent layered fluid PE)
+
+Range-dependent layered-fluid parabolic-equation model by Michael D. Collins
+(Naval Research Laboratory). **Public domain** — a U.S. Government work; the
+source carries no copyright or licence notice. uacpy vendors it from the
+Acoustics Toolbox `RAM/` bundle (Porter's AT, mirroring
+http://oalib.hlsresearch.com/Modes/AcousticsToolbox/), which merely
+redistributes Collins' original.
+
+- Collins, *A split-step Padé solution for the parabolic equation method*, JASA 93, 1736–1742, 1993
+- Collins, *Users Guide for RAM versions 1.0 and 1.0p / RAMGeo*, NRL, 1999
+
 ### OASES --- OAST, OASN, OASR, OASP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
@@ -416,6 +455,8 @@ Chitre's 2016 copyright header and cite arlpy as the source.
 
 ## 📄 Licensing
 
+### Third party code
+
 UACPY aggregates code from multiple projects, each under its own
 license. Downstream users are responsible for respecting each license
 when redistributing or modifying UACPY or its outputs.
@@ -427,9 +468,63 @@ when redistributing or modifying UACPY or its outputs.
 | bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
+| ramgeo (Collins, NRL)      | `third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
+
+### Python dependencies
+
+UACPY's runtime dependencies are installed from PyPI (not bundled or
+redistributed by UACPY); all are permissive and GPL-3.0-compatible.
+
+| Package | Used for | License |
+|---------|----------|---------|
+| **numpy** | arrays / numerics (core) | BSD-3-Clause |
+| **scipy** | interpolation, FFT, nearest-neighbour search | BSD-3-Clause |
+| **matplotlib** | visualization | Matplotlib License (PSF-based, BSD-style) |
+| **netCDF4** | reading WOA23 / GEBCO / GlobSed grids | MIT |
+| **shapely** | EMODnet seabed-substrate polygon lookups | BSD-3-Clause |
+| **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
+| **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
+| **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
+
+Test/development tooling (`pytest`, `pytest-xdist`, `pytest-cov`, `black`,
+`flake8` — the `[test]` / `[dev]` extras) is MIT-licensed and not required at
+runtime.
+
+
+### External data sources
+
+The `uacpy.data` layer builds an `Environment` (and, for
+`uacpy.plot.plot_bathymetry_map`, a coastline map) from public databases.
+These datasets are **fetched on demand - not redistributed** with UACPY.
+Their licences (CC-BY, CC-BY-NC, public domain, …) impose: whoever fetches 
+the data is its licensee and is responsible for honouring the licence and 
+citing the source. UACPY exposes a `base_url=` on each fetcher so heavy 
+users can point at their own mirror.
+
+| Source | Used for | License | Required attribution / citation |
+|--------|----------|---------|---------------------------------|
+| **GEBCO** grid (served via [OpenTopoData](https://www.opentopodata.org/), MIT) | bathymetry | Public domain (attribution requested) | "GEBCO Compilation Group, *GEBCO Grid*" (see [GEBCO terms](https://www.gebco.net/data-products/gridded-bathymetry/terms-of-use) for the grid DOI). OpenTopoData public API is fair-use: **≤1000 req/day, ≤1 req/s** --- self-host for heavy use |
+| **GMRT** Global Multi-Resolution Topography (`bathymetry_sources='gmrt'`) | bathymetry (multibeam, higher-res) | **CC-BY 4.0** | Ryan, W.B.F., *et al.* (2009). *Global Multi-Resolution Topography synthesis.* Geochem. Geophys. Geosyst. 10, Q03014. doi:[10.1029/2008GC002332](https://doi.org/10.1029/2008GC002332) |
+| **World Ocean Atlas 2023** (NOAA NCEI) | sound speed (climatology), absorption | U.S. Government work --- public domain | Reagan, J.R., *et al.* (2024). *World Ocean Atlas 2023.* NOAA National Centers for Environmental Information |
+| **Copernicus Marine Service** (free account required) | sound speed (operational) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**; free account required) | "Generated using E.U. Copernicus Marine Service Information; *&lt;product DOI&gt;*" |
+| **Argo** float profiles (`ssp_sources='argo'`, via Ifremer ERDDAP) | sound speed (real in-situ profiles) | **Free and unrestricted** (Argo data policy) | "These data were collected and made freely available by the International Argo Program (argo.ucsd.edu)"; Argo (2024), Argo GDAC, SEANOE, doi:[10.17882/42182](https://doi.org/10.17882/42182) |
+| **EMODnet Geology** --- seabed substrate (`bottom_sources='emodnet'`) | sediment (European seas) | **CC-BY 4.0** | "EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0" |
+| **NCEI Seafloor Sediment Grain-Size Database** (NOAA, G00127; `bottom_sources='grainsize'`) | sediment (global, public-domain samples) | U.S. Government work --- public domain | National Geophysical Data Center (1976), *The NGDC Seafloor Sediment Grain Size Database*, NOAA NCEI, doi:[10.7289/V5G44N6W](https://doi.org/10.7289/V5G44N6W). (The DECK41 G02094 lithology file is also accepted if supplied.) |
+| **Diesing 2020** global deep-sea seafloor lithology (`bottom_sources='diesing'`) | sediment (global deep-sea, >500 m) | **CC-BY 4.0** | Diesing, M. (2020). *Deep-sea sediments of the global ocean.* Earth Syst. Sci. Data 12, 3367--3381. doi:[10.5194/essd-12-3367-2020](https://doi.org/10.5194/essd-12-3367-2020); data: PANGAEA doi:[10.1594/PANGAEA.911692](https://doi.org/10.1594/PANGAEA.911692) |
+| **Pelagic model** (`bottom_sources='pelagic'`, depth/latitude classifier) | sediment (global open-ocean fallback, modelled) | **Public domain** (first-principles model) | after Diesing (2020) & Berger, W.H. (1974), *Deep-sea sedimentation* |
+| **GlobSed** total sediment thickness (NOAA NCEI) | sediment thickness (low-frequency seabed) | U.S. Government work --- public domain | Straume, E.O., *et al.* (2019). *GlobSed: Updated total sediment thickness in the world's oceans.* Geochem. Geophys. Geosyst. 20, 1756--1772. doi:[10.1029/2018GC008115](https://doi.org/10.1029/2018GC008115) |
+| **CRUST1.0** global crustal model (`bottom_sources='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
+| **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
+| **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
+
+> A fetched environment carries its provenance per layer: `env.data_sources` is
+> a tuple of `DataProvenance` records, each pairing the dataset (`.source`) with
+> the **actual date and coordinates** that fetch returned. `uacpy.data.citations(env)`
+> prints the required attribution/citation — plus the fetched date/location — for
+> exactly those sources (`uacpy.data.citations()` prints the full catalogue below).
 
 ## 📬 Contact
 
@@ -460,21 +555,4 @@ etc.), the maintainer can be reached at:
 - https://github.com/marcuskd/pyram
 - https://github.com/org-arl/UnderwaterAcoustics.jl
 - https://github.com/SPECFEM
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -12,8 +12,8 @@ import numpy as np
 import pytest
 
 from uacpy.core.environment import (
-    BoundaryProperties, Environment, LayeredBottom,
-    RangeDependentBottom, RangeDependentLayeredBottom, SedimentLayer,
+    BoundaryProperties, Environment, SeabedColumn,
+    Bottom, SedimentLayer,
     SoundSpeedProfile,
 )
 from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
@@ -29,17 +29,14 @@ from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
 # (model class name, expected per-key overrides relative to DEFAULT_COLLAPSE)
 _PER_MODEL_DEFAULTS = [
     ('Bellhop',     {}),
-    ('BellhopCUDA', {}),
-    ('Kraken',      {'ssp': 'mean', 'bottom': 'median'}),
-    ('KrakenC',     {'ssp': 'mean', 'bottom': 'median'}),
-    ('KrakenField', {'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('Scooter',     {'ssp': 'mean', 'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('SPARC',       {'ssp': 'mean', 'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('OAST',        {'ssp': 'mean', 'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('OASN',        {'ssp': 'mean', 'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('OASR',        {'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('OASP',        {'ssp': 'mean', 'bottom': 'median', 'rd_layered_layers': 'preserve'}),
-    ('Bounce',      {'bottom': 'median', 'rd_layered_layers': 'preserve'}),
+    ('Kraken',      {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('Scooter',     {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('SPARC',       {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('OAST',        {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('OASN',        {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('OASR',        {'bottom_range': 'median'}),
+    ('OASP',        {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('Bounce',      {'bottom_range': 'median'}),
     ('RAM',         {}),
 ]
 
@@ -78,8 +75,8 @@ def test_per_model_collapse_defaults(cls_name, overrides):
 def test_user_collapse_overrides_per_model_defaults():
     """User ``collapse={...}`` always wins over model defaults."""
     from uacpy.models import Bounce
-    bn = Bounce(verbose=False, collapse={'bottom': 'r0'})
-    assert bn._collapse['bottom'] == 'r0'  # not Bounce's 'median' default
+    bn = Bounce(verbose=False, collapse={'bottom_range': 'r0'})
+    assert bn._collapse['bottom_range'] == 'r0'  # not Bounce's 'median' default
 
 
 def test_unknown_collapse_key_raises():
@@ -100,15 +97,12 @@ def _make_rdlb():
     )
     profiles = []
     for c in (1600.0, 1620.0, 1640.0):
-        profiles.append(LayeredBottom(
+        profiles.append(SeabedColumn(
             layers=[SedimentLayer(thickness=10.0, sound_speed=c, density=1.5,
                                   attenuation=0.2)],
             halfspace=hs,
         ))
-    return RangeDependentLayeredBottom(
-        ranges=np.array([0.0, 5000.0, 10000.0]),
-        profiles=profiles,
-    )
+    return Bottom.from_columns(profiles, ranges=np.array([0.0, 5000.0, 10000.0]))
 
 
 def _rdlb_env():
@@ -124,7 +118,7 @@ def _bare_model_factory(supports_layered: bool):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
 
-        def run(self, env, source, receiver, run_mode=None, **kwargs):
+        def run(self, env, source, receiver, run_mode=None):
             return self._project_environment(env)
 
     return _Bare
@@ -135,54 +129,38 @@ def _bare_model_factory(supports_layered: bool):
     ('rmax',   1640.0),
     ('median', 1620.0),
 ])
-def test_rd_layered_range_picks_right_profile(range_method, expected_c):
-    """``rd_layered_range`` selects which profile contributes (when the
-    layer axis collapses to ``top_layer`` we can read the layer's c
-    directly)."""
+def test_bottom_range_picks_right_profile(range_method, expected_c):
+    """``bottom_range`` selects which column contributes; with the layer
+    axis flattened to ``top_layer`` we read that column's layer c directly."""
     Bare = _bare_model_factory(supports_layered=False)
     bare = Bare(collapse={
-        'rd_layered_range': range_method,
-        'rd_layered_layers': 'top_layer',
+        'bottom_range': range_method,
+        'bottom_layers': 'top_layer',
     })
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         proj = bare.run(_rdlb_env(), None, None)
-    assert proj.bottom.sound_speed == pytest.approx(expected_c)
+    assert not proj.bottom.is_range_dependent
+    assert proj.bottom.columns[0].halfspace.sound_speed == pytest.approx(expected_c)
 
 
-def test_rd_layered_layers_preserve_keeps_layeredbottom():
-    """``rd_layered_layers='preserve'`` keeps the layer stack at the
-    chosen range. Requires the model to support ``LayeredBottom``."""
+def test_layered_kept_when_model_supports_layers():
+    """A model that supports layers keeps the layer stack at the chosen
+    column — only the range axis collapses."""
     Bare = _bare_model_factory(supports_layered=True)
-    bare = Bare(collapse={
-        'rd_layered_range': 'median',
-        'rd_layered_layers': 'preserve',
-    })
+    bare = Bare(collapse={'bottom_range': 'median'})
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         proj = bare.run(_rdlb_env(), None, None)
-    assert isinstance(proj.bottom, LayeredBottom)
-    assert len(proj.bottom.layers) == 1
-
-
-def test_rd_layered_layers_preserve_requires_layered_support():
-    """``preserve`` on a model that doesn't support ``LayeredBottom``
-    raises ``ConfigurationError`` — the projected env would be a shape
-    the model can't consume."""
-    Bare = _bare_model_factory(supports_layered=False)
-    bare = Bare(collapse={'rd_layered_layers': 'preserve'})
-    with pytest.raises(ConfigurationError, match='preserve'):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            bare.run(_rdlb_env(), None, None)
+    assert not proj.bottom.is_range_dependent and proj.bottom.is_layered
+    assert len(proj.bottom.columns[0].layers) == 1
 
 
 @pytest.mark.parametrize('bad_key,bad_val', [
-    ('rd_layered_range',  'mean'),       # 'mean' isn't valid for to_profile
-    ('rd_layered_layers', 'bogus'),
-    ('rd_layered_range',  'bogus'),
+    ('bottom_range',  'bogus'),
+    ('bottom_layers', 'bogus'),
 ])
-def test_rd_layered_invalid_value_raises(bad_key, bad_val):
+def test_collapse_invalid_value_raises(bad_key, bad_val):
     """Invalid collapse values raise :class:`ConfigurationError` at
     construction, like unknown keys."""
     Bare = _bare_model_factory(supports_layered=True)
@@ -236,16 +214,15 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
 
 
 # ---------------------------------------------------------------------
-# Bellhop auto-route detects elastic-RangeDependentBottom
+# Bellhop auto-route detects elastic-Bottom
 # ---------------------------------------------------------------------
 
 @pytest.mark.requires_binary  # constructs Bellhop
 def test_bellhop_auto_route_detects_elastic_rd_halfspace():
-    """A ``RangeDependentBottom`` with non-zero ``shear_speed`` anywhere
+    """A ``Bottom`` with non-zero ``shear_speed`` anywhere
     along range triggers the BOUNCE auto-route."""
     from uacpy.models import Bellhop
-    rd = RangeDependentBottom(
-        ranges=np.array([0.0, 5000.0, 10000.0]),
+    rd = Bottom.from_halfspaces(np.array([0.0, 5000.0, 10000.0]),
         sound_speed=np.array([1600.0, 1650.0, 1700.0]),
         density=np.array([1.5, 1.6, 1.7]),
         attenuation=np.array([0.2, 0.3, 0.4]),
@@ -262,7 +239,7 @@ def test_bellhop_auto_route_detects_elastic_rd_halfspace():
 
 
 # ---------------------------------------------------------------------
-# LayeredBottom.collapse('volume_average') forwards shear_attenuation
+# SeabedColumn.collapse('volume_average') forwards shear_attenuation
 # ---------------------------------------------------------------------
 
 def test_layered_volume_average_forwards_shear_attenuation():
@@ -279,7 +256,7 @@ def test_layered_volume_average_forwards_shear_attenuation():
         SedimentLayer(thickness=10.0, sound_speed=1700.0, density=1.6,
                       attenuation=0.25, shear_speed=400.0, shear_attenuation=0.6),
     ]
-    lb = LayeredBottom(layers=layers, halfspace=hs)
+    lb = SeabedColumn(layers=layers, halfspace=hs)
     flat = lb.collapse('volume_average')
     assert flat.shear_attenuation > 0.0, (
         "volume_average collapse must forward shear_attenuation, not drop it"
@@ -287,7 +264,7 @@ def test_layered_volume_average_forwards_shear_attenuation():
 
 
 # ---------------------------------------------------------------------
-# _collapse_elastic_boundary handles RangeDependentBottom shear ndarrays
+# _collapse_elastic_boundary handles Bottom shear ndarrays
 # ---------------------------------------------------------------------
 
 def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
@@ -295,8 +272,7 @@ def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
     per-range ``shear_speed`` / ``shear_attenuation`` ndarrays while
     preserving shape and dtype."""
     from uacpy.models.base import PropagationModel
-    rd = RangeDependentBottom(
-        ranges=np.array([0.0, 5000.0, 10000.0]),
+    rd = Bottom.from_halfspaces(np.array([0.0, 5000.0, 10000.0]),
         sound_speed=np.array([1600.0, 1650.0, 1700.0]),
         density=np.array([1.5, 1.6, 1.7]),
         attenuation=np.array([0.2, 0.3, 0.4]),
@@ -304,42 +280,30 @@ def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
         shear_attenuation=np.array([0.0, 0.5, 1.0]),
     )
     collapsed = PropagationModel._collapse_elastic_boundary(rd, 'fluid')
-    # Must remain a RangeDependentBottom with per-range arrays
-    assert isinstance(collapsed, RangeDependentBottom)
-    assert isinstance(collapsed.shear_speed, np.ndarray)
-    assert collapsed.shear_speed.shape == (3,)
-    assert np.all(collapsed.shear_speed == 0.0), (
-        f"shear_speed must be zeroed, got {collapsed.shear_speed!r}"
-    )
-    assert isinstance(collapsed.shear_attenuation, np.ndarray)
-    assert collapsed.shear_attenuation.shape == (3,)
-    assert np.all(collapsed.shear_attenuation == 0.0), (
-        f"shear_attenuation must be zeroed, "
-        f"got {collapsed.shear_attenuation!r}"
-    )
+    # Must remain a range-dependent half-space Bottom, shear zeroed per column
+    assert isinstance(collapsed, Bottom)
+    assert collapsed.is_range_dependent and not collapsed.is_layered
+    assert np.all(collapsed.halfspace_shear_speed == 0.0)
+    assert np.all(collapsed.halfspace_shear_attenuation == 0.0)
     # Compressional properties preserved
     np.testing.assert_array_equal(
-        collapsed.sound_speed, np.array([1600.0, 1650.0, 1700.0])
-    )
+        collapsed.halfspace_sound_speed, np.array([1600.0, 1650.0, 1700.0]))
     np.testing.assert_array_equal(
-        collapsed.density, np.array([1.5, 1.6, 1.7])
-    )
+        collapsed.halfspace_density, np.array([1.5, 1.6, 1.7]))
     # Original input untouched (deepcopy contract)
-    assert rd.shear_speed[1] == 400.0
+    assert rd.halfspace_shear_speed[1] == 400.0
 
 
 # ---------------------------------------------------------------------
-# RangeDependentLayeredBottom.collapse uses median range
+# Bottom.collapse uses median range
 # ---------------------------------------------------------------------
 
-def test_rdlb_collapse_uses_median_range():
-    """``rdlb.collapse(method)`` shorthand selects the median range
-    profile (aligned with ``_project_environment``)."""
+def test_rdlb_collapse_median_range_top_layer():
+    """``collapse(range='median', layers='top_layer')`` selects the median
+    column and exposes its top-layer sound speed."""
     rdlb = _make_rdlb()
-    # The 'halfspace' branch returns the chosen profile's halfspace
-    # (1700 for all profiles in _make_rdlb — same hs object). Use
-    # 'top_layer' instead to expose the per-range layer's sound_speed.
-    flat_top = rdlb.collapse('top_layer')
-    assert flat_top.sound_speed == pytest.approx(1620.0), (
-        f"Expected median-range top layer c ~ 1620, got {flat_top.sound_speed}"
+    flat_top = rdlb.collapse(range='median', layers='top_layer')
+    cp = flat_top.columns[0].halfspace.sound_speed
+    assert cp == pytest.approx(1620.0), (
+        f"Expected median-range top layer c ~ 1620, got {cp}"
     )

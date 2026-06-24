@@ -7,8 +7,8 @@ to this test so the public capability surface stays explicit.
 
 import pytest
 
-from uacpy.models.bellhop import Bellhop, BellhopCUDA
-from uacpy.models.kraken import Kraken, KrakenC, KrakenField
+from uacpy.models.bellhop import Bellhop
+from uacpy.models.kraken import Kraken
 from uacpy.models.scooter import Scooter
 from uacpy.models.sparc import SPARC
 from uacpy.models.bounce import Bounce
@@ -39,32 +39,8 @@ _EXPECTED = {
          'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
-    'BellhopCUDA': (
-        lambda: BellhopCUDA(),
-        {'altimetry': True, 'range_dependent_bathymetry': True,
-         'range_dependent_ssp': True,
-         'range_dependent_bottom': True, 'layered_bottom': False,
-         'range_dependent_layered_bottom': False,
-         'elastic_media': True},
-    ),
     'Kraken': (
         lambda: Kraken(),
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
-         'elastic_media': True},
-    ),
-    'KrakenC': (
-        lambda: KrakenC(),
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
-         'elastic_media': True},
-    ),
-    'KrakenField': (
-        lambda: KrakenField(),
         {'altimetry': False, 'range_dependent_bathymetry': True,
          'range_dependent_ssp': True,
          'range_dependent_bottom': False, 'layered_bottom': True,

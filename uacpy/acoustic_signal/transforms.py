@@ -6,15 +6,66 @@ Each has a standalone inverse: forward -> filter coefficients -> inverse.
 
 from __future__ import annotations
 
-import numpy as np
-import matplotlib.pyplot as plt
+from collections import namedtuple
 
-from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
-                                  REFERENCE_PRESSURE_WATER)
+import numpy as np
+from scipy.signal import get_window
+
 from uacpy.core.exceptions import ConfigurationError
 
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
+
+RadonResult = namedtuple("RadonResult", "moveout taus panel")
+TauPResult = namedtuple("TauPResult", "slownesses taus panel")
+FKResult = namedtuple("FKResult", "frequencies wavenumbers power spectrum")
+
+
+def _taper(spec, n):
+    """Length-``n`` taper for a ``scipy.signal.get_window`` spec.
+
+    ``spec`` is ``None`` (rectangular ``ones``) or any get_window argument —
+    a name (``'hann'``) or a ``(name, *params)`` tuple (``('kaiser', 8)``).
+    Periodic (``fftbins=True``) form, the correct convention for spectra.
+    """
+    if spec is None:
+        return np.ones(int(n))
+    return get_window(spec, int(n), fftbins=True).astype(float)
+
+
+def _fk_tapers(window, nt, nx):
+    """Separable (time, space) tapers for the 2-D f-k window.
+
+    ``window`` applies one spec to both axes; a 2-element ``list``
+    ``[time_spec, space_spec]`` tapers the axes independently.
+    """
+    if isinstance(window, list):
+        if len(window) != 2:
+            raise ConfigurationError(
+                "fk_transform: window list must be [time_window, space_window]")
+        t_spec, x_spec = window
+    else:
+        t_spec = x_spec = window
+    return _taper(t_spec, nt), _taper(x_spec, nx)
+
+
+def _fk_nfft(nfft, nt, nx):
+    """Resolve the zero-padded f-k transform shape ``(NT, NX) >= (nt, nx)``."""
+    if nfft is None:
+        return nt, nx
+    if np.isscalar(nfft):
+        NT = NX = int(nfft)
+    else:
+        nfft = tuple(nfft)
+        if len(nfft) != 2:
+            raise ConfigurationError(
+                "fk_transform: nfft must be an int or (n_time, n_space)")
+        NT, NX = int(nfft[0]), int(nfft[1])
+    if NT < nt or NX < nx:
+        raise ConfigurationError(
+            f"fk_transform: nfft {(NT, NX)} must be >= data shape {(nt, nx)} "
+            "(zero-pad only, no truncation)")
+    return NT, NX
 
 
 def _moveout_times(kind, taus, x, m):
@@ -30,7 +81,7 @@ def _moveout_times(kind, taus, x, m):
     )
 
 
-def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
+def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
     """Forward Radon transform (slant stack) of a ``(nt, nx)`` gather.
 
     Sums the data along moveout curves ``t = t(tau, x)``:
@@ -43,7 +94,7 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
     ----------
     data : ndarray
         Gather, shape ``(nt, nx)`` (time down columns, offset across rows).
-    fs : float
+    sample_rate : float
         Temporal sample rate (Hz).
     dx : float
         Sensor spacing (m).
@@ -56,12 +107,9 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
 
     Returns
     -------
-    moveout : ndarray
-        The scanned moveout axis.
-    taus : ndarray
-        Intercept-time axis (s).
-    R : ndarray
-        Radon panel, shape ``(len(moveout), nt)``.
+    RadonResult
+        Namedtuple ``(moveout, taus, panel)``: the scanned moveout axis, the
+        intercept-time axis (s), and the Radon panel ``(len(moveout), nt)``.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
@@ -69,16 +117,16 @@ def radon_transform(data, fs, dx, moveout, kind="linear", x0=0.0):
     nt, nx = d.shape
     x = np.arange(nx) * float(dx) - float(x0)
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
-    taus = np.arange(nt) / float(fs)
+    taus = np.arange(nt) / float(sample_rate)
     R = np.zeros((moveout.size, nt))
     for i, m in enumerate(moveout):
         for ix in range(nx):
             tt = _moveout_times(kind, taus, x[ix], m)
             R[i] += np.interp(tt, taus, d[:, ix], left=0.0, right=0.0)
-    return moveout, taus, R
+    return RadonResult(moveout, taus, R)
 
 
-def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
+def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
     """Adjoint (back-projection) Radon transform: ``(n_moveout, nt) -> (nt, nx)``.
 
     Spreads each Radon sample back along its moveout curve. This is the matched
@@ -92,7 +140,7 @@ def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
     if moveout.size != nm:
         raise ConfigurationError("inverse_radon: moveout length must match R rows")
-    taus = np.arange(nt) / float(fs)
+    taus = np.arange(nt) / float(sample_rate)
     x = np.arange(int(nx)) * float(dx) - float(x0)
     out = np.zeros((nt, int(nx)))
     for i, m in enumerate(moveout):
@@ -102,38 +150,50 @@ def inverse_radon(R, fs, dx, moveout, nx, kind="linear", x0=0.0):
     return out
 
 
-def taup_transform(data, fs, dx, slownesses=None, n_slowness=201, p_max=None):
+def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
+                   p_max=None, *, window=None, nfft=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
-    Returns ``(slownesses, taus, taup)``: slowness axis (s/m), intercept-time
-    axis (s), and the panel ``(n_slowness, nt)``. See :class:`TauP` for the
-    convention; this is the standalone functional form (no stored state).
+    Returns a :class:`TauPResult` namedtuple ``(slownesses, taus, panel)``:
+    slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slowness,
+    NT)``.
+
+    ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
+    ``(name, *params)`` tuple) applied down each trace before the time FFT to
+    curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time FFT to
+    ``NT >= nt`` samples (finer ``tau`` spacing); ``None`` keeps ``nt``.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
         raise ConfigurationError("taup_transform: data must be 2-D (nt, nx)")
     nt, nx = d.shape
-    fs = float(fs)
+    fs = float(sample_rate)
+    NT = nt if nfft is None else int(nfft)
+    if NT < nt:
+        raise ConfigurationError(
+            f"taup_transform: nfft ({NT}) must be >= nt ({nt}) (zero-pad only)")
+    d = d * _taper(window, nt)[:, None]
     x = np.arange(nx) * float(dx)
     if slownesses is None:
         if p_max is None:
             p_max = 1.0 / 1000.0
         slownesses = np.linspace(-p_max, p_max, int(n_slowness))
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
-    D = np.fft.rfft(d, axis=0)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / fs)
-    taup = np.empty((slownesses.size, nt))
+    D = np.fft.rfft(d, n=NT, axis=0)
+    omega = 2.0 * np.pi * np.fft.rfftfreq(NT, 1.0 / fs)
+    taup = np.empty((slownesses.size, NT))
     for i, p in enumerate(slownesses):
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
-        taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=nt)
-    return slownesses, np.arange(nt) / fs, taup
+        taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
+    return TauPResult(slownesses, np.arange(NT) / fs, taup)
 
 
-def inverse_taup(taup, slownesses, fs, dx, nx):
+def inverse_taup(taup, slownesses, sample_rate, dx, nx):
     """Adjoint slant stack ``(n_slowness, nt) -> (nt, nx)``.
 
     Standalone inverse — pass a tau-p panel you already have (e.g. a filtered
-    one) plus its slowness axis and geometry; no forward ``compute`` needed.
+    one) plus its slowness axis and geometry; no prior :func:`taup_transform`
+    call needed.
     """
     u = np.asarray(taup, dtype=float)
     if u.ndim != 2:
@@ -144,332 +204,110 @@ def inverse_taup(taup, slownesses, fs, dx, nx):
         raise ConfigurationError("inverse_taup: slownesses length must match taup rows")
     x = np.arange(int(nx)) * float(dx)
     U = np.fft.rfft(u, axis=1)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(fs))
+    omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(sample_rate))
     D = np.zeros((omega.size, int(nx)), dtype=complex)
     for i, p in enumerate(slownesses):
         D += U[i][:, None] * np.exp(-1j * omega[:, None] * (p * x)[None, :])
     return np.fft.irfft(D, n=nt, axis=0)
 
 
-class Radon:
-    """Radon transform (compute + plot), mirroring TauP / FK.
-
-    Stateful wrapper over :func:`radon_transform`: ``compute`` stores the panel
-    and ``plot`` images ``|R|`` (modulus taken on a copy, so the stored panel is
-    untouched). Reconstruct a (filtered) panel with the standalone
-    :func:`inverse_radon`.
-    """
-
-    _AXIS = {
-        "linear": ("Slowness p [s/km]", 1e3),
-        "parabolic": ("Curvature q [s/km^2]", 1e6),
-        "hyperbolic": ("Velocity v [m/s]", 1.0),
-    }
-
-    def __init__(self, ref: float = 1e-6):
-        self.ref = float(ref)
-
-    def compute(self, data, fs, dx, moveout, kind="linear", x0=0.0):
-        """Forward Radon transform; see :func:`radon_transform`."""
-        d = np.asarray(data, dtype=float)
-        if d.ndim != 2:
-            raise ConfigurationError("Radon.compute: data must be 2-D (nt, nx)")
-        self.moveout, self.taus, self.R = radon_transform(d, fs, dx, moveout,
-                                                          kind, x0)
-        self.fs, self.dx, self.nx = float(fs), float(dx), d.shape[1]
-        self.kind, self.x0 = kind, float(x0)
-        return self.moveout, self.taus, self.R
-
-    def plot(self, title="", vmin=None, vmax=None, cmap="jet", **kwargs):
-        """Image ``|R|`` (moveout axis on x, intercept time on y).
-
-        To reconstruct a (filtered) panel, pass it to :func:`inverse_radon`.
-        """
-        if not hasattr(self, "R"):
-            raise RuntimeError("Radon.plot: compute() must be called before plotting")
-        amp = np.abs(self.R)
-        xlabel, scale = self._AXIS.get(self.kind, ("Moveout", 1.0))
-        m = self.moveout * scale
-        if vmax is None:
-            vmax = amp.max()
-        if vmin is None:
-            vmin = 0.0
-        fig, ax = plt.subplots(figsize=(8, 6))
-        im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                       extent=[m[0], m[-1], self.taus[-1], self.taus[0]],
-                       vmin=vmin, vmax=vmax, cmap=cmap, **kwargs)
-        ax.set_title(f"[radon:{self.kind}] {title}", loc="left")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Intercept time tau [s]")
-        fig.colorbar(im, ax=ax, label="Stack amplitude")
-        plt.tight_layout()
-        return fig, ax
-
-
-class TauP:
-    """Linear tau-p (slant-stack) transform — time-domain dual of FK.
-
-    Computed in the frequency domain: a time shift ``p*x`` per trace is a phase
-    ``exp(i*omega*p*x)``, so ``U(p, omega) = sum_x D(omega, x) exp(i*omega*p*x)``
-    and ``u(p, tau)`` is the inverse transform over ``omega``.
-    """
-
-    def __init__(self, ref: float = 1e-6):
-        self.ref = float(ref)
-
-    def compute(self, data, fs, dx, slownesses=None, n_slowness: int = 201,
-                p_max=None):
-        """Forward tau-p transform.
-
-        Parameters
-        ----------
-        data : ndarray
-            Gather ``(nt, nx)``.
-        fs : float
-            Temporal sample rate (Hz).
-        dx : float
-            Sensor spacing (m).
-        slownesses : array, optional
-            Slowness axis (s/m). Default: ``n_slowness`` points spanning
-            ``+/- p_max`` with ``p_max = 1/1000`` s/m (apparent speeds >= 1000 m/s).
-        n_slowness : int
-            Number of slownesses when ``slownesses`` is None.
-        p_max : float, optional
-            Half-width of the default slowness axis (s/m).
-
-        Returns
-        -------
-        slownesses, taus, taup : ndarray
-            Slowness axis (s/m), intercept-time axis (s), and panel
-            ``(n_slowness, nt)``.
-        """
-        d = np.asarray(data, dtype=float)
-        if d.ndim != 2:
-            raise ConfigurationError("TauP.compute: data must be 2-D (nt, nx)")
-        self.slownesses, self.taus, self.taup = taup_transform(
-            d, fs, dx, slownesses, n_slowness, p_max)
-        self.fs, self.dx, self.nx = float(fs), float(dx), d.shape[1]
-        return self.slownesses, self.taus, self.taup
-
-    @staticmethod
-    def draw_slowness_line(ax, tau_max, sound_speed, *, color="w", ls="--",
-                           lw=1.1, alpha=0.85, label=True):
-        """Mark the slowness ``p = 1/c`` of a reference speed as vertical lines.
-
-        In tau-p, a wave of apparent speed ``c`` focuses at ``p = +/- 1/c`` (here
-        drawn in s/km). ``sound_speed`` is required — no default line.
-        """
-        p_skm = 1000.0 / float(sound_speed)
-        for sgn in (-1.0, 1.0):
-            ax.axvline(sgn * p_skm, color=color, ls=ls, lw=lw, alpha=alpha)
-        if label:
-            ax.text(p_skm, tau_max, f" {sound_speed:.0f} m/s", color=color,
-                    fontsize=8, va="bottom", ha="left")
-
-    def plot(self, title="", vmin=None, vmax=None, sound_speed=None, cmap="jet",
-             **kwargs):
-        """Image the tau-p panel (slowness in s/km on x, intercept time on y).
-
-        To reconstruct a (filtered) panel, pass it to :func:`inverse_taup`.
-        """
-        if not hasattr(self, "taup"):
-            raise RuntimeError("TauP.plot: compute() must be called before plotting")
-        p_skm = self.slownesses * 1000.0
-        amp = np.abs(self.taup)
-        if vmax is None:
-            vmax = amp.max()
-        if vmin is None:
-            vmin = 0.0
-        fig, ax = plt.subplots(figsize=(8, 6))
-        im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                       extent=[p_skm[0], p_skm[-1], self.taus[-1], self.taus[0]],
-                       vmin=vmin, vmax=vmax, cmap=cmap, **kwargs)
-        if sound_speed is not None:
-            self.draw_slowness_line(ax, self.taus[-1], sound_speed)
-        ax.set_title(f"[tau-p] {title}", loc="left")
-        ax.set_xlabel("Slowness p [s/km]")
-        ax.set_ylabel("Intercept time tau [s]")
-        fig.colorbar(im, ax=ax, label="Stack amplitude")
-        plt.tight_layout()
-        return fig, ax
-
-
 def inverse_fk(FK):
     """Inverse f-k transform: complex (fftshifted) spectrum -> real ``(nt, nx)``.
 
-    Pass the (possibly filtered/muted) complex spectrum — e.g. ``FK``'s
-    ``.FK`` attribute after applying an f-k mask. ``FK`` must be in the
-    ``fftshift``ed layout that ``FK.compute`` produces.
+    Pass the (possibly filtered/muted) complex spectrum — i.e. the ``spectrum``
+    returned by :func:`fk_transform` (single-segment), after any f-k mask. It
+    must be in the ``fftshift``ed layout that :func:`fk_transform` produces.
     """
+    if FK is None:
+        raise ConfigurationError(
+            "inverse_fk: spectrum is None — an averaged f-k panel (nperseg<nt) "
+            "has no phase and cannot be inverted. Re-run fk_transform with "
+            "nperseg=None for an invertible spectrum.")
+    if isinstance(FK, tuple):
+        raise ConfigurationError(
+            "inverse_fk: pass the complex spectrum (the .spectrum field / 4th "
+            "element of fk_transform's result), not the whole FKResult tuple.")
     fk = np.asarray(FK)
     if fk.ndim != 2:
         raise ConfigurationError("inverse_fk: FK must be 2-D (nt, nx)")
     return np.real(np.fft.ifft2(np.fft.ifftshift(fk, axes=(0, 1))))
 
 
+def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
+                 window=None, nfft=None, normalize=False):
+    """Frequency-wavenumber transform with optional Welch time-averaging.
 
-class FK:
-    """Frequency-Wavenumber (f-k) transform computation and visualization."""
+    Returns an :class:`FKResult` namedtuple ``(frequencies, wavenumbers, power,
+    spectrum)``. ``frequencies`` are in Hz; ``wavenumbers`` is the **angular**
+    wavenumber ``k = 2π·ν`` in **rad/m** (the package-wide ``k = ω/c``
+    convention), so a wave of speed ``c`` sits on the line ``ω = c·k``.
+    ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``normalize=True``
+    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. With
+    ``nperseg=None`` the whole record is one
+    segment and ``spectrum`` is the complex (fftshifted) panel for
+    :func:`inverse_fk`. With ``nperseg < nt`` the time axis is split into
+    overlapping segments, ``|FK|^2`` is averaged across them (variance ~1/sqrt(N);
+    a single-snapshot f-k panel is an inconsistent estimator), and ``spectrum`` is
+    ``None`` — an averaged power panel has no single phase and is not invertible.
 
-    def __init__(self, ref=REFERENCE_PRESSURE_WATER, **kwargs):
-        """
-        Frequency-Wavenumber (f-k) transform computation and visualization class.
+    Parameters
+    ----------
+    data : ndarray
+        Gather ``(nt, nx)``.
+    sample_rate : float
+        Temporal sample rate (Hz).
+    dx : float
+        Sensor spacing (m).
+    nperseg : int, optional
+        Time-segment length for Welch averaging. ``None`` (default) uses the
+        whole record (one segment, invertible).
+    noverlap : int, optional
+        Overlap between segments (samples). Defaults to ``nperseg // 2`` when
+        ``nperseg`` is set; ``0`` otherwise. Must satisfy ``0 <= noverlap < nperseg``.
+    window, nfft, normalize
+        As in the single-segment transform, applied per segment.
+    """
+    d = np.asarray(data)
+    if d.ndim != 2:
+        raise ConfigurationError("fk_transform: data must be 2-D (nt, nx)")
+    nt, nx = d.shape
+    fs = float(sample_rate)
+    seg = nt if nperseg is None else int(nperseg)
+    if seg > nt or seg < 1:
+        raise ConfigurationError(
+            f"fk_transform: nperseg ({seg}) must be in [1, nt={nt}]")
+    ov = (seg // 2) if (noverlap is None and nperseg is not None) else int(noverlap or 0)
+    if not (0 <= ov < seg):
+        raise ConfigurationError(
+            f"fk_transform: noverlap ({ov}) must be in [0, nperseg={seg})")
+    wt, wx = _fk_tapers(window, seg, nx)
+    NF, NX = _fk_nfft(nfft, seg, nx)
 
-        Parameters
-        ----------
-        ref : float
-            Reference level for dB scaling.
-        **kwargs
-            Additional keyword arguments.
-        """
-        self.ref = ref
-
-    @staticmethod
-    def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w",
-                        ls="--", lw=1.1, alpha=0.85, label=True):
-        """Overlay the acoustic cone ``f = c * nu`` onto an f-k axis.
-
-        On an f-k plot (x = spatial frequency ``nu`` in cycles/m, y = frequency
-        in Hz) a wave with apparent horizontal speed ``c`` lies on the line
-        ``f = c * nu``. The cone (the ``V`` of the two mirror lines through the
-        origin) bounds the propagating region: acoustic energy has apparent
-        speed ``>= c``, so it falls on or inside the cone. ``sound_speed`` (m/s)
-        is required — there is no default cone. Used by :meth:`plot` via its
-        ``sound_speed`` argument; exposed so it can also annotate an externally
-        drawn f-k axis.
-        """
-        c = float(sound_speed)
-        nu = min(f_max / c, k_max)
-        f = nu * c
-        ax.plot([0, nu], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
-        ax.plot([0, -nu], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
-        if label:
-            ax.text(nu, f, f" {c:.0f} m/s", color=color, fontsize=8,
-                    va="top", ha="right")
-
-    def compute(self, data, fs, dx, normalize=False):
-        """
-        Compute the frequency-wavenumber (f-k) spectrum using a 2D FFT.
-
-        Parameters
-        ----------
-        data : array_like
-            2D array with shape (nt, nx).
-        fs : float
-            Temporal sampling frequency (Hz).
-        dx : float
-            Spatial sampling interval (m).
-        normalize : bool
-            If ``False`` (default) ``fk`` is the raw ``|FFT2|^2`` — a *relative*
-            power (plotted as relative dB). If ``True`` it is the calibrated
-            two-sided 2-D power spectral density
-            ``|FFT2|^2 * dx / (fs * nt * nx)``, in ``input_unit^2 / (Hz·cyc/m)``
-            — Parseval-consistent (``sum(fk)*df*dk == mean(data^2)``). Assumes a
-            rectangular window; for a tapered ``data`` divide by ``mean(w^2)``
-            for absolute accuracy.
-
-        Returns
-        -------
-        freqs : ndarray
-            Frequency axis (Hz).
-        wavenumbers : ndarray
-            Spatial-frequency axis in cycles/m (``= 1/wavelength = k/(2*pi)``,
-            from ``np.fft.fftfreq``). This is **not** the angular wavenumber
-            ``k = 2*pi/lambda`` (rad/m) used elsewhere in ocean acoustics —
-            multiply by ``2*pi`` for that. Phase speed reads off directly as
-            ``c = f / wavenumber`` either way.
-        fk : ndarray
-            2-D power panel (relative ``|FK|^2`` or, with ``normalize``, the
-            calibrated PSD). The complex spectrum is kept on ``.FK`` for
-            :func:`inverse_fk` and is unaffected by ``normalize``.
-        """
-        data = np.asarray(data)
-        nt, nx = data.shape
-
-        # Forward 2D FFT (complex, kept raw for the inverse)
-        FK = np.fft.fftshift(np.fft.fft2(data), axes=(0, 1))
-
-        FKp = np.abs(FK) ** 2
+    # Whole-segment starts only (trailing samples that don't fill a segment are
+    # dropped, as in scipy's Welch); each block is therefore exactly `seg` long.
+    starts = range(0, nt - seg + 1, seg - ov)
+    power = np.zeros((NF, NX))
+    last_spectrum = None
+    n_seg = 0
+    for s0 in starts:
+        block = d[s0:s0 + seg]
+        bw = block * wt[:, None] * wx[None, :]
+        FKc = np.fft.fftshift(np.fft.fft2(bw, s=(NF, NX)), axes=(0, 1))
+        last_spectrum = FKc
+        FKp = np.abs(FKc) ** 2
         if normalize:
-            # Two-sided 2-D PSD; Parseval: sum(FKp)*df*dk == mean(data**2).
-            FKp = FKp * (float(dx) / (float(fs) * nt * nx))
+            s2 = float(np.sum(wt ** 2) * np.sum(wx ** 2))
+            # Density per (Hz · rad/m): the extra 2π converts the per-bin spatial
+            # width to rad/m so that ΣP·Δf·Δk = ⟨x²⟩ still holds with k in rad/m.
+            FKp = FKp * (float(dx) / (fs * s2 * 2.0 * np.pi))
+        power += FKp
+        n_seg += 1
+    power /= n_seg
 
-        # Axes
-        freqs = np.fft.fftshift(np.fft.fftfreq(nt, d=1 / fs))
-        wavenumbers = np.fft.fftshift(np.fft.fftfreq(nx, d=dx))
-
-        # Store results
-        self.frequencies = freqs
-        self.wavenumbers = wavenumbers
-        self.FK = FK
-        self.fk = FKp
-        self.normalized = bool(normalize)
-
-        return freqs, wavenumbers, FKp
-
-    def plot(self, title="", vmin=-60, vmax=20, sound_speed=None, **kwargs):
-        """
-        Plot the computed f-k spectrum as an image.
-
-        Parameters
-        ----------
-        title : str
-            Plot title.
-        vmin, vmax : float
-            Color scale limits (dB).
-        sound_speed : float, optional
-            If given (m/s), overlay the acoustic cone ``f = sound_speed * nu``.
-            Default ``None`` draws no cone.
-        **kwargs
-            Additional keyword arguments passed to ``ax.imshow``.
-        """
-        if not hasattr(self, "frequencies") or not hasattr(self, "wavenumbers") or not hasattr(self, "fk"):
-            raise RuntimeError(
-                "FK.plot: compute() must be called before plotting"
-            )
-
-        floor = np.finfo(float).tiny
-        fk_db = 10 * np.log10(np.maximum(self.fk, floor) / (self.ref ** 2))
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        im = ax.imshow(
-            fk_db,
-            extent=[
-                self.wavenumbers[0],
-                self.wavenumbers[-1],
-                self.frequencies[0],
-                self.frequencies[-1],
-            ],
-            origin="lower",
-            aspect="auto",
-            vmin=vmin,
-            vmax=vmax,
-            **kwargs,
-        )
-
-        ax.set_title(f"[f–k] {title}", loc="left")
-        ax.set_xlabel("Spatial frequency [cycles/m]")
-        ax.set_ylabel("Frequency [Hz]")
-        ax.set_xlim((self.wavenumbers[0], self.wavenumbers[-1]))
-        ax.set_ylim((0, self.frequencies[-1]))
-        ax.grid(alpha=0.3)
-
-        if sound_speed is not None:
-            self.draw_sound_cone(ax, self.frequencies[-1],
-                                 self.wavenumbers[-1], sound_speed)
-
-        cbar = fig.colorbar(im, ax=ax)
-        if getattr(self, "normalized", False):
-            if self.ref == REFERENCE_PRESSURE_WATER:
-                ref = "1µ"
-            elif self.ref == REFERENCE_PRESSURE_AIR:
-                ref = "20µ"
-            else:
-                ref = f"{self.ref:.0e} "
-            cbar.set_label(f"PSD [dB re {ref}Pa²/(Hz·cyc/m)]")
-        else:
-            # raw |FFT2|^2: relative (uncalibrated) power, not a spectral density
-            cbar.set_label("Relative power [dB]")
-
-        plt.tight_layout()
-        return fig, ax
+    freqs = np.fft.fftshift(np.fft.fftfreq(NF, d=1.0 / fs))
+    # Angular wavenumber k = 2π·ν in rad/m (ν = fftfreq is cycles/m), matching
+    # the package-wide convention k = ω/c used by the models: a wave of speed c
+    # lies on the line ω = c·k (i.e. f = c·k/2π — the acoustic "sound cone").
+    wavenumbers = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
+    spectrum = last_spectrum if nperseg is None else None
+    return FKResult(freqs, wavenumbers, power, spectrum)

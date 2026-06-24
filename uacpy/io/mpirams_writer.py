@@ -12,6 +12,9 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Union
 
+from uacpy.core.exceptions import ConfigurationError
+from uacpy.io.units import m_to_km
+
 
 def write_inpe(
     filepath: Union[str, Path],
@@ -144,7 +147,7 @@ def write_inpe(
 
 def write_sediment_file(
     filepath: Union[str, Path],
-    ranges_km: np.ndarray,
+    ranges_m: np.ndarray,
     cs_profiles: np.ndarray,
     rho_profiles: np.ndarray,
     attn_profiles: np.ndarray,
@@ -159,8 +162,9 @@ def write_sediment_file(
     ----------
     filepath : str or Path
         Output file path
-    ranges_km : ndarray
-        Range points in km, shape (N,)
+    ranges_m : ndarray
+        Range points in metres, shape (N,). Converted to the km the
+        ``.sed`` format expects at this boundary.
     cs_profiles : ndarray
         Sound speed perturbation profiles, shape (nzs, N).
     rho_profiles : ndarray
@@ -168,7 +172,7 @@ def write_sediment_file(
     attn_profiles : ndarray
         Attenuation profiles, shape (nzs, N).
     """
-    ranges_km = np.asarray(ranges_km)
+    ranges_km = m_to_km(ranges_m)
     n_profiles = len(ranges_km)
 
     with open(filepath, 'w') as f:
@@ -183,7 +187,7 @@ def write_ssp_file(
     filepath: Union[str, Path],
     depths: np.ndarray,
     speeds: np.ndarray,
-    ranges_km: Optional[np.ndarray] = None,
+    ranges_m: Optional[np.ndarray] = None,
 ):
     """
     Write sound speed profile file for mpiramS.
@@ -201,9 +205,10 @@ def write_ssp_file(
     speeds : ndarray
         Sound speed values. Either 1D (nz,) for range-independent,
         or 2D (nz, n_profiles) for range-dependent.
-    ranges_km : ndarray, optional
-        Range of each profile in km. Required if speeds is 2D.
-        If None and speeds is 1D, writes a single profile at range 0.
+    ranges_m : ndarray, optional
+        Range of each profile in metres, converted to the km the
+        ``.ssp`` format expects at this boundary. Required if speeds
+        is 2D. If None and speeds is 1D, writes a single profile at 0.
     """
     depths = np.asarray(depths)
 
@@ -211,13 +216,12 @@ def write_ssp_file(
         # Range-independent: single profile
         n_profiles = 1
         speeds = speeds.reshape(-1, 1)
-        if ranges_km is None:
-            ranges_km = np.array([0.0])
+        ranges_km = np.array([0.0])
     else:
         n_profiles = speeds.shape[1]
-        if ranges_km is None:
-            raise ValueError("ranges_km required for range-dependent SSP")
-        ranges_km = np.asarray(ranges_km)
+        if ranges_m is None:
+            raise ConfigurationError("ranges_m required for range-dependent SSP")
+        ranges_km = m_to_km(ranges_m)
 
     with open(filepath, 'w') as f:
         for ip in range(n_profiles):
@@ -247,6 +251,12 @@ def write_bth_file(
     """
     ranges_m = np.asarray(ranges_m)
     depths_m = np.asarray(depths_m)
+    if ranges_m.shape != depths_m.shape:
+        raise ConfigurationError(
+            f"write_bth_file: ranges_m ({ranges_m.size}) and depths_m "
+            f"({depths_m.size}) must have the same length; a mismatch would "
+            f"silently truncate the bathymetry."
+        )
     with open(filepath, 'w') as f:
         for r, d in zip(ranges_m, depths_m):
             f.write(f"{r} {d}\n")

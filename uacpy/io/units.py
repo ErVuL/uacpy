@@ -23,6 +23,16 @@ def m_to_km(x):
     return np.asarray(x, dtype=float) / 1000.0
 
 
+def hz_to_khz(x):
+    """Divide a Hz axis by 1000 to get kHz (display / kHz-on-disk axes)."""
+    return np.asarray(x, dtype=float) / 1000.0
+
+
+def khz_to_hz(x):
+    """Multiply a kHz axis by 1000 to get Hz."""
+    return np.asarray(x, dtype=float) * 1000.0
+
+
 def deg_to_rad(x):
     """Convert degrees to radians."""
     return np.asarray(x, dtype=float) * (np.pi / 180.0)
@@ -33,4 +43,5 @@ def rad_to_deg(x):
     return np.asarray(x, dtype=float) * (180.0 / np.pi)
 
 
-__all__ = ["km_to_m", "m_to_km", "deg_to_rad", "rad_to_deg"]
+__all__ = ["km_to_m", "m_to_km", "hz_to_khz", "khz_to_hz",
+           "deg_to_rad", "rad_to_deg"]

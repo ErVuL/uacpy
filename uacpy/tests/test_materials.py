@@ -7,7 +7,7 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import (
-    BoundaryProperties, SedimentLayer, LayeredBottom,
+    BoundaryProperties, SedimentLayer, SeabedColumn,
 )
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 
@@ -110,11 +110,11 @@ class TestPublicReexports:
 
 class TestLayeredBottomFromPresets:
     def test_simple_stack(self):
-        bot = LayeredBottom.from_presets(
+        bot = SeabedColumn.from_presets(
             layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
             halfspace='limestone',
         )
-        assert isinstance(bot, LayeredBottom)
+        assert isinstance(bot, SeabedColumn)
         assert len(bot.layers) == 3
         assert [layer.thickness for layer in bot.layers] == [5.0, 15.0, 30.0]
         assert bot.layers[0].sound_speed == 1500.0  # clay c_p
@@ -122,7 +122,7 @@ class TestLayeredBottomFromPresets:
         assert bot.halfspace.sound_speed == 3000.0  # limestone c_p
 
     def test_layer_overrides(self):
-        bot = LayeredBottom.from_presets(
+        bot = SeabedColumn.from_presets(
             layers=[('silt', 10.0, {'attenuation': 1.5})],
             halfspace='sand',
         )
@@ -130,7 +130,7 @@ class TestLayeredBottomFromPresets:
         assert bot.layers[0].sound_speed == 1575.0  # silt baseline kept
 
     def test_halfspace_overrides(self):
-        bot = LayeredBottom.from_presets(
+        bot = SeabedColumn.from_presets(
             layers=[('sand', 5.0)],
             halfspace='limestone',
             halfspace_overrides={'attenuation': 0.05},
@@ -140,7 +140,7 @@ class TestLayeredBottomFromPresets:
 
     def test_bad_entry_shape_raises(self):
         with pytest.raises(ConfigurationError, match="(name, thickness)"):
-            LayeredBottom.from_presets(
+            SeabedColumn.from_presets(
                 layers=[('sand',)],
                 halfspace='limestone',
             )

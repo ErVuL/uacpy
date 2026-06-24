@@ -101,30 +101,3 @@ def apply_fading_channel(signal, taps, delays_samples):
     for i, di in enumerate(d):
         y[di:di + n] += taps[i, :n] * x
     return y
-
-
-def plot_channel(h, sample_rate, title="", axes=None):
-    """Two-panel channel view: |h[n]| (delay) and |H(f)| (frequency response).
-
-    Returns ``(fig, axes)``.
-    """
-    import matplotlib.pyplot as plt
-    h = np.asarray(h, dtype=complex)
-    fs = float(sample_rate)
-    if axes is None:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    else:
-        fig = axes[0].figure
-    t = np.arange(h.size) / fs * 1e3
-    axes[0].stem(t, np.abs(h))
-    axes[0].set_xlabel("Delay [ms]"); axes[0].set_ylabel("|h|")
-    axes[0].set_title(f"[channel] impulse response {title}", loc="left")
-    axes[0].grid(alpha=0.3)
-    nfft = max(1024, 2 * h.size)
-    f = np.fft.rfftfreq(nfft, d=1.0 / fs)
-    H = 20 * np.log10(np.abs(np.fft.rfft(h, nfft)) + 1e-12)
-    axes[1].plot(f, H)
-    axes[1].set_xlabel("Frequency [Hz]"); axes[1].set_ylabel("|H(f)| [dB]")
-    axes[1].set_title("frequency response", loc="left"); axes[1].grid(alpha=0.3)
-    plt.tight_layout()
-    return fig, axes

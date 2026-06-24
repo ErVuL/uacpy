@@ -17,6 +17,8 @@ ISO 18405:2017, *Underwater acoustics — Terminology* (decidecade = 1/10 decade
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
@@ -43,14 +45,14 @@ def decidecade_bands(f_low, f_high):
     return lower[keep], centers[keep], upper[keep]
 
 
-def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
+def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
     """Integrate a one-sided PSD into decidecade band levels.
 
     Parameters
     ----------
     psd : array_like
         One-sided power spectral density [pressure²/Hz, e.g. Pa²/Hz].
-    freqs : array_like
+    frequencies : array_like
         Frequencies [Hz] matching ``psd`` (monotonic, > 0).
     ref : float
         Reference pressure (default ``1e-6`` Pa = 1 µPa, the water standard).
@@ -60,38 +62,43 @@ def decidecade_band_levels(psd, freqs, ref=REFERENCE_PRESSURE_WATER):
     centers, levels : numpy.ndarray
         Band centre frequencies [Hz] and band levels [dB re ``ref²``]; bands with
         no spectral support are ``nan``.
+
+    Notes
+    -----
+    A band straddling fewer than two PSD grid points is integrated by a
+    rectangular ``psd · bandwidth`` estimate (``np.trapezoid`` over a single
+    point is 0, which would silently ``NaN`` the band on a grid too coarse to
+    resolve it) and a one-time :class:`UserWarning` names how many bands were
+    under-resolved, so grid coarseness is visible rather than read as "no
+    energy".
     """
     psd = np.asarray(psd, dtype=float)
-    freqs = np.asarray(freqs, dtype=float)
-    pos = freqs > 0
-    lower, centers, upper = decidecade_bands(freqs[pos].min(), freqs[pos].max())
+    frequencies = np.asarray(frequencies, dtype=float)
+    pos = frequencies > 0
+    lower, centers, upper = decidecade_bands(frequencies[pos].min(),
+                                             frequencies[pos].max())
     levels = np.full(centers.size, np.nan)
+    n_coarse = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
-        m = (freqs >= lo) & (freqs < hi)
-        if np.count_nonzero(m) >= 1:
-            power = np.trapezoid(psd[m], freqs[m])
-            if power > 0:
-                levels[i] = 10.0 * np.log10(power / ref ** 2)
+        m = (frequencies >= lo) & (frequencies < hi)
+        n = int(np.count_nonzero(m))
+        if n >= 2:
+            power = np.trapezoid(psd[m], frequencies[m])
+        elif n == 1:
+            # Coarse grid: trapezoid over one point is 0; fall back to a
+            # rectangular psd·bandwidth estimate so the band isn't lost.
+            n_coarse += 1
+            power = float(psd[m][0]) * (hi - lo)
+        else:
+            continue
+        if power > 0:
+            levels[i] = 10.0 * np.log10(power / ref ** 2)
+    if n_coarse:
+        warnings.warn(
+            f"decidecade_band_levels: {n_coarse} band(s) straddled only one PSD "
+            "grid point and were estimated rectangularly (psd·bandwidth); the "
+            "PSD grid is too coarse to resolve them. Use a finer-resolution PSD "
+            "for an integrated level.",
+            UserWarning, stacklevel=2,
+        )
     return centers, levels
-
-
-def plot_band_levels(centers, levels, ax=None, title="", width=0.8, **kwargs):
-    """Bar plot of decidecade band levels vs centre frequency. Returns ``(fig, ax)``."""
-    import matplotlib.pyplot as plt
-    c = np.asarray(centers, dtype=float)
-    lv = np.asarray(levels, dtype=float)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(9, 4))
-    else:
-        fig = ax.figure
-    x = np.log10(c)
-    bw = width * np.median(np.diff(x)) if c.size > 1 else 0.04
-    ax.bar(x, lv, width=bw, **kwargs)
-    ticks = x[:: max(1, c.size // 12)]
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
-    ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel("Band level [dB re 1 µPa²]")
-    ax.set_title(f"[decidecade] band levels {title}", loc="left")
-    ax.grid(alpha=0.3, axis="y")
-    return fig, ax

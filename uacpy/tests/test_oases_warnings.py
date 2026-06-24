@@ -22,6 +22,11 @@ pytestmark = pytest.mark.requires_oases
 class TestOASTWarnings:
     """Tests that the OAST wrapper warns on unsupported inputs."""
 
+    # The off-grid dB-interpolation warning (asserted on its own below) also
+    # fires here incidentally; silence it so only the RD warning is under test.
+    # The leading '.' matches the literal colon in "OAST:".
+    @pytest.mark.filterwarnings(
+        "ignore:OAST. receiver.ranges do not match:UserWarning")
     def test_oast_range_dependent_warning(
         self, range_dependent_env, source, receiver_small
     ):
@@ -32,6 +37,22 @@ class TestOASTWarnings:
             result = oast.run(range_dependent_env, source, receiver_small)
 
         assert result is not None, "OAST failed with range-dependent environment"
+
+    @pytest.mark.requires_binary
+    def test_oast_off_grid_range_interpolation_warning(self):
+        """Audit M7: OAST warns when receiver ranges miss its native FFT grid
+        and TL is therefore interpolated in dB (which smears nulls)."""
+        env = uacpy.Environment(
+            name='oast_offgrid', bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.5, attenuation=0.5))
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        # Deliberately off the internal FFT range grid.
+        rcv = uacpy.Receiver(depths=[50.0], ranges=[1234.0, 4321.0])
+        oast = OAST(verbose=False)
+        with pytest.warns(UserWarning, match="receiver.ranges do not match"):
+            oast.run(env, src, rcv)
 
 
 def test_all_oases_models_available():

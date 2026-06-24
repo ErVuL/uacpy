@@ -36,6 +36,8 @@ import warnings as _warnings
 import numpy as np
 from typing import Union, Optional, Tuple
 
+from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
+
 __all__ = [
     'soundspeed',
     'soundspeed_unesco',
@@ -49,6 +51,7 @@ __all__ = [
     'bubble_soundspeed',
     'pressure',
     'spl',
+    'power_to_db',
     'pekeris_root',
 ]
 
@@ -481,12 +484,15 @@ def bubble_surface_loss(
     Returns
     -------
     float or ndarray
-        Absorption as a linear multiplier
+        Surface reflection as a linear amplitude multiplier in ``(0, 1]``
+        (1.0 = no loss). To express the loss as a **positive** dB number,
+        consistent with :func:`bottom_loss_curve`, negate the log:
+        ``loss_db = -20 * np.log10(multiplier)``.
 
     Examples
     --------
-    >>> loss = bubble_surface_loss(3, 10000, 0)
-    >>> loss_db = 20 * np.log10(loss)
+    >>> mult = bubble_surface_loss(3, 10000, 0)
+    >>> loss_db = -20 * np.log10(mult)   # positive dB loss
     >>> print(f"Surface loss: {loss_db:.2f} dB")
 
     References
@@ -622,6 +628,38 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
     """
     rmsx = np.sqrt(np.mean(np.abs(x) ** 2))
     return 20 * np.log10(rmsx / ref)
+
+
+def power_to_db(power, ref: float = REFERENCE_PRESSURE_WATER, *,
+                floor: float = PRESSURE_FLOOR):
+    """Mean-square / power-like pressure quantity → level in dB re ``ref``.
+
+    For a *squared* quantity (PSD in Pa²/Hz, SEL in Pa²·s, mean-square
+    pressure, an f-k spectrum, …) the level is ``10·log10(power / ref²)``. The
+    single conversion every spectral estimator should use: ``power`` is floored
+    at ``floor`` before the log so a silent (zero) sample yields a finite, very
+    negative level instead of ``-inf`` (which would otherwise poison a
+    subsequent ``mean`` / ``histogram``).
+
+    Parameters
+    ----------
+    power : array_like
+        Squared-pressure quantity (e.g. PSD, SEL, |p|²); same units as
+        ``ref**2``.
+    ref : float, optional
+        Reference pressure (default: 1 µPa, water). Use
+        ``REFERENCE_PRESSURE_AIR`` for air.
+    floor : float, optional
+        Lower bound applied to ``power`` before the log (default
+        :data:`PRESSURE_FLOOR`), guarding ``log10(0)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Level in dB re ``ref``.
+    """
+    power = np.asarray(power, dtype=float)
+    return 10.0 * np.log10(np.maximum(power, floor) / (ref ** 2))
 
 
 def pekeris_root(gamma2: np.ndarray) -> np.ndarray:

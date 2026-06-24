@@ -155,12 +155,39 @@ def _blend(a, b, t):
 BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
 # Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
 BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
+# facecolor (NOT color): a ``color=`` entry makes mpl draw the hatch in the
+# fill colour, hiding the '///'; ``facecolor`` leaves the hatch in ``edgecolor``.
 BOTTOM_FILL_STYLE = {
-    'color': BOTTOM_FILL_COLOR,
+    'facecolor': BOTTOM_FILL_COLOR,
     'hatch': BOTTOM_FILL_HATCH,
     'edgecolor': BOTTOM_HATCH_COLOR,
     'linewidth': 0.4,
 }
+# Plain (un-hatched) seabed fill for TL / ray data overlays — the '///'
+# half-space hatch is reserved for the environment cross-section, where it
+# reads as the semi-infinite substrate; over a TL heatmap it just clutters.
+BOTTOM_FILL_STYLE_SOLID = {
+    'facecolor': BOTTOM_FILL_COLOR,
+    'edgecolor': 'none',
+}
+
+# "Ground" colormap used to shade the seabed by sound speed: light sandy tan
+# (soft sediment) → a rich medium-brown (hard rock). Terrain-toned like
+# ``copper`` but deliberately capped well short of black, so the hard/fast end
+# reads as warm brown ground rather than a near-black band. Callers sample its
+# 0.25–0.85 band, which spans light-tan → medium-brown.
+def _bottom_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list('uacpy_bottom', [
+        (0.00, '#efe2c8'),   # very light tan
+        (0.25, '#e0c49a'),   # light sand-tan  (soft sediment)
+        (0.55, '#b9824c'),   # sienna / copper
+        (0.85, '#835331'),   # medium-dark brown (hard rock) — not black
+        (1.00, '#6a4226'),
+    ])
+
+
+BOTTOM_CMAP = _bottom_cmap()
 
 # Seafloor edge styles — applied above ``BOTTOM_FILL_STYLE`` at the
 # water-sediment interface. RD bathymetry traces the actual seafloor and

@@ -5,12 +5,12 @@ EXAMPLE 15: Elastic Boundaries - Complete Comparison of Both Workflows
 
 OBJECTIVE:
     Demonstrate and compare TWO workflows for handling elastic boundaries:
-    1. KrakenField Auto-Detection (uses KrakenC internally)
+    1. Kraken Auto-Detection (uses krakenc internally)
     2. BOUNCE → SCOOTER (pre-computed reflection coefficients)
 
 FEATURES DEMONSTRATED:
-    ✓ KrakenField automatic elastic boundary detection
-    ✓ KrakenC for complex modes with shear
+    ✓ Kraken automatic elastic boundary detection
+    ✓ krakenc for complex modes with shear
     ✓ BOUNCE reflection coefficient computation
     ✓ SCOOTER with .brc files
     ✓ Side-by-side comparison of both approaches
@@ -18,7 +18,7 @@ FEATURES DEMONSTRATED:
 
 WHEN TO USE EACH APPROACH:
 
-    **Approach 1: KrakenField Auto (→ KrakenC)**
+    **Approach 1: Kraken Auto (→ krakenc)**
     ✓ Simple elastic boundaries
     ✓ Quick, one-step solution
     ✓ Good for beginners
@@ -49,7 +49,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
-from uacpy.models import KrakenField, Bounce, Scooter  # noqa: E402
+from uacpy.models import Kraken, Bounce, Scooter  # noqa: E402
 from uacpy.core import BoundaryProperties  # noqa: E402
 import time  # noqa: E402
 
@@ -59,7 +59,7 @@ def main():
     print("EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison")
     print("═" * 80)
     print("\nCompares two approaches for modeling elastic boundaries:")
-    print("  1. KrakenField Auto-Detection (→ KrakenC)")
+    print("  1. Kraken Auto-Detection (→ krakenc)")
     print("  2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -97,28 +97,28 @@ def main():
     print(f"  ✓ Receiver: {len(receiver.depths)} depths, {len(receiver.ranges)} ranges")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # APPROACH 1: KrakenField Auto-Detection (→ KrakenC)
+    # APPROACH 1: Kraken Auto-Detection (→ krakenc)
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\n" + "─" * 80)
-    print("APPROACH 1: KrakenField with Auto-Detection")
+    print("APPROACH 1: Kraken with Auto-Detection")
     print("─" * 80)
-    print("KrakenField detects elastic boundary and automatically uses KrakenC")
+    print("Kraken detects elastic boundary and automatically uses krakenc")
     print("for complex modes computation.\n")
 
-    print("[1/2] Running KrakenField...")
-    print("  • KrakenField will detect shear_speed > 0")
-    print("  • Automatically switches to KrakenC (complex modes)")
+    print("[1/2] Running Kraken...")
+    print("  • Kraken will detect shear_speed > 0")
+    print("  • Automatically switches to krakenc (complex modes)")
     print("  • Computes TL field directly")
 
     t_start = time.time()
-    krakenfield = KrakenField(verbose=False)
+    krakenfield = Kraken(verbose=False)
     result_krakenfield = krakenfield.compute_tl(env, source, receiver)
     t_krakenfield = time.time() - t_start
 
-    print(f"  ✓ KrakenField completed in {t_krakenfield:.2f}s")
+    print(f"  ✓ Kraken completed in {t_krakenfield:.2f}s")
     print(f"    - TL field shape: {result_krakenfield.data.shape}")
-    print("    - Used KrakenC internally for elastic bottom")
+    print("    - Used krakenc internally for elastic bottom")
 
     # ═══════════════════════════════════════════════════════════════════════
     # APPROACH 2: BOUNCE → SCOOTER
@@ -204,13 +204,13 @@ def main():
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))
 
-    print("\nTL Comparison (KrakenField vs SCOOTER):")
+    print("\nTL Comparison (Kraken vs SCOOTER):")
     print(f"  • Maximum difference: {max_diff:.2f} dB")
     print(f"  • Mean absolute difference: {mean_diff:.2f} dB")
     print(f"  • RMS difference: {rms_diff:.2f} dB")
 
     print("\nPerformance:")
-    print(f"  • KrakenField: {t_krakenfield:.2f}s")
+    print(f"  • Kraken: {t_krakenfield:.2f}s")
     print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.2f}s (BOUNCE: {t_bounce:.2f}s + SCOOTER: {t_scooter:.2f}s)")
     direction = 'faster' if t_krakenfield < t_bounce_total else 'slower'
     print(f"  • Speedup: {t_bounce_total/t_krakenfield:.1f}x {direction}")
@@ -233,7 +233,7 @@ def main():
     gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.35)
 
     # ─────────────────────────────────────────────────────────────────────
-    # Plot 1: KrakenField TL
+    # Plot 1: Kraken TL
     # ─────────────────────────────────────────────────────────────────────
     ax1 = fig.add_subplot(gs[0, 0])
 
@@ -249,7 +249,7 @@ def main():
     )
     ax1.set_xlabel('Range (km)', fontweight='bold')
     ax1.set_ylabel('Depth (m)', fontweight='bold')
-    ax1.set_title('APPROACH 1: KrakenField (Auto KrakenC)', fontweight='bold', fontsize=11)
+    ax1.set_title('APPROACH 1: Kraken (auto krakenc)', fontweight='bold', fontsize=11)
     ax1.invert_yaxis()
     plt.colorbar(im1, ax=ax1, label='TL (dB)')
 
@@ -290,7 +290,7 @@ def main():
     )
     ax3.set_xlabel('Range (km)', fontweight='bold')
     ax3.set_ylabel('Depth (m)', fontweight='bold')
-    ax3.set_title(f'Difference (KrakenField - SCOOTER)\nMean: {mean_diff:.2f} dB',
+    ax3.set_title(f'Difference (Kraken - SCOOTER)\nMean: {mean_diff:.2f} dB',
                   fontweight='bold', fontsize=11)
     ax3.invert_yaxis()
     plt.colorbar(im3, ax=ax3, label='ΔTL (dB)')
@@ -327,7 +327,7 @@ def main():
     ax5 = fig.add_subplot(gs[1, 1])
 
     ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.at(depth=source.depths[0]).tl,
-             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
+             'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
     ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).tl,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
@@ -346,7 +346,7 @@ def main():
     mid_range_km = np.median(result_krakenfield.ranges) / 1000
 
     ax6.plot(result_krakenfield.at(range=mid_range_km * 1000.0).tl, result_krakenfield.depths,
-             'b-', linewidth=2.5, label='KrakenField (Auto)', alpha=0.8)
+             'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
     ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).tl, result_scooter.depths,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
@@ -363,17 +363,17 @@ def main():
     ax7 = fig.add_subplot(gs[2, 0])
     ax7.axis('off')
 
-    workflow1 = "APPROACH 1: KrakenField Auto\n" + "="*35 + "\n\n"
+    workflow1 = "APPROACH 1: Kraken Auto\n" + "="*35 + "\n\n"
     workflow1 += "Step 1: Define environment\n"
     workflow1 += "  bottom = BoundaryProperties(\n"
     workflow1 += "    acoustic_type='half-space',\n"
     workflow1 += "    shear_speed=400  # Elastic!\n"
     workflow1 += "  )\n\n"
-    workflow1 += "Step 2: Run KrakenField\n"
-    workflow1 += "  krakenfield = KrakenField()\n"
+    workflow1 += "Step 2: Run Kraken\n"
+    workflow1 += "  krakenfield = Kraken()\n"
     workflow1 += "  result = krakenfield.run(...)\n"
     workflow1 += "  # Auto-detects elastic\n"
-    workflow1 += "  # Uses KrakenC internally\n\n"
+    workflow1 += "  # Uses krakenc internally\n\n"
     workflow1 += "✓ Simple, one-step\n"
     workflow1 += "✓ Good for beginners\n"
     workflow1 += f"✓ Time: {t_krakenfield:.1f}s"
@@ -417,7 +417,7 @@ def main():
 
     summary = "RECOMMENDATIONS\n" + "="*35 + "\n\n"
     summary += "When to use EACH:\n\n"
-    summary += "KrakenField Auto:\n"
+    summary += "Kraken Auto:\n"
     summary += "  • Simple elastic bottoms\n"
     summary += "  • Single simulation runs\n"
     summary += "  • Quick prototyping\n"
@@ -461,16 +461,16 @@ def main():
     print(f"✓ RMS difference: {rms_diff:.2f} dB")
 
     print("\nPERFORMANCE:")
-    print(f"  • KrakenField Auto: {t_krakenfield:.2f}s")
+    print(f"  • Kraken Auto: {t_krakenfield:.2f}s")
     print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.2f}s")
     if t_krakenfield < t_bounce_total:
-        print(f"  → KrakenField is {t_bounce_total/t_krakenfield:.1f}x faster for single runs")
+        print(f"  → Kraken is {t_bounce_total/t_krakenfield:.1f}x faster for single runs")
     else:
         print(f"  → SCOOTER is {t_krakenfield/t_bounce_total:.1f}x faster for single runs")
     print("  → But BOUNCE .brc can be reused for multiple runs!")
 
     print("\nCHOOSE:")
-    print("  • KrakenField Auto → For simple cases and single runs")
+    print("  • Kraken Auto → For simple cases and single runs")
     print("  • BOUNCE→BELLHOP/SCOOTER/KRAKEN → For professional workflows and reusability")
     print("\nNOTE:")
     print("  • BOUNCE outputs: .brc (bottom) + .irc (internal) reflection coefficients")

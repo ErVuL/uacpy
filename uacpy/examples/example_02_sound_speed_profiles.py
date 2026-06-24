@@ -55,7 +55,7 @@ SOURCE:
 MODELS COMPARED:
     1. Bellhop      - Ray tracing
     2. RAM          - Parabolic equation
-    3. KrakenField  - Normal modes
+    3. Kraken  - Normal modes
     4. Scooter      - Wavenumber integration
     5. SPARC        - Seismo-acoustic PE
     6. OAST         - OASES wavenumber integration
@@ -77,7 +77,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy.models import Bellhop, RAM, KrakenField, Scooter  # noqa: E402
+from uacpy.models import Bellhop, RAM, Kraken, Scooter  # noqa: E402
 from plotting_utils import create_example_report  # noqa: E402
 
 
@@ -134,7 +134,7 @@ def scenario_a_munk_profile():
     results = {}
     models = [
         ('Bellhop', Bellhop(verbose=False)),
-        ('KrakenField', KrakenField(verbose=False)),
+        ('Kraken', Kraken(verbose=False)),
     ]
 
     print("\nRunning propagation models:")
@@ -228,7 +228,7 @@ def scenario_b_pekeris_waveguide():
     models = [
         ('Bellhop', Bellhop(verbose=False)),
         ('RAM', RAM(verbose=False)),
-        ('KrakenField', KrakenField(verbose=False)),
+        ('Kraken', Kraken(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
     ]
 
@@ -325,7 +325,7 @@ def scenario_c_thermocline():
     models = [
         ('Bellhop', Bellhop(verbose=False)),
         ('RAM', RAM(verbose=False)),
-        ('KrakenField', KrakenField(verbose=False)),
+        ('Kraken', Kraken(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
     ]
 

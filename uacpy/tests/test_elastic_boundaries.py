@@ -17,10 +17,10 @@ import numpy as np
 from pathlib import Path
 
 from uacpy.core import Environment, Receiver, BoundaryProperties
-from uacpy.core.environment import LayeredBottom, SedimentLayer
+from uacpy.core.environment import SeabedColumn, SedimentLayer
 from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy import Field
-from uacpy.models import Kraken, KrakenC, KrakenField, Bounce, Scooter
+from uacpy.models import Kraken, Bounce, Scooter
 
 # Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
 pytestmark = pytest.mark.requires_binary
@@ -50,7 +50,7 @@ def elastic_env():
 
 class TestElasticOverFluidHalfspaceGuard:
     """`krakenc.exe` spins forever in setup on a solid-over-liquid bottom
-    interface (an elastic ``LayeredBottom`` layer over a fluid halfspace).
+    interface (an elastic ``SeabedColumn`` layer over a fluid halfspace).
     `_KrakenBase` rejects it up front so all three Kraken-family models fail
     fast with a typed error instead of hanging for ``timeout`` seconds."""
 
@@ -65,7 +65,7 @@ class TestElasticOverFluidHalfspaceGuard:
     def _elastic_over_fluid():
         return Environment(
             name='elastic-over-fluid', bathymetry=50.0, ssp=1500.0,
-            bottom=LayeredBottom(
+            bottom=SeabedColumn(
                 layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
                                       density=1.8, attenuation=0.3, shear_speed=300.0)],
                 halfspace=BoundaryProperties(acoustic_type='half-space',
@@ -73,7 +73,7 @@ class TestElasticOverFluidHalfspaceGuard:
                                              attenuation=0.4)),  # cs=0 ⇒ fluid
         )
 
-    @pytest.mark.parametrize('model_cls', [Kraken, KrakenC, KrakenField])
+    @pytest.mark.parametrize('model_cls', [Kraken])
     def test_rejects_fast_with_alternatives(self, model_cls):
         src, rcv = self._src_rcv()
         with pytest.raises(UnsupportedFeatureError) as exc:
@@ -84,7 +84,7 @@ class TestElasticOverFluidHalfspaceGuard:
     def _elastic_over_elastic():
         return Environment(
             name='elastic-over-elastic', bathymetry=50.0, ssp=1500.0,
-            bottom=LayeredBottom(
+            bottom=SeabedColumn(
                 layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
                                       density=1.8, attenuation=0.3, shear_speed=300.0)],
                 halfspace=BoundaryProperties(acoustic_type='half-space',
@@ -95,8 +95,7 @@ class TestElasticOverFluidHalfspaceGuard:
         """Guard is specific: an elastic layer over an *elastic* halfspace is
         not rejected (krakenc handles solid-solid)."""
         src, _ = self._src_rcv()
-        rcv = Receiver(depths=np.linspace(2, 48, 20), ranges=np.linspace(100, 3000, 20))
-        modes = KrakenC().run(self._elastic_over_elastic(), src, rcv)
+        modes = Kraken(backend='krakenc').compute_modes(self._elastic_over_elastic(), src)
         assert modes.k.shape[0] > 0
 
     def test_receiver_in_elastic_subbottom_returns_nan(self):
@@ -109,7 +108,7 @@ class TestElasticOverFluidHalfspaceGuard:
         rcv = Receiver(depths=np.array([20.0, 55.0, 70.0]),
                        ranges=np.linspace(100, 3000, 20))
         with pytest.warns(UserWarning, match='sub-bottom'):
-            field = KrakenField().run(self._elastic_over_elastic(), src, rcv)
+            field = Kraken().run(self._elastic_over_elastic(), src, rcv)
         tl = field.tl
         assert np.isfinite(tl[0]).any()          # water column: real values
         assert not np.isfinite(tl[1]).any()      # in elastic layer: all NaN
@@ -145,7 +144,7 @@ class TestElasticBoundaryAutoDetection:
 
     def test_krakenfield_detects_elastic_bottom(self, elastic_env, source, receiver_small):
         """Test that KrakenField detects elastic bottom and uses KrakenC."""
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
 
         # This should automatically detect elastic boundary and use KrakenC
         result = krakenfield.compute_tl(elastic_env, source, receiver_small)
@@ -161,7 +160,7 @@ class TestElasticBoundaryAutoDetection:
 
     def test_krakenfield_fluid_bottom(self, fluid_env, source, receiver_small):
         """Test that KrakenField works with fluid bottom (uses regular Kraken)."""
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
 
         result = krakenfield.compute_tl(fluid_env, source, receiver_small)
 
@@ -171,7 +170,7 @@ class TestElasticBoundaryAutoDetection:
 
     def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_small):
         """Test that elastic and fluid bottoms produce different results."""
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
 
         result_elastic = krakenfield.compute_tl(elastic_env, source, receiver_small)
         result_fluid = krakenfield.compute_tl(fluid_env, source, receiver_small)
@@ -326,7 +325,7 @@ class TestWorkflowComparison:
     def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
         """Compare results from both elastic boundary workflows."""
         # Approach 1: KrakenField auto-detection
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
         result_krakenfield = krakenfield.compute_tl(elastic_env, source, receiver_small)
 
         # Approach 2: BOUNCE → SCOOTER

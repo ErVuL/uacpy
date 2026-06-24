@@ -3,17 +3,17 @@ Acoustics Toolbox / OALIB environment-file writers.
 
 Each function writes one logical block of the AT ``.env`` format onto an
 open text handle, plus the ``.flp`` field-parameter writers used by
-KrakenField. ``write_multi_profile_env`` and ``write_fieldflp`` /
+Kraken. ``write_multi_profile_env`` and ``write_fieldflp`` /
 ``write_field3dflp`` write the full file.
 
 Adoption across uacpy model wrappers:
 
-- ``write_header``: Kraken, KrakenC, KrakenField, Scooter, Bounce.
+- ``write_header``: Kraken, Scooter, Bounce.
   SPARC writes its own title/freq/NMedia line (`SPARC` has a 5th TopOpt
   position for ``output_mode``); Bellhop has its own writer entirely.
-- ``write_bottom_section``: Kraken, KrakenC, KrakenField, Bounce.
-  Scooter and SPARC open-code the bottom block because their ``'F'``
-  (BRC) and ``'A'`` halfspace formats slightly differ.
+- ``write_bottom_section``: Kraken, Scooter, Bounce.
+  SPARC open-codes the bottom block because its ``'A'`` halfspace
+  format differs.
 - ``write_source_depths`` / ``write_receiver_depths`` /
   ``write_receiver_ranges``: every AT-family wrapper, including Bellhop.
 - ``write_absorption_block`` (calls ``write_fg_params`` / ``write_bio_layers``):
@@ -33,19 +33,35 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR,
+    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
 )
 from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
 from uacpy.io.units import m_to_km
+from uacpy.core.exceptions import ConfigurationError
 
 
 _BOUNDARY_TYPE_MAP = {
     "vacuum": "V", "rigid": "R",
     "halfspace": "A", "half-space": "A",
     "file": "F", "precalc": "P",
-    "grain-size": "G", "grain_size": "G", "grain": "G",
 }
+
+# AT env files write layer depths at .1f precision, so a sediment layer thinner
+# than this rounds to zero thickness (top depth == bottom depth) — a degenerate,
+# over-meshed medium that Kraken / Scooter / Bounce reject. Drop such
+# sub-resolution layers when writing; the medium below becomes the boundary.
+_MIN_LAYER_THICKNESS_M = 0.1
+
+
+def _writable_layers(bottom):
+    """Sediment layers (of a range-independent ``Bottom`` or a
+    ``SeabedColumn``) thick enough to be a distinct AT medium (≥ the ``.1f``
+    depth resolution); sub-resolution layers are dropped as degenerate (they
+    would collapse to a zero-thickness medium)."""
+    col = bottom.columns[0] if hasattr(bottom, 'columns') else bottom
+    return [lyr for lyr in col.layers
+            if lyr.thickness >= _MIN_LAYER_THICKNESS_M]
 
 
 _AT_INTERP_TO_CODE = {
@@ -91,7 +107,7 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
         return 'C'
     key = resolve_ssp_interp(env, model_interp)
     if key not in _AT_INTERP_TO_CODE:
-        raise ValueError(
+        raise ConfigurationError(
             f"interp_ssp={model_interp!r} not recognised. Valid: "
             f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
         )
@@ -161,11 +177,11 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     # otherwise produce a silently-malformed .ssp file that Bellhop
     # rejects deep in its run.
     if c.ndim != 2:
-        raise ValueError(
+        raise ConfigurationError(
             f"write_ssp: c must be 2-D (n_depth, n_ranges); got shape {c.shape}"
         )
     if c.shape[1] != Npts:
-        raise ValueError(
+        raise ConfigurationError(
             f"write_ssp: len(r_km) = {Npts} does not match c.shape[1] = "
             f"{c.shape[1]} (each column of c must be one profile)"
         )
@@ -241,7 +257,7 @@ def write_header(
     else:
         n_media = 1
         if env.has_layered_bottom():
-            n_media += len(env.bottom.layers)
+            n_media += len(_writable_layers(env.bottom))
     f.write(f"{n_media}\n")
 
     ssp_code = ssp_topopt
@@ -292,7 +308,7 @@ def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> Non
         mean depth (m).
     """
     if params is None or len(params) != 4:
-        raise ValueError(
+        raise ConfigurationError(
             "write_fg_params: params must be a 4-tuple (T, S, pH, z_bar)"
         )
     T, S, pH, z_bar = params
@@ -315,11 +331,11 @@ def write_bio_layers(f: TextIO, bio_layers) -> None:
         [(Z1, Z2, f0, Q, a0), ...] per layer.
     """
     if not bio_layers:
-        raise ValueError("bio_layers must be a non-empty list of 5-tuples")
+        raise ConfigurationError("bio_layers must be a non-empty list of 5-tuples")
     f.write(f"{len(bio_layers)}\n")
     for layer in bio_layers:
         if len(layer) != 5:
-            raise ValueError(
+            raise ConfigurationError(
                 "Each bio layer must be a 5-tuple (Z1, Z2, f0, Q, a0)"
             )
         Z1, Z2, f0, Q, a0 = layer
@@ -365,7 +381,7 @@ def resolve_phase_speed_bounds(
         return float(c_low), float(c_high)
     ssp_pairs = env.ssp.to_pairs()
     c_min = float(ssp_pairs[:, 1].min())
-    hs_c = env.halfspace_at_range(0.0).sound_speed
+    hs_c = env.bottom.halfspace_at(range=0.0).sound_speed
     c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
     return (
         float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
@@ -391,7 +407,7 @@ def write_phase_speed_and_rmax(
 
     ``rmax_m`` is converted to km. ``rmax_format`` controls the Fortran
     print width (Scooter/SPARC use ``"{:.6f}"`` to preserve sub-km
-    precision; Kraken/KrakenField use the ``"{:.1f}"`` default).
+    precision; Kraken/Kraken use the ``"{:.1f}"`` default).
     """
     _c_low, _c_high = resolve_phase_speed_bounds(env, c_low, c_high)
     f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
@@ -438,7 +454,7 @@ def write_layer_sections(
     n_mesh: int = 0,
 ) -> float:
     """
-    Write sediment layer SSP blocks for LayeredBottom (NMEDIA > 1).
+    Write sediment layer SSP blocks for a layered SeabedColumn (NMEDIA > 1).
 
     Each SedimentLayer becomes an additional medium in the AT format.
     Each medium block has: mesh params line, then isovelocity SSP entries.
@@ -448,7 +464,7 @@ def write_layer_sections(
     f : TextIO
         Open file handle
     env : Environment
-        Environment with a LayeredBottom on env.bottom
+        Environment with a layered SeabedColumn on env.bottom
     seafloor_depth : float
         Depth of the seafloor (bottom of water column)
     n_mesh : int, optional
@@ -469,7 +485,7 @@ def write_layer_sections(
     # requires the last SSP depth to exactly match the mesh max depth.
     current_depth = float(f"{seafloor_depth:.1f}")
 
-    for layer in layered.layers:
+    for layer in _writable_layers(layered):
         top_depth = current_depth
         bottom_depth = float(f"{current_depth + layer.thickness:.1f}")
         f.write(f"{n_mesh}  0.0  {bottom_depth:.1f}\n")
@@ -537,7 +553,7 @@ def write_bottom_section(
         ``'F'``. Phase-velocity sampling bounds (m/s) and angle-resolution
         range (m) for the model that reads the ``.brc`` table.
     """
-    hs = env.halfspace_at_range(0.0)
+    hs = env.bottom.halfspace_at(range=0.0)
     if bottom_type is None:
         bottom_type = parse_boundary_type(hs.acoustic_type)
 
@@ -549,7 +565,7 @@ def write_bottom_section(
     bottom_code = bottom_type.to_acoustics_toolbox_code()
     sigma = getattr(hs, 'roughness', 0.0)
 
-    if len(env.bathymetry) > 1:
+    if env.bathymetry.n_ranges > 1:
         f.write(f"'{bottom_code}~' {sigma:.1f}\n")
     else:
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
@@ -571,14 +587,14 @@ def write_bottom_section(
                     f"generate it via BOUNCE or OASR first."
                 )
         elif hs.reflection_file is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "at_env_writer: acoustic_type='file' requires reflection_file= "
                 "on the bottom BoundaryProperties (path to a .brc file)."
             )
 
         if emit_reflection_table_block:
             if c_low is None or c_high is None or rmax is None:
-                raise ValueError(
+                raise ConfigurationError(
                     "write_bottom_section: acoustic_type='file' with "
                     "emit_reflection_table_block=True requires "
                     "c_low, c_high, rmax to be passed by the caller."
@@ -593,7 +609,7 @@ def write_bottom_section(
             z_bottom = env.depth
             if env.has_layered_bottom():
                 z_bottom = float(f"{z_bottom:.1f}")
-                for layer in env.bottom.layers:
+                for layer in _writable_layers(env.bottom):
                     z_bottom = float(f"{z_bottom + layer.thickness:.1f}")
         if halfspace_alpha_s_source == 'env':
             alpha_s = getattr(hs, 'shear_attenuation', 0.0)
@@ -684,14 +700,14 @@ def write_multi_profile_env(
     if n_mesh <= 0:
         freq = float(source.frequencies[0])
         max_depth = max(seg.depth for _, seg in segments)
-        n_mesh = max(500, int(max_depth * freq / 1500.0 * 20))
+        n_mesh = max(500, int(max_depth * freq / DEFAULT_SOUND_SPEED * 20))
 
     # Determine max NMedia across all segments so every profile
     # can be padded to the same number of media (=> same NTotal).
     def _n_media(env_seg):
         n = 1
         if env_seg.has_layered_bottom():
-            n += len(env_seg.bottom.layers)
+            n += len(_writable_layers(env_seg.bottom))
         return n
 
     max_n_media = max(_n_media(seg) for _, seg in segments)
@@ -715,7 +731,7 @@ def write_multi_profile_env(
     def _total_depth(env_seg):
         d = env_seg.depth
         if env_seg.has_layered_bottom():
-            for layer in env_seg.bottom.layers:
+            for layer in env_seg.bottom.columns[0].layers:
                 d += layer.thickness
         return d
 
@@ -746,7 +762,7 @@ def write_multi_profile_env(
                 )
             else:
                 surface_type = BoundaryType.VACUUM
-            bottom_type = parse_boundary_type(env_seg.halfspace_at_range(0.0).acoustic_type)
+            bottom_type = parse_boundary_type(env_seg.bottom.halfspace_at(range=0.0).acoustic_type)
 
             n_media_this = _n_media(env_seg)
             n_media_write = max_n_media
@@ -769,16 +785,16 @@ def write_multi_profile_env(
             # --- Sediment layers (media 2..n_media_this) ---
             # Collect real layers with their depths, then write
             # them together with any needed extensions.
-            # ``halfspace_at_range`` digs into ``LayeredBottom.halfspace`` so
-            # a per-segment LayeredBottom (from RDLB → to_profile) still
-            # exposes a flat halfspace for the padding-layer fields below.
-            hs = env_seg.halfspace_at_range(0.0)
+            # ``bottom.halfspace_at`` digs into the column's ``halfspace`` so
+            # a per-segment layered column still exposes a flat halfspace for
+            # the padding-layer fields below.
+            hs = env_seg.bottom.halfspace_at(range=0.0)
             seafloor = float(f"{env_seg.depth:.1f}")
             current_depth = seafloor
             real_layers = []
 
             if env_seg.has_layered_bottom():
-                for layer in env_seg.bottom.layers:
+                for layer in env_seg.bottom.columns[0].layers:
                     top = current_depth
                     bot = float(f"{current_depth + layer.thickness:.1f}")
                     real_layers.append((top, bot, layer))
@@ -861,7 +877,7 @@ def write_fieldflp(
     title: str = "",
     M_limit: int = 999999,
     n_profiles: int = 1,
-    profile_ranges_km: Any = None,
+    profile_ranges_m: Any = None,
 ) -> None:
     """
     Write field parameters file (.flp) for FIELD/FIELDS programs.
@@ -895,10 +911,12 @@ def write_fieldflp(
         Maximum number of modes to include (default: 999999 = all)
     n_profiles : int, optional
         Number of range profiles (default: 1 for range-independent).
-        For range-dependent, set > 1 and provide profile_ranges_km.
-    profile_ranges_km : array-like, optional
-        Profile boundary ranges in km. Required when n_profiles > 1.
-        First value must be 0.0. Length must equal n_profiles.
+        For range-dependent, set > 1 and provide profile_ranges_m.
+    profile_ranges_m : array-like, optional
+        Profile boundary ranges in metres, converted to the km the
+        ``.flp`` format expects at this boundary. Required when
+        n_profiles > 1. First value must be 0.0. Length must equal
+        n_profiles.
 
     Notes
     -----
@@ -928,16 +946,16 @@ def write_fieldflp(
 
     # Validate profile parameters
     if n_profiles > 1:
-        if profile_ranges_km is None:
-            raise ValueError("profile_ranges_km required when n_profiles > 1")
-        profile_ranges_km = np.asarray(profile_ranges_km, dtype=float)
+        if profile_ranges_m is None:
+            raise ConfigurationError("profile_ranges_m required when n_profiles > 1")
+        profile_ranges_km = m_to_km(profile_ranges_m)
         if len(profile_ranges_km) != n_profiles:
-            raise ValueError(
-                f"profile_ranges_km length ({len(profile_ranges_km)}) "
+            raise ConfigurationError(
+                f"profile_ranges_m length ({len(profile_ranges_km)}) "
                 f"must equal n_profiles ({n_profiles})"
             )
         if abs(profile_ranges_km[0]) > 1e-9:
-            raise ValueError("First profile range must be 0.0 km")
+            raise ConfigurationError("First profile range must be 0.0 km")
 
     with open(filepath, "w") as f:
         f.write(f"'{title}' ! Title \n")
@@ -986,7 +1004,7 @@ def write_fieldflp(
 
         # Receiver range offsets (array tilt) - default to zeros for every
         # receiver. AT's field.f90 enforces ``NRro == NRz`` (see
-        # KrakenField/field.f90:147), so we keep the count = NRz. The
+        # Kraken/field.f90:147), so we keep the count = NRz. The
         # sentinel ``/`` terminator paired with a single explicit value
         # lets AT's SubTab routine replicate it across the full vector
         # (see misc/subtabulate.f90 — when x(3) is left at its -999.9
@@ -1221,7 +1239,7 @@ def write_kraken_env_file(
     c_low: float,
     c_high: float,
 ) -> None:
-    """Write a Kraken / KrakenC environment file (.env).
+    """Write a Kraken environment file (.env).
 
     Kraken extends the KRAKEN ENV format with phase-speed limits (cLow,
     cHigh), a maximum range (RMax), and an optional broadband frequency
@@ -1343,7 +1361,7 @@ def write_sparc_env_file(
         # NMedia = water column + one medium per sediment layer.
         n_media = 1
         if env.has_layered_bottom():
-            n_media += len(env.bottom.layers)
+            n_media += len(env.bottom.columns[0].layers)
         f.write(f"{n_media}\n")
 
         surface_code = surface_type.to_acoustics_toolbox_code()
@@ -1360,7 +1378,7 @@ def write_sparc_env_file(
 
         # Bottom section (SPARC only supports V and R — no halfspace params).
         bottom_code = bottom_type.to_acoustics_toolbox_code()
-        sigma = getattr(env.halfspace_at_range(0.0), 'roughness', 0.0)
+        sigma = getattr(env.bottom.halfspace_at(range=0.0), 'roughness', 0.0)
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
 
         write_phase_speed_and_rmax(

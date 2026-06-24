@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.3.5"
+version = "0.4.0"
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
@@ -40,6 +40,13 @@ dependencies = [
     "numpy>=1.22.0,<3.0",
     "scipy>=1.8.0,<2.0",
     "matplotlib>=3.5.0,<4.0",
+    # External ocean data
+    "copernicusmarine>=1.3",
+    "netCDF4>=1.6",
+    "shapely>=2.0",
+    "pyproj>=3.4",
+    "tifffile>=2021.1",
+    "pillow>=9",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +54,7 @@ test = [
     "pytest>=6.0,<9.0",
     "pytest-xdist>=3.0,<4.0",
 ]
+
 dev = [
     "uacpy[test]",
     "pytest-cov",
@@ -60,18 +68,18 @@ Issues = "https://github.com/ErVuL/uacpy/issues"
 Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
 
 [tool.setuptools.packages.find]
+# Restrict discovery to the uacpy package tree; without an explicit include,
+# flat-layout discovery also sweeps root .py-bearing dirs (docs/, notebooks/,
+# data_cache/) into the wheel as importable top-level modules.
+include = ["uacpy*"]
 exclude = ["uacpy.tests", "uacpy.tests.*"]
 
-[tool.setuptools.package-data]
-# OASES binaries are intentionally NOT listed here: OASES is academic-licensed
-# (not redistributable). It must remain a post-install user-side download via
-# `install.sh --oases yes`, never bundled into a wheel/sdist.
-uacpy = [
-    "bin/oalib/*",
-    "bin/bellhopcuda/*",
-    "bin/mpirams/*",
-    "bin/ramsurf/*",
-]
+# No native binaries are bundled as package-data. Every model binary
+# (OALIB/bellhopcuda/mpiramS/ramsurf/ramgeo, and the academic-licensed OASES)
+# is built post-install by `install.sh` into `uacpy/bin/` and is gitignored,
+# so it is never shipped in an sdist/wheel: binaries are machine-specific
+# (wrong-platform tags) and OASES is non-redistributable. Install flow is
+# `git clone … && pip install -e . && ./install.sh` (see README).
 
 [tool.pytest.ini_options]
 testpaths = ["uacpy/tests"]
@@ -79,10 +87,55 @@ testpaths = ["uacpy/tests"]
 # by default (one worker per logical CPU, work-stealing scheduler).
 # Install with `pip install -e ".[test]"`; override with `-n 0` for a
 # single-process run when debugging.
-addopts = "-n logical --dist=worksteal"
+# Live-network tests (``requires_network``) hit external NOAA/GMRT servers
+# and are minutes-long + server-dependent, so they are deselected by default.
+# Run them explicitly with ``pytest -m requires_network`` (a command-line
+# ``-m`` overrides this one) — CI does so in a dedicated job.
+addopts = "-n logical --dist=worksteal -m 'not requires_network'"
+# Silence warnings in the test report — uacpy emits many intentional
+# UserWarnings (capability collapse, RAM grid caps, degenerate-input notes)
+# that the suite asserts on via ``pytest.warns`` / ``recwarn`` but that are
+# just noise in the summary. ``pytest.warns`` and ``catch_warnings`` still
+# capture them locally; this only hides them from pytest's output.
+# Ignore UserWarnings only: uacpy raises these intentionally as part of the
+# model contract (deliberate env-collapse, out-of-range extrapolation,
+# experimental-mode notices) and they would otherwise drown the suite. The
+# regression-relevant categories — RuntimeWarning (divide/overflow/invalid),
+# DeprecationWarning, FutureWarning from numpy/scipy/matplotlib — are left
+# visible so a new one surfaces instead of being silently swallowed (the old
+# blanket "ignore" hid them). A module-scoped UserWarning filter was avoided:
+# stacklevel attributes some uacpy warnings to the caller's frame, so they
+# leak past a `:uacpy.*` module match.
+filterwarnings = [
+    "ignore::UserWarning",
+    # Deprecation gate: escalate any uacpy-originated DeprecationWarning /
+    # PendingDeprecationWarning / FutureWarning to a hard test failure. This is
+    # the earliest-possible signal that uacpy touches an API a dependency has
+    # begun to deprecate (e.g. after a numpy/scipy/matplotlib upgrade) — CI goes
+    # red on day one of the warning cycle, long before the API is removed.
+    # Scoped to the ``uacpy`` package so third-party libraries' own internal
+    # deprecations stay non-fatal; a deprecated *dependency* call made by uacpy
+    # is attributed to uacpy's frame via the warning stacklevel, so it is caught
+    # here too. (DeprecationWarning/FutureWarning are not UserWarning subclasses,
+    # so the ignore above does not mask them.)
+    "error::DeprecationWarning:uacpy",
+    "error::PendingDeprecationWarning:uacpy",
+    "error::FutureWarning:uacpy",
+    # Third-party exception to the gate above. netCDF4's compiled Cython
+    # (`_netCDF4.pyx`) sets `.shape` on a NumPy array when writing a variable —
+    # an operation NumPy 2.5 deprecated. NumPy attributes the warning to the
+    # *calling* frame (a uacpy test writing a synthetic .nc cache via the
+    # standard `createVariable(...)[:] = data` idiom), so the `:uacpy` gate
+    # would escalate a deprecation that lives entirely inside netCDF4 and that
+    # uacpy cannot fix in its own code. Scoped to this exact message so every
+    # genuine uacpy-originated deprecation still fails CI. Remove once netCDF4
+    # ships a NumPy-2.5-compatible release.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
     "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
-    "integration: end-to-end tests that exercise multiple subsystems",
+    "requires_network: hits a live external service (uacpy.data fetchers); auto-skipped offline",
+    "benchmark: validates model output against a closed-form analytic / canonical reference",
 ]

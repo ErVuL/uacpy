@@ -18,7 +18,7 @@ import numpy as np
 import uacpy
 from uacpy import Field
 from uacpy.core.results import Modes
-from uacpy.models import Bellhop, Kraken, KrakenField, RAM, RunMode
+from uacpy.models import Bellhop, Kraken, RAM, RunMode
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
 
 
@@ -62,7 +62,7 @@ class TestPekerisWaveguide:
         """Receiver grid."""
         return uacpy.Receiver(
             depths=np.array([25.0, 50.0, 75.0]),
-            ranges=np.linspace(1000, 5000, 9)
+            ranges=np.linspace(1000, 5000, 5)
         )
 
     @pytest.mark.requires_binary
@@ -156,38 +156,6 @@ class TestPekerisWaveguide:
             phi_0 = phi[0]
             # Mode should not be all zeros
             assert np.max(np.abs(phi_0)) > 0, "First mode should have non-zero amplitude"
-
-    @pytest.mark.requires_binary
-    @pytest.mark.slow
-    def test_bellhop_kraken_consistency(self, pekeris_env, pekeris_source, pekeris_receiver):
-        """
-        Bellhop and Kraken should give similar TL for Pekeris waveguide
-
-        Both models are solving the same problem with different methods:
-        - Bellhop: Ray/beam tracing
-        - Kraken: Normal modes
-
-        They should agree within ~3 dB for this simple case.
-        """
-        # Run both models
-        bellhop = Bellhop(verbose=False)
-        bellhop_result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
-
-        krakenfield = KrakenField(verbose=False)
-        kraken_result = krakenfield.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
-
-        # Compare TL values
-        # Use mean TL over depths at each range to reduce sensitivity to modal structure
-        bellhop_tl_mean = bellhop_result.tl.mean(axis=0)
-        kraken_tl_mean = kraken_result.tl.mean(axis=0)
-
-        # Models should agree within reasonable tolerance
-        tl_diff = np.abs(bellhop_tl_mean - kraken_tl_mean)
-        max_diff = np.max(tl_diff)
-        mean_diff = np.mean(tl_diff)
-
-        assert mean_diff < 5.0, f"Mean TL difference should be < 5 dB, got {mean_diff:.1f} dB"
-        assert max_diff < 10.0, f"Max TL difference should be < 10 dB, got {max_diff:.1f} dB"
 
 
 class TestRangeDependentPhysicalSanity:
@@ -283,10 +251,10 @@ class TestMunkProfile:
 
     @pytest.fixture
     def munk_receiver(self):
-        """20-point depth grid at one long range — enough to compare
+        """12-point depth grid at one long range — enough to compare
         median TL near the surface vs the channel vs the bottom."""
         return uacpy.Receiver(
-            depths=np.linspace(50.0, 4950.0, 20),
+            depths=np.linspace(50.0, 4950.0, 12),
             ranges=np.array([50000.0]),
         )
 

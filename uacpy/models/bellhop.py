@@ -1,5 +1,5 @@
 """
-Bellhop and BellhopCUDA ray tracing models
+Bellhop ray tracing model (Fortran / C++ / CUDA backends)
 
 Supports broadband time-series generation via the arrivals-based approach
 described in the Bellhop User Guide (Section 9). The workflow:
@@ -21,25 +21,38 @@ from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
-from uacpy.models.base import PropagationModel, RunMode
-from uacpy.core.environment import Environment, BoundaryProperties
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.core.environment import Environment, BoundaryProperties, Bottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Field
+from uacpy.core.results import Result, Field, ResultStack
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX,
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
+from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
+
+
+# Beam-type letters honoured by the Bellhop env reader (case-significant).
+# Anything else maps to the geometric-hat DEFAULT case in
+# ReadEnvironmentBell.f90, so the constructor rejects it rather than letting a
+# typo silently change the beam model.
+_VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'b', 'g', 'G', 'S'})
 
 
 # ---------------------------------------------------------------------------
 # Bellhop-specific signal processing helpers
 # ---------------------------------------------------------------------------
+
+# Length (s) of the all-zero trace returned when a receiver has no arrivals and
+# no explicit time_window — just enough to give a usable, non-empty time axis.
+_EMPTY_TRACE_SECONDS = 0.1
+
 
 def delayandsum(
     rcv_arrivals: dict,
@@ -48,7 +61,6 @@ def delayandsum(
     fc: float,
     time_window: Optional[float] = None,
     t_start: Optional[float] = None,
-    c0: float = DEFAULT_SOUND_SPEED,
     normalize_source: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -78,8 +90,6 @@ def delayandsum(
     t_start : float, optional
         Start time for the output.  If *None*, set to just before the
         earliest arrival.
-    c0 : float, optional
-        Reference sound speed in m/s.
     normalize_source : bool, optional
         When ``True`` rescale the source waveform to peak ``|s| = 1``
         before convolution. Default ``False`` so the absolute amplitude
@@ -103,7 +113,7 @@ def delayandsum(
         if time_window is not None:
             nrts = int(np.ceil(time_window * sample_rate))
         else:
-            nrts = int(0.1 * sample_rate)
+            nrts = int(_EMPTY_TRACE_SECONDS * sample_rate)
         t0 = 0.0 if t_start is None else float(t_start)
         return np.zeros(nrts), t0 + np.arange(nrts) / sample_rate
 
@@ -209,8 +219,18 @@ class Bellhop(PropagationModel):
     ----------
     executable : str or Path, optional
         Bellhop binary; auto-detected if ``None``.
-    prefer_cuda : bool, optional
-        Prefer CUDA → cxx → Fortran when ``executable=None``. Default ``True``.
+    backend : str, optional
+        Force a binary variant: ``'fortran'`` (bellhop), ``'cxx'``
+        (bellhopcxx), or ``'cuda'`` (bellhopcuda). ``None`` (default)
+        auto-selects CUDA → cxx → Fortran among whatever ``install.sh``
+        built. If an explicitly requested variant isn't installed, Bellhop
+        falls back to the Fortran binary with a ``UserWarning``. Mirrors
+        ``RAM(backend=...)``.
+    dimensionality : str, optional
+        Only ``'2D'`` (default) is supported — it is the ``--2D`` flag the
+        bellhopcxx / bellhopcuda CLIs require (the Fortran binary ignores it).
+        ``'3D'`` is rejected: the env writer cannot emit a 3D-format input
+        file, so a 3D flag would mis-drive the binary.
     beam_type : str, optional
         ``B`` Gaussian (default) | ``R`` ray-centered | ``C`` Cartesian |
         ``b`` geometric Gaussian | ``g``/``G`` geometric hat | ``S`` simple Gaussian.
@@ -270,10 +290,10 @@ class Bellhop(PropagationModel):
       ``auto_bounce=True``, BOUNCE is invoked transparently to derive
       the ``.brc`` reflection coefficient table.
 
-    **Auto-route through BOUNCE.** ``Bellhop.run(...)`` detects
-    ``LayeredBottom`` / ``RangeDependentLayeredBottom`` / elastic
-    halfspace / ``RangeDependentBottom`` with non-zero ``shear_speed``
-    anywhere along range, runs BOUNCE upstream to derive a ``.brc``
+    **Auto-route through BOUNCE.** ``Bellhop.run(...)`` detects a layered
+    or elastic ``Bottom`` (layered columns, an elastic halfspace, or
+    non-zero ``shear_speed`` anywhere along range), runs BOUNCE upstream
+    to derive a ``.brc``
     reflection-coefficient table, and re-runs Bellhop against
     ``acoustic_type='file'`` (one ``UserWarning``). The user's
     ``collapse={…}`` dict is forwarded to the spawned Bounce. Use
@@ -303,15 +323,40 @@ class Bellhop(PropagationModel):
     >>> bellhop = Bellhop()
     >>> result = bellhop.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
-    Force Fortran version:
+    Force a specific backend:
 
-    >>> bellhop = Bellhop(prefer_cuda=False)
+    >>> bellhop = Bellhop(backend='fortran')
+    >>> bellhop_gpu = Bellhop(backend='cuda')
     """
+
+    # Declarative metadata (see PropagationModel / ModelSpec). Bellhop is the
+    # ray engine: honours altimetry, range-dependent bathymetry/bottom,
+    # elastic media and a native multi-source-depth grid. No collapse
+    # override — uses the base DEFAULT_COLLAPSE unchanged. ``layered_bottom``
+    # is False (ray model takes a single half-space per column).
+    # ``range_dependent_ssp`` is *instance-dependent* (honoured only on the
+    # 'quad' interp), so it is set in __init__ below, not here.
+    spec = ModelSpec(
+        modes=(
+            RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
+            RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS,
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ),
+        supports={
+            'altimetry',
+            'range_dependent_bathymetry',
+            'range_dependent_bottom',
+            'elastic_media',
+            'multi_source_depth',
+        },
+    )
+    source = 'acoustics_toolbox'
 
     def __init__(
         self,
         executable: Optional[Path] = None,
-        prefer_cuda: bool = True,
+        backend: Optional[str] = None,
+        dimensionality: str = '2D',
         beam_type: str = 'B',
         n_beams: int = 0,
         alpha: tuple = (-80, 80),
@@ -345,15 +390,24 @@ class Bellhop(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
         ----------
         executable : Path, optional
             Path to bellhop executable. Auto-detected if None.
-        prefer_cuda : bool
-            Prefer CUDA version if available. Default: True.
+        backend : str, optional
+            Force a binary variant: ``'fortran'`` (bellhop), ``'cxx'``
+            (bellhopcxx), or ``'cuda'`` (bellhopcuda). ``None`` (default)
+            auto-selects, preferring CUDA > C++ > Fortran among whatever
+            ``install.sh`` built. If an explicitly requested variant isn't
+            installed, Bellhop falls back to the Fortran binary with a
+            ``UserWarning``. Mirrors ``RAM(backend=...)``.
+        dimensionality : str, optional
+            Only ``'2D'`` (default) is supported — the ``--2D`` flag the
+            bellhopcxx / bellhopcuda CLIs require (ignored by the Fortran
+            binary, which has no such flag). ``'3D'`` raises: the env writer
+            produces 2D-format input only.
         beam_type : str
             Beam type: 'B' (Gaussian), 'R' (ray-centered), 'C' (Cartesian),
             'b' (geometric Gaussian), 'g' (geometric hat), 'G' (geometric hat Cartesian),
@@ -436,9 +490,9 @@ class Bellhop(PropagationModel):
             TIME_SERIES output start time (s). ``None`` auto-derives
             from the earliest arrival.
         auto_bounce : bool, optional
-            Default ``True``. When ``env`` carries a ``LayeredBottom`` /
-            ``RangeDependentLayeredBottom`` / elastic halfspace /
-            ``RangeDependentBottom`` with non-zero shear, ``run(...)``
+            Default ``True``. When ``env`` carries a layered or elastic
+            ``Bottom`` (layered columns, an elastic halfspace, or non-zero
+            shear anywhere along range), ``run(...)``
             auto-routes through BOUNCE to derive a ``.brc`` reflection-
             coefficient table and re-runs Bellhop against
             ``acoustic_type='file'``, attaching the in-memory
@@ -451,32 +505,47 @@ class Bellhop(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
 
-        # Declare supported modes for Bellhop
-        self._supported_modes = [
-            RunMode.COHERENT_TL,
-            RunMode.INCOHERENT_TL,
-            RunMode.SEMICOHERENT_TL,
-            RunMode.RAYS,
-            RunMode.EIGENRAYS,
-            RunMode.ARRIVALS,
-            RunMode.BROADBAND,
-            RunMode.TIME_SERIES,
-        ]
-        self._supports_altimetry = True
-        self._supports_range_dependent_bathymetry = True
-        # RD-SSP honoured when Bellhop(interp_ssp='quad'); other interp
-        # values trigger a warning and SSP-collapse in run().
-        self._supports_range_dependent_ssp = True
-        self._supports_range_dependent_bottom = True
-        self._supports_layered_bottom = False
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = True
+        # Run modes, capability flags and collapse defaults come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Instance-dependent override: RD-SSP is honoured natively only via the
+        # external 2-D .ssp file, which Bellhop reaches on the 'quad' interp.
+        # ``interp_ssp=None`` auto-picks 'quad' for a range-dependent SSP
+        # (oalib_writer.resolve_ssp_interp), so the default path honours it. A
+        # user who *pins* a non-quad interp ('linear', 'cubic', …) gets a 1-D
+        # collapse — so the flag must be False for that instance, and
+        # ``_project_environment`` does the collapse with the standard
+        # one-warning-per-feature. Keeping the flag honest means the advertised
+        # capability matches the run-time behaviour.
+        self._supports_range_dependent_ssp = (
+            interp_ssp is None or str(interp_ssp).lower() == 'quad'
+        )
 
-        self.prefer_cuda = prefer_cuda
+        if beam_type not in _VALID_BEAM_TYPES:
+            raise ConfigurationError(
+                f"Bellhop(beam_type={beam_type!r}) is not a known beam type. "
+                f"Choose one of {sorted(_VALID_BEAM_TYPES)} "
+                f"(case-significant; Bellhop would otherwise silently fall "
+                f"back to a geometric-hat beam)."
+            )
+        if source_type not in ('R', 'X'):
+            raise ConfigurationError(
+                f"Bellhop(source_type={source_type!r}) is not valid. Use "
+                f"'R' (point/cylindrical) or 'X' (line/Cartesian)."
+            )
+        if grid_type not in ('R', 'I'):
+            raise ConfigurationError(
+                f"Bellhop(grid_type={grid_type!r}) is not valid. Use "
+                f"'R' (rectilinear) or 'I' (irregular paired depth/range)."
+            )
+        if not isinstance(alpha, (tuple, list, np.ndarray)) or len(alpha) != 2:
+            raise ConfigurationError(
+                f"Bellhop(alpha={alpha!r}) must be a 2-element sequence "
+                f"(min_deg, max_deg) of launch-angle limits."
+            )
         self.beam_type = beam_type
         self.n_beams = n_beams
         self.alpha = alpha
@@ -524,19 +593,40 @@ class Bellhop(PropagationModel):
         self.auto_bounce = bool(auto_bounce)
         _validate_arrivals_format(arrivals_format)
         self.arrivals_format = arrivals_format
+        if backend is not None and backend not in ('fortran', 'cxx', 'cuda'):
+            raise ConfigurationError(
+                f"Bellhop(backend={backend!r}) is not a known backend. "
+                f"Choose 'fortran', 'cxx', 'cuda', or None for automatic "
+                f"selection (CUDA > C++ > Fortran)."
+            )
+        self.backend = backend
+        if dimensionality != '2D':
+            raise ConfigurationError(
+                f"Bellhop(dimensionality={dimensionality!r}) is not supported. "
+                f"Only '2D' is available: the env writer produces 2D-format "
+                f"input files, so a '3D' (or any other) flag would mis-drive "
+                f"the binary (silent 2D run on Fortran, abort on cxx/cuda)."
+            )
+        self.dimensionality = dimensionality
         self.version = "unknown"
 
-        if executable is None:
-            self.executable = self._find_bellhop_executable()
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary honoring
+        # ``backend=`` instead of re-pinning the already-resolved path (which
+        # would flip ``version`` to 'custom' and drop the cxx/cuda ``--<dim>``
+        # flag). The resolved path lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_bellhop_executable()
         else:
-            self.executable = Path(executable)
+            self._exe = self.executable
             self.version = "custom"
 
-        if not self.executable.exists():
-            raise ExecutableNotFoundError("Bellhop", str(self.executable))
+        if not self._exe.exists():
+            raise ExecutableNotFoundError("Bellhop", str(self._exe))
 
-        if verbose and self.version != "custom":
-            self._log(f"Using Bellhop {self.version}: {self.executable}")
+        if self.version != "custom":
+            self._log(f"Using Bellhop {self.version}: {self._exe}")
 
     def _warn_on_ignored_cerveny_knobs(self) -> None:
         """The Cerveny beam knobs are written only for ``beam_type`` in
@@ -561,15 +651,24 @@ class Bellhop(PropagationModel):
             )
 
     def _find_bellhop_executable(self) -> Path:
-        """Locate the Bellhop binary using the base class helper.
+        """Locate the Bellhop binary, keyed on ``self.backend``.
 
-        Preference order honors ``prefer_cuda``: CUDA > C++ > Fortran.
-        ``self.version`` is inferred from the name of the returned path.
+        ``None`` auto-selects in preference order CUDA > C++ > Fortran among
+        whatever ``install.sh`` built. An explicitly requested variant is
+        tried first; if it isn't installed the search falls back to the
+        Fortran binary and emits a ``UserWarning``. ``self.version`` is
+        inferred from the name of the returned path.
         """
-        if self.prefer_cuda:
-            names = ['bellhopcuda', 'bellhopcxx', 'bellhop']
+        backend_names = {
+            'fortran': ['bellhop'],
+            'cxx': ['bellhopcxx'],
+            'cuda': ['bellhopcuda'],
+        }
+        if self.backend in backend_names:
+            # Requested variant first, then Fortran as a graceful fallback.
+            names = backend_names[self.backend] + ['bellhop']
         else:
-            names = ['bellhop']
+            names = ['bellhopcuda', 'bellhopcxx', 'bellhop']
 
         path = self._find_executable_in_paths(
             names,
@@ -583,7 +682,96 @@ class Bellhop(PropagationModel):
             self.version = 'cxx'
         else:
             self.version = 'fortran'
+
+        if self.backend is not None and self.version != self.backend:
+            warnings.warn(
+                f"Bellhop(backend={self.backend!r}): the {self.backend} binary "
+                f"was not found; falling back to the {self.version} binary.",
+                UserWarning, stacklevel=2,
+            )
         return path
+
+    def _run_eigenrays_multi_depth(self, env, source, receiver, run_mode,
+                                   frequencies, source_waveform, sample_rate):
+        """EIGENRAYS with multiple source depths: Bellhop's eigenray search
+        reorders ``alpha`` and ``WriteRay2D`` leaves no per-source boundary in
+        the ``.ray`` file, so loop one run per source depth in Python and stack."""
+        slabs = []
+        for sd in source.depths:
+            single = Source(
+                depths=float(sd),
+                frequencies=source.frequencies,
+                source_type=source.source_type,
+            )
+            slabs.append(self.run(
+                env, single, receiver, run_mode=run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            ))
+        return ResultStack(
+            slabs=slabs, coordinate=source.depths,
+            coordinate_name='source_depth',
+        )
+
+    def _maybe_route_through_bounce(self, env, source, receiver, run_mode,
+                                    frequencies, source_waveform, sample_rate):
+        """Layered/elastic bottoms can't be represented by Bellhop's fluid ray
+        tracer natively. With ``auto_bounce`` (default) route through BOUNCE for
+        an exact reflection-coefficient table and return that Result; otherwise
+        warn that the reflection will be fluid-approximated and return ``None``
+        to continue the native run."""
+        is_layered = env.bottom.is_layered
+        is_elastic = env.has_elastic_bottom()
+        if not (is_layered or is_elastic):
+            return None
+        tag = ' (elastic)' if is_elastic else ''
+        kind = ('layered bottom' if is_layered else 'bottom') + tag
+        if self.auto_bounce:
+            warnings.warn(
+                f"{self.model_name}: env.bottom is {kind}; auto-routing "
+                f"through BOUNCE to derive a reflection-coefficient table. "
+                f"BOUNCE is range-independent — Bounce's collapse policy "
+                f"reduces the env (default: bottom_range='median', layer "
+                f"stack kept). "
+                f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
+                f"(Bellhop will then collapse the bottom via its own "
+                f"collapse policy and run with fluid-approximated physics).",
+                UserWarning, stacklevel=2,
+            )
+            return self.run_with_bounce(
+                env, source, receiver,
+                run_mode=run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+            )
+        # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
+        # a halfspace by ``_project_environment`` (collapse policy). A pure
+        # ELASTIC halfspace is NOT collapsed — Bellhop sets
+        # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
+        # the ray tracer fluid-approximates the elastic reflection internally.
+        if is_layered:
+            detail = (
+                "collapsing the layered bottom to a halfspace via the "
+                "model's collapse policy and running with fluid ray-tracer "
+                "physics"
+            )
+        else:
+            detail = (
+                "writing the elastic halfspace directly (no collapse — "
+                "Bellhop supports elastic media); its reflection coefficient "
+                "is fluid-approximated by the ray tracer"
+            )
+        warnings.warn(
+            f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
+            f"{detail}. Reflection-coefficient accuracy near elastic / "
+            f"layered bottoms will be degraded. Set auto_bounce=True "
+            f"(default) or call run_with_bounce() for the elastic-correct "
+            f"path.",
+            UserWarning, stacklevel=2,
+        )
+        return None
 
     def run(
         self,
@@ -661,24 +849,9 @@ class Bellhop(PropagationModel):
             run_mode == RunMode.EIGENRAYS
             and len(np.atleast_1d(source.depths)) > 1
         ):
-            from uacpy.core.results import ResultStack
-            slabs = []
-            for sd in source.depths:
-                single = Source(
-                    depths=float(sd),
-                    frequencies=source.frequencies,
-                    source_type=source.source_type,
-                )
-                slabs.append(self.run(
-                    env, single, receiver, run_mode=run_mode,
-                    frequencies=frequencies,
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                ))
-            return ResultStack(
-                slabs=slabs, coordinate=source.depths,
-                coordinate_name='source_depth',
-            )
+            return self._run_eigenrays_multi_depth(
+                env, source, receiver, run_mode,
+                frequencies, source_waveform, sample_rate)
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
@@ -686,100 +859,55 @@ class Bellhop(PropagationModel):
 
         # Auto-route through BOUNCE whenever Bellhop's fluid ray-tracer
         # cannot represent the bottom's full reflection physics natively:
-        #   - LayeredBottom / RangeDependentLayeredBottom — Bellhop has
-        #     no multi-medium .env format; without BOUNCE the layers are
-        #     silently lost.
-        #   - BoundaryProperties (or RangeDependentBottom) with non-zero
-        #     shear — Bellhop's writer emits cs/alpha_s on the 'A' line
-        #     (or per-range on the long .bty), but the ray tracer
-        #     approximates the resulting reflection coefficient with
-        #     fluid physics; BOUNCE pre-computes the exact elastic RC
-        #     including shear-conversion and Bellhop consumes it via the
-        #     'F' bottom type.
+        #   - layered columns — Bellhop has no multi-medium .env format;
+        #     without BOUNCE the layers are silently lost.
+        #   - a halfspace with non-zero shear — Bellhop's writer emits
+        #     cs/alpha_s on the 'A' line (or per-range on the long .bty),
+        #     but the ray tracer approximates the resulting reflection
+        #     coefficient with fluid physics; BOUNCE pre-computes the exact
+        #     elastic RC including shear-conversion and Bellhop consumes it
+        #     via the 'F' bottom type.
         # BOUNCE itself is range-independent; the spawned Bounce instance
         # collapses any range-dependent env via its own collapse policy
-        # (Bounce defaults: ``bottom='median'``, ``rd_layered_range=
-        # 'median'``, ``rd_layered_layers='preserve'`` → median range,
-        # layer stack kept since BOUNCE consumes LayeredBottom natively).
+        # (Bounce default ``bottom_range='median'`` → median range, layer
+        # stack kept since BOUNCE consumes layered columns natively).
         # Pass ``collapse={...}`` to Bellhop to override;
         # ``Bellhop.run_with_bounce(...)`` is the explicit form for
         # users who want to control the BOUNCE constructor.
-        from uacpy.core.environment import (
-            LayeredBottom, RangeDependentLayeredBottom,
-        )
-        bp = env.bottom
-        is_layered = isinstance(bp, (LayeredBottom, RangeDependentLayeredBottom))
-        is_elastic = env.has_elastic_bottom()
-        if is_layered or is_elastic:
-            tag = ' (elastic)' if is_elastic else ''
-            kind = type(bp).__name__ + tag
-            if self.auto_bounce:
-                warnings.warn(
-                    f"{self.model_name}: env.bottom is {kind}; auto-routing "
-                    f"through BOUNCE to derive a reflection-coefficient table. "
-                    f"BOUNCE is range-independent — Bounce's collapse policy "
-                    f"reduces the env (defaults: bottom='median', "
-                    f"rd_layered_range='median', rd_layered_layers='preserve'). "
-                    f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
-                    f"(Bellhop will then collapse the bottom via its own "
-                    f"collapse policy and run with fluid-approximated physics).",
-                    UserWarning, stacklevel=2,
-                )
-                return self.run_with_bounce(
-                    env, source, receiver,
-                    run_mode=run_mode,
-                    frequencies=frequencies,
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
-            # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
-            # a halfspace by ``_project_environment`` (collapse policy). A pure
-            # ELASTIC halfspace is NOT collapsed — Bellhop sets
-            # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
-            # the ray tracer fluid-approximates the elastic reflection internally.
-            if is_layered:
-                detail = (
-                    "collapsing the layered bottom to a halfspace via the "
-                    "model's collapse policy and running with fluid ray-tracer "
-                    "physics"
-                )
-            else:
-                detail = (
-                    "writing the elastic halfspace directly (no collapse — "
-                    "Bellhop supports elastic media); its reflection coefficient "
-                    "is fluid-approximated by the ray tracer"
-                )
-            warnings.warn(
-                f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
-                f"{detail}. Reflection-coefficient accuracy near elastic / "
-                f"layered bottoms will be degraded. Set auto_bounce=True "
-                f"(default) or call run_with_bounce() for the elastic-correct "
-                f"path.",
-                UserWarning, stacklevel=2,
-            )
+        routed = self._maybe_route_through_bounce(
+            env, source, receiver, run_mode,
+            frequencies, source_waveform, sample_rate)
+        if routed is not None:
+            return routed
 
         from uacpy.io.oalib_writer import resolve_ssp_interp
         effective_interp = resolve_ssp_interp(env, self.interp_ssp)
+        interp_for_writer = self.interp_ssp
         if self.interp_ssp is None:
             self._log(
                 f"interp_ssp auto-picked = {effective_interp!r} "
                 f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp()})"
             )
-        if env.has_range_dependent_ssp() and effective_interp != 'quad':
-            method = self._collapse['ssp']
-            env = env.copy()
-            env.ssp = env.ssp.collapse(method)
+        if effective_interp == 'quad' and not env.has_range_dependent_ssp():
+            # 'quad' is Bellhop's external .ssp (2-D) interpolator; with a
+            # range-independent SSP there is no .ssp file to write, so fall
+            # back to the auto 1-D interp instead of letting Bellhop fail on
+            # a missing model.ssp.
+            fallback = resolve_ssp_interp(env, None)
             warnings.warn(
-                f"Bellhop reads range-dependent SSP only when "
-                f"interp_ssp='quad' (external .ssp file). With "
-                f"interp_ssp={self.interp_ssp!r} (resolved to "
-                f"{effective_interp!r}) the SSP is collapsed to 1-D "
-                f"(collapse['ssp']={method!r}). Pass "
-                f"``Bellhop(interp_ssp='quad')`` (or leave the default "
-                f"``None`` for auto-detection) to enable the 2-D profile.",
+                f"Bellhop(interp_ssp='quad') needs a range-dependent env.ssp "
+                f"(the external .ssp / 2-D profile); this environment's SSP is "
+                f"range-independent, so falling back to interp_ssp={fallback!r}. "
+                f"Provide a range-dependent SSP to use the quad profile.",
                 UserWarning, stacklevel=2,
             )
+            effective_interp = fallback
+            interp_for_writer = fallback
 
+        # When ``interp_ssp`` is pinned to a non-quad scheme, the RD-SSP
+        # capability flag is False and ``_project_environment`` collapses the
+        # SSP to 1-D (one UserWarning per dropped feature). On the 'quad' /
+        # auto path the flag is True and the 2-D profile is written verbatim.
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
@@ -827,7 +955,7 @@ class Bellhop(PropagationModel):
         self.file_manager = fm
 
         extra_writer_kwargs = {
-            'interp_ssp': self.interp_ssp,
+            'interp_ssp': interp_for_writer,
             'interp_bathymetry': self.interp_bathymetry,
             'interp_altimetry': self.interp_altimetry,
         }
@@ -932,7 +1060,6 @@ class Bellhop(PropagationModel):
             # 600 dB as a real value. Honest shadow zones elsewhere
             # keep the 600 dB marker.
             if rt in ('C', 'I', 'S'):
-                from uacpy.core.results import ResultStack
                 if isinstance(result, ResultStack):
                     pf_slabs = result.slabs
                 else:
@@ -944,8 +1071,6 @@ class Bellhop(PropagationModel):
                         and float(slab.ranges[0]) == 0.0
                     ):
                         slab.data[:, 0] = np.nan
-
-            from uacpy.core.results import ResultStack
 
             # The .ray header records only NSz (count), not Pos%Sz; the
             # reader returns the stack with a placeholder coordinate.
@@ -979,6 +1104,7 @@ class Bellhop(PropagationModel):
             for i, slab in enumerate(slabs_to_set):
                 slab.model = self.model_name
                 slab.backend = self.model_name.lower()
+                slab.model_source = self.provenance
                 if isinstance(result, ResultStack):
                     slab.source_depths = np.array(
                         [float(result.coordinate[i])], dtype=float,
@@ -1049,10 +1175,16 @@ class Bellhop(PropagationModel):
             Bellhop simulation results using reflection coefficients
         """
         from uacpy.models.bounce import Bounce
-        import tempfile
 
         self._log("Running BOUNCE to compute reflection coefficients...")
-        bounce_work_dir = Path(tempfile.mkdtemp(prefix='bellhop_bounce_'))
+        # Route the bounce scratch through FileManager so it honours
+        # ``use_tmpfs`` like every other path and is cleaned up here.
+        bounce_fm = FileManager(
+            use_tmpfs=self.use_tmpfs,
+            prefix='bellhop_bounce_',
+            cleanup=True,
+        )
+        bounce_work_dir = bounce_fm.create_work_dir()
         bounce = Bounce(
             verbose=self.verbose,
             c_low=c_low,
@@ -1073,10 +1205,10 @@ class Bellhop(PropagationModel):
                 )
 
             env_bounce = copy.deepcopy(env)
-            env_bounce.bottom = BoundaryProperties(
+            env_bounce.bottom = Bottom.from_halfspace(BoundaryProperties(
                 acoustic_type='file',
                 reflection_file=brc_file,
-            )
+            ))
 
             self._log("Running Bellhop with BOUNCE reflection coefficients...")
             result = self.run(
@@ -1097,7 +1229,7 @@ class Bellhop(PropagationModel):
             result.metadata['bounce_result'] = bounce_result
             return result
         finally:
-            shutil.rmtree(bounce_work_dir, ignore_errors=True)
+            bounce_fm.cleanup_work_dir()
 
     def _run_broadband(
         self,
@@ -1294,7 +1426,7 @@ class Bellhop(PropagationModel):
                     'time': t_vec,
                 },
                 **self._result_kwargs(
-                    source, backend='bellhop', frequencies=fc,
+                    source, backend=self.model_name.lower(), frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
                 ),
@@ -1330,7 +1462,7 @@ class Bellhop(PropagationModel):
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
-                backend='bellhop',
+                backend=self.model_name.lower(),
                 frequencies=frequencies,
                 center_frequency=fc,
                 arrivals_field=arr_field,
@@ -1394,13 +1526,12 @@ class Bellhop(PropagationModel):
     def _build_command(self, base_name: str) -> list:
         """Build the argv used to launch the binary.
 
-        Subclasses (BellhopCUDA) may override this to add flags.
+        The bellhopcxx / bellhopcuda CLIs require a ``--<dim>`` flag; the
+        Fortran binary takes none.
         """
         if self.version in ('cuda', 'cxx'):
-            # bellhopcxx/cuda require a dimensionality flag.
-            dim = getattr(self, 'dimensionality', '2D')
-            return [str(self.executable), f'--{dim}', base_name]
-        return [str(self.executable), base_name]
+            return [str(self._exe), f'--{self.dimensionality}', base_name]
+        return [str(self._exe), base_name]
 
     def _run_bellhop(self, base_name: str, work_dir: Path):
         """Execute the Bellhop binary via the shared subprocess runner.
@@ -1411,81 +1542,5 @@ class Bellhop(PropagationModel):
         diagnostic surface to the user instead of a blank stderr.
         """
         cmd = self._build_command(base_name)
-        try:
-            result = self._run_subprocess(cmd, cwd=work_dir)
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
+        self._run_and_attach_prt(cmd, work_dir, base_name)
 
-        if self.verbose and result.stdout:
-            self._log(f"Bellhop output:\n{result.stdout}", level='debug')
-
-
-class BellhopCUDA(Bellhop):
-    """
-    BellhopCUDA - C++/CUDA ray tracing model (thin ``Bellhop`` subclass).
-
-    Shares all Environment/Source/Receiver plumbing, broadband synthesis,
-    and output parsing with the parent. Only the executable selection and
-    the ``--<dim>`` invocation flag differ.
-
-    Parameters
-    ----------
-    use_gpu : bool, optional
-        Select ``bellhopcuda`` (True) vs ``bellhopcxx`` (False). Default True.
-    executable : str or Path, optional
-        Override path to the chosen binary. Auto-detected if None.
-    dimensionality : str, optional
-        Either '2D' or '3D'. Default '2D' (matches the CLI flag '--2D').
-    **kwargs
-        All other kwargs are forwarded to ``Bellhop.__init__`` unchanged.
-
-    Examples
-    --------
-    >>> bhc = BellhopCUDA(use_gpu=True)
-    >>> result = bhc.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-    """
-
-    def __init__(
-        self,
-        use_gpu: bool = True,
-        executable: Optional[Path] = None,
-        dimensionality: str = '2D',
-        **kwargs,
-    ):
-        # Stash CUDA-specific knobs before super() uses them in executable
-        # discovery.
-        self.use_gpu = use_gpu
-        self.dimensionality = dimensionality
-        # prefer_cuda is meaningless here (CUDA/CXX only, never Fortran); drop
-        # any inherited value so model.copy() can round-trip it without clashing
-        # with the forced True below.
-        kwargs.pop('prefer_cuda', None)
-        super().__init__(
-            executable=executable,
-            prefer_cuda=True,  # always prefer GPU/CXX before Fortran
-            **kwargs,
-        )
-
-    def _find_bellhop_executable(self) -> Path:
-        """Override parent: pick CUDA or CXX flavor, never Fortran.
-
-        With ``use_gpu=True`` we look for bellhopcuda first and fall back to
-        bellhopcxx so a CPU-only install (where install.sh built only the C++
-        variant) still satisfies BellhopCUDA — install.sh's `--bellhop cxx`
-        path produces just bellhopcxx, and forcing the user to instantiate
-        BellhopCUDA(use_gpu=False) on every CPU box would break the
-        "auto-picks whichever install.sh built" contract.
-        """
-        names = ['bellhopcuda', 'bellhopcxx'] if self.use_gpu else ['bellhopcxx']
-        path = self._find_executable_in_paths(
-            names,
-            bin_subdirs=['bellhopcuda'],
-            dev_subdir='bellhopcuda',
-        )
-        self.version = 'cuda' if 'cuda' in path.name.lower() else 'cxx'
-        return path
-
-    def _build_command(self, base_name: str) -> list:
-        """Always emit the ``--<dim>`` flag required by the CUDA/CXX CLI."""
-        return [str(self.executable), f'--{self.dimensionality}', base_name]

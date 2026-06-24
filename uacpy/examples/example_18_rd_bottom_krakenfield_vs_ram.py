@@ -2,7 +2,7 @@
 Example 18: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM
 ========================================================================
 
-Compares transmission loss from KrakenField in adiabatic and coupled mode
+Compares transmission loss from Kraken in adiabatic and coupled mode
 theory, and RAM (parabolic equation) for a range-dependent scenario with:
   - Sloping bathymetry (100 m to 200 m over 20 km)
   - Range-dependent layered sediment
@@ -25,11 +25,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import (  # noqa: E402
-    BoundaryProperties, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, SoundSpeedProfile,
+    BoundaryProperties, SedimentLayer, SeabedColumn,
+    Bottom, SoundSpeedProfile,
 )
 from uacpy.models.ram import RAM  # noqa: E402
-from uacpy.models.kraken import KrakenField  # noqa: E402
+from uacpy.models.kraken import Kraken  # noqa: E402
 
 
 def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
@@ -74,7 +74,7 @@ def make_base_env(bottom):
 
 def make_hard_bottom():
     """Hard layered bottom: high impedance contrast, low attenuation."""
-    near = LayeredBottom(
+    near = SeabedColumn(
         layers=[
             SedimentLayer(thickness=8.0, sound_speed=1600, density=1.8,
                           attenuation=0.2),
@@ -86,7 +86,7 @@ def make_hard_bottom():
             density=2.5, attenuation=0.05,
         ),
     )
-    far = LayeredBottom(
+    far = SeabedColumn(
         layers=[
             SedimentLayer(thickness=3.0, sound_speed=1800, density=2.0,
                           attenuation=0.1),
@@ -96,15 +96,12 @@ def make_hard_bottom():
             density=2.8, attenuation=0.02,
         ),
     )
-    return RangeDependentLayeredBottom(
-        ranges=np.array([0, 20000]),
-        profiles=[near, far],
-    )
+    return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
 
 
 def make_soft_bottom():
     """Soft lossy layered bottom: low impedance contrast, high attenuation."""
-    near = LayeredBottom(
+    near = SeabedColumn(
         layers=[
             SedimentLayer(thickness=8.0, sound_speed=1500, density=1.2,
                           attenuation=1.0),
@@ -116,7 +113,7 @@ def make_soft_bottom():
             density=2.0, attenuation=0.2,
         ),
     )
-    far = LayeredBottom(
+    far = SeabedColumn(
         layers=[
             SedimentLayer(thickness=3.0, sound_speed=1650, density=1.8,
                           attenuation=0.3),
@@ -126,10 +123,7 @@ def make_soft_bottom():
             density=2.5, attenuation=0.05,
         ),
     )
-    return RangeDependentLayeredBottom(
-        ranges=np.array([0, 20000]),
-        profiles=[near, far],
-    )
+    return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
 
 
 def main():
@@ -162,8 +156,8 @@ def main():
 
     models = [
         ('RAM', RAM(verbose=False, accuracy=1e-1)),
-        ('KF adiabatic', KrakenField(verbose=False, n_segments=8, mode_coupling='adiabatic')),
-        ('KF coupled', KrakenField(verbose=False, n_segments=8, mode_coupling='coupled')),
+        ('KF adiabatic', Kraken(verbose=False, n_segments=8, mode_coupling='adiabatic')),
+        ('KF coupled', Kraken(verbose=False, n_segments=8, mode_coupling='coupled')),
     ]
 
     # results[case_label][model_label] = field
@@ -220,8 +214,8 @@ def main():
 
     model_panels = [
         ('RAM', 'RAM (PE)'),
-        ('KF adiabatic', 'KrakenField (adiabatic)'),
-        ('KF coupled', 'KrakenField (coupled)'),
+        ('KF adiabatic', 'Kraken (adiabatic)'),
+        ('KF coupled', 'Kraken (coupled)'),
     ]
 
     tl_im = None

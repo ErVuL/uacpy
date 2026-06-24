@@ -68,6 +68,28 @@ def test_compute_windnoise_band_integrate(freqs):
     assert np.all(np.isfinite(integrated))
 
 
+def test_compute_windnoise_pinned_anchors():
+    """Pin the wind-noise spectral level at a few (wind, frequency) anchors.
+
+    The melding constants in ``compute_windnoise`` (``f0w``, ``L0w``, the
+    ``s1w``/``s2w`` slopes) descend from a secondary IDL/MATLAB lineage and
+    are **not yet reconciled line-by-line against the primary references**
+    (Wenz 1962). These anchors are NOT independently validated — they lock
+    the *current* output so any future change to those coefficients is caught
+    and forced to be deliberate. Re-validate against Wenz (1962) before
+    updating the expected values here.
+    """
+    expected = {
+        (10.0, 100.0): 58.9076655148,
+        (10.0, 1000.0): 59.6619005873,
+        (20.0, 100.0): 65.3631715344,
+        (20.0, 1000.0): 65.6516662333,
+    }
+    for (u, fhz), level in expected.items():
+        got = compute_windnoise(np.array([fhz]), u=u, water_depth='deep')
+        assert got[0] == pytest.approx(level, abs=1e-6)
+
+
 def test_wenznoise_high_freq_only_no_rain_meld_crash():
     """Rain melding only fires when both <7kHz and >7kHz frequencies exist."""
     f_high = np.logspace(4.0, 5.0, 30)  # all > 7 kHz
@@ -95,17 +117,19 @@ def test_wenznoise_default_attributes(freqs):
         assert not np.any(np.isnan(v)), f"{attr} contains NaN"
 
 
-def test_wenznoise_components_matrix_layout(freqs):
+def test_wenznoise_components_named(freqs):
     wenz = WenzNoise(freqs, wind_speed=10, shipping_level='medium',
                      rain_rate='moderate')
-    M = wenz.components
-    assert M.shape == (freqs.size, 6)
-    np.testing.assert_array_equal(M[:, 0], wenz.total)
-    np.testing.assert_array_equal(M[:, 1], wenz.shipping)
-    np.testing.assert_array_equal(M[:, 2], wenz.wind)
-    np.testing.assert_array_equal(M[:, 3], wenz.rain)
-    np.testing.assert_array_equal(M[:, 4], wenz.thermal)
-    np.testing.assert_array_equal(M[:, 5], wenz.turbulence)
+    c = wenz.components
+    assert c._fields == ('total', 'wind', 'shipping', 'rain',
+                         'thermal', 'turbulence')
+    assert len(c) == 6
+    np.testing.assert_array_equal(c.total, wenz.total)
+    np.testing.assert_array_equal(c.shipping, wenz.shipping)
+    np.testing.assert_array_equal(c.wind, wenz.wind)
+    np.testing.assert_array_equal(c.rain, wenz.rain)
+    np.testing.assert_array_equal(c.thermal, wenz.thermal)
+    np.testing.assert_array_equal(c.turbulence, wenz.turbulence)
 
 
 def test_wenznoise_total_geq_components(freqs):
@@ -127,11 +151,13 @@ def test_wenznoise_shipping_levels_ordered(freqs):
 
 def test_wenznoise_as_psd_round_trip(freqs):
     wenz = WenzNoise(freqs, wind_speed=10)
-    # Default ref=1e-6 Pa (= 1 µPa) returns Pa²/Hz; converting back to
-    # dB re 1 µPa²/Hz must reproduce the .total attribute exactly.
-    pa2 = wenz.as_psd()
-    db_back = 10 * np.log10(pa2 / 1e-12)
-    np.testing.assert_allclose(db_back, wenz.total, rtol=0, atol=1e-9)
+    # Default returns µPa²/Hz — the same 1 µPa reference as .total
+    # (dB re 1 µPa²/Hz), so a plain 10·log10 reproduces .total exactly.
+    upa2 = wenz.as_psd()
+    np.testing.assert_allclose(10 * np.log10(upa2), wenz.total, rtol=0, atol=1e-9)
+    # An explicit SI request (ref = 1 µPa in Pa) returns Pa²/Hz.
+    pa2 = wenz.as_psd(ref=1e-6)
+    np.testing.assert_allclose(10 * np.log10(pa2 / 1e-12), wenz.total, rtol=0, atol=1e-9)
 
 
 def test_wenznoise_repr_contains_params(freqs):
@@ -153,9 +179,19 @@ def test_wenznoise_rejects_invalid_kwargs(freqs):
         WenzNoise(freqs, wind_speed=10, rain_rate='monsoon')
 
 
+def test_wenznoise_rejects_dc_and_negative_frequencies():
+    # The empirical fits are all log10(f); a DC bin (common from a raw rfft
+    # grid) would otherwise produce log10(0) = -inf/NaN, not a clear error.
+    with pytest.raises(ConfigurationError, match='> 0 Hz'):
+        WenzNoise(np.array([0.0, 10.0, 100.0]), wind_speed=10)
+    with pytest.raises(ConfigurationError, match='> 0 Hz'):
+        WenzNoise(np.array([-5.0, 10.0]), wind_speed=10)
+
+
 def test_wenznoise_plot_returns_fig_ax(freqs):
     wenz = WenzNoise(freqs, wind_speed=15)
-    fig, ax = wenz.plot()
+    from uacpy.visualization import plot_wenz
+    fig, ax = plot_wenz(wenz)
     assert fig is not None and ax is not None
     import matplotlib.pyplot as plt
     plt.close(fig)
@@ -163,7 +199,8 @@ def test_wenznoise_plot_returns_fig_ax(freqs):
 
 def test_wenznoise_plot_total_only(freqs):
     wenz = WenzNoise(freqs, wind_speed=15)
-    fig, ax = wenz.plot(show_components=False)
+    from uacpy.visualization import plot_wenz
+    fig, ax = plot_wenz(wenz, show_components=False)
     assert fig is not None and ax is not None
     import matplotlib.pyplot as plt
     plt.close(fig)
@@ -268,3 +305,10 @@ class TestMarineMammalWeighting:
         assert np.allclose(apply_weighting(lvl, f, "LF"),
                            lvl + auditory_weighting(f, "LF"))
         assert np.isfinite(weighted_level(lvl, f, "LF"))
+        # weighted_level integrates over frequency, so it must be independent
+        # of the grid density (a bare sample-sum was not — it swung ~10 dB).
+        f_coarse = np.linspace(20.0, 20000.0, 50)
+        f_fine = np.linspace(20.0, 20000.0, 500)
+        wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), f_coarse, "LF")
+        wl_fine = weighted_level(np.full(f_fine.size, 120.0), f_fine, "LF")
+        assert abs(wl_coarse - wl_fine) < 0.5     # was ~10 dB before the fix

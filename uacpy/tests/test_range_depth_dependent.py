@@ -10,8 +10,8 @@ from uacpy import Field
 from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
-    RangeDependentBottom, SedimentLayer, LayeredBottom,
-    RangeDependentLayeredBottom, BoundaryProperties, SoundSpeedProfile,
+    Bottom, SedimentLayer, SeabedColumn,
+    BoundaryProperties, SoundSpeedProfile,
 )
 
 
@@ -32,9 +32,9 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.is_range_dependent
-        assert len(env.bathymetry) == 21
-        assert env.bathymetry[0, 1] == 80.0
-        assert env.bathymetry[-1, 1] == 120.0
+        assert env.bathymetry.n_ranges == 21
+        assert env.bathymetry.depths[0] == 80.0
+        assert env.bathymetry.depths[-1] == 120.0
 
     def test_range_dependent_bottom_properties(self):
         """Test range-dependent bottom properties."""
@@ -43,8 +43,7 @@ class TestRangeDependentEnvironment:
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
-        bottom_rd = RangeDependentBottom(
-            ranges=ranges,
+        bottom_rd = Bottom.from_halfspaces(ranges,
             sound_speed=sound_speeds,
             density=densities,
             attenuation=attenuations,
@@ -61,7 +60,7 @@ class TestRangeDependentEnvironment:
         assert len(env.bottom.ranges) == 3
 
         # Test getting bottom at specific range
-        bottom_at_2km = env.bottom_at_range(2000)
+        bottom_at_2km = env.bottom.halfspace_at(range=2000)
         assert bottom_at_2km.sound_speed > 1600
         assert bottom_at_2km.sound_speed < 1650
 
@@ -245,8 +244,7 @@ class TestModelWithRangeDependence:
         densities = np.array([1.5, 1.6, 1.7])
         attenuations = np.array([0.5, 0.6, 0.7])
 
-        bottom_rd = RangeDependentBottom(
-            ranges=ranges,
+        bottom_rd = Bottom.from_halfspaces(ranges,
             sound_speed=sound_speeds,
             density=densities,
             attenuation=attenuations,
@@ -272,12 +270,11 @@ class TestModelWithRangeDependence:
 
     @pytest.mark.requires_binary
     def test_ram_range_dependent_bottom_default_dz(self):
-        """RAM auto-computes dz on a RangeDependentBottom (per-range ndarray
+        """RAM auto-computes dz on a Bottom (per-range ndarray
         sound_speed) without crashing — regression for the 'truth value of an
         array is ambiguous' error when dz is unpinned (every other RD test
         pins dz=2.0, which masked it)."""
-        bottom_rd = RangeDependentBottom(
-            ranges=np.array([0.0, 2500.0, 5000.0]),
+        bottom_rd = Bottom.from_halfspaces(np.array([0.0, 2500.0, 5000.0]),
             sound_speed=np.array([1600.0, 1700.0, 1800.0]),
             density=np.array([1.5, 1.6, 1.7]),
             attenuation=np.array([0.5, 0.5, 0.5]),
@@ -329,8 +326,7 @@ class TestRangeDependentConsistency:
         bathymetry = np.column_stack([ranges, np.array([100, 110, 120])])
         sound_speeds = np.array([1600, 1650, 1700])
 
-        bottom_rd = RangeDependentBottom(
-            ranges=ranges,
+        bottom_rd = Bottom.from_halfspaces(ranges,
             sound_speed=sound_speeds,
             density=np.array([1.5, 1.5, 1.5]),
             attenuation=np.array([0.5, 0.5, 0.5]),
@@ -343,8 +339,8 @@ class TestRangeDependentConsistency:
             bottom=bottom_rd
         )
 
-        bottom_at_2_5km = env.bottom_at_range(2500)
-        depth_at_2_5km = float(env.bathymetry_at_range(2500)[0])
+        bottom_at_2_5km = env.bottom.halfspace_at(range=2500)
+        depth_at_2_5km = float(env.bathymetry.eval(range=2500))
 
         assert 1600 < bottom_at_2_5km.sound_speed < 1650
         assert 100 < depth_at_2_5km < 110
@@ -400,11 +396,11 @@ class TestSedimentLayer:
 
 
 class TestLayeredBottom:
-    """Tests for the LayeredBottom class."""
+    """Tests for the SeabedColumn class."""
 
     def test_basic_creation(self):
-        """Test basic LayeredBottom creation."""
-        lb = LayeredBottom(
+        """Test basic SeabedColumn creation."""
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
                 SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
@@ -419,7 +415,7 @@ class TestLayeredBottom:
 
     def test_layer_depths(self):
         """Test layer depth computation."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
                 SedimentLayer(thickness=50, sound_speed=1650, density=1.7),
@@ -430,17 +426,17 @@ class TestLayeredBottom:
         assert depths[0] == (200, 210)
         assert depths[1] == (210, 260)
 
-    def test_empty_layers_raises(self):
-        """Empty layers list should raise ValueError."""
-        with pytest.raises(ConfigurationError, match="at least one"):
-            LayeredBottom(
-                layers=[],
-                halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
-            )
+    def test_empty_layers_is_halfspace(self):
+        """A 0-layer SeabedColumn is a valid pure half-space."""
+        col = SeabedColumn(
+            layers=[],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
+        )
+        assert not col.is_layered and col.total_thickness() == 0.0
 
     def test_environment_with_layered_bottom(self):
-        """Test Environment accepts LayeredBottom."""
-        lb = LayeredBottom(
+        """Test Environment coerces a SeabedColumn into a layered Bottom."""
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
@@ -448,45 +444,43 @@ class TestLayeredBottom:
 
         assert env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
-        assert env.bottom is lb
-        assert env.bottom.halfspace.sound_speed == 1800
+        assert env.bottom.columns[0] is lb
+        assert env.bottom.columns[0].halfspace.sound_speed == 1800
 
     def test_environment_plain_boundary_properties(self):
-        """Plain BoundaryProperties bottom has no layered/RD bottom attached."""
+        """A half-space bottom is a non-layered, range-independent Bottom."""
         env = uacpy.Environment(name='test', bathymetry=100)
-        assert not env.has_layered_bottom()
-        assert isinstance(env.bottom, uacpy.BoundaryProperties)
+        assert not env.has_layered_bottom() and not env.bottom.is_range_dependent
+        assert isinstance(env.bottom, uacpy.Bottom)
 
 
 class TestRangeDependentLayeredBottom:
-    """Tests for the RangeDependentLayeredBottom class."""
+    """Tests for the Bottom class."""
 
     def _make_rdl(self):
-        near = LayeredBottom(
+        near = SeabedColumn(
             layers=[SedimentLayer(5, 1500, 1.2, 1.0),
                     SedimentLayer(15, 1550, 1.4, 0.8)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=1700, density=1.8, attenuation=0.2),
         )
-        far = LayeredBottom(
+        far = SeabedColumn(
             layers=[SedimentLayer(3, 1650, 1.8, 0.3),
                     SedimentLayer(10, 1750, 2.0, 0.2)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=2200, density=2.5, attenuation=0.05),
         )
-        return RangeDependentLayeredBottom(
-            ranges=np.array([0, 20000]),
-            profiles=[near, far],
-        )
+        return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
 
     def test_basic_creation(self):
         rdl = self._make_rdl()
-        assert len(rdl.profiles) == 2
+        assert len(rdl.columns) == 2
         assert rdl.max_total_thickness() == 20.0  # max(5+15, 3+10)
 
     def test_sample_at_depths(self):
         rdl = self._make_rdl()
-        cs, rho, attn = rdl.sample_at_depths(0, n_points=4)
+        cs, rho, attn = rdl.columns[0].sample_at_depths(
+            4, max_thickness=rdl.max_total_thickness())
         assert len(cs) == 4
         # First sample is at depth 0 → layer 0
         assert cs[0] == 1500
@@ -497,22 +491,21 @@ class TestRangeDependentLayeredBottom:
         rdl = self._make_rdl()
         # Profile 1 has total thickness 13m, max is 20m
         # So sample at depth 20m is below its layers → halfspace
-        cs, rho, attn = rdl.sample_at_depths(1, n_points=4)
+        cs, rho, attn = rdl.columns[1].sample_at_depths(
+            4, max_thickness=rdl.max_total_thickness())
         # Last sample should be halfspace (2200)
         assert cs[3] == 2200
         assert rho[3] == 2.5
 
     def test_validation_length_mismatch(self):
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(5, 1500, 1.2)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=1700, density=1.8),
         )
-        with pytest.raises(ConfigurationError, match="profiles length"):
-            RangeDependentLayeredBottom(
-                ranges=np.array([0, 10000, 20000]),
-                profiles=[lb, lb],  # 2 profiles for 3 ranges
-            )
+        with pytest.raises(ConfigurationError, match="columns length"):
+            # 2 columns for 3 ranges — length mismatch
+            Bottom.from_columns([lb, lb], ranges=np.array([0, 10000, 20000]))
 
     def test_environment_accepts_rdl(self):
         rdl = self._make_rdl()
@@ -527,14 +520,14 @@ class TestRangeDependentLayeredBottom:
         assert not env.has_layered_bottom()
         assert not env.has_range_dependent_bottom()
         assert env.is_range_dependent
-        assert len(env.bathymetry) == 2
-        assert env.bathymetry[0, 1] == 100
-        assert env.bathymetry[1, 1] == 300
+        assert env.bathymetry.n_ranges == 2
+        assert env.bathymetry.depths[0] == 100
+        assert env.bathymetry.depths[1] == 300
 
     @pytest.mark.requires_binary
     @pytest.mark.filterwarnings("ignore:.*below the local seafloor.*:UserWarning")
     def test_ram_with_rdl(self):
-        """RAM should handle RangeDependentLayeredBottom. The deepest
+        """RAM should handle Bottom. The deepest
         receivers sit below the seafloor at the near ranges where the
         bathy shoals to 100 m — that's exactly the PE absorbing-layer
         regime, hence the targeted filterwarnings above."""
@@ -563,8 +556,7 @@ class TestWarnings:
     def test_bellhop_accepts_bottom_rd(self):
         """Bellhop honours range-dependent bottom geoacoustics natively
         through the long .bty format — no warning expected."""
-        rd_bottom = RangeDependentBottom(
-            ranges=np.array([0, 10000]),
+        rd_bottom = Bottom.from_halfspaces(np.array([0, 10000]),
             sound_speed=np.array([1600, 1700]),
             density=np.array([1.5, 1.7]),
             attenuation=np.array([0.5, 0.3]),
@@ -583,7 +575,7 @@ class TestWarnings:
 
     def test_bellhop_auto_routes_layered_bottom_through_bounce(self):
         """Bellhop auto-routes a layered bottom through BOUNCE."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
@@ -600,7 +592,7 @@ class TestWarnings:
 
     def test_ram_accepts_layered_bottom(self):
         """RAM consumes a layered bottom natively — no collapse warning."""
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
@@ -627,7 +619,7 @@ class TestIntegrationLayeredBottom:
 
     @pytest.fixture
     def layered_env(self):
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=5.0, sound_speed=1550.0, density=1.5, attenuation=0.3),
                 SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.7, attenuation=0.5),
@@ -652,8 +644,8 @@ class TestIntegrationLayeredBottom:
     @pytest.mark.requires_binary
     def test_krakenfield_layered(self, layered_env, source, receiver):
         """KrakenField should produce valid TL with layered bottom."""
-        from uacpy.models import KrakenField
-        kf = KrakenField(verbose=False)
+        from uacpy.models import Kraken
+        kf = Kraken(verbose=False)
         result = kf.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
         assert 30 < np.nanmin(result.tl) < 100
@@ -711,8 +703,7 @@ class TestIntegrationRAMRangeDependent:
     @pytest.mark.requires_binary
     def test_ram_rd_bottom_produces_tl(self):
         """RAM with RD bottom should produce valid TL."""
-        bottom_rd = RangeDependentBottom(
-            ranges=np.array([0, 5000, 10000]),
+        bottom_rd = Bottom.from_halfspaces(np.array([0, 5000, 10000]),
             sound_speed=np.array([1500, 1600, 1700]),
             density=np.array([1.2, 1.5, 2.0]),
             attenuation=np.array([1.0, 0.5, 0.3]),
@@ -740,7 +731,7 @@ class TestATEnvWriterLayered:
         from uacpy.io.oalib_writer import write_header
         from uacpy.core.constants import BoundaryType
 
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
                 SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
@@ -766,7 +757,7 @@ class TestATEnvWriterLayered:
         import io
         from uacpy.io.oalib_writer import write_layer_sections
 
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5)],
             halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
         )
@@ -784,7 +775,7 @@ class TestATEnvWriterLayered:
         import io
         from uacpy.io.oalib_writer import write_bottom_section
 
-        lb = LayeredBottom(
+        lb = SeabedColumn(
             layers=[
                 SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
                 SedimentLayer(thickness=50, sound_speed=1650, density=1.7),

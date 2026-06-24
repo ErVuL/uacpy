@@ -115,7 +115,7 @@ class TestResolveTimeSeriesFrequencies:
 
     def test_non_time_series_passes_through(self):
         out = self.model._resolve_time_series_frequencies(
-            RunMode.COHERENT_TL, self.source, None,
+            RunMode.COHERENT_TL, None,
             source_waveform=_gaussian_pulse(), sample_rate=FS,
         )
         assert out is None
@@ -123,7 +123,7 @@ class TestResolveTimeSeriesFrequencies:
     def test_explicit_frequencies_bypasses_derivation(self):
         freqs_in = np.linspace(100, 300, 11)
         out = self.model._resolve_time_series_frequencies(
-            RunMode.TIME_SERIES, self.source, freqs_in,
+            RunMode.TIME_SERIES, freqs_in,
             source_waveform=_gaussian_pulse(), sample_rate=FS,
         )
         assert out is freqs_in  # user-supplied wins, no derivation
@@ -132,7 +132,7 @@ class TestResolveTimeSeriesFrequencies:
         wf = _gaussian_pulse()
         with pytest.warns(UserWarning, match=r"auto-derived"):
             freqs = self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, self.source, None,
+                RunMode.TIME_SERIES, None,
                 source_waveform=wf, sample_rate=FS,
             )
         assert freqs is not None
@@ -149,7 +149,7 @@ class TestResolveTimeSeriesFrequencies:
         wf = np.zeros(100)
         with pytest.raises(ConfigurationError, match='identically zero'):
             self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, self.source, None,
+                RunMode.TIME_SERIES, None,
                 source_waveform=wf, sample_rate=FS,
             )
 
@@ -281,6 +281,44 @@ class TestDFTWraparoundWarning:
         wf[: int(0.005 * FS)] = 1.0  # short non-zero burst
         with pytest.warns(UserWarning, match=r"wraps back"):
             tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+
+
+class TestSynthesisSizeCap:
+    """``Field.synthesize_time_series`` caps the *auto* IFFT length so a
+    too-high sample_rate cannot silently allocate a multi-GB buffer / OOM;
+    an explicit ``nfft=`` is the user's opt-in and bypasses the cap."""
+
+    @staticmethod
+    def _tf():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)
+        H = np.ones((1, 1, len(freqs)), dtype=complex)
+        return Field(
+            data=H,
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs, phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    def _wf(self):
+        wf = np.zeros(64); wf[:8] = 1.0
+        return wf
+
+    def test_huge_sample_rate_raises(self):
+        with pytest.raises(ConfigurationError, match="safety cap"):
+            self._tf().synthesize_time_series(
+                source_waveform=self._wf(), sample_rate=1e9)
+
+    def test_normal_sample_rate_ok(self):
+        ts = self._tf().synthesize_time_series(
+            source_waveform=self._wf(), sample_rate=1e4)
+        assert ts.kind == 'time_series'
+        assert ts.data.shape[-1] <= (1 << 26)
+
+    def test_explicit_nfft_bypasses_cap(self):
+        ts = self._tf().synthesize_time_series(
+            source_waveform=self._wf(), sample_rate=1e9, nfft=4096)
+        assert ts.data.shape[-1] == 4096
 
 
 class TestSynthesisAbsoluteAmplitude:

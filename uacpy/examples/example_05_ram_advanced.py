@@ -41,7 +41,7 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy import RangeDependentBottom  # noqa: E402
+from uacpy import Bottom  # noqa: E402
 from uacpy.models import RAM  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_field,
@@ -99,8 +99,7 @@ def main():
     ])
 
     # Bottom: soft mud → hard sand
-    bottom_rd = RangeDependentBottom(
-        ranges=np.array([0, 1000, 2000, 3000]),
+    bottom_rd = Bottom.from_halfspaces(np.array([0, 1000, 2000, 3000]),
         sound_speed=np.array([1500, 1580, 1640, 1700]),
         density=np.array([1.2, 1.5, 1.8, 2.0]),
         attenuation=np.array([1.0, 0.7, 0.5, 0.3]),
@@ -108,8 +107,8 @@ def main():
         acoustic_type='half-space'
     )
 
-    print(f"  ✓ Bottom sound speed: {bottom_rd.sound_speed.min():.0f} → {bottom_rd.sound_speed.max():.0f} m/s")
-    print(f"  ✓ Bottom density: {bottom_rd.density.min():.1f} → {bottom_rd.density.max():.1f} g/cm³")
+    print(f"  ✓ Bottom sound speed: {bottom_rd.halfspace_sound_speed.min():.0f} → {bottom_rd.halfspace_sound_speed.max():.0f} m/s")
+    print(f"  ✓ Bottom density: {bottom_rd.halfspace_density.min():.1f} → {bottom_rd.halfspace_density.max():.1f} g/cm³")
 
     # ═══════════════════════════════════════════════════════════════════════
     # CREATE ENVIRONMENT WITH ALL RANGE-DEPENDENT FEATURES
@@ -156,24 +155,24 @@ def main():
         result = None
 
     # ═══════════════════════════════════════════════════════════════════════
-    # COMPARISON: KrakenField with Range-Independent Approximation
+    # COMPARISON: Kraken with Range-Independent Approximation
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Comparison] Running KrakenField for comparison...")
-    print("  Note: KrakenField will use range-independent approximation for the bottom")
+    print("\n[Comparison] Running Kraken for comparison...")
+    print("  Note: Kraken will use range-independent approximation for the bottom")
     print("  → Range-dependent bottom effects will not be fully captured")
     print("  → For full accuracy, use RAM or Bellhop\n")
 
-    from uacpy.models import KrakenField, Bellhop
+    from uacpy.models import Kraken, Bellhop
 
-    # Run KrakenField
+    # Run Kraken
     try:
-        krakenfield = KrakenField(verbose=False)
+        krakenfield = Kraken(verbose=False)
         result_krakenfield = krakenfield.compute_tl(env, source, receiver)
-        print("  ✓ KrakenField completed (using range-independent approximation)")
+        print("  ✓ Kraken completed (using range-independent approximation)")
         print(f"  ✓ TL range: {result_krakenfield.tl.min():.1f} to {result_krakenfield.tl.max():.1f} dB")
     except Exception as e:
-        print(f"  ✗ KrakenField: {e}")
+        print(f"  ✗ Kraken: {e}")
         result_krakenfield = None
 
     # Run Bellhop (supports range-dependent natively)
@@ -190,7 +189,7 @@ def main():
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
     if result is not None and result_krakenfield is not None:
         diff_kf = np.abs(result.tl - result_krakenfield.tl)
-        print(f"\n  RAM vs KrakenField: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
+        print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
         diff_bh = np.abs(result.tl - result_bellhop.tl)
@@ -198,7 +197,7 @@ def main():
 
     if result_bellhop is not None and result_krakenfield is not None:
         diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)
-        print(f"  Bellhop vs KrakenField: Mean diff = {np.nanmean(diff_bk):.1f} dB")
+        print(f"  Bellhop vs Kraken: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════
     # VISUALIZATION
@@ -226,11 +225,11 @@ def main():
         plt.savefig(OUTPUT_DIR / 'example_05_result.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_05_result.png")
 
-    # Plot 5: Three-Model Comparison (RAM, Bellhop, KrakenField)
+    # Plot 5: Three-Model Comparison (RAM, Bellhop, Kraken)
     if result is not None and result_bellhop is not None and result_krakenfield is not None:
         from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
-            {'RAM': result, 'Bellhop': result_bellhop, 'KrakenField': result_krakenfield},
+            {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_krakenfield},
             env=env, vmin=40, vmax=100,
             suptitle='Three-Model Comparison — Sediment Transition + Sloping Shelf',
         )
@@ -242,9 +241,9 @@ def main():
         _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
                            label='RAM − Bellhop', show_colorbar=True)
         _plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
-                           label='RAM − KrakenField', show_colorbar=True)
+                           label='RAM − Kraken', show_colorbar=True)
         _plot_tl_difference(result_bellhop, result_krakenfield, env,
-                           ax=axes6[2], label='Bellhop − KrakenField',
+                           ax=axes6[2], label='Bellhop − Kraken',
                            show_colorbar=True)
         fig6.suptitle('Pairwise Differences (signed, dB)',
                       fontsize=13, fontweight='bold')
@@ -257,7 +256,7 @@ def main():
     print("  ✓ Range-dependent bottom properties (mud → sand)")
     print("  ✓ Sloping shelf bathymetry")
     print("  ✓ RAM parabolic equation with PE accuracy control")
-    print("  ✓ Three-model comparison (RAM / Bellhop / KrakenField)")
+    print("  ✓ Three-model comparison (RAM / Bellhop / Kraken)")
 
     print("\n✓ Example 05 complete\n")
 

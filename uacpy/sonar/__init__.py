@@ -3,7 +3,10 @@
 Builds on uacpy's propagation outputs (TL fields) and noise spectra to assemble
 active/passive sonar performance: scattering-strength laws, cell-scattering
 reverberation, the sonar equation (signal excess, figure of merit, detection
-range), and detection-theory thresholds.
+range), and detection-theory thresholds. The ``*_field`` helpers map the
+sonar equation over a model TL :class:`~uacpy.core.results.Field` —
+signal-excess and detection-probability maps over ``(depth, range)``, plus
+the per-depth detection-range profile.
 """
 
 from .scattering import (
@@ -19,11 +22,15 @@ from .reverberation import (
 )
 from .sonar_equation import (
     active_signal_excess,
+    active_signal_excess_field,
     detection_range,
+    detection_range_by_depth,
     echo_level,
     figure_of_merit,
     noise_background,
     passive_signal_excess,
+    passive_signal_excess_field,
+    probability_of_detection_field,
 )
 from .detection import (
     albersheim_snr,
@@ -33,8 +40,17 @@ from .detection import (
     probability_of_detection,
     roc_curve,
 )
+from .target_strength import (
+    ts_convex,
+    ts_cylinder,
+    ts_ellipsoid,
+    ts_plate,
+    ts_sphere,
+)
 
-from . import scattering, reverberation, sonar_equation, detection
+from . import (
+    scattering, reverberation, sonar_equation, detection, target_strength,
+)
 
 __all__ = [
     "LAMBERT_MU_DB",
@@ -48,16 +64,26 @@ __all__ = [
     "noise_background",
     "passive_signal_excess",
     "active_signal_excess",
+    "passive_signal_excess_field",
+    "active_signal_excess_field",
     "figure_of_merit",
     "detection_range",
+    "detection_range_by_depth",
+    "probability_of_detection_field",
     "deflection_coefficient",
     "detection_index",
     "probability_of_detection",
     "roc_curve",
     "albersheim_snr",
     "detection_threshold_energy",
+    "ts_sphere",
+    "ts_convex",
+    "ts_ellipsoid",
+    "ts_cylinder",
+    "ts_plate",
     "scattering",
     "reverberation",
     "sonar_equation",
     "detection",
+    "target_strength",
 ]

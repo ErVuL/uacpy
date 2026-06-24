@@ -29,13 +29,14 @@ import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.acoustic_signal import (  # noqa: E402
-    FK,
-    TauP,
+    fk_transform,
+    taup_transform,
     cepstrum,
     cwt,
     radon_transform,
     wigner_ville,
 )
+from uacpy.visualization import draw_sound_cone, draw_slowness_line  # noqa: E402
 
 
 def main():
@@ -52,7 +53,7 @@ def main():
     field = (np.cos(2 * np.pi * (f0 * tt[:, None] - (f0 / 1500.0) * xx[None, :]))
              + 0.8 * np.cos(2 * np.pi * (f0 * tt[:, None] + (f0 / 2500.0) * xx[None, :])))
     field = field * np.hanning(nt)[:, None] * np.hanning(nx)[None, :]
-    fkf, fkk, fkp = FK().compute(field, fs, dx)
+    fkf, fkk, fkp, _ = fk_transform(field, fs, dx)
 
     # --- (B) pulsed linear gather for tau-p ---
     gfs, gnt, gnx, gdx = 1000.0, 512, 48, 10.0
@@ -67,7 +68,7 @@ def main():
     for p0, tau0 in [(1 / 1800.0, 0.04), (-1 / 2500.0, 0.13)]:
         for ix in range(gnx):
             gather[:, ix] += ricker(gt, tau0 + p0 * gx[ix])
-    pax, tauax, U = TauP().compute(gather, gfs, gdx, p_max=1 / 1200.0,
+    pax, tauax, U = taup_transform(gather, gfs, gdx, p_max=1 / 1200.0,
                                    n_slowness=301)
 
     # --- (C,D) multi-component transient for CWT + Wigner-Ville ---
@@ -110,7 +111,7 @@ def main():
     im = ax.imshow(10 * np.log10(fkp / fkp.max() + 1e-6), aspect='auto',
                    origin='lower', extent=[fkk[0], fkk[-1], fkf[0], fkf[-1]],
                    vmin=-40, vmax=0, cmap='jet')
-    FK.draw_sound_cone(ax, fkf[-1], fkk[-1], 1500)
+    draw_sound_cone(ax, fkf[-1], fkk[-1], 1500)
     ax.set_title('f-k transform + 1500 m/s cone', fontweight='bold')
     ax.set_xlabel('Spatial frequency [cycles/m]'); ax.set_ylabel('Frequency [Hz]')
     ax.set_ylim(0, 400)
@@ -121,7 +122,7 @@ def main():
     im = ax.imshow(np.abs(U).T, aspect='auto', origin='upper', cmap='jet',
                    extent=[pax[0] * 1e3, pax[-1] * 1e3, tauax[-1], tauax[0]],
                    vmin=0, vmax=np.abs(U).max())
-    TauP.draw_slowness_line(ax, tauax[-1], 1500)
+    draw_slowness_line(ax, tauax[-1], 1500)
     ax.set_title('tau-p slant stack + 1500 m/s', fontweight='bold')
     ax.set_xlabel('Slowness p [s/km]'); ax.set_ylabel('Intercept tau [s]')
     fig.colorbar(im, ax=ax, label='Stack amplitude')

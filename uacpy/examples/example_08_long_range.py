@@ -23,7 +23,7 @@ SOURCE:
 
 MODELS TESTED:
     ✓ Bellhop      (ray tracing - efficient for long range)
-    ✓ KrakenField  (normal modes - very efficient for ducted long range)
+    ✓ Kraken  (normal modes - very efficient for ducted long range)
     ✓ Scooter      (wavenumber integration)
     ✓ OAST         (wavenumber integration)
 
@@ -41,7 +41,7 @@ EXPECTED BEHAVIOR:
     - Very low TL in sound channel (<80 dB at 100 km)
     - Strong energy trapping with minimal bottom interaction
     - Clear modal structure in channel
-    - KrakenField likely most efficient
+    - Kraken likely most efficient
 
 COMPUTATIONAL NOTES:
     - Long range requires fine grid spacing
@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy.models import Bellhop, KrakenField, Scooter, OAST  # noqa: E402
+from uacpy.models import Bellhop, Kraken, Scooter, OAST  # noqa: E402
 from plotting_utils import create_example_report  # noqa: E402
 
 
@@ -106,7 +106,7 @@ def main():
     results = {}
     models = [
         ('Bellhop', Bellhop(verbose=False)),
-        ('KrakenField', KrakenField(verbose=False)),
+        ('Kraken', Kraken(verbose=False)),
         ('Scooter', Scooter(verbose=False)),
         ('OAST', OAST(verbose=False)),
     ]

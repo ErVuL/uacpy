@@ -17,7 +17,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode
+from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -78,7 +78,7 @@ class Bounce(PropagationModel):
     need the on-disk files.
 
     To **chain to another model** (Bellhop / Scooter / Kraken /
-    KrakenC reading ``acoustic_type='file'``), pin ``work_dir=`` so the
+    Kraken reading ``acoustic_type='file'``), pin ``work_dir=`` so the
     ``.brc`` / ``.irc`` files outlive the call. The same uniform
     ``(work_dir, cleanup)`` rule every other model uses applies here:
 
@@ -92,9 +92,8 @@ class Bounce(PropagationModel):
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     BOUNCE produces ONE BRC consumed across the whole receiver-range
     axis; the median sample is the most representative single profile.
-    Per-model: ``'bottom': 'median'``,
-    ``'rd_layered_layers': 'preserve'`` (BOUNCE consumes
-    ``LayeredBottom`` natively).
+    Per-model: ``'bottom_range': 'median'`` (the layer stack is kept since
+    BOUNCE consumes layered seabed columns natively).
 
     Examples
     --------
@@ -164,6 +163,19 @@ class Bounce(PropagationModel):
     - Acoustics Toolbox: http://oalib.hlsresearch.com/
     """
 
+    # Declarative metadata read and validated by PropagationModel. BOUNCE
+    # emits only plane-wave reflection coefficients; it consumes layered and
+    # elastic seabed columns natively (so those env shapes are *not*
+    # collapsed) but handles no range dependence. It produces ONE BRC used
+    # across the whole receiver-range axis, so a range-dependent bottom is
+    # reduced to its most-representative single column (median).
+    spec = ModelSpec(
+        modes=(RunMode.REFLECTION,),
+        supports={'layered_bottom', 'elastic_media'},
+        collapse={'bottom_range': 'median'},
+    )
+    source = 'acoustics_toolbox'
+
     def __init__(
         self,
         executable: Optional[Path] = None,
@@ -178,7 +190,6 @@ class Bounce(PropagationModel):
         cleanup: Optional[bool] = None,
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
-        **kwargs,
     ):
         """
         Parameters
@@ -207,18 +218,9 @@ class Bounce(PropagationModel):
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse, **kwargs,
+            cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
         self.interp_ssp = interp_ssp
-
-        # BOUNCE produces ONE BRC consumed across the whole range axis;
-        # the median sample is the most representative single profile.
-        # ``rd_layered_layers='preserve'`` keeps the layer stack (BOUNCE
-        # handles LayeredBottom natively).
-        self._set_collapse_defaults({
-            'bottom': 'median',
-            'rd_layered_layers': 'preserve',
-        })
 
         self.c_low = c_low
         self.c_high = c_high
@@ -226,6 +228,31 @@ class Bounce(PropagationModel):
         self.n_angles = n_angles
 
         # Validate phase velocity bounds up front
+        self._validate_phase_speed_bounds()
+
+        # Run modes, capability flags and collapse defaults now come from the
+        # class-level ``spec`` (applied by PropagationModel.__init__).
+        #
+        # Keep the user's ``executable`` arg verbatim (``None`` when
+        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
+        # re-pinning the already-resolved absolute path. The resolved path
+        # lives in ``self._exe``.
+        self.executable = Path(executable) if executable is not None else None
+        if self.executable is None:
+            self._exe = self._find_executable_in_paths(
+                'bounce',
+                bin_subdirs='oalib',
+                dev_subdir='Acoustics-Toolbox/Kraken',
+            )
+        else:
+            self._exe = self.executable
+
+        if not self._exe.exists():
+            raise ExecutableNotFoundError('Bounce', str(self._exe))
+
+    def _validate_phase_speed_bounds(self) -> None:
+        """Phase-velocity bounds invariant, enforced at construction AND at
+        ``run()`` (a single source of truth for both call sites)."""
         if self.c_low <= 0:
             raise ConfigurationError(
                 f"Bounce requires c_low > 0 strictly (got {self.c_low}). "
@@ -238,34 +265,17 @@ class Bounce(PropagationModel):
                 f"c_low ({self.c_low})."
             )
 
-        # BOUNCE computes plane-wave reflection coefficients, not TL.
-        self._supported_modes = [RunMode.REFLECTION]
-        self._supports_altimetry = False
-        self._supports_range_dependent_bathymetry = False
-        self._supports_range_dependent_ssp = False
-        self._supports_range_dependent_bottom = False
-        self._supports_layered_bottom = True
-        self._supports_range_dependent_layered_bottom = False
-        self._supports_elastic_media = True
-        self._supports_multi_source_depth = False
-        if executable is None:
-            self.executable = self._find_executable_in_paths(
-                'bounce',
-                bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self.executable = Path(executable)
-
-        if not self.executable.exists():
-            raise ExecutableNotFoundError('Bounce', str(self.executable))
-
     def run(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
+        *,
+        frequencies=None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration=None,
     ) -> Result:
         """
         Run BOUNCE reflection coefficient computation.
@@ -274,7 +284,7 @@ class Bounce(PropagationModel):
         ``work_dir`` (constructor kwarg). Pin the location with
         ``Bounce(work_dir='./bounce_out')`` — a pinned work dir defaults
         ``cleanup=False`` so the files outlive the call and can be
-        consumed by Bellhop / Scooter / Kraken / KrakenC; an unpinned
+        consumed by Bellhop / Scooter / Kraken; an unpinned
         temp work dir is wiped after ``run()``.
 
         Parameters
@@ -305,21 +315,15 @@ class Bounce(PropagationModel):
           (``c_high=1e9`` triggers ``kmin=0`` in the Fortran; see
           ``bounce.f90``).
         - Larger ``rmax`` gives finer angular resolution.
-        - ``.brc`` is consumed by Bellhop / Scooter / KrakenC via
+        - ``.brc`` is consumed by Bellhop / Scooter / Kraken via
           ``BoundaryProperties(acoustic_type='file', reflection_file=…)``.
           ``.irc`` is consumed by Kraken (true normal modes).
         """
+        self._reject_unsupported_run_kwargs(
+            frequencies=frequencies, source_waveform=source_waveform,
+            sample_rate=sample_rate, output_duration=output_duration)
         run_mode = self._resolve_run_mode(run_mode)
-
-        if self.c_low <= 0:
-            raise ConfigurationError(
-                f"Bounce requires c_low > 0 strictly (got {self.c_low})."
-            )
-        if self.c_high <= self.c_low:
-            raise ConfigurationError(
-                f"c_high ({self.c_high}) must be strictly greater than "
-                f"c_low ({self.c_low})."
-            )
+        self._validate_phase_speed_bounds()
 
         # Per-call rmax. ``n_angles`` (below) overrides via the inverse of
         # bounce.f90:49  NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π)).
@@ -406,8 +410,19 @@ class Bounce(PropagationModel):
             self._log(f"Reading output: {brc_file}")
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
 
+            theta_out = np.atleast_1d(np.asarray(result.get('theta', []), dtype=float))
+            if theta_out.size == 0:
+                raise ConfigurationError(
+                    f"Bounce produced an empty reflection-coefficient table — "
+                    f"{brc_file.name} has no angle rows. This usually means RMax "
+                    f"(derived from receiver.ranges, here {rmax:g} m) is too small "
+                    f"for the wavenumber sweep to resolve any grazing angles. Pass a "
+                    f"receiver with a realistic max range (km-scale), or inspect "
+                    f"{brc_file.with_suffix('.prt').name} for BOUNCE diagnostics."
+                )
+
             from uacpy.core.results import ReflectionCoefficient
-            frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
+            frequency = float(source.frequencies[0])
 
             field = ReflectionCoefficient(
                 theta=result.get('theta', np.array([])),
@@ -462,9 +477,9 @@ class Bounce(PropagationModel):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
-        bottom_type = parse_boundary_type(env.halfspace_at_range(0.0).acoustic_type)
+        bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
-        frequency = source.frequencies[0] if hasattr(source.frequencies, '__len__') else source.frequencies
+        frequency = float(source.frequencies[0])
         c_water = float(env.ssp.to_pairs()[0, 1])
         wavelength = c_water / frequency
         n_mesh = max(100, int(20 * env.depth / wavelength))
@@ -482,16 +497,6 @@ class Bounce(PropagationModel):
         )
 
     def _execute(self, input_file: Path, work_dir: Path):
-        """Execute BOUNCE binary via base-class subprocess helper."""
+        """Execute BOUNCE binary via the shared binary-launch helper."""
         base_name = input_file.stem
-        try:
-            result = self._run_subprocess(
-                [str(self.executable), base_name],
-                cwd=work_dir,
-            )
-        except ModelExecutionError as exc:
-            self._attach_prt_tail(exc, work_dir, base_name)
-            raise
-        if self.verbose and result.stdout:
-            self._log(f"Bounce output:\n{result.stdout}", level='debug')
-
+        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)

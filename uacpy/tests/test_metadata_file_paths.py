@@ -17,16 +17,19 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.models import Bellhop, Bounce, Kraken, KrakenField, RAM, SPARC
+from uacpy.models import Bellhop, Bounce, Kraken, RAM, SPARC
 from uacpy.core import BoundaryProperties
 
 
 def _basic_setup():
+    # These tests assert metadata keys / output file paths, not numerics or
+    # shapes, so a small grid + modest frequency keeps the slow models
+    # (SPARC ~f**3, OASP spectral ~RMax) cheap without affecting coverage.
     env = uacpy.Environment(name='t', bathymetry=100.0, ssp=1500.0)
-    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    src = uacpy.Source(depths=50.0, frequencies=50.0)
     rcv = uacpy.Receiver(
-        depths=np.linspace(10, 90, 5),
-        ranges=np.linspace(500, 5000, 10),
+        depths=np.linspace(10, 90, 3),
+        ranges=np.linspace(500, 2500, 4),
     )
     return env, src, rcv
 
@@ -121,7 +124,7 @@ def test_bounce_paths_absent_when_no_work_dir():
 @pytest.mark.requires_binary
 def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
-    kf = KrakenField(verbose=False, work_dir=tmp_path)
+    kf = Kraken(verbose=False, work_dir=tmp_path)
     field = kf.run(env, src, rcv)
     assert 'shd_file' in field.metadata
     assert os.path.exists(field.metadata['shd_file'])
@@ -130,7 +133,7 @@ def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
 @pytest.mark.requires_binary
 def test_krakenfield_paths_absent_when_cleanup_true():
     env, src, rcv = _basic_setup()
-    kf = KrakenField(verbose=False)
+    kf = Kraken(verbose=False)
     field = kf.run(env, src, rcv)
     assert 'shd_file' not in field.metadata
 
@@ -156,7 +159,7 @@ def test_sparc_paths_present_when_cleanup_false(tmp_path):
     env = _sparc_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
-                         ranges=np.linspace(500, 3000, 8))
+                         ranges=np.linspace(500, 1500, 3))
     sp = SPARC(verbose=False, work_dir=tmp_path)
     field = sp.run(env, src, rcv)
     # SPARC writes per-depth/.rts under base_name; one of grn/rts should
@@ -177,7 +180,7 @@ def test_sparc_paths_absent_when_cleanup_true():
     env = _sparc_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
-                         ranges=np.linspace(500, 3000, 8))
+                         ranges=np.linspace(500, 1500, 3))
     sp = SPARC(verbose=False)
     field = sp.run(env, src, rcv)
     for key in ('rts_file', 'grn_file', 'prt_file'):
@@ -276,14 +279,14 @@ _OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
 
 def _drift_cases():
     from uacpy.models import (
-        Bellhop, Bounce, Kraken, KrakenField, RAM, Scooter, SPARC,
+        Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
         OAST, OASR, OASP,
     )
     raw = [
         ('Bellhop', Bellhop, {}, {}),
         ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax=10000.0), {}),
         ('Kraken',  Kraken,  {}, dict(run_mode=uacpy.RunMode.MODES)),
-        ('KrakenField', KrakenField, {}, {}),
+        ('Kraken', Kraken, {}, {}),
         ('RAM',     RAM,     {}, {}),
         ('Scooter', Scooter, {}, {}),
         ('SPARC',   SPARC,   dict(n_t_out=256), {}),

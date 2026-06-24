@@ -1,7 +1,3 @@
-# This Makefile is vendored by uacpy. Compiler flags here are intentionally
-# minimal and overridable; uacpy's install.sh injects FFLAGS / LDFLAGS /
-# FORTRAN_ARCH_FLAGS on the make command line. To build outside uacpy, pass
-# your own flags (e.g. `make FFLAGS="-O3 -march=native ..."`).
 #
 # To install the Acoustics Toolbox:
 #
@@ -36,6 +32,15 @@
 # -static is supposed to work if gfortran has been compiled to enable that option.
 # However, crt0.o comes up as misssing
 # -Bstatic worked
+# You may need to specify an architecture flag under gfortran:
+# -mcpu=apple-m2 ( for M2 processor)
+# -mcpu=ARMv8.6-A ( for generic ARM processor instruction sets)
+# For further info, see https://oalib-acoustics.org/website_resources/AcousticsToolbox/AT_compile_mac_linux.html
+# 11/27/2023:
+# A user reported issues with security on the HPC binary files. Apparently some of the downloaded files were quarantined by the Mac OS
+# and needed fixing using the xattr command
+# Also a user noted that Xcor developer tools are not needed. Apparently the Command Line Tools are sufficient.
+# A user reported that the warning messages produced when running the Makefile were confusing, but that the compiled code worked anyway.
 
 # The make utility tends to get confused with modules because it does not necessarily update the *.mod file
 # when it compiles the *.f90 file. (The *.mod file contains interface information that doesn't necessarily change
@@ -82,7 +87,7 @@ export FFLAGS= -O3 -xHost              -funroll-loops           -no-prec-div -no
 # runtime diagnostics on as well:
 #export FFLAGS= -nologo     -inline-level=2 -assume byterecl -threads -heap-arrays -check all -ftrapuv -fpe0 -gen-interfaces -traceback
 #export FFLAGS= -nologo     -inline-level=2 -assume byterecl -threads -heap-arrays -check all -ftrapuv                       -traceback -check noarg_temp_created
-export FFLAGS= -nologo     -inline-level=2 -assume byterecl -threads -heap-arrays -check all                                -traceback -check noarg_temp_created
+#export FFLAGS= -nologo     -inline-level=2 -assume byterecl -threads -heap-arrays -check all                                -traceback -check noarg_temp_created
 
 # profiling:
 # export FFLAGS= -g -O3 -profile-functions -profile-loops=all -xHost -nologo -inline-level=2 -assume byterecl -threads -heap-arrays -traceback
@@ -118,13 +123,8 @@ export FC=gfortran
 # export FFLAGS= -march=corei7 -Bstatic -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation        -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer
 # export FFLAGS= -march=native          -Waliasing -Wampersand -Wsurprising -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wa,-q -std=f2008 -O3 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
 # Had a problem with -O2 in the KRAKENC root finder for at/tests/Noise/Sduct. Switching to O1 (4//25/2023)
-# -march=native / -mtune=native baked-in flags commented out by uacpy: they
-# produce CPU-specific binaries that break wheel/sdist consumers and macOS/ARM
-# cross-compiles. install.sh sets FORTRAN_ARCH_FLAGS via FFLAGS= on the
-# command line; users invoking `make` directly should pass FFLAGS= explicitly
-# if they want CPU tuning.
 # export FFLAGS= -march=native -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer -mtune=native
-export FFLAGS= -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
+export FFLAGS= -mcpu=apple-m2 -Bstatic -Waliasing -Wampersand              -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation         -std=gnu  -O1 -ffast-math -funroll-all-loops -fomit-frame-pointer
 
 # Compilation and run-time diagnostics on:
 # omni.env fails trap=invalid
@@ -195,7 +195,6 @@ all:
 	@echo "***********************************"
 
 install:
-	mkdir bin
 	(cd misc;	make -k all)
 	(cd tslib;	make -k all)
 	(cd Bellhop;	make -k install)
@@ -209,7 +208,7 @@ install:
 	@echo "***************************************"
 
 clean:
-	-rm -rf bin
+	-rm -f bin/*.exe
 	find . -name '*.dSYM' -exec rm -r {} +
 	find . -name '*.png'  -exec rm -r {} +
 	find . -name '*.eps'  -exec rm -r {} +
@@ -226,5 +225,4 @@ clean:
 	(cd Krakel;	make -k -i clean)
 	(cd Scooter;	make -k -i clean)
 	(cd tests;	make -k -i clean)
-
 
