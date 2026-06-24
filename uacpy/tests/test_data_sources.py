@@ -39,7 +39,7 @@ def stub_fetchers(monkeypatch):
 
 def test_environment_records_data_sources(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bottom=2.0)   # ϕ bottom, no fetch
-    ids = [s.id for s in env.data_sources]
+    ids = [s.source.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23']        # bathy + ssp, no fetched bottom
     # citations(env) renders just those.
     text = sources.citations(env)
@@ -54,5 +54,5 @@ def test_environment_records_fetched_bottom_sources(monkeypatch, stub_fetchers):
                                                   grain_size_phi=2.0, sound_speed=1650,
                                                   density=1.9))
     env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='emodnet')
-    ids = [s.id for s in env.data_sources]
+    ids = [s.source.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23', 'emodnet']

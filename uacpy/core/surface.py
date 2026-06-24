@@ -71,6 +71,18 @@ class Surface:
             raise ConfigurationError(
                 "Surface: multiple boundaries require a matching ranges= axis.")
 
+    @property
+    def data_sources(self) -> tuple:
+        """Aggregated provenance across surface nodes, de-duplicated by source
+        id (harmonised with the leaf carriers and ``env.data_sources``)."""
+        seen, out = set(), []
+        for p in self.properties:
+            for r in getattr(p, 'data_sources', ()) or ():
+                if r.source.id not in seen:
+                    seen.add(r.source.id)
+                    out.append(r)
+        return tuple(out)
+
     # ── constructors ────────────────────────────────────────────────────────
     @classmethod
     def coerce(cls, value) -> 'Surface':

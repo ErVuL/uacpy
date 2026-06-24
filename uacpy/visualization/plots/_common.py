@@ -206,8 +206,11 @@ def _credit_attributions(data_source, *, carrier=None):
                      else [data_source])
     out, seen = [], set()
     for s in items:
-        attr = (getattr(s, 'attribution', None)
-                or (s if isinstance(s, str) else getattr(s, 'name', None)))
+        # An item is a DataProvenance (→ its .source), a bare DataSource, or a
+        # plain string the caller passed.
+        src = getattr(s, 'source', s)
+        attr = (getattr(src, 'attribution', None)
+                or (src if isinstance(src, str) else getattr(src, 'name', None)))
         if attr and attr not in seen:
             seen.add(attr)
             out.append(attr)

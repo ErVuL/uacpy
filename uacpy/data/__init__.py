@@ -74,7 +74,7 @@ from uacpy.data.seaice_local import (
     sea_ice_surface, fetch_sea_ice_surface, sea_ice_surface_transect,
 )
 from uacpy.data.environment import fetch_environment
-from uacpy.data.sources import DataSource, SOURCES, citations
+from uacpy.data.sources import DataSource, DataProvenance, SOURCES, citations
 
 __all__ = [
     # bathymetry
@@ -131,5 +131,6 @@ __all__ = [
     # provenance / licensing
     'SOURCES',
     'DataSource',
+    'DataProvenance',
     'citations',
 ]

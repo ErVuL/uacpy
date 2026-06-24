@@ -36,10 +36,12 @@ class Bathymetry:
 
     ranges: np.ndarray
     depths: np.ndarray
+    data_sources: tuple = ()
 
     def __post_init__(self):
         self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
         self.depths = np.array(self.depths, dtype=float).reshape(-1)
+        self.data_sources = tuple(self.data_sources)
         if self.ranges.size != self.depths.size:
             raise ConfigurationError(
                 f"Bathymetry: ranges ({self.ranges.size}) and depths "

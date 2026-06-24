@@ -75,7 +75,7 @@ def test_literal_ssp_skips_fetch(monkeypatch):
     prof = SoundSpeedProfile(depths=[0.0, 2000.0], data=[1500.0, 1520.0])
     env = env_mod.fetch_environment((43.2, 7.5), ssp=prof)
     assert env.ssp.data[0] == 1500.0
-    assert 'woa23' not in [s.id for s in env.data_sources]
+    assert 'woa23' not in [s.source.id for s in env.data_sources]
 
 
 def test_literal_bathymetry_skips_fetch(monkeypatch):
@@ -87,7 +87,7 @@ def test_literal_bathymetry_skips_fetch(monkeypatch):
                                                               data=[1500.0, 1490.0]))
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry=120.0)
     assert env.depth == 120.0
-    assert 'gebco' not in [s.id for s in env.data_sources]
+    assert 'gebco' not in [s.source.id for s in env.data_sources]
 
 
 def test_source_fetch_wins_over_literal(stub_fetchers):
@@ -95,22 +95,22 @@ def test_source_fetch_wins_over_literal(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry=999.0,
                                     bathymetry_sources='gebco')
     assert env.depth == 2000.0                       # stub-fetched, not 999.0
-    assert 'gebco' in [s.id for s in env.data_sources]
+    assert 'gebco' in [s.source.id for s in env.data_sources]
 
 
 def test_bathymetry_sources_auto_prefers_gmrt(stub_fetchers):
     # 'auto' bathymetry = ('gmrt', 'gebco'); the stub fetcher succeeds, so the
     # first source (gmrt) wins and is recorded in provenance.
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry_sources='auto')
-    assert 'gmrt' in [s.id for s in env.data_sources]
+    assert 'gmrt' in [s.source.id for s in env.data_sources]
 
 
 def test_ssp_sources_auto_falls_to_woa23_without_date(stub_fetchers):
     # 'auto' ssp = ('argo','copernicus','woa23'); argo/copernicus need date=, so
     # with none they fall through to WOA23 (the stub).
     env = env_mod.fetch_environment((43.2, 7.5), ssp_sources='auto')
-    assert 'woa23' in [s.id for s in env.data_sources]
-    assert 'argo' not in [s.id for s in env.data_sources]
+    assert 'woa23' in [s.source.id for s in env.data_sources]
+    assert 'argo' not in [s.source.id for s in env.data_sources]
 
 
 def test_literal_fallback_when_fetch_fails(monkeypatch):
@@ -125,7 +125,7 @@ def test_literal_fallback_when_fetch_fails(monkeypatch):
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry=120.0,
                                     bathymetry_sources='gebco')
     assert env.depth == 120.0                        # literal fallback
-    assert 'gebco' not in [s.id for s in env.data_sources]
+    assert 'gebco' not in [s.source.id for s in env.data_sources]
 
 
 def test_range_dependent_ssp(monkeypatch, stub_fetchers):
@@ -184,7 +184,7 @@ def test_bottom_auto_falls_back_to_pelagic(tmp_path, monkeypatch, stub_fetchers)
     monkeypatch.setattr(pelagic_mod, '_water_depth', lambda *a, **k: 5000.0)
     env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='auto')
     assert env.bottom is not None
-    assert env.data_sources[-1].id == 'pelagic'
+    assert env.data_sources[-1].source.id == 'pelagic'
 
 
 def test_range_dependent_bottom(monkeypatch, stub_fetchers):

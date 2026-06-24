@@ -163,8 +163,10 @@ class BoundaryProperties:
     grain_size_phi: Optional[float] = None
     reflection_file: Optional[str] = None
     name: Optional[str] = None
+    data_sources: tuple = ()
 
     def __post_init__(self):
+        self.data_sources = tuple(self.data_sources)
         # sound_speed is non-negative (0 ok for vacuum/rigid), unlike
         # SedimentLayer.sound_speed which must be strictly positive.
         _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
@@ -359,6 +361,13 @@ class SeabedColumn:
     @property
     def is_layered(self) -> bool:
         return len(self.layers) > 0
+
+    @property
+    def data_sources(self) -> tuple:
+        """Provenance of this column — its half-space's ``data_sources``
+        (harmonised with the leaf carriers; a fetched seabed stamps the
+        half-space)."""
+        return tuple(getattr(self.halfspace, 'data_sources', ()) or ())
 
     def __repr__(self) -> str:
         bits = [f"n_layers={len(self.layers)}"]
@@ -645,6 +654,18 @@ class Bottom:
                     f"columns length ({len(self.columns)})")
 
     # ── queries (replace isinstance dispatch) ──────────────────────────────
+    @property
+    def data_sources(self) -> tuple:
+        """Aggregated provenance across all columns, de-duplicated by source id
+        (harmonised with the leaf carriers and ``env.data_sources``)."""
+        seen, out = set(), []
+        for c in self.columns:
+            for r in getattr(c, 'data_sources', ()) or ():
+                if r.source.id not in seen:
+                    seen.add(r.source.id)
+                    out.append(r)
+        return tuple(out)
+
     @property
     def is_range_dependent(self) -> bool:
         return self.ranges is not None and len(self.columns) > 1

@@ -50,8 +50,14 @@ class SoundSpeedProfile:
     data: np.ndarray
     ranges: Optional[np.ndarray] = None
     shape: str = 'measured'
+    data_sources: tuple = ()
 
     def __post_init__(self):
+        # Provenance of a fetched profile (tuple of DataSource/DataProvenance);
+        # empty for a literal/hand-built one. Physics-agnostic metadata —
+        # transforms that return a new profile (extend_to/collapse/eval slices)
+        # carry it forward; the fresh-construction classmethods do not.
+        self.data_sources = tuple(self.data_sources)
         self.depths = np.array(self.depths, dtype=float).reshape(-1)
         self.data = np.array(self.data, dtype=float)
         if self.data.ndim == 1:
@@ -169,7 +175,8 @@ class SoundSpeedProfile:
                     f"for {self.data.shape[1]} column(s)")
             sliced = SoundSpeedProfile(
                 depths=self.depths.copy(),
-                data=self.data[:, [ridx]].copy(), ranges=None, shape=self.shape)
+                data=self.data[:, [ridx]].copy(), ranges=None, shape=self.shape,
+                data_sources=self.data_sources)
         if depth is not None:
             didx = int(depth)
             if not -sliced.depths.size <= didx < sliced.depths.size:
@@ -179,7 +186,7 @@ class SoundSpeedProfile:
             sliced = SoundSpeedProfile(
                 depths=np.array([float(sliced.depths[didx])]),
                 data=sliced.data[[didx], :].copy(), ranges=None,
-                shape=sliced.shape)
+                shape=sliced.shape, data_sources=self.data_sources)
         return sliced
 
     def _slice(
@@ -198,11 +205,11 @@ class SoundSpeedProfile:
                 return self
             return SoundSpeedProfile(
                 depths=self.depths.copy(), data=data.copy(),
-                ranges=None, shape=self.shape)
+                ranges=None, shape=self.shape, data_sources=self.data_sources)
         c, dv = collapse_axis(data[:, 0], self.depths, depth, interp, axis=0)
         return SoundSpeedProfile(
             depths=np.array([float(dv)]), data=np.array([[float(c)]]),
-            ranges=None, shape=self.shape)
+            ranges=None, shape=self.shape, data_sources=self.data_sources)
 
     @property
     def value(self) -> float:
@@ -252,6 +259,7 @@ class SoundSpeedProfile:
             data=col.reshape(-1, 1),
             ranges=None,
             shape=self.shape,
+            data_sources=self.data_sources,
         )
 
     def extend_to(self, depth_max: float) -> 'SoundSpeedProfile':
@@ -293,6 +301,7 @@ class SoundSpeedProfile:
             data=new_data,
             ranges=(self.ranges.copy() if self.ranges is not None else None),
             shape=self.shape,
+            data_sources=self.data_sources,
         )
 
     @classmethod

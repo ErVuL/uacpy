@@ -1,18 +1,31 @@
 """Catalogue of the external data sources, their licences and citations.
 
-Single source of truth for provenance/attribution across the data layer (the
-README licensing table mirrors this). :func:`uacpy.data.fetch_environment`
-records the sources it actually used on the returned ``Environment`` as
-``env.data_sources``; :func:`citations` renders the required attribution text
-for an environment, a list of source ids, or the whole catalogue.
+Two levels, one renderer — deliberately not three parallel classes:
+
+* :class:`DataSource` — a **catalogue entry**: one immutable record per dataset
+  (GEBCO, WOA23, …) holding its identity, licence, **attribution and citation
+  text**. (So "citation" is a *field* here, not its own class.) :data:`SOURCES`
+  is the single source of truth; the README licensing table mirrors it. One
+  ``DataSource`` is shared by every fetch that used that dataset.
+* :class:`DataProvenance` — one **fetch instance**: references a ``DataSource``
+  and adds the *actual* date/coordinates that fetch returned. Delegates the
+  ``DataSource`` attributes, so it is drop-in wherever a source is expected.
+
+Carriers and environments carry provenance **uniformly as a tuple of
+``DataProvenance``** (``carrier.data_sources`` / ``env.data_sources``); an
+un-stamped/literal layer is a bare ``DataProvenance(source=…)`` with no
+date/coords. :func:`uacpy.data.fetch_environment` aggregates the union across a
+built env's carriers; :func:`citations` renders the licence/attribution/citation
+(plus the fetched date/coords when present) for an environment, a carrier, a
+list of ids/sources, or the whole catalogue.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from uacpy.core.exceptions import ConfigurationError
 
-__all__ = ['DataSource', 'SOURCES', 'citations']
+__all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'citations']
 
 
 @dataclass(frozen=True)
@@ -26,6 +39,55 @@ class DataSource:
     citation: str
     url: str
     commercial_use: bool
+
+
+@dataclass(frozen=True)
+class DataProvenance:
+    """One fetched data layer's provenance: a reference to the catalogue
+    :class:`DataSource` (``.source``) plus the **actual** date and coordinates
+    the returned data corresponds to.
+
+    The actual values can differ from what was requested — a WOA23 climatology
+    snaps to a grid cell (and to a month, not a day), a daily Copernicus mean
+    snaps to the nearest day, an Argo float is the nearest cast (tens of km and
+    days away). Recording them closes the "did I actually get data where/when I
+    asked?" gap.
+
+    The two levels are kept distinct: read the dataset's identity/licence/
+    citation through ``prov.source`` (a shared catalogue entry), and this
+    fetch's specifics off ``prov`` directly. Carriers and environments hold
+    these uniformly as ``data_sources`` tuples."""
+    source: DataSource
+    data_date: Optional[str] = None                    # actual date/period represented
+    data_point: Optional[Tuple[float, float]] = None   # actual (lat, lon) returned
+    requested_point: Optional[Tuple[float, float]] = None
+    requested_date: Optional[str] = None
+
+    @property
+    def offset_km(self) -> Optional[float]:
+        """Great-circle distance (km) from the requested point to the actual
+        ``data_point`` — derived, not stored. ``None`` if either is unknown."""
+        if self.data_point is None or self.requested_point is None:
+            return None
+        from uacpy.data._geo import great_circle_km
+        la, lo = self.requested_point
+        da, do = self.data_point
+        return float(great_circle_km(la, lo, da, do))
+
+    def _fetch_line(self) -> Optional[str]:
+        """The ``Fetched:`` provenance line (date + actual coords), or ``None``."""
+        bits = []
+        if self.data_date is not None:
+            req = (f", requested {self.requested_date}"
+                   if self.requested_date and self.requested_date != self.data_date
+                   else "")
+            bits.append(f"date {self.data_date}{req}")
+        if self.data_point is not None:
+            la, lo = self.data_point
+            off_km = self.offset_km
+            off = f", {off_km:.0f} km from requested" if off_km else ""
+            bits.append(f"at {la:.3f}, {lo:.3f}{off}")
+        return "  Fetched:     " + "; ".join(bits) if bits else None
 
 
 SOURCES: Dict[str, DataSource] = {
@@ -179,25 +241,30 @@ SOURCES: Dict[str, DataSource] = {
 }
 
 
-def _resolve(obj) -> List[DataSource]:
+def _resolve(obj) -> List[DataProvenance]:
+    """Normalise any accepted input to a uniform list of :class:`DataProvenance`.
+
+    A bare :class:`DataSource` or a catalogue id is wrapped in a
+    ``DataProvenance`` with no fetch specifics, so every consumer reads the
+    same type (``.source`` for the dataset, the rest for the fetch)."""
+    def wrap(x):
+        if isinstance(x, DataProvenance):
+            return x
+        if isinstance(x, DataSource):
+            return DataProvenance(source=x)
+        if x in SOURCES:
+            return DataProvenance(source=SOURCES[x])
+        raise ConfigurationError(
+            f"citations: unknown source id {x!r}; valid ids: {sorted(SOURCES)}"
+        )
+
     if obj is None:
-        return list(SOURCES.values())
-    if hasattr(obj, 'data_sources'):       # an Environment from fetch_environment
+        return [DataProvenance(source=s) for s in SOURCES.values()]
+    if hasattr(obj, 'data_sources'):       # an Environment / carrier
         return list(obj.data_sources)
-    if isinstance(obj, (str, DataSource)):  # a single id / source, not an iterable
+    if isinstance(obj, (str, DataSource, DataProvenance)):  # a single id/source
         obj = [obj]
-    resolved = []
-    for s in obj:
-        if isinstance(s, DataSource):
-            resolved.append(s)
-        elif s in SOURCES:
-            resolved.append(SOURCES[s])
-        else:
-            raise ConfigurationError(
-                f"citations: unknown source id {s!r}; valid ids: "
-                f"{sorted(SOURCES)}"
-            )
-    return resolved
+    return [wrap(s) for s in obj]
 
 
 def citations(obj=None) -> str:
@@ -206,22 +273,27 @@ def citations(obj=None) -> str:
     Parameters
     ----------
     obj : optional
-        ``None`` → the whole catalogue; an ``Environment`` returned by
-        :func:`fetch_environment` → the sources it used (``env.data_sources``);
-        or an iterable of source ids / :class:`DataSource`.
+        ``None`` → the whole catalogue; an ``Environment`` / carrier → the
+        provenance it carries (``.data_sources``); or an iterable of source
+        ids / :class:`DataSource` / :class:`DataProvenance`.
 
     Returns
     -------
     str
-        One block per source (name, licence, attribution, citation), with a
-        flag where commercial use is not confirmed.
+        One block per source (name, licence, attribution, citation, plus the
+        fetched date/coords when known), with a flag where commercial use is
+        not confirmed.
     """
     blocks = []
-    for s in _resolve(obj):
-        lines = [f"{s.name}  [{s.license}]",
-                 f"  Attribution: {s.attribution}",
-                 f"  Cite:        {s.citation}"]
-        if not s.commercial_use:
+    for prov in _resolve(obj):
+        src = prov.source
+        lines = [f"{src.name}  [{src.license}]",
+                 f"  Attribution: {src.attribution}",
+                 f"  Cite:        {src.citation}"]
+        fetched = prov._fetch_line()
+        if fetched is not None:
+            lines.append(fetched)
+        if not src.commercial_use:
             lines.append("  ⚠ Commercial use not confirmed — verify licence terms")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)

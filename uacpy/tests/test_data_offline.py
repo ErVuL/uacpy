@@ -290,7 +290,7 @@ def test_fetch_environment_from_cache(cache):
     assert env.depth == 1500.0
     assert env.ssp.n_depths >= 5
     assert env.bottom.columns[0].halfspace.grain_size_phi == 3.0
-    assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
+    assert [s.source.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
 
 
 def test_fetch_environment_cache_preset(cache):
@@ -301,7 +301,7 @@ def test_fetch_environment_cache_preset(cache):
                                  ssp_sources='local', bottom_sources='local')
     assert env.depth == 1500.0
     assert env.bottom.columns[0].halfspace.grain_size_phi == 3.0
-    assert [s.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
+    assert [s.source.id for s in env.data_sources] == ['gebco', 'woa23', 'grainsize']
 
 
 def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
@@ -332,7 +332,7 @@ def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
     # bottom_sources='crust1' rescales its column with GlobSed by default, so
     # both CRUST1.0 and GlobSed appear in the environment's provenance.
     env = data.fetch_environment((30.5, -40.5), bottom_sources='crust1')
-    ids = [s.id for s in env.data_sources]
+    ids = [s.source.id for s in env.data_sources]
     assert ids == ['gebco', 'woa23', 'crust1', 'globsed']
     assert env.bottom.columns[0].total_thickness() == pytest.approx(500.0)
 
@@ -348,7 +348,7 @@ def test_fetch_environment_sea_ice(cache, monkeypatch):
                                  surface_sources='seaice')
     assert env.surface.acoustic_type == 'half-space'
     assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface()
-    assert 'seaice' in [s.id for s in env.data_sources]
+    assert 'seaice' in [s.source.id for s in env.data_sources]
 
 
 def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
@@ -360,7 +360,7 @@ def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
                                  bottom_sources='grainsize',
                                  surface_sources='auto')
     assert env.surface.acoustic_type == 'vacuum'
-    assert 'seaice' not in [s.id for s in env.data_sources]
+    assert 'seaice' not in [s.source.id for s in env.data_sources]
 
 
 def test_fetch_environment_sea_ice_requires_date(cache):

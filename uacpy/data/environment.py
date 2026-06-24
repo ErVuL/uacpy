@@ -40,7 +40,7 @@ from uacpy.data._geo import (
 from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import fetch_ssp, fetch_ssp_transect
-from uacpy.data.sources import SOURCES
+from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['fetch_environment']
 
@@ -572,28 +572,48 @@ def fetch_environment(
 
 
 def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface_src):
-    """Stamp ``env.data_sources`` with the catalogue ids actually fetched and
-    warn on any non-commercial licence. The resolved source names
-    ('gebco'/'woa23'/…) are the catalogue ids; a literal (un-fetched) axis
-    contributes none."""
-    used = [s for s in (bathy_src, ssp_src) if s is not None]
-    if bottom_kw is not None:
-        used.append(bottom_kw)   # source keyword == catalogue id
-        # CRUST1.0 rescales its sediment column with GlobSed thickness by
-        # default; record GlobSed too whenever it was actually applied.
-        if getattr(bottom_props, 'sediment_thickness_source', None) == 'globsed':
-            used.append('globsed')
-    if surface_src is not None:
-        used.append(surface_src)   # 'seaice' (a literal surface= cites nothing)
-    env.data_sources = tuple(SOURCES[i] for i in dict.fromkeys(used))
+    """Stamp ``env.data_sources`` by aggregating the per-layer provenance the
+    fetchers attached to each carrier, in axis order
+    (bathymetry → ssp → bottom → surface), de-duplicated by source id.
+
+    Each fetched carrier carries its own ``data_sources`` — a tuple of
+    :class:`~uacpy.data.sources.DataProvenance` records holding the dataset plus
+    the **actual** date/coordinates it returned (which can differ from what was
+    requested). Where a carrier wasn't stamped (older path, or a literal axis),
+    fall back to the bare catalogue id so attribution is never lost. Warns on
+    any non-commercial licence used."""
+    def layer(carrier, src_id, extra_ids=()):
+        prov = tuple(getattr(carrier, 'data_sources', ()) or ())
+        if prov:
+            return prov
+        # Un-stamped layer (older path / literal axis): wrap the bare catalogue
+        # id in a DataProvenance so env.data_sources is uniformly DataProvenance
+        # — no date/coords, just the source. Keeps one record type in the tuple.
+        ids = ([src_id] if src_id is not None else []) + list(extra_ids)
+        return tuple(DataProvenance(source=SOURCES[i]) for i in ids)
+
+    extra = (('globsed',)
+             if getattr(bottom_props, 'sediment_thickness_source', None) == 'globsed'
+             else ())
+    records = (layer(env.bathymetry, bathy_src)
+               + layer(env.ssp, ssp_src)
+               + layer(bottom_props, bottom_kw, extra)
+               + layer(getattr(env, 'surface', None), surface_src))
+    seen, dedup = set(), []
+    for r in records:
+        if r.source.id not in seen:
+            seen.add(r.source.id)
+            dedup.append(r)
+    env.data_sources = tuple(dedup)
     # A licence-restricted source must never enter a result silently: warn at
     # fetch time for any non-commercial dataset used (e.g. CRUST1.0). Driven off
     # the catalogue flag so future non-commercial sources are covered too.
-    for s in env.data_sources:
-        if not s.commercial_use:
+    for prov in env.data_sources:
+        src = prov.source
+        if not src.commercial_use:
             warnings.warn(
-                f"fetch_environment: data source {s.id!r} ({s.name}) does not "
-                f"permit commercial use without verification — see "
+                f"fetch_environment: data source {src.id!r} ({src.name}) does "
+                f"not permit commercial use without verification — see "
                 f"uacpy.data.citations(env) for its licence/attribution.",
                 UserWarning, stacklevel=2)
 

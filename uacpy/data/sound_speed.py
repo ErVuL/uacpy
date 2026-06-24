@@ -35,6 +35,7 @@ from uacpy.data._geo import (
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._http import http_get
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
 __all__ = ['fetch_ssp', 'fetch_ssp_transect', 'fetch_ts_profile']
@@ -123,7 +124,21 @@ def fetch_ssp(
         'sound_speed', f"WOA23 SSP at {lat:.3f}, {lon:.3f}: {depths.size} "
         f"levels, c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose,
     )
-    return SoundSpeedProfile(depths=depths, data=c, shape='measured')
+    # Provenance: WOA23 is a climatology snapped to a grid cell — the actual
+    # "date" is a month/annual period, and the actual coordinates are the cell
+    # centre (which can be tens of km from the requested point, even on land).
+    period = _resolve_period(date, month)
+    _, _, lat_c, lon_c = _grid_index(lat, lon, resolution)
+    prov = DataProvenance(
+        source=SOURCES['woa23'],
+        data_date=(f"month {period:02d} (climatology)" if period
+                   else "annual mean (climatology)"),
+        data_point=(lat_c, lon_c),
+        requested_point=(lat, lon),
+        requested_date=(str(parse_date(date)) if date is not None else None),
+    )
+    return SoundSpeedProfile(depths=depths, data=c, shape='measured',
+                             data_sources=(prov,))
 
 
 def ssp_transect_plan(

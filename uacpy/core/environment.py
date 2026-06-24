@@ -238,6 +238,25 @@ class Environment:
 
         self.bottom = self._coerce_bottom(bottom)
 
+        # Harmonised provenance: the union of each carrier's own ``data_sources``
+        # (every fetched carrier carries dated/located ``DataProvenance`` records;
+        # literal carriers carry none), de-duplicated by source id in axis order
+        # bathymetry → ssp → bottom → surface. ``fetch_environment`` may refine
+        # this (e.g. fall back to a bare catalogue id for an un-stamped layer).
+        self.data_sources = self._aggregate_data_sources()
+
+    def _aggregate_data_sources(self) -> tuple:
+        """Union of the carriers' ``data_sources`` (dedup by source id, axis
+        order). The single home for ``env.data_sources``, mirrored per-carrier
+        by ``Bottom``/``Surface``/``SeabedColumn``."""
+        seen, out = set(), []
+        for carrier in (self.bathymetry, self.ssp, self.bottom, self.surface):
+            for r in getattr(carrier, 'data_sources', ()) or ():
+                if r.source.id not in seen:
+                    seen.add(r.source.id)
+                    out.append(r)
+        return tuple(out)
+
     @staticmethod
     def _coerce_bottom(bottom) -> Bottom:
         """Coerce ``bottom=`` into a :class:`Bottom`, mirroring ``ssp=``:

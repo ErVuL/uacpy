@@ -30,6 +30,7 @@ from uacpy.data._geo import (
 )
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
+from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['fetch_argo_profile', 'fetch_ssp_argo']
 
@@ -114,7 +115,8 @@ def fetch_argo_profile(
         except ValueError:
             continue
         prof = profiles.setdefault((plat, cyc),
-                                   {'lat': vals[0], 'lon': vals[1], 'lev': []})
+                                   {'lat': vals[0], 'lon': vals[1],
+                                    'time': _t, 'lev': []})
         prof['lev'].append(vals[2:])
 
     if not profiles:
@@ -137,6 +139,7 @@ def fetch_argo_profile(
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
     return {'platform': plat, 'cycle': cyc, 'lat': prof['lat'],
             'lon': prof['lon'], 'distance_km': float(dist),
+            'time': prof.get('time'),
             'pres': lev[:, 0], 'temp': lev[:, 1], 'psal': lev[:, 2]}
 
 
@@ -171,4 +174,13 @@ def fetch_ssp_argo(
         'sound_speed', f"Argo SSP from float {prof['platform']} "
         f"({prof['distance_km']:.0f} km away): {depths.size} levels, "
         f"c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose)
-    return SoundSpeedProfile(depths=depths, data=c, shape='measured')
+    lat, lon = as_coordinate(point)
+    prov = DataProvenance(
+        source=SOURCES['argo'],
+        data_date=(prof['time'][:10] if prof.get('time') else None),  # YYYY-MM-DD
+        data_point=(float(prof['lat']), float(prof['lon'])),
+        requested_point=(lat, lon),
+        requested_date=str(parse_date(date)),
+    )
+    return SoundSpeedProfile(depths=depths, data=c, shape='measured',
+                             data_sources=(prov,))
