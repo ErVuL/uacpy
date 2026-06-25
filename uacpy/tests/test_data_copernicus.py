@@ -117,14 +117,23 @@ def test_bad_date_raises(monkeypatch):
         copernicus.fetch_ssp_operational((0.0, 0.0), date='not-a-date')
 
 
-def test_out_of_range_date_warns(monkeypatch):
-    # Dataset's only time step is 2021; asking for 2030 snaps to the edge.
+def test_out_of_range_date_raises(monkeypatch):
+    # Dataset's only time step is 2021; asking for 2030 is far beyond max_days,
+    # so the nearest-edge value is rejected rather than silently substituted.
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
-    with pytest.warns(UserWarning, match='outside the'):
+    with pytest.raises(DataFetchError, match='outside the'):
         copernicus.fetch_ssp_operational((30.0, -40.0), date='2030-06-15')
 
 
-def test_in_range_date_no_warn(monkeypatch, recwarn):
+def test_out_of_range_within_widened_max_days_ok(monkeypatch):
+    # The same edge case succeeds once max_days is widened past the gap.
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
+    ssp = copernicus.fetch_ssp_operational(
+        (30.0, -40.0), date='2021-02-01', max_days=60)
+    assert isinstance(ssp, SoundSpeedProfile)
+
+
+def test_in_range_date_ok(monkeypatch):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2020-06-15'))
-    copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
-    assert not [w for w in recwarn if 'outside' in str(w.message)]
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    assert isinstance(ssp, SoundSpeedProfile)

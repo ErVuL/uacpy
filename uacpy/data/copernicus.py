@@ -17,7 +17,6 @@ effect over typical profiles).
 """
 
 import datetime as _dt
-import warnings
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -43,6 +42,15 @@ __all__ = [
 DEFAULT_DATASET_ID = 'cmems_mod_glo_phy_my_0.083deg_P1D-m'
 TEMPERATURE_VAR = 'thetao'
 SALINITY_VAR = 'so'
+# Max days the nearest available time step may sit from the requested date
+# before we treat it as out-of-coverage and raise (shared tolerance contract
+# with the other dated SSP sources — cf. argo.DEFAULT_MAX_DAYS=15). Looser than
+# Argo's by design: this is daily-mean *model* output (smooth, persistent — and
+# in-coverage the nearest step is sub-day, so this is really a coverage-edge
+# guard), whereas an Argo profile is one real in-situ snapshot that the ocean
+# decorrelates from within a couple of weeks. The default tracks how slowly the
+# field varies: climatology (month) > model (31 d) > in-situ obs (15 d).
+DEFAULT_MAX_DAYS = 31
 
 
 def fetch_ssp_operational(
@@ -50,6 +58,7 @@ def fetch_ssp_operational(
     *,
     date: Union[str, _dt.date],
     formula: str = 'unesco',
+    max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
@@ -64,6 +73,11 @@ def fetch_ssp_operational(
         Calendar date of interest. The nearest available time step is used.
     formula : {'unesco', 'delgrosso'}, optional
         Sound-speed equation. Default ``'unesco'``.
+    max_days : int, optional
+        Maximum days the nearest available time step may differ from ``date``
+        before raising ``DataFetchError`` (the date is outside the dataset's
+        coverage). Default 31. The shared tolerance guard mirrors
+        ``argo``'s — the nearest match is never silently substituted.
     dataset_id : str, optional
         Copernicus Marine dataset. Default is the global physics reanalysis;
         for recent dates use an analysis/forecast id, e.g.
@@ -81,7 +95,8 @@ def fetch_ssp_operational(
         Unknown ``formula``.
     DataFetchError
         ``copernicusmarine`` is not installed / not authenticated, the
-        service fails, or the location has no profile.
+        service fails, the location has no profile, or the nearest available
+        time step is more than ``max_days`` from ``date``.
     """
     if formula not in _FORMULAS:
         raise ConfigurationError(
@@ -90,7 +105,8 @@ def fetch_ssp_operational(
         )
     lat, lon = as_coordinate(point)
     depths, temp, sal = fetch_ts_profile_operational(
-        point, date=date, dataset_id=dataset_id, timeout=timeout, verbose=verbose,
+        point, date=date, max_days=max_days, dataset_id=dataset_id,
+        timeout=timeout, verbose=verbose,
     )
     pressure = depth_to_pressure_dbar(depths, lat)
     speed_fn = _FORMULAS[formula]
@@ -110,6 +126,7 @@ def fetch_ssp_transect_operational(
     date: Union[str, _dt.date],
     n_points: int = 6,
     formula: str = 'unesco',
+    max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
@@ -143,7 +160,7 @@ def fetch_ssp_transect_operational(
     speed_fn = _FORMULAS[formula]
     columns = []
     for la, lo in zip(lats, lons):
-        depths, temp, sal = _extract_ts(ds, la, lo, when)
+        depths, temp, sal = _extract_ts(ds, la, lo, when, max_days=max_days)
         if depths.size == 0:
             raise DataFetchError(
                 f"No Copernicus profile at {la:.3f}, {lo:.3f} on {when}.",
@@ -164,6 +181,7 @@ def fetch_ts_profile_operational(
     point: Coordinate,
     *,
     date: Union[str, _dt.date],
+    max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
@@ -188,7 +206,7 @@ def fetch_ts_profile_operational(
                         "the dataset_id and network connectivity.",
         ) from exc
 
-    depths, temp, sal = _extract_ts(ds, lat, lon, when)
+    depths, temp, sal = _extract_ts(ds, lat, lon, when, max_days=max_days)
     if depths.size == 0:
         raise DataFetchError(
             f"No Copernicus profile at {lat:.3f}, {lon:.3f} on {when} "
@@ -201,6 +219,7 @@ def fetch_ts_profile_operational(
 def _extract_ts(
     ds, lat: float, lon: float, when: Optional[str],
     *, temp_var: str = TEMPERATURE_VAR, sal_var: str = SALINITY_VAR,
+    max_days: int = DEFAULT_MAX_DAYS,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pull a single seafloor-truncated water column from an xarray dataset."""
     depth = np.asarray(ds['depth'].values, dtype=float).reshape(-1)
@@ -210,16 +229,18 @@ def _extract_ts(
     t_da = ds[temp_var].sel(method='nearest', **sel)
     if when is not None and 'time' in getattr(t_da, 'coords', {}):
         # ``method='nearest'`` snaps silently to the dataset edge for an
-        # out-of-range date; warn so the substitution isn't invisible.
+        # out-of-range date; raise rather than substitute an edge value so the
+        # tolerance is honoured the same way the other dated sources honour it.
         actual = np.datetime64(np.asarray(t_da['time'].values).reshape(-1)[0], 'D')
         gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
-        if gap > 31:
-            warnings.warn(
-                f"Copernicus: requested {when} but the nearest available time "
-                f"is {actual} ({gap:.0f} days away) — the date is outside the "
-                "dataset's range; using the edge value. Pass a date within "
-                "range or a forecast dataset_id.",
-                UserWarning, stacklevel=2)
+        if gap > max_days:
+            raise DataFetchError(
+                f"Copernicus: nearest available time is {actual} "
+                f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
+                "— the date is outside the dataset's range.",
+                remediation="Pass a date within range, a forecast dataset_id, "
+                            "raise max_days, or use ssp_sources='woa23'.",
+            )
     t = np.asarray(t_da.values, float).reshape(-1)
     s = np.asarray(ds[sal_var].sel(method='nearest', **sel).values, float).reshape(-1)
 

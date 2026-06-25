@@ -36,9 +36,27 @@ __all__ = ['fetch_argo_profile', 'fetch_ssp_argo']
 
 ARGO_ERDDAP_URL = 'https://erddap.ifremer.fr/erddap/tabledap/ArgoFloats.csv'
 DEFAULT_MAX_DISTANCE_KM = 250.0
+# Tight by design: one Argo profile is a single real in-situ snapshot and the
+# ocean decorrelates from it within a couple of weeks, so we accept less
+# temporal slack here than for the smoother daily-mean Copernicus model
+# (DEFAULT_MAX_DAYS=31). The tolerance tracks how slowly the field varies.
 DEFAULT_MAX_DAYS = 15
 _FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso}
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
+
+
+def _abs_days(time_str, when):
+    """``|days|`` between an ERDDAP ISO time string and ``when`` (a
+    ``datetime64[D]``). Returns ``0.0`` (neutral in the cost) when the time is
+    missing or unparseable — ERDDAP times are well-formed, this is just a guard.
+    """
+    if not time_str:
+        return 0.0
+    try:
+        day = np.datetime64(str(time_str)[:10])
+    except (ValueError, TypeError):
+        return 0.0
+    return abs(float((day - when) / np.timedelta64(1, 'D')))
 
 
 def _pressure_dbar_to_depth(pres_dbar, lat):
@@ -64,8 +82,8 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
     t1 = (when + np.timedelta64(max_days, 'D'))
     # A box straddling the antimeridian can't be expressed as a single
     # longitude>=A & longitude<=B clause (it would invert to ~the whole globe);
-    # drop the longitude clause there and let the haversine distance guard in
-    # the caller select the nearest profile. Only triggers within ``dlon`` of ±180°.
+    # drop the longitude clause there and let the haversine distance filter in
+    # the caller enforce the bound. Only triggers within ``dlon`` of ±180°.
     if lo_lo < -180.0 or lo_hi > 180.0:
         lon_clause = ""
     else:
@@ -88,6 +106,11 @@ def fetch_argo_profile(
     verbose: Union[bool, str] = False,
 ) -> dict:
     """Nearest Argo T/S profile to ``(lat, lon)`` and ``date``.
+
+    Among the good-QC profiles within ``max_distance_km`` and ``max_days``, the
+    one nearest in **combined space-time** is returned — each axis normalised by
+    its own tolerance and added in quadrature, so a slightly farther but fresher
+    float is preferred over a marginally closer but staler one.
 
     Returns ``{'platform', 'cycle', 'lat', 'lon', 'distance_km', 'pres', 'temp',
     'psal'}`` (arrays sorted by increasing pressure, good-QC levels only). Raises
@@ -126,16 +149,30 @@ def fetch_argo_profile(
             remediation="Widen max_distance_km / max_days, or use "
                         "ssp_sources='woa23' (climatology).",
         )
-    (plat, cyc), prof = min(
-        profiles.items(),
-        key=lambda kv: great_circle_km(lat, lon, kv[1]['lat'], kv[1]['lon']))
-    dist = great_circle_km(lat, lon, prof['lat'], prof['lon'])
-    if dist > max_distance_km:
+    # The query bounds time to ±max_days, so every candidate already satisfies
+    # the temporal tolerance; the lat/lon box only approximates the distance
+    # circle (and is dropped near the antimeridian), so enforce max_distance_km
+    # here as a hard filter. Among the profiles that pass, pick the nearest in
+    # combined space-time: each axis normalised by its own tolerance, so a
+    # slightly farther but much fresher float can win over a marginally closer,
+    # staler one (a profile at the edge of either tolerance costs the same).
+    scored = [(key, p, great_circle_km(lat, lon, p['lat'], p['lon']))
+              for key, p in profiles.items()]
+    within = [t for t in scored if t[2] <= max_distance_km]
+    if not within:
+        nearest = min(d_km for _, _, d_km in scored)
         raise DataFetchError(
-            f"Nearest Argo profile is {dist:.0f} km away "
+            f"Nearest Argo profile is {nearest:.0f} km away "
             f"(> max_distance_km={max_distance_km:.0f}).",
             remediation="Widen max_distance_km, or use ssp_sources='woa23'.",
         )
+
+    def _spacetime_cost(item):
+        _key, p, d_km = item
+        dt_days = _abs_days(p.get('time'), when)
+        return (d_km / max_distance_km) ** 2 + (dt_days / max_days) ** 2
+
+    (plat, cyc), prof, dist = min(within, key=_spacetime_cost)
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
     return {'platform': plat, 'cycle': cyc, 'lat': prof['lat'],
             'lon': prof['lon'], 'distance_km': float(dist),

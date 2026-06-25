@@ -161,6 +161,8 @@ def fetch_environment(
     range_dependent_surface: Optional[bool] = None,
     surface_n_points: Union[int, str] = 'auto',
     with_absorption: bool = False,
+    max_distance_km: Optional[float] = None,
+    max_days: Optional[int] = None,
     formula: str = 'unesco',
     resolution: str = '1.00',
     timeout: float = 120.0,
@@ -303,6 +305,23 @@ def fetch_environment(
         If ``True``, attach a Francois-Garrison absorption built from the
         site's fetched temperature/salinity column (costs one extra T/S
         request). Default ``False`` (model-default Thorp absorption).
+    max_distance_km : float, optional
+        Maximum great-circle distance (km) to the nearest measured sample for
+        the **nearest-neighbour** sources — ``ssp_sources`` ``'argo'`` and
+        ``bottom_sources`` ``'grainsize'``. A source whose nearest sample is
+        farther raises ``DataFetchError`` and the next source in the chain is
+        tried (so a tight value makes ``'auto'`` fall through from Argo to
+        WOA23). Ignored by grid/polygon/global sources (WOA23, Copernicus,
+        EMODnet, Diesing, CRUST1, pelagic, bathymetry) — they have no distance
+        concept. Default ``None`` → each source's own default (250 km).
+    max_days : int, optional
+        Maximum days the data used may differ from ``date`` for the **time-
+        specific** SSP sources — ``ssp_sources`` ``'argo'`` (nearest float
+        profile) and ``'copernicus'`` (nearest model time step). A source whose
+        nearest match is staler raises ``DataFetchError`` and the chain falls
+        through (e.g. ``'auto'`` → WOA23). Ignored by WOA23 (a climatology
+        keyed on month only) and by the bottom/bathymetry sources. Default
+        ``None`` → each source's own default (Argo 15, Copernicus 31).
     formula, resolution, timeout, verbose
         Forwarded to the sound-speed / bathymetry fetchers.
 
@@ -404,8 +423,9 @@ def fetch_environment(
             if not rd_ssp:
                 return _fetch_ssp(
                     point, date=date, ssp_source=src, formula=formula,
-                    resolution=resolution, source=backend, timeout=timeout,
-                    verbose=verbose)
+                    resolution=resolution, source=backend,
+                    max_distance_km=max_distance_km, max_days=max_days,
+                    timeout=timeout, verbose=verbose)
             if src == 'woa23':
                 return fetch_ssp_transect(
                     point, transect_to, n_points=ssp_n_points,
@@ -421,9 +441,10 @@ def fetch_environment(
                 # Copernicus has no 'auto' resolver (no cheap cell identity
                 # exposed here); fall back to a fixed column count, capped.
                 cop_n = ssp_n_points if isinstance(ssp_n_points, int) else 6
+                cop_extra = {} if max_days is None else {'max_days': max_days}
                 return fetch_ssp_transect_operational(
                     point, transect_to, date=date, n_points=min(cop_n, max_points),
-                    formula=formula, timeout=timeout, verbose=verbose)
+                    formula=formula, timeout=timeout, verbose=verbose, **cop_extra)
             raise ConfigurationError(
                 f"fetch_environment: range_dependent_ssp not supported for "
                 f"ssp_sources={src!r}.",
@@ -460,13 +481,15 @@ def fetch_environment(
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect_to, transect=True,
                     cache_only=bottom_cache_only, water_sound_speed=water_c,
+                    max_distance_km=max_distance_km,
                     n_points=bottom_n_points, max_points=max_points,
                     timeout=timeout, verbose=verbose,
                 )
             else:
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect=False, cache_only=bottom_cache_only,
-                    water_sound_speed=water_c, timeout=timeout, verbose=verbose,
+                    water_sound_speed=water_c, max_distance_km=max_distance_km,
+                    timeout=timeout, verbose=verbose,
                 )
         except (DataFetchError, ConfigurationError) as exc:
             if bottom is None:
@@ -563,7 +586,8 @@ def fetch_environment(
     if with_absorption:
         kwargs['absorption'] = _fetch_absorption(
             point, date=date, ssp_source=ssp_src, ssp_backend=ssp_backend,
-            cache_only=ssp_cache_only, timeout=timeout, verbose=verbose,
+            cache_only=ssp_cache_only, max_distance_km=max_distance_km,
+            max_days=max_days, timeout=timeout, verbose=verbose,
         )
     env = Environment(**kwargs)
 
@@ -619,7 +643,7 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface
 
 
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
-                      timeout, verbose):
+                      max_distance_km=None, max_days=None, timeout, verbose):
     """Francois-Garrison absorption from the site's fetched T/S column.
 
     Reuses the backend the SSP resolved to (``ssp_backend``) for the WOA23 T/S
@@ -637,11 +661,18 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         return build_francois_garrison(depths, temp, sal)
     if ssp_source == 'copernicus':
         from uacpy.data.copernicus import fetch_ts_profile_operational
+        extra = {} if max_days is None else {'max_days': max_days}
         depths, temp, sal = fetch_ts_profile_operational(
-            point, date=date, timeout=timeout, verbose=verbose)
+            point, date=date, timeout=timeout, verbose=verbose, **extra)
     elif ssp_source == 'argo':
         from uacpy.data.argo import fetch_argo_profile, _pressure_dbar_to_depth
-        prof = fetch_argo_profile(point, date=date, timeout=timeout, verbose=verbose)
+        extra = {}
+        if max_distance_km is not None:
+            extra['max_distance_km'] = max_distance_km
+        if max_days is not None:
+            extra['max_days'] = max_days
+        prof = fetch_argo_profile(point, date=date, timeout=timeout,
+                                  verbose=verbose, **extra)
         depths = _pressure_dbar_to_depth(prof['pres'], prof['lat'])
         temp, sal = prof['temp'], prof['psal']
     else:
@@ -653,7 +684,7 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
 
 
 def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
-               timeout, verbose):
+               max_distance_km=None, max_days=None, timeout, verbose):
     if ssp_source == 'woa23':
         return fetch_ssp(
             point, date=date, formula=formula, resolution=resolution,
@@ -666,8 +697,10 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
                 remediation="Pass a date, or use ssp_sources='woa23'.",
             )
         from uacpy.data.copernicus import fetch_ssp_operational
+        extra = {} if max_days is None else {'max_days': max_days}
         return fetch_ssp_operational(
             point, date=date, formula=formula, timeout=timeout, verbose=verbose,
+            **extra,
         )
     if ssp_source == 'argo':
         if date is None:
@@ -676,8 +709,14 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
                 remediation="Pass a date, or use ssp_sources='woa23'.",
             )
         from uacpy.data.argo import fetch_ssp_argo
+        extra = {}
+        if max_distance_km is not None:
+            extra['max_distance_km'] = max_distance_km
+        if max_days is not None:
+            extra['max_days'] = max_days
         return fetch_ssp_argo(
             point, date=date, formula=formula, timeout=timeout, verbose=verbose,
+            **extra,
         )
     raise ConfigurationError(
         f"fetch_environment: unknown ssp_source={ssp_source!r}.",
@@ -709,6 +748,7 @@ class _BottomProvider:
     has_cached_variant: bool = False
     in_auto: bool = False
     in_cache_auto: bool = False
+    accepts_max_distance: bool = False  # nearest-neighbour source: honours max_distance_km
 
 
 def _emodnet_pair(cached):
@@ -746,7 +786,8 @@ def _pelagic_pair(cached):
 _BOTTOM_PROVIDERS = (
     _BottomProvider('emodnet', _emodnet_pair, has_cached_variant=True,
                     in_auto=True, in_cache_auto=True),
-    _BottomProvider('grainsize', _grainsize_pair, in_cache_auto=True),
+    _BottomProvider('grainsize', _grainsize_pair, in_cache_auto=True,
+                    accepts_max_distance=True),
     _BottomProvider('crust1', _crust1_pair),
     _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True),
     _BottomProvider('pelagic', _pelagic_pair, has_cached_variant=True,
@@ -777,19 +818,25 @@ def _bottom_order(bottom_source):
     return order, False
 
 
-def _fetch_bottom(order, *args, transect, cache_only=False, **kwargs):
+def _fetch_bottom(order, *args, transect, cache_only=False,
+                  max_distance_km=None, **kwargs):
     """Fetch a bottom from the first source in ``order`` that yields data.
 
     ``transect`` selects the point (``False``) or transect (``True``) fetcher.
     Cache-first within each source (EMODnet tries its local polygons before the
     live WFS); ``cache_only`` keeps only cached backends. ``args``/``kwargs``
-    are forwarded. Returns ``(bottom, source_keyword)``; a source with no
-    coverage (or no installed cache) falls through to the next.
+    are forwarded; ``max_distance_km`` reaches only the nearest-neighbour
+    sources that accept it (``accepts_max_distance``) — others have no distance
+    concept. Returns ``(bottom, source_keyword)``; a source with no coverage (or
+    no installed cache) falls through to the next.
     """
     idx = 1 if transect else 0
     errors = []
     for name in order:
         provider = _BOTTOM_BY_ID[name]
+        call_kwargs = dict(kwargs)
+        if provider.accepts_max_distance and max_distance_km is not None:
+            call_kwargs['max_distance_km'] = max_distance_km
         # Cache-first: the local twin before the live backend, where one exists;
         # cache_only drops the live attempt.
         if provider.has_cached_variant:
@@ -799,7 +846,7 @@ def _fetch_bottom(order, *args, transect, cache_only=False, **kwargs):
         for cached in cached_flags:
             fn = provider.resolve(cached)[idx]
             try:
-                return fn(*args, **kwargs), name
+                return fn(*args, **call_kwargs), name
             except (DataFetchError, ConfigurationError) as exc:
                 errors.append(exc)
     data_errs = [e for e in errors if isinstance(e, DataFetchError)]
