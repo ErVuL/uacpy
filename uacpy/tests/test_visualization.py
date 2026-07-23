@@ -161,6 +161,49 @@ class TestPlotRays:
         fig, ax = rays.plot(env=env)
         plt.close(fig)
 
+    def test_edge_markers_not_clipped(self, env):
+        # A single receiver at the max range sits exactly on the right axis
+        # spine (xlim clips to the receiver extent); its marker — and the
+        # source at r=0 — must still render fully, i.e. clip_on=False.
+        from uacpy.visualization.plots._common import (
+            ZORDER_RECEIVERS, ZORDER_SOURCE,
+        )
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 50),
+                   'z': 50 + 10 * np.sin(np.linspace(0, 5, 50)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            source_depths=np.array([10.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        by_z = {line.get_zorder(): line for line in ax.lines}
+        assert by_z[ZORDER_RECEIVERS].get_clip_on() is False
+        assert by_z[ZORDER_SOURCE].get_clip_on() is False
+        plt.close(fig)
+
+    def test_marker_sizes_visible(self, env):
+        # Source/receiver markers are bumped in ray plots (receiver more) so
+        # they read clearly against the ray fan.
+        from uacpy.visualization.plots._common import (
+            ZORDER_RECEIVERS, ZORDER_SOURCE,
+        )
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 50),
+                   'z': 50 + 10 * np.sin(np.linspace(0, 5, 50)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            source_depths=np.array([10.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        by_z = {line.get_zorder(): line for line in ax.lines}
+        assert by_z[ZORDER_RECEIVERS].get_markersize() >= 6
+        assert by_z[ZORDER_SOURCE].get_markersize() >= 16
+        plt.close(fig)
+
 
 class TestPlotArrivals:
     def test_stem_plot(self):

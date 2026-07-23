@@ -339,6 +339,7 @@ def plot_signal_excess(
         if vmax <= 0:
             vmax = 1.0
 
+    _owns_fig = ax is None
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -376,6 +377,8 @@ def plot_signal_excess(
         ax.set_title(f"{auto} — {pin}" if pin else auto)
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'])
+    if _owns_fig:                        # credit only a figure we own
+        _draw_result_credit(fig, field, env=env)
     return fig, ax
 
 
@@ -430,6 +433,7 @@ def plot_detection_probability(
         )
 
     Z = np.asarray(field.data, dtype=float)
+    _owns_fig = ax is None
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -471,6 +475,8 @@ def plot_detection_probability(
         ax.set_title(f"{auto} — {pin}" if pin else auto)
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'])
+    if _owns_fig:                        # credit only a figure we own
+        _draw_result_credit(fig, field, env=env)
     return fig, ax
 
 
@@ -658,4 +664,5 @@ def plot_field_stack(stack, env: Optional[Environment] = None, *,
     for j in range(n, len(flat)):
         flat[j].axis('off')
     fig.tight_layout()
+    _draw_result_credit(fig, stack.slabs[0], env=env)
     return fig, axes

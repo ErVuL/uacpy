@@ -81,10 +81,13 @@ _AXIS_LABELS = {
 
 
 def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag',
-    'phase', 'real', 'imag'}``."""
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag_db',
+    'mag', 'phase', 'real', 'imag'}``."""
     if value == 'tl':
         return field.tl, 'TL (dB)'
+    if value == 'mag_db':
+        # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
+        return -field.tl, '|H| (dB)'
     if value == 'mag':
         return field.magnitude, '|p|'
     if value == 'phase':

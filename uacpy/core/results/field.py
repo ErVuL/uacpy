@@ -667,20 +667,40 @@ class Field(Result):
         return f
 
     def plot_transfer_function(
-        self, *, value: str = 'mag', ax=None, title=None, **kwargs,
+        self, *, axes=None, title=None, figsize=(8, 6), **kwargs,
     ):
-        """Plot the transfer function ``H(f)`` at a single receiver cell.
+        """Plot the transfer function ``H(f)`` at one receiver cell as two
+        stacked panels: modulus in dB (``20·log10|H|``, top) over phase
+        (bottom), sharing the frequency axis.
 
         Reduce-then-plot: call on a field already sliced to one ``(depth,
         range)`` cell (``H.at(depth=…, range=…).plot_transfer_function()``); a
         single-receiver field plots directly (singleton axes are squeezed).
-        ``value`` is ``'mag'`` (default, ``|H(f)|``), ``'phase'``, ``'real'``
-        or ``'imag'``. Returns ``(fig, ax)``."""
+        Pass ``axes=(ax_mag, ax_phase)`` to draw into existing axes.
+        Returns ``(fig, (ax_mag, ax_phase))``."""
+        import matplotlib.pyplot as plt
         spec = self._reduce_to_spectrum('plot_transfer_function')
-        return spec.plot(value=value, ax=ax, title=title, **kwargs)
+        owns_fig = axes is None
+        if owns_fig:
+            fig, (ax_mag, ax_phase) = plt.subplots(
+                2, 1, sharex=True, figsize=figsize)
+        else:
+            ax_mag, ax_phase = axes
+            fig = ax_mag.figure
+        spec.plot(value='mag_db', ax=ax_mag, title=title, **kwargs)
+        spec.plot(value='phase', ax=ax_phase, **kwargs)
+        ax_phase.set_title('')       # keep the title/pinned subtitle on top only
+        ax_mag.set_xlabel('')        # shared axis: label only the bottom panel
+        if owns_fig:
+            # plot_field skips its credit when handed an ``ax``; draw the
+            # model-source footnote once, from the (attributed) source Field.
+            from uacpy.visualization.plots._common import _draw_result_credit
+            _draw_result_credit(fig, self)
+        return fig, (ax_mag, ax_phase)
 
     def plot_impulse_response(
-        self, *, ax=None, title=None, window: str = 'hann', **kwargs,
+        self, *, ax=None, title=None, window: str = 'hann',
+        figsize=(8, 4), **kwargs,
     ):
         """Plot the band-limited impulse response ``p(t)`` at one receiver cell.
 
@@ -689,6 +709,7 @@ class Field(Result):
         .plot_impulse_response()``; a single-receiver field works directly).
         For the response to a specific source pulse use
         :meth:`synthesize_time_series` instead. Returns ``(fig, ax)``."""
+        import matplotlib.pyplot as plt
         spec = self._reduce_to_spectrum('plot_impulse_response')
         # Rebuild the canonical (depth, range, frequency) cell so the existing
         # IFFT path applies; the pinned depth/range come from the reduction.
@@ -701,8 +722,19 @@ class Field(Result):
                     if k not in ('depth', 'range')},
             **spec.id_kwargs(),
         )
-        return grid.to_time_trace(window=window).plot(
-            ax=ax, title=title, **kwargs)
+        trace = grid.to_time_trace(window=window)
+        owns_fig = ax is None
+        if owns_fig:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+        trace.plot(ax=ax, title=title, **kwargs)
+        if owns_fig:
+            # Draw the model-source footnote from the (attributed) source Field
+            # — the IFFT trace does not carry the model provenance.
+            from uacpy.visualization.plots._common import _draw_result_credit
+            _draw_result_credit(fig, self)
+        return fig, ax
 
     # ── time-domain only (requires 'time' coord) ──────────────────────
 
@@ -1115,6 +1147,7 @@ def _ifft_to_trace(
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
+        model_source=tf.model_source,
         metadata={'window': window, 'source_model': tf.model},
     )
 
@@ -1215,5 +1248,6 @@ def _synthesize_time_series(
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
+        model_source=tf.model_source,
         metadata={'source_waveform_sample_rate': sample_rate, 'window': window},
     )

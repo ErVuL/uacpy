@@ -183,6 +183,7 @@ class Arrivals(Result):
             backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            model_source=self.model_source,
             metadata={k: v for k, v in self.metadata.items()
                       if k != 'arrivals_by_receiver'},
         )
@@ -513,5 +514,6 @@ class Rays(Result):
             backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )

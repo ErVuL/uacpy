@@ -109,19 +109,24 @@ def _plot_rays(
         rr = rr_full[::step_r]
         rd = rd_full[::step_d]
         RR, RD = np.meshgrid(rr, rd)
-        # Shrink the marker for ray-fan plots — receivers are sampling
-        # points, not the visual focus.
+        # Slightly shrink the marker for ray-fan plots — receivers are
+        # sampling points, not the visual focus — but keep them clearly
+        # readable against the ray fan.
         rcv_style = dict(RECEIVER_MARKER_STYLE)
-        rcv_style['markersize'] = min(rcv_style.get('markersize', 8), 4)
+        rcv_style['markersize'] = min(rcv_style.get('markersize', 8), 7)
+        # clip_on=False: a receiver at the max range sits on the right spine;
+        # without it the marker is clipped to an invisible sliver.
         ax.plot(RR.ravel(), RD.ravel(),
-                zorder=ZORDER_RECEIVERS, **rcv_style)
+                zorder=ZORDER_RECEIVERS, clip_on=False, **rcv_style)
         # Clip the x-axis to the full receiver extent (not the decimated
         # subset) so rays don't trail off into empty bathy-less range.
         ax.set_xlim(0.0, float(np.max(rr_full)))
     if show_source and rays.source_depths is not None and rays.source_depths.size:
+        src_style = dict(SOURCE_MARKER_STYLE)
+        src_style['markersize'] = src_style.get('markersize', 15) + 2
         for sd in rays.source_depths:
             ax.plot([0.0], [float(sd)], zorder=ZORDER_SOURCE,
-                    **SOURCE_MARKER_STYLE)
+                    clip_on=False, **src_style)
 
     if show_legend and color_by == 'bounces':
         import matplotlib.lines as mlines

@@ -1042,7 +1042,7 @@ A `UserWarning` fires if `1/Δf` (the DFT period) is shorter than the waveform
 duration — refine the frequency grid so the late response does not wrap.
 
 To **plot** one cell directly, `H.at(depth=50, range=5000).plot_transfer_function()`
-draws `|H(f)|` (pass `value='phase'`/`'tl'` for the phase or TL) and
+draws stacked modulus-in-dB (`20·log10|H|`, top) and phase (bottom) panels, and
 `.plot_impulse_response()` the band-limited `p(t)` — both reduce-then-plot, so a
 single-receiver field needs no `.at()`. They wrap the slice-and-plot / IFFT chains
 above; use `synthesize_time_series` for the response to a specific source pulse.
@@ -1118,7 +1118,7 @@ helpers, and the raw-array DSP/comms plotters. They are exposed at top level
 | `plot_result(result, env=…)` | type-dispatch — the function `.plot()` calls |
 | `plot_field(field, env=…)` | auto-shape a (sliced) Field: 1 surviving axis → line, 2 → heatmap |
 | `result.plot()` | shorthand for `plot_result(result)` |
-| `H.plot_transfer_function(value='mag')` | `\|H(f)\|` at one receiver cell (reduce with `.at(depth=, range=)` first; a single receiver plots directly) |
+| `H.plot_transfer_function()` | stacked modulus-in-dB + phase at one receiver cell (reduce with `.at(depth=, range=)` first; a single receiver plots directly) |
 | `H.plot_impulse_response()` | band-limited `p(t)` at one cell (IFFT of `H(f)`); same reduce-then-plot shape |
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…)` | side-by-side heatmaps, one shared colourbar |
