@@ -52,8 +52,8 @@ def plot_field(
     env : Environment, optional
         Overlays the seafloor on a 2-D ``(depth, range)`` heatmap.
     value : str
-        ``'tl'`` (default, dB), ``'mag'``, ``'phase'``, ``'real'``,
-        ``'imag'``.
+        ``'tl'`` (default, dB), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
+        ``'phase'``, ``'real'``, ``'imag'``.
     vmin, vmax : float, optional
         Colour limits. ``None`` picks an auto-clip for TL.
     cmap : str, optional

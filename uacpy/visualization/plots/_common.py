@@ -100,7 +100,7 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
         return field.data.imag, 'Im(p)'
     raise ConfigurationError(
         f"plot_field: unknown value={value!r}; "
-        "valid: 'tl', 'mag', 'phase', 'real', 'imag'"
+        "valid: 'tl', 'mag_db', 'mag', 'phase', 'real', 'imag'"
     )
 
 

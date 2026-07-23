@@ -16,7 +16,6 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results.field import Field, ResultStack
 from uacpy.core.results.array_products import Covariance, Replicas
 from uacpy.sonar.matched_field import (
-    synthesize_replica,
     replica_bank,
     replica_bank_from_field,
     csdm,
