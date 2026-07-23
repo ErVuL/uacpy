@@ -257,6 +257,22 @@ class Absorption:
         """
         raise NotImplementedError
 
+    def plot(self, frequencies, *, depth: float = 0.0, **kwargs):
+        """Plot this model's volume absorption ``α(f)`` (dB/km, log-log).
+
+        Dispatches to :func:`uacpy.visualization.plot_absorption` — the carrier
+        counterpart of :meth:`Result.plot`. ``frequencies`` (Hz) is required
+        because absorption *is* a function of frequency; ``depth`` (m) is the
+        evaluation depth (matters for depth-dependent models such as
+        Francois-Garrison; Thorp is depth-invariant). ``kwargs`` are
+        forwarded."""
+        from uacpy.visualization import plot_absorption
+        freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
+        alpha_km = np.array([
+            float(np.asarray(self.alpha_db_per_m(f, depth)).reshape(-1)[0])
+            * 1000.0 for f in freqs])
+        return plot_absorption(freqs, absorption=alpha_km, **kwargs)
+
 
 @dataclass
 class Thorp(Absorption):

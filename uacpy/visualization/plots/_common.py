@@ -309,7 +309,7 @@ def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):
     produced it (always, when known) plus any data sources from ``env``.
 
     The single call every result plotter makes — keeps data + model credit
-    rendering identical across :func:`plot_field`, :func:`plot_rays`, … ."""
+    rendering identical across :func:`plot_field`, `_plot_rays`, … ."""
     data = _credit_attributions(data_source, carrier=env)
     _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
 

@@ -362,7 +362,7 @@ SSP varies with range), so — exactly like a range-dependent *bottom* — **no
 model honours range-dependent surface properties**: every model collapses it to
 one boundary with a `UserWarning` (`collapse={'surface': 'r0'|'rmax'|'mean'|'median'}`).
 The `Surface` carrier still lets you build, fetch, and **plot** the marginal ice
-zone (`plot_environment` draws it from `env.surface`). An elastic ice surface is
+zone (`env.plot()` draws it from `env.surface`). An elastic ice surface is
 best run with **Bellhop** (Kraken's `krakenc` aborts on an elastic top). The data
 layer can build a marginal-ice-zone surface straight from sea-ice climatology with
 `uacpy.data.sea_ice_surface_transect(start, end)`.
@@ -519,6 +519,13 @@ Environment(bathymetry=100, absorption=ConstantAbsorption(0.1))   # flat dB/λ
 Environment(bathymetry=100, absorption=Biological(          # fish-bladder layers
     [(0, 50, 1000, 5, 0.5)]))   # (z_top, z_bottom, f0, Q, a0)
 ```
+
+`fetch_environment(..., with_absorption=True)` builds the `FrancoisGarrison`
+model from the site's fetched temperature/salinity column. Its pH is pH-source
+aware: on the Copernicus SSP branch (`ssp_sources='copernicus'`) it prefers the
+date-specific Copernicus biogeochemistry `ph` field, else the cached GLODAP
+climatology when installed (`install.sh --data glodap`), else the open-ocean
+default (8.1).
 
 Default is `None` (no explicit volume absorption). The bare formulas
 `thorp_db_per_km(f)` and `francois_garrison_db_per_km(f, ...)` are available
@@ -1034,6 +1041,12 @@ t = ts.times                                # seconds
 A `UserWarning` fires if `1/Δf` (the DFT period) is shorter than the waveform
 duration — refine the frequency grid so the late response does not wrap.
 
+To **plot** one cell directly, `H.at(depth=50, range=5000).plot_transfer_function()`
+draws `|H(f)|` (pass `value='phase'`/`'tl'` for the phase or TL) and
+`.plot_impulse_response()` the band-limited `p(t)` — both reduce-then-plot, so a
+single-receiver field needs no `.at()`. They wrap the slice-and-plot / IFFT chains
+above; use `synthesize_time_series` for the response to a specific source pulse.
+
 **(b) Manual `2·Re[ifft(H)]`** for `travelling_wave` `H(f)`, when you want full
 control. Place each model frequency at bin `round(f/Δf)`; the window length
 `1/Δf` must exceed the arrival time `r/c0`, so the grid must be fine enough:
@@ -1091,19 +1104,27 @@ Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
 
 ## 9. Visualization
 
-A small, composable helper set. The convention is uniform: **the result is the
-positional argument; `env=` adds overlays.** All are exposed at top level
+The convention is uniform: **every object you plot on its own has `.plot()`** —
+results (`tl.plot()`, `rays.plot()`, `arrivals.plot()`, `modes.plot()`, …) and
+the input carriers (`env.plot()`, `env.ssp.plot()`, `absorption.plot(freqs)`).
+The free `plot_*` functions below are the remaining public surface: the
+type-dispatcher, the grid/flexible renderers, alternate views, composition
+helpers, and the raw-array DSP/comms plotters. They are exposed at top level
 (`uacpy.plot_field`, `uacpy.plot_result`, …) and under `uacpy.plot.*`.
 
 | Function | Use |
 |---|---|
-| `plot_result(result, env=…)` | type-dispatch — calls the right plotter for any result |
-| `plot_field(field, env=…)` | auto-shape: 1 surviving axis → line, 2 → heatmap |
+| `result.plot(env=…)` / carrier `.plot()` | preferred — any result or carrier plots itself (dispatches via `plot_result`) |
+| `plot_result(result, env=…)` | type-dispatch — the function `.plot()` calls |
+| `plot_field(field, env=…)` | auto-shape a (sliced) Field: 1 surviving axis → line, 2 → heatmap |
 | `result.plot()` | shorthand for `plot_result(result)` |
+| `H.plot_transfer_function(value='mag')` | `\|H(f)\|` at one receiver cell (reduce with `.at(depth=, range=)` first; a single receiver plots directly) |
+| `H.plot_impulse_response()` | band-limited `p(t)` at one cell (IFFT of `H(f)`); same reduce-then-plot shape |
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…)` | side-by-side heatmaps, one shared colourbar |
-| `plot_environment(env)` | SSP + seafloor cross-section, optional source/receiver markers |
-| `plot_ssp(env_or_ssp)` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
+| `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
+| `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
+| `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
 | `plot_overview(env, map_args, tl=…)` | three-panel map + TL + environment composite |
 
 **DSP / comms plotters.** All signal-processing and communications plotting also

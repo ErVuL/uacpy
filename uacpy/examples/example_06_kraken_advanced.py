@@ -42,10 +42,8 @@ from uacpy import Bottom  # noqa: E402
 from uacpy.models import Kraken  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_field,
-    plot_mode_functions,
     plot_mode_wavenumbers,
     plot_modes_heatmap,
-    plot_environment,
 )
 
 
@@ -204,7 +202,7 @@ def main():
     print("[4/4] Generating plots...")
 
     # Plot 1: Environment with bottom properties
-    fig1, _ = plot_environment(env)
+    fig1, _ = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_06_bottom.png")
 
@@ -289,8 +287,7 @@ def main():
 
         # Use plot_modes with show_imaginary=True
         try:
-            fig2c, (ax_modes, ax_k) = plot_mode_functions(
-                modes_field,
+            fig2c, (ax_modes, ax_k) = modes_field.plot(
                 show_imaginary=True  # Show imaginary parts as dashed lines
             )
             fig2c.suptitle('Mode Shapes with Imaginary Parts\n' +

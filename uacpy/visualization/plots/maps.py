@@ -14,7 +14,7 @@ from uacpy.visualization.plots._common import ZORDER_SOURCE, _credit_attribution
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
-from uacpy.visualization.plots.environment import plot_environment
+from uacpy.visualization.plots.environment import _plot_environment
 
 
 BATHYMETRY_CMAP = _mcolors.LinearSegmentedColormap.from_list('uacpy_bathy', [
@@ -191,10 +191,10 @@ def plot_overview(
         Data-source credit shown as a footnote under the map. ``True`` uses
         ``env.data_sources``; ``None`` / ``False`` hides it; or pass an explicit
         ``Environment`` / ``Result`` / list of ``DataSource`` / strings. See
-        :func:`plot_environment` for the same argument on a single panel.
+        :func:`_plot_environment` for the same argument on a single panel.
     sea_ice : optional
         Sea-ice cover for the environment panel — a concentration 0–1 or
-        ``(ranges_km, concentration)`` (forwarded to :func:`plot_environment`).
+        ``(ranges_km, concentration)`` (forwarded to :func:`_plot_environment`).
     map_kwargs : dict, optional
         Extra keyword arguments forwarded to :func:`plot_bathymetry_map`
         (e.g. ``coastline_resolution``, ``graticule``).
@@ -244,13 +244,13 @@ def plot_overview(
         ax_tl.set_xticks([])
         ax_tl.set_yticks([])
 
-    plot_environment(env, ax=ax_env, source=source, receiver=receiver,
+    _plot_environment(env, ax=ax_env, source=source, receiver=receiver,
                      bottom_colorbar=True, sea_ice=sea_ice)
     ax_env.set_title(env_title)
 
     # Both right-column panels now keep their full gridspec cell — neither
     # colorbar steals axes width (the TL bar is the inset above; the env cp
-    # bars are inset by plot_environment) — so they share x0/width by
+    # bars are inset by _plot_environment) — so they share x0/width by
     # construction. Sync the x-limits so the equal-width panels line up
     # range-for-range.
     if tl is not None:

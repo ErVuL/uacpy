@@ -44,7 +44,6 @@ from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import Bottom  # noqa: E402
 from uacpy.models import Bellhop, RAM, Kraken, Scooter, OAST  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_environment,
     compare_models,
 )
 
@@ -201,7 +200,7 @@ def main():
     # Plot 1: Environment overview — single panel showing the water
     # column (Blues) + bottom (YlOrBr) on one figure.
     print("\n[1/3] Environment overview...")
-    fig1, ax_env = plot_environment(env)
+    fig1, ax_env = env.plot()
     ax_env.set_title('Thermal Front: 2D Range-Dependent SSP + bottom')
     fig1.savefig(OUTPUT_DIR / 'example_07_environment.png', dpi=150,
                  bbox_inches='tight')

@@ -642,6 +642,68 @@ class Field(Result):
             t_start=t_start, window=window, nfft=nfft,
         )
 
+    def _reduce_to_spectrum(self, method: str) -> "Field":
+        """Reduce a broadband Field to a single ``['frequency']`` spectrum.
+
+        Singleton ``depth`` / ``range`` axes are squeezed automatically (so a
+        single-receiver field needs no ``.at()``); any remaining non-frequency
+        axis means the caller must pick a cell first. Used by the
+        transfer-function / impulse-response plot helpers."""
+        if 'frequency' not in self.coords:
+            raise ConfigurationError(
+                f"Field.{method}: needs a broadband field with a 'frequency' "
+                f"axis; got coords {list(self.coords)}."
+            )
+        f = self
+        for axis in ('source_depth', 'depth', 'range'):
+            if axis in f.coords and f.coords[axis].size == 1:
+                f = f.isel(**{axis: 0})
+        if list(f.coords) != ['frequency']:
+            raise ConfigurationError(
+                f"Field.{method}: reduce to one (depth, range) cell first, "
+                f"e.g. H.at(depth=…, range=…) — after squeezing singleton axes "
+                f"the remaining coords are {list(f.coords)}."
+            )
+        return f
+
+    def plot_transfer_function(
+        self, *, value: str = 'mag', ax=None, title=None, **kwargs,
+    ):
+        """Plot the transfer function ``H(f)`` at a single receiver cell.
+
+        Reduce-then-plot: call on a field already sliced to one ``(depth,
+        range)`` cell (``H.at(depth=…, range=…).plot_transfer_function()``); a
+        single-receiver field plots directly (singleton axes are squeezed).
+        ``value`` is ``'mag'`` (default, ``|H(f)|``), ``'phase'``, ``'real'``
+        or ``'imag'``. Returns ``(fig, ax)``."""
+        spec = self._reduce_to_spectrum('plot_transfer_function')
+        return spec.plot(value=value, ax=ax, title=title, **kwargs)
+
+    def plot_impulse_response(
+        self, *, ax=None, title=None, window: str = 'hann', **kwargs,
+    ):
+        """Plot the band-limited impulse response ``p(t)`` at one receiver cell.
+
+        Reduce-then-plot counterpart of :meth:`plot_transfer_function`: IFFTs
+        the single-cell spectrum (``H.at(depth=…, range=…)
+        .plot_impulse_response()``; a single-receiver field works directly).
+        For the response to a specific source pulse use
+        :meth:`synthesize_time_series` instead. Returns ``(fig, ax)``."""
+        spec = self._reduce_to_spectrum('plot_impulse_response')
+        # Rebuild the canonical (depth, range, frequency) cell so the existing
+        # IFFT path applies; the pinned depth/range come from the reduction.
+        grid = Field(
+            data=spec.data.reshape(1, 1, -1),
+            coords={'depth': np.array([spec.pinned.get('depth', 0.0)]),
+                    'range': np.array([spec.pinned.get('range', 0.0)]),
+                    'frequency': spec.coords['frequency']},
+            pinned={k: v for k, v in spec.pinned.items()
+                    if k not in ('depth', 'range')},
+            **spec.id_kwargs(),
+        )
+        return grid.to_time_trace(window=window).plot(
+            ax=ax, title=title, **kwargs)
+
     # ── time-domain only (requires 'time' coord) ──────────────────────
 
     def get_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:

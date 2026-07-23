@@ -36,12 +36,21 @@ __all__ = [
     'fetch_ssp_operational',
     'fetch_ssp_transect_operational',
     'fetch_ts_profile_operational',
+    'fetch_waves_operational',
+    'fetch_ph_operational',
 ]
 
 # Global ocean physics, daily means, 1/12° — multi-year reanalysis.
 DEFAULT_DATASET_ID = 'cmems_mod_glo_phy_my_0.083deg_P1D-m'
 TEMPERATURE_VAR = 'thetao'
 SALINITY_VAR = 'so'
+# Global wave reanalysis (WAVERYS), 1/5°, 3-hourly, 1980→present.
+DEFAULT_WAVE_DATASET_ID = 'cmems_mod_glo_wav_my_0.2deg_PT3H-i'
+WAVE_HS_VAR = 'VHM0'                 # spectral significant wave height (m)
+WAVE_TP_VAR = 'VTPK'                 # wave peak period (s)
+# Global biogeochemistry reanalysis, 0.25°, monthly, 1993→present.
+DEFAULT_BGC_DATASET_ID = 'cmems_mod_glo_bgc_my_0.25deg_P1M-m'
+BGC_PH_VAR = 'ph'                    # sea-water pH (total scale)
 # Max days the nearest available time step may sit from the requested date
 # before we treat it as out-of-coverage and raise (shared tolerance contract
 # with the other dated SSP sources — cf. argo.DEFAULT_MAX_DAYS=15). Looser than
@@ -249,6 +258,128 @@ def _extract_ts(
     valid = np.isfinite(t) & np.isfinite(s)
     cut = valid.size if valid.all() else int(np.argmax(~valid))
     return depth[:cut], t[:cut], s[:cut]
+
+
+def fetch_waves_operational(
+    point: Coordinate,
+    *,
+    date: Union[str, _dt.date],
+    max_days: int = DEFAULT_MAX_DAYS,
+    dataset_id: str = DEFAULT_WAVE_DATASET_ID,
+    timeout: float = 120.0,
+    verbose: Union[bool, str] = False,
+) -> dict:
+    """Significant wave height (m) and peak period (s) from Copernicus WAVERYS.
+
+    Returns ``{'hs', 'tp'}`` at the ``(lat, lon)`` cell nearest ``date`` (full
+    reanalysis history, 1980→present). ``tp`` is ``None`` when the dataset does
+    not expose a peak-period variable. Raises ``DataFetchError`` on land / out of
+    coverage or when the nearest time step is more than ``max_days`` away.
+    """
+    lat, lon = as_coordinate(point)
+    when = parse_date(date).isoformat()
+    marine = _import_copernicusmarine()
+    log_message('waves', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
+                verbose=verbose, level='debug')
+    try:
+        ds = marine.open_dataset(dataset_id=dataset_id)
+    except Exception as exc:  # toolbox raises a variety of auth/network errors
+        raise DataFetchError(
+            f"Copernicus Marine open_dataset failed: {exc}",
+            remediation="Run `copernicusmarine login` (free account) and check "
+                        "the dataset_id and network connectivity.",
+        ) from exc
+
+    sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
+    hs_da = ds[WAVE_HS_VAR].sel(method='nearest', **sel)
+    if 'time' in getattr(hs_da, 'coords', {}):
+        actual = np.datetime64(np.asarray(hs_da['time'].values).reshape(-1)[0], 'D')
+        gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
+        if gap > max_days:
+            raise DataFetchError(
+                f"Copernicus waves: nearest time is {actual} ({gap:.0f} days "
+                f"from {when}, > max_days={max_days}).",
+                remediation="Pass a date within range, raise max_days, or use "
+                            "the WaveWatch III source.",
+            )
+    hs = float(np.asarray(hs_da.values, float).reshape(-1)[0])
+    if not np.isfinite(hs):
+        raise DataFetchError(
+            f"No Copernicus wave height at {lat:.3f}, {lon:.3f} on {when} "
+            "(on land or outside the dataset domain).",
+            remediation="Pick an ocean location/date within the dataset.",
+        )
+    tp = None
+    if WAVE_TP_VAR in getattr(ds, 'variables', {}) or WAVE_TP_VAR in ds:
+        tp_val = float(np.asarray(
+            ds[WAVE_TP_VAR].sel(method='nearest', **sel).values, float).reshape(-1)[0])
+        tp = tp_val if np.isfinite(tp_val) else None
+    return {'hs': hs, 'tp': tp}
+
+
+def fetch_ph_operational(
+    point: Coordinate,
+    *,
+    date: Union[str, _dt.date],
+    reference_depth: Optional[float] = None,
+    max_days: int = DEFAULT_MAX_DAYS,
+    dataset_id: str = DEFAULT_BGC_DATASET_ID,
+    timeout: float = 120.0,
+    verbose: Union[bool, str] = False,
+) -> float:
+    """Date-specific seawater pH from Copernicus Marine biogeochemistry.
+
+    The operational counterpart of the cached GLODAP climatology
+    (:func:`uacpy.data.fetch_ph`): returns the pH at ``reference_depth`` (m,
+    nearest level), or the shallowest finite level when ``None`` — matching the
+    nominal-row convention of :func:`uacpy.data.build_francois_garrison`.
+
+    Raises ``DataFetchError`` when ``copernicusmarine`` is unavailable, the
+    service fails, the location has no column, or the nearest time step is more
+    than ``max_days`` from ``date``.
+    """
+    lat, lon = as_coordinate(point)
+    when = parse_date(date).isoformat()
+    marine = _import_copernicusmarine()
+    log_message('copernicus', f"opening {dataset_id} (pH) for {lat:.3f}, "
+                f"{lon:.3f}", verbose=verbose, level='debug')
+    try:
+        ds = marine.open_dataset(dataset_id=dataset_id)
+    except Exception as exc:  # toolbox raises a variety of auth/network errors
+        raise DataFetchError(
+            f"Copernicus Marine open_dataset failed: {exc}",
+            remediation="Run `copernicusmarine login` (free account) and check "
+                        "the dataset_id and network connectivity.",
+        ) from exc
+
+    sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
+    ph_da = ds[BGC_PH_VAR].sel(method='nearest', **sel)
+    if 'time' in getattr(ph_da, 'coords', {}):
+        actual = np.datetime64(np.asarray(ph_da['time'].values).reshape(-1)[0], 'D')
+        gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
+        if gap > max_days:
+            raise DataFetchError(
+                f"Copernicus pH: nearest time is {actual} ({gap:.0f} days from "
+                f"{when}, > max_days={max_days}) — outside the dataset's range.",
+                remediation="Pass a date within range, raise max_days, or rely "
+                            "on the GLODAP climatology / model default.",
+            )
+    depth = np.asarray(ds['depth'].values, float).reshape(-1)
+    ph = np.asarray(ph_da.values, float).reshape(-1)
+    n = min(depth.size, ph.size)
+    depth, ph = depth[:n], ph[:n]
+    finite = np.isfinite(ph)
+    if not finite.any():
+        raise DataFetchError(
+            f"No Copernicus pH at {lat:.3f}, {lon:.3f} on {when} "
+            "(on land or outside the dataset domain).",
+            remediation="Pick an ocean location/date within the dataset.",
+        )
+    depth, ph = depth[finite], ph[finite]
+    if reference_depth is None:
+        return float(ph[0])
+    i = int(np.argmin(np.abs(depth - float(reference_depth))))
+    return float(ph[i])
 
 
 def _import_copernicusmarine():

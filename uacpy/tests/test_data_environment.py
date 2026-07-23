@@ -98,11 +98,11 @@ def test_source_fetch_wins_over_literal(stub_fetchers):
     assert 'gebco' in [s.source.id for s in env.data_sources]
 
 
-def test_bathymetry_sources_auto_prefers_gmrt(stub_fetchers):
-    # 'auto' bathymetry = ('gmrt', 'gebco'); the stub fetcher succeeds, so the
-    # first source (gmrt) wins and is recorded in provenance.
+def test_bathymetry_sources_auto_prefers_emodnet_dtm(stub_fetchers):
+    # 'auto' bathymetry = ('emodnet_dtm', 'gmrt', 'gebco'); the stub fetcher
+    # succeeds, so the first (highest-res regional DTM) wins in provenance.
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry_sources='auto')
-    assert 'gmrt' in [s.source.id for s in env.data_sources]
+    assert 'emodnet_dtm' in [s.source.id for s in env.data_sources]
 
 
 def test_ssp_sources_auto_falls_to_woa23_without_date(stub_fetchers):

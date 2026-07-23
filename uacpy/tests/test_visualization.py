@@ -158,7 +158,7 @@ class TestPlotRays:
             receiver_ranges=np.array([2000.0]),
             model='Bellhop',
         )
-        fig, ax = plots.plot_rays(rays, env=env)
+        fig, ax = rays.plot(env=env)
         plt.close(fig)
 
 
@@ -179,13 +179,13 @@ class TestPlotArrivals:
             receiver_ranges=np.array([2000.0]),
             model='Bellhop',
         )
-        fig, ax = plots.plot_arrivals(arr)
+        fig, ax = arr.plot()
         plt.close(fig)
 
 
 class TestPlotEnvironment:
     def test_flat_env(self, env):
-        fig, _ = plots.plot_environment(env)
+        fig, _ = env.plot()
         plt.close(fig)
 
 
@@ -193,7 +193,7 @@ class TestPlotSSP:
     def test_profile_input_depth_down_single_line(self):
         ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1520), (100, 1490),
                                                   (200, 1480)])
-        fig, ax = plots.plot_ssp(ssp)
+        fig, ax = ssp.plot()
         assert ax.get_xlabel() == 'Sound speed (m/s)'
         assert ax.get_ylabel() == 'Depth (m)'
         assert ax.yaxis_inverted()          # depth positive down
@@ -201,7 +201,7 @@ class TestPlotSSP:
         plt.close(fig)
 
     def test_environment_input(self, env):
-        fig, ax = plots.plot_ssp(env)        # isovelocity env
+        fig, ax = env.ssp.plot()             # isovelocity env
         assert len(ax.lines) == 1
         plt.close(fig)
 
@@ -211,7 +211,7 @@ class TestPlotSSP:
             matrix=np.array([[1520, 1510, 1500],
                              [1500, 1495, 1490],
                              [1480, 1478, 1475]]))
-        fig, ax = plots.plot_ssp(ssp)
+        fig, ax = ssp.plot()
         assert len(ax.lines) == 3            # one per range column
         assert len(fig.axes) > 1             # range colorbar
         plt.close(fig)
@@ -220,13 +220,14 @@ class TestPlotSSP:
         fig, ax = plt.subplots()
         ax.invert_yaxis()                    # already depth-down
         ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1490)])
-        _, ax_out = plots.plot_ssp(ssp, ax=ax)
+        _, ax_out = ssp.plot(ax=ax)
         assert ax_out is ax and ax.yaxis_inverted()
         plt.close(fig)
 
     def test_bad_input_raises(self):
+        from uacpy.visualization.plots.environment import _plot_ssp
         with pytest.raises(ConfigurationError):
-            plots.plot_ssp(42)
+            _plot_ssp(42)
 
 
 class TestPlotBottomProperties:
@@ -284,7 +285,7 @@ class TestPlotModes:
         return Modes(k=k, phi=phi, depths=depths, model='Test', frequencies=100.0)
 
     def test_plot_mode_functions(self, modes):
-        fig, _ = plots.plot_mode_functions(modes)
+        fig, _ = modes.plot()
         plt.close(fig)
 
     def test_plot_mode_wavenumbers(self, modes):
@@ -304,7 +305,7 @@ class TestPlotReflectionCoefficient:
             phi=np.zeros(91),
             model='Bounce',
         )
-        fig, _ = plots.plot_reflection_coefficient(rc)
+        fig, _ = rc.plot()
         plt.close(fig)
 
     def test_broadband(self):
@@ -315,7 +316,7 @@ class TestPlotReflectionCoefficient:
             theta=theta, R=R, phi=np.zeros_like(R),
             frequencies=freqs, model='Bounce',
         )
-        fig, _ = plots.plot_reflection_coefficient(rc)
+        fig, _ = rc.plot()
         plt.close(fig)
 
 
@@ -433,7 +434,7 @@ class TestOverview:
 
 
 class TestSeaIce:
-    """plot_sea_ice_map (mirrors the depth map) + plot_environment(sea_ice=)."""
+    """plot_sea_ice_map (mirrors the depth map) + env.plot(sea_ice=)."""
 
     def test_sea_ice_map_notation(self, monkeypatch):
         import uacpy.data.seaice_local as sil
@@ -449,10 +450,10 @@ class TestSeaIce:
         plt.close(fig)
 
     def test_environment_shows_ice(self, env):
-        fig0, ax0 = plots.plot_environment(env)            # no ice
+        fig0, ax0 = env.plot()            # no ice
         n0 = len(ax0.collections)
         plt.close(fig0)
-        fig, ax = plots.plot_environment(env, sea_ice=0.8)
+        fig, ax = env.plot(sea_ice=0.8)
         assert len(ax.collections) > n0                    # ice band added at surface
         plt.close(fig)
 
@@ -464,5 +465,6 @@ def test_compare_models_label_length_validation(tl_field):
 
 
 def test_plot_environment_rejects_non_environment():
+    from uacpy.visualization.plots.environment import _plot_environment
     with pytest.raises(ConfigurationError, match="Environment"):
-        uacpy.plot_environment("not an environment")
+        _plot_environment("not an environment")

@@ -359,11 +359,11 @@ def _compare_bottoms(env, plt):
                                   ssp=env.ssp, bottom=crust)
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.2))
-    uacpy.plot.plot_environment(env_grain, ax=axes[0], bottom_colorbar=False,
-                                data_source=None)
+    env_grain.plot(ax=axes[0], bottom_colorbar=False,
+                   data_source=None)
     axes[0].set_title("Grain-size half-space  (surficial · high-freq)")
-    uacpy.plot.plot_environment(env_crust, ax=axes[1], bottom_colorbar=False,
-                                data_source=None)
+    env_crust.plot(ax=axes[1], bottom_colorbar=False,
+                   data_source=None)
     axes[1].set_title("CRUST1.0 layered elastic  (deep · low-freq)")
     fig.suptitle("Seabed model comparison — grain size vs sediment layers",
                  fontsize=13, fontweight='bold')
@@ -375,7 +375,7 @@ def _compare_bottoms(env, plt):
 
     # The CRUST1.0 seabed is elastic (shear); plot_bottom_properties lays out
     # every geoacoustic property (cp, cs, ρ, αp, αs) as its own cross-section —
-    # the visual home for shear & friends that plot_environment (cp-only) omits.
+    # the visual home for shear & friends that env.plot() (cp-only) omits.
     figp, _ = uacpy.plot.plot_bottom_properties(env_crust, data_source=None)
     figp.suptitle("CRUST1.0 seabed properties along A→B "
                   "(cp · cs · ρ · αp · αs)", fontsize=13, fontweight='bold')

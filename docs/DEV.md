@@ -27,7 +27,7 @@ uacpy/
     ├── io/                  File-format readers/writers + FileManager
     ├── acoustic_signal/     psd/ppsd/sel, fk_transform/taup/radon, spectrogram, FRF
     ├── noise/               Wenz curves, wind noise, ship noise
-    ├── visualization/       plot_field / plot_rays / plot_modes / …
+    ├── visualization/       plot_field / plot_bottom_properties / … (+ result.plot())
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
     ├── examples/            38 numbered example scripts (01–38)
     ├── third_party/         Vendored Fortran/C sources (see §9)
@@ -395,9 +395,14 @@ objects (typically `Field`) or raw arrays.
   `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
   `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
 - `noise/noise.py` — `compute_windnoise`, Wenz curves, ship noise.
-- `visualization/plots.py` — single-entry `plot_result(result, env=…)`
-  plus per-result-type helpers (`plot_field`, `plot_rays`,
-  `plot_arrivals`, `plot_modes_heatmap`, `plot_covariance`, …).
+- `visualization/plots.py` — every result/carrier plots via `.plot()`,
+  which dispatches through `plot_result(result, env=…)` to the private
+  per-type renderers (`_plot_rays`, `_plot_arrivals`, `_plot_mode_functions`,
+  `_plot_environment`, `_plot_ssp`, …). Public free functions remain for the
+  grid/flexible renderers (`plot_field`, `plot_absorption`), alternate views
+  (`plot_bottom_properties`, `plot_mode_wavenumbers`, `plot_modes_heatmap`),
+  composition (`compare`, `compare_models`, `plot_overview`, maps), and the
+  raw-array DSP/comms plotters.
 - `visualization/style.py` — colour palette + font/sizing presets.
   Touch this if you want to change the package look-and-feel globally.
 
@@ -433,11 +438,22 @@ emits user notices via `warnings.warn`.
 **Adding a source.** Write a module exposing a fetcher with the standard trio,
 then:
 
-- *Sediment* → add one row to `environment._bottom_registry()`
-  (`id → (point_fetcher, transect_fetcher)`) and, to join `'auto'`, to
-  `_AUTO_BOTTOM_ORDER` / `_BOTTOM_SOURCE_KEYWORDS`.
+- *Sediment* → write a `_<name>_pair(cached)` resolver returning
+  `(point_fetcher, transect_fetcher)` and add one `_BottomProvider` row to
+  `environment._BOTTOM_PROVIDERS` (its `id` doubles as the source keyword;
+  `in_auto=True` joins the `'auto'` chain, `in_cache_auto=True` the `'local'`
+  one). The accepted keywords, fallback order and provenance id all derive from
+  that list.
 - *Sound speed* → add a branch to `environment._fetch_ssp` (and the
   range-dependent block) keyed on `ssp_source`.
+- *Absorption pH* → `environment._fetch_ph` is pH-source aware: it prefers the
+  operational Copernicus BGC `ph` field on the Copernicus SSP branch
+  (`copernicus.fetch_ph_operational`), else the cached GLODAP grid
+  (`glodap_local.py`), else the model-default constant, then feeds
+  `build_francois_garrison` under `with_absorption` (cache/best-effort, silent
+  fallback).
+- *Offline grid* → register it in `_cache.DATASETS` and add an `install.sh`
+  `download_<name>` (mirror `download_globsed`/`download_glodap`).
 - Add a `DataSource` row to `sources.SOURCES` (id, licence, attribution,
   citation, `commercial_use`) and map the dispatch keyword to that id so
   provenance is recorded automatically.

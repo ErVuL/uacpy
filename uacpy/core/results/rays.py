@@ -131,7 +131,7 @@ class Arrivals(Result):
                         })
         return out
 
-    # Plot helpers — :func:`uacpy.visualization.plots.plot_arrivals` uses these.
+    # Plot helpers — :func:`uacpy.visualization.plots._plot_arrivals` uses these.
     @property
     def depths(self) -> np.ndarray:
         return self.receiver_depths

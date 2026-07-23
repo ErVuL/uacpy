@@ -32,6 +32,7 @@ from typing import Callable, Optional, Sequence, Union
 
 import numpy as np
 
+from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
@@ -56,6 +57,7 @@ _SSP_BACKENDS = {
 _BATHY_BACKENDS = {
     'gebco': ('local', 'api'),
     'gmrt': ('gmrt',),
+    'emodnet_dtm': ('emodnet',),
 }
 _CACHE_BACKEND = 'local'   # the cached-twin backend token (``*_sources='local'``)
 # Default fetch chains for the two mandatory axes (used when neither a literal
@@ -67,7 +69,7 @@ _DEFAULT_BATHY_SOURCES = ('gebco',)
 # Copernicus login, else they fall through to WOA23); bathymetry prefers the
 # higher-res multibeam synthesis, falling back to the global grid.
 _AUTO_SSP_SOURCES = ('argo', 'copernicus', 'woa23')
-_AUTO_BATHY_SOURCES = ('gmrt', 'gebco')
+_AUTO_BATHY_SOURCES = ('emodnet_dtm', 'gmrt', 'gebco')
 
 
 def _resolve_axis_sources(spec, *, auto):
@@ -151,6 +153,9 @@ def fetch_environment(
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
+    altimetry_sources: Optional[str] = None,
+    sea_surface_n_points: int = 500,
+    sea_surface_seed: Optional[int] = None,
     transect_to: Optional[Coordinate] = None,
     n_points: Union[int, str] = 50,
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
@@ -203,10 +208,12 @@ def fetch_environment(
         on its own, bathymetry is not fetched.
     bathymetry_sources : str or sequence of str, optional
         Bathymetry source(s) to **fetch**, tried in order, or a preset:
-        ``'auto'`` (best-available: ``gmrt`` → ``gebco``, i.e. high-res multibeam
-        where surveyed, else the global grid) or ``'local'`` (the cached GEBCO
-        grid only — no network). Choices: ``'gebco'`` (global) or ``'gmrt'``
-        (multibeam, higher-res, CC-BY). Default ``None`` → fetch ``'gebco'``.
+        ``'auto'`` (best-available: ``emodnet_dtm`` → ``gmrt`` → ``gebco``, i.e.
+        the ~115 m regional DTM where it covers, else high-res multibeam where
+        surveyed, else the global grid) or ``'local'`` (the cached GEBCO grid
+        only — no network). Choices: ``'gebco'`` (global), ``'gmrt'`` (multibeam,
+        higher-res, CC-BY) or ``'emodnet_dtm'`` (EMODnet DTM ~115 m, European
+        seas + Caribbean, CC-BY). Default ``None`` → fetch ``'gebco'``.
     bottom : float or str or BoundaryProperties, optional
         A **literal** seafloor supplied directly (no fetch): a mean grain size
         (ϕ, float), a :data:`~uacpy.materials.MATERIALS` class name, a ready
@@ -299,12 +306,27 @@ def fetch_environment(
     altimetry : array-like, optional
         A **literal** rough-surface wave profile ``[(range, height_m), …]``
         (height positive up; same as :class:`Environment`'s ``altimetry=``).
-        There is no fetch source for sea state, so this is literal-only — build
-        one with :func:`uacpy.generate_sea_surface`. Default ``None`` (flat).
+        If ``altimetry_sources`` is *also* given, the source is fetched first and
+        this is the **fallback**. Default ``None`` (flat).
+    altimetry_sources : str, optional
+        Sea-state source to **fetch** into a Pierson-Moskowitz sea-surface
+        realization: ``'waves'`` (observed significant wave height → surface),
+        ``'wind'`` (10 m wind → surface, fully-developed assumption) or
+        ``'auto'`` (waves, else wind). **Requires ``transect_to`` and ``date``**
+        (the realization spans the transect range and sea state is time-
+        specific); a single point has no range, so point altimetry is not
+        fetched. Sea state is **live-only** (no cached climatology). Default
+        ``None`` (flat surface unless ``altimetry=`` is given).
+    sea_surface_n_points : int, optional
+        Range samples in a fetched sea-surface realization. Default 500.
+    sea_surface_seed : int, optional
+        Random seed for a fetched sea-surface realization (reproducibility).
     with_absorption : bool, optional
         If ``True``, attach a Francois-Garrison absorption built from the
         site's fetched temperature/salinity column (costs one extra T/S
-        request). Default ``False`` (model-default Thorp absorption).
+        request). pH comes from the cached GLODAP climatology when installed
+        (``install.sh --data glodap``), else the open-ocean default (8.1).
+        Default ``False`` (model-default Thorp absorption).
     max_distance_km : float, optional
         Maximum great-circle distance (km) to the nearest measured sample for
         the **nearest-neighbour** sources — ``ssp_sources`` ``'argo'`` and
@@ -551,6 +573,36 @@ def fetch_environment(
     elif surface is not None:
         surface_props = surface
 
+    # ── Altimetry (sea surface, optional): fetch a wave/wind-driven surface ──
+    # Sea state is live and time-specific, and the realization spans a range, so
+    # a fetched altimetry needs both a transect (for its extent) and a date.
+    altimetry_result, altimetry_src = altimetry, None
+    if altimetry_sources is not None:
+        if transect_to is None:
+            raise ConfigurationError(
+                "fetch_environment: altimetry_sources requires transect_to= "
+                "(the sea-surface realization spans the transect range).",
+                remediation="Pass transect_to=(lat, lon), or supply altimetry= "
+                            "directly for a single point.")
+        if date is None:
+            raise ConfigurationError(
+                "fetch_environment: altimetry_sources needs date= (sea state is "
+                "time-specific).",
+                remediation="Pass date='YYYY-MM-DD'.")
+        from uacpy.data.bathymetry import transect_length
+        from uacpy.data.sea_surface import fetch_sea_surface
+        try:
+            altimetry_result, altimetry_src = fetch_sea_surface(
+                (lat, lon), date=date,
+                max_range=transect_length((lat, lon), transect_to),
+                n_points=sea_surface_n_points, seed=sea_surface_seed,
+                source=altimetry_sources, max_days=max_days,
+                timeout=timeout, verbose=verbose)
+        except (DataFetchError, ConfigurationError):
+            if altimetry is None:
+                raise
+            altimetry_result, altimetry_src = altimetry, None   # literal fallback
+
     # Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
     # products, so their deepest points rarely coincide. Reconcile the SSP to
     # span exactly the fetched water column with the carrier's own method
@@ -581,21 +633,24 @@ def fetch_environment(
         kwargs['bottom'] = bottom_props
     if surface_props is not None:
         kwargs['surface'] = surface_props
-    if altimetry is not None:
-        kwargs['altimetry'] = altimetry
+    if altimetry_result is not None:
+        kwargs['altimetry'] = altimetry_result
+    ph_src = None
     if with_absorption:
-        kwargs['absorption'] = _fetch_absorption(
+        kwargs['absorption'], ph_src = _fetch_absorption(
             point, date=date, ssp_source=ssp_src, ssp_backend=ssp_backend,
             cache_only=ssp_cache_only, max_distance_km=max_distance_km,
             max_days=max_days, timeout=timeout, verbose=verbose,
         )
     env = Environment(**kwargs)
 
-    _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface_src)
+    _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
+                       surface_src, ph_src, altimetry_src)
     return env
 
 
-def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface_src):
+def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
+                       surface_src, ph_src=None, altimetry_src=None):
     """Stamp ``env.data_sources`` by aggregating the per-layer provenance the
     fetchers attached to each carrier, in axis order
     (bathymetry → ssp → bottom → surface), de-duplicated by source id.
@@ -622,7 +677,9 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props, surface
     records = (layer(env.bathymetry, bathy_src)
                + layer(env.ssp, ssp_src)
                + layer(bottom_props, bottom_kw, extra)
-               + layer(getattr(env, 'surface', None), surface_src))
+               + layer(getattr(env, 'surface', None), surface_src)
+               + layer(None, ph_src)
+               + layer(None, altimetry_src))
     seen, dedup = set(), []
     for r in records:
         if r.source.id not in seen:
@@ -646,20 +703,21 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
                       max_distance_km=None, max_days=None, timeout, verbose):
     """Francois-Garrison absorption from the site's fetched T/S column.
 
-    Reuses the backend the SSP resolved to (``ssp_backend``) for the WOA23 T/S
-    column, so a cache-resolved SSP draws its absorption from the same cached
-    grid rather than re-fetching it live. ``None`` (literal SSP) leaves the
-    WOA fetcher on its own default. ``cache_only`` (a ``*_sources='local'``
-    run) forces the local WOA23 grid so the T/S column never hits the network
-    either — including when a cache-pinned SSP fell back to a literal.
+    Returns ``(absorption, ph_source)``. Reuses the backend the SSP resolved to
+    (``ssp_backend``) for the WOA23 T/S column, so a cache-resolved SSP draws
+    its absorption from the same cached grid rather than re-fetching it live.
+    ``None`` (literal SSP) leaves the WOA fetcher on its own default.
+    ``cache_only`` (a ``*_sources='local'`` run) forces the local WOA23 grid so
+    the T/S column never hits the network either — including when a cache-pinned
+    SSP fell back to a literal. pH comes from the cached GLODAP grid when
+    installed (``ph_source='glodap'``), else the model default.
     """
     from uacpy.data.absorption import build_francois_garrison
     if cache_only:
         from uacpy.data.sound_speed import fetch_ts_profile
         depths, temp, sal = fetch_ts_profile(
             point, date=date, source='local', timeout=timeout, verbose=verbose)
-        return build_francois_garrison(depths, temp, sal)
-    if ssp_source == 'copernicus':
+    elif ssp_source == 'copernicus':
         from uacpy.data.copernicus import fetch_ts_profile_operational
         extra = {} if max_days is None else {'max_days': max_days}
         depths, temp, sal = fetch_ts_profile_operational(
@@ -680,7 +738,45 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         ts_kwargs = {} if ssp_backend is None else {'source': ssp_backend}
         depths, temp, sal = fetch_ts_profile(
             point, date=date, timeout=timeout, verbose=verbose, **ts_kwargs)
-    return build_francois_garrison(depths, temp, sal)
+    pH, ph_src = _fetch_ph(point, date=date, ssp_source=ssp_source,
+                           cache_only=cache_only, timeout=timeout,
+                           verbose=verbose)
+    return build_francois_garrison(depths, temp, sal, pH=pH), ph_src
+
+
+def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
+              timeout=120.0, verbose=False):
+    """Representative seawater pH at ``point``, pH-source-aware and cache-first.
+
+    Returns ``(pH, source_id)``. On the Copernicus SSP branch (``ssp_source ==
+    'copernicus'`` and not ``cache_only``) the time-varying BGC ``ph`` field is
+    preferred (``source_id='copernicus_bgc'``), riding the same Copernicus
+    session as the SSP. Otherwise — or if the BGC fetch fails — it falls back to
+    the cached GLODAP climatology (``'glodap'``), and finally to the model
+    default (``DEFAULT_OCEAN_PH``, ``None``). pH is cache/best-effort like every
+    other axis: a run without any pH source silently keeps the default rather
+    than failing.
+    """
+    from uacpy.data.absorption import DEFAULT_OCEAN_PH
+    from uacpy.data.glodap_local import fetch_ph
+    lat, lon = as_coordinate(point)
+    if ssp_source == 'copernicus' and not cache_only and date is not None:
+        from uacpy.data.copernicus import fetch_ph_operational
+        try:
+            pH = fetch_ph_operational(point, date=date, timeout=timeout,
+                                      verbose=verbose)
+            log_message('copernicus', f"pH {pH:.3f} from Copernicus BGC at "
+                        f"{lat:.3f}, {lon:.3f}", verbose=verbose)
+            return pH, 'copernicus_bgc'
+        except (DataFetchError, ConfigurationError):
+            pass                                    # fall through to GLODAP
+    try:
+        pH = fetch_ph(point)
+    except (DataFetchError, ConfigurationError):
+        return DEFAULT_OCEAN_PH, None
+    log_message('glodap', f"pH {pH:.3f} from GLODAP at {lat:.3f}, {lon:.3f}",
+                verbose=verbose)
+    return pH, 'glodap'
 
 
 def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
@@ -764,6 +860,11 @@ def _grainsize_pair(cached):
     return (m.fetch_bottom_local, m.fetch_bottom_local_transect)
 
 
+def _mars_pair(cached):
+    from uacpy.data import mars as m
+    return (m.fetch_bottom_mars, m.fetch_bottom_mars_transect)
+
+
 def _crust1_pair(cached):
     from uacpy.data import crust1_local as m
     return (m.fetch_bottom_crust1, m.fetch_bottom_crust1_transect)
@@ -772,6 +873,11 @@ def _crust1_pair(cached):
 def _diesing_pair(cached):
     from uacpy.data import diesing_local as m
     return (m.fetch_bottom_diesing, m.fetch_bottom_diesing_transect)
+
+
+def _graw_pair(cached):
+    from uacpy.data import graw_local as m
+    return (m.fetch_bottom_graw, m.fetch_bottom_graw_transect)
 
 
 def _pelagic_pair(cached):
@@ -786,9 +892,12 @@ def _pelagic_pair(cached):
 _BOTTOM_PROVIDERS = (
     _BottomProvider('emodnet', _emodnet_pair, has_cached_variant=True,
                     in_auto=True, in_cache_auto=True),
+    _BottomProvider('mars', _mars_pair, in_auto=True,
+                    accepts_max_distance=True),
     _BottomProvider('grainsize', _grainsize_pair, in_cache_auto=True,
                     accepts_max_distance=True),
     _BottomProvider('crust1', _crust1_pair),
+    _BottomProvider('graw', _graw_pair),
     _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True),
     _BottomProvider('pelagic', _pelagic_pair, has_cached_variant=True,
                     in_auto=True, in_cache_auto=True),  # never fails (last resort)

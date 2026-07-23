@@ -116,6 +116,15 @@ class SoundSpeedProfile:
         bits.append(f"c=[{c_lo:g}, {c_hi:g}] m/s")
         return f"SoundSpeedProfile({', '.join(bits)})"
 
+    def plot(self, **kwargs):
+        """Plot the sound-speed profile ``c(z)`` (depth increasing downward).
+
+        The carrier counterpart of :meth:`Result.plot` — any uacpy object you
+        plot on its own has ``.plot()``. A range-dependent profile draws one
+        line per range column. ``kwargs`` are forwarded to the renderer."""
+        from uacpy.visualization.plots.environment import _plot_ssp
+        return _plot_ssp(self, **kwargs)
+
     @property
     def is_range_dependent(self) -> bool:
         return self.ranges is not None and self.data.shape[1] > 1

@@ -54,7 +54,7 @@ MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 po
 #: lifts the limit (set to 0.0 there). Tests set it to 0.0 to run instantly.
 OPENTOPODATA_MIN_INTERVAL_S = 1.0
 
-BATHY_SOURCES = ('api', 'gmrt', 'local')
+BATHY_SOURCES = ('api', 'gmrt', 'emodnet', 'local')
 
 _last_request_monotonic = 0.0    # wall-clock of the last public-host call
 
@@ -64,7 +64,9 @@ def _check_source(source):
         raise ConfigurationError(
             f"bathymetry source must be one of {BATHY_SOURCES}; got {source!r}.",
             remediation="Use 'api' (OpenTopoData/GEBCO), 'gmrt' (GMRT multibeam, "
-                        "higher-res live), or 'local' (offline GEBCO grid).",
+                        "higher-res live), 'emodnet' (EMODnet DTM, ~115 m, "
+                        "European seas + Caribbean), or 'local' (offline GEBCO "
+                        "grid).",
         )
 
 
@@ -83,11 +85,13 @@ def fetch_bathy(
     ----------
     point : (lat, lon)
         Latitude and longitude in decimal degrees (WGS84).
-    source : {'api', 'gmrt', 'local'}, optional
+    source : {'api', 'gmrt', 'emodnet', 'local'}, optional
         ``'api'`` (default) queries OpenTopoData/GEBCO online; ``'gmrt'`` queries
         the GMRT multibeam synthesis (higher resolution where surveyed, CC-BY,
-        live); ``'local'`` samples the install-time GEBCO grid (offline, no rate
-        limit; see ``install.sh --data gebco``).
+        live); ``'emodnet'`` queries the EMODnet Bathymetry DTM (~115 m,
+        European seas + Caribbean only, CC-BY, live); ``'local'`` samples the
+        install-time GEBCO grid (offline, no rate limit; see ``install.sh --data
+        gebco``).
     dataset : str, optional
         OpenTopoData dataset name. Default ``'gebco2020'`` (``'api'`` only).
     base_url : str, optional
@@ -115,6 +119,10 @@ def fetch_bathy(
     if source == 'gmrt':
         from uacpy.data import gmrt_live
         return gmrt_live.point_depth(point, timeout=timeout, verbose=verbose)
+    if source == 'emodnet':
+        from uacpy.data import emodnet_bathy_live
+        return emodnet_bathy_live.point_depth(point, timeout=timeout,
+                                              verbose=verbose)
     depths = _fetch_depths(
         [as_coordinate(point)], dataset=dataset, base_url=base_url,
         timeout=timeout, verbose=verbose,
@@ -202,6 +210,10 @@ def fetch_bathy_transect(
     elif source == 'gmrt':
         from uacpy.data import gmrt_live
         depths = gmrt_live.depths_along(lats, lons, timeout=timeout, verbose=verbose)
+    elif source == 'emodnet':
+        from uacpy.data import emodnet_bathy_live
+        depths = emodnet_bathy_live.depths_along(lats, lons, timeout=timeout,
+                                                 verbose=verbose)
     else:
         depths = _fetch_depths(
             list(zip(lats, lons)), dataset=dataset, base_url=base_url,
@@ -277,6 +289,12 @@ def fetch_bathy_grid(
                     f"lat{lat_range} lon{lon_range}", verbose=verbose)
         return gmrt_live.region_grid(lat_range, lon_range, n_lat, n_lon,
                                      timeout=timeout, verbose=verbose)
+    if source == 'emodnet':
+        from uacpy.data import emodnet_bathy_live
+        log_message('bathymetry', f"EMODnet DTM grid {n_lat}×{n_lon} over "
+                    f"lat{lat_range} lon{lon_range}", verbose=verbose)
+        return emodnet_bathy_live.region_grid(lat_range, lon_range, n_lat, n_lon,
+                                              timeout=timeout, verbose=verbose)
     n_requests = -(-(n_lat * n_lon) // MAX_LOCATIONS_PER_REQUEST)   # ceil-div
     if n_requests > MAX_GRID_REQUESTS:
         raise ConfigurationError(
