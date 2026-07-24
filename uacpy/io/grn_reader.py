@@ -211,16 +211,41 @@ def _hanning_taper(k: np.ndarray, freq: float,
 
     Mirrors ``fieldsco.m:taper`` — symmetric Hanning roll-offs at the
     spectrum edges, ones in the middle. Returns ``ones`` when both bounds
-    are inactive.
+    are inactive. Raises :class:`ConfigurationError` when the requested
+    phase-speed band has no overlap with the file's wavenumber grid —
+    the taper would zero the entire spectrum.
     """
     Nk = len(k)
     win = np.ones(Nk, dtype=float)
-    if Nk < 4:
+    if Nk == 0:
         return win
 
     omega = 2.0 * np.pi * freq
     k_left = omega / cmax if (cmax is not None and cmax > 0) else None
     k_right = omega / cmin if (cmin is not None and cmin > 0) else None
+
+    # The pass band is [ω/cmax, ω/cmin]; the grid spans phase speeds
+    # [ω/k[-1], ω/k[0]]. A band that misses the grid entirely would taper
+    # every sample to zero (and the roll-off construction below would build
+    # a window longer than the grid).
+    c_grid_lo = omega / float(k[-1])
+    c_grid_hi = omega / float(k[0])
+    if k_left is not None and k_right is not None and k_left > k_right:
+        raise ConfigurationError(
+            f"phase-speed taper: cmin ({cmin:g} m/s) exceeds cmax "
+            f"({cmax:g} m/s); the pass band [ω/cmax, ω/cmin] is empty."
+        )
+    if (k_left is not None and k_left > k[-1]) or \
+            (k_right is not None and k_right < k[0]):
+        raise ConfigurationError(
+            f"phase-speed taper: the requested band "
+            f"(cmin={cmin!r}, cmax={cmax!r} m/s) has no overlap with the "
+            f"file's phase-speed grid [{c_grid_lo:.1f}, {c_grid_hi:.1f}] m/s "
+            f"at {freq:g} Hz — the taper would zero the entire spectrum. "
+            f"Widen or drop cmin/cmax."
+        )
+    if Nk < 4:
+        return win
 
     if k_left is not None and k_left > k[0]:
         n = 2 * round((k_left - k[0]) / (k[-1] - k[0]) * Nk) + 1

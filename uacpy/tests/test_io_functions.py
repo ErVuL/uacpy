@@ -425,6 +425,58 @@ class TestShdNoDataCells:
         assert pr[1, 1] == pytest.approx(2.0 - 1.0j)
 
 
+class TestGrnPhaseSpeedTaper:
+    """The cmin/cmax phase-speed taper: valid bands taper the spectrum edges;
+    a band with no overlap with the file's phase-speed grid raises a typed
+    ConfigurationError instead of a raw broadcast ValueError."""
+
+    def _k(self, freq=100.0, c_lo=1400.0, c_hi=1700.0, nk=64):
+        # Wavenumber grid spanning phase speeds [c_lo, c_hi] at ``freq``.
+        omega = 2.0 * np.pi * freq
+        return np.linspace(omega / c_hi, omega / c_lo, nk)
+
+    def test_interior_band_tapers_edges(self):
+        from uacpy.io.grn_reader import _hanning_taper
+        win = _hanning_taper(self._k(), 100.0, cmin=1450.0, cmax=1650.0)
+        assert win.shape == (64,)
+        assert np.all((win >= 0.0) & (win <= 1.0))
+        assert win[0] < 1.0 and win[-1] < 1.0     # rolled off at both edges
+        assert np.any(win == 1.0)                 # flat in the middle
+
+    def test_generous_bounds_are_a_noop(self):
+        from uacpy.io.grn_reader import _hanning_taper
+        win = _hanning_taper(self._k(), 100.0, cmin=1000.0, cmax=3000.0)
+        assert np.all(win == 1.0)
+
+    @pytest.mark.parametrize("cmin,cmax", [
+        (None, 100.0),      # cmax below the grid's slowest phase speed
+        (5000.0, None),     # cmin above the grid's fastest phase speed
+        (1650.0, 1450.0),   # inverted band (cmin > cmax)
+    ])
+    def test_no_overlap_band_raises_typed(self, cmin, cmax):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.io.grn_reader import _hanning_taper
+        with pytest.raises(ConfigurationError):
+            _hanning_taper(self._k(), 100.0, cmin=cmin, cmax=cmax)
+
+    def test_public_grn_to_field_raises_typed(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.io.grn_reader import grn_to_field
+        nk = 32
+        freq = 100.0
+        cvec = np.linspace(1700.0, 1400.0, nk)     # decreasing, as on disk
+        grn = {
+            "freq": freq, "freqVec": np.array([freq]), "nfreq": 1,
+            "nsd": 1, "nrd": 2, "nk": nk,
+            "sd": np.array([50.0]), "rd": np.array([25.0, 75.0]),
+            "cVec": cvec, "atten": 0.0,
+            "G": np.ones((1, 1, 2, nk), dtype=np.complex64),
+            "title": "SCOOTER test", "PlotType": "Green", "is_sparc": False,
+        }
+        with pytest.raises(ConfigurationError, match="no overlap"):
+            grn_to_field(grn, np.array([1000.0]), cmax=100.0)
+
+
 class TestReaderCorruptFileRaises:
     """The io readers' failure path: a truncated / garbage binary must raise
     the typed :class:`FileFormatError`, not a bare struct/EOF error or a
