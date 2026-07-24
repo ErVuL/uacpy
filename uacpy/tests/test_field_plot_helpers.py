@@ -121,6 +121,42 @@ def test_ir_multireceiver_without_reduction_raises():
         _broadband(n_depth=3, n_range=4).plot_impulse_response()
 
 
+def test_ir_unpinned_range_raises():
+    # A frequency-only Field with no pinned range cannot be IFFTed honestly
+    # (t_start / demodulation need r); fabricating r=0 mispositions the peak.
+    spec = Field(
+        data=np.exp(-2j * np.pi * _FREQS * 2.0),
+        coords={'frequency': _FREQS},
+        model='Synthetic', source_depths=np.array([5.0]),
+        frequencies=_FREQS, phase_reference=PhaseReference.TRAVELLING_WAVE)
+    with pytest.raises(ConfigurationError, match='pinned range|range'):
+        spec.plot_impulse_response()
+    assert not plt.get_fignums()                        # no leaked figure
+
+
+def test_tf_real_field_raises_before_drawing():
+    # A real (already-dB) broadband field has no phase panel; the guard must
+    # be a typed error raised before any figure exists.
+    tl = _broadband().to_tl()
+    with pytest.raises(ConfigurationError, match='complex'):
+        tl.plot_transfer_function()
+    assert not plt.get_fignums()
+
+
+# ── compare guards + credits ─────────────────────────────────────────────────
+
+def test_compare_label_length_mismatch_raises():
+    a = _broadband(n_depth=2, n_range=4).at(depth=25.0, range=1000.0)
+    with pytest.raises(ConfigurationError, match='labels'):
+        uacpy.plot.compare([a, a, a], labels=['one', 'two'])
+
+
+def test_compare_draws_model_credit():
+    a = _broadband().isel(depth=0, range=0)
+    fig, ax = uacpy.plot.compare([a, a], labels=['A', 'B'])
+    assert any('Model' in t.get_text() for t in fig.texts)
+
+
 # ── plot_environment(title=) ─────────────────────────────────────────────────
 
 def test_environment_plot_accepts_title():

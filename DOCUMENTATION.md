@@ -968,7 +968,7 @@ narrow.pinned                       # {'frequency': 199.6}  (nearest sample)
 narrow.kind                         # 'pressure'
 
 line = narrow.at(depth=50)          # now coords = {'range': ...}, a 1-D cut
-peak = H.max()                      # argmax of |data| → scalar Field, coords = {}
+peak = H.max()                      # loudest point (argmax |p|; min finite dB for TL) → scalar Field
 peak.pinned                         # {'depth': 50.0, 'range': 3000.0, 'frequency': 59.6}
 ```
 

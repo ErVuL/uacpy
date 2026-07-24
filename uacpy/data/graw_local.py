@@ -13,6 +13,7 @@ attenuation) are ϕ-derived by **inverting** that same table — so
 grid value and whose speed/attenuation are consistent with it.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -55,8 +56,10 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
     log_message('graw', "downloading Graw 2021 seabed density grid (~37 MB)",
                 verbose=verbose)
     if not _curl_download(GRAW_URL, out, timeout=timeout, verbose=verbose):
-        out.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
-                                 source='graw'))
+        part = Path(str(out) + '.part')
+        part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
+                                  source='graw'))
+        os.replace(part, out)
     _GRID.clear()
     log_message('graw', f"Graw density grid cached → {out}", verbose=verbose)
     return out

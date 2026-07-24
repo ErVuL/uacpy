@@ -270,7 +270,11 @@ def _credit_lines(data_attributions, model_attribution):
     if data_attributions:
         groups.append(("Data:", list(data_attributions)))
     if model_attribution:
-        groups.append(("Model:", [model_attribution]))
+        # A single attribution string, or a list of them (multi-model
+        # comparison figures).
+        lines = ([model_attribution] if isinstance(model_attribution, str)
+                 else list(model_attribution))
+        groups.append(("Model:", lines))
     if not groups:
         return []
     width = max(len(label) for label, _ in groups)

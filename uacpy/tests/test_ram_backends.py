@@ -71,6 +71,39 @@ def _env(*, bottom, altimetry=None):
     )
 
 
+# ─── Collins bottom-profile depth reference ────────────────────────────────
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestCollinsDepthReference:
+    """ramgeo/ramsurf read bottom-profile depths as depth-below-seafloor
+    (``matrc`` restarts the profile index at the grid point under the local
+    seafloor; the vendored ``ramgeo.in`` confirms it), while rams0.5 indexes
+    absolutely from z=0. The segment builder must emit each convention."""
+
+    def _segments(self, kind):
+        env = _env(bottom=_fluid_layered_bottom())     # 100 m water, 15 m layer
+        return RAM(verbose=False)._collins_range_segments(env, kind, zmax=400.0)
+
+    @pytest.mark.parametrize('kind', ['ramgeo', 'ramsurf'])
+    def test_relative_for_ramgeo_ramsurf(self, kind):
+        seg = self._segments(kind)[0]
+        depths = [d for d, _ in seg['bottom_c']]
+        assert depths[0] == pytest.approx(0.0)          # top of sediment
+        assert depths[1] == pytest.approx(15.0)         # layer bottom
+        assert max(depths) == pytest.approx(300.0)      # zmax - seafloor
+        # layer speed then half-space speed
+        assert seg['bottom_c'][0][1] == pytest.approx(1650.0)
+        assert seg['bottom_c'][-1][1] == pytest.approx(1900.0)
+
+    def test_absolute_for_rams(self):
+        seg = self._segments('rams')[0]
+        depths = [d for d, _ in seg['bottom_c']]
+        assert depths[0] == pytest.approx(100.0)        # seafloor (absolute)
+        assert depths[1] == pytest.approx(115.0)        # layer bottom
+        assert max(depths) == pytest.approx(400.0)      # zmax (absolute)
+
+
 # ─── Backend selection (no binary needed) ─────────────────────────────────
 
 
@@ -376,7 +409,9 @@ class TestCollinsBinaries:
         mpi = RAM(verbose=False, dr=20.0, dz=1.0, backend='mpiramS').run(
             env, src, rcv)
         d = np.abs(geo.tl - mpi.tl)
-        assert np.nanmedian(d) < 6.0
+        # Post depth-reference fix the two PEs agree to ~1 dB median; the
+        # tight bound guards the seafloor-relative profile convention.
+        assert np.nanmedian(d) < 3.0
 
     def test_ramgeo_broadband_runs(self):
         """A forced ramgeo serves BROADBAND via its complex-envelope patch —
@@ -394,6 +429,44 @@ class TestCollinsBinaries:
         assert f.phase_reference == 'travelling_wave'
         assert f.data.ndim == 3 and f.frequencies.size > 1
         assert np.all(np.isfinite(f.data))
+
+    @pytest.mark.slow
+    def test_mpirams_broadband_rd_ssp_short_range(self):
+        """BROADBAND with a range-dependent SSP at rmax < 5 km must not take
+        mpiramS's ihorz=1 path (nrp=nint(rmax/10000)=0 → zero-length allocate
+        → SIGABRT); the 2-D ssp.dat already carries the per-range profiles."""
+        from uacpy.core.ssp import SoundSpeedProfile
+        ssp = SoundSpeedProfile.from_2d(
+            depths=[0.0, 50.0, 100.0], ranges=[0.0, 1500.0, 3000.0],
+            matrix=np.array([[1500.0, 1505.0, 1510.0],
+                             [1495.0, 1500.0, 1505.0],
+                             [1490.0, 1495.0, 1500.0]]))
+        env = Environment(name='rd', bathymetry=100.0, ssp=ssp,
+                          bottom=_fluid_bottom())
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([30.0, 60.0]),
+                       ranges=np.linspace(500.0, 3000.0, 10))
+        f = RAM(verbose=False, np_pade=6, dr=8.0, dz=1.0, zmax=200.0,
+                Q=2.0, T=2.0, backend='mpiramS').run(
+            env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert isinstance(f, Field)
+        assert np.all(np.isfinite(f.data))
+
+    @pytest.mark.slow
+    def test_mpirams_broadband_below_domain_depth_is_nan(self):
+        """A receiver depth below the PE domain must come back NaN in
+        BROADBAND, matching the COHERENT_TL below-domain convention — not a
+        plausible-looking edge-extrapolated H(f)."""
+        env = _env(bottom=_fluid_bottom())
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([50.0, 300.0]),   # 300 m > zmax=200
+                       ranges=np.linspace(500.0, 3000.0, 10))
+        with pytest.warns(UserWarning, match="below the model's resolvable"):
+            f = RAM(verbose=False, np_pade=6, dr=8.0, dz=1.0, zmax=200.0,
+                    Q=2.0, T=2.0, backend='mpiramS').run(
+                env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert np.all(np.isfinite(f.data[0]))            # in-domain row
+        assert np.all(np.isnan(f.data[1].real))          # below-domain row
 
     @pytest.mark.slow
     def test_collins_backend_broadband_returns_transfer_function(self):

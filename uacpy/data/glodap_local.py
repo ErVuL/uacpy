@@ -11,6 +11,7 @@ without it :func:`uacpy.data.build_francois_garrison` falls back to a constant
 letting :func:`uacpy.data.fetch_environment` build absorption from measured pH.
 """
 
+import os
 import shutil
 import subprocess
 import tarfile
@@ -42,19 +43,26 @@ _GRID = {}   # path -> _GlodapGrid
 def _curl_download(url, out, *, timeout, verbose):
     """Fetch ``url`` → ``out`` with curl; ``True`` on success, ``False`` if curl
     is absent or fails. The GLODAP host serves curl at full speed; mirrors the
-    GlobSed/curl-first pattern for the large static grids."""
+    GlobSed/curl-first pattern for the large static grids. Downloads to
+    ``<out>.part`` and moves it into place only on success, so an interrupted
+    transfer never leaves a truncated ``out``."""
     curl = shutil.which('curl')
     if not curl:
         return False
+    part = Path(str(out) + '.part')
     try:
         subprocess.run(
             [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(out), url],
+             '-o', str(part), url],
             check=True, capture_output=not verbose)
     except (subprocess.SubprocessError, OSError):
-        out.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
         return False
-    return out.exists() and out.stat().st_size > 0
+    if not (part.exists() and part.stat().st_size > 0):
+        part.unlink(missing_ok=True)
+        return False
+    os.replace(part, out)
+    return True
 
 
 def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
@@ -75,8 +83,10 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
         tar_path = Path(tmp) / GLODAP_TARBALL
         if not _curl_download(GLODAP_URL, tar_path, timeout=timeout,
                               verbose=verbose):
-            tar_path.write_bytes(http_get(GLODAP_URL, timeout=timeout,
-                                          verbose=verbose, source='glodap'))
+            part = Path(str(tar_path) + '.part')
+            part.write_bytes(http_get(GLODAP_URL, timeout=timeout,
+                                      verbose=verbose, source='glodap'))
+            os.replace(part, tar_path)
         _extract_ph(tar_path, out)
     _GRID.clear()
     log_message('glodap', f"GLODAP pH grid cached → {out}", verbose=verbose)
@@ -84,9 +94,13 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
 
 
 def _extract_ph(tar_path, out):
-    """Extract the pH member from the mapped-product tarball to ``out``."""
+    """Extract the pH member from the mapped-product tarball to ``out``.
+
+    Iterates lazily (member data is never read before its declared size passes
+    the decompression-bomb cap) and writes atomically via ``<out>.part``."""
+    from uacpy.data._http import checked_member_size
     with tarfile.open(tar_path, 'r:gz') as tar:
-        member = next((m for m in tar.getmembers()
+        member = next((m for m in tar
                        if Path(m.name).name == GLODAP_FILE), None)
         if member is None:
             raise DataFetchError(
@@ -94,8 +108,16 @@ def _extract_ph(tar_path, out):
                 "have changed.",
                 remediation="Check the GLODAP mapped-product download.",
             )
+        checked_member_size(member.size, member.name)
         src = tar.extractfile(member)
-        out.write_bytes(src.read())
+        if src is None:
+            raise DataFetchError(
+                f"GLODAP tarball member {member.name!r} is not a regular file.",
+                remediation="Check the GLODAP mapped-product download.",
+            )
+        part = Path(str(out) + '.part')
+        part.write_bytes(src.read())
+        os.replace(part, out)
 
 
 class _GlodapGrid(NetcdfGrid):

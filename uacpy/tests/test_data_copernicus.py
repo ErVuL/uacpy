@@ -240,3 +240,36 @@ def test_fetch_ph_woa_source_does_not_hit_bgc(monkeypatch, tmp_path):
     assert pH == pytest.approx(DEFAULT_OCEAN_PH)
     assert src is None
     assert calls == []
+
+
+# ── provenance stamping ─────────────────────────────────────────────────────
+
+def test_fetch_ssp_operational_stamps_provenance(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    assert len(ssp.data_sources) == 1
+    prov = ssp.data_sources[0]
+    assert prov.source.id == 'copernicus'
+    assert prov.requested_point == (30.0, -40.0)
+    assert prov.requested_date == '2020-06-15'
+
+
+def test_fetch_ssp_transect_operational_stamps_provenance(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    ssp = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4)
+    assert [p.source.id for p in ssp.data_sources] == ['copernicus']
+
+
+def test_assemble_range_dependent_aggregates_provenance():
+    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sources import SOURCES, DataProvenance
+    provs = (DataProvenance(source=SOURCES['copernicus'],
+                            requested_point=(30.0, -40.0)),
+             DataProvenance(source=SOURCES['copernicus'],
+                            requested_point=(31.0, -40.0)),
+             DataProvenance(source=SOURCES['woa23']))
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
+                              data_sources=(p,)) for p in provs]
+    out = assemble_range_dependent(cols, [0.0, 1000.0, 2000.0])
+    assert [p.source.id for p in out.data_sources] == ['copernicus', 'woa23']

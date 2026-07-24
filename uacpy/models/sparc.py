@@ -437,20 +437,21 @@ class SPARC(PropagationModel):
                 ],
             )
 
-        # SPARC drives its source pulse via the constructor ``pulse_type``.
-        # ``source_waveform`` / ``sample_rate`` / ``output_duration`` exist on
-        # the signature for API uniformity but cannot influence the run — warn
-        # loudly when the caller supplies them so they don't expect their
-        # waveform / window to propagate.
-        if (source_waveform is not None or sample_rate is not None
-                or output_duration is not None):
-            warnings.warn(
-                "SPARC.run: source_waveform / sample_rate / output_duration "
-                "are ignored — SPARC builds p(t) from its native pulse_type "
-                "over its own time grid. To shape the pulse, pass "
-                "SPARC(pulse_type=...).",
-                UserWarning, stacklevel=2,
-            )
+        # SPARC builds p(t) from its native pulse_type on its own time grid
+        # at source.frequencies — none of the contract extras can influence
+        # the run, in any run mode.
+        self._warn_ignored_run_kwargs(
+            run_mode,
+            reason=(
+                "SPARC builds p(t) from its native pulse_type over its own "
+                "time grid at source.frequencies; pass SPARC(pulse_type=...) "
+                "to shape the pulse"
+            ),
+            frequencies=frequencies,
+            source_waveform=source_waveform,
+            sample_rate=sample_rate,
+            output_duration=output_duration,
+        )
         env = self._project_environment(env)
         env = self._sparc_rigidify_halfspace(env)
         receiver = self._clip_receiver_depths(

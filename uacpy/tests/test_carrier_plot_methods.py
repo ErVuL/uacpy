@@ -79,3 +79,21 @@ def test_francois_garrison_plot_depth_dependent():
 def test_absorption_plot_forwards_kwargs():
     fig, ax = Thorp().plot(_FREQS, title='α(f)')
     assert ax.get_title(loc='left') == 'α(f)'   # plot_absorption titles left
+
+
+def test_biological_plot_outside_layer_warns():
+    from uacpy.core.absorption import Biological
+    bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
+    # depth 0 m is outside the 40-60 m layer → α ≡ 0 → blank log-log axes.
+    with pytest.warns(UserWarning, match='depth 0'):
+        fig, ax = bio.plot(_FREQS, depth=0.0)
+
+
+def test_biological_plot_inside_layer_no_warning():
+    import warnings
+    from uacpy.core.absorption import Biological
+    bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        fig, ax = bio.plot(_FREQS, depth=50.0)
+    assert np.all(ax.lines[0].get_ydata() > 0)

@@ -267,3 +267,33 @@ def test_from_grain_size_builds_halfspace():
 def test_seabedcolumn_copy_is_deep():
     c = SeabedColumn([], BoundaryProperties())
     assert c.copy() is not c and type(c.copy()) is SeabedColumn
+
+
+# ─── from_halfspaces roughness ─────────────────────────────────────────────
+
+def test_from_halfspaces_roughness_scalar():
+    b = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
+                               density=[1.5, 1.6], attenuation=[0.5, 0.4],
+                               roughness=0.3)
+    assert all(c.halfspace.roughness == pytest.approx(0.3) for c in b.columns)
+
+
+def test_from_halfspaces_roughness_per_range():
+    b = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
+                               density=[1.5, 1.6], attenuation=[0.5, 0.4],
+                               roughness=[0.1, 0.4])
+    assert b.halfspace_roughness.tolist() == [
+        pytest.approx(0.1), pytest.approx(0.4)]
+
+
+def test_from_halfspaces_roughness_default_zero():
+    b = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
+                               density=[1.5, 1.6], attenuation=[0.5, 0.4])
+    assert all(c.halfspace.roughness == 0.0 for c in b.columns)
+
+
+def test_from_halfspaces_roughness_length_mismatch():
+    with pytest.raises(ConfigurationError, match='roughness'):
+        Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
+                               density=[1.5, 1.6], attenuation=[0.5, 0.4],
+                               roughness=[0.1, 0.2, 0.3])

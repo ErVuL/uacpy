@@ -6,8 +6,8 @@ observed significant wave height ``Hs`` is inverted to the effective
 Pierson-Moskowitz wind ``U = √(Hs / 0.021)`` and handed to
 :func:`uacpy.core.ssp.generate_sea_surface`, so the realization reproduces the
 observed ``Hs`` regardless of whether the sea is fully developed. When no wave
-source is available it falls back to the fetched 10 m wind (treated as the PM
-wind — a fully-developed assumption).
+source is available it falls back to the fetched 10 m wind, scaled to the
+19.5 m PM reference height (a fully-developed assumption).
 """
 
 import numpy as np
@@ -24,6 +24,9 @@ SEA_SURFACE_SOURCES = ('waves', 'wind', 'auto')
 #: (U at the 19.5 m reference height), the relation used by
 #: :func:`generate_sea_surface`.
 _PM_HS_COEFF = 0.021
+#: Log-profile wind scaling from the 10 m observation height to the 19.5 m
+#: Pierson-Moskowitz reference height.
+_U10_TO_U195 = 1.026
 
 
 def hs_to_pm_wind(hs):
@@ -85,8 +88,9 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
     # Wind-driven (explicit, or the 'auto' fallback when waves are unavailable).
     try:
         from uacpy.data.wind_live import fetch_wind
-        u = fetch_wind(point, date=date, timeout=timeout, verbose=verbose)
-        log_message('wind', f"U10 {u:.1f} m/s (nbs) → sea surface",
+        u10 = fetch_wind(point, date=date, timeout=timeout, verbose=verbose)
+        u = u10 * _U10_TO_U195
+        log_message('wind', f"U10 {u10:.1f} m/s (nbs) → PM wind {u:.1f} m/s",
                     verbose=verbose)
         return _surface(max_range, u, n_points, seed), 'nbs'
     except (DataFetchError, ConfigurationError) as exc:

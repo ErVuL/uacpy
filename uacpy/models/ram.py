@@ -1342,11 +1342,10 @@ class RAM(PropagationModel):
         surface = (self._build_ramsurf_surface(env, max_range)
                    if kind == 'ramsurf' else None)
 
-        # Bottom depth in Collins format is referenced from z=0 (top of
-        # the water), the same convention as everywhere else in uacpy.
-        # The to_piecewise_breakpoints helper already emits that. One
-        # profile section per range break carries the range-dependent SSP
-        # and (layered) bottom.
+        # One profile section per range break carries the range-dependent
+        # SSP and (layered) bottom; bottom-profile depths are seafloor-
+        # relative for ramgeo/ramsurf, absolute for rams (see
+        # _collins_range_segments).
         range_segments = self._collins_range_segments(env, kind, zmax)
 
         fm = self._setup_file_manager()
@@ -1670,9 +1669,14 @@ class RAM(PropagationModel):
         initial profile plus one extra ``(range, profile blocks)`` section per
         break. Sections are emitted at the union of the bottom's and the SSP's
         range breakpoints; a range-independent axis contributes its single
-        column at every break. Range-dependent bathymetry is carried by the
-        separate bathymetry block, so each section's bottom breakpoints are
-        referenced to the local seafloor depth.
+        column at every break.
+
+        Bottom-profile depth reference differs per binary: ramgeo/ramsurf
+        ``matrc`` restarts the profile index at the grid point below the local
+        seafloor, so their ``z cb/rhob/attn`` blocks are **depth below the
+        seafloor** (layers track the bathymetry — RAMGEO's defining feature);
+        rams0.5 indexes absolutely from z=0. Water-SSP blocks are absolute for
+        all three.
         """
         properties = (
             ('sound_speed', 'shear_speed', 'density',
@@ -1681,6 +1685,7 @@ class RAM(PropagationModel):
             else ('sound_speed', 'density', 'attenuation')
         )
         b = env.bottom
+        seafloor_relative = kind in ('ramgeo', 'ramsurf')
 
         breaks = {0.0}
         if b.is_range_dependent:
@@ -1700,7 +1705,9 @@ class RAM(PropagationModel):
                     col.halfspace, water_depth=seafloor, synthesize=True)
 
             bp = col.to_piecewise_breakpoints(
-                seafloor_depth=seafloor, zmax=zmax, properties=properties
+                seafloor_depth=0.0 if seafloor_relative else seafloor,
+                zmax=(zmax - seafloor) if seafloor_relative else zmax,
+                properties=properties,
             )
             ssp_pairs = (
                 env.ssp.eval(range=rng).to_pairs()
@@ -2309,7 +2316,11 @@ class RAM(PropagationModel):
 
             rs = self.rs_stability if self.rs_stability is not None else rmax
 
-            ihorz = 1 if env.has_range_dependent_ssp() else 0
+            # ihorz=0 always — same rationale as _run_tl: mpiramS's ihorz=1
+            # resample (nrp=nint(rmax/10000)) zero-allocates below 5 km
+            # (SIGABRT) and coarsens RD SSPs below 15 km; the 2-D ssp.dat
+            # from _prepare_ssp already carries the per-range profiles.
+            ihorz = 0
 
             write_inpe(
                 filepath=work_dir / 'in.pe',
@@ -2388,6 +2399,11 @@ class RAM(PropagationModel):
                 # Vectorized interpolation: (n_out, nf, nr)
                 pressure = (pressure[idx_lo, :, :] * (1.0 - w[:, None, None]) +
                             pressure[idx_lo + 1, :, :] * w[:, None, None])
+                # Depths outside the PE grid are NaN, matching the
+                # COHERENT_TL below-domain convention — never a
+                # plausible-looking edge extrapolation.
+                outside = (out_depths < zg[0]) | (out_depths > zg[-1])
+                pressure[outside, :, :] = np.nan
             else:
                 out_depths = zg
 

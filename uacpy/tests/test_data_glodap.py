@@ -161,3 +161,65 @@ def test_with_absorption_no_glodap_keeps_default(tmp_path, monkeypatch):
                                  with_absorption=True)
     assert env.absorption.pH == pytest.approx(DEFAULT_OCEAN_PH)
     assert 'glodap' not in [s.source.id for s in env.data_sources]
+
+
+# ── download hygiene ─────────────────────────────────────────────────────────
+
+def test_curl_interrupt_leaves_no_destination(tmp_path, monkeypatch):
+    """A curl killed mid-transfer must never leave a truncated file at the
+    final destination (the cache would accept it forever)."""
+    from pathlib import Path
+    out = tmp_path / 'GLODAPv2.tar.gz'
+
+    def fake_run(cmd, **kw):
+        Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        glodap_local._curl_download('http://x', out, timeout=5.0, verbose=False)
+    assert not out.exists()
+
+
+def test_curl_failure_leaves_no_destination(tmp_path, monkeypatch):
+    from pathlib import Path
+    import subprocess
+    out = tmp_path / 'GLODAPv2.tar.gz'
+
+    def fake_run(cmd, **kw):
+        Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
+        raise subprocess.SubprocessError("curl died")
+
+    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
+    assert glodap_local._curl_download('http://x', out, timeout=5.0,
+                                       verbose=False) is False
+    assert not out.exists()
+
+
+# ── tarball extraction guards ────────────────────────────────────────────────
+
+def test_extract_ph_rejects_decompression_bomb(tmp_path):
+    import gzip
+    import tarfile
+    info = tarfile.TarInfo(glodap_local.GLODAP_FILE)
+    info.size = 3 * 1024 ** 3                    # over the 2 GiB member cap
+    tar_path = tmp_path / 'bomb.tar.gz'
+    with gzip.open(tar_path, 'wb') as f:
+        f.write(info.tobuf(tarfile.GNU_FORMAT))
+        f.write(b'\0' * 1024)
+    with pytest.raises(DataFetchError, match='decompression bomb'):
+        glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')
+    assert not (tmp_path / 'out.nc').exists()
+
+
+def test_extract_ph_non_regular_member_raises(tmp_path):
+    import tarfile
+    tar_path = tmp_path / 'dir.tar.gz'
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        info = tarfile.TarInfo('mapped/' + glodap_local.GLODAP_FILE)
+        info.type = tarfile.DIRTYPE
+        tf.addfile(info)
+    with pytest.raises(DataFetchError, match='not a regular file'):
+        glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')

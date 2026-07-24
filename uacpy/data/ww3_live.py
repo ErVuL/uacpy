@@ -12,7 +12,7 @@ Returns significant wave height (m); WaveWatch III output is **public domain**.
 import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import as_coordinate
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
 
@@ -27,9 +27,11 @@ _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 
 def _griddap_url(var, when, lat, lon):
+    """``ww3_global`` axes are [time][depth][latitude][longitude] with a
+    singleton surface depth node and a [0, 360) longitude axis."""
     import urllib.parse
     iso = f"{parse_date(when)}T00:00:00Z"
-    constraint = f"{var}[({iso})][({lat})][({normalize_lon(lon)})]"
+    constraint = f"{var}[({iso})][(0.0)][({lat})][({lon % 360.0})]"
     query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
     return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
 

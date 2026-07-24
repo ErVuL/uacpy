@@ -136,3 +136,14 @@ def test_range_dependent_bottom_preserves_shear():
     for col in bottom.columns:
         assert col.halfspace.shear_speed == pytest.approx(1200.0)
         assert col.halfspace.shear_attenuation == pytest.approx(0.2)
+
+
+def test_range_dependent_bottom_preserves_roughness():
+    """A point-fetcher's roughness must survive the transect rebuild."""
+    bp = BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1700.0, density=1.9,
+        attenuation=0.5, roughness=0.3)
+    bottom = sediment.range_dependent_bottom_along(
+        lambda la, lo: bp, (0.0, 0.0), (0.0, 0.1), 4, source_label='test')
+    for col in bottom.columns:
+        assert col.halfspace.roughness == pytest.approx(0.3)

@@ -160,10 +160,69 @@ def test_fetch_environment_bottom_sources_mars(monkeypatch, tmp_path):
 
 # ── live ────────────────────────────────────────────────────────────────────
 
+_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
+                        'unreachable', 'http 502', 'http 503', 'http 504')
+
+
 @pytest.mark.requires_network
 def test_live_mars_point():
     try:
         s = mars.fetch_mars_sediment((-34.0, 151.5))     # off Sydney
     except DataFetchError as exc:
-        pytest.skip(f"AusSeabed WFS unreachable: {exc.message}")
+        if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
+            pytest.skip(f"AusSeabed WFS unreachable: {exc.message}")
+        pytest.fail(f"AusSeabed WFS rejected the query: {exc.message}")
     assert -5.0 < s['phi'] < 13.0
+
+
+# ── OFFLINE stubs: nearest-sample correctness ───────────────────────────────
+
+def test_radius_ladder_corner_sample_keeps_expanding(monkeypatch):
+    # Rung 1 (10 km) bbox corner holds a ~13.8 km sample — beyond the rung
+    # radius — while a closer ~11 km sample sits due east, outside that bbox.
+    # The ladder must keep expanding instead of settling for the corner hit.
+    corner = _feature(-34.088, 151.405, grain_um=1000.0)     # ϕ = 0, 13.8 km
+    closer = _feature(-34.0, 151.4196, grain_um=250.0)       # ϕ = 2, 11.0 km
+    calls = []
+
+    def responder(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            return _collection(corner)
+        return _collection(corner, closer)
+
+    _install(monkeypatch, responder)
+    s = mars.fetch_mars_sediment(_P)
+    assert len(calls) > 1
+    assert s['phi'] == pytest.approx(2.0)
+    assert s['distance_km'] == pytest.approx(11.0, abs=0.2)
+
+
+def test_corner_sample_confirmed_by_wider_rung(monkeypatch):
+    # A rung-1 corner hit beyond the rung radius is re-checked at the wider
+    # rung; with nothing closer there, it is still the returned sample.
+    calls = []
+
+    def responder(url, **kw):
+        calls.append(url)
+        return _collection(_feature(-34.088, 151.405, grain_um=1000.0))
+
+    _install(monkeypatch, responder)
+    s = mars.fetch_mars_sediment(_P)
+    assert len(calls) == 2                       # 13.8 km ≤ 30 km ends rung 2
+    assert s['phi'] == pytest.approx(0.0)
+    assert s['distance_km'] == pytest.approx(13.76, abs=0.1)
+
+
+def test_capped_response_warns_not_nearest(monkeypatch):
+    # numberMatched above the returned feature count means the server capped
+    # the page — the true nearest sample may be missing from the response.
+    body = json.dumps({
+        'type': 'FeatureCollection',
+        'features': [_feature(-34.0, 151.31, grain_um=500.0)],
+        'numberMatched': 5000,
+    }).encode()
+    _install(monkeypatch, body)
+    with pytest.warns(UserWarning, match='nearest'):
+        s = mars.fetch_mars_sediment(_P)
+    assert s['phi'] == pytest.approx(1.0)

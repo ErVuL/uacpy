@@ -242,7 +242,8 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     Shared by the WOA23 and Copernicus transect fetchers. Columns are reordered
     to strictly increasing range, so a caller that supplies them out of order
     still gets a correctly-ordered range axis (the carriers assume ascending
-    range).
+    range). The columns' provenance is aggregated onto the assembled profile,
+    de-duplicated by source id.
     """
     ranges = np.asarray(ranges_m, dtype=float)
     order = np.argsort(ranges, kind='stable')
@@ -252,8 +253,14 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     data = np.column_stack([
         np.interp(z, col.depths, col.data[:, 0]) for col in columns
     ])
+    seen, provs = set(), []
+    for col in columns:
+        for prov in getattr(col, 'data_sources', ()) or ():
+            if prov.source.id not in seen:
+                seen.add(prov.source.id)
+                provs.append(prov)
     return SoundSpeedProfile(depths=z, data=data, ranges=ranges,
-                             shape='measured')
+                             shape='measured', data_sources=tuple(provs))
 
 
 def fetch_ts_profile(

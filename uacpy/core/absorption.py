@@ -32,6 +32,8 @@ Module-level numerics
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
@@ -271,6 +273,12 @@ class Absorption:
         alpha_km = np.array([
             float(np.asarray(self.alpha_db_per_m(f, depth)).reshape(-1)[0])
             * 1000.0 for f in freqs])
+        if not np.any(alpha_km > 0):
+            warnings.warn(
+                f"Absorption.plot: α(f) is entirely non-positive at depth "
+                f"{depth:g} m, so the log-log plot will be blank. For layered "
+                f"models (e.g. Biological) pick a depth inside a layer.",
+                UserWarning, stacklevel=2)
         return plot_absorption(freqs, absorption=alpha_km, **kwargs)
 
 

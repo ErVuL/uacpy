@@ -176,3 +176,23 @@ def test_live_graw_download(tmp_path, monkeypatch):
         pytest.skip(f"Zenodo unreachable: {exc.message}")
     rho = graw_local.fetch_seabed_density((30.0, -40.0))  # mid-Atlantic
     assert 1.0 < rho < 2.3
+
+
+# ── download hygiene ─────────────────────────────────────────────────────────
+
+def test_graw_interrupted_curl_no_final_file(tmp_path, monkeypatch):
+    """A curl killed mid-transfer must not poison the cache with a truncated
+    grid at the final path."""
+    from pathlib import Path
+    from uacpy.data import globsed_local
+    dest = tmp_path / 'o'
+
+    def fake_run(cmd, **kw):
+        Path(cmd[cmd.index('-o') + 1]).write_bytes(b'truncated')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(globsed_local.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(globsed_local.subprocess, 'run', fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        graw_local.download_graw_db(cache_dir=str(dest))
+    assert not (dest / graw_local.GRAW_FILE).exists()

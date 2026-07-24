@@ -196,7 +196,8 @@ def write_bellhop_env_file(
         atten_unit = f"{atten_unit_char}{vol_atten_char}"
 
         # Position 5: Altimetry flag ('~' = read .ati file, ' ' = flat surface)
-        has_altimetry = getattr(env, 'altimetry', None) is not None and env.altimetry.n_ranges > 1
+        has_altimetry = (getattr(env, 'altimetry', None) is not None
+                         and env.altimetry.n_ranges >= 1)
         alti_char = '~' if has_altimetry else ' '
 
         # SSP option string (pad to 6 chars for Fortran compatibility)
@@ -213,6 +214,13 @@ def write_bellhop_env_file(
         if has_altimetry:
             ati_filepath = filepath.with_suffix(".ati")
             ati_data = env.altimetry.to_pairs()
+            if ati_data.shape[0] == 1:
+                # Single sample = constant offset; expand to a 2-point
+                # profile spanning the receiver range so it isn't dropped.
+                r_last = max(float(np.max(receiver.ranges)),
+                             float(ati_data[0, 0]) + 1.0)
+                ati_data = np.array([[0.0, ati_data[0, 1]],
+                                     [r_last, ati_data[0, 1]]])
             ati_data[:, 1] = -ati_data[:, 1]
             write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
             log_message('bellhop_writer',
@@ -329,17 +337,28 @@ def write_bellhop_env_file(
         bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
 
         is_range_dependent_bathy = env.bathymetry.n_ranges > 1
+        rd_bottom = (env.bottom.is_range_dependent
+                     and len(env.bottom.ranges) > 0)
 
         hs = env.bottom.halfspace_at(range=0.0)
-        if is_range_dependent_bathy:
+        if is_range_dependent_bathy or rd_bottom:
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
             # auto-selected by the writer: write_bty_long_format emits
             # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. The first char
             # is the interpolation chosen via ``interp_bathymetry``.
-            if env.bottom.is_range_dependent and len(env.bottom.ranges) > 0:
+            if rd_bottom:
+                # The long-format .bty is the only vehicle for per-range
+                # geoacoustics; a flat bathymetry becomes a 2-point constant
+                # profile so the property breaks still reach Bellhop.
+                bathy_for_bty = env.bathymetry
+                if not is_range_dependent_bathy:
+                    r_last = max(float(np.max(env.bottom.ranges)),
+                                 float(np.max(receiver.ranges)))
+                    bathy_for_bty = np.array(
+                        [[0.0, env.depth], [r_last, env.depth]])
                 write_bty_long_format(
-                    bty_filepath, env.bathymetry, env.bottom,
+                    bty_filepath, bathy_for_bty, env.bottom,
                     interp_type=bty_code,
                 )
             else:

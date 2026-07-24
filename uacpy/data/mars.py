@@ -20,6 +20,7 @@ parameter over an expanding search-radius ladder and filter client-side.
 import json
 import math
 import urllib.parse
+import warnings
 from typing import Dict, Optional, Union
 
 from uacpy.core.environment import BoundaryProperties, Bottom
@@ -96,11 +97,20 @@ def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
     body = http_get(f"{base_url}?{query}", timeout=timeout, verbose=verbose,
                     source='mars')
     try:
-        return json.loads(body).get('features') or []
+        payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise DataFetchError(
             f"AusSeabed WFS returned a non-JSON body: {exc}.",
         ) from exc
+    features = payload.get('features') or []
+    matched = payload.get('numberMatched')
+    if isinstance(matched, (int, float)) and matched > len(features):
+        warnings.warn(
+            f"AusSeabed MARS returned {len(features)} of {int(matched)} "
+            f"matching samples (server page cap) — the result may not be the "
+            f"nearest sample; use a smaller search radius.",
+            UserWarning, stacklevel=2)
+    return features
 
 
 def fetch_mars_sediment(
@@ -141,7 +151,10 @@ def fetch_mars_sediment(
             if best is None or d < best['distance_km']:
                 best = {**conv, 'distance_km': float(d),
                         'folk_class': (f['properties'] or {}).get('FOLK_CLASS')}
-        if best is not None:
+        # A bbox-corner hit can lie beyond the rung radius while a closer
+        # sample sits just outside the box — only settle once the best find
+        # is within the rung actually searched.
+        if best is not None and best['distance_km'] <= radius:
             break
     if best is None or best['distance_km'] > max_distance_km:
         raise DataFetchError(

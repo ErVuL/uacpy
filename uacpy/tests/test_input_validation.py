@@ -368,9 +368,10 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     assert env.bottom.halfspace_at(range=4_500.0).sound_speed == pytest.approx(1675.0)
 
 
-def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):
-    """RD-bottom whose ranges differ from bathymetry ranges should be
-    silently resampled onto the bathymetry range grid by the writer."""
+def test_bty_long_format_uses_union_of_range_grids(tmp_path):
+    """RD-bottom ranges that differ from the bathymetry ranges are emitted on
+    the union grid — the bottom's own breakpoints survive exactly (with depth
+    interpolated onto them) instead of being blended onto the bathy grid."""
     from uacpy.io.bathy_io import write_bty_long_format
 
     bathy = np.array([[0.0, 100.0],
@@ -387,11 +388,13 @@ def test_bty_long_format_interpolates_bottom_onto_bathy_ranges(tmp_path):
     write_bty_long_format(out, bathy, rd_bot)
     lines = [ln.split() for ln in out.read_text().splitlines() if ln.strip()
              and not ln.strip().startswith("'")]
-    assert int(lines[0][0]) == 3
-    rows = [list(map(float, row)) for row in lines[1:4]]
-    assert rows[0][2] == pytest.approx(1600.0)
-    assert rows[1][2] == pytest.approx(1700.0)
-    assert rows[2][2] == pytest.approx(1800.0)
+    assert int(lines[0][0]) == 4                    # union {0, 3, 6, 9} km
+    rows = [list(map(float, row)) for row in lines[1:5]]
+    by_range = {r[0]: r for r in rows}
+    assert by_range[3.0][2] == pytest.approx(1700.0)    # midway 1600→1800
+    assert by_range[6.0][2] == pytest.approx(1800.0)    # bottom's own break
+    assert by_range[6.0][1] == pytest.approx(165.0)     # depth interpolated
+    assert by_range[9.0][2] == pytest.approx(1800.0)    # constant-extended
 
 
 @pytest.mark.requires_binary  # constructs Scooter/KrakenField/Bellhop (resolves their binaries)

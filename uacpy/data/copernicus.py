@@ -30,6 +30,7 @@ from uacpy.data._time import parse_date
 from uacpy.data.sound_speed import (
     _FORMULAS, assemble_range_dependent,
 )
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
 __all__ = [
@@ -125,7 +126,13 @@ def fetch_ssp_operational(
         f"{depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
         verbose=verbose,
     )
-    return SoundSpeedProfile(depths=depths, data=c, shape='measured')
+    prov = DataProvenance(
+        source=SOURCES['copernicus'],
+        requested_point=(lat, lon),
+        requested_date=str(parse_date(date)),
+    )
+    return SoundSpeedProfile(depths=depths, data=c, shape='measured',
+                             data_sources=(prov,))
 
 
 def fetch_ssp_transect_operational(
@@ -177,7 +184,11 @@ def fetch_ssp_transect_operational(
             )
         pressure = depth_to_pressure_dbar(depths, la)
         c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
-        columns.append(SoundSpeedProfile(depths=depths, data=c, shape='measured'))
+        prov = DataProvenance(source=SOURCES['copernicus'],
+                              requested_point=(float(la), float(lo)),
+                              requested_date=when)
+        columns.append(SoundSpeedProfile(depths=depths, data=c, shape='measured',
+                                         data_sources=(prov,)))
 
     log_message(
         'copernicus', f"operational range-dependent SSP: {n_points} columns "

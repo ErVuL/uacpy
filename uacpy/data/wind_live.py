@@ -16,7 +16,7 @@ NBS is a U.S. Government work — **public domain**.
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import as_coordinate
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
 
@@ -24,10 +24,10 @@ __all__ = ['fetch_wind', 'fetch_wind_transect', 'ERDDAP_URL', 'WIND_SOURCES']
 
 ERDDAP_URL = 'https://coastwatch.noaa.gov/erddap/griddap'
 DATASET = 'noaacwBlendedWinds6hr'
-#: Wind-speed variable candidates, then the (u, v) components to combine when no
-#: scalar speed variable is exposed.
-_SPEED_VARS = ('windspeed', 'wind_speed', 'w')
-_COMPONENT_VARS = ('u', 'v')
+#: (u, v) component pairs to combine — ``noaacwBlendedWinds6hr`` carries
+#: ``u_wind`` / ``v_wind`` — then scalar speed candidates as schema tolerance.
+_COMPONENT_VARS = (('u_wind', 'v_wind'), ('u', 'v'))
+_SPEED_VARS = ('windspeed', 'wind_speed')
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 WIND_SOURCES = ('erddap', 'local')
@@ -46,11 +46,12 @@ def _griddap_url(var, when, lat, lon):
     """ERDDAP griddap CSV URL for ``var`` at the nearest time/lat/lon cell.
 
     NBS carries a singleton 10 m ``zlev`` axis between time and latitude; the
-    ``[(...)]`` value selectors snap each axis to its nearest node.
+    ``[(...)]`` value selectors snap each axis to its nearest node. The
+    longitude axis is [0, 360).
     """
     import urllib.parse
     iso = f"{parse_date(when)}T00:00:00Z"
-    constraint = (f"{var}[({iso})][(10.0)][({lat})][({normalize_lon(lon)})]")
+    constraint = (f"{var}[({iso})][(10.0)][({lat})][({lon % 360.0})]")
     query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
     return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
 
@@ -74,31 +75,38 @@ def _fetch_var(var, when, lat, lon, *, timeout, verbose):
 
 
 def _wind_speed(lat, lon, when, *, timeout, verbose):
-    """10 m wind speed (m/s) at a cell: a scalar speed var, else √(u²+v²)."""
+    """10 m wind speed (m/s) at a cell: √(u²+v²), else a scalar speed var."""
+    last_exc = None
+    for u_var, v_var in _COMPONENT_VARS:
+        try:
+            u = _fetch_var(u_var, when, lat, lon, timeout=timeout,
+                           verbose=verbose)
+            v = _fetch_var(v_var, when, lat, lon, timeout=timeout,
+                           verbose=verbose)
+        except DataFetchError as exc:
+            last_exc = exc
+            continue
+        if not (np.isfinite(u) and np.isfinite(v)):
+            raise DataFetchError(
+                f"NBS has no wind at ({lat:.4f}, {lon:.4f}) on {parse_date(when)}.",
+                remediation="Pick an ocean location/date in range, or "
+                            "source='local'.",
+            )
+        return float(np.hypot(u, v))
     for var in _SPEED_VARS:
         try:
             speed = _fetch_var(var, when, lat, lon, timeout=timeout,
                                verbose=verbose)
-        except DataFetchError:
-            continue                              # variable absent — try next
+        except DataFetchError as exc:
+            last_exc = exc
+            continue
         if np.isfinite(speed):
             return abs(speed)
-    try:
-        u = _fetch_var(_COMPONENT_VARS[0], when, lat, lon, timeout=timeout,
-                       verbose=verbose)
-        v = _fetch_var(_COMPONENT_VARS[1], when, lat, lon, timeout=timeout,
-                       verbose=verbose)
-    except DataFetchError as exc:
-        raise DataFetchError(
-            f"NBS returned no wind speed at ({lat:.4f}, {lon:.4f}): {exc.message}",
-            remediation="Retry, or use source='local' (cached climatology).",
-        ) from exc
-    if not (np.isfinite(u) and np.isfinite(v)):
-        raise DataFetchError(
-            f"NBS has no wind at ({lat:.4f}, {lon:.4f}) on {parse_date(when)}.",
-            remediation="Pick an ocean location/date in range, or source='local'.",
-        )
-    return float(np.hypot(u, v))
+    raise DataFetchError(
+        f"NBS returned no wind speed at ({lat:.4f}, {lon:.4f}): "
+        f"{last_exc.message}",
+        remediation="Retry, or use source='local' (cached climatology).",
+    ) from last_exc
 
 
 def fetch_wind(point, *, date, source='erddap', timeout=60.0, verbose=False):

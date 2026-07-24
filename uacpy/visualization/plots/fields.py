@@ -499,6 +499,12 @@ def compare(
     """
     if not fields:
         raise ConfigurationError("compare: empty fields list")
+    if labels is not None and len(labels) != len(fields):
+        raise ConfigurationError(
+            f"compare: labels ({len(labels)}) must match fields "
+            f"({len(fields)})"
+        )
+    _owns_fig = ax is None
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -547,7 +553,24 @@ def compare(
     ax.legend()
     if title:
         ax.set_title(title)
+    if _owns_fig:
+        _draw_multi_model_credit(fig, fields)
     return fig, ax
+
+
+def _draw_multi_model_credit(fig, fields):
+    """One credit footnote listing every distinct contributing model."""
+    from uacpy.visualization.plots._common import (
+        _draw_credit, _model_attribution,
+    )
+    seen, attrs = set(), []
+    for f in fields:
+        a = _model_attribution(f)
+        if a and a not in seen:
+            seen.add(a)
+            attrs.append(a)
+    if attrs:
+        _draw_credit(fig, (), model=attrs)
 
 
 def compare_models(
@@ -640,6 +663,7 @@ def compare_models(
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
     if suptitle:
         fig.suptitle(suptitle, fontsize=14, fontweight='bold', y=0.97)
+    _draw_multi_model_credit(fig, fields)
     return fig, axes_flat
 
 

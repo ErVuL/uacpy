@@ -4,6 +4,10 @@ The ERDDAP / Copernicus HTTP layers are stubbed with canned responses so these
 run offline; ``requires_network`` tests hit the live services.
 """
 
+import re
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import pytest
 
@@ -14,32 +18,99 @@ from uacpy.data import (
     wind_local, ww3_live,
 )
 
-_WIND_CSV = ("time,zlev,latitude,longitude,windspeed\n"
+_WIND_CSV = ("time,zlev,latitude,longitude,{var}\n"
              "UTC,m,degrees_north,degrees_east,m s-1\n"
-             "2020-01-01T00:00:00Z,10.0,50.0,0.0,{v}\n")
-_WW3_CSV = ("time,latitude,longitude,Thgt\n"
-            "UTC,degrees_north,degrees_east,m\n"
-            "2020-01-01T00:00:00Z,50.0,0.0,{v}\n")
+             "2020-01-01T00:00:00Z,10.0,50.0,330.0,{v}\n")
+_WW3_CSV = ("time,depth,latitude,longitude,Thgt\n"
+            "UTC,m,degrees_north,degrees_east,m\n"
+            "2020-01-01T00:00:00Z,0.0,50.0,0.0,{v}\n")
+
+
+def _selectors(url):
+    """(variable, [axis selector values]) from a griddap query URL."""
+    query = urllib.parse.unquote(url.split('?', 1)[1])
+    return query.split('[', 1)[0], re.findall(r'\[\(([^)]*)\)\]', query)
+
+
+def _nbs_server(values):
+    """Stub of the real ``noaacwBlendedWinds6hr`` griddap: only the variables
+    in ``values`` exist, 4 axes (time, zlev, latitude, longitude), longitude
+    axis [0.0, 359.75]."""
+    def fake(url, *, timeout=60.0, verbose=False, source='data',
+             user_agent='uacpy'):
+        var, sel = _selectors(url)
+        if var not in values:
+            raise DataFetchError(
+                f"HTTP 404: Query error: variable={var} wasn't found "
+                f"in datasetID=noaacwBlendedWinds6hr.")
+        if len(sel) != 4:
+            raise DataFetchError(
+                "HTTP 400: Query error: Constraint does not match the 4 axes "
+                "[time][zlev][latitude][longitude].")
+        lon = float(sel[3])
+        if not 0.0 <= lon < 360.0:
+            raise DataFetchError(
+                f"HTTP 404: Query error: longitude={lon} is outside the axis "
+                f"actual_range [0.0, 359.75].")
+        return _WIND_CSV.format(var=var, v=values[var]).encode()
+    return fake
+
+
+def _ww3_server(v):
+    """Stub of the real PacIOOS ``ww3_global`` griddap: variable ``Thgt`` with
+    4 axes (time, depth, latitude, longitude), longitude axis [0.0, 359.5]."""
+    def fake(url, *, timeout=60.0, verbose=False, source='data',
+             user_agent='uacpy'):
+        var, sel = _selectors(url)
+        if var != 'Thgt':
+            raise DataFetchError(
+                f"HTTP 404: Query error: variable={var} wasn't found in "
+                f"datasetID=ww3_global.")
+        if len(sel) != 4:
+            raise DataFetchError(
+                "HTTP 400: Query error: Constraint does not match the 4 axes "
+                "[time][depth][latitude][longitude].")
+        lon = float(sel[3])
+        if not 0.0 <= lon < 360.0:
+            raise DataFetchError(
+                f"HTTP 404: Query error: longitude={lon} is outside the axis "
+                f"actual_range [0.0, 359.5].")
+        return _WW3_CSV.format(v=v).encode()
+    return fake
 
 
 # ── wind (live NBS) ───────────────────────────────────────────────────────────
 
-def test_fetch_wind_parses_speed(monkeypatch):
+def test_fetch_wind_real_nbs_schema(monkeypatch):
+    # The real dataset exposes only u_wind / v_wind → √(3² + 4²) = 5 m/s.
     monkeypatch.setattr(wind_live, 'http_get',
-                        lambda url, **kw: _WIND_CSV.format(v=7.3).encode())
+                        _nbs_server({'u_wind': 3.0, 'v_wind': 4.0}))
+    assert wind_live.fetch_wind((50.0, 0.0), date='2020-01-01') == pytest.approx(5.0)
+
+
+def test_fetch_wind_western_longitude(monkeypatch):
+    # lon=-30 must be sent as 330 on the [0, 360) axis.
+    monkeypatch.setattr(wind_live, 'http_get',
+                        _nbs_server({'u_wind': 3.0, 'v_wind': 4.0}))
+    assert wind_live.fetch_wind((45.0, -30.0), date='2020-01-15') == pytest.approx(5.0)
+
+
+def test_fetch_wind_scalar_speed_tolerance(monkeypatch):
+    # A host exposing a scalar speed variable is still honoured first.
+    monkeypatch.setattr(wind_live, 'http_get', _nbs_server({'windspeed': 7.3}))
     assert wind_live.fetch_wind((50.0, 0.0), date='2020-01-01') == pytest.approx(7.3)
 
 
-def test_fetch_wind_components_fallback(monkeypatch):
-    # No scalar speed var (brackets are literal in the griddap query) → the
-    # fetcher combines the u, v = 3, 4 components → 5 m/s.
-    def fake(url, *, timeout, verbose, source='data', user_agent='uacpy'):
-        if 'windspeed[(' in url or 'wind_speed[(' in url or 'w[(' in url:
-            raise DataFetchError("no such variable")
-        val = 3.0 if 'u[(' in url else 4.0
-        return _WIND_CSV.replace('windspeed', 'x').format(v=val).encode()
-    monkeypatch.setattr(wind_live, 'http_get', fake)
+def test_fetch_wind_generic_uv_fallback(monkeypatch):
+    monkeypatch.setattr(wind_live, 'http_get', _nbs_server({'u': 3.0, 'v': 4.0}))
     assert wind_live.fetch_wind((50.0, 0.0), date='2020-01-01') == pytest.approx(5.0)
+
+
+def test_fetch_wind_land_raises(monkeypatch):
+    monkeypatch.setattr(wind_live, 'http_get',
+                        _nbs_server({'u_wind': 'NaN', 'v_wind': 'NaN'}))
+    with pytest.raises(DataFetchError, match='no wind'):
+        wind_live.fetch_wind((50.0, 0.0), date='2020-01-01')
 
 
 def test_fetch_wind_bad_source_raises():
@@ -49,7 +120,7 @@ def test_fetch_wind_bad_source_raises():
 
 def test_fetch_wind_transect(monkeypatch):
     monkeypatch.setattr(wind_live, 'http_get',
-                        lambda url, **kw: _WIND_CSV.format(v=6.0).encode())
+                        _nbs_server({'u_wind': 0.0, 'v_wind': 6.0}))
     ranges, speeds = wind_live.fetch_wind_transect(
         (50.0, 0.0), (50.5, 0.5), date='2020-01-01', n_points=3)
     assert speeds.tolist() == [6.0, 6.0, 6.0]
@@ -97,14 +168,18 @@ def test_fetch_wind_local_dispatch(wind_cache):
 # ── waves ─────────────────────────────────────────────────────────────────────
 
 def test_ww3_fetch_hs(monkeypatch):
-    monkeypatch.setattr(ww3_live, 'http_get',
-                        lambda url, **kw: _WW3_CSV.format(v=2.4).encode())
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(2.4))
     assert ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01') == pytest.approx(2.4)
 
 
+def test_ww3_western_longitude(monkeypatch):
+    # lon=-158 must be sent as 202 on the [0, 360) axis.
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(2.4))
+    assert ww3_live.fetch_hs((21.0, -158.0), date='2020-01-01') == pytest.approx(2.4)
+
+
 def test_ww3_land_raises(monkeypatch):
-    monkeypatch.setattr(ww3_live, 'http_get',
-                        lambda url, **kw: _WW3_CSV.format(v='NaN').encode())
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server('NaN'))
     with pytest.raises(DataFetchError, match='no wave height'):
         ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01')
 
@@ -115,8 +190,7 @@ def test_fetch_waves_auto_falls_to_ww3(monkeypatch):
         raise DataFetchError("no login")
     monkeypatch.setattr('uacpy.data.copernicus.fetch_waves_operational',
                         no_copernicus)
-    monkeypatch.setattr(ww3_live, 'http_get',
-                        lambda url, **kw: _WW3_CSV.format(v=1.8).encode())
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(1.8))
     out = waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01')
     assert out['hs'] == pytest.approx(1.8) and out['source'] == 'ww3'
 
@@ -180,10 +254,33 @@ def test_fetch_environment_altimetry(monkeypatch):
     assert 'waverys' in [s.source.id for s in env.data_sources]
 
 
+_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
+                        'unreachable', 'http 502', 'http 503', 'http 504')
+
+
+def _skip_or_fail(exc, service):
+    """Skip only on network-level failure; a structured server rejection
+    (bad variable / constraint / axis) is a real bug and must fail."""
+    if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
+        pytest.skip(f"{service} unreachable: {exc.message}")
+    pytest.fail(f"{service} rejected the query: {exc.message}")
+
+
 @pytest.mark.requires_network
 def test_live_nbs_wind():
     try:
         u = wind_live.fetch_wind((45.0, -30.0), date='2020-01-15')
     except DataFetchError as exc:
-        pytest.skip(f"NBS unreachable: {exc.message}")
+        _skip_or_fail(exc, 'NBS')
     assert 0.0 <= u < 60.0
+
+
+@pytest.mark.requires_network
+def test_live_ww3_hs():
+    # Operational feed = rolling recent window; western-hemisphere point.
+    when = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+    try:
+        hs = ww3_live.fetch_hs((21.0, -158.0), date=when)
+    except DataFetchError as exc:
+        _skip_or_fail(exc, 'WaveWatch III')
+    assert 0.0 <= hs < 30.0

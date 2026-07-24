@@ -460,8 +460,9 @@ def write_bty_long_format(
     - Following lines:
       ``range_km depth cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
 
-    Ranges in ``bottom_rd.ranges`` (metres) are re-sampled onto the
-    bathymetry range grid via ``numpy.interp`` so the two lengths match.
+    Rows are emitted on the **union** of the bathymetry and bottom range
+    grids (depth and geoacoustics each interpolated onto it), so property
+    breaks between bathymetry points survive rather than being blended away.
     """
     filepath = Path(filepath)
     interp_char = _validate_interp_type(interp_type)
@@ -471,15 +472,17 @@ def write_bty_long_format(
         bathymetry = bathymetry.to_pairs()
     bathy_km = np.asarray(bathymetry, dtype=float).copy()
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
-    n_pts = bathy_km.shape[0]
 
     rd_r_km = m_to_km(bottom_rd.ranges)
-    cp = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_sound_speed)
-    rho = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_density)
-    alpha = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_attenuation)
-    cs = np.interp(bathy_km[:, 0], rd_r_km, bottom_rd.halfspace_shear_speed)
-    alpha_s = np.interp(bathy_km[:, 0], rd_r_km,
+    r_km = np.union1d(bathy_km[:, 0], np.asarray(rd_r_km, dtype=float))
+    depth = np.interp(r_km, bathy_km[:, 0], bathy_km[:, 1])
+    cp = np.interp(r_km, rd_r_km, bottom_rd.halfspace_sound_speed)
+    rho = np.interp(r_km, rd_r_km, bottom_rd.halfspace_density)
+    alpha = np.interp(r_km, rd_r_km, bottom_rd.halfspace_attenuation)
+    cs = np.interp(r_km, rd_r_km, bottom_rd.halfspace_shear_speed)
+    alpha_s = np.interp(r_km, rd_r_km,
                         bottom_rd.halfspace_shear_attenuation)
+    n_pts = r_km.size
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")
@@ -487,7 +490,7 @@ def write_bty_long_format(
         for i in range(n_pts):
             # Column order matches bdryMod.f90:200-201 (range_km depth cp cs rho alpha_p alpha_s).
             f.write(
-                f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f} "
+                f"{r_km[i]:.6f} {depth[i]:.6f} "
                 f"{cp[i]:.3f} {cs[i]:.3f} {rho[i]:.3f} "
                 f"{alpha[i]:.6f} {alpha_s[i]:.6f}\n"
             )

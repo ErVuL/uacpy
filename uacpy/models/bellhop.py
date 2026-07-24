@@ -692,7 +692,8 @@ class Bellhop(PropagationModel):
         return path
 
     def _run_eigenrays_multi_depth(self, env, source, receiver, run_mode,
-                                   frequencies, source_waveform, sample_rate):
+                                   frequencies, source_waveform, sample_rate,
+                                   output_duration):
         """EIGENRAYS with multiple source depths: Bellhop's eigenray search
         reorders ``alpha`` and ``WriteRay2D`` leaves no per-source boundary in
         the ``.ray`` file, so loop one run per source depth in Python and stack."""
@@ -708,6 +709,7 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
+                output_duration=output_duration,
             ))
         return ResultStack(
             slabs=slabs, coordinate=source.depths,
@@ -839,6 +841,14 @@ class Bellhop(PropagationModel):
                 output_duration=output_duration,
             )
 
+        self._warn_ignored_run_kwargs(
+            run_mode,
+            frequencies=frequencies,
+            source_waveform=source_waveform,
+            sample_rate=sample_rate,
+            output_duration=output_duration,
+        )
+
         # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires only on
         # receiver hits AND Bellhop's eigenray search reorders ``alpha``
         # for its bracketing heuristic, so the ``.ray`` file has no
@@ -851,7 +861,7 @@ class Bellhop(PropagationModel):
         ):
             return self._run_eigenrays_multi_depth(
                 env, source, receiver, run_mode,
-                frequencies, source_waveform, sample_rate)
+                frequencies, source_waveform, sample_rate, output_duration)
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 

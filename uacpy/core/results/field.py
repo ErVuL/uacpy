@@ -153,6 +153,7 @@ class Field(Result):
             'source_depths': self.source_depths,
             'frequencies': self.frequencies,
             'phase_reference': self.phase_reference,
+            'model_source': self.model_source,
             'metadata': dict(self.metadata),
         }
 
@@ -168,6 +169,7 @@ class Field(Result):
             source_depths=d.get('source_depths'),
             frequencies=d.get('frequencies'),
             phase_reference=d.get('phase_reference'),
+            model_source=d.get('model_source'),
             metadata=d.get('metadata'),
         )
 
@@ -372,14 +374,24 @@ class Field(Result):
             data, pinned, new_frequencies, new_source_depths)
 
     def max(self) -> "Field":
-        """Slice at the global argmax of ``|data|``.
+        """Slice at the loudest field point.
 
-        Every axis collapses to a pinned scalar; the returned Field has
-        empty :attr:`coords`, 0-D :attr:`data`, and every original axis
-        recorded in :attr:`pinned`."""
+        Complex / time-domain data: global argmax of ``|data|``. Real dB
+        (``kind='tl'``): the *minimum* finite TL — smaller dB is louder —
+        with ``NaN`` and the AT no-data sentinel excluded (via
+        :attr:`finite_tl`). Every axis collapses to a pinned scalar; the
+        returned Field has empty :attr:`coords`, 0-D :attr:`data`, and
+        every original axis recorded in :attr:`pinned`."""
         if self.data.size == 0:
             raise ConfigurationError("Field.max: data is empty")
-        flat = int(np.argmax(np.abs(self.data)))
+        if self.kind == 'tl':
+            strength = -self.finite_tl          # loudest = smallest dB
+        else:
+            strength = np.abs(self.data)
+        if not np.isfinite(strength).any():
+            raise ConfigurationError(
+                "Field.max: no finite samples (all NaN / no-data sentinel)")
+        flat = int(np.nanargmax(strength))
         idx = np.unravel_index(flat, self.data.shape)
         idx_map = {name: int(i) for name, i in zip(self.coords, idx)}
         return self._slice(idx_map)
@@ -680,6 +692,12 @@ class Field(Result):
         Returns ``(fig, (ax_mag, ax_phase))``."""
         import matplotlib.pyplot as plt
         spec = self._reduce_to_spectrum('plot_transfer_function')
+        if not spec.is_complex:
+            raise ConfigurationError(
+                "Field.plot_transfer_function: needs a complex H(f) (a real "
+                "dB spectrum has no phase panel) — plot it with "
+                ".plot(value='tl') instead."
+            )
         owns_fig = axes is None
         if owns_fig:
             fig, (ax_mag, ax_phase) = plt.subplots(
@@ -711,12 +729,19 @@ class Field(Result):
         :meth:`synthesize_time_series` instead. Returns ``(fig, ax)``."""
         import matplotlib.pyplot as plt
         spec = self._reduce_to_spectrum('plot_impulse_response')
+        if 'range' not in spec.pinned:
+            raise ConfigurationError(
+                "Field.plot_impulse_response: the spectrum carries no pinned "
+                "range — the IFFT needs it for t_start and demodulation. "
+                "Slice a canonical broadband grid (H.at(depth=…, range=…)), "
+                "or use to_time_trace on the grid directly."
+            )
         # Rebuild the canonical (depth, range, frequency) cell so the existing
         # IFFT path applies; the pinned depth/range come from the reduction.
         grid = Field(
             data=spec.data.reshape(1, 1, -1),
             coords={'depth': np.array([spec.pinned.get('depth', 0.0)]),
-                    'range': np.array([spec.pinned.get('range', 0.0)]),
+                    'range': np.array([spec.pinned['range']]),
                     'frequency': spec.coords['frequency']},
             pinned={k: v for k, v in spec.pinned.items()
                     if k not in ('depth', 'range')},
@@ -1239,6 +1264,26 @@ def _synthesize_time_series(
                 time_vec = tr.coords['time']
                 out = np.zeros((n_d, n_r, tr.n_times), dtype=tr.data.dtype)
             out[di, ri, :] = tr.data
+
+    # All cells share one time window anchored at (depths[0], ranges[0]);
+    # arrivals for ranges further out than the window can hold wrap back
+    # into early bins (DFT periodicity) — flag it rather than alias silently.
+    if n_r > 1 and time_vec is not None and time_vec.size > 1:
+        c0 = float(tf.metadata.get('c0', DEFAULT_SOUND_SPEED) or
+                   DEFAULT_SOUND_SPEED)
+        span_s = float(ranges.max() - ranges.min()) / c0
+        window_s = float(time_vec[-1] - time_vec[0])
+        if span_s > window_s:
+            import warnings
+            warnings.warn(
+                f"synthesize_time_series: the receiver range span "
+                f"({ranges.max() - ranges.min():.0f} m ≈ {span_s:.2f}s of "
+                f"travel time) exceeds the {window_s:.2f}s synthesis window "
+                f"— far-range arrivals wrap back into early bins. Pass "
+                f"output_duration ≥ {span_s:.2f}s to run() (or refine the "
+                f"frequency grid to Δf ≤ {1.0/span_s:.3g} Hz).",
+                UserWarning, stacklevel=3,
+            )
 
     return Field(
         data=out,

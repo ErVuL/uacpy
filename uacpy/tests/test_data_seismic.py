@@ -199,3 +199,20 @@ def test_crust1_download(tmp_path, monkeypatch):
     monkeypatch.setattr(crust1_local, 'http_get', lambda url, **kw: buf.getvalue())
     out = crust1_local.download_crust1_db(cache_dir=str(tmp_path / 'o'))
     assert (out / 'crust1.bnds').exists()
+
+
+def test_globsed_interrupted_curl_no_final_file(tmp_path, monkeypatch):
+    """A curl killed mid-transfer must not poison the cache with a truncated
+    grid at the final path."""
+    from pathlib import Path
+    dest = tmp_path / 'o'
+
+    def fake_run(cmd, **kw):
+        Path(cmd[cmd.index('-o') + 1]).write_bytes(b'truncated')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(globsed_local.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(globsed_local.subprocess, 'run', fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        globsed_local.download_globsed_db(cache_dir=str(dest))
+    assert not (dest / globsed_local.GLOBSED_FILE).exists()

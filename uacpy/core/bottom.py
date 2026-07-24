@@ -903,9 +903,13 @@ class Bottom:
         attenuation,
         shear_speed=None,
         shear_attenuation=None,
+        roughness=None,
         acoustic_type: Optional[str] = None,
     ) -> 'Bottom':
-        """Range-dependent half-space bottom from parallel property arrays."""
+        """Range-dependent half-space bottom from parallel property arrays.
+
+        ``roughness`` (RMS, m) is a scalar applied to every range break or a
+        per-range array; default 0."""
         # RD bottoms always carry user cp/ρ/α, so 'half-space' is the coherent
         # default — never infer vacuum just because a sample happens to equal
         # the BoundaryProperties defaults.
@@ -920,9 +924,13 @@ class Bottom:
               else np.asarray(shear_speed, dtype=float).ravel())
         a_s = (np.zeros(n) if shear_attenuation is None
                else np.asarray(shear_attenuation, dtype=float).ravel())
+        rough = (np.zeros(n) if roughness is None
+                 else np.asarray(roughness, dtype=float).ravel())
+        if rough.size == 1:
+            rough = np.full(n, rough[0])
         for name, arr in (('sound_speed', cp), ('density', rho),
                           ('attenuation', alpha), ('shear_speed', cs),
-                          ('shear_attenuation', a_s)):
+                          ('shear_attenuation', a_s), ('roughness', rough)):
             if len(arr) != n:
                 raise ConfigurationError(
                     f"Bottom.from_halfspaces: {name} length ({len(arr)}) must "
@@ -931,7 +939,8 @@ class Bottom:
             SeabedColumn(layers=[], halfspace=BoundaryProperties(
                 acoustic_type=acoustic_type, sound_speed=float(cp[i]),
                 density=float(rho[i]), attenuation=float(alpha[i]),
-                shear_speed=float(cs[i]), shear_attenuation=float(a_s[i])))
+                shear_speed=float(cs[i]), shear_attenuation=float(a_s[i]),
+                roughness=float(rough[i])))
             for i in range(n)
         ]
         return cls(columns=columns, ranges=ranges if n > 1 else None)
