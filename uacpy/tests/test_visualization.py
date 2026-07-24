@@ -161,10 +161,11 @@ class TestPlotRays:
         fig, ax = rays.plot(env=env)
         plt.close(fig)
 
-    def test_edge_markers_not_clipped(self, env):
-        # A single receiver at the max range sits exactly on the right axis
-        # spine (xlim clips to the receiver extent); its marker — and the
-        # source at r=0 — must still render fully, i.e. clip_on=False.
+    def test_edge_receiver_visible_via_xlim_margin(self, env):
+        # A single receiver at the max range must be visible — not clipped to
+        # the spine. Solved by an x-axis right margin (NOT clip_on=False, which
+        # would paint out-of-view receivers across a later zoom). Markers keep
+        # default clipping so a zoom hides them correctly.
         from uacpy.visualization.plots._common import (
             ZORDER_RECEIVERS, ZORDER_SOURCE,
         )
@@ -179,8 +180,32 @@ class TestPlotRays:
         )
         fig, ax = rays.plot(env=env)
         by_z = {line.get_zorder(): line for line in ax.lines}
-        assert by_z[ZORDER_RECEIVERS].get_clip_on() is False
-        assert by_z[ZORDER_SOURCE].get_clip_on() is False
+        # zoom-safe: default clipping on both markers
+        assert by_z[ZORDER_RECEIVERS].get_clip_on() is True
+        assert by_z[ZORDER_SOURCE].get_clip_on() is True
+        # edge receiver at 2.0 km sits inside the axis (right margin past it)
+        assert ax.get_xlim()[1] > 2.0
+        plt.close(fig)
+
+    def test_markers_clipped_on_user_zoom(self, env):
+        # Regression (example_11b): a wide receiver grid must NOT paint
+        # markers outside a user-set zoom window — they carry clip_on so
+        # matplotlib clips them to the axes.
+        from uacpy.visualization.plots._common import ZORDER_RECEIVERS
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 100000, 60),
+                   'z': 500 + 100 * np.sin(np.linspace(0, 8, 60)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([500.0]),
+            receiver_ranges=np.linspace(0.0, 100000.0, 21),  # 0–100 km
+            source_depths=np.array([50.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        ax.set_xlim(20, 40)                       # user zoom, as in example_11b
+        rcv = next(ln for ln in ax.lines
+                   if ln.get_zorder() == ZORDER_RECEIVERS)
+        assert rcv.get_clip_on() is True          # → far markers stay hidden
         plt.close(fig)
 
     def test_marker_sizes_visible(self, env):

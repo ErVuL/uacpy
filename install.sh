@@ -219,6 +219,8 @@ Options:
                                      (CC-BY, ~211 MB tarball → pH grid)
                          wind      — NBS 10 m wind-speed monthly climatology
                                      (NOAA, public domain; needs netCDF4)
+                         graw      — Graw 2021 predicted seabed bulk density,
+                                     global 5' (Zenodo, CC-BY, ~37 MB; needs netCDF4)
                          all       — all of the above   |   no — skip (default)
   --no-models          Skip ALL native propagation-model builds (no compilers
        (--data-only)   needed). Pure-Python install — pairs with --data for an
@@ -521,10 +523,16 @@ choose_data() {
         && sel="${sel}crust1,"
     prompt_yes_no "  • Diesing 2020 global deep-sea seafloor lithology (~40 MB, CC-BY 4.0)?" \
         && sel="${sel}diesing,"
+    prompt_yes_no "  • Graw 2021 predicted seabed bulk density, global 5' (~37 MB, CC-BY 4.0)?" \
+        && sel="${sel}graw,"
     prompt_yes_no "  • NSIDC sea-ice monthly climatology (built from ~120 grids, public domain)?" \
         && sel="${sel}seaice,"
+    prompt_yes_no "  • NBS 10 m wind-speed monthly climatology (built from ERDDAP grids, public domain)?" \
+        && sel="${sel}wind,"
     prompt_yes_no "  • WOA23 sound-speed climatology grids (~hundreds of MB, public domain)?" \
         && sel="${sel}woa23,"
+    prompt_yes_no "  • GLODAPv2.2016b mapped seawater pH, global (~211 MB tarball → pH grid, CC-BY 4.0)?" \
+        && sel="${sel}glodap,"
     prompt_yes_no "  • GEBCO 2025 bathymetry grid (~4 GB, public domain)?" \
         && sel="${sel}gebco,"
     INSTALL_DATA="${sel%,}"
