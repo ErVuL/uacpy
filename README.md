@@ -45,22 +45,6 @@ community-driven.
 > 
 > UACPY is *not* production‑ready. Expect missing features,
 > inconsistencies, and the need for validation.
-> 
-> #### To user's of v0.3.x:
-> 
-> The changes between v0.3.x and v0.4.x are big, some of the API changed too..
-> This was done in order to clean up, harmonized and simplify the usage and 
-> maintainability. You will have to fully reinstall to compile RAMGeo, update
-> AT and fetch data if you want to. Moreover, it comes with its bag of new
-> features, including:
->   - RAMGeo
->   - Last updated version of AT toolbox
->   - Environment data fetching layer (based on GPS and date)
->   - Basic map plot and overview
->   - Basic SONAR performances
->   - Constant-Q transform family
->   - Ice support
->   - API harmonization
 >
 > #### Use of LLM and definitive API
 > 
