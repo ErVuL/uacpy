@@ -136,7 +136,8 @@ def range_dependent_bottom_along(
     if n_points == 'auto':
         # Identity = the geoacoustic tuple; collapse consecutive equal seabeds.
         keys = [(p.sound_speed, p.density, p.attenuation,
-                 p.shear_speed, p.shear_attenuation) for p in props]
+                 p.shear_speed, p.shear_attenuation, p.roughness)
+                for p in props]
         reps = run_representative_indices(keys)
     else:
         reps = list(range(len(props)))
@@ -149,6 +150,7 @@ def range_dependent_bottom_along(
         attenuation=np.array([p.attenuation for p in props]),
         shear_speed=np.array([p.shear_speed for p in props]),
         shear_attenuation=np.array([p.shear_attenuation for p in props]),
+        roughness=np.array([p.roughness for p in props]),
     )
 
 

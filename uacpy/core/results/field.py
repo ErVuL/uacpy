@@ -153,6 +153,7 @@ class Field(Result):
             'source_depths': self.source_depths,
             'frequencies': self.frequencies,
             'phase_reference': self.phase_reference,
+            'model_source': self.model_source,
             'metadata': dict(self.metadata),
         }
 
@@ -168,6 +169,7 @@ class Field(Result):
             source_depths=d.get('source_depths'),
             frequencies=d.get('frequencies'),
             phase_reference=d.get('phase_reference'),
+            model_source=d.get('model_source'),
             metadata=d.get('metadata'),
         )
 
@@ -372,14 +374,24 @@ class Field(Result):
             data, pinned, new_frequencies, new_source_depths)
 
     def max(self) -> "Field":
-        """Slice at the global argmax of ``|data|``.
+        """Slice at the loudest field point.
 
-        Every axis collapses to a pinned scalar; the returned Field has
-        empty :attr:`coords`, 0-D :attr:`data`, and every original axis
-        recorded in :attr:`pinned`."""
+        Complex / time-domain data: global argmax of ``|data|``. Real dB
+        (``kind='tl'``): the *minimum* finite TL — smaller dB is louder —
+        with ``NaN`` and the AT no-data sentinel excluded (via
+        :attr:`finite_tl`). Every axis collapses to a pinned scalar; the
+        returned Field has empty :attr:`coords`, 0-D :attr:`data`, and
+        every original axis recorded in :attr:`pinned`."""
         if self.data.size == 0:
             raise ConfigurationError("Field.max: data is empty")
-        flat = int(np.argmax(np.abs(self.data)))
+        if self.kind == 'tl':
+            strength = -self.finite_tl          # loudest = smallest dB
+        else:
+            strength = np.abs(self.data)
+        if not np.isfinite(strength).any():
+            raise ConfigurationError(
+                "Field.max: no finite samples (all NaN / no-data sentinel)")
+        flat = int(np.nanargmax(strength))
         idx = np.unravel_index(flat, self.data.shape)
         idx_map = {name: int(i) for name, i in zip(self.coords, idx)}
         return self._slice(idx_map)
@@ -641,6 +653,113 @@ class Field(Result):
             sample_rate=sample_rate,
             t_start=t_start, window=window, nfft=nfft,
         )
+
+    def _reduce_to_spectrum(self, method: str) -> "Field":
+        """Reduce a broadband Field to a single ``['frequency']`` spectrum.
+
+        Singleton ``depth`` / ``range`` axes are squeezed automatically (so a
+        single-receiver field needs no ``.at()``); any remaining non-frequency
+        axis means the caller must pick a cell first. Used by the
+        transfer-function / impulse-response plot helpers."""
+        if 'frequency' not in self.coords:
+            raise ConfigurationError(
+                f"Field.{method}: needs a broadband field with a 'frequency' "
+                f"axis; got coords {list(self.coords)}."
+            )
+        f = self
+        for axis in ('source_depth', 'depth', 'range'):
+            if axis in f.coords and f.coords[axis].size == 1:
+                f = f.isel(**{axis: 0})
+        if list(f.coords) != ['frequency']:
+            raise ConfigurationError(
+                f"Field.{method}: reduce to one (depth, range) cell first, "
+                f"e.g. H.at(depth=…, range=…) — after squeezing singleton axes "
+                f"the remaining coords are {list(f.coords)}."
+            )
+        return f
+
+    def plot_transfer_function(
+        self, *, axes=None, title=None, figsize=(8, 6), **kwargs,
+    ):
+        """Plot the transfer function ``H(f)`` at one receiver cell as two
+        stacked panels: modulus in dB (``20·log10|H|``, top) over phase
+        (bottom), sharing the frequency axis.
+
+        Reduce-then-plot: call on a field already sliced to one ``(depth,
+        range)`` cell (``H.at(depth=…, range=…).plot_transfer_function()``); a
+        single-receiver field plots directly (singleton axes are squeezed).
+        Pass ``axes=(ax_mag, ax_phase)`` to draw into existing axes.
+        Returns ``(fig, (ax_mag, ax_phase))``."""
+        import matplotlib.pyplot as plt
+        spec = self._reduce_to_spectrum('plot_transfer_function')
+        if not spec.is_complex:
+            raise ConfigurationError(
+                "Field.plot_transfer_function: needs a complex H(f) (a real "
+                "dB spectrum has no phase panel) — plot it with "
+                ".plot(value='tl') instead."
+            )
+        owns_fig = axes is None
+        if owns_fig:
+            fig, (ax_mag, ax_phase) = plt.subplots(
+                2, 1, sharex=True, figsize=figsize)
+        else:
+            ax_mag, ax_phase = axes
+            fig = ax_mag.figure
+        spec.plot(value='mag_db', ax=ax_mag, title=title, **kwargs)
+        spec.plot(value='phase', ax=ax_phase, **kwargs)
+        ax_phase.set_title('')       # keep the title/pinned subtitle on top only
+        ax_mag.set_xlabel('')        # shared axis: label only the bottom panel
+        if owns_fig:
+            # plot_field skips its credit when handed an ``ax``; draw the
+            # model-source footnote once, from the (attributed) source Field.
+            from uacpy.visualization.plots._common import _draw_result_credit
+            _draw_result_credit(fig, self)
+        return fig, (ax_mag, ax_phase)
+
+    def plot_impulse_response(
+        self, *, ax=None, title=None, window: str = 'hann',
+        figsize=(8, 4), **kwargs,
+    ):
+        """Plot the band-limited impulse response ``p(t)`` at one receiver cell.
+
+        Reduce-then-plot counterpart of :meth:`plot_transfer_function`: IFFTs
+        the single-cell spectrum (``H.at(depth=…, range=…)
+        .plot_impulse_response()``; a single-receiver field works directly).
+        For the response to a specific source pulse use
+        :meth:`synthesize_time_series` instead. Returns ``(fig, ax)``."""
+        import matplotlib.pyplot as plt
+        spec = self._reduce_to_spectrum('plot_impulse_response')
+        if 'range' not in spec.pinned:
+            raise ConfigurationError(
+                "Field.plot_impulse_response: the spectrum carries no pinned "
+                "range — the IFFT needs it for t_start and demodulation. "
+                "Slice a canonical broadband grid (H.at(depth=…, range=…)), "
+                "or use to_time_trace on the grid directly."
+            )
+        # Rebuild the canonical (depth, range, frequency) cell so the existing
+        # IFFT path applies; the pinned depth/range come from the reduction.
+        grid = Field(
+            data=spec.data.reshape(1, 1, -1),
+            coords={'depth': np.array([spec.pinned.get('depth', 0.0)]),
+                    'range': np.array([spec.pinned['range']]),
+                    'frequency': spec.coords['frequency']},
+            pinned={k: v for k, v in spec.pinned.items()
+                    if k not in ('depth', 'range')},
+            **spec.id_kwargs(),
+        )
+        trace = grid.to_time_trace(window=window)
+        owns_fig = ax is None
+        if owns_fig:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+        trace.plot(ax=ax, title=title, **kwargs)
+        if owns_fig:
+            # Draw the model-source footnote from the (attributed) source Field
+            # — the IFFT trace does not carry the model provenance.
+            from uacpy.visualization.plots._common import _draw_result_credit
+            _draw_result_credit(fig, self)
+        return fig, ax
 
     # ── time-domain only (requires 'time' coord) ──────────────────────
 
@@ -1053,6 +1172,7 @@ def _ifft_to_trace(
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
+        model_source=tf.model_source,
         metadata={'window': window, 'source_model': tf.model},
     )
 
@@ -1145,6 +1265,26 @@ def _synthesize_time_series(
                 out = np.zeros((n_d, n_r, tr.n_times), dtype=tr.data.dtype)
             out[di, ri, :] = tr.data
 
+    # All cells share one time window anchored at (depths[0], ranges[0]);
+    # arrivals for ranges further out than the window can hold wrap back
+    # into early bins (DFT periodicity) — flag it rather than alias silently.
+    if n_r > 1 and time_vec is not None and time_vec.size > 1:
+        c0 = float(tf.metadata.get('c0', DEFAULT_SOUND_SPEED) or
+                   DEFAULT_SOUND_SPEED)
+        span_s = float(ranges.max() - ranges.min()) / c0
+        window_s = float(time_vec[-1] - time_vec[0])
+        if span_s > window_s:
+            import warnings
+            warnings.warn(
+                f"synthesize_time_series: the receiver range span "
+                f"({ranges.max() - ranges.min():.0f} m ≈ {span_s:.2f}s of "
+                f"travel time) exceeds the {window_s:.2f}s synthesis window "
+                f"— far-range arrivals wrap back into early bins. Pass "
+                f"output_duration ≥ {span_s:.2f}s to run() (or refine the "
+                f"frequency grid to Δf ≤ {1.0/span_s:.3g} Hz).",
+                UserWarning, stacklevel=3,
+            )
+
     return Field(
         data=out,
         coords={'depth': depths, 'range': ranges, 'time': time_vec},
@@ -1153,5 +1293,6 @@ def _synthesize_time_series(
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
+        model_source=tf.model_source,
         metadata={'source_waveform_sample_rate': sample_rate, 'window': window},
     )

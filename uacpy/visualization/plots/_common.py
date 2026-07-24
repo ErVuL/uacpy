@@ -81,10 +81,13 @@ _AXIS_LABELS = {
 
 
 def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag',
-    'phase', 'real', 'imag'}``."""
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag_db',
+    'mag', 'phase', 'real', 'imag'}``."""
     if value == 'tl':
         return field.tl, 'TL (dB)'
+    if value == 'mag_db':
+        # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
+        return -field.tl, '|H| (dB)'
     if value == 'mag':
         return field.magnitude, '|p|'
     if value == 'phase':
@@ -97,7 +100,7 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
         return field.data.imag, 'Im(p)'
     raise ConfigurationError(
         f"plot_field: unknown value={value!r}; "
-        "valid: 'tl', 'mag', 'phase', 'real', 'imag'"
+        "valid: 'tl', 'mag_db', 'mag', 'phase', 'real', 'imag'"
     )
 
 
@@ -267,7 +270,11 @@ def _credit_lines(data_attributions, model_attribution):
     if data_attributions:
         groups.append(("Data:", list(data_attributions)))
     if model_attribution:
-        groups.append(("Model:", [model_attribution]))
+        # A single attribution string, or a list of them (multi-model
+        # comparison figures).
+        lines = ([model_attribution] if isinstance(model_attribution, str)
+                 else list(model_attribution))
+        groups.append(("Model:", lines))
     if not groups:
         return []
     width = max(len(label) for label, _ in groups)
@@ -309,7 +316,7 @@ def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):
     produced it (always, when known) plus any data sources from ``env``.
 
     The single call every result plotter makes — keeps data + model credit
-    rendering identical across :func:`plot_field`, :func:`plot_rays`, … ."""
+    rendering identical across :func:`plot_field`, `_plot_rays`, … ."""
     data = _credit_attributions(data_source, carrier=env)
     _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
 

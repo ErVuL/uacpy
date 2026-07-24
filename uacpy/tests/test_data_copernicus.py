@@ -117,14 +117,159 @@ def test_bad_date_raises(monkeypatch):
         copernicus.fetch_ssp_operational((0.0, 0.0), date='not-a-date')
 
 
-def test_out_of_range_date_warns(monkeypatch):
-    # Dataset's only time step is 2021; asking for 2030 snaps to the edge.
+def test_out_of_range_date_raises(monkeypatch):
+    # Dataset's only time step is 2021; asking for 2030 is far beyond max_days,
+    # so the nearest-edge value is rejected rather than silently substituted.
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
-    with pytest.warns(UserWarning, match='outside the'):
+    with pytest.raises(DataFetchError, match='outside the'):
         copernicus.fetch_ssp_operational((30.0, -40.0), date='2030-06-15')
 
 
-def test_in_range_date_no_warn(monkeypatch, recwarn):
+def test_out_of_range_within_widened_max_days_ok(monkeypatch):
+    # The same edge case succeeds once max_days is widened past the gap.
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
+    ssp = copernicus.fetch_ssp_operational(
+        (30.0, -40.0), date='2021-02-01', max_days=60)
+    assert isinstance(ssp, SoundSpeedProfile)
+
+
+def test_in_range_date_ok(monkeypatch):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2020-06-15'))
-    copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
-    assert not [w for w in recwarn if 'outside' in str(w.message)]
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    assert isinstance(ssp, SoundSpeedProfile)
+
+
+# ── BGC pH ──────────────────────────────────────────────────────────────────
+
+class _BGCStub:
+    """BGC dataset stub: a ``ph`` depth column (with optional time coord)."""
+    def __init__(self, ph, time=None, depth=None):
+        mk = (lambda v: _TimeDAStub(v, time)) if time else _DAStub
+        if depth is None:
+            depth = [0.0, 500.0, 2000.0][:len(ph)]
+        self._vars = {'ph': mk(ph), 'depth': _DAStub(depth)}
+
+    def __getitem__(self, key):
+        return self._vars[key]
+
+
+def test_fetch_ph_operational_surface_value(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _BGCStub([8.05, 8.00, 7.90]))
+    ph = copernicus.fetch_ph_operational((30.0, -40.0), date='2020-06-15')
+    assert ph == pytest.approx(8.05)
+
+
+def test_fetch_ph_operational_skips_nan_surface(monkeypatch):
+    # A masked surface level falls through to the shallowest finite one.
+    _install_fake_toolbox(monkeypatch, _BGCStub([np.nan, 8.00, 7.90]))
+    ph = copernicus.fetch_ph_operational((30.0, -40.0), date='2020-06-15')
+    assert ph == pytest.approx(8.00)
+
+
+def test_fetch_ph_operational_land_raises(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _BGCStub([np.nan, np.nan, np.nan]))
+    with pytest.raises(DataFetchError, match='No Copernicus pH'):
+        copernicus.fetch_ph_operational((0.0, 0.0), date='2020-06-15')
+
+
+def test_fetch_ph_operational_out_of_range_date(monkeypatch):
+    _install_fake_toolbox(monkeypatch,
+                          _BGCStub([8.05, 8.00, 7.90], time='2021-01-15'))
+    with pytest.raises(DataFetchError, match='outside the'):
+        copernicus.fetch_ph_operational((30.0, -40.0), date='2030-06-15')
+
+
+# ── fetch_environment wiring: live BGC pH on the Copernicus SSP branch ──────
+
+def _install_routing_toolbox(monkeypatch, *, bgc):
+    """Physics datasets → the T/S stub; BGC dataset ids → ``bgc``."""
+    fake = types.ModuleType('copernicusmarine')
+    physics = _DSStub(_DEPTH, _T, _S)
+
+    def open_dataset(*, dataset_id):
+        if 'bgc' in dataset_id:
+            if isinstance(bgc, Exception):
+                raise bgc
+            return bgc
+        return physics
+    fake.open_dataset = open_dataset
+    monkeypatch.setitem(sys.modules, 'copernicusmarine', fake)
+
+
+def test_environment_copernicus_ssp_prefers_bgc_ph(monkeypatch, tmp_path):
+    import uacpy.data as data
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    _install_routing_toolbox(monkeypatch, bgc=_BGCStub([8.02, 7.95, 7.90]))
+    env = data.fetch_environment((30.0, -40.0), bathymetry=1000.0,
+                                 ssp_sources='copernicus', date='2020-06-15',
+                                 with_absorption=True)
+    assert env.absorption.pH == pytest.approx(8.02)
+    assert 'copernicus_bgc' in [s.source.id for s in env.data_sources]
+
+
+def test_environment_bgc_failure_falls_back(monkeypatch, tmp_path):
+    import uacpy.data as data
+    from uacpy.data.absorption import DEFAULT_OCEAN_PH
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    _install_routing_toolbox(monkeypatch, bgc=RuntimeError("auth failed"))
+    env = data.fetch_environment((30.0, -40.0), bathymetry=1000.0,
+                                 ssp_sources='copernicus', date='2020-06-15',
+                                 with_absorption=True)
+    # No BGC, no GLODAP cache → the model-default constant, silently.
+    assert env.absorption.pH == pytest.approx(DEFAULT_OCEAN_PH)
+    assert 'copernicus_bgc' not in [s.source.id for s in env.data_sources]
+
+
+def test_fetch_ph_woa_source_does_not_hit_bgc(monkeypatch, tmp_path):
+    # A non-Copernicus SSP source must not silently open a Copernicus dataset
+    # for pH — the BGC preference rides the existing Copernicus session only.
+    from uacpy.data import environment
+    from uacpy.data.absorption import DEFAULT_OCEAN_PH
+    calls = []
+    fake = types.ModuleType('copernicusmarine')
+
+    def open_dataset(*, dataset_id):
+        calls.append(dataset_id)
+        raise RuntimeError("should not be called")
+    fake.open_dataset = open_dataset
+    monkeypatch.setitem(sys.modules, 'copernicusmarine', fake)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    pH, src = environment._fetch_ph((30.0, -40.0), date='2020-06-15',
+                                    ssp_source='woa23', cache_only=False,
+                                    timeout=5.0, verbose=False)
+    assert pH == pytest.approx(DEFAULT_OCEAN_PH)
+    assert src is None
+    assert calls == []
+
+
+# ── provenance stamping ─────────────────────────────────────────────────────
+
+def test_fetch_ssp_operational_stamps_provenance(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    assert len(ssp.data_sources) == 1
+    prov = ssp.data_sources[0]
+    assert prov.source.id == 'copernicus'
+    assert prov.requested_point == (30.0, -40.0)
+    assert prov.requested_date == '2020-06-15'
+
+
+def test_fetch_ssp_transect_operational_stamps_provenance(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    ssp = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4)
+    assert [p.source.id for p in ssp.data_sources] == ['copernicus']
+
+
+def test_assemble_range_dependent_aggregates_provenance():
+    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sources import SOURCES, DataProvenance
+    provs = (DataProvenance(source=SOURCES['copernicus'],
+                            requested_point=(30.0, -40.0)),
+             DataProvenance(source=SOURCES['copernicus'],
+                            requested_point=(31.0, -40.0)),
+             DataProvenance(source=SOURCES['woa23']))
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
+                              data_sources=(p,)) for p in provs]
+    out = assemble_range_dependent(cols, [0.0, 1000.0, 2000.0])
+    assert [p.source.id for p in out.data_sources] == ['copernicus', 'woa23']

@@ -282,6 +282,16 @@ class Environment:
             "BoundaryProperties, a scalar sound speed (m/s), or a material "
             f"preset name; got {type(bottom).__name__}")
 
+    def plot(self, **kwargs):
+        """Plot the water column + seafloor cross-section.
+
+        Water column (SSP) + seafloor cross-section, with optional
+        ``source=`` / ``receiver=`` markers. The carrier counterpart of
+        :meth:`Result.plot` — any uacpy object you plot on its own has
+        ``.plot()``. ``kwargs`` are forwarded to the renderer."""
+        from uacpy.visualization.plots.environment import _plot_environment
+        return _plot_environment(self, **kwargs)
+
     @property
     def depth(self) -> float:
         """Maximum water depth in metres (derived from bathymetry)."""

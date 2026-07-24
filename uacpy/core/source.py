@@ -43,6 +43,21 @@ class Source:
     source_type : str
         Source type
 
+    Notes
+    -----
+    ``frequencies`` is the single source of truth for the frequency content.
+    How it is consumed depends on the run mode:
+
+    * Single-frequency modes (``COHERENT_TL`` / ``INCOHERENT_TL`` / rays /
+      ``ARRIVALS`` / ``MODES``) require a length-1 ``frequencies``.
+    * Broadband modes (``BROADBAND`` / ``TIME_SERIES``) use it as the grid:
+      a multi-element array *is* the band (used as-is); a single value
+      auto-expands to a default band ``fc·(1 ± bandwidth/2)``.
+
+    ``run(..., frequencies=…)`` is an optional per-call **override** of this
+    broadband grid (handy to reuse one ``Source`` while sweeping different
+    grids); when omitted, ``source.frequencies`` is used.
+
     Examples
     --------
     Single source at 50m depth, 100 Hz:

@@ -130,10 +130,7 @@ def main():
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from uacpy.visualization.plots import (
-    plot_field,
-    plot_environment,
-)
+    from uacpy.visualization.plots import plot_field
 
     print("\n" + "═" * 80)
     print("EXAMPLE 18: Range-Dependent Bottom — Adiabatic vs Coupled vs RAM")
@@ -308,7 +305,7 @@ def main():
     print(f"\n  ✓ Saved: {out_path}")
 
     for case_label in ('Hard layered', 'Soft layered'):
-        fig_b, _ = plot_environment(envs[case_label])
+        fig_b, _ = envs[case_label].plot()
         slug = case_label.lower().replace(' ', '_')
         path = out_dir / f'example_18_rd_layered_{slug}.png'
         fig_b.savefig(path, dpi=150, bbox_inches='tight')

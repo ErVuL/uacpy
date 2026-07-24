@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Tuple
+from typing import Optional, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.visualization.style import (
@@ -242,7 +242,7 @@ def _draw_halfspace_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
     return z_max_layer
 
 
-def plot_environment(
+def _plot_environment(
     env: Environment,
     *,
     source=None,
@@ -251,6 +251,7 @@ def plot_environment(
     bottom_colorbar: bool = True,
     data_source=True,
     sea_ice=None,
+    title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
 ):
     """Single-panel water column + bottom structure with two colorbars.
@@ -285,10 +286,12 @@ def plot_environment(
     ``sea_ice`` overlays a (symbolic, not-to-scale) ice cover at the surface — a
     concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
     e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
+
+    ``title`` overrides the default ``"Bottom — <type>"`` panel title.
     """
     if not isinstance(env, Environment):
         raise ConfigurationError(
-            f"plot_environment: expected an Environment, got "
+            f"_plot_environment: expected an Environment, got "
             f"{type(env).__name__}.")
     if ax is None:
         fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
@@ -516,7 +519,8 @@ def plot_environment(
     _draw_surface_boundary(ax_bathy, env)
     if sea_ice is not None:
         _draw_sea_ice(ax_bathy, sea_ice)
-    ax_bathy.set_title(f"Bottom — {type(env.bottom).__name__}",
+    ax_bathy.set_title(title if title is not None
+                       else f"Bottom — {type(env.bottom).__name__}",
                        fontweight='bold', fontsize=12)
 
     if ax is None:
@@ -526,7 +530,7 @@ def plot_environment(
     return fig, ax_bathy
 
 
-def plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
+def _plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
     """Plot the sound-speed profile ``c(z)`` as a depth-down line.
 
     Accepts an :class:`~uacpy.core.environment.Environment` or a bare
@@ -541,7 +545,7 @@ def plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
     ssp = env_or_ssp.ssp if isinstance(env_or_ssp, Environment) else env_or_ssp
     if not isinstance(ssp, SoundSpeedProfile):
         raise ConfigurationError(
-            "plot_ssp: pass an Environment or a SoundSpeedProfile, got "
+            "_plot_ssp: pass an Environment or a SoundSpeedProfile, got "
             f"{type(env_or_ssp).__name__}."
         )
 
@@ -627,7 +631,7 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
     ``env.bottom`` — sound speed ``cp``, shear speed ``cs``, density ``ρ``,
     compressional / shear attenuation ``αp`` / ``αs`` — each with its own
     colorbar. Properties that are uniformly zero or absent (e.g. shear for a
-    fluid seabed) are skipped. Complements :func:`plot_environment`, which
+    fluid seabed) are skipped. Complements :func:`_plot_environment`, which
     colours the seabed by ``cp`` alone; this is where ``cs`` and friends live.
 
     Works for every ``Bottom`` shape (half-space, layered, range-dependent

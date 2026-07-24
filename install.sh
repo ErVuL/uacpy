@@ -75,7 +75,7 @@ AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
 FORCE=0
 BELLHOP_VERSION="" # "fortran", "cxx", or "cuda" (empty => prompt/auto)
 INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
-INSTALL_DATA=""    # comma list of gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice | "all" | "no" (empty => skip)
+INSTALL_DATA=""    # comma list of gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw | "all" | "no" (empty => skip)
 BUILD_MODELS=1     # 0 with --no-models: skip all native builds (data-only install)
 
 # -------------------------
@@ -215,6 +215,12 @@ Options:
                                      lithology map (CC-BY, ~40 MB; needs pyproj)
                          seaice    — NSIDC sea-ice concentration monthly
                                      climatology (public domain; needs tifffile)
+                         glodap    — GLODAPv2.2016b mapped seawater pH, global
+                                     (CC-BY, ~211 MB tarball → pH grid)
+                         wind      — NBS 10 m wind-speed monthly climatology
+                                     (NOAA, public domain; needs netCDF4)
+                         graw      — Graw 2021 predicted seabed bulk density,
+                                     global 5' (Zenodo, CC-BY, ~37 MB; needs netCDF4)
                          all       — all of the above   |   no — skip (default)
   --no-models          Skip ALL native propagation-model builds (no compilers
        (--data-only)   needed). Pure-Python install — pairs with --data for an
@@ -228,7 +234,7 @@ Examples:
   ./install.sh --oases no          # Skip OASES, prompt for rest
   ./install.sh --data sediment     # Only the small public-domain sediment DB
   ./install.sh --data crust1,globsed    # Low-frequency layered seabed stack
-  ./install.sh --data all          # Full stack (gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice)
+  ./install.sh --data all          # Full stack (gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw)
   ./install.sh --no-models --data all   # Data-only: no compilers, offline stack
 EOF
 }
@@ -269,7 +275,7 @@ while [[ $# -gt 0 ]]; do
                 INSTALL_DATA="$1"
                 shift
             else
-                echo -e "${RED}--data requires an argument: gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice|all|no${NC}"
+                echo -e "${RED}--data requires an argument: gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw|all|no${NC}"
                 exit 1
             fi
             ;;
@@ -517,10 +523,16 @@ choose_data() {
         && sel="${sel}crust1,"
     prompt_yes_no "  • Diesing 2020 global deep-sea seafloor lithology (~40 MB, CC-BY 4.0)?" \
         && sel="${sel}diesing,"
+    prompt_yes_no "  • Graw 2021 predicted seabed bulk density, global 5' (~37 MB, CC-BY 4.0)?" \
+        && sel="${sel}graw,"
     prompt_yes_no "  • NSIDC sea-ice monthly climatology (built from ~120 grids, public domain)?" \
         && sel="${sel}seaice,"
+    prompt_yes_no "  • NBS 10 m wind-speed monthly climatology (built from ERDDAP grids, public domain)?" \
+        && sel="${sel}wind,"
     prompt_yes_no "  • WOA23 sound-speed climatology grids (~hundreds of MB, public domain)?" \
         && sel="${sel}woa23,"
+    prompt_yes_no "  • GLODAPv2.2016b mapped seawater pH, global (~211 MB tarball → pH grid, CC-BY 4.0)?" \
+        && sel="${sel}glodap,"
     prompt_yes_no "  • GEBCO 2025 bathymetry grid (~4 GB, public domain)?" \
         && sel="${sel}gebco,"
     INSTALL_DATA="${sel%,}"
@@ -1679,8 +1691,70 @@ download_seaice() {
     return 1
 }
 
+download_glodap() {
+    local dir="${DATA_CACHE_DIR}/glodap"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/GLODAPv2.2016b.pHtsinsitutp.nc" ]]; then
+        echo -e "${GREEN}✓ GLODAP pH grid present in ${dir}${NC}"; return 0
+    fi
+    # GLODAPv2.2016b mapped seawater pH (CC-BY); the ~211 MB product tarball is
+    # downloaded and only the in-situ pH grid extracted by glodap_local.
+    if python3 -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
+        echo -e "${BLUE}Downloading GLODAPv2.2016b mapped pH (CC-BY, ~211 MB tarball)...${NC}"
+        if python3 -c "from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ GLODAP pH grid ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic GLODAP download failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy not importable here — GLODAP skipped.${NC}"
+    fi
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import glodap_local; glodap_local.download_glodap_db()\""
+    NOTE_DATA="${NOTE_DATA} glodap:manual"
+    return 1
+}
+
+download_wind() {
+    local dir="${DATA_CACHE_DIR}/wind"; mkdir -p "$dir"
+    if [[ "$FORCE" != "1" && -s "${dir}/wind_climatology.npz" ]]; then
+        echo -e "${GREEN}✓ NBS wind climatology present in ${dir}${NC}"; return 0
+    fi
+    # Builds a monthly NBS 10 m wind-speed climatology from the CoastWatch ERDDAP
+    # monthly grids (needs netCDF4). Public domain.
+    if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
+        echo -e "${BLUE}Building NBS wind monthly climatology (downloads ERDDAP grids; a few minutes)...${NC}"
+        if python3 -c "from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir='${dir}', verbose=True)"; then
+            echo -e "${GREEN}✓ NBS wind climatology ready${NC}"; return 0
+        fi
+        echo -e "${YELLOW}◐ Automatic wind build failed.${NC}"
+    else
+        echo -e "${YELLOW}◐ uacpy (netCDF4) not importable here — wind skipped.${NC}"
+    fi
+    echo "    Build it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import wind_local; wind_local.download_wind_db()\""
+    NOTE_DATA="${NOTE_DATA} wind:manual"
+    return 1
+}
+
+download_graw() {
+    local dir="${DATA_CACHE_DIR}/graw"; mkdir -p "$dir"
+    local out="${dir}/Dataset_S2.nc"
+    if [[ "$FORCE" != "1" && -s "$out" ]]; then
+        echo -e "${GREEN}✓ Graw density grid present in ${dir}${NC}"; return 0
+    fi
+    # Graw 2021 predicted global seabed bulk density (Zenodo, CC-BY 4.0, ~37 MB).
+    echo -e "${BLUE}Downloading Graw 2021 seabed density grid (~37 MB)...${NC}"
+    if curl -fL --retry 3 -o "$out" "https://zenodo.org/records/3762390/files/Dataset_S2.nc"; then
+        echo -e "${GREEN}✓ Graw density grid ready${NC}"; return 0
+    fi
+    rm -f "$out"
+    echo "    Fetch it from Python once uacpy is installed:"
+    echo "      python -c \"from uacpy.data import graw_local; graw_local.download_graw_db()\""
+    NOTE_DATA="${NOTE_DATA} graw:manual"
+    return 1
+}
+
 case "$INSTALL_DATA" in
-    all) INSTALL_DATA_NORM="gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice" ;;
+    all) INSTALL_DATA_NORM="gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw" ;;
     no|"") INSTALL_DATA_NORM="" ;;
     *) INSTALL_DATA_NORM="$INSTALL_DATA" ;;
 esac
@@ -1701,6 +1775,9 @@ if [[ -n "$INSTALL_DATA_NORM" ]]; then
         data_requested crust1    && { download_crust1    || DATA_OK=0; }
         data_requested diesing   && { download_diesing   || DATA_OK=0; }
         data_requested seaice    && { download_seaice    || DATA_OK=0; }
+        data_requested glodap    && { download_glodap    || DATA_OK=0; }
+        data_requested wind      && { download_wind      || DATA_OK=0; }
+        data_requested graw      && { download_graw      || DATA_OK=0; }
         if [[ "$DATA_OK" == "1" ]]; then STATUS_DATA="ok"; else STATUS_DATA="partial"; fi
         echo -e "${BLUE}Data cache: ${DATA_CACHE_DIR}${NC}"
     fi

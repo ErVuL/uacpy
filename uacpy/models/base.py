@@ -506,6 +506,31 @@ class PropagationModel(ABC):
                 alternatives_label='run parameters',
             )
 
+    def _warn_ignored_run_kwargs(self, run_mode, reason=None, **named_values):
+        """Warn when the resolved ``run_mode`` will not consume some of the
+        optional ``run()`` keywords the caller supplied.
+
+        Complements :meth:`_reject_unsupported_run_kwargs`: that helper is
+        for models that *never* consume a keyword (hard error); this one is
+        for keywords the model does consume, just not on the resolved run
+        mode's path. Only non-``None`` values are reported, in a single
+        ``UserWarning``. Consuming paths (BROADBAND/TIME_SERIES, …) must not
+        call it."""
+        ignored = [
+            f'{name}=' for name, value in named_values.items()
+            if value is not None
+        ]
+        if not ignored:
+            return
+        if reason is None:
+            reason = 'these apply to BROADBAND/TIME_SERIES only'
+        warnings.warn(
+            f"{self.model_name}.run(run_mode="
+            f"{getattr(run_mode, 'name', run_mode)}): ignoring "
+            f"{', '.join(ignored)} — {reason}.",
+            UserWarning, stacklevel=3,
+        )
+
     @property
     def supported_modes(self) -> List[RunMode]:
         """List of run modes supported by this model."""

@@ -16,8 +16,7 @@ FEATURES DEMONSTRATED:
     - Bellhop.run_with_bounce() for explicit BOUNCE parameters
     - SeabedColumn + SedimentLayer for depth-dependent sediment
     - Bottom with RAM (true Fortran RD support)
-    - plot_field(), plot_environment(), plot_environment()
-    - plot_environment(), plot_environment()
+    - plot_field(), env.plot()
 
 ===============================================================================
 """
@@ -38,10 +37,7 @@ from uacpy import (  # noqa: E402
     BoundaryProperties,
 )
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
-from uacpy.visualization.plots import (  # noqa: E402
-    plot_field,
-    plot_environment,
-)
+from uacpy.visualization.plots import plot_field  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -215,12 +211,12 @@ def demo_layered_bottom():
         traceback.print_exc()
 
     # Plot layered bottom structure
-    fig2, ax2 = plot_environment(env)
+    fig2, ax2 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_layered_structure.png")
 
     # Plot environment overview
-    fig3, axes3 = plot_environment(env)
+    fig3, axes3 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_layered_env.png")
 
@@ -290,17 +286,17 @@ def demo_range_dependent_bottom():
         traceback.print_exc()
 
     # Plot RD bottom properties
-    fig2, _ = plot_environment(env)
+    fig2, _ = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_bottom_props.png")
 
     # Plot 2D SSP
-    fig3, ax3 = plot_environment(env)
+    fig3, ax3 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_ssp.png")
 
     # Plot full environment
-    fig4, axes4 = plot_environment(env)
+    fig4, axes4 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rd_env.png")
 
@@ -402,7 +398,7 @@ def demo_rd_layered_bottom():
         traceback.print_exc()
 
     # Plot the RD layered structure
-    fig2, axes2 = plot_environment(env)
+    fig2, axes2 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rdl_structure.png', dpi=150,
                 bbox_inches='tight')
     print("  ✓ Saved: output/example_16_rdl_structure.png")
@@ -426,11 +422,11 @@ def main():
     print("  - Range-dependent bottom (scalar) with RAM")
     print("  - Range-dependent LAYERED bottom (depth+range) with RAM")
     print("  - plot_field() with contours")
-    print("  - plot_environment() for sediment structure")
-    print("  - plot_environment() for RD layered structure")
-    print("  - plot_environment() for RD bottom")
-    print("  - plot_environment() for range-dependent SSP")
-    print("  - plot_environment() for full overview")
+    print("  - env.plot() for sediment structure")
+    print("  - env.plot() for RD layered structure")
+    print("  - env.plot() for RD bottom")
+    print("  - env.plot() for range-dependent SSP")
+    print("  - env.plot() for full overview")
 
     print("\n✓ Example 16 complete\n")
     return 0

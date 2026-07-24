@@ -59,8 +59,7 @@ from uacpy.models import (
 from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
 from uacpy.visualization.plots import (
-    plot_result, plot_field, plot_overview, plot_environment, plot_ssp,
-    compare_models,
+    plot_result, plot_field, plot_overview, compare_models,
 )
 from uacpy import io
 from uacpy import acoustic_signal
@@ -109,8 +108,7 @@ __all__ = [
     'ParallelResult',
     'models',
     'plot',
-    'plot_result', 'plot_field', 'plot_overview', 'plot_environment',
-    'plot_ssp', 'compare_models',
+    'plot_result', 'plot_field', 'plot_overview', 'compare_models',
     'io',
     'acoustic_signal',
     'noise',

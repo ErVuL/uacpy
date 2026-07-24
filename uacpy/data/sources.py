@@ -117,6 +117,17 @@ SOURCES: Dict[str, DataSource] = {
         url='https://www.gmrt.org/',
         commercial_use=True,
     ),
+    'emodnet_dtm': DataSource(
+        id='emodnet_dtm',
+        name='EMODnet Bathymetry DTM 2024',
+        used_for='bathymetry (European seas + Caribbean, ~115 m)',
+        license='CC-BY 4.0',
+        attribution='EMODnet Bathymetry (emodnet.ec.europa.eu), CC-BY 4.0',
+        citation='EMODnet Bathymetry Consortium (2024). EMODnet Digital '
+                 'Bathymetry (DTM 2024). EMODnet Bathymetry.',
+        url='https://emodnet.ec.europa.eu/en/bathymetry',
+        commercial_use=True,
+    ),
     'woa23': DataSource(
         id='woa23',
         name='World Ocean Atlas 2023 (NOAA NCEI)',
@@ -150,6 +161,65 @@ SOURCES: Dict[str, DataSource] = {
                     'Information; <product DOI>',
         citation='E.U. Copernicus Marine Service Information; cite the '
                  'product DOI from the Copernicus Marine catalogue.',
+        url='https://marine.copernicus.eu/',
+        commercial_use=True,
+    ),
+    'glodap': DataSource(
+        id='glodap',
+        name='GLODAPv2.2016b Mapped Climatology (GLODAP)',
+        used_for='seawater pH (absorption)',
+        license='CC-BY 4.0',
+        attribution='GLODAPv2.2016b Mapped Climatology (glodap.info), CC-BY 4.0',
+        citation='Lauvset, S.K., et al. (2016). A new global interior ocean '
+                 'mapped climatology: the 1x1 GLODAP version 2. Earth Syst. '
+                 'Sci. Data 8, 325-340. doi:10.5194/essd-8-325-2016',
+        url='https://glodap.info/index.php/mapped-data-product/',
+        commercial_use=True,
+    ),
+    'copernicus_bgc': DataSource(
+        id='copernicus_bgc',
+        name='Copernicus Marine global biogeochemistry reanalysis (pH)',
+        used_for='seawater pH (absorption; operational)',
+        license='Copernicus Marine License (free; commercial use allowed)',
+        attribution='pH: E.U. Copernicus Marine Service Information '
+                    '(GLOBAL_MULTIYEAR_BGC_001_029); <product DOI>',
+        citation='E.U. Copernicus Marine Service Information; '
+                 'GLOBAL_MULTIYEAR_BGC_001_029. Cite the product DOI.',
+        url='https://marine.copernicus.eu/',
+        commercial_use=True,
+    ),
+    'nbs': DataSource(
+        id='nbs',
+        name='NOAA/NCEI Blended Seawinds (NBS)',
+        used_for='10 m wind speed (ambient noise, sea surface)',
+        license='U.S. Government work — public domain',
+        attribution='Wind: NOAA/NCEI Blended Seawinds (NBS)',
+        citation='Zhang, H.-M., Bates, J.J. & Reynolds, R.W. (2006). Assessment '
+                 'of composite global sampling: Sea surface wind speed. Geophys. '
+                 'Res. Lett. 33, L17714. NOAA/NCEI Blended Seawinds.',
+        url='https://www.ncei.noaa.gov/products/blended-sea-winds',
+        commercial_use=True,
+    ),
+    'ww3': DataSource(
+        id='ww3',
+        name='NOAA WaveWatch III',
+        used_for='significant wave height (sea surface; recent)',
+        license='U.S. Government work — public domain',
+        attribution='Waves: NOAA WaveWatch III',
+        citation='Tolman, H.L. (2009). User manual and system documentation of '
+                 'WAVEWATCH III. NOAA/NWS/NCEP Technical Note 276.',
+        url='https://polar.ncep.noaa.gov/waves/',
+        commercial_use=True,
+    ),
+    'waverys': DataSource(
+        id='waverys',
+        name='Copernicus Marine WAVERYS global wave reanalysis',
+        used_for='significant wave height (sea surface; reanalysis)',
+        license='Copernicus Marine License (free; commercial use allowed)',
+        attribution='Waves: E.U. Copernicus Marine Service Information '
+                    '(WAVERYS); <product DOI>',
+        citation='E.U. Copernicus Marine Service Information; GLOBAL_MULTIYEAR_'
+                 'WAV_001_032 (WAVERYS). Cite the product DOI.',
         url='https://marine.copernicus.eu/',
         commercial_use=True,
     ),
@@ -227,6 +297,31 @@ SOURCES: Dict[str, DataSource] = {
                  'doi:10.5194/essd-12-3367-2020 (CC-BY 4.0). '
                  'After Berger, W.H. (1974), Deep-sea sedimentation.',
         url='https://essd.copernicus.org/articles/12/3367/2020/',
+        commercial_use=True,
+    ),
+    'mars': DataSource(
+        id='mars',
+        name='AusSeabed Marine Sediments (MARS) database (Geoscience Australia)',
+        used_for='sediment (Australian margin, point samples)',
+        license='CC-BY 4.0',
+        attribution='Sediment samples: AusSeabed MARS database (Geoscience '
+                    'Australia), CC-BY 4.0',
+        citation='Geoscience Australia (2020). Marine Sediments (MARS) '
+                 'Database. AusSeabed data portal.',
+        url='https://portal.ga.gov.au/persona/marine',
+        commercial_use=True,
+    ),
+    'graw': DataSource(
+        id='graw',
+        name='Graw 2021 predicted global seabed bulk density (NRL)',
+        used_for='seabed bulk density (measured-density bottom)',
+        license='CC-BY 4.0',
+        attribution='Seabed density: Graw, Wood & Phrampus (2021), CC-BY 4.0',
+        citation='Graw, J.H., Wood, W.T. & Phrampus, B.J. (2021). Predicting '
+                 'global marine sediment density using the random forest '
+                 'regressor machine learning algorithm. J. Geophys. Res. Solid '
+                 'Earth 126. Data: Zenodo doi:10.5281/zenodo.3762390.',
+        url='https://doi.org/10.5281/zenodo.3762390',
         commercial_use=True,
     ),
     'grainsize': DataSource(

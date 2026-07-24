@@ -38,15 +38,26 @@ from uacpy.data.sound_speed import (
 )
 from uacpy.data.copernicus import (
     fetch_ssp_operational, fetch_ssp_transect_operational,
-    fetch_ts_profile_operational,
+    fetch_ts_profile_operational, fetch_waves_operational,
+    fetch_ph_operational,
 )
+from uacpy.data.wind_live import fetch_wind, fetch_wind_transect
+from uacpy.data.wind_local import download_wind_db
+from uacpy.data.waves import fetch_waves
+from uacpy.data.sea_surface import fetch_sea_surface
 from uacpy.data.argo import fetch_argo_profile, fetch_ssp_argo
 from uacpy.data.absorption import build_francois_garrison
+from uacpy.data.glodap_local import (
+    download_glodap_db, fetch_ph_profile, fetch_ph,
+)
 from uacpy.data.sediment import (
     grain_size_to_geoacoustics, bottom_from_grain_size, bottom_from_class,
 )
 from uacpy.data.seabed import (
     fetch_seabed_substrate, fetch_bottom, fetch_bottom_transect,
+)
+from uacpy.data.mars import (
+    fetch_mars_sediment, fetch_bottom_mars, fetch_bottom_mars_transect,
 )
 from uacpy.data.sediment_db import (
     download_sediment_db, fetch_sediment_sample, fetch_bottom_local,
@@ -67,6 +78,10 @@ from uacpy.data.pelagic import (
 from uacpy.data.diesing_local import (
     download_diesing_db, fetch_seafloor_lithology, fetch_bottom_diesing,
     fetch_bottom_diesing_transect,
+)
+from uacpy.data.graw_local import (
+    download_graw_db, fetch_seabed_density, fetch_seabed_density_transect,
+    fetch_bottom_graw, fetch_bottom_graw_transect,
 )
 from uacpy.data.seaice_local import (
     download_seaice_db, fetch_sea_ice_concentration,
@@ -89,9 +104,19 @@ __all__ = [
     'fetch_ssp_operational',
     'fetch_ssp_transect_operational',
     'fetch_ts_profile_operational',
+    'fetch_waves_operational',
+    'fetch_ph_operational',
+    'fetch_wind',
+    'fetch_wind_transect',
+    'download_wind_db',
+    'fetch_waves',
+    'fetch_sea_surface',
     'fetch_argo_profile',
     'fetch_ssp_argo',
     'build_francois_garrison',
+    'download_glodap_db',
+    'fetch_ph_profile',
+    'fetch_ph',
     # bottom
     'grain_size_to_geoacoustics',
     'bottom_from_grain_size',
@@ -99,6 +124,9 @@ __all__ = [
     'fetch_seabed_substrate',
     'fetch_bottom',
     'fetch_bottom_transect',
+    'fetch_mars_sediment',
+    'fetch_bottom_mars',
+    'fetch_bottom_mars_transect',
     'download_sediment_db',
     'download_emodnet_db',
     'download_globsed_db',
@@ -119,6 +147,11 @@ __all__ = [
     'fetch_seafloor_lithology',
     'fetch_bottom_diesing',
     'fetch_bottom_diesing_transect',
+    'download_graw_db',
+    'fetch_seabed_density',
+    'fetch_seabed_density_transect',
+    'fetch_bottom_graw',
+    'fetch_bottom_graw_transect',
     'download_seaice_db',
     'fetch_sea_ice_concentration',
     'fetch_sea_ice_concentration_transect',

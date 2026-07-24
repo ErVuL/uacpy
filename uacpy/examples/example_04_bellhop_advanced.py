@@ -39,7 +39,7 @@ import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import Bottom  # noqa: E402
 from uacpy.models import Bellhop  # noqa: E402
-from uacpy.visualization.plots import plot_field, plot_environment, plot_rays  # noqa: E402
+from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
@@ -220,7 +220,7 @@ def main():
     print("\nGenerating plots...")
 
     # Plot 1: Environment setup with range-dependent bottom
-    fig1, axes1 = plot_environment(env)
+    fig1, axes1 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_04_environment.png")
 
@@ -282,8 +282,8 @@ def main():
     # Plot 4: Ray trace
     # Using color_by="bounces" for ray color-coding
     if result_rays is not None:
-        fig4, ax4 = plot_rays(result_rays, env=env,
-                              color_by="bounces")  # Color-code rays by bounce type
+        fig4, ax4 = result_rays.plot(env=env,
+                                     color_by="bounces")  # Color-code rays by bounce type
         ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
                       '(rays colored by bounce type - R/G/B/K)')
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')

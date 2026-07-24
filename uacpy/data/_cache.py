@@ -59,6 +59,15 @@ DATASETS = {
     'seaice': _Dataset(
         'seaice', 'seaice', './install.sh --data seaice',
         'NSIDC sea-ice concentration monthly climatology (public domain)'),
+    'glodap': _Dataset(
+        'glodap', 'glodap', './install.sh --data glodap',
+        'GLODAPv2.2016b mapped seawater pH climatology (CC-BY)'),
+    'wind': _Dataset(
+        'wind', 'wind', './install.sh --data wind',
+        'NBS 10 m wind-speed monthly climatology (NOAA, public domain)'),
+    'graw': _Dataset(
+        'graw', 'graw', './install.sh --data graw',
+        'Graw 2021 predicted seabed bulk-density grid (CC-BY 4.0)'),
 }
 
 

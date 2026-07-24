@@ -10,6 +10,7 @@ reaches basement (and how thick the column is) matters more than the top-cm
 texture. Pair it with :mod:`uacpy.data.crust1_local` for a layered bottom.
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,19 +37,27 @@ _GRID = {}   # path -> _GlobSedGrid
 def _curl_download(url, out, *, timeout, verbose):
     """Fetch ``url`` → ``out`` with curl; ``True`` on success, ``False`` if curl
     is absent or fails. NCEI/Akamai throttles Python urllib to a trickle but
-    serves curl at full speed, so this is the preferred path for the grid."""
+    serves curl at full speed, so this is the preferred path for the grid.
+    Downloads to ``<out>.part`` and moves it into place only on success, so an
+    interrupted transfer never leaves a truncated ``out`` for the cache to
+    accept."""
     curl = shutil.which('curl')
     if not curl:
         return False
+    part = Path(str(out) + '.part')
     try:
         subprocess.run(
             [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(out), url],
+             '-o', str(part), url],
             check=True, capture_output=not verbose)
     except (subprocess.SubprocessError, OSError):
-        out.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
         return False
-    return out.exists() and out.stat().st_size > 0
+    if not (part.exists() and part.stat().st_size > 0):
+        part.unlink(missing_ok=True)
+        return False
+    os.replace(part, out)
+    return True
 
 
 def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -63,8 +72,10 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     log_message('globsed', "downloading GlobSed v3 sediment thickness (~11 MB)",
                 verbose=verbose)
     if not _curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
-        out.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
-                                 source='globsed'))
+        part = Path(str(out) + '.part')
+        part.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
+                                  source='globsed'))
+        os.replace(part, out)
     _GRID.clear()
     log_message('globsed', f"GlobSed grid cached → {out}", verbose=verbose)
     return out

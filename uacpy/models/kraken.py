@@ -899,6 +899,15 @@ class Kraken(_KrakenBase):
         )
         run_mode = self._resolve_run_mode(run_mode, default=smart_default)
 
+        if run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                output_duration=output_duration,
+            )
+
         # Resolve the modes binary once, as a visible dispatch step (parity
         # with RAM.select_backend): kraken.exe vs krakenc.exe is a
         # deterministic function of env elasticity / leaky_modes — preserved

@@ -51,7 +51,7 @@ What it covers:
   wavenumber-integration (Scooter/OASES), parabolic equation (RAM),
   time-domain FDTD (SPARC), and plane-wave reflection (Bounce/OASR).
 - **DSP & sonar** (`acoustic_signal`, `sonar`) — waveforms, beamforming,
-  matched filtering, the sonar equation.
+  matched filtering, the sonar equation, matched-field localization.
 - **Communications** (`comms`) — modems including a bit-exact NATO JANUS.
 - **Ambient noise & metrics** (`noise`, `metrics`) — Wenz spectra, plus
   ISO/UNESCO/Southall standards-based metrics.
@@ -362,7 +362,7 @@ SSP varies with range), so — exactly like a range-dependent *bottom* — **no
 model honours range-dependent surface properties**: every model collapses it to
 one boundary with a `UserWarning` (`collapse={'surface': 'r0'|'rmax'|'mean'|'median'}`).
 The `Surface` carrier still lets you build, fetch, and **plot** the marginal ice
-zone (`plot_environment` draws it from `env.surface`). An elastic ice surface is
+zone (`env.plot()` draws it from `env.surface`). An elastic ice surface is
 best run with **Bellhop** (Kraken's `krakenc` aborts on an elastic top). The data
 layer can build a marginal-ice-zone surface straight from sea-ice climatology with
 `uacpy.data.sea_ice_surface_transect(start, end)`.
@@ -519,6 +519,13 @@ Environment(bathymetry=100, absorption=ConstantAbsorption(0.1))   # flat dB/λ
 Environment(bathymetry=100, absorption=Biological(          # fish-bladder layers
     [(0, 50, 1000, 5, 0.5)]))   # (z_top, z_bottom, f0, Q, a0)
 ```
+
+`fetch_environment(..., with_absorption=True)` builds the `FrancoisGarrison`
+model from the site's fetched temperature/salinity column. Its pH is pH-source
+aware: on the Copernicus SSP branch (`ssp_sources='copernicus'`) it prefers the
+date-specific Copernicus biogeochemistry `ph` field, else the cached GLODAP
+climatology when installed (`install.sh --data glodap`), else the open-ocean
+default (8.1).
 
 Default is `None` (no explicit volume absorption). The bare formulas
 `thorp_db_per_km(f)` and `francois_garrison_db_per_km(f, ...)` are available
@@ -961,7 +968,7 @@ narrow.pinned                       # {'frequency': 199.6}  (nearest sample)
 narrow.kind                         # 'pressure'
 
 line = narrow.at(depth=50)          # now coords = {'range': ...}, a 1-D cut
-peak = H.max()                      # argmax of |data| → scalar Field, coords = {}
+peak = H.max()                      # loudest point (argmax |p|; min finite dB for TL) → scalar Field
 peak.pinned                         # {'depth': 50.0, 'range': 3000.0, 'frequency': 59.6}
 ```
 
@@ -1034,6 +1041,12 @@ t = ts.times                                # seconds
 A `UserWarning` fires if `1/Δf` (the DFT period) is shorter than the waveform
 duration — refine the frequency grid so the late response does not wrap.
 
+To **plot** one cell directly, `H.at(depth=50, range=5000).plot_transfer_function()`
+draws stacked modulus-in-dB (`20·log10|H|`, top) and phase (bottom) panels, and
+`.plot_impulse_response()` the band-limited `p(t)` — both reduce-then-plot, so a
+single-receiver field needs no `.at()`. They wrap the slice-and-plot / IFFT chains
+above; use `synthesize_time_series` for the response to a specific source pulse.
+
 **(b) Manual `2·Re[ifft(H)]`** for `travelling_wave` `H(f)`, when you want full
 control. Place each model frequency at bin `round(f/Δf)`; the window length
 `1/Δf` must exceed the arrival time `r/c0`, so the grid must be fine enough:
@@ -1091,19 +1104,27 @@ Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
 
 ## 9. Visualization
 
-A small, composable helper set. The convention is uniform: **the result is the
-positional argument; `env=` adds overlays.** All are exposed at top level
+The convention is uniform: **every object you plot on its own has `.plot()`** —
+results (`tl.plot()`, `rays.plot()`, `arrivals.plot()`, `modes.plot()`, …) and
+the input carriers (`env.plot()`, `env.ssp.plot()`, `absorption.plot(freqs)`).
+The free `plot_*` functions below are the remaining public surface: the
+type-dispatcher, the grid/flexible renderers, alternate views, composition
+helpers, and the raw-array DSP/comms plotters. They are exposed at top level
 (`uacpy.plot_field`, `uacpy.plot_result`, …) and under `uacpy.plot.*`.
 
 | Function | Use |
 |---|---|
-| `plot_result(result, env=…)` | type-dispatch — calls the right plotter for any result |
-| `plot_field(field, env=…)` | auto-shape: 1 surviving axis → line, 2 → heatmap |
+| `result.plot(env=…)` / carrier `.plot()` | preferred — any result or carrier plots itself (dispatches via `plot_result`) |
+| `plot_result(result, env=…)` | type-dispatch — the function `.plot()` calls |
+| `plot_field(field, env=…)` | auto-shape a (sliced) Field: 1 surviving axis → line, 2 → heatmap |
 | `result.plot()` | shorthand for `plot_result(result)` |
+| `H.plot_transfer_function()` | stacked modulus-in-dB + phase at one receiver cell (reduce with `.at(depth=, range=)` first; a single receiver plots directly) |
+| `H.plot_impulse_response()` | band-limited `p(t)` at one cell (IFFT of `H(f)`); same reduce-then-plot shape |
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…)` | side-by-side heatmaps, one shared colourbar |
-| `plot_environment(env)` | SSP + seafloor cross-section, optional source/receiver markers |
-| `plot_ssp(env_or_ssp)` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
+| `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
+| `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
+| `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
 | `plot_overview(env, map_args, tl=…)` | three-panel map + TL + environment composite |
 
 **DSP / comms plotters.** All signal-processing and communications plotting also
@@ -1225,6 +1246,7 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy` |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| Matched-field localization | `synthesize_replica`, `replica_bank`, `csdm`, `bartlett`, `mvdr` |
 
 ```python
 from uacpy.sonar import figure_of_merit, albersheim_snr
@@ -1235,7 +1257,33 @@ fom = figure_of_merit(source_level=180, noise_level=60,
 # fom is the max allowable one-way TL — cross it with a TL field for range.
 ```
 
-See example 27 (sonar equation, reverberation, detection-range maps).
+**Matched-field processing (MFP).** Localize a source in range and depth by
+correlating measured array data against *replicas* — the modeled pressure at
+the sensors for each candidate position. Replicas are synthesized directly
+from a KRAKEN `Modes` set (the far-field modal sum, validated against
+`field.exe` to a normalized correlation of 1.0), so the modes are computed once
+and every grid point is a cheap re-sum. This path is self-contained (KRAKEN +
+numpy); it does not require OASES/OASN.
+
+```python
+import numpy as np
+from uacpy.models import Kraken
+from uacpy.sonar import synthesize_replica, replica_bank, csdm, bartlett, mvdr
+
+modes = Kraken().compute_modes(env, source)     # eigenpairs (k_m, phi_m), once
+bank  = replica_bank(modes, array_depths, cand_depths, cand_ranges)  # (N, nz, nr)
+K     = csdm(snapshots)                          # (N, L) snapshots -> (N, N) CSDM
+amb_b = bartlett(K, bank)                        # robust, broad-lobed
+amb_m = mvdr(K, bank, loading=1e-2)              # Capon: sharp, mismatch-sensitive
+iz, ir = np.unravel_index(np.argmax(amb_m), amb_m.shape)   # localization peak
+```
+
+`mvdr`'s `loading` trades resolution for robustness: small values give sharp
+Capon peaks, larger values flatten the surface toward Bartlett under
+environmental mismatch — the dominant error source in MFP.
+
+See example 27 (sonar equation, reverberation, detection-range maps) and
+example 38 (matched-field localization with KRAKEN replicas).
 
 ## 12. Digital Communications
 
@@ -1443,7 +1491,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 
 ## 17. Examples Index
 
-All 37 runnable scripts live in `uacpy/examples/`.
+All 38 runnable scripts live in `uacpy/examples/`.
 
 | # | Topic |
 |---|-------|
@@ -1484,6 +1532,7 @@ All 37 runnable scripts live in `uacpy/examples/`.
 | 35 | Underwater noise impact assessment — standards chain |
 | 36 | Modeled noise impact — ship SL through a real TL field |
 | 37 | Real-world environment — map · transmission loss · section |
+| 38 | Matched-field source localization — KRAKEN replicas, Bartlett vs MVDR |
 
 ## 18. Parameter Reference
 

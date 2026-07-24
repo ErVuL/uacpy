@@ -158,7 +158,75 @@ class TestPlotRays:
             receiver_ranges=np.array([2000.0]),
             model='Bellhop',
         )
-        fig, ax = plots.plot_rays(rays, env=env)
+        fig, ax = rays.plot(env=env)
+        plt.close(fig)
+
+    def test_edge_receiver_visible_via_xlim_margin(self, env):
+        # A single receiver at the max range must be visible — not clipped to
+        # the spine. Solved by an x-axis right margin (NOT clip_on=False, which
+        # would paint out-of-view receivers across a later zoom). Markers keep
+        # default clipping so a zoom hides them correctly.
+        from uacpy.visualization.plots._common import (
+            ZORDER_RECEIVERS, ZORDER_SOURCE,
+        )
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 50),
+                   'z': 50 + 10 * np.sin(np.linspace(0, 5, 50)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            source_depths=np.array([10.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        by_z = {line.get_zorder(): line for line in ax.lines}
+        # zoom-safe: default clipping on both markers
+        assert by_z[ZORDER_RECEIVERS].get_clip_on() is True
+        assert by_z[ZORDER_SOURCE].get_clip_on() is True
+        # edge receiver at 2.0 km sits inside the axis (right margin past it)
+        assert ax.get_xlim()[1] > 2.0
+        plt.close(fig)
+
+    def test_markers_clipped_on_user_zoom(self, env):
+        # Regression (example_11b): a wide receiver grid must NOT paint
+        # markers outside a user-set zoom window — they carry clip_on so
+        # matplotlib clips them to the axes.
+        from uacpy.visualization.plots._common import ZORDER_RECEIVERS
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 100000, 60),
+                   'z': 500 + 100 * np.sin(np.linspace(0, 8, 60)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([500.0]),
+            receiver_ranges=np.linspace(0.0, 100000.0, 21),  # 0–100 km
+            source_depths=np.array([50.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        ax.set_xlim(20, 40)                       # user zoom, as in example_11b
+        rcv = next(ln for ln in ax.lines
+                   if ln.get_zorder() == ZORDER_RECEIVERS)
+        assert rcv.get_clip_on() is True          # → far markers stay hidden
+        plt.close(fig)
+
+    def test_marker_sizes_visible(self, env):
+        # Source/receiver markers are bumped in ray plots (receiver more) so
+        # they read clearly against the ray fan.
+        from uacpy.visualization.plots._common import (
+            ZORDER_RECEIVERS, ZORDER_SOURCE,
+        )
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 50),
+                   'z': 50 + 10 * np.sin(np.linspace(0, 5, 50)),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            source_depths=np.array([10.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        by_z = {line.get_zorder(): line for line in ax.lines}
+        assert by_z[ZORDER_RECEIVERS].get_markersize() >= 6
+        assert by_z[ZORDER_SOURCE].get_markersize() >= 16
         plt.close(fig)
 
 
@@ -179,13 +247,13 @@ class TestPlotArrivals:
             receiver_ranges=np.array([2000.0]),
             model='Bellhop',
         )
-        fig, ax = plots.plot_arrivals(arr)
+        fig, ax = arr.plot()
         plt.close(fig)
 
 
 class TestPlotEnvironment:
     def test_flat_env(self, env):
-        fig, _ = plots.plot_environment(env)
+        fig, _ = env.plot()
         plt.close(fig)
 
 
@@ -193,7 +261,7 @@ class TestPlotSSP:
     def test_profile_input_depth_down_single_line(self):
         ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1520), (100, 1490),
                                                   (200, 1480)])
-        fig, ax = plots.plot_ssp(ssp)
+        fig, ax = ssp.plot()
         assert ax.get_xlabel() == 'Sound speed (m/s)'
         assert ax.get_ylabel() == 'Depth (m)'
         assert ax.yaxis_inverted()          # depth positive down
@@ -201,7 +269,7 @@ class TestPlotSSP:
         plt.close(fig)
 
     def test_environment_input(self, env):
-        fig, ax = plots.plot_ssp(env)        # isovelocity env
+        fig, ax = env.ssp.plot()             # isovelocity env
         assert len(ax.lines) == 1
         plt.close(fig)
 
@@ -211,7 +279,7 @@ class TestPlotSSP:
             matrix=np.array([[1520, 1510, 1500],
                              [1500, 1495, 1490],
                              [1480, 1478, 1475]]))
-        fig, ax = plots.plot_ssp(ssp)
+        fig, ax = ssp.plot()
         assert len(ax.lines) == 3            # one per range column
         assert len(fig.axes) > 1             # range colorbar
         plt.close(fig)
@@ -220,13 +288,14 @@ class TestPlotSSP:
         fig, ax = plt.subplots()
         ax.invert_yaxis()                    # already depth-down
         ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1490)])
-        _, ax_out = plots.plot_ssp(ssp, ax=ax)
+        _, ax_out = ssp.plot(ax=ax)
         assert ax_out is ax and ax.yaxis_inverted()
         plt.close(fig)
 
     def test_bad_input_raises(self):
+        from uacpy.visualization.plots.environment import _plot_ssp
         with pytest.raises(ConfigurationError):
-            plots.plot_ssp(42)
+            _plot_ssp(42)
 
 
 class TestPlotBottomProperties:
@@ -284,7 +353,7 @@ class TestPlotModes:
         return Modes(k=k, phi=phi, depths=depths, model='Test', frequencies=100.0)
 
     def test_plot_mode_functions(self, modes):
-        fig, _ = plots.plot_mode_functions(modes)
+        fig, _ = modes.plot()
         plt.close(fig)
 
     def test_plot_mode_wavenumbers(self, modes):
@@ -304,7 +373,7 @@ class TestPlotReflectionCoefficient:
             phi=np.zeros(91),
             model='Bounce',
         )
-        fig, _ = plots.plot_reflection_coefficient(rc)
+        fig, _ = rc.plot()
         plt.close(fig)
 
     def test_broadband(self):
@@ -315,7 +384,7 @@ class TestPlotReflectionCoefficient:
             theta=theta, R=R, phi=np.zeros_like(R),
             frequencies=freqs, model='Bounce',
         )
-        fig, _ = plots.plot_reflection_coefficient(rc)
+        fig, _ = rc.plot()
         plt.close(fig)
 
 
@@ -433,7 +502,7 @@ class TestOverview:
 
 
 class TestSeaIce:
-    """plot_sea_ice_map (mirrors the depth map) + plot_environment(sea_ice=)."""
+    """plot_sea_ice_map (mirrors the depth map) + env.plot(sea_ice=)."""
 
     def test_sea_ice_map_notation(self, monkeypatch):
         import uacpy.data.seaice_local as sil
@@ -449,10 +518,10 @@ class TestSeaIce:
         plt.close(fig)
 
     def test_environment_shows_ice(self, env):
-        fig0, ax0 = plots.plot_environment(env)            # no ice
+        fig0, ax0 = env.plot()            # no ice
         n0 = len(ax0.collections)
         plt.close(fig0)
-        fig, ax = plots.plot_environment(env, sea_ice=0.8)
+        fig, ax = env.plot(sea_ice=0.8)
         assert len(ax.collections) > n0                    # ice band added at surface
         plt.close(fig)
 
@@ -464,5 +533,6 @@ def test_compare_models_label_length_validation(tl_field):
 
 
 def test_plot_environment_rejects_non_environment():
+    from uacpy.visualization.plots.environment import _plot_environment
     with pytest.raises(ConfigurationError, match="Environment"):
-        uacpy.plot_environment("not an environment")
+        _plot_environment("not an environment")

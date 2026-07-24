@@ -215,7 +215,7 @@ def main():
     import matplotlib.pyplot as plt
     from uacpy.models.ram import RAM
     from uacpy.models.bellhop import Bellhop
-    from uacpy.visualization.plots import plot_field, plot_environment
+    from uacpy.visualization.plots import plot_field
 
     # (label, setup_fn, model_class)
     scenarios = [
@@ -294,7 +294,7 @@ def main():
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
         if env.has_range_dependent_layered_bottom():
-            fig_b, _ = plot_environment(env)
+            fig_b, _ = env.plot()
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')
             plt.close(fig_b)

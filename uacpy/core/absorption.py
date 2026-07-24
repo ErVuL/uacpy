@@ -32,6 +32,8 @@ Module-level numerics
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
@@ -256,6 +258,28 @@ class Absorption:
         ndarray, same shape as ``depths``
         """
         raise NotImplementedError
+
+    def plot(self, frequencies, *, depth: float = 0.0, **kwargs):
+        """Plot this model's volume absorption ``α(f)`` (dB/km, log-log).
+
+        Dispatches to :func:`uacpy.visualization.plot_absorption` — the carrier
+        counterpart of :meth:`Result.plot`. ``frequencies`` (Hz) is required
+        because absorption *is* a function of frequency; ``depth`` (m) is the
+        evaluation depth (matters for depth-dependent models such as
+        Francois-Garrison; Thorp is depth-invariant). ``kwargs`` are
+        forwarded."""
+        from uacpy.visualization import plot_absorption
+        freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
+        alpha_km = np.array([
+            float(np.asarray(self.alpha_db_per_m(f, depth)).reshape(-1)[0])
+            * 1000.0 for f in freqs])
+        if not np.any(alpha_km > 0):
+            warnings.warn(
+                f"Absorption.plot: α(f) is entirely non-positive at depth "
+                f"{depth:g} m, so the log-log plot will be blank. For layered "
+                f"models (e.g. Biological) pick a depth inside a layer.",
+                UserWarning, stacklevel=2)
+        return plot_absorption(freqs, absorption=alpha_km, **kwargs)
 
 
 @dataclass

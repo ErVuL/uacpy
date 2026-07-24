@@ -27,7 +27,7 @@ import numpy as np
 import uacpy
 from uacpy import SoundSpeedProfile
 from uacpy.models import Scooter
-from uacpy.visualization.plots import compare_models, plot_environment
+from uacpy.visualization.plots import compare_models
 
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
@@ -79,7 +79,7 @@ def main() -> None:
     )
 
     print("[1/2] Environment overview…")
-    fig_env, _ = plot_environment(env)
+    fig_env, _ = env.plot()
     out_env = OUTPUT_DIR / 'example_23_environment.png'
     fig_env.savefig(out_env, dpi=150, bbox_inches='tight')
     plt.close(fig_env)

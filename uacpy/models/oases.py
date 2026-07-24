@@ -1126,6 +1126,9 @@ class OASR(OASES):
         run_mode: Optional[RunMode] = None,
         *,
         frequencies: Optional[np.ndarray] = None,
+        source_waveform=None,
+        sample_rate=None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """Run OASR.
 
@@ -1144,8 +1147,18 @@ class OASR(OASES):
             Explicit frequency vector (Hz). When provided, overrides
             ``source.frequencies``. OASES treats the sweep as
             equispaced — uacpy resamples and warns if your vector is not.
+        source_waveform, sample_rate, output_duration
+            Accepted for the polymorphic ``run()`` contract; OASR computes
+            reflection coefficients only, so a non-``None`` value warns.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        self._warn_ignored_run_kwargs(
+            run_mode,
+            reason='OASR computes plane-wave reflection coefficients only',
+            source_waveform=source_waveform,
+            sample_rate=sample_rate,
+            output_duration=output_duration,
+        )
 
         angles = self.angles if self.angles is not None else np.linspace(0, 90, 181)
 

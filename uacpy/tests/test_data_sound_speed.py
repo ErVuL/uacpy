@@ -19,8 +19,8 @@ SEP = '-' * 45
 
 def _axis_body(name, values):
     body = '\n'.join(str(v) for v in [
-        f"Dataset {{", f"    Float32 {name}[{name} = {len(values)}];",
-        f"}} file;", SEP, f"{name}[{len(values)}]",
+        "Dataset {", f"    Float32 {name}[{name} = {len(values)}];",
+        "} file;", SEP, f"{name}[{len(values)}]",
         ', '.join(str(v) for v in values),
     ])
     return body.encode()
@@ -44,7 +44,7 @@ def _make_fake_http(columns):
     def fake_http(url, *, timeout, verbose, source='data'):
         # filename .../woa23_decav_t07_01.nc.ascii?...
         fname = url.split('/')[-1]
-        var = 't' if f"_t" in fname.split('.')[0] else 's'
+        var = 't' if "_t" in fname.split('.')[0] else 's'
         period = int(fname.split('_')[2][1:3])
         depths, values = columns[(var, period)]
         if '.ascii?depth' in url:

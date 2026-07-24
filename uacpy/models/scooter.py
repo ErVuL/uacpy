@@ -283,6 +283,14 @@ class Scooter(PropagationModel):
             for TIME_SERIES.
         """
         run_mode = self._resolve_run_mode(run_mode)
+        if run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                output_duration=output_duration,
+            )
         source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
             output_duration,

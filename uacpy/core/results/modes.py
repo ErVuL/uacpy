@@ -80,6 +80,7 @@ class Modes(Result):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )
 
@@ -255,6 +256,7 @@ class Modes(Result):
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )
 
@@ -350,5 +352,6 @@ class Modes(Result):
             model=self.model, backend='modal_sum',
             source_depths=np.array([z_s]),
             frequencies=self.frequencies,
+            model_source=self.model_source,
             metadata=dict(self.metadata),
         )

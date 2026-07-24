@@ -21,17 +21,18 @@ Canonical surface
 * :func:`plot_detection_probability` — ``P_D`` heatmap on [0, 1] with
   labelled probability contours (fields from
   :func:`uacpy.sonar.probability_of_detection_field`).
-* :func:`plot_rays`, :func:`plot_arrivals` — ray fans, arrival stems.
-* :func:`plot_environment` — single-panel view of the env: water column
-  (SSP, Blues cmap) + bottom (every flavour, YlOrBr cmap) + optional
-  ``source=``/``receiver=`` markers, with two independent colorbars.
+* Ray fans / arrival stems / mode functions / covariance / replicas /
+  reflection coefficients and the environment / SSP cross-sections are plotted
+  via ``result.plot()`` / ``env.plot()`` / ``ssp.plot()`` — every object that
+  renders on its own carries its own ``.plot()`` (dispatched by
+  :func:`plot_result`).
 * :func:`plot_bottom_properties` — small-multiples seabed cross-sections,
   one panel per property (cp, cs, ρ, αp, αs); shows shear & friends that
-  ``plot_environment`` (cp-only) does not.
-* :func:`plot_mode_functions`, :func:`plot_mode_wavenumbers`,
-  :func:`plot_modes_heatmap` — three distinct mode views.
-* :func:`plot_reflection_coefficient`, :func:`plot_covariance`,
-  :func:`plot_replicas` — niche typed results.
+  ``env.plot()`` (cp-only) does not.
+* :func:`plot_mode_wavenumbers`, :func:`plot_modes_heatmap` — the two
+  alternate mode views (the default ``modes.plot()`` is the mode functions).
+* :func:`plot_absorption` — volume absorption α(f) from a raw dB/km array or a
+  model string (``absorption.plot(frequencies)`` is the object-oriented form).
 
 Stylesheet (``apply_professional_style``) is opt-in — importing this
 module does not mutate ``matplotlib.rcParams``.
@@ -50,21 +51,13 @@ from uacpy.visualization.plots import (
     plot_time_snapshots,
     compare,
     compare_models,
-    plot_rays,
-    plot_arrivals,
-    plot_environment,
     plot_bottom_properties,
-    plot_ssp,
     plot_absorption,
     plot_bathymetry_map,
     plot_overview,
     plot_sea_ice_map,
-    plot_mode_functions,
     plot_mode_wavenumbers,
     plot_modes_heatmap,
-    plot_reflection_coefficient,
-    plot_covariance,
-    plot_replicas,
     plot_fk,
     plot_radon,
     plot_taup,
@@ -111,21 +104,13 @@ __all__ = [
     'plot_time_snapshots',
     'compare',
     'compare_models',
-    'plot_rays',
-    'plot_arrivals',
-    'plot_environment',
     'plot_bottom_properties',
-    'plot_ssp',
     'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',
-    'plot_mode_functions',
     'plot_mode_wavenumbers',
     'plot_modes_heatmap',
-    'plot_reflection_coefficient',
-    'plot_covariance',
-    'plot_replicas',
     'plot_fk',
     'plot_radon',
     'plot_taup',

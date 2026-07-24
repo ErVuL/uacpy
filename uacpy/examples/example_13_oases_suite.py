@@ -136,8 +136,8 @@ def main():
             result_oasr.at(frequency=result_oasr.frequencies[len(result_oasr.frequencies) // 2])
             if result_oasr.is_broadband else result_oasr
         )
-        fig2, _ = uacpy.plot.plot_reflection_coefficient(
-            rc_for_plot, show_phase=True,
+        fig2, _ = rc_for_plot.plot(
+            show_phase=True,
             title=(
                 f"OASR {result_oasr.metadata.get('reflection_type', 'P-P')} "
                 f"@ {rc_for_plot.f0:.1f} Hz"
@@ -168,9 +168,9 @@ def main():
             plt.close(fig2b)
             print("  ✓ Saved: output/example_13_oasr_broadband.png")
 
-    # Plot 3: OASN spatial covariance heatmap (Covariance → plot_covariance).
+    # Plot 3: OASN spatial covariance heatmap (Covariance → cov.plot()).
     if oasn_success and result_oasn is not None:
-        fig3, _ = uacpy.plot.plot_covariance(result_oasn)
+        fig3, _ = result_oasn.plot()
         fig3.savefig(OUTPUT_DIR / 'example_13_oasn_covariance.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig3)

@@ -45,7 +45,6 @@ from uacpy import Bottom  # noqa: E402
 from uacpy.models import RAM  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
     plot_field,
-    plot_environment,
 )
 
 
@@ -206,11 +205,11 @@ def main():
     print("\nGenerating plots...")
 
     # Plot 1: Advanced environment overview
-    fig1, axes1 = plot_environment(env)
+    fig1, axes1 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_05_environment.png', dpi=150, bbox_inches='tight')
     print("  ✓ Saved: example_05_environment.png")
 
-    # ``plot_environment`` already renders SSP and bottom in two panels;
+    # ``env.plot()`` already renders SSP and bottom in two panels;
     # the previous SSP-only and bottom-only plots are subsumed.
 
     # Plot 4: TL field result

@@ -7,7 +7,7 @@ Two helpers:
   of the canonical :mod:`uacpy.visualization` surface because it consumes
   a *dict of models* and operates on already-sliced TL profiles.
 * :func:`create_example_report` — one-shot orchestrator that runs the
-  four canonical plotters (:func:`plot_environment`,
+  four canonical plotters (``env.plot()``,
   :func:`compare_models`, :func:`compare`, plus
   :func:`plot_model_statistics` above) and saves them under a common
   prefix.
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict
 
 from uacpy.visualization import (
-    plot_environment, compare_models, compare,
+    compare_models, compare,
 )
 
 # Default output directory: next to this file, so examples drop plots under
@@ -136,7 +136,7 @@ def create_example_report(example_num: int, title: str, description: str,
     Generates and persists, under ``output_dir`` (default
     ``<examples>/output/``):
 
-    * ``<prefix>_environment.png`` — :func:`plot_environment` with source
+    * ``<prefix>_environment.png`` — ``env.plot()`` with source
       and receiver markers.
     * ``<prefix>_fields.png`` — :func:`compare_models` heatmap grid.
     * ``<prefix>_curves.png`` — TL-vs-range and TL-vs-depth overlays via
@@ -180,7 +180,7 @@ def create_example_report(example_num: int, title: str, description: str,
     print("\nGenerating plots...")
 
     # Plot 1: Environment overview
-    fig, _ = plot_environment(env, source=source, receiver=receiver)
+    fig, _ = env.plot(source=source, receiver=receiver)
     env_path = output_dir / f'{output_prefix}_environment.png'
     fig.savefig(env_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
