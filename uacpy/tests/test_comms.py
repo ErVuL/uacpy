@@ -122,6 +122,20 @@ class TestSync:
         assert abs(k - offset) <= 1
 
 
+class TestFadingChannelConvention:
+    def test_gain_sampled_at_input_time(self):
+        # Pins the documented convention y[n] = Σ taps[i, n-d_i]·x[n-d_i]:
+        # tap gain multiplies the input sample it delays, so taps needs only
+        # len(signal) columns.
+        x = np.array([1.0, 2.0, 3.0], dtype=complex)
+        taps = np.array([[1.0, 1.0, 1.0],
+                         [10.0, 20.0, 30.0]], dtype=complex)
+        y = comms.apply_fading_channel(x, taps, [0, 2])
+        # direct path: x itself; delayed path: taps[1, m]*x[m] shifted by 2
+        expected = np.array([1.0, 2.0, 3.0 + 10.0, 40.0, 90.0], dtype=complex)
+        assert np.allclose(y, expected)
+
+
 class TestChannelEstimation:
     def test_ls_and_omp_recover_sparse_channel(self):
         rng = np.random.default_rng(6)

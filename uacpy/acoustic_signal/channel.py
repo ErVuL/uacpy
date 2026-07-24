@@ -19,9 +19,9 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     """Channel impulse response from discrete arrivals.
 
     Places each arrival ``amplitudes[i]`` at delay ``delays_s[i]``. With
-    ``fractional=True`` the energy is split linearly between the two nearest
-    samples (band-unlimited fractional delay); otherwise it is placed at the
-    nearest sample.
+    ``fractional=True`` the amplitude is split linearly between the two
+    nearest samples (band-unlimited fractional delay); otherwise it is placed
+    at the nearest sample.
 
     Parameters
     ----------
@@ -86,7 +86,10 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
     """Real impulse response from a one-sided transfer function ``H(f)``.
 
     Resamples ``H`` onto a uniform DFT grid ``[0, fs/2]`` and inverse-transforms.
-    ``frequencies`` must be non-negative and increasing.
+    ``frequencies`` must be non-negative and increasing. Grid bins outside
+    ``[frequencies[0], frequencies[-1]]`` are **zero** — a band-limited model
+    ``H(f)`` carries no energy out of band (constant extrapolation would
+    fabricate a DC/high-frequency plateau in the impulse response).
 
     Returns ``(t, h)``.
     """
@@ -101,7 +104,8 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
         n_samples = 2 * (f.size - 1) if f.size > 1 else 2
     n_rfft = n_samples // 2 + 1
     grid = np.linspace(0.0, fs / 2.0, n_rfft)
-    Hr = np.interp(grid, f, Hc.real) + 1j * np.interp(grid, f, Hc.imag)
+    Hr = (np.interp(grid, f, Hc.real, left=0.0, right=0.0)
+          + 1j * np.interp(grid, f, Hc.imag, left=0.0, right=0.0))
     h = np.fft.irfft(Hr, n=n_samples)
     t = np.arange(n_samples) / fs
     return t, h

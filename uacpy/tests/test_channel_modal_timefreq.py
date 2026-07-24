@@ -52,6 +52,21 @@ class TestChannel:
         _, h = impulse_response_from_transfer_function(H, f, FS, n_samples=128)
         assert np.argmax(np.abs(h)) == 0
 
+    def test_ir_from_bandlimited_tf_has_no_out_of_band_energy(self):
+        # H given only on a band; out-of-band DFT bins must be zero, not
+        # held at the band-edge values (constant extrapolation would put an
+        # artificial DC-to-band plateau into the impulse response).
+        f = np.linspace(1000.0, 2000.0, 41)
+        H = np.ones_like(f, dtype=complex)
+        n = 256
+        _, h = impulse_response_from_transfer_function(H, f, FS, n_samples=n)
+        spec = np.fft.rfft(h, n=n)
+        grid = np.fft.rfftfreq(n, 1.0 / FS)
+        out_band = (grid < 900.0) | (grid > 2100.0)
+        in_band = (grid >= 1100.0) & (grid <= 1900.0)
+        assert np.max(np.abs(spec[out_band])) < 1e-9 * np.max(np.abs(spec))
+        assert np.min(np.abs(spec[in_band])) > 0.5
+
     def test_negative_delay_raises(self):
         with pytest.raises(ConfigurationError):
             impulse_response([1.0], [-0.01], FS)

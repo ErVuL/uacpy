@@ -258,6 +258,42 @@ class TestOutputDurationEndToEnd:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class TestSynthesisCarriesMetadata:
+    """Time-domain synthesis must carry the source Field's metadata forward
+    (pinned-work-dir output paths per DOCUMENTATION §6, c0/c_min, …) —
+    every other derived-Field path preserves it."""
+
+    @staticmethod
+    def _tf_with_metadata():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)          # Δf = 10 Hz
+        return Field(
+            data=np.ones((1, 1, len(freqs)), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'grn_file': '/pinned/model.grn', 'c0': 1500.0},
+        )
+
+    def test_synthesize_time_series_keeps_source_metadata(self):
+        tf = self._tf_with_metadata()
+        wf = np.zeros(int(0.05 * FS))
+        wf[: int(0.005 * FS)] = 1.0
+        ts = tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+        assert ts.metadata['grn_file'] == '/pinned/model.grn'
+        assert ts.metadata['c0'] == 1500.0
+        assert ts.metadata['window'] == 'hann'          # synthesis keys too
+
+    def test_to_time_trace_keeps_source_metadata(self):
+        tf = self._tf_with_metadata()
+        trace = tf.to_time_trace(depth=25.0, range=100.0)
+        assert trace.metadata['grn_file'] == '/pinned/model.grn'
+        assert trace.metadata['c0'] == 1500.0
+        assert trace.metadata['window'] == 'hann'
+
+
 class TestDFTWraparoundWarning:
     """``Field.synthesize_time_series`` should warn when the source
     waveform is longer than the IFFT period ``1/Δf``."""

@@ -1158,7 +1158,11 @@ def _ifft_to_trace(
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
         model_source=tf.model_source,
-        metadata={'window': window, 'source_model': tf.model},
+        # Carry the source Field's metadata forward (output paths attached
+        # under a pinned work_dir, c0/c_min, …) — every other derived-Field
+        # path (slices, id_kwargs clones) preserves it; synthesis must too.
+        metadata={**dict(tf.metadata),
+                  'window': window, 'source_model': tf.model},
     )
 
 
@@ -1279,5 +1283,8 @@ def _synthesize_time_series(
         frequencies=tf.frequencies,
         phase_reference=tf.phase_reference,
         model_source=tf.model_source,
-        metadata={'source_waveform_sample_rate': sample_rate, 'window': window},
+        # Carry the source Field's metadata forward (see _ifft_to_trace).
+        metadata={**dict(tf.metadata),
+                  'source_waveform_sample_rate': sample_rate,
+                  'window': window},
     )

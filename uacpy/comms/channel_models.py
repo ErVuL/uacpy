@@ -84,7 +84,15 @@ def fading_taps(n_taps, n_samples, doppler_hz, sample_rate, *, rician_k=0.0,
 
 
 def apply_fading_channel(signal, taps, delays_samples):
-    """Apply a time-varying channel: ``y[n] = sum_i taps[i,n] * x[n - d_i]``.
+    """Apply a time-varying channel: ``y[n] = sum_i taps[i, n-d_i] * x[n-d_i]``.
+
+    Each tap's gain is sampled at the **input** time of the sample it delays
+    (``taps[i, m]`` multiplies ``x[m]``), which is why ``taps`` only needs
+    ``len(signal)`` columns. The textbook tap-delay line samples the gain at
+    the output time instead (``taps[i, n]·x[n-d_i]``); the two differ only
+    by a per-tap gain shift of ``d_i`` samples and are statistically
+    indistinguishable when Doppler × delay spread ≪ 1 — always true for a
+    physical underwater channel.
 
     ``taps`` is ``(n_taps, >=len(signal))``; ``delays_samples`` the integer tap
     delays. Returns ``y`` of length ``len(signal) + max(delay)``.
