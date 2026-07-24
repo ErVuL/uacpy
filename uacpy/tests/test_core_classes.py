@@ -219,6 +219,15 @@ class TestField:
         assert field.n_depths == 10
         assert not field.is_complex
 
+    def test_to_dict_roundtrip_preserves_model_source(self):
+        from uacpy.models.sources import model_source
+        src = model_source('acoustics_toolbox')
+        field = self._tl_field(
+            np.zeros((2, 2)), np.array([100.0, 200.0]),
+            np.array([10.0, 20.0]), model_source=src)
+        rt = Field.from_dict(field.to_dict())
+        assert rt.model_source is src
+
     def test_field_at_point(self):
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
@@ -815,6 +824,40 @@ class TestFieldSlicing:
         d_idx, r_idx = np.unravel_index(flat, f.data.shape)
         assert m.pinned['depth'] == float(f.coords['depth'][d_idx])
         assert m.pinned['range'] == float(f.coords['range'][r_idx])
+
+    def _tl_grid(self, data):
+        from uacpy.core.results import Field
+        d = np.asarray(data, dtype=float)
+        return Field(
+            data=d,
+            coords={'depth': np.arange(d.shape[0], dtype=float) * 10 + 10,
+                    'range': np.arange(d.shape[1], dtype=float) * 100 + 100},
+            model='Test', frequencies=100.0,
+        )
+
+    def test_max_on_tl_returns_loudest_not_sentinel(self):
+        # kind='tl': loudest = smallest dB; the 600 dB no-data sentinel and an
+        # 80 dB cell must lose to 35 dB.
+        from uacpy.core.constants import NO_DATA_TL_DB
+        f = self._tl_grid([[40.0, NO_DATA_TL_DB], [35.0, 80.0]])
+        m = f.max()
+        assert float(m.data) == pytest.approx(35.0)
+        assert m.pinned['depth'] == 20.0 and m.pinned['range'] == 100.0
+
+    def test_max_on_tl_skips_nan(self):
+        f = self._tl_grid([[np.nan, 50.0], [45.0, 60.0]])
+        assert float(f.max().data) == pytest.approx(45.0)
+
+    def test_max_all_nan_raises(self):
+        from uacpy.core.exceptions import ConfigurationError
+        f = self._tl_grid([[np.nan, np.nan]])
+        with pytest.raises(ConfigurationError, match='finite'):
+            f.max()
+
+    def test_max_complex_unchanged_argmax_abs(self):
+        f = self._full_grid(complex_data=True)   # |data| argmax, not dB path
+        m = f.max()
+        assert abs(complex(m.data)) == pytest.approx(np.max(np.abs(f.data)))
 
     def test_tf_at_frequency_drops_frequency_axis(self):
         tf = self._tf()

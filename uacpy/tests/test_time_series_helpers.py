@@ -16,6 +16,8 @@ across RAM / Scooter / KrakenField / Bellhop / OASP:
 * DFT-wraparound warning in ``Field.synthesize_time_series``.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -281,6 +283,42 @@ class TestDFTWraparoundWarning:
         wf[: int(0.005 * FS)] = 1.0  # short non-zero burst
         with pytest.warns(UserWarning, match=r"wraps back"):
             tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+
+
+class TestSynthesisRangeSpanWarning:
+    """All cells share one time window anchored at the nearest cell; a
+    receiver-range span wider than the window aliases far-range arrivals
+    back into early bins. ``Field.synthesize_time_series`` must warn."""
+
+    @staticmethod
+    def _pure_delay_tf(ranges, df=25.0):
+        from uacpy.core.results import Field, PhaseReference
+        c0 = 1500.0
+        freqs = np.arange(df, 16.0 * df + df, df)
+        H = np.exp(-2j * np.pi * freqs[None, None, :]
+                   * (np.asarray(ranges)[None, :, None] / c0))
+        return Field(
+            data=H,
+            coords={'depth': np.array([50.0]),
+                    'range': np.asarray(ranges, dtype=float),
+                    'frequency': freqs},
+            model='Synthetic', frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'c0': c0})
+
+    def test_warns_when_range_span_exceeds_window(self):
+        tf = self._pure_delay_tf([100.0, 3000.0])   # 1.93 s spread, ~1 s window
+        wf = np.zeros(64); wf[0] = 1.0
+        with pytest.warns(UserWarning, match=r"range span|wrap"):
+            tf.synthesize_time_series(wf, sample_rate=4000.0)
+
+    def test_no_span_warning_for_single_range(self):
+        tf = self._pure_delay_tf([100.0])
+        wf = np.zeros(64); wf[0] = 1.0
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            tf.synthesize_time_series(wf, sample_rate=4000.0)
+        assert not [w for w in rec if 'range span' in str(w.message)]
 
 
 class TestSynthesisSizeCap:
