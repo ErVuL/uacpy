@@ -139,6 +139,9 @@ def read_shd_bin(
             For a broadband file, pass ``frequency=`` per frequency (or iterate
             ``freqVec`` calling this once per entry) — do not treat
             ``pressure`` as spanning ``freqVec``.
+            Cells the engine never wrote (exact zeros on disk — Bellhop's
+            r=0 column and ray shadow zones, an empty KRAKEN modal sum)
+            are returned as NaN, uacpy's no-data convention.
         - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
             cube was sliced at (``frequency`` snapped to the nearest ``freqVec``
             entry, or ``freqVec[0]`` when ``frequency`` is None).
@@ -293,6 +296,16 @@ def read_shd_bin(
                         pressure[itheta, isz, irz, :] = temp[0::2] + 1j * temp[1::2]
             freq_label = float(freqVec[0]) if len(freqVec) else None
 
+    # AT engines zero-initialise the pressure grid and never touch cells no
+    # energy reached (Bellhop: the r=0 column and ray shadow zones; an empty
+    # KRAKEN modal sum below cutoff), so an exact complex zero on disk means
+    # "no data", not a field value — a computed field is never exactly 0 in
+    # float. Surface those cells as NaN, uacpy's no-data convention (RAM uses
+    # the same for absorbing-layer / outside-PE-grid cells), so TL reductions
+    # and metrics exclude them via np.isfinite instead of reading a huge
+    # pressure-floor dB level as real.
+    pressure[pressure == 0] = np.nan
+
     return {
         "title": title,
         "PlotType": PlotType,
@@ -406,6 +419,9 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     fid.close()
     pressure = temp[0::2, :].T + 1j * temp[1::2, :].T
+    # Exact complex zero = cell the engine never wrote (see read_shd_bin);
+    # surface as NaN, uacpy's no-data convention.
+    pressure[pressure == 0] = np.nan
 
     return {
         "title": title,

@@ -1484,7 +1484,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 |---------|-------------|
 | `binary not found` / model won't run | native binaries aren't built — run `./install.sh -y` (lands in `uacpy/bin/`, gitignored); pick a backend with `--bellhop fortran\|cxx\|cuda`. |
 | `UnsupportedFeatureError` | the model can't honour that `RunMode` or env axis. Check `model.supports_mode(...)`; unsupported env *shapes* are reduced by `_project_environment()` (one `UserWarning` per dropped feature) — override the policy with `Model(collapse={...})`. |
-| TL is `inf`/`NaN` at the source | `r = 0` and very-near-field cells are sentinel/NaN by construction (TL undefined at zero range); start receiver ranges past the first cell. |
+| TL is `NaN` in places | `NaN` marks no-data cells: `r = 0` (TL undefined at zero range) and, for Bellhop, cells no ray reached (shadow zones). Reductions and `uacpy.metrics` exclude them via `np.isfinite`; plots leave them blank. |
 | OASES tests skipped / `requires_oases` | OASES is academic-licensed and not bundled; fetch it via `install.sh --oases yes`. Run only the rest with `pytest -m "not requires_oases"`. |
 | CUDA backend silently slow | driver/toolkit mismatch falls back to Fortran with a warning — check the emitted backend; pin with `Bellhop(backend="fortran")`. |
 | Wrong Python / missing deps | use the workspace venv (`../pyenv/bin/python`), not system Python; `pip install -e ".[dev]"`. |

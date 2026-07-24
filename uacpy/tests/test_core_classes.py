@@ -835,11 +835,10 @@ class TestFieldSlicing:
             model='Test', frequencies=100.0,
         )
 
-    def test_max_on_tl_returns_loudest_not_sentinel(self):
-        # kind='tl': loudest = smallest dB; the 600 dB no-data sentinel and an
-        # 80 dB cell must lose to 35 dB.
-        from uacpy.core.constants import NO_DATA_TL_DB
-        f = self._tl_grid([[40.0, NO_DATA_TL_DB], [35.0, 80.0]])
+    def test_max_on_tl_returns_loudest(self):
+        # kind='tl': loudest = smallest dB; a NaN no-data cell and an 80 dB
+        # cell must lose to 35 dB.
+        f = self._tl_grid([[40.0, np.nan], [35.0, 80.0]])
         m = f.max()
         assert float(m.data) == pytest.approx(35.0)
         assert m.pinned['depth'] == 20.0 and m.pinned['range'] == 100.0

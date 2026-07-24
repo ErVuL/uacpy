@@ -1451,20 +1451,21 @@ class Kraken(_KrakenBase):
                 shd_file, source, receiver, is_rd, n_profiles,
                 broadband, freq_vec, return_pressure, fm, base_name)
 
-            # No-propagation guard: an all-floor field means the modal sum was
-            # empty — Kraken found 0 trapped modes (frequency below the
-            # waveguide's modal cutoff, or c_high too low). field.exe still
-            # emits a uniform no-signal sentinel; flag it rather than return a
-            # silent all-max-TL field (compute_modes raises on the same case).
+            # No-propagation guard: an empty modal sum — Kraken found 0
+            # trapped modes (frequency below the waveguide's modal cutoff, or
+            # c_high too low) — leaves field.exe's grid untouched, which the
+            # SHD reader surfaces as all-NaN (no-data). Flag it rather than
+            # return a silent empty field (compute_modes raises on the same
+            # case).
             fd = np.asarray(field.data)
             finite = np.isfinite(fd)
-            if finite.any() and not np.any(np.abs(fd[finite]) > PRESSURE_FLOOR):
+            if not np.any(np.abs(fd[finite]) > PRESSURE_FLOOR):
                 warnings.warn(
                     f"{self.model_name}: no propagating field — the modal sum "
                     f"is empty (0 trapped modes: the frequency is below the "
                     f"waveguide's modal cutoff, or c_high is too low). The "
-                    f"returned TL is a uniform no-signal sentinel, not a "
-                    f"physical result; raise the frequency or c_high.",
+                    f"returned field is all-NaN (no data), not a physical "
+                    f"result; raise the frequency or c_high.",
                     UserWarning, stacklevel=2,
                 )
 

@@ -183,10 +183,10 @@ def main():
               f"with {stack.n_slabs} source-depth slabs")
         for sd_value, slab in stack:
             tl = np.asarray(slab.tl)
-            real = tl[(tl > 0) & (tl < 500)]
+            real = tl[np.isfinite(tl)]        # NaN = no-data (no ray reached)
             if real.size:
                 print(f"      sd={sd_value:6.1f} m  →  median TL "
-                      f"{np.nanmedian(real):.1f} dB")
+                      f"{np.median(real):.1f} dB")
     except Exception as e:
         print(f"  ✗ Error: {e}")
         stack = None

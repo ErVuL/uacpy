@@ -207,21 +207,6 @@ class Field(Result):
         return np.asarray(self.data, dtype=float)
 
     @property
-    def finite_tl(self) -> np.ndarray:
-        """:attr:`tl` with the AT "no data" sentinel masked to ``NaN``.
-
-        Bellhop fills cells that received no ray arrivals (the r=0 column and
-        honest shadow zones) with zero pressure, which reads as
-        ``NO_DATA_TL_DB`` (~600 dB). Reach for this accessor when *reducing*
-        TL — ``field.finite_tl.mean()``, ``np.nanmax(field.finite_tl)``,
-        colormaps — so the sentinel does not silently poison the statistic;
-        :attr:`tl` returns the raw values (including the sentinel) unchanged."""
-        from uacpy.core.constants import NO_DATA_TL_DB
-        tl = np.array(self.tl, dtype=float)
-        tl[tl >= NO_DATA_TL_DB - 1.0] = np.nan
-        return tl
-
-    @property
     def p(self) -> np.ndarray:
         """Complex pressure / transfer-function values.
 
@@ -377,20 +362,20 @@ class Field(Result):
         """Slice at the loudest field point.
 
         Complex / time-domain data: global argmax of ``|data|``. Real dB
-        (``kind='tl'``): the *minimum* finite TL — smaller dB is louder —
-        with ``NaN`` and the AT no-data sentinel excluded (via
-        :attr:`finite_tl`). Every axis collapses to a pinned scalar; the
-        returned Field has empty :attr:`coords`, 0-D :attr:`data`, and
-        every original axis recorded in :attr:`pinned`."""
+        (``kind='tl'``): the *minimum* finite TL — smaller dB is louder.
+        ``NaN`` no-data cells (e.g. Bellhop cells no ray reached) are
+        excluded. Every axis collapses to a pinned scalar; the returned
+        Field has empty :attr:`coords`, 0-D :attr:`data`, and every
+        original axis recorded in :attr:`pinned`."""
         if self.data.size == 0:
             raise ConfigurationError("Field.max: data is empty")
         if self.kind == 'tl':
-            strength = -self.finite_tl          # loudest = smallest dB
+            strength = -np.asarray(self.tl, dtype=float)  # loudest = smallest dB
         else:
             strength = np.abs(self.data)
         if not np.isfinite(strength).any():
             raise ConfigurationError(
-                "Field.max: no finite samples (all NaN / no-data sentinel)")
+                "Field.max: no finite samples (all NaN no-data cells)")
         flat = int(np.nanargmax(strength))
         idx = np.unravel_index(flat, self.data.shape)
         idx_map = {name: int(i) for name, i in zip(self.coords, idx)}

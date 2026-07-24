@@ -53,6 +53,19 @@ class TestBellhopRunModes:
         assert np.all(result.tl > 0), "TL should be positive"
 
     @pytest.mark.requires_binary
+    def test_r0_column_is_no_data_nan(self, setup_env, setup_source):
+        """Bellhop writes zero pressure at r=0 (no ray travels zero distance);
+        the SHD reader surfaces those cells as NaN no-data."""
+        rcv = Receiver(depths=np.array([25.0, 50.0, 75.0]),
+                       ranges=np.array([0.0, 1000.0, 3000.0]))
+        result = Bellhop(verbose=False).run(
+            env=setup_env, source=setup_source, receiver=rcv,
+            run_mode=RunMode.COHERENT_TL)
+        tl = np.asarray(result.tl)
+        assert np.all(np.isnan(tl[:, 0]))
+        assert np.all(np.isfinite(tl[:, 1:]))
+
+    @pytest.mark.requires_binary
     def test_bellhop_incoherent_tl(self, setup_env, setup_source, setup_receiver):
         """Test Bellhop incoherent TL (run_mode=RunMode.INCOHERENT_TL)."""
         bellhop = Bellhop(verbose=False)
@@ -266,19 +279,23 @@ class TestAdvancedBeamTypes:
 
     @pytest.mark.requires_binary
     def test_cartesian_beam(self, env, source, receiver):
-        """Test Cartesian beam (type 'C')."""
+        """Test Cartesian beam (type 'C').
+
+        Cerveny-style beams leave cells outside every beam's footprint
+        unwritten — those come back as NaN no-data cells, so assert real
+        data arrives somewhere rather than everywhere."""
         bellhop = Bellhop(verbose=False, beam_type='C')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.data))
+        assert np.any(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
     def test_ray_centered_beam(self, env, source, receiver):
-        """Test ray-centered beam (type 'R')."""
+        """Test ray-centered beam (type 'R'); no-data cells as for 'C'."""
         bellhop = Bellhop(verbose=False, beam_type='R')
         result = bellhop.run(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.data))
+        assert np.any(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
     def test_beam_type_changes_tl(self, env, source, receiver):
@@ -382,8 +399,8 @@ class TestBellhopRangeDependentSSP:
         bh = Bellhop(verbose=False, interp_ssp='quad', backend=backend)
         res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
         tl = np.asarray(res.tl)
-        # Drop the 600 dB shadow sentinels Bellhop fills in.
-        real = tl[(tl > 0) & (tl < 500)]
+        # Cells no ray reached (shadow zones) are NaN no-data cells.
+        real = tl[np.isfinite(tl)]
         assert real.size > tl.size * 0.5, (
             'most cells should carry real TL values'
         )

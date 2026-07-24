@@ -393,6 +393,38 @@ class TestRamsurfReaderDepthAxis:
         assert np.allclose(depths, np.array([2.0, 4.0, 6.0, 8.0, 10.0]))
 
 
+class TestShdNoDataCells:
+    """Exact-zero SHD pressure cells — grid points the engine never wrote
+    (Bellhop no-ray cells, an empty KRAKEN modal sum) — surface as NaN,
+    uacpy's no-data convention."""
+
+    def test_read_shd_asc_zero_pressure_is_nan(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_asc
+        # 1 freq, 1 theta, 1 source, 2 receiver depths, 2 ranges; the
+        # (depth 0, range 0) cell is an exact complex zero = no data.
+        header = [
+            "'test'", "'rectilin'",
+            "1 1 1 2 2", "100.0 0.0",
+            "100.0",             # freq_vec
+            "0.0",               # theta
+            "50.0",              # s_z
+            "10.0", "20.0",      # r_z
+            "100.0", "200.0",    # r_r
+        ]
+        pressure_rows = [
+            "0.0", "0.0", "0.5", "0.25",     # depth 10 m: no-data, 0.5+0.25j
+            "1.0", "0.0", "2.0", "-1.0",     # depth 20 m: 1+0j, 2-1j
+        ]
+        p = tmp_path / "t.shd.asc"
+        p.write_text("\n".join(header + pressure_rows) + "\n")
+        pr = read_shd_asc(p)['pressure']
+        assert pr.shape == (2, 2)
+        assert np.isnan(pr[0, 0])
+        assert pr[0, 1] == pytest.approx(0.5 + 0.25j)
+        assert pr[1, 0] == pytest.approx(1.0 + 0.0j)
+        assert pr[1, 1] == pytest.approx(2.0 - 1.0j)
+
+
 class TestReaderCorruptFileRaises:
     """The io readers' failure path: a truncated / garbage binary must raise
     the typed :class:`FileFormatError`, not a bare struct/EOF error or a

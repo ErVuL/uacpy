@@ -120,8 +120,8 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
 
 # Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
 # ``vmax = 120 dB``. A fixed scale keeps TL panels directly comparable across
-# models / frequencies / runs (and the 600 dB no-data sentinel some AT binaries
-# emit clips harmlessly to the top).
+# models / frequencies / runs. No-data cells (e.g. Bellhop cells no ray
+# reached) are NaN and render as the axes background.
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 

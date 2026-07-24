@@ -921,11 +921,11 @@ class Bellhop(PropagationModel):
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
-        # Bellhop fills the r=0 column with the 600 dB "no data" sentinel
-        # because no rays have travelled distance zero. Newcomers using
+        # Bellhop never writes the r=0 column (no ray travels zero
+        # distance), so it comes back as NaN no-data cells. Newcomers using
         # ``np.linspace(0, R, N)`` for ``receiver.ranges`` hit a wall of
-        # 600 dB values at r=0 and rightly wonder what is wrong. Warn once
-        # per ``Bellhop`` instance to nudge them toward a non-zero start.
+        # NaN at r=0 and rightly wonder what is wrong. Warn once per
+        # ``Bellhop`` instance to nudge them toward a non-zero start.
         if (
             run_mode in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
                          RunMode.SEMICOHERENT_TL)
@@ -935,10 +935,10 @@ class Bellhop(PropagationModel):
         ):
             warnings.warn(
                 f"{self.model_name}: receiver.ranges starts at r=0 m. "
-                f"Bellhop fills that column with the 600 dB no-data "
-                f"sentinel (no rays have travelled zero distance). "
-                f"Start ranges at a small positive value "
-                f"(e.g. ``np.linspace(eps, R, N)``) to avoid surprise.",
+                f"Bellhop writes no data there (no ray travels zero "
+                f"distance), so that column is NaN. Start ranges at a "
+                f"small positive value (e.g. ``np.linspace(eps, R, N)``) "
+                f"to avoid surprise.",
                 UserWarning, stacklevel=2,
             )
             self._warned_r0_sentinel = True
@@ -1062,25 +1062,6 @@ class Bellhop(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
             result = reader(output_file)
-
-            # Bellhop fills the r=0 column with zero pressure ⇒ TL=600 dB
-            # (the AT "no data" sentinel: no rays have travelled distance
-            # zero). Replace that column with NaN so downstream numerics
-            # (.tl.min(), np.nanmean, plots) ignore it rather than read
-            # 600 dB as a real value. Honest shadow zones elsewhere
-            # keep the 600 dB marker.
-            if rt in ('C', 'I', 'S'):
-                if isinstance(result, ResultStack):
-                    pf_slabs = result.slabs
-                else:
-                    pf_slabs = [result]
-                for slab in pf_slabs:
-                    if (
-                        getattr(slab, 'ranges', None) is not None
-                        and slab.ranges.size > 0
-                        and float(slab.ranges[0]) == 0.0
-                    ):
-                        slab.data[:, 0] = np.nan
 
             # The .ray header records only NSz (count), not Pos%Sz; the
             # reader returns the stack with a placeholder coordinate.

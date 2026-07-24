@@ -57,6 +57,17 @@ class TestTLRmseBasic:
         with pytest.raises(ConfigurationError):
             uacpy.metrics.tl_rmse(a, object())
 
+    def test_nan_no_data_cells_excluded(self):
+        # NaN marks a no-data cell (e.g. a Bellhop cell no ray reached); it
+        # must be excluded from every statistic, not read as a value.
+        d = np.array([10.0, 20.0])
+        r = np.array([100.0, 200.0])
+        a = _tl_field(np.array([[60.0, np.nan], [62.0, 64.0]]), d, r)
+        b = _tl_field(np.array([[61.0, 70.0], [63.0, 65.0]]), d, r)
+        assert tl_rmse(a, b) == pytest.approx(1.0)
+        assert tl_max_error(a, b) == pytest.approx(1.0)
+        assert tl_bias(a, b) == pytest.approx(-1.0)
+
 
 class TestGridAlignment:
     """Grids agreeing to ~1 mm compare directly (models interpolate onto the
