@@ -185,6 +185,10 @@ class Surface:
         def _pull(attr):
             return float(reduce([getattr(p, attr) for p in self.properties]))
         p0 = self.properties[0]
+        if p0.acoustic_type in ('vacuum', 'rigid'):
+            # Parameter-free types have nothing to average.
+            return Surface(properties=[BoundaryProperties(
+                acoustic_type=p0.acoustic_type)])
         return Surface(properties=[BoundaryProperties(
             acoustic_type=p0.acoustic_type,
             sound_speed=_pull('sound_speed'),

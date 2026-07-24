@@ -6,7 +6,7 @@ bottom properties, and their range-dependent variants. Split out of
 import copy as _copy
 import numpy as np
 from typing import List, Tuple, Optional, Dict
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
@@ -108,10 +108,13 @@ class BoundaryProperties:
     acoustic_type : str, optional
         Boundary type: 'vacuum', 'rigid', 'half-space', 'file'.
         Inferred from the supplied parameters when omitted: ``reflection_file``
-        → ``'file'``, any non-default cp/ρ/α/cs/roughness → ``'half-space'``,
-        nothing → ``'vacuum'``. Pass ``acoustic_type='rigid'`` explicitly (a
-        parameter-free physical model). To build a bottom from a grain size,
-        use :meth:`from_grain_size` — there is no ``'grain-size'`` type.
+        → ``'file'``, any **explicitly passed** cp/ρ/α/cs/roughness →
+        ``'half-space'`` (even a value equal to the documented default —
+        passing ``sound_speed=1600`` means a 1600 m/s half-space, never a
+        vacuum), nothing → ``'vacuum'``. Pass ``acoustic_type='rigid'``
+        explicitly (a parameter-free physical model). To build a bottom from a
+        grain size, use :meth:`from_grain_size` — there is no ``'grain-size'``
+        type.
     density : float
         Density (g/cm³)
     sound_speed : float
@@ -154,20 +157,46 @@ class BoundaryProperties:
     """
 
     acoustic_type: Optional[str] = None
-    density: float = 1.5
-    sound_speed: float = 1600.0
-    attenuation: float = 0.5
-    roughness: float = 0.0
-    shear_speed: float = 0.0
-    shear_attenuation: float = 0.0
+    density: Optional[float] = None
+    sound_speed: Optional[float] = None
+    attenuation: Optional[float] = None
+    roughness: Optional[float] = None
+    shear_speed: Optional[float] = None
+    shear_attenuation: Optional[float] = None
     grain_size_phi: Optional[float] = None
     reflection_file: Optional[str] = None
     name: Optional[str] = None
     data_sources: tuple = ()
 
+    # Resolved values for acoustic parameters left unset. The dataclass
+    # defaults are ``None`` sentinels so "explicitly passed" is detectable:
+    # BoundaryProperties(sound_speed=1600) means a 1600 m/s half-space even
+    # though 1600 is also the resolved default — value-vs-default comparison
+    # cannot tell the two apart. After ``__post_init__`` every attribute
+    # carries a concrete float.
+    _ACOUSTIC_DEFAULTS = {
+        'density': 1.5,
+        'sound_speed': 1600.0,
+        'attenuation': 0.5,
+        'roughness': 0.0,
+        'shear_speed': 0.0,
+        'shear_attenuation': 0.0,
+    }
+
     def __post_init__(self):
         self.data_sources = _coerce_data_sources(
             self.data_sources, "BoundaryProperties")
+
+        explicit = {
+            name for name in self._ACOUSTIC_DEFAULTS
+            if getattr(self, name) is not None
+        }
+        for name, default in self._ACOUSTIC_DEFAULTS.items():
+            if getattr(self, name) is None:
+                setattr(self, name, default)
+            else:
+                setattr(self, name, float(getattr(self, name)))
+
         # sound_speed is non-negative (0 ok for vacuum/rigid), unlike
         # SedimentLayer.sound_speed which must be strictly positive.
         _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
@@ -175,17 +204,13 @@ class BoundaryProperties:
                      'shear_attenuation'):
             _require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
 
-        # Detect which acoustic params differ from their dataclass defaults
-        # (read from the field definitions so a default change cannot
-        # silently break the inference). We use this both for
-        # auto-inference (when acoustic_type is None) and for the
-        # explicit-conflict guard below.
-        defaults = {f.name: f.default for f in dataclass_fields(self)}
+        # Explicitly passed acoustic params drive both the auto-inference
+        # (when acoustic_type is None) and the explicit-conflict guard below.
         half_space_offenders = [
             f"{name}={getattr(self, name):g}"
             for name in ('sound_speed', 'density', 'attenuation',
                          'shear_speed', 'shear_attenuation', 'roughness')
-            if getattr(self, name) != defaults[name]
+            if name in explicit
         ]
 
         if self.acoustic_type is None:
@@ -743,6 +768,9 @@ class Bottom:
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
                 f"None; got {interp!r}")
         hs = [c.halfspace for c in self.columns]
+        if hs[0].acoustic_type in ('vacuum', 'rigid'):
+            # Parameter-free types have nothing to blend.
+            return _copy.deepcopy(self.at(range=range).halfspace)
         return BoundaryProperties(
             acoustic_type=hs[0].acoustic_type,
             sound_speed=float(np.interp(range, self.ranges,
@@ -825,6 +853,11 @@ class Bottom:
                 "or 'median'.")
         reduce = np.mean if method == 'mean' else np.median
         hs0 = self.columns[0].halfspace
+        if hs0.acoustic_type in ('vacuum', 'rigid'):
+            # Parameter-free types have nothing to average.
+            return Bottom(columns=[SeabedColumn(
+                layers=[], halfspace=BoundaryProperties(
+                    acoustic_type=hs0.acoustic_type))], ranges=None)
         return Bottom(columns=[SeabedColumn(layers=[], halfspace=(
             BoundaryProperties(
                 acoustic_type=hs0.acoustic_type,

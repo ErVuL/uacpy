@@ -273,8 +273,11 @@ class Environment:
         if isinstance(bottom, BoundaryProperties):
             return Bottom.from_halfspace(bottom)
         if isinstance(bottom, (int, float, np.integer, np.floating)):
-            return Bottom.from_halfspace(
-                BoundaryProperties(sound_speed=float(bottom)))
+            # Explicit type: a scalar always means "half-space at this cp" —
+            # never let inference see it (a bare 1600.0 equals the resolved
+            # default and would otherwise be indistinguishable from unset).
+            return Bottom.from_halfspace(BoundaryProperties(
+                acoustic_type='half-space', sound_speed=float(bottom)))
         if isinstance(bottom, str):
             return Bottom.from_halfspace(BoundaryProperties.from_preset(bottom))
         raise ConfigurationError(

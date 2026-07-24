@@ -25,6 +25,53 @@ def _layers():
                           attenuation=0.3)]
 
 
+# ─── acoustic_type inference ────────────────────────────────────────────────
+
+class TestAcousticTypeInference:
+    """acoustic_type inference keys on *explicitly passed* parameters, not on
+    value-vs-default comparison — passing the documented default values must
+    still mean 'half-space'."""
+
+    def test_bare_construction_is_vacuum(self):
+        assert BoundaryProperties().acoustic_type == 'vacuum'
+
+    def test_default_valued_params_infer_halfspace(self):
+        # 1600/1.5/0.5 are exactly the resolved defaults; explicitly passing
+        # them must still build a half-space, never a silent vacuum.
+        bp = BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                attenuation=0.5)
+        assert bp.acoustic_type == 'half-space'
+        assert bp.sound_speed == 1600.0
+
+    def test_single_default_valued_param_infers_halfspace(self):
+        assert BoundaryProperties(sound_speed=1600.0).acoustic_type == \
+            'half-space'
+
+    def test_unset_params_resolve_to_documented_defaults(self):
+        bp = BoundaryProperties(sound_speed=1700.0)
+        assert bp.density == 1.5 and bp.attenuation == 0.5
+        assert bp.roughness == 0.0 and bp.shear_speed == 0.0
+
+    def test_environment_scalar_bottom_1600_is_halfspace(self):
+        # The documented scalar form with the textbook sand speed — which
+        # coincides with the class default — must be a half-space.
+        from uacpy.core.environment import Environment
+        env = Environment(bathymetry=100.0, bottom=1600)
+        assert env.bottom.acoustic_type == 'half-space'
+        assert env.bottom.columns[0].halfspace.sound_speed == 1600.0
+
+    def test_explicit_vacuum_with_params_raises(self):
+        with pytest.raises(ConfigurationError):
+            BoundaryProperties(acoustic_type='vacuum', sound_speed=1600.0)
+
+    def test_vacuum_bottom_reductions_stay_parameter_free(self):
+        cols = [SeabedColumn([], BoundaryProperties(acoustic_type='vacuum'))
+                for _ in range(2)]
+        b = Bottom.from_columns(cols, ranges=[0.0, 5000.0])
+        assert b.select_range('mean').acoustic_type == 'vacuum'
+        assert b.halfspace_at(range=2500.0).acoustic_type == 'vacuum'
+
+
 # ─── construction / queries ────────────────────────────────────────────────
 
 class TestBottomQueries:

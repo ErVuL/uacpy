@@ -479,10 +479,12 @@ BoundaryProperties(
 )
 ```
 
-`acoustic_type` is usually inferred: any non-default property → `'half-space'`,
-a `reflection_file` → `'file'`, nothing → `'vacuum'` (pressure-release surface,
-the default). Pass it explicitly only for the distinct models `'rigid'` and
-`'grain-size'`. The default `surface` is a vacuum (pressure-release) boundary.
+`acoustic_type` is usually inferred: any *explicitly passed* acoustic property
+→ `'half-space'` (even a value equal to the documented default — passing
+`sound_speed=1600` always means a 1600 m/s half-space), a `reflection_file` →
+`'file'`, nothing → `'vacuum'` (pressure-release surface, the default). Pass it
+explicitly only for the parameter-free `'rigid'` model. The default `surface`
+is a vacuum (pressure-release) boundary.
 
 ### Materials catalog
 
