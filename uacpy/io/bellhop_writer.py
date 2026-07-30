@@ -251,7 +251,7 @@ def write_bellhop_env_file(
                         verbose=verbose)
 
         # Handle range-dependent SSP if using Quad interpolation
-        if interp_char == 'Q' and env.has_range_dependent_ssp():
+        if interp_char == 'Q' and env.has_range_dependent_ssp:
             from uacpy.io.oalib_writer import write_ssp
             ssp_file = filepath.with_suffix('.ssp')
             ssp_ranges = np.asarray(env.ssp.ranges, dtype=float)

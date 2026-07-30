@@ -241,3 +241,163 @@ def test_kraken_zero_modes_warns():
     # 1 Hz in a 100 m guide is far below the modal cutoff → 0 trapped modes
     with pytest.warns(UserWarning, match="no propagating field|0 trapped modes"):
         Kraken().compute_tl(env, Source(depths=50.0, frequencies=1.0), rcv)
+
+
+class TestKrakenSourceGeometry:
+    """Kraken reads geometry and directivity from Source (spec 2026-07-25)."""
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='geom', bathymetry=200.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800, density=1.8,
+                                      attenuation=0.3))
+
+    def test_constructor_no_longer_accepts_source_type(self):
+        with pytest.raises(TypeError):
+            Kraken(source_type='R')
+
+    def test_constructor_no_longer_accepts_beam_pattern_file(self):
+        with pytest.raises(TypeError):
+            Kraken(source_beam_pattern_file=None)
+
+    def test_field_option_position_one_tracks_source_type(self):
+        model = Kraken()
+        codes = {
+            t: model._build_field_option(
+                False, Source(depths=50, frequencies=100, source_type=t))[0]
+            for t in ('point', 'line', 'scaled')
+        }
+        assert codes == {'point': 'R', 'line': 'X', 'scaled': 'S'}
+
+    def test_field_option_position_three_tracks_beam_pattern(self):
+        model = Kraken()
+        pat = np.array([[-90.0, -20.0], [90.0, 0.0]])
+        omni = model._build_field_option(
+            False, Source(depths=50, frequencies=100))
+        directional = model._build_field_option(
+            False, Source(depths=50, frequencies=100, beam_pattern=pat))
+        assert omni[2] == ' '
+        assert directional[2] == '*'
+
+    def test_beam_pattern_array_writes_sbp(self, tmp_path):
+        env = self._env()
+        rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
+        pat = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+        model.run(env, Source(depths=50, frequencies=200,
+                              beam_pattern=pat), rcv)
+        sbp = list(tmp_path.rglob('*.sbp'))
+        assert sbp, "no .sbp written for Source(beam_pattern=...)"
+        assert sbp[0].read_text().split()[0] == '3'
+
+
+def test_coarse_beam_pattern_does_not_hang_field_exe(tmp_path):
+    """Regression for the patched AT interp1 (MODIFICATIONS.md).
+
+    A 3-point pattern puts x(N-1) at 0 deg, so every mode angle lands in
+    interp1's final segment — which looped forever before the patch.
+    """
+    env = Environment(
+        name='coarse', bathymetry=200.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800, density=1.8,
+                                  attenuation=0.3))
+    rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
+    pat = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
+    field = Kraken(work_dir=tmp_path, cleanup=False, timeout=90.0).run(
+        env, Source(depths=50, frequencies=200, beam_pattern=pat), rcv)
+    assert np.isfinite(np.asarray(field.tl)).any()
+
+
+def test_field_exe_timeout_is_not_swallowed(tmp_path, monkeypatch):
+    """A timeout must surface as a timeout, not as a downstream parse error.
+
+    _run_field_exe deliberately tolerates a non-zero teardown status, but a
+    timeout means the run never finished — reading the 0-byte .shd it leaves
+    behind previously surfaced as FileFormatError from detect_endian.
+    """
+    from uacpy.core.exceptions import ModelExecutionError
+
+    model = Kraken(work_dir=tmp_path, cleanup=False)
+
+    def fake_run(cmd, **kwargs):
+        raise ModelExecutionError('Kraken', return_code=-1,
+                                  stderr="Timed out after 1.0s", timed_out=True)
+
+    monkeypatch.setattr(model, '_run_subprocess', fake_run)
+    fm = model._setup_file_manager()
+    (fm.work_dir / 'model.shd').write_bytes(b'')
+
+    with pytest.raises(ModelExecutionError) as exc:
+        model._run_field_exe(fm, 'model', 'RC C')
+    assert exc.value.timed_out
+    assert 'timed out' in str(exc.value).lower()
+
+
+def test_empty_shd_reports_no_usable_output(tmp_path, monkeypatch):
+    """A 0-byte .shd is 'no output', not a file to hand to the reader."""
+    from uacpy.core.exceptions import ModelExecutionError
+
+    model = Kraken(work_dir=tmp_path, cleanup=False)
+    monkeypatch.setattr(model, '_run_subprocess', lambda cmd, **kw: None)
+    fm = model._setup_file_manager()
+    (fm.work_dir / 'model.shd').write_bytes(b'')
+
+    with pytest.raises(ModelExecutionError, match="no usable .shd"):
+        model._run_field_exe(fm, 'model', 'RC C')
+
+
+def test_two_receiver_depths_are_not_range_offset():
+    """NRz==2 must give the same field as those depths inside a larger grid.
+
+    AT's SubTab does not replicate the Rro sentinel below 3 elements, so a
+    two-depth run used to hand the shallowest receiver ro=-999.9 m and
+    evaluate its row at r-999.9 — plausible numbers at the wrong ranges.
+    """
+    env = Environment(name='pek', bathymetry=200.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1800.0, density=1.8,
+                                                attenuation=0.5))
+    src = Source(depths=50.0, frequencies=100.0)
+    ranges = np.array([1000., 2000., 3000.])
+    m = Kraken(verbose=False)
+    tl2 = np.asarray(m.run(env, src, Receiver(depths=[60., 120.], ranges=ranges)).tl)
+    tl3 = np.asarray(m.run(env, src, Receiver(depths=[60., 120., 180.], ranges=ranges)).tl)
+    np.testing.assert_allclose(tl2[0], tl3[0], rtol=0, atol=0.05)
+    np.testing.assert_allclose(tl2[1], tl3[1], rtol=0, atol=0.05)
+
+
+def test_mode_count_probe_matches_pekeris_theory():
+    """``_count_modes_at_freq`` must return real counts, not a swallowed error.
+
+    It called ``read_modes_bin(freq=...)`` while the parameter is
+    ``frequency=``; the broad ``except Exception`` turned the resulting
+    TypeError into "0 modes" at *every* frequency, so
+    ``_propagating_frequency_floor`` concluded nothing propagates and the
+    broadband sub-cutoff recovery was dead. Counts are checked against the
+    Pekeris estimate M ~ (2 D f / c_w) sqrt(1 - (c_w/c_b)^2) rather than
+    against uacpy's own output.
+    """
+    D, c_w, c_b = 200.0, 1500.0, 1800.0
+    env = Environment(name='pek', bathymetry=D, ssp=c_w,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=c_b, density=1.8,
+                                                attenuation=0.5))
+    src = Source(depths=50.0, frequencies=100.0)
+    rcv = Receiver(depths=100.0, ranges=np.array([1000.0]))
+    m = Kraken(verbose=False)
+    exe = m._select_kraken_exe(env)
+
+    freqs = np.array([20.0, 50.0, 100.0, 400.0])
+    counts = np.array([m._count_modes_at_freq(env, src, rcv, float(f), exe)
+                       for f in freqs])
+    predicted = (2.0 * D * freqs / c_w) * np.sqrt(1.0 - (c_w / c_b) ** 2)
+
+    assert np.all(counts > 0), f"no modes found at any frequency: {counts}"
+    assert np.all(np.abs(counts - predicted) <= 0.15 * predicted + 1.5), (
+        f"counts {counts} depart from Pekeris estimate {np.round(predicted, 1)}")
+    assert np.all(np.diff(counts) > 0), "mode count must rise with frequency"
+    # Everything above propagates, so the sub-cutoff prefix is empty.
+    assert m._propagating_frequency_floor(env, src, rcv, freqs, exe) == 0

@@ -1090,3 +1090,79 @@ class TestCopyAndGeolocation:
                 uacpy.Environment(bathymetry=100., ssp=1500., date=bad)
             else:
                 uacpy.Environment(bathymetry=100., ssp=1500., location=bad)
+
+
+class TestSourceGeometryAndBeamPattern:
+    """Source owns source geometry and directivity (spec 2026-07-25)."""
+
+    def test_scaled_is_a_valid_source_type(self):
+        src = uacpy.Source(depths=50, frequencies=100, source_type='scaled')
+        assert src.source_type == 'scaled'
+
+    def test_unknown_source_type_raises(self):
+        with pytest.raises(ConfigurationError, match="source_type"):
+            uacpy.Source(depths=50, frequencies=100, source_type='Z')
+
+    def test_beam_pattern_defaults_to_none(self):
+        assert uacpy.Source(depths=50, frequencies=100).beam_pattern is None
+
+    def test_beam_pattern_accepts_angle_level_array(self):
+        pat = np.array([[-90.0, -20.0], [0.0, 0.0], [90.0, -20.0]])
+        src = uacpy.Source(depths=50, frequencies=100, beam_pattern=pat)
+        assert src.beam_pattern.shape == (3, 2)
+
+    def test_beam_pattern_wrong_shape_raises(self):
+        with pytest.raises(ConfigurationError, match=r"N, 2"):
+            uacpy.Source(depths=50, frequencies=100,
+                         beam_pattern=np.array([1.0, 2.0, 3.0]))
+
+    def test_beam_pattern_non_monotonic_angles_raise(self):
+        # beampattern.f90:56-58 rejects this with ERROUT, which gfortran
+        # exits 0 on; catching it here is the point of validating in Python.
+        pat = np.array([[0.0, 0.0], [-90.0, -20.0], [90.0, -20.0]])
+        with pytest.raises(ConfigurationError):
+            uacpy.Source(depths=50, frequencies=100, beam_pattern=pat)
+
+    def test_beam_pattern_path_is_stored_as_path(self, tmp_path):
+        from pathlib import Path
+        sbp = tmp_path / 'pattern.sbp'
+        sbp.write_text("2\n-90.0 0.0\n90.0 0.0\n")
+        src = uacpy.Source(depths=50, frequencies=100, beam_pattern=sbp)
+        assert isinstance(src.beam_pattern, Path)
+
+    def test_copy_carries_geometry_and_pattern(self):
+        pat = np.array([[-90.0, -20.0], [90.0, 0.0]])
+        src = uacpy.Source(depths=50, frequencies=100,
+                           source_type='line', beam_pattern=pat)
+        dup = src.copy()
+        assert dup.source_type == 'line'
+        np.testing.assert_array_equal(dup.beam_pattern, pat)
+
+
+class TestEnvironmentPredicatesAreProperties:
+    """``has_*`` must be properties, not methods.
+
+    As bound methods they are always truthy, so ``if env.has_layered_bottom:``
+    silently takes the True branch for every environment. They sit alongside
+    ``is_range_dependent``, which was already a property.
+    """
+
+    _NAMES = (
+        'has_range_dependent_bathymetry', 'has_range_dependent_ssp',
+        'has_range_dependent_bottom', 'has_layered_bottom',
+        'has_range_dependent_layered_bottom', 'has_elastic_bottom',
+        'has_elastic_surface',
+    )
+
+    @pytest.mark.parametrize('name', _NAMES)
+    def test_is_a_property(self, name):
+        import inspect
+        from uacpy.core.environment import Environment
+        assert isinstance(inspect.getattr_static(Environment, name), property), (
+            f"Environment.{name} is a {type(inspect.getattr_static(Environment, name)).__name__}; "
+            f"as a method it is always truthy in a boolean test")
+
+    def test_flat_environment_reports_false_not_truthy_method(self):
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+        for name in self._NAMES:
+            assert getattr(env, name) is False, f"{name} should be False"

@@ -70,7 +70,12 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
+from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.models._segmentation import segment_environment_by_range
+
+
+# Source geometry -> field.exe Opt(1:1), per field.f90:70-79.
+_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 
 
 class _KrakenBase(PropagationModel):
@@ -95,8 +100,6 @@ class _KrakenBase(PropagationModel):
         Kraken pick automatically from frequency / wavelength. Default: 0.
         Note: this is NOT a "points per wavelength" density — it is a total
         point count per medium.
-    roughness : float, optional
-        Bottom roughness (m). Default: 0.0.
     leaky_modes : bool, optional
         If True, override ``c_high`` to 1e9 so Kraken attempt to
         compute leaky modes (trapped modes with phase speeds above the
@@ -290,7 +293,6 @@ class _KrakenBase(PropagationModel):
             bottom_type=bottom_type,
             frequencies=frequencies,
             n_mesh=self.n_mesh,
-            roughness=self.roughness,
             rmax_m=rmax_m,
             c_low=cl, c_high=ch,
         )
@@ -368,7 +370,7 @@ class _KrakenBase(PropagationModel):
             mode_depths = self.mode_depth_grid
         else:
             total_depth = env.depth
-            if env.has_layered_bottom():
+            if env.has_layered_bottom:
                 for layer in env.bottom.columns[0].layers:
                     total_depth += layer.thickness
             ppm = float(getattr(self, 'mode_points_per_meter', 0.0) or 0.0)
@@ -544,11 +546,6 @@ class Kraken(_KrakenBase):
         to override with a uniform linspace decomposition.
     mode_points_per_meter : float, optional
         Mode-depth grid density. Default ``1.5`` pts/m.
-    source_beam_pattern_file : Path, optional
-        Bellhop-style ``.sbp`` file; sets ``field.exe`` ``Opt(3)='*'``.
-    source_type : str, optional
-        ``field.exe`` Opt(1): ``'R'`` cylindrical (default) | ``'X'``
-        Cartesian line | ``'S'`` scaled-cylindrical.
     executable, field_executable : Path, optional
         ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
     backend : str, optional
@@ -557,7 +554,7 @@ class Kraken(_KrakenBase):
         modes (complex eigenvalues), ``kraken.exe`` otherwise. Forcing
         ``'kraken'`` where complex eigenvalues are required raises
         ``ConfigurationError``.
-    c_low, c_high, n_mesh, roughness, leaky_modes, top_reflection_file : optional
+    c_low, c_high, n_mesh, leaky_modes, top_reflection_file : optional
         Inherited modal-solver knobs from :class:`_KrakenBase`.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
@@ -595,8 +592,6 @@ class Kraken(_KrakenBase):
     """
 
     # Valid source types for field.exe option col 1 (AT field.f90:71-79).
-    _ALLOWED_SOURCE_TYPE = ('R', 'X', 'S')
-
     # Declarative metadata (see PropagationModel / ModelSpec). Kraken: normal
     # modes. Segments RD-bathymetry / RD-SSP natively; the bottom (and the RDLB
     # axis) and a range-dependent *surface* still collapse — the RD .env carries
@@ -613,7 +608,10 @@ class Kraken(_KrakenBase):
             'range_dependent_ssp',
             'layered_bottom',
             'elastic_media',
+            'source_beam_pattern',
+            'rough_surface',
         },
+        source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'acoustics_toolbox'
@@ -626,13 +624,10 @@ class Kraken(_KrakenBase):
         n_segments: Optional[int] = None,
         executable: Optional[Path] = None,
         field_executable: Optional[Path] = None,
-        source_beam_pattern_file: Optional[Path] = None,
-        source_type: str = 'R',
         backend: Optional[str] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         n_mesh: int = 0,
-        roughness: float = 0.0,
         interp_ssp: Optional[str] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
@@ -658,7 +653,6 @@ class Kraken(_KrakenBase):
         self.c_low = None if c_low is None else float(c_low)
         self.c_high = c_high
         self.n_mesh = n_mesh
-        self.roughness = roughness
         self.leaky_modes = leaky_modes
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
@@ -720,40 +714,29 @@ class Kraken(_KrakenBase):
         self.mode_coupling = mode_coupling
         self.coherent = coherent
         self.n_segments = n_segments
-        self.source_beam_pattern_file = (
-            Path(source_beam_pattern_file)
-            if source_beam_pattern_file is not None else None
-        )
 
-        # Validate source_type
-        source_type = str(source_type).upper()
-        if source_type not in self._ALLOWED_SOURCE_TYPE:
-            raise ConfigurationError(
-                f"source_type must be one of {self._ALLOWED_SOURCE_TYPE}, "
-                f"got {source_type!r}"
-            )
-        self.source_type = source_type
-
-    def _build_field_option(self, is_range_dependent: bool) -> str:
+    def _build_field_option(self, is_range_dependent: bool,
+                            source: Source) -> str:
         """Build the 4-character option string for field.exe.
 
         Columns follow AT ``field.f90`` / ``ReadModes.f90``:
 
-        * pos 1: source geometry — 'R' point source (cylindrical), 'X'
-          line source (Cartesian), 'S' scaled point source.
+        * pos 1: source geometry from ``source.source_type`` — 'R' point
+          source (cylindrical), 'X' line source (Cartesian), 'S' scaled
+          point source.
         * pos 2: coupling — 'C' coupled modes, 'A' adiabatic.
           For NProf > 1 we honour ``mode_coupling``; for range-independent
           runs we default to 'C' (coupled) so the option string is fully
           populated rather than containing a padding blank. AT's
           field.f90 treats NProf == 1 identically for 'A' and 'C'.
-        * pos 3: source beam pattern — '*' to apply a .sbp file, else
-          ' ' (omnidirectional). Field.exe rejects any other character
+        * pos 3: source beam pattern — '*' when ``source.beam_pattern`` is
+          set, else ' ' (omnidirectional). Field.exe rejects any other character
           (``field.f90:83-90``), so the elastic Comp selector (H/V/T/N)
           is not exposed here; it is only reachable if a user invokes
           ReadModes directly.
         * pos 4: 'C' coherent TL, 'I' incoherent.
         """
-        pos1 = self.source_type
+        pos1 = _SOURCE_TYPE_CODE[source.source_type]
         if is_range_dependent:
             pos2 = 'C' if self.mode_coupling.lower() == 'coupled' else 'A'
         else:
@@ -762,7 +745,7 @@ class Kraken(_KrakenBase):
             # AT's own field.f90 does internally when NProf == 1.
             pos2 = 'C'
         # pos3: '*' => field.exe reads <base>.sbp, else omnidirectional.
-        pos3 = '*' if self.source_beam_pattern_file is not None else ' '
+        pos3 = '*' if source.beam_pattern is not None else ' '
         pos4 = 'C' if self.coherent else 'I'
         return f"{pos1}{pos2}{pos3}{pos4}"
 
@@ -805,8 +788,8 @@ class Kraken(_KrakenBase):
         wrong field.
         """
         needs_krakenc = (
-            env.has_elastic_bottom()
-            or env.has_elastic_surface()
+            env.has_elastic_bottom
+            or env.has_elastic_surface
             or getattr(self, 'leaky_modes', False)
         )
         forced = getattr(self, 'backend', None)
@@ -933,7 +916,7 @@ class Kraken(_KrakenBase):
         # elastic-over-fluid-halfspace case that hangs krakenc.exe was already
         # rejected by _reject_elastic_over_fluid_halfspace above.)
         elastic_subbottom = (
-            env.has_layered_bottom()
+            env.has_layered_bottom
             and any(
                 (getattr(layer, 'shear_speed', 0) or 0) > 0
                 for layer in env.bottom.columns[0].layers
@@ -978,7 +961,7 @@ class Kraken(_KrakenBase):
             f"the r=0 profile of the range-dependent environment.",
             UserWarning, stacklevel=2,
         )
-        ssp = env.ssp.collapse('r0') if env.has_range_dependent_ssp() else env.ssp
+        ssp = env.ssp.collapse('r0') if env.has_range_dependent_ssp else env.ssp
         bottom = env.bottom
         if bottom is not None and bottom.is_range_dependent:
             bottom = bottom.select_range('r0')
@@ -1101,7 +1084,13 @@ class Kraken(_KrakenBase):
             )
             self._run_kraken_executable(base, fm.work_dir, exe=exe)
             return int(read_modes_bin(str(fm.get_path(base)),
-                                      freq=float(freq)).get('M', 0))
+                                      frequency=float(freq)).get('M', 0))
+        except TypeError:
+            # A signature mismatch here is a programming error, not a
+            # below-cutoff condition; the broad handler below would report it
+            # as "zero modes" at every frequency and silently disable the
+            # sub-cutoff recovery entirely.
+            raise
         except Exception as e:   # noqa: BLE001
             # Below cutoff the single-freq .mod is unreadable (zero-mode record),
             # which legitimately means "no modes". Infrastructure failures
@@ -1147,7 +1136,7 @@ class Kraken(_KrakenBase):
 
         def _n_media_seg(seg_env):
             n = 1
-            if seg_env.has_layered_bottom():
+            if seg_env.has_layered_bottom:
                 n += len(seg_env.bottom.columns[0].layers)
             return n
 
@@ -1224,7 +1213,6 @@ class Kraken(_KrakenBase):
                 receiver=receiver_for_modes,
                 interp_ssp=self.interp_ssp,
                 n_mesh=n_mesh_fixed,
-                roughness=self.roughness,
                 c_low=self._c_low_eff,
                 c_high=self.c_high,
                 rmax_m=rmax_m,
@@ -1249,6 +1237,11 @@ class Kraken(_KrakenBase):
                 cwd=fm.work_dir,
             )
         except ModelExecutionError as exc:
+            # A timeout means the run never finished, so there is no output to
+            # salvage; only a non-zero teardown status is worth continuing past.
+            if exc.timed_out:
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise
             warnings.warn(
                 f"{self.model_name}: field.exe exited with non-zero "
                 f"status ({exc}); attempting to read the .shd output "
@@ -1258,12 +1251,13 @@ class Kraken(_KrakenBase):
             )
 
         shd_file = fm.get_path(f'{base_name}.shd')
-        if not shd_file.exists():
+        if not shd_file.exists() or shd_file.stat().st_size == 0:
             exc = ModelExecutionError(
                 self.model_name, return_code=0, stdout=None,
                 stderr=(
-                    "field.exe did not produce a .shd file; check the "
-                    f".prt log at {fm.get_path(base_name + '.prt')}"
+                    "field.exe produced no usable .shd file (missing or "
+                    "empty); check the .prt log at "
+                    f"{fm.get_path(base_name + '.prt')}"
                 ),
             )
             self._attach_prt_tail(exc, fm.work_dir, base_name)
@@ -1418,7 +1412,7 @@ class Kraken(_KrakenBase):
 
             # 3. Write .flp file
             flp_file = fm.get_path(f'{base_name}.flp')
-            option = self._build_field_option(is_rd)
+            option = self._build_field_option(is_rd, source)
             pos = {
                 's': {'z': source.depths},
                 'r': {'z': receiver.depths, 'r': receiver.ranges},
@@ -1432,17 +1426,10 @@ class Kraken(_KrakenBase):
                 flp_kwargs['M_limit'] = int(n_modes)
             write_fieldflp(flp_file, option, pos, **flp_kwargs)
 
-            # Copy source beam pattern file when requested. field.exe reads
-            # <base>.sbp when Opt(3:3)='*' — we set that in
-            # _build_field_option above.
-            sbp_path = getattr(self, 'source_beam_pattern_file', None)
-            if sbp_path is not None:
-                src = Path(sbp_path)
-                if not src.exists():
-                    raise ConfigurationError(
-                        f"source_beam_pattern_file not found: {src}"
-                    )
-                shutil.copy(src, fm.get_path(f'{base_name}.sbp'))
+            # field.exe reads <base>.sbp when Opt(3:3)='*'.
+            if source.beam_pattern is not None:
+                stage_source_beam_pattern(
+                    source.beam_pattern, fm.get_path(f'{base_name}.sbp'))
 
             # 4. Run field.exe → .shd
             shd_file = self._run_field_exe(fm, base_name, option)

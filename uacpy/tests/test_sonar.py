@@ -494,3 +494,28 @@ class TestTargetStrength:
             190.0, 60.0, ts, noise_level=75.0, directivity_index=15.0,
         )
         assert np.isfinite(se)
+
+
+class TestDetectionThresholdReference:
+    """Pin the DT convention and the 10*log10(w) offset to Urick's form."""
+
+    def test_five_db_per_decade_of_time_bandwidth(self):
+        """Abraham 9.2.3.1: SNR_d falls 5 dB per decade of M = w*t."""
+        from uacpy.sonar import detection_threshold_energy
+        a = detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
+                                       integration_time_s=1.0)
+        b = detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
+                                       integration_time_s=10.0)
+        assert (a - b) == pytest.approx(5.0, abs=1e-9)
+
+    def test_offset_from_urick_band_power_form_is_10log10_w(self):
+        """This DT is the unitless S0/N0 ratio; Urick's d*w/t form is
+        referenced to noise in a 1-Hz band. They differ by 10*log10(w)."""
+        import numpy as np
+        from uacpy.sonar import detection_threshold_energy, detection_index
+        pd, pf, w, t = 0.5, 1e-4, 100.0, 2.0
+        this = detection_threshold_energy(pd, pf, w, t)
+        urick = 5.0 * np.log10(detection_index(pd, pf) * w / t)
+        assert (urick - this) == pytest.approx(10.0 * np.log10(w), abs=1e-9)
+        # 100 Hz -> exactly the 20 dB the docstring warns about
+        assert (urick - this) == pytest.approx(20.0, abs=1e-9)

@@ -39,12 +39,12 @@ def test_point_environment(stub_fetchers):
     assert isinstance(env, Environment)
     assert env.depth == 2000.0
     assert env.name == '43.200, 7.500'
-    assert not env.has_range_dependent_bathymetry()
+    assert not env.has_range_dependent_bathymetry
 
 
 def test_transect_environment(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1), name='slope')
-    assert env.has_range_dependent_bathymetry()
+    assert env.has_range_dependent_bathymetry
     assert env.name == 'slope'
 
 
@@ -137,7 +137,7 @@ def test_range_dependent_ssp(monkeypatch, stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
                                     range_dependent_ssp=True)
     assert env.ssp.is_range_dependent
-    assert env.has_range_dependent_bathymetry()
+    assert env.has_range_dependent_bathymetry
 
 
 def test_range_dependent_ssp_requires_transect(stub_fetchers):
@@ -225,3 +225,55 @@ def test_copernicus_requires_date(stub_fetchers):
 def test_unknown_ssp_sources(stub_fetchers):
     with pytest.raises(ConfigurationError, match='unknown ssp source'):
         env_mod.fetch_environment((43.2, 7.5), ssp_sources='nope')
+
+
+class TestWoaWetCellSearch:
+    """A coastal point must not be refused because it snaps onto a land cell.
+
+    The documented quick-start ``fetch_environment((43.2, 7.5))`` is in the
+    Ligurian Sea, close enough to shore that the nearest WOA cell can be dry;
+    the fetch used to raise "on land or outside the analyzed domain".
+    """
+
+    def test_ring_offsets_are_nearest_first_and_complete(self):
+        from uacpy.data.sound_speed import _ring_offsets
+        r1 = _ring_offsets(1)
+        assert len(r1) == 8, r1
+        assert r1[0] in {(0, -1), (0, 1), (-1, 0), (1, 0)}
+        assert len(_ring_offsets(2)) == 16
+
+    def test_dry_nearest_cell_falls_back_to_a_wet_neighbour(self):
+        import numpy as np
+        from uacpy.data.sound_speed import _nearest_wet_column
+        wet = (60, 100)
+
+        def fetch(i, j):
+            if (i, j) == wet:
+                return (np.array([0.0, 10.0]), np.array([15.0, 14.0]),
+                        np.array([38.0, 38.1]))
+            return np.array([]), np.array([]), np.array([])
+
+        z, t, s, i, j = _nearest_wet_column(fetch, 60, 99, '1.00')
+        assert (i, j) == wet
+        assert z.size == 2
+
+    def test_longitude_wraps_during_the_search(self):
+        import numpy as np
+        from uacpy.data.sound_speed import _nearest_wet_column
+        n_lon = 360
+        wet = (10, 0)
+
+        def fetch(i, j):
+            if (i, j) == wet:
+                return np.array([0.0]), np.array([15.0]), np.array([38.0])
+            return np.array([]), np.array([]), np.array([])
+
+        z, t, s, i, j = _nearest_wet_column(fetch, 10, n_lon - 1, '1.00')
+        assert (i, j) == wet, "search must wrap across the antimeridian"
+
+    def test_land_locked_request_still_fails(self):
+        import numpy as np
+        from uacpy.data.sound_speed import _nearest_wet_column
+        empty = (np.array([]), np.array([]), np.array([]))
+        z, t, s, i, j = _nearest_wet_column(lambda i, j: empty, 60, 100, '1.00')
+        assert z.size == 0, "a genuinely dry region must not be papered over"

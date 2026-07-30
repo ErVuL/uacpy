@@ -351,6 +351,35 @@ class TestFieldFlpWriter:
         nums = data_part.replace('/', ' ').split()
         assert nums == ['0.0'], f"expected single zero + slash, got {nums!r}"
 
+    @pytest.mark.parametrize('n_rz', [1, 2])
+    def test_write_fieldflp_writes_explicit_rro_below_subtab_threshold(
+            self, tmp_path, n_rz):
+        """With NRz < 3 the Rro vector must be written out in full.
+
+        AT's SubTab only replicates a sentinel-terminated vector when
+        ``Nx >= 3`` (misc/subtabulate.f90:24). Below that the ``0.0 /``
+        idiom leaves ``x(2)`` at ReadVector's -999.9 pre-fill
+        (SourceReceiverPositions.f90:219-221), and the following ``Sort``
+        moves it to Rro(1) — giving the *shallowest* receiver a -999.9 m
+        range offset, which EvaluateMod applies as ``1/sqrt(r + ro)``.
+        """
+        from uacpy.io.oalib_writer import write_fieldflp
+
+        out = tmp_path / f"n{n_rz}.flp"
+        write_fieldflp(
+            filepath=out, option='RA  ',
+            pos={'s': {'z': np.array([50.0])},
+                 'r': {'z': np.linspace(10.0, 40.0, n_rz),
+                       'r': np.array([1000.0, 2000.0])}},
+            title='unit-test', M_limit=999,
+        )
+        rro = [ln for ln in out.read_text().splitlines() if 'Rro(' in ln][0]
+        values = rro.split('!')[0].replace('/', ' ').split()
+        assert len(values) == n_rz, (
+            f"NRz={n_rz} needs {n_rz} explicit Rro values (SubTab will not "
+            f"replicate below 3); got {values}")
+        assert all(float(v) == 0.0 for v in values)
+
 
 class TestRamsurfReaderDepthAxis:
     """The Collins PE grid maps stored index i to depth (i-1)*dz.
@@ -549,3 +578,147 @@ class TestOASRFrequencyOverride:
                          angles=np.linspace(0, 90, 91))
         fmin, fmax, nfreq = self._freq_line(out)
         assert (fmin, fmax, nfreq) == (50.0, 150.0, 3)
+
+
+class TestHankelScaledCylindrical:
+    """fieldsco.m:133 — 'S' is 'R' with cylindrical spreading removed."""
+
+    def test_scaled_equals_point_times_sqrt_r(self):
+        from uacpy.io.grn_reader import _hankel_transform
+        rng = np.random.default_rng(0)
+        k = np.linspace(0.1, 1.0, 64)
+        G = rng.normal(size=(2, 64)) + 1j * rng.normal(size=(2, 64))
+        ranges = np.array([500.0, 1000.0, 2000.0])
+        kw = dict(atten=0.0, spectrum='P')
+        p_point = _hankel_transform(G, k, ranges, source_type='R', **kw)
+        p_scaled = _hankel_transform(G, k, ranges, source_type='S', **kw)
+        np.testing.assert_allclose(
+            p_scaled, p_point * np.sqrt(ranges)[None, :], rtol=1e-12)
+
+    def test_unknown_source_type_still_raises(self):
+        from uacpy.io.grn_reader import _hankel_transform
+        with pytest.raises(ConfigurationError):
+            _hankel_transform(
+                np.zeros((1, 4), dtype=complex), np.linspace(0.1, 1.0, 4),
+                np.array([100.0]), atten=0.0, source_type='Q', spectrum='P')
+
+
+class TestConstantAbsorptionColumn:
+    """A ConstantAbsorption baseline must land in AT's alphaI column.
+
+    ``sspMod.f90:334`` reads each SSP line as
+    ``z, alphaR (cp), betaR (cs), rhoR, alphaI, betaI``. Writing the baseline
+    third makes it the water column's *shear speed*: Kraken then returns an
+    all-NaN field and Scooter segfaults.
+    """
+
+    @staticmethod
+    def _env(value):
+        import uacpy
+        from uacpy.core.absorption import ConstantAbsorption
+        return uacpy.Environment(
+            name='abs', bathymetry=200.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5),
+            absorption=ConstantAbsorption(value))
+
+    def test_baseline_goes_in_the_attenuation_column(self, tmp_path):
+        from uacpy.io.oalib_writer import write_ssp_section
+        out = tmp_path / 'ssp.txt'
+        with open(out, 'w') as f:
+            write_ssp_section(f, self._env(0.5), bottom_depth=200.0)
+        rows = [ln for ln in out.read_text().splitlines() if '/' in ln][1:]
+        assert rows, "no SSP sample rows written"
+        for ln in rows:
+            cols = ln.replace('/', ' ').split()
+            assert len(cols) >= 5, f"need z cp cs rho alphaI; got {cols}"
+            assert float(cols[2]) == 0.0, f"cs must be 0 for water; got {cols[2]}"
+            assert float(cols[4]) == pytest.approx(0.5), (
+                f"absorption must be in alphaI (col 5); got {cols}")
+
+    def test_no_absorption_keeps_the_short_form(self, tmp_path):
+        import uacpy
+        from uacpy.io.oalib_writer import write_ssp_section
+        env = uacpy.Environment(name='p', bathymetry=200.0, ssp=1500.0)
+        out = tmp_path / 'ssp2.txt'
+        with open(out, 'w') as f:
+            write_ssp_section(f, env, bottom_depth=200.0)
+        rows = [ln for ln in out.read_text().splitlines() if '/' in ln][1:]
+        for ln in rows:
+            assert len(ln.replace('/', ' ').split()) == 2
+
+
+class TestOaspTrfFrequencyAxis:
+    """TRF bin indices are 1-based, so bin k is (k-1)*DLFRQ.
+
+    ``oasiun22.f:1256-1261`` sets ``DLFRQP = 1/(DT*NX)`` and
+    ``LX = nint(FMIN/DLFRQP + 1)``. Reading bin k as ``k/(dt*nx)`` shifts the
+    whole axis up by one bin.
+    """
+
+    @staticmethod
+    def _axis(lx, mx, nx, dt):
+        """The reader's frequency-axis expression, isolated."""
+        return np.array([((k - 1) / (dt * nx)) for k in range(lx, mx + 1)],
+                        dtype=np.float64)
+
+    def test_round_trips_the_oases_index_formula(self):
+        nx, dt = 1024, 1.0 / 4096.0
+        dlfrq = 1.0 / (dt * nx)
+        f_min, f_max = 100.0, 400.0
+        lx = int(round(f_min / dlfrq + 1))       # oasiun22.f:1259
+        mx = int(round(f_max / dlfrq + 1))       # oasiun22.f:1261
+        axis = self._axis(lx, mx, nx, dt)
+        assert axis[0] == pytest.approx(f_min, abs=0.5 * dlfrq)
+        assert axis[-1] == pytest.approx(f_max, abs=0.5 * dlfrq)
+
+    def test_first_bin_is_dc_not_one_bin_up(self):
+        nx, dt = 512, 1.0 / 2048.0
+        assert self._axis(1, 4, nx, dt)[0] == pytest.approx(0.0)
+
+    def test_spacing_is_the_dft_bin_width(self):
+        nx, dt = 2048, 1.0 / 8192.0
+        axis = self._axis(10, 20, nx, dt)
+        np.testing.assert_allclose(np.diff(axis), 1.0 / (dt * nx), rtol=1e-12)
+
+
+class TestRoughnessGoesToItsOwnInterface:
+    """Surface and seabed roughness must come from their own carriers.
+
+    AT reads the medium mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
+    (ReadEnvironmentMod.f90:81-88), so the water column's line is sigma(1) —
+    the *sea surface*. The seabed is sigma(NMedia+1), written on the bottom
+    halfspace line (:121). A model-level ``roughness=`` kwarg documented as
+    "bottom roughness" wrote sigma(1), i.e. the surface.
+    """
+
+    @staticmethod
+    def _env(surf=0.0, bot=0.0):
+        import uacpy
+        e = uacpy.Environment(
+            name='r', bathymetry=200.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5, roughness=bot))
+        e.surface.roughness = surf
+        return e
+
+    def _mesh_sigma(self, tmp_path, env):
+        from uacpy.io.oalib_writer import write_ssp_section
+        out = tmp_path / 'ssp.txt'
+        with open(out, 'w') as f:
+            write_ssp_section(f, env, bottom_depth=200.0)
+        return float(out.read_text().splitlines()[0].split()[1])
+
+    def test_surface_carrier_drives_the_water_medium_sigma(self, tmp_path):
+        assert self._mesh_sigma(tmp_path, self._env(surf=2.0)) == pytest.approx(2.0)
+
+    def test_bottom_carrier_does_not_touch_the_water_medium_sigma(self, tmp_path):
+        assert self._mesh_sigma(tmp_path, self._env(bot=2.0)) == pytest.approx(0.0)
+
+    @pytest.mark.parametrize('model_name', ['Kraken', 'Scooter', 'SPARC'])
+    def test_models_no_longer_take_a_roughness_kwarg(self, model_name):
+        import uacpy
+        with pytest.raises(TypeError):
+            getattr(uacpy, model_name)(roughness=2.0)

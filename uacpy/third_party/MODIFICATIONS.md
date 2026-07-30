@@ -48,6 +48,81 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
+### `misc/interpolation.f90` -- non-terminating segment search
+
+`interp1` walks a segment index `iseg` over the tabulated abscissa `x(1:N)`.
+Valid segments are `1 : N-1`, but the right-hand search clamps at `N-2`:
+
+```fortran
+DO WHILE ( xi( I ) > x( iseg + 1 ) )
+   IF ( iseg < N - 2 ) THEN
+      iseg = iseg + 1
+   END IF
+END DO
+```
+
+Once `iseg` is clamped the `IF` stops incrementing while the `DO WHILE`
+keeps testing the same condition, so **any query point in the final segment
+`[x(N-1), x(N)]` loops forever**.  The left-hand search has the same defect
+at `iseg == 1` for any query below `x(1)`.  Neither hangs on typical input:
+a finely sampled table makes the final segment a narrow sliver, and the
+callers query well inside the range.  It is reachable from
+`KrakenField/field.f90:198`, which shades modes by a `.sbp` source beam
+pattern at angles `RadDeg*ATAN(SQRT(kz2)/k)` — bounded by the critical
+angle, so a *coarse* pattern (e.g. the three points `-90, 0, 90`) puts
+`x(N-1)` at `0` deg and every mode angle then spins.  Reproduced standalone:
+with `x = [-90,-45,0,45,90]`, `xi = 30` returns, `xi = 70` never does.
+`Bellhop` is unaffected — `bellhop.f90:267-274` does its own `maxloc`
+bracket search and never calls `interp1`.
+
+**Fix:** move the clamp into the loop condition, so each search stops when
+`iseg` can no longer move, making the last segment reachable.  Out-of-table
+queries are handled by the separate `R` clamp described below.  Other callers:
+`Scooter/fields.f90`,
+`KrakenField/EvaluatepdqMod.f90`, `KrakenField/Evaluate3DMod.f90`.
+
+**Why `N-1` is the intended bound, not `N-2`.**  `Bellhop/bellhop.f90:265-274`
+performs the same operation — bracket a beam-pattern angle, then interpolate
+linearly — but hand-rolled rather than via `interp1`, and clamps its segment
+index explicitly:
+
+```fortran
+IBP = MAX( IBP, 1 )               ! don't go before beginning of table
+IBP = MIN( IBP, NSBPPts - 1 )     ! don't go past end of table
+```
+
+Same codebase, same author, same task, bound `N-1`, with the comment stating
+the intent.  Bellhop's own out-of-range behaviour is to extrapolate: with `IBP`
+pinned at `NSBPPts-1` and an angle past the table its `s` exceeds 1, and below
+the table `s` goes negative.
+
+Note that extrapolating a beam pattern can yield a negative shading factor
+(a query past the table on a decaying pattern gives e.g. `-0.167`).  That is
+pre-existing AT behaviour.  The interpolation parameter is therefore clamped to
+`[0, 1]` here, so an out-of-table query holds the end value instead of
+extrapolating:
+
+```diff
+-       R       = ( xi( I ) - x( iseg ) ) / ( x( iseg + 1 ) - x( iseg ) )
++       R       = ( xi( I ) - x( iseg ) ) / ( x( iseg + 1 ) - x( iseg ) )
++       R       = MIN( MAX( R, 0.0D0 ), 1.0D0 )
+        yi( I ) = ( 1.0 - R ) * y( iseg ) + R * y( iseg + 1 )
+```
+
+The clamp is inert for in-range queries — verified bit-identical before and
+after (`xi = 30` on `x = [-90,-45,0,45,90]` gives `0.66666666666666674` either
+way); it only changes queries outside `[ x(1), x(N) ]`.
+
+The equivalent inline interpolation in `Bellhop/bellhop.f90:273` and
+`Bellhop/bellhop3D.f90` is **deliberately left unclamped**.  Bellhop has three
+implementations — the Fortran binary plus `bellhopcxx` / `bellhopcuda`, and
+`Bellhop(backend=None)` selects CUDA first — and the port extrapolates too:
+`bellhopcuda/src/common_run.hpp:61-80` returns `0` below the table and `n-1`
+above, `trace.hpp:139` clamps only that *index* to `n-2`, and `trace.hpp:144`
+uses `s` unclamped.  Clamping one of three back ends would make the same input
+shade differently depending on `backend=`, which is worse than the uniform
+pre-existing behaviour.  `interp1` has no such counterpart.
+
 ### Root `Makefile` -- intentionally unpatched
 
 The upstream root `Makefile` bakes a CPU-specific flag into its default
@@ -166,6 +241,54 @@ engineering travelling-wave convention.
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
 waveguide modal dispersion ~20 ms).
+
+### `rams0.5.f` — enlarged array dimensions and bounds checks
+
+Stock RAMS dimensions `parameter (mr=100,mz=10000,mp=10)` are too small for
+uacpy's Lytaev grids, and unlike its siblings rams0.5 shipped with **no
+bounds checks at all**, so an overrun corrupted memory instead of failing.
+Both are fixed:
+
+```diff
+-      parameter (mr=100,mz=10000,mp=10)
++      parameter (mr=505,mz=40004,mp=10)
+```
+
+```diff
++      if(2*nz+4.gt.mz)then
++      write(*,*)'   Need to increase parameter mz to ',2*nz+4
++      stop
++      end if
++      if(np.gt.mp)then
++      write(*,*)'   Need to increase parameter mp to ',np
++      stop
++      end if
++      if(i.gt.mr)then
++      write(*,*)'   Need to increase parameter mr to ',i
++      stop
++      end if
+       do 3 i=1,2*nz+4
+```
+
+**Why `mz` is 40004 here but 20002 for the fluid codes.** rams0.5 is elastic
+and interleaves the field vector, so it indexes the depth arrays to `2*nz+4`
+(`rams0.5.f:137`, and `2*nz` at `:673-675`, `:778-825`) where ramgeo/ramsurf
+index `nz+2`. `mz=40004` therefore gives all three the same usable depth grid,
+`nz ≤ 20000`. Cost is ~48 MB of static arrays (14 `(mz,mp)` complex arrays),
+against ~12 MB before.
+
+The bounds-check condition is `2*nz+4`, not the `nz+2` its siblings use —
+copying theirs would have understated rams' capacity by 2×.
+`uacpy.models.ram._COLLINS_ARRAY_LIMITS` carries the same per-backend rate,
+and `tests/test_ram_backends.py` asserts the two agree by parsing these
+guard expressions out of the sources.
+
+Verified inert: on an input that fits the stock dimensions, builds from the
+pre-patch and post-patch sources produce **byte-identical** `tl.grid` and
+`pcomplex.bin`. (Note separately that a rebuild on a newer gfortran than the
+one that produced a given binary shifts TL by ~0.005 dB — `mz` is the leading
+dimension of the `(mz,mp)` arrays, so it also changes column stride and hence
+vectorisation. Both effects are far below any physical tolerance.)
 
 ### Build system
 

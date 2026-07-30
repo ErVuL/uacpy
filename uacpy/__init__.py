@@ -12,11 +12,7 @@ downward; sea-surface altimetry height is positive upward (z=0 at the
 mean sea surface).
 """
 
-try:
-    from importlib.metadata import version as _pkg_version
-    __version__ = _pkg_version('uacpy')
-except Exception:
-    __version__ = 'unknown'
+from uacpy._version import __version__
 __author__ = 'ErVuL'
 
 from uacpy._log import install_warning_formatter as _install_warning_formatter

@@ -435,3 +435,68 @@ class TestSynthesisAbsoluteAmplitude:
         assert float(np.abs(a.data).max()) == pytest.approx(
             float(np.abs(b.data).max()), rel=1e-6,
         )
+
+
+class TestSourceSpectrumAtArbitraryFrequencies:
+    """``_source_spectrum_at`` must be exact off the waveform's own DFT grid.
+
+    The previous implementation linearly interpolated ``rfft(w)/fs``. That is a
+    convolution with a triangular kernel in frequency — a ``sinc^2(pi df_src t)``
+    taper anchored at t=0 plus periodisation at ``1/df_src`` — and is only
+    correct when the target grid happens to coincide with the source grid,
+    which is why an on-grid test could not see it.
+    """
+
+    @staticmethod
+    def _wf(n=256, fs=2000.0):
+        t = np.arange(n) / fs
+        return np.sin(2 * np.pi * 100.0 * t) * np.hanning(n), fs
+
+    @staticmethod
+    def _dtft(wf, fs, freqs):
+        n = wf.size
+        return (wf[None, :] * np.exp(
+            -2j * np.pi * np.asarray(freqs)[:, None] * np.arange(n)[None, :] / fs
+        )).sum(1) / fs
+
+    def test_matches_rfft_on_the_native_grid(self):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._wf()
+        grid = np.fft.rfftfreq(wf.size, 1.0 / fs)
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid), np.fft.rfft(wf) / fs,
+            rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize('shift', [0.5, 0.25])
+    def test_exact_on_a_half_bin_offset_grid(self, shift):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._wf()
+        native = np.fft.rfftfreq(wf.size, 1.0 / fs)
+        grid = native[:-1] + shift * (native[1] - native[0])
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid), self._dtft(wf, fs, grid),
+            rtol=1e-9, atol=1e-12)
+
+    def test_exact_on_a_finer_grid(self):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._wf()
+        grid = np.fft.rfftfreq(4 * wf.size, 1.0 / fs)
+        grid = grid[grid <= fs / 2]
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid), self._dtft(wf, fs, grid),
+            rtol=1e-9, atol=1e-12)
+
+    def test_out_of_band_frequencies_are_zero(self):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._wf()
+        out = _source_spectrum_at(wf, fs, np.array([-10.0, fs, 2 * fs]))
+        assert np.all(out == 0)
+
+    def test_chunking_does_not_change_the_result(self):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._wf()
+        grid = np.linspace(10.0, 900.0, 137)
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid, _max_elems=1000),
+            _source_spectrum_at(wf, fs, grid),
+            rtol=1e-12, atol=1e-15)

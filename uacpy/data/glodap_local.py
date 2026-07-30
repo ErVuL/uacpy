@@ -146,9 +146,16 @@ class _GlodapGrid(NetcdfGrid):
         The mapped product masks land and sub-seafloor levels as ``_FillValue``;
         drop them so the returned column runs surface → deepest analysed level.
         """
+        # np.asarray() on a netCDF4 masked array discards the mask and exposes
+        # the raw _FillValue (-999 in the mapped product), which np.isfinite
+        # then accepts as a real pH. Fill *through* the mask instead.
         col = np.ma.filled(
-            np.asarray(self._ph[:, self.row(lat), self.col(lon)], dtype=float),
+            np.ma.asarray(self._ph[:, self.row(lat), self.col(lon)],
+                          dtype=float),
             np.nan)
+        # Backstop for a file whose fill is a bare sentinel with no mask:
+        # seawater pH cannot leave the 0-14 scale.
+        col[(col < 0.0) | (col > 14.0)] = np.nan
         valid = np.isfinite(col)
         return self._depth[valid], col[valid]
 

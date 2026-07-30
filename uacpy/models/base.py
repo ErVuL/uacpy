@@ -95,9 +95,16 @@ if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COL
     raise RuntimeError("DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS")
 
 
+# Source geometries a model may declare via ``ModelSpec.source_types``.
+# 'point'  -> AT 'R', cylindrical spreading applied
+# 'line'   -> AT 'X', Cartesian spreading
+# 'scaled' -> AT 'S', point source with cylindrical spreading removed
+VALID_SOURCE_TYPES: frozenset = frozenset({'point', 'line', 'scaled'})
+
+
 # Capability-flag names a model may advertise. Each maps to a
-# ``_supports_<name>`` instance attribute consumed by ``_project_environment``;
-# the question each answers is "does this env *shape* work with this model?".
+# ``_supports_<name>`` instance attribute; the question each answers is "does
+# this env *shape* — or this source feature — work with this model?".
 # Keep in lockstep with the ``self._supports_*`` block in
 # ``PropagationModel.__init__``.
 _CAPABILITY_FLAGS: frozenset = frozenset({
@@ -110,6 +117,8 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     'range_dependent_layered_bottom',
     'elastic_media',
     'multi_source_depth',
+    'source_beam_pattern',
+    'rough_surface',
 })
 
 
@@ -147,6 +156,10 @@ class ModelSpec:
         Capability-flag names (subset of :data:`_CAPABILITY_FLAGS`) the
         model honours natively. Every flag not listed defaults ``False``
         and its env feature is collapsed by ``_project_environment``.
+    source_types : frozenset of str
+        Source geometries (subset of :data:`VALID_SOURCE_TYPES`) the model
+        honours. Becomes ``self._supported_source_types``; a ``Source``
+        carrying anything else is rejected by ``validate_inputs``.
     collapse : dict
         Per-model collapse defaults overriding :data:`DEFAULT_COLLAPSE`.
 
@@ -166,6 +179,7 @@ class ModelSpec:
 
     modes: tuple = ()
     supports: frozenset = frozenset()
+    source_types: frozenset = frozenset({'point'})
     collapse: dict = field(default_factory=dict)
 
     def validate(self, model_name: str) -> None:
@@ -181,6 +195,17 @@ class ModelSpec:
             raise ValueError(
                 f"{model_name}.spec.supports has unknown capability flags: "
                 f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
+            )
+        bad_types = set(self.source_types) - VALID_SOURCE_TYPES
+        if bad_types:
+            raise ValueError(
+                f"{model_name}.spec.source_types has unknown geometries: "
+                f"{sorted(bad_types)}. Valid: {sorted(VALID_SOURCE_TYPES)}."
+            )
+        if not self.source_types:
+            raise ValueError(
+                f"{model_name}.spec.source_types is empty; every model must "
+                f"accept at least one source geometry."
             )
         unknown = set(self.collapse) - set(DEFAULT_COLLAPSE)
         if unknown:
@@ -317,7 +342,11 @@ class PropagationModel(ABC):
         self.use_tmpfs = use_tmpfs
         self.verbose = verbose
         self.work_dir = work_dir
-        # cleanup defaults to True only when uacpy owns the work dir.
+        # cleanup defaults to True only when uacpy owns the work dir. Whether
+        # the caller passed it is kept so ``copy()`` can re-resolve against a
+        # new work_dir instead of carrying an auto-derived True onto a
+        # caller-supplied directory and deleting it.
+        self._cleanup_explicit = cleanup is not None
         self.cleanup = (work_dir is None) if cleanup is None else bool(cleanup)
         self.timeout = float(timeout)
         # Per-feature collapse policies applied by ``_project_environment``
@@ -382,6 +411,11 @@ class PropagationModel(ABC):
         # Bellhop is the only model that runs one source-depth grid in
         # a single binary call; everyone else loops in Python.
         self._supports_multi_source_depth: bool = False
+        self._supports_source_beam_pattern: bool = False
+        # SPARC's GetPar and Bounce's elastic branch ERROUT on a
+        # non-zero SSP%sigma; Kraken/Scooter consume it.
+        self._supports_rough_surface: bool = False
+        self._supported_source_types: frozenset = frozenset({'point'})
 
         # When the subclass declares a ModelSpec, apply it now (after the
         # defaults above and after ``_user_collapse`` is populated, so the
@@ -438,6 +472,7 @@ class PropagationModel(ABC):
             self._supported_modes = list(spec.modes)
         for flag in _CAPABILITY_FLAGS:
             setattr(self, f'_supports_{flag}', flag in spec.supports)
+        self._supported_source_types = frozenset(spec.source_types)
         if spec.collapse:
             self._set_collapse_defaults(spec.collapse)
 
@@ -591,6 +626,15 @@ class PropagationModel(ABC):
             )
 
         kwargs.update(overrides)
+
+        # An auto-derived ``cleanup`` describes *this* instance's work_dir, not
+        # the clone's. Hand back the ``None`` sentinel so the new instance
+        # re-resolves; otherwise ``model.copy(work_dir=d)`` off an unpinned
+        # model would arrive at ``cleanup=True`` and rmtree the caller's ``d``.
+        # An explicitly passed value is the caller's choice and is preserved.
+        if (not self._cleanup_explicit and 'cleanup' not in overrides):
+            kwargs['cleanup'] = None
+
         return type(self)(**kwargs)
 
     @abstractmethod
@@ -931,9 +975,11 @@ class PropagationModel(ABC):
         InvalidDepthError
             If source depths exceed the model's resolvable depth.
         ConfigurationError
-            If source/receiver depths are negative, or if ``run_mode`` is a
+            If source/receiver depths are negative, if ``run_mode`` is a
             single-frequency mode and ``source`` carries multiple
-            frequencies.
+            frequencies, if ``source.source_type`` is outside
+            ``_supported_source_types``, or if ``source.beam_pattern`` is set
+            on a model that does not read one.
         """
         if (run_mode is not None
                 and run_mode in self._SINGLE_FREQUENCY_MODES
@@ -953,6 +999,36 @@ class PropagationModel(ABC):
                 f"got {len(source.depths)}: {list(source.depths)}. Loop "
                 f"over Sources externally for multi-depth runs."
             )
+
+        if source.source_type not in self._supported_source_types:
+            raise ConfigurationError(
+                f"{self.model_name} does not support "
+                f"Source(source_type={source.source_type!r}); it supports "
+                f"{sorted(self._supported_source_types)}."
+            )
+
+        if (source.beam_pattern is not None
+                and not self._supports_source_beam_pattern):
+            raise ConfigurationError(
+                f"{self.model_name} does not read a source beam pattern; "
+                f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
+            )
+
+        # receiver_type='line' is honoured by the input-side checks (seafloor
+        # comparison, depth clipping) but no model's result assembly collapses
+        # the depth x range grid to the paired samples, so a 'line' request
+        # silently returns the full cross-product. Refuse rather than hand back
+        # a shape the caller did not ask for.
+        if receiver.receiver_type == 'line':
+            raise ConfigurationError(
+                f"{self.model_name}: receiver_type='line' is not implemented — "
+                f"every model returns the full depth x range grid, so the "
+                f"paired (depths[i], ranges[i]) sampling you asked for would "
+                f"be silently ignored. Use receiver_type='grid' and index the "
+                f"diagonal yourself: "
+                f"tl[np.arange(len(depths)), np.arange(len(ranges))]."
+            )
+
         resolvable_depth = self._max_receiver_depth(env)
 
         # The source injects energy into the medium, so it must sit within
@@ -1005,7 +1081,7 @@ class PropagationModel(ABC):
         range-dependent case is handled per-range by
         :meth:`_check_per_range_receiver_depth`.
         """
-        if env.has_range_dependent_bathymetry():
+        if env.has_range_dependent_bathymetry:
             return
         if receiver.depth_max > resolvable_depth:
             warnings.warn(
@@ -1031,7 +1107,7 @@ class PropagationModel(ABC):
         ``receiver_type='line'`` pairs depths[i] with ranges[i] (1-D
         compare); ``'grid'`` evaluates the depth × range cross-product.
         """
-        if not env.has_range_dependent_bathymetry():
+        if not env.has_range_dependent_bathymetry:
             return
         depths = np.atleast_1d(receiver.depths).astype(float)
         ranges = np.atleast_1d(receiver.ranges).astype(float)
@@ -1083,7 +1159,7 @@ class PropagationModel(ABC):
                     UserWarning, stacklevel=3,
                 )
 
-        if env.has_range_dependent_bathymetry():
+        if env.has_range_dependent_bathymetry:
             _check("env.bathymetry", float(env.bathymetry.ranges[-1]))
         if env.ssp.is_range_dependent:
             _check("env.ssp.ranges", float(env.ssp.ranges[-1]))
@@ -1598,6 +1674,7 @@ class PropagationModel(ABC):
                 self.model_name, return_code=-1,
                 stdout=(e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout),
                 stderr=f"Timed out after {timeout}s",
+                timed_out=True,
             ) from e
 
         if check and result.returncode != 0:
@@ -1703,7 +1780,19 @@ class PropagationModel(ABC):
                 UserWarning, stacklevel=3,
             )
 
-        if e.has_range_dependent_bathymetry() and not self._supports_range_dependent_bathymetry:
+        surf_sigma = float(getattr(e.surface, 'roughness', 0.0) or 0.0)
+        if surf_sigma and not self._supports_rough_surface:
+            e.surface = _copy.deepcopy(e.surface)
+            e.surface.roughness = 0.0
+            warnings.warn(
+                f"{self.model_name} cannot model a rough sea surface "
+                f"(its solver rejects a non-zero interfacial sigma); "
+                f"env.surface.roughness={surf_sigma:g} m dropped. Use Kraken "
+                f"or Scooter to keep it.",
+                UserWarning, stacklevel=3,
+            )
+
+        if e.has_range_dependent_bathymetry and not self._supports_range_dependent_bathymetry:
             method = self._collapse["bathymetry"]
             new_depth = e.get_representative_depth(method)
             min_d = float(e.bathymetry.depths.min())
@@ -1721,7 +1810,7 @@ class PropagationModel(ABC):
                 UserWarning, stacklevel=3,
             )
 
-        if e.has_range_dependent_ssp() and not self._supports_range_dependent_ssp:
+        if e.has_range_dependent_ssp and not self._supports_range_dependent_ssp:
             method = self._collapse["ssp"]
             e.ssp = e.ssp.collapse(method)
             warnings.warn(
@@ -2002,9 +2091,10 @@ class PropagationModel(ABC):
                 continue
             value = getattr(self, name)
             # ``cleanup`` resolves to ``work_dir is None`` when left at its None
-            # default; hide it while it carries that auto value (copy-stable,
-            # since copy passes the resolved bool back).
-            if name == 'cleanup' and value == (self.work_dir is None):
+            # default; hide it while it carries that auto value, matching
+            # ``copy()``, which hands the ``None`` sentinel back so the clone
+            # re-resolves against its own work_dir.
+            if name == 'cleanup' and not self._cleanup_explicit:
                 continue
             if default is not _NO_DEFAULT and _values_equal(value, default):
                 continue

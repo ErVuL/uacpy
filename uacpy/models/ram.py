@@ -66,6 +66,25 @@ from uacpy.io.ramsurf_reader import read_tl_grid, read_pcomplex_grid
 # RAMS_DR_LAMBDA_CAP — empirical upper stability bound on dr for rams0.5's
 #   rotated Padé elastic march, expressed as a divisor of c_min/freq.
 #   ``dr ≤ c_min / (RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ per step.
+# Fortran array dimensions of the Collins binaries (``parameter (mr=…,mz=…)``
+# at the top of each source); all three are enlarged locally over upstream, see
+# third_party/MODIFICATIONS.md. ``mr`` bounds the bathymetry arrays. ``mz``
+# bounds the depth arrays, but the codes do not consume it at the same rate:
+# rams0.5 interleaves the elastic field vector and indexes 2*nz+4
+# (rams0.5.f:137, 673-675, 778-825), while the fluid codes index nz+2
+# (ramgeo1.5.f:138). ``mz`` is therefore set so all three reach nz=20000.
+# Each binary stops with a diagnostic on an overrun but writes no output, so it
+# would otherwise surface as a truncated-file read — guard before launching.
+_COLLINS_ARRAY_LIMITS = {
+    'rams':    {'mr': 505, 'mz': 40004, 'nz_factor': 2, 'nz_pad': 4},
+    'ramsurf': {'mr': 505, 'mz': 20002, 'nz_factor': 1, 'nz_pad': 2},
+    'ramgeo':  {'mr': 505, 'mz': 20002, 'nz_factor': 1, 'nz_pad': 2},
+}
+
+
+# Lytaev grid-accuracy target used when the caller does not pin one.
+DEFAULT_RAM_ACCURACY = 1e-3
+
 LAMBDA_PER_DZ_FLOOR = 16.0
 RAMS_DR_LAMBDA_CAP = 5.0
 
@@ -308,7 +327,7 @@ class RAM(PropagationModel):
         # ``dr`` / ``dz`` are picked by the Lytaev (2023) Padé-error
         # optimizer when not set explicitly. ``accuracy`` is the per-run
         # error budget; ``theta_max`` (degrees) bounds the PE spectrum.
-        accuracy: float = 1e-3,
+        accuracy: Optional[float] = None,
         theta_max: float = 30.0,
         # Collins backends only — ignored when the dispatcher picks mpiramS.
         # `theta` is the Padé rotation angle (degrees, 0–90) used by RAMS
@@ -487,7 +506,12 @@ class RAM(PropagationModel):
         self.n_sed_points = n_sed_points
         self.c0 = c0
 
-        self.accuracy = float(accuracy)
+        # None => the Lytaev target is uacpy's own default, so a grid
+        # cap that misses it is a status fact, not something the caller
+        # asked for; an explicit value makes an unmet target a warning.
+        self._accuracy_explicit = accuracy is not None
+        self.accuracy = float(DEFAULT_RAM_ACCURACY if accuracy is None
+                              else accuracy)
         self.theta_max = float(theta_max)
         # ``rams_theta`` is either a float (used for every frequency) or
         # a callable ``theta_fn(freq_hz) -> float`` resolved per
@@ -725,7 +749,7 @@ class RAM(PropagationModel):
         branches in :meth:`_prepare_bottom_properties`.
         """
         depth = env.depth
-        if env.has_range_dependent_ssp():
+        if env.has_range_dependent_ssp:
             if range is None:
                 range = 0.0
             ssp = env.ssp.eval(range=range).to_pairs()
@@ -754,11 +778,11 @@ class RAM(PropagationModel):
         # Use thin sediment layer for sharp interface (≈ half-space)
         sedlayer = self._effective_dz(env)
 
-        if env.has_range_dependent_layered_bottom() and work_dir is not None:
+        if env.has_range_dependent_layered_bottom and work_dir is not None:
             return self._bottom_rd_layered(env, work_dir, nzs)
-        if env.has_layered_bottom():
+        if env.has_layered_bottom:
             return self._bottom_layered(env, nzs, cwg_bottom)
-        if env.has_range_dependent_bottom() and work_dir is not None:
+        if env.has_range_dependent_bottom and work_dir is not None:
             return self._bottom_rd_halfspace(env, work_dir, nzs, sedlayer)
         return self._bottom_halfspace(env, nzs, cwg_bottom, sedlayer)
 
@@ -786,7 +810,7 @@ class RAM(PropagationModel):
             seafloor_i = float(np.asarray(
                 env.bathymetry.eval(range=rdl.ranges[i])
             ).flat[0])
-            if env.has_range_dependent_ssp():
+            if env.has_range_dependent_ssp:
                 ssp_at_range = env.ssp.eval(range=rdl.ranges[i]).to_pairs()
                 cwg_local = float(np.interp(seafloor_i,
                                             ssp_at_range[:, 0], ssp_at_range[:, 1]))
@@ -861,7 +885,7 @@ class RAM(PropagationModel):
         for i in range(n_ranges):
             cb = cp_arr[i]
             seafloor_i = float(env.bathymetry.eval(range=bottom_rd.ranges[i]))
-            if env.has_range_dependent_ssp():
+            if env.has_range_dependent_ssp:
                 ssp_at_range = env.ssp.eval(range=bottom_rd.ranges[i]).to_pairs()
                 cwg_local = float(np.interp(seafloor_i,
                                             ssp_at_range[:, 0], ssp_at_range[:, 1]))
@@ -1064,7 +1088,7 @@ class RAM(PropagationModel):
     @staticmethod
     def _env_has_elastic_bottom(env: Environment) -> bool:
         """Return True if any bottom container carries shear_speed > 0."""
-        return env.has_elastic_bottom()
+        return env.has_elastic_bottom
 
     _BACKENDS = ('mpiramS', 'ramgeo', 'rams', 'ramsurf')
 
@@ -1164,6 +1188,18 @@ class RAM(PropagationModel):
                 "(env.altimetry). For a flat surface use backend='mpiramS' / "
                 "'ramgeo', or backend=None for automatic dispatch."
             )
+        if backend == 'rams' and not elastic:
+            # rams0.5 is the elastic (RAMS) PE. Run on a fluid bottom its
+            # shear machinery degenerates and it returns a null field —
+            # TL saturated at 200 dB at every range — rather than failing.
+            # Mirrors the ramsurf rule above: a backend whose defining
+            # feature is absent from the env is a configuration error.
+            raise ConfigurationError(
+                "RAM(backend='rams') is the elastic PE and needs a bottom "
+                "with shear (shear_speed > 0); on a fluid bottom it returns "
+                "a null field. Use backend='mpiramS' / 'ramgeo', or "
+                "backend=None for automatic dispatch."
+            )
 
     def _collins_binary(self, kind: str) -> Path:
         """Resolve the path to a Collins-family binary on disk."""
@@ -1197,6 +1233,63 @@ class RAM(PropagationModel):
         if callable(t):
             return float(t(float(freq)))
         return float(t)
+
+
+    @staticmethod
+    def _collins_mz_budget(kind: str, zmax: float):
+        """``(slots_needed, mz, min_dz)`` for one Collins depth grid.
+
+        ``slots_needed`` is how many ``mz`` slots the binary's own
+        ``nz = zmax/dz - 0.5`` consumes, per that backend's indexing;
+        ``min_dz`` is the coarsest-resolution bound that fits, with half a
+        grid point of headroom against the Fortran truncation.
+        """
+        limits = _COLLINS_ARRAY_LIMITS.get(kind)
+        if limits is None:
+            return None
+        nz_max = (limits['mz'] - limits['nz_pad']) // limits['nz_factor']
+
+        def needed(dz):
+            nz = int(zmax / dz - 0.5)
+            return limits['nz_factor'] * nz + limits['nz_pad']
+
+        return needed, limits['mz'], zmax / (nz_max - 0.5)
+
+    def _check_collins_array_limits(self, env: Environment, kind: str,
+                                    dz: float, zmax: float) -> None:
+        """Reject a run that would overrun a Collins binary's fixed arrays.
+
+        ``mr`` bounds the bathymetry arrays ``rb``/``zb``; ``mz`` bounds the
+        depth arrays, at the per-backend rate recorded in
+        :data:`_COLLINS_ARRAY_LIMITS`.
+
+        Each binary does test its own bounds and ``stop`` with a diagnostic,
+        but exits before writing ``tl.grid``, so the failure would otherwise
+        reach the caller as a ``FileFormatError`` about a truncated file with
+        the real message lost. Only a ``dz`` the caller pinned can get here —
+        an auto-picked grid is coarsened to fit in ``_resolve_collins_grid``.
+        """
+        limits = _COLLINS_ARRAY_LIMITS.get(kind)
+        if limits is None:
+            return
+        bathy = getattr(env, 'bathymetry', None)
+        n_ranges = int(getattr(bathy, 'n_ranges', 0) or 0)
+        if n_ranges > limits['mr']:
+            raise ConfigurationError(
+                f"RAM(backend={kind!r}): the environment has {n_ranges} "
+                f"bathymetry points but the binary's arrays hold "
+                f"{limits['mr']} (mr={limits['mr']}), so it would stop "
+                f"without producing output. Decimate the bathymetry, or use "
+                f"backend='mpiramS' (no fixed limit)."
+            )
+        needed, mz, dz_min = self._collins_mz_budget(kind, zmax)
+        if needed(dz) > mz:
+            raise ConfigurationError(
+                f"RAM(backend={kind!r}): dz={dz:g} m over a zmax={zmax:.1f} m "
+                f"domain needs {needed(dz)} depth slots but the binary's "
+                f"arrays hold {mz} (mz={mz}). Coarsen to dz>={dz_min:.4g} m, "
+                f"lower zmax, or use backend='mpiramS' (no fixed limit)."
+            )
 
     def _run_collins(
         self,
@@ -1313,6 +1406,10 @@ class RAM(PropagationModel):
             env, fc, kind, max_range,
             dr_override, dz_override, zmax_override,
         )
+        # Checked here rather than in ``_run_collins`` so the broadband sweep,
+        # which calls this method directly, is covered too — and so the mz
+        # bound sees the grid actually resolved for this frequency.
+        self._check_collins_array_limits(env, kind, dz, zmax)
 
         # Catch receiver depths that exceed the PE computational domain —
         # without this warning the RegularGridInterpolator below silently
@@ -1449,6 +1546,7 @@ class RAM(PropagationModel):
         dz = float(dz_override) if dz_override is not None else (
             float(self.dz) if self.dz is not None else None
         )
+        dz_pinned = dz is not None
 
         if dr is None or dz is None:
             dr_auto, dz_auto = self._compute_grid_lytaev(
@@ -1464,7 +1562,34 @@ class RAM(PropagationModel):
             zmax = float(self.zmax)
         else:
             zmax = self._compute_zmax(env, fc)
+
+        if not dz_pinned:
+            dz = self._fit_dz_to_mz(kind, dz, zmax)
         return dr, dz, zmax
+
+    def _fit_dz_to_mz(self, kind: str, dz: float, zmax: float) -> float:
+        """Coarsen an auto-picked ``dz`` so the depth grid fits ``mz``.
+
+        Mirrors the ``MAX_DEPTH_POINTS`` clamp in ``_compute_grid_lytaev``: an
+        auto grid is uacpy's own choice, so a hard array bound it cannot meet
+        is coarsened here rather than raised at the caller. A ``dz`` the caller
+        pinned is left alone and rejected by ``_check_collins_array_limits``.
+        """
+        budget = self._collins_mz_budget(kind, zmax)
+        if budget is None or dz <= 0 or zmax <= 0:
+            return dz
+        needed, mz, dz_min = budget
+        if needed(dz) <= mz:
+            return dz
+        warnings.warn(
+            f"RAM:{kind}: raised dz from {dz:.4f} m to {dz_min:.3f} m to fit "
+            f"the binary's depth arrays ({needed(dz)} slots needed, mz={mz}) "
+            f"over a zmax={zmax:.1f} m domain. Lytaev accuracy budget "
+            f"eps={self.accuracy:.0e} is no longer met — lower zmax, or use "
+            f"backend='mpiramS' (no fixed limit) to keep the finer grid.",
+            UserWarning, stacklevel=3,
+        )
+        return dz_min
 
     def _build_ramsurf_surface(self, env, max_range):
         """Build the ramsurf1.5 surface profile from ``env.altimetry``.
@@ -1690,7 +1815,7 @@ class RAM(PropagationModel):
         breaks = {0.0}
         if b.is_range_dependent:
             breaks.update(float(r) for r in b.ranges)
-        if env.has_range_dependent_ssp():
+        if env.has_range_dependent_ssp:
             breaks.update(float(r) for r in env.ssp.ranges)
         ranges = sorted(breaks)
 
@@ -1711,7 +1836,7 @@ class RAM(PropagationModel):
             )
             ssp_pairs = (
                 env.ssp.eval(range=rng).to_pairs()
-                if env.has_range_dependent_ssp() else env.ssp.to_pairs()
+                if env.has_range_dependent_ssp else env.ssp.to_pairs()
             )
             seg = dict(
                 range=float(rng),
@@ -1958,7 +2083,7 @@ class RAM(PropagationModel):
                 reason = 'mpiramS runtime cap (λ_p / 16)'
             else:
                 reason = 'acoustic stability (λ_p / 16)'
-            warnings.warn(
+            msg = (
                 f"RAM:{kind}: raised dz from {dz_pre:.3f} m to "
                 f"{dz_opt:.3f} m for {reason} "
                 f"(floor={dz_floor:.3f} m at cs_min={cs_min:.0f} m/s, "
@@ -1968,9 +2093,17 @@ class RAM(PropagationModel):
                 f"to override. For broadband sweeps the cap is computed "
                 f"at the *lowest* frequency in the sweep, so it may be "
                 f"sub-Nyquist for the upper band — pin dz≈λ(f_max)/8 "
-                f"to resolve the full pulse spectrum.",
-                UserWarning, stacklevel=3
+                f"to resolve the full pulse spectrum."
             )
+            # The stability floor sits above the default Lytaev dz for every
+            # ordinary frequency, so warning on the default target fires on
+            # essentially every run and trains callers to ignore uacpy
+            # warnings. Warn only when the caller pinned an accuracy that is
+            # then not delivered; otherwise report it as status.
+            if self._accuracy_explicit:
+                warnings.warn(msg, UserWarning, stacklevel=3)
+            else:
+                self._log(msg, level="info")
 
         c0_origin = 'user' if self.c0 is not None else 'Lytaev Eq.15'
         self._log(

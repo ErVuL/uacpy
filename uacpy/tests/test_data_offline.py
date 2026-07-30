@@ -347,7 +347,7 @@ def test_fetch_environment_sea_ice(cache, monkeypatch):
                                  bottom_sources='grainsize',
                                  surface_sources='seaice')
     assert env.surface.acoustic_type == 'half-space'
-    assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface()
+    assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface
     assert 'seaice' in [s.source.id for s in env.data_sources]
 
 

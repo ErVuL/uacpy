@@ -56,6 +56,7 @@ from uacpy.io.bathy_io import (
 from uacpy.io.refl_io import (
     read_reflection_coefficient, read_source_beam_pattern,
     write_reflection_coefficient, write_source_beam_pattern,
+    stage_source_beam_pattern,
     dedupe_reflection_file,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
@@ -124,6 +125,7 @@ __all__ = [
     "write_bty_file", "write_bty_long_format", "write_bty_3d",
     "write_ati_file",
     "write_reflection_coefficient", "write_source_beam_pattern",
+    "stage_source_beam_pattern",
     # Bellhop writer
     "write_bellhop_env_file",
     # OASES writers

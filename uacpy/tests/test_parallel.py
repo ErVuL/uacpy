@@ -160,10 +160,49 @@ def test_run_parallel_broken_pool_interactive_message(monkeypatch):
     with pytest.raises(uacpy.ConfigurationError, match="interactive session"):
         P.run_parallel([job], start_method='spawn')
 
+    # Importable __main__ (a real .py script) and the pool dies before any job
+    # completes: that is a *startup* death, and for a script the usual cause is
+    # a module-level run_parallel with no `if __name__ == "__main__":` guard,
+    # so the message must name the guard rather than blame a segfault.
     monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
-    with pytest.raises(uacpy.ConfigurationError, match="died mid-run") as ei:
+    with pytest.raises(uacpy.ConfigurationError, match="__main__") as ei:
         P.run_parallel([job], start_method='spawn')
     assert isinstance(ei.value.__cause__, BrokenProcessPool)       # original kept
+
+
+def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(monkeypatch):
+    """Once a job has completed, a dead pool really is a mid-run crash."""
+    import uacpy.parallel as P
+    from concurrent.futures.process import BrokenProcessPool
+
+    class _OneThenDead:
+        """First future succeeds; the pool then breaks."""
+        def __init__(self, *a, **k):
+            self._n = 0
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def submit(self, fn, *a, **k):
+            self._n += 1
+            f = _Fut(self._n == 1)
+            return f
+
+    class _Fut:
+        def __init__(self, ok): self._ok = ok
+        def cancel(self): return True
+        def result(self, *a, **k):
+            if self._ok:
+                return 'result-object'
+            raise BrokenProcessPool("pool died")
+
+    monkeypatch.setattr(P, 'ProcessPoolExecutor', _OneThenDead)
+    monkeypatch.setattr(P, 'as_completed', lambda m: list(m))
+    monkeypatch.setattr(P, '_main_is_importable', lambda: True)
+    jobs = [Job(model=object(), env='e', source='s', receiver='r'),
+            Job(model=object(), env='e', source='s', receiver='r')]
+    with pytest.raises(uacpy.ConfigurationError, match="died mid-run"):
+        P.run_parallel(jobs, start_method='spawn')
 
 
 def test_job_defaults():
@@ -307,3 +346,68 @@ def test_run_parallel_collects_errors(pekeris_env):
     assert batch[0] is not None
     assert 1 in batch.errors
     assert len(batch.stack()) == 1
+
+
+def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
+    """``copy(work_dir=...)`` must not wipe the caller's directory.
+
+    ``cleanup`` resolves to ``work_dir is None`` at construction, so a plain
+    ``Bellhop()`` carries ``cleanup=True``. ``copy()`` rebuilds from the
+    *resolved* attributes, so re-pointing the clone at a user directory used
+    to hand it ``cleanup=True`` and delete that directory after ``run()``.
+    """
+    d = tmp_path / 'user_outputs'
+    d.mkdir()
+    keep = d / 'precious.txt'
+    keep.write_text('do not delete')
+
+    base = uacpy.models.Bellhop()
+    assert base.cleanup is True, "unpinned model should own its temp dir"
+
+    clone = base.copy(work_dir=d)
+    assert clone.cleanup is False, (
+        "copy() inherited cleanup=True onto a caller-supplied work_dir; "
+        "run() would rmtree it")
+
+    # cleanup_work_dir() wipes unconditionally; the flag gates whether it is
+    # reached (FileManager.__exit__), so exercise that path.
+    fm = clone._setup_file_manager()
+    assert fm.cleanup is False
+    with fm:
+        pass
+    assert keep.exists(), "caller's work_dir was wiped by an inherited cleanup"
+
+
+def test_copy_preserves_an_explicit_cleanup_choice(tmp_path):
+    """An explicitly requested cleanup=True still survives copy()."""
+    d = tmp_path / 'scratch'
+    base = uacpy.models.Bellhop(cleanup=True)
+    assert base.copy(work_dir=d).cleanup is True
+    base2 = uacpy.models.Bellhop(work_dir=tmp_path / 'a', cleanup=False)
+    assert base2.copy(work_dir=tmp_path / 'b').cleanup is False
+
+
+def test_pool_death_before_any_job_names_the_main_guard(monkeypatch):
+    """A pool that dies before any job completes must blame the __main__ guard.
+
+    An unguarded module-level ``run_parallel`` in a .py script leaves
+    ``__main__`` importable, so the interactive-session check does not fire and
+    the message used to blame a segfault/OOM instead of the missing guard.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+    import uacpy.parallel as par
+    from uacpy.core.exceptions import ConfigurationError
+
+    class _DeadPool:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def submit(self, *a, **k): raise BrokenProcessPool("pool died")
+
+    monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+    job = par.Job(uacpy.models.Bellhop(), env,
+                  uacpy.Source(depths=50.0, frequencies=100.0),
+                  uacpy.Receiver(depths=50.0, ranges=[1000.0]))
+    with pytest.raises(ConfigurationError, match="__main__"):
+        par.run_parallel([job], n_workers=1)

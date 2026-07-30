@@ -124,7 +124,7 @@ def _emit_bottom_layers(
         def suffix_fn(_i): return static_trail  # noqa: E731  -- static-suffix shortcut
 
     iface = iface_start
-    if env.has_layered_bottom():
+    if env.has_layered_bottom:
         lb = env.bottom.columns[0]
         current_depth = water_depth
         for layer in _writable_layers(lb):
@@ -226,7 +226,7 @@ def _count_bottom_layers(env: Environment) -> int:
 
     Sub-resolution layers are excluded — see ``_writable_layers`` — so the count
     matches what the writer actually emits."""
-    if env.has_layered_bottom():
+    if env.has_layered_bottom:
         return len(_writable_layers(env.bottom))
     return 0
 

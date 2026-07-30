@@ -75,8 +75,12 @@ class ExecutableNotFoundError(UACPYError):
 class ModelExecutionError(UACPYError):
     """Raised when a model subprocess exits with a non-zero code."""
 
-    def __init__(self, model_name: str, return_code: int, stdout: str = None, stderr: str = None):
-        message = f"{model_name} execution failed (exit code: {return_code})"
+    def __init__(self, model_name: str, return_code: int, stdout: str = None,
+                 stderr: str = None, timed_out: bool = False):
+        if timed_out:
+            message = f"{model_name} execution timed out"
+        else:
+            message = f"{model_name} execution failed (exit code: {return_code})"
 
         details = []
         if stderr:
@@ -98,11 +102,13 @@ class ModelExecutionError(UACPYError):
         self.return_code = return_code
         self.stdout = stdout
         self.stderr = stderr
+        self.timed_out = timed_out
 
     def __reduce__(self):
         return (_rebuild_exc, (ModelExecutionError,
                                (self.model_name, self.return_code,
-                                self.stdout, self.stderr), {}))
+                                self.stdout, self.stderr),
+                               {'timed_out': self.timed_out}))
 
 
 class InvalidDepthError(UACPYError):

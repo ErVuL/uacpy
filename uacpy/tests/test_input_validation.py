@@ -228,7 +228,7 @@ def test_ram_collins_threads_rd_bottom():
         acoustic_type='half-space',
     )
     env = Environment(bathymetry=100.0, ssp=1500.0, bottom=rd_bot)
-    assert env.has_elastic_bottom()
+    assert env.has_elastic_bottom
     ram = RAM()
     assert ram.select_backend(env) == 'rams'
     src = uacpy.Source(depths=10.0, frequencies=100.0)
@@ -670,3 +670,34 @@ def test_francois_garrison_accepts_list_pH():
     out = francois_garrison_db_per_km(10000, 10, 35, [8.0, 8.1], 100)
     out = np.atleast_1d(np.asarray(out, dtype=float))
     assert out.shape == (2,) and np.all(out > 0)
+
+
+@pytest.mark.parametrize('model_name', ['Bellhop', 'Kraken', 'Scooter', 'RAM'])
+def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
+    """``receiver_type='line'`` must raise, not return the full grid.
+
+    The carrier accepts it and the input-side checks honour it, but no model's
+    result assembly collapses depth x range to the paired samples — so a 'line'
+    request used to come back as the cross-product with no indication.
+    """
+    import uacpy
+    from uacpy.core.exceptions import ConfigurationError
+
+    env = uacpy.Environment(
+        name='p', bathymetry=200.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1800.0, density=1.8,
+                                        attenuation=0.5))
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    d = np.array([60.0, 90.0, 120.0])
+    r = np.array([1000.0, 2000.0, 3000.0])
+
+    model = getattr(uacpy, model_name)(verbose=False)
+    with pytest.raises(ConfigurationError, match="receiver_type='line'"):
+        model.run(env, src, uacpy.Receiver(depths=d, ranges=r,
+                                           receiver_type='line'))
+    # The documented workaround still works.
+    tl = np.asarray(model.run(env, src,
+                              uacpy.Receiver(depths=d, ranges=r)).tl)
+    i = np.arange(len(d))
+    assert tl[i, i].shape == (3,)

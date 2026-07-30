@@ -565,10 +565,9 @@ class TestRamPekerisReference:
             sound_speed=1700.0, density=1.7, attenuation=0.5,
         ))
         src, rcv = self._src_rcv()
-        with pytest.warns(UserWarning, match="raised dz from"):
-            ram_field = RAM(verbose=False).run(
-                env, src, rcv, run_mode=RunMode.COHERENT_TL,
-            )
+        ram_field = RAM(verbose=False).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL,
+        )
         assert ram_field.backend == 'mpiramS'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
@@ -578,10 +577,9 @@ class TestRamPekerisReference:
     def test_rams_pekeris_elastic(self):
         env = _env(bottom=_elastic_bottom())
         src, rcv = self._src_rcv()
-        with pytest.warns(UserWarning, match="raised dz from"):
-            ram_field = RAM(verbose=False).run(
-                env, src, rcv, run_mode=RunMode.COHERENT_TL,
-            )
+        ram_field = RAM(verbose=False).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL,
+        )
         assert ram_field.backend == 'rams'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
@@ -602,10 +600,9 @@ class TestRamPekerisReference:
         )
         env_ref = _env(bottom=bottom)
         src, rcv = self._src_rcv()
-        with pytest.warns(UserWarning, match="raised dz from"):
-            ram_field = RAM(verbose=False).run(
-                env_ram, src, rcv, run_mode=RunMode.COHERENT_TL,
-            )
+        ram_field = RAM(verbose=False).run(
+            env_ram, src, rcv, run_mode=RunMode.COHERENT_TL,
+        )
         assert ram_field.backend == 'ramsurf'
         ref_field = self._kraken_reference(env_ref, src, rcv)
         self._assert_window_agreement(
@@ -629,3 +626,149 @@ def test_rams_elastic_no_negative_tl():
         tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).tl)
     finite = np.isfinite(tl)
     assert (tl[finite] >= 0).all(), "TL must be >= 0 (no field gain)"
+
+
+class TestCollinsArrayLimits:
+    """Overrunning a Collins binary's fixed arrays must raise before launch.
+
+    All three are locally enlarged over upstream and all three ``stop`` with a
+    diagnostic on an overrun, but they exit before writing ``tl.grid``, so the
+    failure otherwise reaches the caller as a ``FileFormatError`` about a
+    truncated file. ``mz`` is consumed at different rates: rams0.5 interleaves
+    the elastic field vector (2*nz+4), the fluid codes use nz+2.
+    """
+
+    @staticmethod
+    def _env(n_points):
+        from uacpy.core.environment import Bathymetry
+        r = np.linspace(0.0, 20000.0, n_points)
+        d = 200.0 + 10.0 * np.sin(r / 3000.0)
+        return Environment(
+            name='rd', bathymetry=Bathymetry(ranges=r, depths=d), ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5, shear_speed=300.0))
+
+    @staticmethod
+    def _fluid_env():
+        return Environment(
+            name='flat', bathymetry=200.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+
+    def test_rams_rejects_more_bathymetry_points_than_mr(self):
+        from uacpy.core.exceptions import ConfigurationError
+        src = Source(depths=50.0, frequencies=50.0)
+        rcv = Receiver(depths=100.0, ranges=np.array([5000.0]))
+        with pytest.raises(ConfigurationError, match="mr=505"):
+            RAM(verbose=False, backend='rams').run(self._env(600), src, rcv)
+
+    @pytest.mark.parametrize('kind,mz', [('ramgeo', 20002), ('rams', 40004)])
+    def test_pinned_dz_past_mz_is_rejected(self, kind, mz):
+        """A pinned ``dz`` bypasses the MAX_DEPTH_POINTS cap, so nz can exceed
+        mz. The binary stops with 'Need to increase parameter mz', writes no
+        output, and the reader then reports a truncated tl.grid — the mz bound
+        has to be caught before launch instead."""
+        from uacpy.core.exceptions import ConfigurationError
+        src = Source(depths=50.0, frequencies=50.0)
+        rcv = Receiver(depths=100.0, ranges=np.array([5000.0]))
+        env = self._env(5) if kind == 'rams' else self._fluid_env()
+        with pytest.raises(ConfigurationError, match=f"mz={mz}"):
+            RAM(verbose=False, backend=kind, dz=0.005).run(env, src, rcv)
+
+    def test_auto_dz_past_mz_is_coarsened_not_rejected(self):
+        """An auto-picked grid is uacpy's own choice, so a bound it cannot meet
+        is coarsened with a warning rather than raised (same policy as
+        MAX_DEPTH_POINTS). Reachable with a pinned zmax and an auto dz."""
+        m = RAM(verbose=False, backend='ramgeo', zmax=100000.0)
+        with pytest.warns(UserWarning, match="fit the binary's depth arrays"):
+            dr, dz, zmax = m._resolve_collins_grid(
+                self._fluid_env(), 50.0, 'ramgeo', 5000.0, None, None, None)
+        needed, mz, _ = m._collins_mz_budget('ramgeo', zmax)
+        assert needed(dz) <= mz
+
+    def test_broadband_path_also_checks_the_limits(self):
+        """The narrowband entry point is not the only way in — the broadband
+        sweep calls the per-frequency runner directly."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.models.base import RunMode
+        src = Source(depths=50.0, frequencies=np.array([40.0, 50.0, 60.0]))
+        rcv = Receiver(depths=100.0, ranges=np.array([5000.0]))
+        with pytest.raises(ConfigurationError, match="mr=505"):
+            RAM(verbose=False, backend='rams').run(
+                self._env(600), src, rcv, run_mode=RunMode.BROADBAND)
+
+    def test_mz_consumption_rate_matches_the_fortran_indexing(self):
+        """rams0.5 interleaves the elastic field vector, so it indexes 2*nz+4
+        where the fluid codes index nz+2. Getting this factor wrong understates
+        rams' depth capacity by 2x."""
+        import re
+        from pathlib import Path
+        from uacpy.models.ram import _COLLINS_ARRAY_LIMITS
+        root = Path(__file__).resolve().parents[1] / 'third_party'
+        srcs = {'rams': root / 'ramsurf' / 'rams0.5.f',
+                'ramsurf': root / 'ramsurf' / 'ramsurf1.5.f',
+                'ramgeo': root / 'ramgeo' / 'ramgeo1.5.f'}
+        for kind, path in srcs.items():
+            if not path.exists():
+                pytest.skip(f"{path.name} not vendored here")
+            lim = _COLLINS_ARRAY_LIMITS[kind]
+            expected = (f"{lim['nz_factor']}*nz+{lim['nz_pad']}"
+                        if lim['nz_factor'] != 1 else f"nz+{lim['nz_pad']}")
+            text = path.read_text(errors='ignore')
+            guard = re.search(r'if\(([^)]*nz[^)]*)\.gt\.mz\)', text)
+            assert guard, f"no mz bounds check in {path.name}"
+            assert guard.group(1).replace(' ', '') == expected, (
+                f"{path.name} guards {guard.group(1)!r}, table says {expected!r}")
+
+    def test_limit_table_matches_the_vendored_sources(self):
+        """The table must track the actual ``parameter (mr=…)`` declarations."""
+        import re
+        from pathlib import Path
+        from uacpy.models.ram import _COLLINS_ARRAY_LIMITS
+        root = Path(__file__).resolve().parents[1] / 'third_party'
+        srcs = {'rams': root / 'ramsurf' / 'rams0.5.f',
+                'ramsurf': root / 'ramsurf' / 'ramsurf1.5.f',
+                'ramgeo': root / 'ramgeo' / 'ramgeo1.5.f'}
+        for kind, path in srcs.items():
+            if not path.exists():
+                pytest.skip(f"{path.name} not vendored here")
+            m = re.search(r'parameter\s*\(mr=(\d+),mz=(\d+)',
+                          path.read_text(errors='ignore'))
+            assert m, f"could not find array dims in {path.name}"
+            assert _COLLINS_ARRAY_LIMITS[kind]['mr'] == int(m.group(1))
+            assert _COLLINS_ARRAY_LIMITS[kind]['mz'] == int(m.group(2))
+
+
+def test_forcing_rams_on_a_fluid_bottom_is_rejected():
+    """rams0.5 is the elastic PE; on a fluid bottom it returns a null field.
+
+    ``_validate_forced_backend`` already rejects ramsurf when its defining
+    feature (altimetry) is absent. rams had no symmetric rule, so forcing it
+    onto a fluid environment silently produced TL saturated at 200 dB at every
+    range instead of an error. Auto-dispatch never routes fluid to rams.
+    """
+    from uacpy.core.exceptions import ConfigurationError
+    fluid = Environment(
+        name='f', bathymetry=200.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800.0, density=1.8,
+                                  attenuation=0.5))
+    src = Source(depths=50.0, frequencies=100.0)
+    rcv = Receiver(depths=100.0, ranges=np.array([1000.0]))
+
+    assert RAM(verbose=False).select_backend(fluid) != 'rams'
+    with pytest.raises(ConfigurationError, match="elastic PE"):
+        RAM(verbose=False, backend='rams').run(fluid, src, rcv)
+
+    # With shear present, rams is both auto-selected and functional.
+    elastic = Environment(
+        name='e', bathymetry=200.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800.0, density=1.8,
+                                  attenuation=0.5, shear_speed=300.0))
+    assert RAM(verbose=False).select_backend(elastic) == 'rams'
+    tl = np.asarray(RAM(verbose=False, backend='rams').run(
+        elastic, src, rcv).tl).ravel()
+    assert np.all(np.isfinite(tl)) and np.all(tl < 150.0), tl

@@ -17,7 +17,9 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models.base import (
+    PropagationModel, RunMode, ModelSpec, VALID_SOURCE_TYPES,
+)
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -172,6 +174,9 @@ class Bounce(PropagationModel):
     spec = ModelSpec(
         modes=(RunMode.REFLECTION,),
         supports={'layered_bottom', 'elastic_media'},
+        # Reflection coefficients are independent of source geometry, so
+        # rejecting one would break reusing a Source across models.
+        source_types=VALID_SOURCE_TYPES,
         collapse={'bottom_range': 'median'},
     )
     source = 'acoustics_toolbox'

@@ -1166,6 +1166,48 @@ def _ifft_to_trace(
     )
 
 
+def _source_spectrum_at(
+    waveform: np.ndarray, sample_rate: float, freqs: np.ndarray,
+    *, _max_elems: int = 4_000_000,
+) -> np.ndarray:
+    """Continuous source spectrum ``S(f)`` at arbitrary ``freqs``.
+
+    Evaluates the DTFT of the sampled waveform directly::
+
+        S(f) = (1/fs) * sum_n w[n] exp(-2 pi i f n / fs)
+
+    which reproduces ``rfft(w)/fs`` exactly on the waveform's own DFT grid and
+    stays exact off it. Interpolating the rfft samples instead is only correct
+    when the two grids coincide: linear interpolation is a convolution with a
+    triangular kernel in frequency, i.e. a ``sinc^2(pi df_src t)`` taper
+    anchored at ``t = 0`` plus periodisation at ``1/df_src`` in time. On a
+    half-bin-offset grid that is a >100% median error in ``S(f)``.
+
+    Frequencies outside ``[0, fs/2]`` return 0 — a band-limited source carries
+    no out-of-band energy, and the DTFT would alias there.
+    """
+    wf = np.asarray(waveform, dtype=np.float64).ravel()
+    freqs = np.atleast_1d(np.asarray(freqs, dtype=np.float64))
+    fs = float(sample_rate)
+    n = wf.size
+
+    out = np.zeros(freqs.size, dtype=np.complex128)
+    in_band = (freqs >= 0.0) & (freqs <= 0.5 * fs)
+    if not np.any(in_band):
+        return out
+
+    idx = np.arange(n, dtype=np.float64)
+    sel = np.flatnonzero(in_band)
+    # Chunk over frequency so the phase matrix stays bounded regardless of
+    # waveform length x grid size.
+    step = max(1, int(_max_elems // max(n, 1)))
+    for a in range(0, sel.size, step):
+        blk = sel[a:a + step]
+        phase = np.exp(-2j * np.pi * np.outer(freqs[blk], idx) / fs)
+        out[blk] = phase @ wf
+    return out / fs
+
+
 def _synthesize_time_series(
     tf: "Field",
     *,
@@ -1216,15 +1258,8 @@ def _synthesize_time_series(
                 UserWarning, stacklevel=3,
             )
 
-    # ×dt_src: raw DFT → continuous spectrum S(f), the unit _ifft_to_trace expects
-    src_fft = np.fft.rfft(wf) / float(sample_rate)
-    src_freqs = np.fft.rfftfreq(n_src, 1.0 / sample_rate)
-
-    from scipy.interpolate import interp1d
-    re_interp = interp1d(src_freqs, src_fft.real, bounds_error=False, fill_value=0.0)
-    im_interp = interp1d(src_freqs, src_fft.imag, bounds_error=False, fill_value=0.0)
     freqs = tf.coords['frequency']
-    source_spectrum = re_interp(freqs) + 1j * im_interp(freqs)
+    source_spectrum = _source_spectrum_at(wf, sample_rate, freqs)
 
     n_d, n_r, _ = tf.data.shape
     depths = np.asarray(tf.coords['depth'])

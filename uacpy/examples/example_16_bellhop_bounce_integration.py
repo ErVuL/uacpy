@@ -184,7 +184,7 @@ def demo_layered_bottom():
         ssp=1500.0,
         bottom=layered,
     )
-    print(f"has_layered_bottom: {env.has_layered_bottom()}")
+    print(f"has_layered_bottom: {env.has_layered_bottom}")
 
     source = uacpy.Source(frequencies=100.0, depths=50.0)
     receiver = uacpy.Receiver(
@@ -371,7 +371,7 @@ def demo_rd_layered_bottom():
     )
 
     print(f"has_range_dependent_layered_bottom: "
-          f"{env.has_range_dependent_layered_bottom()}")
+          f"{env.has_range_dependent_layered_bottom}")
 
     source = uacpy.Source(frequencies=100.0, depths=30.0)
     receiver = uacpy.Receiver(

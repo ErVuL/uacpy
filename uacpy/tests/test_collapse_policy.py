@@ -229,12 +229,12 @@ def test_bellhop_auto_route_detects_elastic_rd_halfspace():
         shear_speed=np.array([0.0, 400.0, 0.0]),  # elastic in the middle
     )
     env = Environment(name='elastic-RD', bathymetry=100.0, ssp=1500.0, bottom=rd)
-    assert env.has_elastic_bottom() is True
+    assert env.has_elastic_bottom is True
 
     # Don't actually run BOUNCE — just confirm the predicate fires.
     bh = Bellhop(verbose=False)
     assert bh._supports_range_dependent_bottom is True  # fluid-RD is native
-    # The auto-route trigger inside Bellhop.run reads env.has_elastic_bottom()
+    # The auto-route trigger inside Bellhop.run reads env.has_elastic_bottom
     # — assert directly on the env API to avoid binary execution.
 
 

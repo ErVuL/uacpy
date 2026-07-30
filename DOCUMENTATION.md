@@ -594,13 +594,20 @@ Receiver(depths=np.linspace(0, 100, 51),
          ranges=np.linspace(0, 10_000, 201))                  # full grid
 ```
 
-By default a receiver is a **grid**: the field is evaluated on the full
-depth × range cross-product. Pass `receiver_type='line'` to pair depths and
-ranges point-by-point instead (e.g. a glider track or tilted array), requiring
-equal-length `depths` and `ranges` (or one scalar):
+A receiver is a **grid**: the field is evaluated on the full depth × range
+cross-product.
+
+`receiver_type='line'` (pairing depths and ranges point-by-point, e.g. a glider
+track or tilted array) is **accepted by the carrier but not implemented by any
+model** — the input-side checks honour it, but every model's result assembly
+returns the full cross-product. `run()` therefore rejects it rather than
+silently handing back a grid. Take the paired samples from a grid run instead:
 
 ```python
-Receiver(depths=[10, 20, 30], ranges=[100, 200, 300], receiver_type='line')
+rcv = Receiver(depths=[10, 20, 30], ranges=[100, 200, 300])   # grid
+tl = model.run(env, src, rcv).tl
+i = np.arange(len(rcv.depths))
+paired = tl[i, i]        # (depths[k], ranges[k]) for each k
 ```
 
 ## 7. Propagation Models
@@ -886,19 +893,23 @@ same operation — and hand the list to `run_parallel`:
 ```python
 from uacpy import Bellhop, Kraken, RAM, run_parallel, Job, RunMode
 
-jobs = [
-    Job(Bellhop(), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='bellhop'),
-    Job(Kraken(),  env, source, receiver, run_mode=RunMode.COHERENT_TL, label='kraken'),
-    Job(RAM(accuracy=1e-1), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='ram'),
-]
-batch = run_parallel(jobs, n_workers=3)                     # ParallelResult
-for label, result in zip(['bellhop', 'kraken', 'ram'], batch):
-    print(label, result.tl.min())
+# The `if __name__ == '__main__':` guard is required, not stylistic: workers
+# start with 'spawn' and re-import __main__, so an unguarded module-level
+# run_parallel call re-enters itself in every worker and the pool dies.
+if __name__ == '__main__':
+    jobs = [
+        Job(Bellhop(), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='bellhop'),
+        Job(Kraken(),  env, source, receiver, run_mode=RunMode.COHERENT_TL, label='kraken'),
+        Job(RAM(accuracy=1e-1), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='ram'),
+    ]
+    batch = run_parallel(jobs, n_workers=3)                 # ParallelResult
+    for label, result in zip(['bellhop', 'kraken', 'ram'], batch):
+        print(label, result.tl.min())
 
-# Single-model sweep -> stack into one ResultStack:
-sweep = [Job(RAM(accuracy=1e-1).copy(np_pade=p), env, source, receiver, label=p)
-         for p in (4, 6, 8)]
-stack = run_parallel(sweep).stack(coordinate_name='np_pade')
+    # Single-model sweep -> stack into one ResultStack:
+    sweep = [Job(RAM(accuracy=1e-1).copy(np_pade=p), env, source, receiver, label=p)
+             for p in (4, 6, 8)]
+    stack = run_parallel(sweep).stack(coordinate_name='np_pade')
 ```
 
 `ParallelResult` is indexable/iterable (`.results`, `.errors`, `.ok`);
@@ -1338,7 +1349,7 @@ from uacpy.noise import WenzNoise
 f = np.logspace(0, 5, 500)
 wenz = WenzNoise(f, wind_speed=15, water_depth="deep",
                 shipping_level="medium", rain_rate="moderate")
-psd = wenz.as_psd(ref=1)        # linear Pa²/Hz; uacpy.plot_wenz(wenz) for the dB spectrum
+psd = wenz.as_psd(ref=1)        # linear Pa²/Hz; uacpy.visualization.plot_wenz(wenz) for the dB spectrum
 ```
 
 Hearing groups: `LF, HF, VHF, SI, PCW, OCW, PCA, OCA`. See examples 9, 35, 36.
@@ -1579,7 +1590,15 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 |---|---|---|---|
 | `Source.depths` | m | *required* | Source depth(s), positive down. |
 | `Source.frequencies` | Hz | *required* | Source frequency or frequencies. |
-| `Source.source_type` | — | `'point'` | `'point'` or `'line'` (physical line-source geometry). |
+| `Source.source_type` | — | `'point'` | `'point'` (cylindrical spreading), `'line'` (Cartesian), `'scaled'` (point with cylindrical spreading removed). Support: Bellhop `point/line`; Kraken, Scooter, Bounce and `SPARC(output_mode='S')` all three; RAM and OASES `point` only. |
+| `Source.beam_pattern` | deg / dB | `None` | Source directivity: `(N, 2)` `[angle_deg, level_dB]` array with strictly increasing angles, or a `.sbp` path. `None` = omnidirectional. Read by Bellhop and Kraken. |
+
+Interface roughness lives on the boundary carriers, not on the models:
+`env.surface.roughness` is the sea-surface RMS roughness (AT `sigma(1)`, the
+water column's mesh line) and `env.bottom`'s `roughness` is the seabed
+(`sigma(NMedia+1)`, the bottom half-space line). Kraken and Scooter consume a
+rough surface; SPARC and Bounce reject one in their solver, so `run()` drops it
+with a warning.
 | `Receiver.depths` | m | *required* | Receiver depth(s), positive down. |
 | `Receiver.ranges` | m | `None` | Receiver range(s); `None` → a single point at 0 m. |
 | `Receiver.receiver_type` | — | `'grid'` | `'grid'` (depth×range cross-product) or `'line'` (depths/ranges paired point-by-point, `len(depths)==len(ranges)`). |
@@ -1598,12 +1617,10 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `step` | m | `0.0` | Ray step size; `0` = automatic. |
 | `z_box` | m | `None` | Max depth of the ray box; `None` = 1.2 × max depth. |
 | `r_box` | m | `None` | Max range of the ray box; `None` = 1.2 × max range. |
-| `source_type` | — | `'R'` | `'R'` point (cylindrical), `'X'` line (Cartesian). |
 | `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular. |
 | `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`); also `'linear'`/`'pchip'`/`'cubic'`/`'quad'`/`'n2linear'`/`'analytic'`. |
 | `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | — | `'linear'` | `.ati` interpolation: `'linear'` or `'curvilinear'`. |
-| `source_beam_pattern_file` | path/array | `None` | `.sbp` path or `(angle_deg, level_dB)` pairs; `None` = omnidirectional. |
 | `arrivals_format` | — | `'ascii'` | `ARRIVALS` output format. Use `'ascii'`; `'binary'` (`'a'`, Fortran unformatted) is accepted at construction but **not yet parseable** — `compute_arrivals` raises `ConfigurationError` on read. |
 | `beam_width_type` | — | `'F'` | Cerveny width: `'F'` filling, `'M'` match, `'W'` waveguide (used for `beam_type` ∈ C/R). |
 | `beam_curvature` | — | `'D'` | `'D'` double, `'S'` single, `'Z'` zero. |
@@ -1628,13 +1645,10 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `coherent` | — | `True` | Coherent mode addition; `'coupled'` + `coherent=False` is rejected. |
 | `n_segments` | count | `None` | Range segments for RD; `None` auto-picks from change-points (gaps > 2 km split). |
 | `mode_points_per_meter` | pts/m | `1.5` | Mode-depth grid density. |
-| `source_type` | — | `'R'` | `field.exe` Opt(1): `'R'` cylindrical, `'X'` Cartesian line, `'S'` scaled-cylindrical. |
-| `source_beam_pattern_file` | path | `None` | `.sbp` file; sets `field.exe` Opt(3)=`'*'`. |
 | `field_executable` | path | `None` | `field.exe` path; auto-detected if `None`. |
 | `c_low` | m/s | `None` | Lower phase-speed limit of the modal solver. |
 | `c_high` | m/s | `None` | Upper phase-speed limit. |
 | `n_mesh` | count | `0` | Mesh points per medium; `0` = auto. |
-| `roughness` | m | `0.0` | Bottom RMS roughness. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme (as Bellhop). |
 | `leaky_modes` | — | `False` | Include leaky modes (forces `krakenc`). |
 | `top_reflection_file` | path | `None` | Top-boundary reflection-coefficient file. |
@@ -1648,10 +1662,8 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `c_low` | m/s | `None` | Lower phase-speed limit; `None` = 0.95 × min SSP. |
 | `c_high` | m/s | `None` | Upper phase-speed limit; `None` = 1.05 × max(SSP, bottom). |
 | `n_mesh` | count | `0` | Total FE mesh points **per medium** (AT `NG`); `0` = auto. Not points-per-wavelength. |
-| `roughness` | m | `0.0` | Bottom RMS roughness. |
 | `rmax_multiplier` | factor | `None` | Wavenumber-resolution range multiplier; `None` → 2.0 narrowband / 3.0 broadband. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme. |
-| `source_type` | — | `'R'` | FLP Opt(1): `'R'` cylindrical, `'X'` Cartesian. |
 | `spectrum` | — | `'positive'` | FLP Opt(2): `'positive'`/`'negative'`/`'both'` wavenumber spectrum. |
 | `stabilizing_attenuation_off` | — | `False` | Disable Scooter's stabilising attenuation (TopOpt pos 7 = `'0'`). |
 | `field_interp` | — | `'O'` | FLP Opt(3): `'O'` polynomial, `'P'` Padé. |
@@ -1663,11 +1675,10 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `c_low` | m/s | `None` | Lower phase-speed limit; `None` = auto. |
 | `c_high` | m/s | `None` | Upper phase-speed limit; `None` = auto. |
 | `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
-| `roughness` | m | `0.0` | Bottom RMS roughness. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme. |
 | `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. For `COHERENT_TL`, the default **`'R'`** is divided by `√(4π)` to convert SPARC's native cylindrical-Hankel RTS output into uacpy's shared **3-D point-source (spherical) TL** convention, agreeing with Kraken to ~1–4 dB on a Pekeris benchmark. **`'D'` and `'S'` keep SPARC's native normalisation (a `√(4π)` ≈ 11 dB higher level for `'D'`); they are experimental — use `'R'` (or Kraken/Scooter) for absolute levels.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run` for the convention. |
 | `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. The `'B'` band-pass is not modelled by the CW source-spectrum deconvolution, so it adds a few dB to the `'R'` absolute level; `'PN+N'` (no band-pass) calibrates tighter (~±1.5 dB vs Kraken). |
-| `n_t_out` | count | `512` | Number of output time samples. For `COHERENT_TL` this is **auto-raised** when needed so the output Nyquist clears the pulse band (else the requested CW frequency aliases); `TIME_SERIES` uses it verbatim. |
+| `n_t_out` | count | `512` | Number of output time samples. For `COHERENT_TL` this is **auto-raised** when needed so the output Nyquist clears the pulse band (else the requested CW frequency aliases); `TIME_SERIES` uses it verbatim, but warns (naming the required value) when the resulting Nyquist sits below the source band. |
 | `t_max` | s | `None` | Max time; `None` = auto (2.5 × travel time). |
 | `t_start` | s | `-0.1` | Integration start time. |
 | `t_mult` | factor | `0.999` | Integration time multiplier. |
@@ -1696,7 +1707,7 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `absorbing_layer_attn` | dB/λ | `10.0` | Attenuation at the absorbing-layer floor (ramped from sediment attn). |
 | `n_sed_points` | count | `50` | Sediment depth control points for the mpiramS profile. |
 | `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15). |
-| `accuracy` | — | `0.001` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|). |
+| `accuracy` | — | `None` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|); `None` uses the 1e-3 default. A pinned value that the stability floor prevents reaching warns; the default reports it as status only. |
 | `theta_max` | deg | `30.0` | Max propagation angle bounding the PE spectrum (Lytaev). |
 | `rams_theta` | deg | `45.0` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke). |
 | `rams_irot` | — | `1` | `rams` rotation flag. |

@@ -9,13 +9,15 @@ Bathymetry / altimetry / 3-D boundary files live in
 :mod:`uacpy.io.bathy_io`.
 """
 
+import shutil
+
 import numpy as np
 from pathlib import Path
 from typing import Dict, Union
 
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
-from uacpy.core.exceptions import FileFormatError
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.io._fortran_helpers import typed_format_error
 
 
@@ -298,6 +300,26 @@ def write_source_beam_pattern(
         # Write angle, amplitude pairs
         for i in range(n_angles):
             f.write(f"{angles[i]:8.2f} {pattern[i]:12.6f}\n")
+
+
+def stage_source_beam_pattern(
+    pattern: Union[np.ndarray, str, Path], dest: Union[str, Path]
+) -> None:
+    """Materialise a source beam pattern at ``dest`` as a ``.sbp`` file.
+
+    ``pattern`` is either a path to an existing ``.sbp`` (copied verbatim)
+    or an ``(N, 2)`` array of ``[angle_deg, level_dB]``.
+    """
+    if isinstance(pattern, (str, Path)):
+        src = Path(pattern)
+        if not src.exists():
+            raise ConfigurationError(
+                f"Source beam pattern file not found: {src}"
+            )
+        shutil.copy(src, dest)
+        return
+    arr = np.asarray(pattern, dtype=float)
+    write_source_beam_pattern(dest, arr[:, 0], arr[:, 1])
 
 
 def dedupe_reflection_file(filepath: Union[str, Path]) -> None:

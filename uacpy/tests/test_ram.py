@@ -150,3 +150,33 @@ class TestRAMRangeDependentSSPShortRange:
         assert np.isfinite(tl_ri).all() and np.isfinite(tl_rd).all()
         # Differing SSP columns must move the field by more than numerical noise.
         assert not np.allclose(tl_ri, tl_rd, atol=0.5)
+
+
+def test_default_run_does_not_warn_about_its_own_accuracy_target():
+    """A plain ``RAM()`` must not warn that uacpy's own default is unmet.
+
+    The mpiramS stability floor (lambda_p/16) sits above the Lytaev dz for the
+    default epsilon at any ordinary frequency, so warning on the default target
+    fired on essentially every run — alarm fatigue that trains callers to
+    filter uacpy warnings entirely. An accuracy the caller *pinned* and did not
+    get is still a warning.
+    """
+    import warnings
+    env = Environment(name='p', bathymetry=200.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1800.0, density=1.8,
+                                                attenuation=0.5))
+    src = Source(depths=50.0, frequencies=100.0)
+    rcv = Receiver(depths=100.0, ranges=np.array([1000.0]))
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        RAM(verbose=False).run(env, src, rcv)
+    budget = [x for x in w if 'accuracy budget' in str(x.message)]
+    assert not budget, f"default run warned about its own default: {budget}"
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        RAM(verbose=False, accuracy=1e-3).run(env, src, rcv)
+    budget = [x for x in w if 'accuracy budget' in str(x.message)]
+    assert budget, "an explicitly pinned accuracy that is not met must warn"

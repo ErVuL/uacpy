@@ -56,7 +56,7 @@ class TestRangeDependentEnvironment:
             bottom=bottom_rd
         )
 
-        assert env.has_range_dependent_bottom()
+        assert env.has_range_dependent_bottom
         assert len(env.bottom.ranges) == 3
 
         # Test getting bottom at specific range
@@ -83,7 +83,7 @@ class TestRangeDependentEnvironment:
                                           ),
         )
 
-        assert env.has_range_dependent_ssp()
+        assert env.has_range_dependent_ssp
         assert env.ssp.data.shape == (21, 3)
 
     def test_combined_range_dependencies(self):
@@ -106,7 +106,7 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.is_range_dependent
-        assert env.has_range_dependent_ssp()
+        assert env.has_range_dependent_ssp
 
 
 class TestDepthDependentSSP:
@@ -442,15 +442,15 @@ class TestLayeredBottom:
         )
         env = uacpy.Environment(name='test', bathymetry=100, bottom=lb)
 
-        assert env.has_layered_bottom()
-        assert not env.has_range_dependent_bottom()
+        assert env.has_layered_bottom
+        assert not env.has_range_dependent_bottom
         assert env.bottom.columns[0] is lb
         assert env.bottom.columns[0].halfspace.sound_speed == 1800
 
     def test_environment_plain_boundary_properties(self):
         """A half-space bottom is a non-layered, range-independent Bottom."""
         env = uacpy.Environment(name='test', bathymetry=100)
-        assert not env.has_layered_bottom() and not env.bottom.is_range_dependent
+        assert not env.has_layered_bottom and not env.bottom.is_range_dependent
         assert isinstance(env.bottom, uacpy.Bottom)
 
 
@@ -516,9 +516,9 @@ class TestRangeDependentLayeredBottom:
         env = uacpy.Environment(
             name='test', bottom=rdl, bathymetry=bathymetry,
         )
-        assert env.has_range_dependent_layered_bottom()
-        assert not env.has_layered_bottom()
-        assert not env.has_range_dependent_bottom()
+        assert env.has_range_dependent_layered_bottom
+        assert not env.has_layered_bottom
+        assert not env.has_range_dependent_bottom
         assert env.is_range_dependent
         assert env.bathymetry.n_ranges == 2
         assert env.bathymetry.depths[0] == 100

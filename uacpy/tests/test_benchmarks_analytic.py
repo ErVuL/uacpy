@@ -371,3 +371,137 @@ def test_bellhop_lloyd_mirror():
     d = np.abs(tl_num - tl_ana)[good]
     assert np.median(d) < 2.0, f"median |dTL|={np.median(d):.2f} dB"
     assert np.percentile(d, 90) < 2.5, f"p90 |dTL|={np.percentile(d, 90):.2f} dB"
+
+
+def lloyd_mirror_pressure(ranges, z_s, z_r, f, c):
+    """Complex Lloyd-mirror pressure, COA (Jensen et al.) Eq. (1.19)::
+
+        p(r) = e^{i k R1}/R1 - e^{i k R2}/R2
+
+    with the ``exp(-i w t)`` time factor suppressed and unit amplitude at 1 m.
+    The Acoustics Toolbox reports the conjugate convention ``e^{i(w t - k r)}``
+    (``KrakenField/EvaluateMod.f90:42``), so callers compare against
+    ``conj`` of this.
+    """
+    r = np.asarray(ranges, dtype=float)
+    k = 2 * np.pi * f / c
+    R1 = np.sqrt(r**2 + (z_r - z_s) ** 2)
+    R2 = np.sqrt(r**2 + (z_r + z_s) ** 2)
+    return np.exp(1j * k * R1) / R1 - np.exp(1j * k * R2) / R2
+
+
+def lloyd_mirror_pressure_2d(ranges, z_s, z_r, f, c):
+    """Complex Lloyd-mirror pressure for a *line* source (2-D)::
+
+        p(r) = (i/4) [ H0(k R1) - H0(k R2) ]
+
+    The 2-D Green's function is the Hankel function, whose asymptotic form
+    ``sqrt(2/pi k R) exp(i(kR - pi/4))`` carries a ``pi/4`` the 3-D
+    ``exp(ikR)/R`` does not — the factor AT's purely real line-source scaling
+    omits. Same ``exp(-i w t)`` convention as :func:`lloyd_mirror_pressure`.
+    """
+    from scipy.special import hankel1
+    r = np.asarray(ranges, dtype=float)
+    k = 2 * np.pi * f / c
+    R1 = np.sqrt(r**2 + (z_r - z_s) ** 2)
+    R2 = np.sqrt(r**2 + (z_r + z_s) ** 2)
+    return 0.25j * (hankel1(0, k * R1) - hankel1(0, k * R2))
+
+
+@pytest.mark.requires_binary
+def test_bellhop_line_source_carries_the_2d_quarter_wave_phase():
+    """A line source must match the 2-D Hankel solution, pi/4 included.
+
+    Without it Bellhop sits +pi/4 from the exact 2-D field while its point
+    source sits at the beam-approximation bias; the assertion is that both
+    land on the *same* residual, which is what pins the pi/4 rather than
+    absorbing it into a loose tolerance.
+    """
+    c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
+    ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
+    env = Environment(
+        bathymetry=4000.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=c, density=RHO_WATER,
+                                  attenuation=0.0))
+    rcv = Receiver(depths=[z_r], ranges=ranges)
+    m = Bellhop(timeout=120)
+    w = lambda a: np.mod(a + 180.0, 360.0) - 180.0
+
+    p_pt = np.asarray(m.run(env, Source(depths=z_s, frequencies=f,
+                                        source_type='point'), rcv).data).ravel()
+    p_ln = np.asarray(m.run(env, Source(depths=z_s, frequencies=f,
+                                        source_type='line'), rcv).data).ravel()
+    bias = np.mean(w(np.angle(
+        p_pt / np.conj(lloyd_mirror_pressure(ranges, z_s, z_r, f, c)), deg=True)))
+    line = np.mean(w(np.angle(
+        p_ln / np.conj(lloyd_mirror_pressure_2d(ranges, z_s, z_r, f, c)), deg=True)))
+    assert abs(line - bias) < 10.0, (
+        f"line-source phase is {line - bias:.1f} deg from the point-source "
+        f"beam bias; ~45 deg means the 2-D exp(-i pi/4) is missing")
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize('model_cls', [Bellhop, Scooter])
+def test_complex_field_phase_matches_lloyd_mirror(model_cls):
+    """Complex pressure must match the analytic Lloyd mirror in *phase*.
+
+    ``lloyd_mirror_tl`` above validates |p| only, which is blind to an overall
+    sign: AT's ``ScalePressure`` (influence.f90:757-795) applies ``const = -1``
+    in the point-source branch, inverting Bellhop's ``.shd`` relative to the
+    convention Kraken and Scooter report. TL plots look identical either way,
+    so only a phase assertion catches it.
+    """
+    c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
+    ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
+    env = Environment(
+        bathymetry=4000.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=c, density=RHO_WATER,
+                                  attenuation=0.0))
+    p_num = np.asarray(model_cls(timeout=120).run(
+        env, Source(depths=z_s, frequencies=f),
+        Receiver(depths=[z_r], ranges=ranges)).data).ravel()
+    p_ana = np.conj(lloyd_mirror_pressure(ranges, z_s, z_r, f, c))
+
+    ratio = p_num / p_ana
+    ang = np.angle(ratio, deg=True)
+    # Wrap into (-180, 180] before averaging so a near-pi error cannot
+    # average away against its own wrap-around.
+    ang = np.mod(ang + 180.0, 360.0) - 180.0
+    assert np.abs(np.mean(ang)) < 20.0, (
+        f"{model_cls.__name__} complex phase is {np.mean(ang):.1f} deg from the "
+        f"analytic Lloyd mirror (~180 deg means an un-undone sign)")
+    assert np.abs(np.mean(np.abs(ratio)) - 1.0) < 0.1, (
+        f"{model_cls.__name__} amplitude ratio "
+        f"{np.mean(np.abs(ratio)):.3f} != 1")
+
+
+@pytest.mark.requires_binary
+def test_scaled_cylindrical_removes_exactly_the_spreading_term():
+    """``source_type='scaled'`` is 'point with cylindrical spreading removed'.
+
+    ``field.f90:76`` and ``fieldsco.m:133`` define it that way, so
+    ``p_scaled = p_point * sqrt(r)`` and therefore
+    ``TL_point - TL_scaled = 10*log10(r)`` exactly. Checked through the model,
+    not just the transform helper.
+    """
+    c = C_W
+    env = Environment(
+        bathymetry=200.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (200.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800.0, density=1.8,
+                                  attenuation=0.5))
+    ranges = np.array([1000.0, 2000.0, 4000.0])
+    rcv = Receiver(depths=[100.0], ranges=ranges)
+
+    def tl(source_type):
+        return np.asarray(Scooter(timeout=120).run(
+            env, Source(depths=50.0, frequencies=100.0,
+                        source_type=source_type), rcv).tl).ravel()
+
+    np.testing.assert_allclose(tl('point') - tl('scaled'),
+                               10.0 * np.log10(ranges), atol=0.01)

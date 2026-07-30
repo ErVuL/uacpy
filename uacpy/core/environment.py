@@ -341,6 +341,7 @@ class Environment:
             )
         return np.interp(d, z, slice_1d.data[:, 0])
 
+    @property
     def has_range_dependent_bathymetry(self) -> bool:
         """``True`` iff the seafloor depth actually varies with range.
 
@@ -350,25 +351,31 @@ class Environment:
         """
         return self.bathymetry.is_range_dependent
 
+    @property
     def has_range_dependent_ssp(self) -> bool:
         return self.ssp.is_range_dependent
 
+    @property
     def has_range_dependent_bottom(self) -> bool:
         """``True`` for a range-dependent *half-space* bottom (no layers)."""
         return self.bottom.is_range_dependent and not self.bottom.is_layered
 
+    @property
     def has_layered_bottom(self) -> bool:
         """``True`` for a range-*independent* layered bottom."""
         return self.bottom.is_layered and not self.bottom.is_range_dependent
 
+    @property
     def has_range_dependent_layered_bottom(self) -> bool:
         """``True`` for a bottom that varies with range *and* has layers."""
         return self.bottom.is_range_dependent and self.bottom.is_layered
 
+    @property
     def has_elastic_bottom(self) -> bool:
         """``True`` iff any layer or half-space of ``self.bottom`` has shear."""
         return self.bottom.is_elastic
 
+    @property
     def has_elastic_surface(self) -> bool:
         """``True`` iff the surface carries non-zero shear at any range."""
         return self.surface is not None and self.surface.is_elastic
@@ -376,7 +383,7 @@ class Environment:
     @property
     def is_range_dependent(self) -> bool:
         return (
-            self.has_range_dependent_bathymetry()
+            self.has_range_dependent_bathymetry
             or self.ssp.is_range_dependent
             or self.bottom.is_range_dependent
             or self.surface.is_range_dependent

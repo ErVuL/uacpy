@@ -134,8 +134,9 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "k-domain G(k) → r-domain p(r) (e.g. 'fft_hankel')."
     ),
     ('Scooter', 'source_type'): (
-        str, "Scooter source type passed to grn_to_field "
-        "('R' = point/cylindrical, 'X' = line/Cartesian)."
+        str, "Scooter source type passed to grn_to_field ('R' = "
+        "point/cylindrical, 'X' = line/Cartesian, 'S' = point with "
+        "cylindrical spreading removed)."
     ),
     ('Scooter', 'spectrum'): (
         'ndarray',
@@ -185,7 +186,8 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "snapshot to r-domain pressure ('time_fft+hankel')."
     ),
     ('SPARC', 'source_type'): (
-        str, "Source type ('R' / 'X') consumed by the Hankel transform."
+        str, "Source type ('R' / 'X' / 'S') consumed by the Hankel "
+        "transform."
     ),
     ('SPARC', 'spectrum'): (
         'ndarray', 'k-domain G(k) consumed by the Hankel transform.'

@@ -5,7 +5,7 @@ ADVANCED EXAMPLE: Bellhop - All Features Showcase
 
 OBJECTIVE:
     Demonstrate ALL Bellhop features including new 2D options:
-    - Advanced RunType control (source_type, grid_type, beam_shift)
+    - Advanced RunType control (grid_type, beam_shift) + Source geometry
     - Cerveny Gaussian beam parameters
     - Volume attenuation (Thorp formula)
     - Grain size boundary conditions
@@ -103,7 +103,7 @@ def main():
     print("\n[1/4] Running Bellhop with Thorp volume attenuation...")
     bellhop_thorp = Bellhop(
         verbose=False,
-        beam_type='B', source_type='R', grid_type='R',
+        beam_type='B', grid_type='R',
         n_beams=500, alpha=(-85, 85),
     )
 
@@ -124,7 +124,7 @@ def main():
 
     bellhop_cerveny = Bellhop(
         verbose=False,
-        beam_type='C', source_type='R', grid_type='R',
+        beam_type='C', grid_type='R',
         n_beams=500, alpha=(-85, 85),
         beam_width_type='M', beam_curvature='Z',
         eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
@@ -148,13 +148,21 @@ def main():
 
     bellhop_line = Bellhop(
         verbose=False,
-        beam_type='B', source_type='X', grid_type='R',
+        beam_type='B', grid_type='R',
         n_beams=500,
+    )
+
+    # Geometry lives on the Source, not the model: same Bellhop, different
+    # source. 'line' is an infinite coherent line source (Cartesian
+    # spreading) rather than a point source (cylindrical).
+    source_line = uacpy.Source(
+        depths=source.depths, frequencies=source.frequencies,
+        source_type='line',
     )
 
     try:
         result_line = bellhop_line.run(
-            env, source, receiver, run_mode=RunMode.COHERENT_TL,
+            env, source_line, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -199,7 +207,7 @@ def main():
 
     bellhop_rays = Bellhop(
         verbose=False,
-        beam_type='g', source_type='R', grid_type='R',
+        beam_type='g', grid_type='R',
         n_beams=50, alpha=(-80, 80),
         beam_shift=True,
     )

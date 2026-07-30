@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uacpy"
-version = "0.4.2"
+dynamic = ["version"]
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
@@ -66,6 +66,9 @@ dev = [
 Source = "https://github.com/ErVuL/uacpy"
 Issues = "https://github.com/ErVuL/uacpy/issues"
 Documentation = "https://github.com/ErVuL/uacpy/blob/main/DOCUMENTATION.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "uacpy._version.__version__" }
 
 [tool.setuptools.packages.find]
 # Restrict discovery to the uacpy package tree; without an explicit include,

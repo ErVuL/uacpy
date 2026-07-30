@@ -124,8 +124,8 @@ def main():
     )
 
     print(f"  ✓ is_range_dependent: {env.is_range_dependent}")
-    print(f"  ✓ has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
-    print(f"  ✓ has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
+    print(f"  ✓ has_range_dependent_ssp: {env.has_range_dependent_ssp}")
+    print(f"  ✓ has_range_dependent_bottom: {env.has_range_dependent_bottom}")
 
     source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(

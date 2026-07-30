@@ -26,6 +26,10 @@ from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_fun
 from uacpy.io.oalib_writer import write_scooter_env_file
 
 
+# Source geometry -> fieldsco.m Opt(1:1), per fieldsco.m:120-140.
+_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
+
+
 class Scooter(PropagationModel):
     """
     Scooter finite element FFP (Fast Field Program) model
@@ -42,16 +46,12 @@ class Scooter(PropagationModel):
         ``1.05 × max SSP+bottom``.
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ auto. Default ``0``.
-    roughness : float, optional
-        Bottom RMS roughness (m). Default ``0``.
     rmax_multiplier : float, optional
         Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
         ``RMax`` — the period of its FFT-based inverse Hankel transform
         (``TransformG.f90``). Default ``None`` → 2.0 for ``COHERENT_TL``,
         3.0 for ``BROADBAND`` / ``TIME_SERIES`` (the alias is otherwise
         visible as a wave from the far range edge).
-    source_type : str, optional
-        FLP Opt(1): ``'R'`` cylindrical (default) | ``'X'`` Cartesian.
     spectrum : str, optional
         FLP Opt(2): ``'positive'`` (fast, default) | ``'negative'`` | ``'both'``.
     stabilizing_attenuation_off : bool, optional
@@ -99,7 +99,8 @@ class Scooter(PropagationModel):
     # INCOHERENT_TL is intentionally absent (no modal decomposition here).
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
-        supports={'layered_bottom', 'elastic_media'},
+        supports={'layered_bottom', 'elastic_media', 'rough_surface'},
+        source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'acoustics_toolbox'
@@ -110,10 +111,8 @@ class Scooter(PropagationModel):
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         n_mesh: int = 0,
-        roughness: float = 0.0,
         rmax_multiplier: Optional[float] = None,
         interp_ssp: Optional[str] = None,
-        source_type: str = 'R',
         spectrum: str = 'positive',
         stabilizing_attenuation_off: bool = False,
         field_interp: str = 'O',
@@ -139,8 +138,6 @@ class Scooter(PropagationModel):
             Scooter pick automatically from frequency / wavelength. Default: 0.
             Note: this is NOT a "points per wavelength" density — it is a total
             point count per medium.
-        roughness : float, optional
-            Bottom roughness (m). Default: 0.0.
         rmax_multiplier : float, optional
             Multiply max receiver range for wavenumber resolution.
             Default ``None`` → 2.0 for ``COHERENT_TL``, 3.0 for
@@ -153,11 +150,6 @@ class Scooter(PropagationModel):
             ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
             ``'analytic'``. ``env.ssp.shape='isovelocity'`` always
             forces ``'C'`` regardless.
-        source_type : {'R', 'X'}, optional
-            FLP Option(1:1). 'R' = cylindrical (point source, default),
-            'X' = Cartesian (line source). The in-tree Hankel transform
-            scales by ``√k`` and ``1/√(2πr)`` for 'R' and by
-            ``1/√(2π)`` for 'X'.
         spectrum : {'positive', 'negative', 'both'}, optional
             FLP Option(2:2). 'positive' (default) uses only the positive
             wavenumber spectrum (fast, recommended). 'negative' uses only
@@ -186,14 +178,7 @@ class Scooter(PropagationModel):
                 f"c_low < c_high; got c_low={c_low} m/s, c_high={c_high} m/s."
             )
         self.n_mesh = n_mesh
-        self.roughness = roughness
         self.rmax_multiplier = rmax_multiplier
-
-        if source_type not in ('R', 'X'):
-            raise ConfigurationError(
-                f"Invalid source_type '{source_type}'. Use 'R' (cylindrical) or 'X' (Cartesian)."
-            )
-        self.source_type = source_type
 
         spectrum_map = {'positive': 'P', 'negative': 'N', 'both': 'B'}
         if spectrum not in spectrum_map:
@@ -363,7 +348,7 @@ class Scooter(PropagationModel):
                 raise exc
 
             transform_kwargs = dict(
-                source_type=self.source_type,
+                source_type=_SOURCE_TYPE_CODE[source.source_type],
                 spectrum=self._spectrum_code,
             )
             if broadband_mode:
@@ -462,7 +447,6 @@ class Scooter(PropagationModel):
             frequencies=frequencies,
             topopt_extra=topopt_extra,
             n_mesh=self.n_mesh,
-            roughness=self.roughness,
             rmax_m=rmax_m,
             c_low=cl, c_high=ch,
         )

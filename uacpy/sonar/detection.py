@@ -93,20 +93,25 @@ def detection_threshold_energy(
     """Detection threshold (dB) for an incoherent energy detector.
 
     ``DT = 5*log10(d / (w * t))`` where ``d`` is the detection index and ``w*t``
-    is the processing time-bandwidth product ``M``. This is the **noise-PSD-
-    normalized** energy-detector form (Abraham, *Underwater Acoustic Signal
-    Processing*, §9.2.11): ``DT`` is the required ratio of signal PSD to noise
-    PSD ``S0/N0``, so pair it with a noise level given as a **spectral level**
-    (dB re 1 µPa²/Hz) in the sonar equation. The required SNR *decreases* by
-    5 dB per decade of increase in ``M = w*t`` (Abraham §9.2.3.1: SNR_d falls
-    asymptotically at 5 dB/decade of the time-bandwidth product) — more
-    incoherent integration relaxes the required per-Hz SNR.
+    is the processing time-bandwidth product ``M`` (Abraham, *Underwater
+    Acoustic Signal Processing*, §9.2.3.1 / §9.2.11). The required SNR
+    *decreases* by 5 dB per decade of increase in ``M`` — more incoherent
+    integration relaxes the required SNR.
 
-    The bandwidth is in the *denominator* here because this is the PSD-ratio
-    convention — not Urick's band-power form ``DT = 5*log10(d*w/t)`` (``w`` in
-    the numerator, referenced to total in-band noise power). The two differ by
-    ``10*log10(w)``, the spectral-vs-band-power noise reference; use this one
-    with spectral-level noise.
+    **Which reference to pair it with.** This ``DT`` is the required ratio
+    ``S0/N0`` of signal to noise *power spectral density*. A ratio of two PSDs
+    over the same band equals the ratio of the two band powers, so ``DT`` here
+    is a **unitless power ratio** (Abraham §2.3.5.5 / the ``DT`` vs ``DT_Hz``
+    distinction): it is correct whenever the source and noise levels in the
+    sonar equation share a reference — both spectral levels
+    (dB re 1 µPa²/Hz), or both band-integrated levels (dB re 1 µPa²). What it
+    must *not* be paired with is a mixed pair, e.g. a band-integrated source
+    level against a spectral-level noise.
+
+    That mixed case is Urick's form, ``DT = 5*log10(d*w/t)`` — signal band
+    power referenced to noise in a 1-Hz band (Abraham's ``DT_Hz``, units
+    dB re Hz). The two differ by ``10*log10(w)``, which is 20 dB at a 100 Hz
+    bandwidth, so the choice matters.
     """
     if bandwidth_hz <= 0.0 or integration_time_s <= 0.0:
         raise ConfigurationError(

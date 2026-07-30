@@ -13,7 +13,6 @@ single run, since ray travel times are frequency-independent (geometric).
 """
 
 import copy
-import shutil
 import warnings
 import numpy as np
 from pathlib import Path
@@ -34,6 +33,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
+from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 
@@ -43,6 +43,9 @@ from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 # ReadEnvironmentBell.f90, so the constructor rejects it rather than letting a
 # typo silently change the beam model.
 _VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'b', 'g', 'G', 'S'})
+
+# Source geometry -> RunType(4:4), per ReadEnvironmentBell.f90:398-406.
+_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X'}
 
 
 # ---------------------------------------------------------------------------
@@ -247,12 +250,8 @@ class Bellhop(PropagationModel):
         Box%r is a horizontal-range cut-off, so the 1.2× pad already
         captures arrivals at the outer receivers; do not enlarge it past a
         range-dependent SSP's defined extent.
-    source_type : str, optional
-        ``'R'`` point/cylindrical (default) | ``'X'`` line/Cartesian.
     grid_type : str, optional
         ``'R'`` rectilinear (default) | ``'I'`` irregular (paired depth/range).
-    source_beam_pattern_file : Path or array, optional
-        ``.sbp`` path or ``(angle_deg, level_dB)`` array; sets ``RunType(3)='*'``.
     arrivals_format : str, optional
         ``'ascii'`` (default). ``'binary'`` is rejected — uacpy can't parse it.
     beam_width_type : str, optional
@@ -348,7 +347,9 @@ class Bellhop(PropagationModel):
             'range_dependent_bottom',
             'elastic_media',
             'multi_source_depth',
+            'source_beam_pattern',
         },
+        source_types=frozenset({'point', 'line'}),
     )
     source = 'acoustics_toolbox'
 
@@ -363,12 +364,10 @@ class Bellhop(PropagationModel):
         step: float = 0.0,
         z_box: Optional[float] = None,
         r_box: Optional[float] = None,
-        source_type: str = 'R',
         grid_type: str = 'R',
         interp_ssp: Optional[str] = None,
         interp_bathymetry: str = 'linear',
         interp_altimetry: str = 'linear',
-        source_beam_pattern_file: Optional[Path] = None,
         arrivals_format: str = 'ascii',
         beam_width_type: str = 'F',
         beam_curvature: str = 'D',
@@ -423,8 +422,6 @@ class Bellhop(PropagationModel):
             Maximum depth for ray box. None = 1.2 * max depth. Default: None.
         r_box : float, optional
             Maximum range for ray box. None = 1.2 * max range. Default: None.
-        source_type : str
-            Source type: 'R' (point, cylindrical), 'X' (line, Cartesian). Default: 'R'.
         grid_type : str
             Receiver grid: 'R' (rectilinear), 'I' (irregular). Default: 'R'.
         interp_ssp : str, optional
@@ -439,14 +436,6 @@ class Bellhop(PropagationModel):
         interp_altimetry : str, optional
             ``.ati`` interpolation. ``'linear'`` (default) or
             ``'curvilinear'``.
-        source_beam_pattern_file : Path or ndarray, optional
-            Source beam pattern. Either a path to an existing ``.sbp`` file
-            (copied to ``<work_dir>/<base>.sbp``) or a 2-column array of
-            ``(angle_deg, level_dB)`` pairs (written via
-            ``write_source_beam_pattern``; Bellhop converts dB -> linear
-            internally, bellhop.f90:132). When set, RunType position 3 is
-            set to ``'*'`` so Bellhop reads the file. Default: None
-            (omnidirectional).
         arrivals_format : str, optional
             Format for ``RunMode.ARRIVALS`` output. ``'ascii'`` (default) maps
             to RunType 'A'; ``'binary'`` maps to 'a' (Fortran unformatted).
@@ -531,11 +520,6 @@ class Bellhop(PropagationModel):
                 f"(case-significant; Bellhop would otherwise silently fall "
                 f"back to a geometric-hat beam)."
             )
-        if source_type not in ('R', 'X'):
-            raise ConfigurationError(
-                f"Bellhop(source_type={source_type!r}) is not valid. Use "
-                f"'R' (point/cylindrical) or 'X' (line/Cartesian)."
-            )
         if grid_type not in ('R', 'I'):
             raise ConfigurationError(
                 f"Bellhop(grid_type={grid_type!r}) is not valid. Use "
@@ -552,16 +536,10 @@ class Bellhop(PropagationModel):
         self.step = step
         self.z_box = z_box
         self.r_box = r_box
-        self.source_type = source_type
         self.grid_type = grid_type
         self.interp_ssp = interp_ssp
         self.interp_bathymetry = interp_bathymetry
         self.interp_altimetry = interp_altimetry
-        self.source_beam_pattern_file = (
-            Path(source_beam_pattern_file)
-            if isinstance(source_beam_pattern_file, (str, Path))
-            else source_beam_pattern_file
-        )
         self.beam_width_type = beam_width_type
         self.beam_curvature = beam_curvature
         self.eps_multiplier = float(eps_multiplier)
@@ -724,7 +702,7 @@ class Bellhop(PropagationModel):
         warn that the reflection will be fluid-approximated and return ``None``
         to continue the native run."""
         is_layered = env.bottom.is_layered
-        is_elastic = env.has_elastic_bottom()
+        is_elastic = env.has_elastic_bottom
         if not (is_layered or is_elastic):
             return None
         tag = ' (elastic)' if is_elastic else ''
@@ -896,9 +874,9 @@ class Bellhop(PropagationModel):
         if self.interp_ssp is None:
             self._log(
                 f"interp_ssp auto-picked = {effective_interp!r} "
-                f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp()})"
+                f"(env.has_range_dependent_ssp={env.has_range_dependent_ssp})"
             )
-        if effective_interp == 'quad' and not env.has_range_dependent_ssp():
+        if effective_interp == 'quad' and not env.has_range_dependent_ssp:
             # 'quad' is Bellhop's external .ssp (2-D) interpolator; with a
             # range-independent SSP there is no .ssp file to write, so fall
             # back to the auto 1-D interp instead of letting Bellhop fail on
@@ -970,38 +948,16 @@ class Bellhop(PropagationModel):
             'interp_altimetry': self.interp_altimetry,
         }
 
-        sbp_spec = self.source_beam_pattern_file
-
         try:
             base_name = 'model'
             env_file = fm.get_path(f'{base_name}.env')
             self._log(f"Writing environment file: {env_file}")
 
-            # Stage source beam pattern file. Bellhop reads by base name
-            # (<base>.sbp) when RunType position 3 is '*'.
-            use_sbp = False
-            if sbp_spec is not None:
+            # Bellhop reads <base>.sbp when RunType position 3 is '*'.
+            use_sbp = source.beam_pattern is not None
+            if use_sbp:
                 sbp_dest = env_file.with_suffix('.sbp')
-                if isinstance(sbp_spec, (str, Path)):
-                    src = Path(sbp_spec)
-                    if not src.exists():
-                        raise ConfigurationError(
-                            f"Source beam pattern file not found: {src}"
-                        )
-                    shutil.copy(src, sbp_dest)
-                else:
-                    # Array-like: expect shape (N, 2) [angle_deg, level_dB]
-                    from uacpy.io.refl_io import write_source_beam_pattern
-                    arr = np.asarray(sbp_spec, dtype=float)
-                    if arr.ndim != 2 or arr.shape[1] != 2:
-                        raise ConfigurationError(
-                            "source_beam_pattern_file array must be shape "
-                            "(N, 2): [angle_deg, level_dB]."
-                        )
-                    write_source_beam_pattern(
-                        sbp_dest, arr[:, 0], arr[:, 1]
-                    )
-                use_sbp = True
+                stage_source_beam_pattern(source.beam_pattern, sbp_dest)
                 self._log(f"Wrote source beam pattern: {sbp_dest}")
 
             write_bellhop_env_file(
@@ -1011,7 +967,7 @@ class Bellhop(PropagationModel):
                 receiver=receiver,
                 run_type=run_type,
                 beam_type=self.beam_type,
-                source_type=self.source_type,
+                source_type=_SOURCE_TYPE_CODE[source.source_type],
                 grid_type=self.grid_type,
                 verbose=self.verbose,
                 n_beams=self.n_beams,
@@ -1062,6 +1018,29 @@ class Bellhop(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
             result = reader(output_file)
+
+            # AT's ScalePressure (influence.f90:757-795) carries const = -1
+            # into the point-source branch (factor = const/sqrt(r)), so the
+            # .shd field is inverted relative to the e^{i(wt-kr)} convention
+            # Kraken and Scooter report. Undo it here so every uacpy model
+            # shares one phase reference. The line-source branch
+            # (factor = -4*sqrt(pi)*const) already cancels the sign, and the
+            # arrivals path computes its own positive factor
+            # (ArrMod.f90:103-111), so neither is touched.
+            # A line source additionally needs the exp(-i*pi/4) that the 2-D
+            # Green's function carries: (i/4)*H0(kR) ~ exp(i(kR + pi/4)) for
+            # large kR, while ScalePressure's line branch
+            # (factor = -4*sqrt(pi)*const) is purely real. Measured against the
+            # exact 2-D solution the correction is pi/4 to 0.01 deg, and once
+            # applied the line-source residual equals the point-source beam
+            # bias exactly (4.78 deg vs 4.79 deg).
+            _shd_phase = {'point': -1.0 + 0j,
+                          'line': np.exp(-1j * np.pi / 4.0)}
+            if rt in ('C', 'I', 'S'):
+                _corr = _shd_phase[source.source_type]
+                for _slab in (result.slabs
+                              if isinstance(result, ResultStack) else [result]):
+                    _slab.data = _slab.data * _corr
 
             # The .ray header records only NSz (count), not Pos%Sz; the
             # reader returns the stack with a placeholder coordinate.

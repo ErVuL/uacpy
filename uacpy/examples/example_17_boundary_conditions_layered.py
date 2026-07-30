@@ -293,7 +293,7 @@ def main():
     print(f"\n  ✓ Saved: {out_path}")
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
-        if env.has_range_dependent_layered_bottom():
+        if env.has_range_dependent_layered_bottom:
             fig_b, _ = env.plot()
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')

@@ -45,7 +45,7 @@ c
 c
 c     mr=bathymetry points, mz=depth grid, mp=pade terms.
 c
-      parameter (mr=100,mz=10000,mp=10)
+      parameter (mr=505,mz=40004,mp=10)
       dimension rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
      >   attns(mz),lamw(mz),lamb(mz),mub(mz),u(mz),v(mz),tlg(mz),
      >   r1(mz,mp),r2(mz,mp),r3(mz,mp),r4(mz,mp),r5(mz,mp),r6(mz,mp),
@@ -133,6 +133,23 @@ c
       nzplt=zmplt/dz-0.5
       z=zb(1)
       iz=z/dz
+c
+c     UACPY: array bounds checks, matching ramgeo1.5.f/ramsurf1.5.f. The
+c     elastic field vector is interleaved, so the depth arrays are indexed to
+c     2*nz+4 here rather than the fluid codes' nz+2.
+c
+      if(2*nz+4.gt.mz)then
+      write(*,*)'   Need to increase parameter mz to ',2*nz+4
+      stop
+      end if
+      if(np.gt.mp)then
+      write(*,*)'   Need to increase parameter mp to ',np
+      stop
+      end if
+      if(i.gt.mr)then
+      write(*,*)'   Need to increase parameter mr to ',i
+      stop
+      end if
 c
       do 3 i=1,2*nz+4
       u(i)=0.0

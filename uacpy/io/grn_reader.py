@@ -280,6 +280,7 @@ def _hankel_transform(
     ------------  --------------------------------------------------
     ``'R'``       cylindrical / point source (3-D), ``√(2πr)`` denom
     ``'X'``       Cartesian / line source (2-D), ``√(2π)`` denom
+    ``'S'``       point source, cylindrical spreading removed, ``√(2π)`` denom
     ============  ==================================================
 
     ============  ==================================================
@@ -298,29 +299,34 @@ def _hankel_transform(
     atten : stabilising attenuation (added to k along the +i axis)
     source_type, spectrum : see table above
     """
-    if source_type not in ('R', 'X'):
-        raise ConfigurationError(f"source_type must be 'R' or 'X', got {source_type!r}")
+    if source_type not in ('R', 'X', 'S'):
+        raise ConfigurationError(
+            f"source_type must be 'R', 'X', or 'S', got {source_type!r}")
     if spectrum not in ('P', 'N', 'B'):
         raise ConfigurationError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
 
     dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
     ck = k + 1j * atten
     abs_r = np.abs(ranges)
+    x = np.outer(ck, abs_r)
 
-    if source_type == 'R':
-        # Point source: phase factor exp(±i(kr - π/4)), √k weighting,
-        # 1/√(2πr) cylindrical spreading.
-        x = np.outer(ck, abs_r)
-        factor1 = np.sqrt(ck)
-        factor2 = dk / np.sqrt(2.0 * np.pi * np.maximum(abs_r, np.finfo(float).tiny))
-        X_pos = np.exp(-1j * (x - np.pi / 4.0))
-        X_neg = np.exp(+1j * (x - np.pi / 4.0))
-    else:  # 'X' — line source
-        x = np.outer(ck, abs_r)
+    if source_type == 'X':
+        # Line source: no √k weighting, no phase shift, 1/√(2π).
         factor1 = np.ones_like(ck)
         factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
         X_pos = np.exp(-1j * x)
         X_neg = np.exp(+1j * x)
+    else:
+        # Point source: phase factor exp(±i(kr - π/4)) and √k weighting.
+        # 'R' adds 1/√(2πr) cylindrical spreading; 'S' omits it.
+        factor1 = np.sqrt(ck)
+        if source_type == 'R':
+            factor2 = dk / np.sqrt(
+                2.0 * np.pi * np.maximum(abs_r, np.finfo(float).tiny))
+        else:
+            factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
+        X_pos = np.exp(-1j * (x - np.pi / 4.0))
+        X_neg = np.exp(+1j * (x - np.pi / 4.0))
 
     G_scaled = G_src * factor1[np.newaxis, :]
 

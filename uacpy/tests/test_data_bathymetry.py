@@ -103,7 +103,7 @@ def test_transect_shape_and_range_axis(stub_http):
     np.testing.assert_allclose(bathy[:, 1], [-e for e in elevs])
     # Directly consumable as range-dependent bathymetry.
     env = uacpy.Environment(name='slope', bathymetry=bathy, ssp=1500)
-    assert env.has_range_dependent_bathymetry()
+    assert env.has_range_dependent_bathymetry
 
 
 def test_transect_range_matches_known_distance(stub_http):

@@ -223,3 +223,50 @@ def test_extract_ph_non_regular_member_raises(tmp_path):
         tf.addfile(info)
     with pytest.raises(DataFetchError, match='not a regular file'):
         glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')
+
+
+def _write_glodap_fillvalue(cache, fill=-999.0):
+    """GLODAP grid whose sub-seafloor level uses a real ``_FillValue``.
+
+    The other fixture masks with NaN, which ``np.isfinite`` rejects anyway —
+    so it never exercised the masked-array path. netCDF4 returns a masked
+    array here, and ``np.asarray`` on it exposes the raw -999 as if it were
+    data.
+    """
+    gdir = cache / 'glodap'
+    gdir.mkdir(parents=True, exist_ok=True)
+    depth = np.array([0.0, 500.0, 2000.0])
+    lat = np.arange(-89.5, 90.5, 1.0)
+    lon = np.arange(20.5, 380.5, 1.0)
+    ds = netCDF4.Dataset(gdir / glodap_local.GLODAP_FILE, 'w')
+    ds.createDimension('depth', depth.size)
+    ds.createDimension('lat', lat.size)
+    ds.createDimension('lon', lon.size)
+    ds.createVariable('Depth', 'f8', ('depth',))[:] = depth
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    v = ds.createVariable('pHtsinsitutp', 'f4', ('depth', 'lat', 'lon'),
+                          fill_value=fill)
+    data = np.full((depth.size, lat.size, lon.size), fill, dtype='f4')
+    data[0, 120, 299] = 8.10
+    data[1, 120, 299] = 8.05
+    v[:] = data
+    ds.close()
+
+
+def test_fillvalue_levels_are_dropped_not_read_as_ph(tmp_path, monkeypatch):
+    """A ``_FillValue`` level must be trimmed, never returned as pH.
+
+    Reading it as data gives pH = -999, which propagates into
+    Francois-Garrison as a wildly wrong boric-acid term.
+    """
+    root = tmp_path / 'fv_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    glodap_local._GRID.clear()
+    _write_glodap_fillvalue(root)
+
+    depths, ph = glodap_local.fetch_ph_profile((30.5, -40.5))
+    assert np.all(np.isfinite(ph)), f"non-finite pH survived: {ph}"
+    assert np.all((ph > 6.0) & (ph < 9.0)), f"implausible pH values: {ph}"
+    np.testing.assert_allclose(depths, [0.0, 500.0])
+    np.testing.assert_allclose(ph, [8.10, 8.05], rtol=1e-5)

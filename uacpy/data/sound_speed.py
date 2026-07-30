@@ -22,6 +22,7 @@ date-specific conditions use the (planned) Copernicus Marine source.
 
 import datetime as _dt
 import re
+import warnings
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -294,15 +295,31 @@ def fetch_ts_profile(
     period = _resolve_period(date, month)
     lat_idx, lon_idx, lat_c, lon_c = _grid_index(lat, lon, resolution)
 
-    depths, temp, sal = _get_column(
-        source, period, lat_idx, lon_idx, resolution=resolution, decade=decade,
-        base_url=base_url, timeout=timeout, verbose=verbose,
+    # A coastal request often snaps onto a land cell even though the point is
+    # at sea, so fall back to the nearest wet neighbour rather than refusing.
+    nearest_idx = (lat_idx, lon_idx)
+    depths, temp, sal, lat_idx, lon_idx = _nearest_wet_column(
+        lambda i, j: _get_column(
+            source, period, i, j, resolution=resolution, decade=decade,
+            base_url=base_url, timeout=timeout, verbose=verbose,
+        ),
+        lat_idx, lon_idx, resolution,
     )
     if depths.size == 0:
         raise DataFetchError(
             f"WOA23 has no water-column data at {lat_c:.3f}, {lon_c:.3f} "
+            f"or within {_WET_CELL_SEARCH_RINGS} grid cells "
             "(on land or outside the analyzed domain).",
             remediation="Pick an ocean location, or a coarser resolution.",
+        )
+    if (lat_idx, lon_idx) != nearest_idx:
+        _n_lat, _n_lon, _c, _first, _step = _GRIDS[resolution]
+        wet_lat = _first + lat_idx * _step
+        wet_lon = (-180.0 + _step / 2) + lon_idx * _step
+        warnings.warn(
+            f"WOA23: nearest cell ({lat_c:.3f}, {lon_c:.3f}) is dry; using the "
+            f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}).",
+            UserWarning, stacklevel=2,
         )
 
     # Monthly/seasonal fields cap at 1500 m. If this column reached that cap
@@ -339,6 +356,47 @@ def _resolve_period(date, month) -> int:
             f"WOA23: month must be 1-12, got {month}.",
         )
     return int(month)
+
+
+# How far the wet-cell search may wander from the nearest cell, in grid cells.
+# A coastal point can snap onto a land cell whose column is entirely fill; the
+# neighbouring cell is usually the same water mass. Kept small so a genuinely
+# land-locked request still fails instead of silently sampling a distant sea.
+_WET_CELL_SEARCH_RINGS = 2
+
+
+def _ring_offsets(radius: int):
+    """(d_lat, d_lon) offsets on the Chebyshev ring of the given radius,
+    ordered nearest-first by Euclidean distance in cells."""
+    out = [(dla, dlo)
+           for dla in range(-radius, radius + 1)
+           for dlo in range(-radius, radius + 1)
+           if max(abs(dla), abs(dlo)) == radius]
+    return sorted(out, key=lambda o: o[0] ** 2 + o[1] ** 2)
+
+
+def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
+    """``(depths, temp, sal, lat_idx, lon_idx)`` for the closest wet cell.
+
+    ``fetch(lat_idx, lon_idx)`` returns one column; an empty depth axis means a
+    dry (land / unanalysed) cell. Searches the nearest cell first, then outward
+    by Chebyshev ring, wrapping in longitude and clamping in latitude.
+    """
+    n_lat, n_lon, _code, _first, _step = _GRIDS[resolution]
+    depths, temp, sal = fetch(lat_idx, lon_idx)
+    if depths.size:
+        return depths, temp, sal, lat_idx, lon_idx
+
+    for radius in range(1, _WET_CELL_SEARCH_RINGS + 1):
+        for d_lat, d_lon in _ring_offsets(radius):
+            i = lat_idx + d_lat
+            if not 0 <= i < n_lat:
+                continue
+            j = (lon_idx + d_lon) % n_lon          # longitude wraps
+            depths, temp, sal = fetch(i, j)
+            if depths.size:
+                return depths, temp, sal, i, j
+    return depths, temp, sal, lat_idx, lon_idx
 
 
 def _grid_index(lat, lon, resolution) -> Tuple[int, int, float, float]:

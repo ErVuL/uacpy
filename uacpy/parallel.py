@@ -276,6 +276,22 @@ def run_parallel(
                 f"`if __name__ == '__main__':`), or pass start_method='fork' "
                 f"(note: fork can deadlock a heavily-threaded process)."
             ) from exc
+        # A spawned worker re-imports __main__. If the calling script runs
+        # run_parallel at module level (no ``if __name__ == '__main__':``), the
+        # import re-enters here and the pool dies before any job completes.
+        # __main__ *is* importable in that case, so the check above does not
+        # catch it — distinguish on "nothing finished".
+        if (start_method in ('spawn', 'forkserver')
+                and not any(r is not None for r in results)):
+            raise ConfigurationError(
+                f"run_parallel: the {start_method!r} worker pool died before "
+                f"any job completed. If the calling script runs run_parallel "
+                f"at module level, wrap it in `if __name__ == '__main__':` — "
+                f"each worker re-imports __main__, so an unguarded call "
+                f"re-enters run_parallel on import. Otherwise a worker "
+                f"crashed on startup (missing model binary, or a native "
+                f"library that cannot initialise in a spawned process)."
+            ) from exc
         # Otherwise a worker died mid-run (a native binary segfaulted or was
         # OOM-killed). ProcessPoolExecutor cannot isolate this — the whole pool
         # is gone — so the batch aborts regardless of raise_on_error, with a

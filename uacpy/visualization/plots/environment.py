@@ -306,7 +306,7 @@ def _plot_environment(
     # Pull a sensible x-extent from any range-dependent axis available.
     # Falls back to (0, 1) only when nothing carries a range vector.
     candidate_rmaxes = []
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         candidate_rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
     if bottom.is_range_dependent:
         candidate_rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
@@ -318,7 +318,7 @@ def _plot_environment(
         candidate_rmaxes.append(float(np.max(env.ssp.ranges)) / 1000.0)
     x_max = max(candidate_rmaxes) if candidate_rmaxes else 1.0
 
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         r_km = env.bathymetry.ranges / 1000.0
         seafloor = env.bathymetry.depths
     else:
@@ -469,7 +469,7 @@ def _plot_environment(
         )
 
     # Seafloor line on top of the bottom rendering.
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         ax_bathy.plot(r_km, seafloor, **BOTTOM_LINE_STYLE, zorder=10)
     else:
         ax_bathy.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=10)
@@ -644,14 +644,14 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
         raise ConfigurationError("plot_bottom_properties: env.bottom is None.")
 
     rmaxes = []
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
     if bottom.is_range_dependent:
         rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
     x_max = max(rmaxes) if rmaxes else 1.0
     r_km = np.linspace(0.0, x_max, n_range)
 
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         b = env.bathymetry
         seafloor_r = np.interp(r_km * 1000.0, b.ranges, b.depths)
     else:

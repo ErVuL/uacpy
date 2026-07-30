@@ -110,6 +110,10 @@ def _validate_pulse_type(pulse_type: str) -> str:
     return pulse_type
 
 
+# Source geometry -> fieldsco.m Opt(1:1), consumed by the Hankel transform.
+_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
+
+
 class SPARC(PropagationModel):
     """
     SPARC - Seismo-Acoustic Propagation in Realistic oCeans
@@ -138,8 +142,6 @@ class SPARC(PropagationModel):
         Phase-speed bounds (m/s). ``None`` ⇒ auto. Default ``None``.
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ auto. Default ``0``.
-    roughness : float, optional
-        Bottom RMS roughness (m). Default ``0``.
     output_mode : str, optional
         ``'R'`` horizontal array (default) | ``'D'`` vertical array | ``'S'`` snapshot.
     pulse_type : str, optional
@@ -231,7 +233,6 @@ class SPARC(PropagationModel):
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         n_mesh: int = 0,
-        roughness: float = 0.0,
         interp_ssp: Optional[str] = None,
         output_mode: str = 'R',
         pulse_type: str = 'PN+B',
@@ -264,8 +265,6 @@ class SPARC(PropagationModel):
             Upper phase speed limit (m/s). None = auto. Default: None.
         n_mesh : int, optional
             Mesh points per wavelength. 0 = auto. Default: 0.
-        roughness : float, optional
-            Bottom roughness (m). Default: 0.0.
         interp_ssp : str, optional
             SSP connection scheme. ``None`` (default) auto-picks
             ``'quad'`` for a range-dependent ``env.ssp`` and
@@ -336,7 +335,6 @@ class SPARC(PropagationModel):
                 f"c_low < c_high; got c_low={c_low} m/s, c_high={c_high} m/s."
             )
         self.n_mesh = n_mesh
-        self.roughness = roughness
         self.interp_ssp = interp_ssp
         if output_mode not in ('R', 'D', 'S'):
             raise ConfigurationError(
@@ -344,6 +342,11 @@ class SPARC(PropagationModel):
                 f"Valid modes: 'R' (horizontal array), 'D' (vertical array), 'S' (snapshot)"
             )
         self.output_mode = output_mode
+        # Only the snapshot path Hankel-transforms (run() dispatch at
+        # sparc.py:493); 'R'/'D' are range-/depth-native and cannot
+        # honour a source geometry.
+        if self.output_mode == 'S':
+            self._supported_source_types = frozenset(_SOURCE_TYPE_CODE)
         self.pulse_type = _validate_pulse_type(pulse_type)
         self.n_t_out = n_t_out
         self.t_max = t_max
@@ -811,6 +814,7 @@ class SPARC(PropagationModel):
         # (fMin/fMax) that sparc_pulse does not replicate.
         result = sparc_snapshot_to_field(
             grn_data, receiver.ranges, frequency=freq,
+            source_type=_SOURCE_TYPE_CODE[source.source_type],
             pulse_type=self.pulse_type,
         )
         self._stamp_result(result, source, backend='sparc',
@@ -922,7 +926,6 @@ class SPARC(PropagationModel):
             bottom_type=bottom_type,
             output_mode=self.output_mode,
             n_mesh=self.n_mesh,
-            roughness=self.roughness,
             rmax_m=rmax_m,
             c_low=self.c_low, c_high=self.c_high,
             pulse_type=self.pulse_type,
@@ -946,6 +949,25 @@ class SPARC(PropagationModel):
         native ``p(t)`` sampling is theirs to choose).
         """
         if run_mode != RunMode.COHERENT_TL:
+            # TIME_SERIES keeps the caller's sampling by contract, but a grid
+            # whose Nyquist sits below the source band aliases silently: the
+            # returned p(t) looks perfectly plausible at the wrong frequency.
+            # Say so, and name the n_t_out that fixes it.
+            window = t_max - self.t_start
+            if window > 0 and f_max > 0:
+                fs = self.n_t_out / window
+                if f_max > 0.5 * fs:
+                    n_needed = int(np.ceil(
+                        window * _SPARC_CW_PULSE_OVERSAMPLE * 2.0 * f_max))
+                    warnings.warn(
+                        f"SPARC TIME_SERIES: the output grid samples at "
+                        f"{fs:.1f} Hz (Nyquist {fs / 2:.1f} Hz) over a "
+                        f"{window:.2f} s window, below the {f_max:.0f} Hz "
+                        f"source band — p(t) will alias. Set n_t_out>="
+                        f"{n_needed} (or shorten the window via t_start / "
+                        f"receiver range).",
+                        UserWarning, stacklevel=3,
+                    )
             return self.n_t_out
         window = t_max - self.t_start
         fs_required = _SPARC_CW_PULSE_OVERSAMPLE * 2.0 * f_max

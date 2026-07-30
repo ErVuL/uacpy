@@ -162,7 +162,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
         return  # nothing to overlay on a zero-width axis
     ax.set_xlim(x_lo, x_hi)
 
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         r_km = m_to_km(env.bathymetry.ranges)
         z = env.bathymetry.depths
         if r_km.size >= 2 and (r_km.min() < x_lo or r_km.max() > x_hi):

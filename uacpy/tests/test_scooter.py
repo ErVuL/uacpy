@@ -109,3 +109,8 @@ class TestScooterBroadband:
                 env, source, receiver,
                 run_mode=RunMode.TIME_SERIES,
             )
+
+
+def test_scooter_constructor_no_longer_accepts_source_type():
+    with pytest.raises(TypeError):
+        Scooter(source_type='R')

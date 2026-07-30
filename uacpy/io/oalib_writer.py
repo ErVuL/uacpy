@@ -86,7 +86,7 @@ def resolve_ssp_interp(env: Environment, model_interp) -> str:
     otherwise ``'linear'``. Explicit values pass through unchanged.
     """
     if model_interp is None:
-        return 'quad' if env.has_range_dependent_ssp() else 'linear'
+        return 'quad' if env.has_range_dependent_ssp else 'linear'
     return str(model_interp).lower()
 
 
@@ -256,7 +256,7 @@ def write_header(
         n_media = n_media_override
     else:
         n_media = 1
-        if env.has_layered_bottom():
+        if env.has_layered_bottom:
             n_media += len(_writable_layers(env.bottom))
     f.write(f"{n_media}\n")
 
@@ -419,7 +419,6 @@ def write_ssp_section(
     env: Environment,
     bottom_depth: float,
     n_mesh: int = 0,
-    roughness: float = 0.0
 ) -> None:
     """Write the SSP section with the deepest sample aligned to
     ``bottom_depth`` (rounded to the writer's ``.1f`` header precision).
@@ -433,7 +432,13 @@ def write_ssp_section(
     """
     from uacpy.core.absorption import ConstantAbsorption
     bottom_depth_rounded = float(f"{bottom_depth:.1f}")
-    f.write(f"{n_mesh}  {roughness:.1f}  {bottom_depth_rounded}\n")
+    # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
+    # (ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
+    # the *sea surface* interface. Seabed roughness is sigma(NMedia+1), written
+    # on the bottom halfspace line from env.bottom. Take each from its own
+    # carrier so neither can be mislabelled.
+    surface_roughness = float(getattr(env.surface, 'roughness', 0.0) or 0.0)
+    f.write(f"{n_mesh}  {surface_roughness:.1f}  {bottom_depth_rounded}\n")
 
     baseline = (
         env.absorption.value_db_per_wavelength
@@ -442,7 +447,15 @@ def write_ssp_section(
     )
     for depth, c in env.ssp.extend_to(bottom_depth_rounded).to_pairs():
         if baseline > 0:
-            f.write(f"  {depth:.6f} {c:.6f} {baseline:.6f} /\n")
+            # AT reads each SSP line as z, alphaR (cp), betaR (cs), rhoR,
+            # alphaI (compressional attenuation), betaI (sspMod.f90:334), so a
+            # volume-absorption baseline belongs in the *fifth* column. Emitting
+            # it third makes it the water column's shear speed, which Kraken
+            # resolves to an all-NaN field and Scooter segfaults on. cs=0 and
+            # rho=1.0 restate the AT water defaults (sspMod.f90:14), which the
+            # short ``z c /`` form otherwise relies on.
+            f.write(f"  {depth:.6f} {c:.6f} 0.000000 1.000000 "
+                    f"{baseline:.6f} /\n")
         else:
             f.write(f"  {depth:.6f} {c:.6f} /\n")
 
@@ -477,7 +490,7 @@ def write_layer_sections(
         Depth of the bottom of the last sediment layer
         (i.e., top of the half-space)
     """
-    if not env.has_layered_bottom():
+    if not env.has_layered_bottom:
         return seafloor_depth
 
     layered = env.bottom
@@ -607,7 +620,7 @@ def write_bottom_section(
             z_bottom = halfspace_depth
         else:
             z_bottom = env.depth
-            if env.has_layered_bottom():
+            if env.has_layered_bottom:
                 z_bottom = float(f"{z_bottom:.1f}")
                 for layer in _writable_layers(env.bottom):
                     z_bottom = float(f"{z_bottom + layer.thickness:.1f}")
@@ -687,12 +700,11 @@ def write_multi_profile_env(
     receiver : Receiver
         Receiver configuration (depths for mode computation)
     **kwargs
-        n_mesh, roughness, c_low, c_high, rmax_m passed through.
+        n_mesh, c_low, c_high, rmax_m passed through.
         TopOpt position 4 is taken from each segment env's ``absorption``
         field via :func:`write_header`.
     """
     n_mesh = kwargs.get('n_mesh', 0)
-    roughness = kwargs.get('roughness', 0.0)
     c_low = kwargs.get('c_low', None)
     c_high = kwargs.get('c_high', None)
     rmax_m = kwargs.get('rmax_m', 100000.0)
@@ -706,7 +718,7 @@ def write_multi_profile_env(
     # can be padded to the same number of media (=> same NTotal).
     def _n_media(env_seg):
         n = 1
-        if env_seg.has_layered_bottom():
+        if env_seg.has_layered_bottom:
             n += len(_writable_layers(env_seg.bottom))
         return n
 
@@ -730,7 +742,7 @@ def write_multi_profile_env(
     # (see tests/wedge/runtests.m: total depth = 2000 m for all).
     def _total_depth(env_seg):
         d = env_seg.depth
-        if env_seg.has_layered_bottom():
+        if env_seg.has_layered_bottom:
             for layer in env_seg.bottom.columns[0].layers:
                 d += layer.thickness
         return d
@@ -779,7 +791,6 @@ def write_multi_profile_env(
             write_ssp_section(
                 f, env_seg, env_seg.depth,
                 n_mesh=n_mesh,
-                roughness=roughness
             )
 
             # --- Sediment layers (media 2..n_media_this) ---
@@ -793,7 +804,7 @@ def write_multi_profile_env(
             current_depth = seafloor
             real_layers = []
 
-            if env_seg.has_layered_bottom():
+            if env_seg.has_layered_bottom:
                 for layer in env_seg.bottom.columns[0].layers:
                     top = current_depth
                     bot = float(f"{current_depth + layer.thickness:.1f}")
@@ -1011,7 +1022,16 @@ def write_fieldflp(
         # default, the vector is filled by repeating x(1)). This matches
         # the canonical AT examples MunkK.flp / DickinsK_rd.flp.
         f.write(f"{len(r_depths):5d} \t \t \t \t ! NRro \n")
-        f.write("    0.0 /    \t \t \t \t ! Rro(1)  ... (m) \n")
+        if len(r_depths) >= 3:
+            f.write("    0.0 /    \t \t \t \t ! Rro(1)  ... (m) \n")
+        else:
+            # SubTab only replicates for Nx >= 3 (misc/subtabulate.f90:24).
+            # Below that the sentinel idiom leaves x(2) at ReadVector's
+            # -999.9 pre-fill (SourceReceiverPositions.f90:219-221) and the
+            # following Sort moves it to Rro(1), so the shallowest receiver
+            # is evaluated at r - 999.9 m. Write the vector out in full.
+            zeros = "  ".join(f"{0.0:6f}" for _ in r_depths)
+            f.write(f"    {zeros} /    \t \t \t \t ! Rro(1)  ... (m) \n")
 
 
 def write_field3dflp(
@@ -1234,7 +1254,6 @@ def write_kraken_env_file(
     bottom_type: BoundaryType,
     frequencies: Optional[np.ndarray],
     n_mesh: int,
-    roughness: float,
     rmax_m: float,
     c_low: float,
     c_high: float,
@@ -1256,7 +1275,7 @@ def write_kraken_env_file(
             frequencies=frequencies,
         )
         write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         write_bottom_section(
             f, env,
@@ -1282,7 +1301,6 @@ def write_scooter_env_file(
     frequencies: Optional[np.ndarray],
     topopt_extra: str,
     n_mesh: int,
-    roughness: float,
     rmax_m: float,
     c_low: float,
     c_high: float,
@@ -1302,7 +1320,7 @@ def write_scooter_env_file(
             topopt_extra=topopt_extra,
         )
         write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         # Scooter honours real shear attenuation on the 'A' halfspace line and
         # writes cLow/cHigh/RMax via write_phase_speed_and_rmax, so the F-type
@@ -1335,7 +1353,6 @@ def write_sparc_env_file(
     bottom_type: BoundaryType,
     output_mode: str,
     n_mesh: int,
-    roughness: float,
     rmax_m: float,
     c_low: float,
     c_high: float,
@@ -1360,7 +1377,7 @@ def write_sparc_env_file(
         f.write(f"{source.frequencies[0]:.6f}\n")
         # NMedia = water column + one medium per sediment layer.
         n_media = 1
-        if env.has_layered_bottom():
+        if env.has_layered_bottom:
             n_media += len(env.bottom.columns[0].layers)
         f.write(f"{n_media}\n")
 
@@ -1373,7 +1390,7 @@ def write_sparc_env_file(
         f.write(f"'{topopt}'\n")
 
         write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=roughness)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
 
         # Bottom section (SPARC only supports V and R — no halfspace params).
@@ -1442,7 +1459,7 @@ def write_bounce_input_file(
             surface_type=surface_type,
         )
         write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh, roughness=0.0)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
         # Layered sediments (no-op when env.bottom is a plain halfspace).
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         write_bottom_section(

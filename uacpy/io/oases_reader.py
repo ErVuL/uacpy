@@ -743,8 +743,13 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
 
         # --- Data records ---
         nf = max(1, mx - lx + 1)
+        # OASES bin indices are 1-based: oasiun22.f:1256-1261 sets
+        # DLFRQP = 1/(DT*NX) and LX = nint(FMIN/DLFRQP + 1), so bin k carries
+        # frequency (k-1)*DLFRQ. Using k/(dt*nx) puts the whole axis one bin
+        # (= 1/(dt*nx) Hz) too high.
         freq_array = np.array(
-            [(k / (dt * nx)) for k in range(lx, mx + 1)], dtype=np.float64
+            [((k - 1) / (dt * nx)) for k in range(lx, mx + 1)],
+            dtype=np.float64,
         ) if nf >= 1 else np.array([freqs], dtype=np.float64)
 
         # Detect the data-record precision from the first record's length

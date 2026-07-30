@@ -3,7 +3,8 @@ Source class for defining acoustic sources in underwater environments
 """
 
 import numpy as np
-from typing import Union, List
+from pathlib import Path
+from typing import Union, List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
@@ -27,12 +28,25 @@ class Source:
     frequencies : float or array-like
         Source frequency or frequencies in Hz
     source_type : str, optional
-        Source *geometry*: 'point' (default, cylindrical / 3-D spreading) or
-        'line' (an infinite coherent line source → 2-D Cartesian spreading),
-        used by Bellhop/Scooter. Note: this 'line' is a physical source shape
-        and is unrelated to :class:`~uacpy.Receiver`'s ``receiver_type='line'``,
+        Source *geometry*. 'point' (default) is a point source with cylindrical
+        spreading; 'line' is an infinite coherent line source with Cartesian
+        spreading; 'scaled' is a point source with the cylindrical spreading
+        factor removed. Support is per-model — see each model's
+        ``spec.source_types``. Note: this 'line' is a physical source shape and
+        is unrelated to :class:`~uacpy.Receiver`'s ``receiver_type='line'``,
         which is a *sampling* rule (depths/ranges paired point-by-point rather
         than gridded). The shared word names two different concepts.
+    beam_pattern : ndarray or Path, optional
+        Source directivity: an ``(N, 2)`` array of ``[angle_deg, level_dB]``
+        with strictly increasing angles, or a path to an existing ``.sbp``
+        file. ``None`` (default) is omnidirectional. Read by Bellhop and
+        Kraken. The engines convert levels to linear amplitude
+        (``10**(dB/20)``, ``beampattern.f90:59``) *before* interpolating
+        between samples, so a coarsely sampled pattern interpolates in
+        amplitude rather than in dB — sample finely across steep roll-offs.
+        Angles should span the full range the model queries: Bellhop uses
+        launch angles (the reference ``shaded.sbp`` covers ±180°), Kraken
+        uses mode angles in [0°, 90°].
 
     Attributes
     ----------
@@ -41,7 +55,9 @@ class Source:
     frequencies : ndarray
         Source frequency/frequencies
     source_type : str
-        Source type
+        Source geometry
+    beam_pattern : ndarray or Path or None
+        Source directivity
 
     Notes
     -----
@@ -72,6 +88,7 @@ class Source:
     depths: Union[float, List[float], np.ndarray]
     frequencies: Union[float, List[float], np.ndarray]
     source_type: str = 'point'
+    beam_pattern: Optional[Union[np.ndarray, str, Path]] = None
 
     def __post_init__(self):
         self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
@@ -94,12 +111,26 @@ class Source:
         _require_strictly_increasing(self.depths, "source depths")
         _require_positive(self.frequencies, "source frequencies", hint="Hz")
 
-        valid_types = ['point', 'line']
+        valid_types = ['point', 'line', 'scaled']
         if self.source_type not in valid_types:
             raise ConfigurationError(
                 f"source_type must be one of {valid_types}; "
                 f"got {self.source_type!r}"
             )
+
+        if self.beam_pattern is not None:
+            if isinstance(self.beam_pattern, (str, Path)):
+                self.beam_pattern = Path(self.beam_pattern)
+            else:
+                pattern = np.asarray(self.beam_pattern, dtype=np.float64)
+                if pattern.ndim != 2 or pattern.shape[1] != 2:
+                    raise ConfigurationError(
+                        "Source beam_pattern must have shape (N, 2): "
+                        f"[angle_deg, level_dB]; got shape {pattern.shape}"
+                    )
+                _require_strictly_increasing(
+                    pattern[:, 0], "source beam-pattern angles")
+                self.beam_pattern = pattern
 
     @property
     def n_sources(self) -> int:
@@ -126,8 +157,12 @@ class Source:
 
     def copy(self):
         """Return a deep copy of the source."""
+        pattern = self.beam_pattern
+        if isinstance(pattern, np.ndarray):
+            pattern = pattern.copy()
         return Source(
             depths=self.depths.copy(),
             frequencies=self.frequencies.copy(),
             source_type=self.source_type,
+            beam_pattern=pattern,
         )

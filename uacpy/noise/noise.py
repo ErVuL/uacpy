@@ -146,9 +146,17 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         if np.any(i_wind):
             NL[i_wind] = temp_noise_dist * df[i_wind]
 
-        # Meld with a sensible line at freqs greater than 2000 Hz
+        # Meld with a sensible line at freqs greater than 2000 Hz. Anchor the
+        # roll-off at the f_wind cutoff itself, not at whatever in-grid sample
+        # happens to be the last one below it — otherwise every level above
+        # 2 kHz depends on the caller's frequency spacing (measured: 17.6 dB
+        # between a grid whose last sub-cutoff point is 1999 Hz and one where
+        # it is 100 Hz). Same reasoning as the rain roll-off below.
         if np.any(~i_wind):
-            prop_const = temp_noise_dist[-1] / f_temp[-1] ** slope
+            L1c = L0w + (s1w / np.log10(2)) * np.log10(f_wind / f0w)
+            L2c = L0w + (s2w / np.log10(2)) * np.log10(f_wind / f0w)
+            Lc = L1c * (1 + (L1c / L2c) ** (-a)) ** (1 / a)
+            prop_const = 10 ** (Lc / 10) / f_wind ** slope
             NL[~i_wind] = prop_const * f[~i_wind] ** slope * df[~i_wind]
 
         NL = 10 * np.log10(NL)

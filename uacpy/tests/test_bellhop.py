@@ -673,10 +673,6 @@ class TestConstructorValidation:
     def test_valid_beam_types_ok(self, bt):
         assert Bellhop(beam_type=bt).beam_type == bt
 
-    def test_invalid_source_type_raises(self):
-        with pytest.raises(ConfigurationError):
-            Bellhop(source_type='Z')
-
     def test_invalid_grid_type_raises(self):
         with pytest.raises(ConfigurationError):
             Bellhop(grid_type='Q')
@@ -688,3 +684,60 @@ class TestConstructorValidation:
     def test_alpha_scalar_raises(self):
         with pytest.raises(ConfigurationError):
             Bellhop(alpha=80)
+
+
+class TestBellhopSourceGeometry:
+    """Source geometry is read off the Source carrier (spec 2026-07-25)."""
+
+    @staticmethod
+    def _env():
+        return Environment(bathymetry=200.0, ssp=1500.0)
+
+    def test_constructor_no_longer_accepts_source_type(self):
+        with pytest.raises(TypeError):
+            Bellhop(source_type='R')
+
+    def test_constructor_no_longer_accepts_beam_pattern_file(self):
+        with pytest.raises(TypeError):
+            Bellhop(source_beam_pattern_file=None)
+
+    def test_line_source_differs_from_point_source(self):
+        # The finding this refactor exists for: identical before the fix.
+        env = self._env()
+        rcv = Receiver(depths=100.0, ranges=np.linspace(100, 5000, 60))
+        model = Bellhop(verbose=False)
+        pt = model.run(env, Source(depths=50, frequencies=200,
+                                   source_type='point'), rcv)
+        ln = model.run(env, Source(depths=50, frequencies=200,
+                                   source_type='line'), rcv)
+        delta = np.nanmax(np.abs(np.asarray(pt.tl) - np.asarray(ln.tl)))
+        assert delta > 10.0, f"source_type is still inert (max dTL={delta})"
+
+    def test_line_vs_point_matches_influence_f90_ratio(self):
+        # influence.f90:783 — line: factor = -4*sqrt(pi)*const;
+        # point: factor = const/sqrt(r). The 1/sqrt(r) is the only
+        # range-dependent term, so the slope of TL_point - TL_line over
+        # range is 10*log10(r2/r1).
+        env = self._env()
+        ranges = np.array([1000.0, 2000.0, 4000.0])
+        rcv = Receiver(depths=100.0, ranges=ranges)
+        model = Bellhop(verbose=False)
+        pt = np.asarray(model.run(env, Source(depths=50, frequencies=200,
+                                              source_type='point'), rcv).tl).ravel()
+        ln = np.asarray(model.run(env, Source(depths=50, frequencies=200,
+                                              source_type='line'), rcv).tl).ravel()
+        diff = pt - ln
+        measured = diff[-1] - diff[0]
+        expected = 10 * np.log10(ranges[-1] / ranges[0])
+        assert measured == pytest.approx(expected, abs=1.0)
+
+    def test_beam_pattern_array_writes_sbp(self, tmp_path):
+        env = self._env()
+        rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
+        pat = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
+        model = Bellhop(verbose=False, work_dir=tmp_path, cleanup=False)
+        model.run(env, Source(depths=50, frequencies=200,
+                              beam_pattern=pat), rcv)
+        sbp = list(tmp_path.rglob('*.sbp'))
+        assert sbp, "no .sbp written for Source(beam_pattern=...)"
+        assert sbp[0].read_text().split()[0] == '3'

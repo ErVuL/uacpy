@@ -312,3 +312,30 @@ class TestMarineMammalWeighting:
         wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), f_coarse, "LF")
         wl_fine = weighted_level(np.full(f_fine.size, 120.0), f_fine, "LF")
         assert abs(wl_coarse - wl_fine) < 0.5     # was ~10 dB before the fix
+
+
+class TestWindNoiseRollOffAnchor:
+    """The >2 kHz roll-off must not depend on the caller's frequency grid.
+
+    The melded high-frequency line used to be anchored at ``f_temp[-1]``, the
+    last in-grid sample below the 2 kHz cutoff, so the level at 5 kHz moved by
+    17.6 dB depending on whether the grid happened to contain 1999 Hz or
+    100 Hz. It is now anchored at the cutoff itself, matching the rain
+    roll-off and the no-sub-cutoff-sample fallback.
+    """
+
+    @pytest.mark.parametrize('anchor', [10.0, 100.0, 500.0, 1500.0, 1999.0])
+    def test_high_frequency_level_is_grid_independent(self, anchor):
+        from uacpy.noise.noise import compute_windnoise
+        probe = 5000.0
+        with_anchor = compute_windnoise(np.array([anchor, probe]), 15.0)[-1]
+        alone = compute_windnoise(np.array([probe]), 15.0)[-1]
+        assert with_anchor == pytest.approx(alone, abs=1e-9), (
+            f"grid containing {anchor} Hz shifts NL(5 kHz) by "
+            f"{with_anchor - alone:.2f} dB")
+
+    def test_curve_is_continuous_across_the_cutoff(self):
+        from uacpy.noise.noise import compute_windnoise
+        nl = compute_windnoise(np.array([1999.0, 2000.0, 2001.0]), 15.0)
+        assert abs(nl[1] - nl[0]) < 0.05
+        assert abs(nl[2] - nl[1]) < 0.05

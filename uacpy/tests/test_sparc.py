@@ -215,3 +215,73 @@ class TestSPARCRigidifyLayered:
             f"NMedia should be 2 (water + 1 sediment layer); got "
             f"{first_lines[2]!r}"
         )
+
+
+def test_sparc_passes_source_geometry_to_the_transform(monkeypatch):
+    """sparc.py:812 must forward Source.source_type, not the 'R' default."""
+    import uacpy.models.sparc as sparc_mod
+
+    seen = {}
+    original = sparc_mod.sparc_snapshot_to_field
+
+    def spy(*args, **kwargs):
+        seen['source_type'] = kwargs.get('source_type')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sparc_mod, 'sparc_snapshot_to_field', spy)
+
+    env = Environment(name='sp_geom', bathymetry=200.0, ssp=1500.0)
+    rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
+    SPARC(output_mode='S').run(
+        env, Source(depths=50, frequencies=200, source_type='line'), rcv)
+    assert seen['source_type'] == 'X'
+
+
+def test_sparc_rejects_geometry_outside_snapshot_mode():
+    """output_mode 'R'/'D' never Hankel-transform, so they honour no geometry."""
+    from uacpy.core.exceptions import ConfigurationError
+    env = Environment(name='sp_rej', bathymetry=200.0, ssp=1500.0)
+    rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
+    with pytest.raises(ConfigurationError, match="source_type"):
+        SPARC(output_mode='R').run(
+            env, Source(depths=50, frequencies=200, source_type='line'), rcv)
+
+
+def test_time_series_warns_when_the_output_grid_aliases():
+    """A TIME_SERIES grid whose Nyquist is below the source band must warn.
+
+    SPARC keeps the caller's ``n_t_out`` for TIME_SERIES by contract, but the
+    default (512 samples over a ~10 s window => fs ~51 Hz) puts a 100 Hz source
+    well above Nyquist. The returned p(t) is plausible-looking and at the wrong
+    frequency, so silence is the wrong behaviour.
+    """
+    import warnings
+    env = Environment(name='p', bathymetry=200.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1800.0, density=1.8,
+                                                attenuation=0.5))
+    src = Source(depths=50.0, frequencies=100.0)
+    rcv = Receiver(depths=100.0, ranges=np.array([2000.0]))
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        SPARC(verbose=False).run(env, src, rcv, run_mode=RunMode.TIME_SERIES)
+    alias = [x for x in w if 'alias' in str(x.message)]
+    assert alias, "aliased TIME_SERIES grid did not warn"
+    assert 'n_t_out>=' in str(alias[0].message), "warning must name the fix"
+
+
+def test_time_series_does_not_warn_when_adequately_sampled():
+    """With enough samples for the band, no aliasing warning."""
+    import warnings
+    env = Environment(name='p', bathymetry=200.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1800.0, density=1.8,
+                                                attenuation=0.5))
+    src = Source(depths=50.0, frequencies=20.0)
+    rcv = Receiver(depths=100.0, ranges=np.array([2000.0]))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        SPARC(verbose=False, n_t_out=4096).run(
+            env, src, rcv, run_mode=RunMode.TIME_SERIES)
+    assert not [x for x in w if 'alias' in str(x.message)]
