@@ -126,11 +126,34 @@ class _KrakenBase(PropagationModel):
         # seafloor. Equals env.depth when there are no sediment layers.
         return self._total_media_depth(env)
 
-    @property
-    def _c_low_eff(self) -> float:
-        """Resolved KRAKEN cLow: ``None`` → ``0.0`` (auto, computed by KRAKEN)."""
-        return (C_LOW_FACTOR_KRAKEN * DEFAULT_SOUND_SPEED
-                if self.c_low is None else float(self.c_low))
+    def _c_low_for(self, env) -> float:
+        """Resolved KRAKEN cLow for ``env``.
+
+        An explicit ``c_low`` always wins. Otherwise ``0.0`` hands the choice
+        to KRAKEN, which is right for a fluid environment.
+
+        It is *not* right once any medium carries shear. ``krakenc.f90:189``
+        folds the shear speeds into ``cMin``, then ``:228-230`` applies
+        ``IF ( ElasticFlag ) cMin = 0.85 * cMin`` and
+        ``cLow = MAX( cLow, 0.99 * cMin )`` — so with cLow=0 the search floor
+        lands near 0.84x the slowest *shear* speed and the solver returns
+        interfacial (Scholte / Stoneley) modes instead of the waterborne
+        field, for a TL of several hundred dB. KRAKEN's own documentation
+        prescribes the minimum compressional speed here, which is what
+        ``_modes_error_message`` already tells the user on the failure path.
+        """
+        if self.c_low is not None:
+            return float(self.c_low)
+        if not (env.has_elastic_bottom or env.has_elastic_surface):
+            return C_LOW_FACTOR_KRAKEN * DEFAULT_SOUND_SPEED
+        speeds = [float(np.min(env.ssp.to_pairs()[:, 1]))]
+        speeds.extend(env.bottom.all_sound_speeds())
+        surface = getattr(env, 'surface', None)
+        if surface is not None:
+            cp = getattr(surface, 'sound_speed', None)
+            if cp:
+                speeds.append(float(cp))
+        return min(speeds)
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
@@ -278,7 +301,7 @@ class _KrakenBase(PropagationModel):
         )
 
         from uacpy.io.oalib_writer import resolve_phase_speed_bounds
-        cl, ch = resolve_phase_speed_bounds(env, self._c_low_eff, self.c_high)
+        cl, ch = resolve_phase_speed_bounds(env, self._c_low_for(env), self.c_high)
         if self.c_high is None:
             self._log(
                 f"c_high auto-derived from env.ssp + bottom = {ch:.1f} m/s "
@@ -610,6 +633,7 @@ class Kraken(_KrakenBase):
             'elastic_media',
             'source_beam_pattern',
             'rough_surface',
+            'rough_bottom',
         },
         source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
@@ -649,7 +673,7 @@ class Kraken(_KrakenBase):
         # c_low default 0.0 (C_LOW_FACTOR_KRAKEN) → KRAKEN computes cLow
         # automatically; a positive c_low skips slower/interfacial (Scholte /
         # Stoneley) modes. Stored raw (None preserved) so repr/copy stay clean;
-        # resolved via ``_c_low_eff`` at write time.
+        # resolved via ``_c_low_for`` at write time.
         self.c_low = None if c_low is None else float(c_low)
         self.c_high = c_high
         self.n_mesh = n_mesh
@@ -1213,7 +1237,7 @@ class Kraken(_KrakenBase):
                 receiver=receiver_for_modes,
                 interp_ssp=self.interp_ssp,
                 n_mesh=n_mesh_fixed,
-                c_low=self._c_low_eff,
+                c_low=self._c_low_for(env),
                 c_high=self.c_high,
                 rmax_m=rmax_m,
             )

@@ -207,6 +207,18 @@ class Surface:
         raise AttributeError(
             f"{type(self).__name__!r} object has no attribute {name!r}")
 
+    def __setattr__(self, name, value):
+        # Writes must follow reads through to the nodes. A plain assignment
+        # would create an instance attribute shadowing ``__getattr__``, so
+        # ``surface.roughness`` would report the new value while ``at()``,
+        # ``collapse()``, the repr and every writer — all of which read
+        # ``properties`` — kept the old one.
+        if name in _SURFACE_DELEGATED and 'properties' in self.__dict__:
+            for node in self.properties:
+                setattr(node, name, value)
+            return
+        super().__setattr__(name, value)
+
     def copy(self) -> 'Surface':
         """Deep copy (symmetric with ``Source`` / ``Receiver`` / the other
         carriers)."""

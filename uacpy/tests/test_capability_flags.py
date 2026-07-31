@@ -199,14 +199,13 @@ def test_every_declared_source_type_is_valid():
 
 
 @pytest.mark.requires_binary
-def test_sparc_gains_geometry_only_in_snapshot_mode():
-    # sparc.py:812 is reached only from _run_snapshot, which output_mode='S'
-    # selects; 'R' and 'D' are range-/depth-native and never run a Hankel
-    # transform, so they honour no geometry.
+def test_sparc_honours_no_source_geometry():
+    # The Hankel transform was reached only from _run_snapshot, which
+    # output_mode='S' selected. That was a CW product and went with
+    # RunMode.COHERENT_TL, so SPARC's native range-domain output honours no
+    # source geometry at all.
     try:
         assert set(SPARC()._supported_source_types) == {'point'}
-        assert set(SPARC(output_mode='S')._supported_source_types) == {
-            'point', 'line', 'scaled'}
     except ExecutableNotFoundError:
         pytest.skip("SPARC binary not available")
 
@@ -284,3 +283,56 @@ def test_rough_surface_is_dropped_for_solvers_that_reject_it():
     assert [x for x in w if 'rough sea surface' in str(x.message)]
     # The caller's environment must not be mutated in place.
     assert env.surface.roughness == 2.0
+
+
+class TestRoughBottomCapability:
+    """Seabed sigma(NMedia+1) is honoured by Kraken/Scooter and ignored by
+    Bellhop/RAM. Symmetric with rough_surface: a model that cannot deliver it
+    must drop it with a warning, not silently discard the caller's input."""
+
+    @staticmethod
+    def _env(sigma):
+        import uacpy
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.8, attenuation=0.5, roughness=sigma))
+
+    @pytest.mark.parametrize('model_name', ['Bellhop', 'RAM'])
+    def test_models_that_ignore_it_warn_and_collapse(self, model_name):
+        import uacpy
+        m = getattr(uacpy, model_name)(verbose=False)
+        with pytest.warns(UserWarning, match="seabed interfacial roughness"):
+            projected = m._project_environment(self._env(3.0))
+        assert projected.bottom.columns[0].halfspace.roughness == 0.0
+
+    @pytest.mark.parametrize('model_name', ['Kraken', 'Scooter'])
+    def test_models_that_honour_it_keep_it(self, model_name):
+        import uacpy
+        import warnings as _w
+        m = getattr(uacpy, model_name)(verbose=False)
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            projected = m._project_environment(self._env(3.0))
+        assert projected.bottom.columns[0].halfspace.roughness == 3.0
+
+    def test_collapse_rebuilds_rather_than_shadowing(self):
+        """Surface.roughness is served by __getattr__ delegation, so a plain
+        assignment would shadow it while properties[] kept the old value."""
+        import uacpy
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                            sound_speed=1700.0, density=1.8,
+                                            attenuation=0.5),
+            surface=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=1600.0, density=0.9,
+                                             attenuation=0.0, roughness=3.0))
+        m = uacpy.Bellhop(verbose=False)
+        with pytest.warns(UserWarning, match="rough sea surface"):
+            projected = m._project_environment(env)
+        assert projected.surface.roughness == 0.0
+        assert projected.surface.properties[0].roughness == 0.0, (
+            "collapse only shadowed the delegating attribute")
+        assert projected.surface.at(range=0.0).roughness == 0.0

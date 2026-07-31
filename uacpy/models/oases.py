@@ -459,8 +459,9 @@ class OAST(OASES):
                     self.model_name, return_code=0, stdout=None,
                     stderr=(
                         f"OAST did not produce {plt_file} (FOR020 .plt). "
-                        f"Check {fm.work_dir}/{base_name}.prt and the "
-                        "examples in third_party/oases/tloss/."
+                        f"OASES writes no .prt; its own message goes to stderr and is "
+                        f"attached above. Compare against the reference decks "
+                        f"in third_party/oases/tloss/."
                     ),
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
@@ -705,9 +706,32 @@ class OASN(OASES):
         self.c_high = c_high
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
-        self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
-        self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
-        self.vrec = float(vrec)
+        # OASN's deck has no range-axis or receiver-velocity field: it emits
+        # covariance matrices and replicas, not TL-vs-range, and VREC appears
+        # nowhere in oasnun22.f / unoasn22.f (it is OAST's Doppler-only slot).
+        # Accepting these silently would advertise knobs that cannot reach the
+        # binary, so they are rejected at construction instead.
+        for name, value in (('plot_rmin', plot_rmin), ('plot_rmax', plot_rmax)):
+            if value is not None:
+                raise ConfigurationError(
+                    f"OASN({name}=...) has no effect: OASN writes covariance "
+                    f"matrices and signal replicas, not a range-axis plot "
+                    f"block.",
+                    remediation=("Use OAST for transmission loss over a range "
+                                 "axis, or drop the argument."),
+                )
+        if vrec:
+            raise ConfigurationError(
+                "OASN(vrec=...) has no effect: VREC is OAST's Doppler "
+                "receiver-velocity field (the 5-token frequency line enabled "
+                "by option 'd') and does not exist in OASN's input format.",
+                remediation="Use OAST with the 'd' option, or drop vrec.",
+            )
+        self.plot_rmin = None
+        self.plot_rmax = None
+        self.vrec = 0.0
+        # Same OASES field as integration_offset (unoasn22.f:142 reads
+        # FREQ1 FREQ2 NFREQ OFFDBIN); an explicit value wins in the writer.
         self.offdb = float(offdb) if offdb is not None else None
 
         # Run modes, capability flags and collapse defaults come from the
@@ -756,9 +780,14 @@ class OASN(OASES):
         # replica integrations (singular on the public API, plural-with-
         # suffix in the writer per OASES's CMINS/CMAXS variable names).
         if self.c_low is not None:
+            # Under its own name for the surface/deep *noise* blocks, and
+            # under the writer's CMINS-style names for the discrete-source and
+            # replica integrations — the docstring promises all four.
+            kw['c_low'] = self.c_low
             kw['cmins_discrete'] = self.c_low
             kw['cmins_replica'] = self.c_low
         if self.c_high is not None:
+            kw['c_high'] = self.c_high
             kw['cmaxs_discrete'] = self.c_high
             kw['cmaxs_replica'] = self.c_high
 
@@ -894,7 +923,7 @@ class OASN(OASES):
                         stderr=(
                             f"OASN did not produce a covariance file. "
                             f"Checked: {xsm_file}, {fort16_file}. "
-                            f"Inspect {fm.work_dir}/{base_name}.prt."
+                            f"OASES writes no .prt; its stderr is attached above."
                         ),
                     )
                     self._attach_prt_tail(exc, fm.work_dir, base_name)
@@ -1376,8 +1405,11 @@ class OASP(OASES):
             Carrier frequency for the pulse (Hz). ``None`` defaults to
             ``source.frequencies[0]`` at ``run()`` time.
         freq_output_increment : int, optional
-            Decimation factor for the .trf frequency axis. ``None`` →
-            ``max(1, n_frequencies // 10)``.
+            OASP's ``INTF`` (Block VII, ``unoasp22.f:160``). It gates how
+            often the wavenumber *integrand* is plotted
+            (``unoasp22.f:541``: ``IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1``)
+            and does **not** decimate the ``.trf`` frequency axis, which
+            always carries every bin ``LXP1..MX``. ``None`` → 40.
         options : str, optional
             Raw OASES option string. ``None`` defers to the writer's
             default (``'N J'``); the ``'J'`` forces a real frequency axis
@@ -1636,7 +1668,7 @@ class OASP(OASES):
                     self.model_name, return_code=0, stdout=None,
                     stderr=(
                         f"OASP did not produce {trf_file} or {plt_file}; "
-                        "check the .prt log tail for the OASES error."
+                        "OASES writes no .prt; its stderr is attached above."
                     ),
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)

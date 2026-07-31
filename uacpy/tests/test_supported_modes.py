@@ -39,7 +39,9 @@ _EXPECTED = {
     ),
     'SPARC': (
         lambda: SPARC(),
-        {RunMode.COHERENT_TL, RunMode.TIME_SERIES},
+        # CW transmission loss withdrawn: the pulse-to-CW extraction is not
+        # quantitative. SPARC's product is its native time series.
+        {RunMode.TIME_SERIES},
     ),
     'Bounce': (
         lambda: Bounce(),

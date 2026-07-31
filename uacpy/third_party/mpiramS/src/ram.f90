@@ -188,15 +188,18 @@ real(kind=wp),dimension(:),allocatable :: rb1, zb1
       if (rint>maxrb1) zbc=zb1(nb+1)
       izl=iz; iz=floor(1.0_wp+zbc/deltaz); iz=max(2,iz); iz=min(nz,iz)
       if (iz/=izl)  then
-      ! bathymetry has changed; call matrc 
-          upd=1    
-          if (abs(izll-iz)*deltaz > 20.0_wp) then 
-          ! The depth has changed by more than 20 m; update the bottom profiles
-          ! This is mainly for attenuation and density.
-          ! Don't need to call this for EVERY depth change! (I don't think...)
+      ! bathymetry has changed; call matrc
+          upd=1
+      ! UACPY: the bottom profiles are rebuilt on every change of iz. Upstream
+      ! deferred this until the depth had moved more than 20 m ("Don't need to
+      ! call this for EVERY depth change! (I don't think...)"), but profl fills
+      ! cw/cb/rhob/attn at ABSOLUTE depth indices and matrc reads them at the
+      ! current iz, so between rebuilds up to 20 m of seabed immediately below
+      ! a RISING seafloor still holds water values. Measured on a 200->100 m
+      ! wedge: 4.38 dB median / 29.6 dB max against ramgeo, versus 0.51 dB
+      ! downslope (where the stale band lands above iz and is unused).
              iflag=iflag+1
              izll=iz
-          end if
       end if
 
       ! Varying profiles - using profile closest to present range.

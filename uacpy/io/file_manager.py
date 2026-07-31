@@ -66,6 +66,11 @@ class FileManager:
         self.cleanup = cleanup
         self.work_dir = None
         self._temp_dir = None
+        # Set when uacpy created the work dir itself, so cleanup may remove it
+        # whole. A caller-pinned directory is adopted via ``adopt_work_dir``,
+        # which records what was already there so cleanup spares it.
+        self._owns_work_dir = False
+        self._preexisting = None
 
         if base_dir is not None:
             self.base_dir = Path(base_dir)
@@ -113,6 +118,27 @@ class FileManager:
             )
             self.work_dir = Path(self._temp_dir)
 
+        self._owns_work_dir = True
+        self._preexisting = None
+        return self.work_dir
+
+    def adopt_work_dir(self, work_dir: Union[str, Path]) -> Path:
+        """Use a caller-named directory, taking ownership only if we create it.
+
+        A directory that did not exist is uacpy's to remove whole. One the
+        caller already had is not: its prior entries are recorded so
+        :meth:`cleanup_work_dir` removes only what this run adds, and the
+        directory itself survives. Snapshotting is used rather than tracking
+        :meth:`get_path` calls because the model binaries also write files
+        uacpy never names (``tl.grid``, ``.prt``, ``.shd``).
+        """
+        self.work_dir = Path(work_dir)
+        existed = self.work_dir.exists()
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self._owns_work_dir = not existed
+        self._temp_dir = None
+        self._preexisting = (
+            {p.name for p in self.work_dir.iterdir()} if existed else None)
         return self.work_dir
 
     def get_path(self, filename: str) -> Path:
@@ -135,17 +161,36 @@ class FileManager:
         return self.work_dir / filename
 
     def cleanup_work_dir(self):
-        """Remove the working directory and all of its contents.
+        """Remove uacpy's scratch files.
+
+        A directory uacpy created is removed whole. A caller-supplied one
+        (see :meth:`adopt_work_dir`) keeps the directory and everything that
+        was already in it — only entries this run added are removed, so
+        ``cleanup=True`` on ``work_dir='.'`` cannot take the caller's tree.
 
         Cleanup failures (stale NFS lock, Windows file-handle held by a
         Fortran subprocess that hasn't reaped, etc.) are swallowed: a
         failed cleanup must never mask the original ``run()`` exception
         a caller is trying to surface.
         """
-        if self.work_dir is not None and self.work_dir.exists():
+        if self.work_dir is None or not self.work_dir.exists():
+            return
+        if self._owns_work_dir:
             shutil.rmtree(self.work_dir, ignore_errors=True)
-            self.work_dir = None
-            self._temp_dir = None
+        else:
+            preexisting = self._preexisting or set()
+            for path in self.work_dir.iterdir():
+                if path.name in preexisting:
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+        self.work_dir = None
+        self._temp_dir = None
 
     def __enter__(self):
         self.create_work_dir()

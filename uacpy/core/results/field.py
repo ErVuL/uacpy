@@ -5,6 +5,7 @@ they construct it)."""
 from __future__ import annotations
 
 import copy as _copy
+import warnings
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
@@ -18,6 +19,12 @@ from uacpy.core.results._base import Result, _complex_to_db
 # multi-GB buffer and OOM the process. Cap the *auto* size at 2**26 ≈ 67 M
 # samples (~1 GB complex) and raise instead; an explicit ``nfft=`` bypasses it.
 _MAX_SYNTHESIS_NFFT = 1 << 26
+
+# Fewest frequency bins a band-edge taper can act on and still leave an
+# interior. numpy's hann/hamming/blackman are symmetric with (near-)zero
+# endpoints, so at 2 bins the window is [0, 0] and at 3 it is [0, 1, 0] — a
+# taper there does not soften the edges, it deletes the band.
+_MIN_TAPERABLE_BINS = 4
 
 
 class Field(Result):
@@ -1061,8 +1068,16 @@ def _ifft_to_trace(
     spectrum = data[d_idx, r_idx, :].copy()
     spectrum = np.nan_to_num(spectrum, nan=0.0)
 
+    # The transfer function is sampled at df_data, so the trace it can
+    # represent without aliasing is exactly 1/df_data long. Refining df below
+    # that (to force a longer window) has to invent the samples in between,
+    # and linear interpolation of the spectrum is a convolution with a
+    # triangular kernel — i.e. a sinc^2(pi df_data t) taper in time, which
+    # progressively attenuates arrivals away from the anchor it is centred on.
+    # Return the honest extent instead; a longer record needs a finer
+    # frequency grid, which means more model runs.
     df_data = float(freqs[1] - freqs[0])
-    df = min(df_data, 1.0)               # cap at 1 Hz for ≥ 1-second window
+    df = df_data
 
     bin_indices = np.floor(freqs / df + 0.5).astype(int)
     max_bin = int(bin_indices[-1])
@@ -1087,7 +1102,25 @@ def _ifft_to_trace(
                 remediation="A typical fix is a smaller sample_rate.",
             )
 
-    if window == 'hann':
+    if window not in ('hann', 'hamming', 'blackman', 'tukey', 'none'):
+        raise ConfigurationError(
+            f"_ifft_to_trace: unknown window={window!r}; "
+            "valid: 'hann', 'hamming', 'blackman', 'tukey', 'none'"
+        )
+    if window != 'none' and n_freq < _MIN_TAPERABLE_BINS:
+        # The taper softens the band *edges*; below this there is no interior
+        # left to keep. np.hanning(2) is [0, 0] and np.hanning(3) is [0, 1, 0],
+        # so tapering would return silence or a single-bin CW tone rather than
+        # an impulse response.
+        warnings.warn(
+            f"_ifft_to_trace: {n_freq}-bin band is too narrow to taper "
+            f"(a {window!r} window needs at least {_MIN_TAPERABLE_BINS} bins "
+            f"to leave an interior); continuing untapered. Widen the band or "
+            f"pass more frequencies for a resolved impulse response.",
+            UserWarning, stacklevel=3,
+        )
+        win = np.ones(n_freq)
+    elif window == 'hann':
         win = np.hanning(n_freq)
     elif window == 'hamming':
         win = np.hamming(n_freq)
@@ -1096,13 +1129,8 @@ def _ifft_to_trace(
     elif window == 'tukey':
         from scipy.signal import windows
         win = windows.tukey(n_freq, alpha=0.5)
-    elif window == 'none':
-        win = np.ones(n_freq)
     else:
-        raise ConfigurationError(
-            f"_ifft_to_trace: unknown window={window!r}; "
-            "valid: 'hann', 'hamming', 'blackman', 'tukey', 'none'"
-        )
+        win = np.ones(n_freq)
 
     dt = 1.0 / (nfft * df)
 
@@ -1120,29 +1148,10 @@ def _ifft_to_trace(
         spectrum = spectrum * np.asarray(source_spectrum)
 
     padded = np.zeros(nfft, dtype=complex)
-    min_bin = int(bin_indices[0])
-    max_bin_fill = int(bin_indices[-1])
 
-    if df < df_data * 0.99 and n_freq >= 4:
-        c0 = tf.metadata.get('c0', DEFAULT_SOUND_SPEED)
-        t_demod = actual_range / c0
-        demod = np.exp(1j * 2.0 * np.pi * freqs * t_demod)
-        spec_demod = spectrum * demod
-
-        from scipy.interpolate import interp1d
-        fill_bins = np.arange(min_bin, min(max_bin_fill + 1, nfft))
-        fill_freqs = fill_bins * df
-        re_interp = interp1d(freqs, spec_demod.real, kind='linear',
-                             bounds_error=False, fill_value=0.0)
-        im_interp = interp1d(freqs, spec_demod.imag, kind='linear',
-                             bounds_error=False, fill_value=0.0)
-        spec_interp = re_interp(fill_freqs) + 1j * im_interp(fill_freqs)
-        remod = np.exp(1j * 2.0 * np.pi * fill_freqs * (t_start - t_demod))
-        padded[fill_bins] = spec_interp * remod
-    else:
-        spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
-        valid = (bin_indices >= 0) & (bin_indices < nfft)
-        padded[bin_indices[valid]] = spectrum[valid]
+    spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
+    valid = (bin_indices >= 0) & (bin_indices < nfft)
+    padded[bin_indices[valid]] = spectrum[valid]
 
     # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
     result = 2.0 * np.real(np.fft.ifft(padded)) * (nfft * df)

@@ -231,29 +231,74 @@ def _count_bottom_layers(env: Environment) -> int:
     return 0
 
 
-_OASES_MAX_SSP_LAYERS = 15
+# OASES' own layer limit, `parameter (NLA = 1001)` in
+# third_party/oases/src/compar.f:23, enforced at oaseun31.f:44 with
+# '*** TOO MANY LAYERS ***'. The profile is passed through in full below this;
+# above it the deck is rejected rather than silently thinned, because a
+# subsampled SSP is a different ocean (a 201-point duct profile cut to 15 rows
+# moved TL by 4.1 dB median against Kraken).
+_OASES_MAX_LAYERS = 1001
+
+# OAST Block VIII trailing pair. XAXIS is the plot axis length in cm, consumed
+# only by OASES's own plotters. XINC is the TL-vs-depth range increment
+# (unoast31.f:255, :705) — expressed as a curve count so it tracks the run's
+# range span instead of a fixed 1 km.
+_OASN_NOISE_SAMPLES = (400, 400, 100)   # NW*C NW*D NW*E manual defaults
 
 
-def _cap_ssp_layers(
-    ssp_data: np.ndarray,
-    max_layers: int = _OASES_MAX_SSP_LAYERS,
-) -> np.ndarray:
-    """Subsample an SSP to at most ``max_layers`` rows.
+def _noise_cmin(kwargs, ssp_data) -> float:
+    """Slow phase-speed edge for an OASN noise block: the model's ``c_low``
+    when pinned, else the manual's 0.95*c_min."""
+    c_low = kwargs.get('c_low')
+    if c_low:
+        return float(c_low)
+    return float(ssp_data[:, 1].min()) * 0.95
 
-    OASES integrates the per-layer wavenumber kernels analytically, and
-    long n^2-linear chains (CS<0 gradient encoding) accumulate
-    cancellation error that shows up as TL bias above ~15 water layers
-    in practice. ``oases_gen.tex`` recommends keeping the SSP coarse.
-    The first and last rows are always preserved so the layer interfaces
-    still pin to env.depth, with evenly-spaced intermediate points.
+
+def _noise_cmax(kwargs) -> float:
+    """Fast phase-speed edge: the model's ``c_high`` when pinned, else the
+    manual's 1E8 ("no upper limit")."""
+    c_high = kwargs.get('c_high')
+    return float(c_high) if c_high else 1.0e8
+
+
+def _noise_nw(kwargs) -> str:
+    """``NW*C NW*D NW*E`` wavenumber-sample counts for a noise block."""
+    nw = kwargs.get('nw_samples')
+    if nw:
+        n = int(nw)
+        return f"{n} {n} {max(1, n // 4)}"
+    return " ".join(str(v) for v in _OASN_NOISE_SAMPLES)
+
+
+_OAST_PLOT_AXIS_CM = 20
+_OAST_TLDEP_CURVES = 20
+
+
+def _check_ssp_layer_count(ssp_data: np.ndarray) -> np.ndarray:
+    """Pass an SSP through, decimating only if it would overrun OASES' arrays.
+
+    Below the limit nothing is touched — thinning a measured profile changes
+    the ocean being modelled (a 201-point duct profile cut to 15 rows moved TL
+    by 4.1 dB median against Kraken). Above it, decimate evenly and say so:
+    the alternative is a deck OASES rejects outright.
     """
-    if len(ssp_data) <= max_layers:
+    n_rows = len(ssp_data)
+    if n_rows <= _OASES_MAX_LAYERS:
         return ssp_data
-    step = max(1, len(ssp_data) // (max_layers - 1))
-    indices = list(range(0, len(ssp_data), step))
-    if indices[-1] != len(ssp_data) - 1:
-        indices.append(len(ssp_data) - 1)
-    return ssp_data[sorted(set(indices)), :]
+
+    # Keep the first and last rows so the layer interfaces still pin to the
+    # surface and env.depth; thin the interior evenly.
+    keep = np.unique(np.linspace(0, n_rows - 1, _OASES_MAX_LAYERS).astype(int))
+    warnings.warn(
+        f"env.ssp has {n_rows} samples but OASES holds at most "
+        f"{_OASES_MAX_LAYERS} layers (compar.f:23 "
+        f"`parameter (NLA = {_OASES_MAX_LAYERS})`); decimated to {keep.size} "
+        f"evenly-spaced samples. Decimate env.ssp yourself if you want to "
+        f"choose which features survive.",
+        UserWarning, stacklevel=3,
+    )
+    return ssp_data[keep, :]
 
 
 def _format_upper_halfspace(env: Environment) -> str:
@@ -471,7 +516,7 @@ def write_oast_input(
         # Block IV: Environment. OASES uses CS = -|c_next| in the
         # Airy-layer convention to encode a continuous SSP gradient
         # (oaseun31.f:160-192).
-        ssp_subset = _cap_ssp_layers(ssp_data)
+        ssp_subset = _check_ssp_layer_count(ssp_data)
 
         # Special case: if isovelocity (all sound speeds are the same), write only 1 layer
         # Check if all sound speeds are equal within tolerance
@@ -549,12 +594,25 @@ def write_oast_input(
         else:
             f.write(f"{nw_samples} 1 {nw_samples}\n")
 
-        # Block VIII: Range axes (for plots) — OASES expects km on disk.
-        # RMIN RMAX RLEN RINC
-        f.write(
-            f"{float(m_to_km(plot_rmin)):.1f} "
-            f"{float(m_to_km(plot_rmax)):.1f} 20 1\n"
-        )
+        # Block VIII (unoast31.f:234): XLEFT XRIGHT XAXIS XINC, all km except
+        # XAXIS. XLEFT/XRIGHT set the FFT output grid, not merely a plot window
+        # (the .plp echoes XOFF/DX/N derived from them), so %.1f km = 100 m
+        # resolution would snap the native grid — and any run shorter than
+        # ~50 m would write XRIGHT = 0.0 and return an all-NaN field with no
+        # exception. %.9f is sub-micron; the read is list-directed.
+        #
+        # XAXIS is the plot axis length in cm, used only by OASES's own
+        # plotters (PLTLOS/PLDAV/CONDRW) — inert here, uacpy reads the numeric
+        # output. XINC is *not* inert: unoast31.f:255 sets
+        # NTLDEP = INT(|XRIGHT-XLEFT|/XINC)+1 and :705 places the TL-vs-depth
+        # curves at XLEFT + (L-1)*XINC, so a hardcoded 1 km collapses to a
+        # single curve on any run shorter than that. Scale it to the span.
+        rmin_km = float(m_to_km(plot_rmin))
+        rmax_km = float(m_to_km(plot_rmax))
+        span_km = abs(rmax_km - rmin_km)
+        xinc_km = (span_km / _OAST_TLDEP_CURVES) if span_km > 0 else 1.0
+        f.write(f"{rmin_km:.9f} {rmax_km:.9f} "
+                f"{_OAST_PLOT_AXIS_CM} {xinc_km:.9f}\n")
 
         # Block gating per oast.tex §IX-XII:
         #   IX (TL axes):       options A, D, T
@@ -698,15 +756,18 @@ def write_oasn_input(
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
-        # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF.
+        # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF
+        # (unoasn22.f:142 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
+        # ``integration_offset`` name the same OASES field, so an explicit
+        # ``offdb`` wins rather than being silently dropped.
         _emit_oases_freq_line(
             f, freq_min_b, freq_max_b, nfreq,
-            integration_offset=integration_offset,
+            integration_offset=kwargs.get('offdb', integration_offset),
         )
 
         # Block IV: Environment. NL = total layers (upper halfspace +
         # water + sediments + bottom halfspace).
-        ssp_subset = _cap_ssp_layers(ssp_data)
+        ssp_subset = _check_ssp_layer_count(ssp_data)
         n_water_layers = len(ssp_subset)
         n_sed_layers = _count_bottom_layers(env)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
@@ -751,11 +812,13 @@ def write_oasn_input(
 
         # Block VII: Surface noise parameters (if surface_noise_level != 0)
         if surface_noise_level != 0:
-            # CMINS CMAXS
-            c_water_min = float(ssp_data[:, 1].min())
-            f.write(f"{c_water_min*0.95:.1f} 1E8\n")
+            # CMINS CMAXS — the model's c_low/c_high when given, else the
+            # OASN-manual defaults (0.95*c_min for the slow edge, 1E8 for
+            # "no upper limit"). Documented as reaching this block, so it must.
+            f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
+                    f"{_noise_cmax(kwargs):.6g}\n")
             # NWSC NWSD NWSE (samples in continuous, discrete, evanescent)
-            f.write("400 400 100\n")
+            f.write(f"{_noise_nw(kwargs)}\n")
 
         # Block VIII: Deep noise parameters (if deep_noise_level != 0)
         if deep_noise_level != 0:
@@ -763,10 +826,10 @@ def write_oasn_input(
             deep_source_depth = kwargs.get('deep_source_depth', depth * 0.5)
             f.write(f"{deep_source_depth:.2f}\n")
             # CMIND CMAXD
-            c_water_min = float(ssp_data[:, 1].min())
-            f.write(f"{c_water_min*0.95:.1f} 1E8\n")
+            f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
+                    f"{_noise_cmax(kwargs):.6g}\n")
             # NWDC NWDD NWDE
-            f.write("400 400 100\n")
+            f.write(f"{_noise_nw(kwargs)}\n")
 
         # Block IX: Discrete sources (if n_discrete > 0)
         if n_discrete > 0:
@@ -935,6 +998,21 @@ def write_oasp_input(
     else:
         n_ranges = len(receiver.ranges)
         if n_ranges > 1:
+            # OASP evaluates r0 + i*dr (unoasp22.f:176 reads R0, RSPACE, NPLOTS
+            # and nothing else), so a non-uniform request cannot be honoured —
+            # it would silently return a different set of ranges than asked
+            # for. OAST warns and interpolates; OASP has no such option.
+            steps = np.diff(np.asarray(receiver.ranges, dtype=float))
+            if not np.allclose(steps, steps[0], rtol=1e-6, atol=1e-9):
+                raise ConfigurationError(
+                    f"OASP evaluates a uniform range axis (r0 + i*dr) but "
+                    f"receiver.ranges is not uniformly spaced (steps "
+                    f"{steps.min():.4g}-{steps.max():.4g} m).",
+                    remediation=(
+                        "Pass uniformly spaced ranges (np.linspace), or run "
+                        "on a uniform grid and interpolate the Field "
+                        "afterwards."),
+                )
             dr_km = float(m_to_km((r_max_m - r_min_m) / (n_ranges - 1)))
         else:
             dr_km = 1.0
@@ -964,7 +1042,7 @@ def write_oasp_input(
 
         # Block IV: Environment. NL = total layers (upper halfspace +
         # water + sediments + bottom halfspace).
-        ssp_array = np.asarray(_cap_ssp_layers(ssp_data), dtype=float).reshape(-1, 2)
+        ssp_array = np.asarray(_check_ssp_layer_count(ssp_data), dtype=float).reshape(-1, 2)
         n_water_layers = len(ssp_array)
         n_sed_layers = _count_bottom_layers(env)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
@@ -1013,11 +1091,20 @@ def write_oasp_input(
             ic1, ic2 = 1, 1
         else:
             ic1, ic2 = 1, int(nw_samples)
-        f.write(f"{nw_samples} {ic1} {ic2} 40\n")
+        # NWVNO ICW1 ICW2 INTF (unoasp22.f:160). INTF gates integrand
+        # *plots* (:541 `IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1`); the
+        # .trf always carries every bin LXP1..MX regardless.
+        intf = int(kwargs.get('freq_output_increment') or 40)
+        f.write(f"{nw_samples} {ic1} {ic2} {intf}\n")
 
         # Block VIII: Frequency and range sampling
         # NT FR1 FR2 DT R1 DR NR
-        f.write(f"{n_time} {freq_min:.1f} {freq_max:.1f} {dt:.6f} {r1_km:.3f} {dr_km:.3f} {nr}\n")
+        # R0/RSPACE are km, so %.3f would be 1 m resolution: sub-metre receiver
+        # spacing rounds to zero (every receiver onto one range) and metre-scale
+        # spacing accumulates drift over the axis. %.9f is sub-micron.
+        # unoasp22.f:176 is a list-directed read, so the extra digits are free.
+        f.write(f"{n_time} {freq_min:.1f} {freq_max:.1f} {dt:.6f} "
+                f"{r1_km:.9f} {dr_km:.9f} {nr}\n")
 
 
 _REFL_TYPE_TO_OPTION = {

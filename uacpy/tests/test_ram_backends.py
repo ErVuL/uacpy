@@ -772,3 +772,99 @@ def test_forcing_rams_on_a_fluid_bottom_is_rejected():
     tl = np.asarray(RAM(verbose=False, backend='rams').run(
         elastic, src, rcv).tl).ravel()
     assert np.all(np.isfinite(tl)) and np.all(tl < 150.0), tl
+
+
+class TestCollinsArrayBoundaries:
+    """The Fortran reads N pairs *plus* the ``-1 -1`` terminator into index
+    N+1 before testing ``i.gt.mr`` (ramgeo1.5.f:146, ramsurf1.5.f:131), and the
+    writer may append one more point to reach the last receiver — so the guard
+    must bound what is actually written, not ``env.bathymetry.n_ranges``."""
+
+    @staticmethod
+    def _bathy_env(n):
+        from uacpy.core.environment import Bathymetry
+        r = np.linspace(0.0, 20000.0, n)
+        d = 200.0 + 10.0 * np.sin(r / 3000.0)
+        return Environment(
+            name='b', bathymetry=Bathymetry(ranges=r, depths=d), ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+
+    _SRC = staticmethod(lambda: Source(depths=50.0, frequencies=50.0))
+    _RCV = staticmethod(lambda: Receiver(depths=100.0, ranges=np.array([5000.0])))
+
+    def test_bathymetry_at_the_boundary_raises_not_truncated_read(self):
+        """504 written points + terminator == mr fits; 505 does not. The 505
+        case previously reached the caller as a FileFormatError about a
+        truncated tl.grid — exactly what this guard exists to prevent."""
+        from uacpy.core.exceptions import ConfigurationError
+        m = RAM(verbose=False, backend='ramgeo', timeout=600)
+        tl = np.asarray(m.run(self._bathy_env(504), self._SRC(), self._RCV()).tl)
+        assert np.all(np.isfinite(tl))
+        with pytest.raises(ConfigurationError, match="mr=505"):
+            RAM(verbose=False, backend='ramgeo', timeout=600).run(
+                self._bathy_env(505), self._SRC(), self._RCV())
+
+    def test_ramsurf_altimetry_count_is_guarded(self):
+        """ramsurf1.5.f:82-88 reads the surface into rsrf(mr)/zsrf(mr) with no
+        bounds check of its own, so an over-long altimetry silently returns a
+        ~430 dB null field (or segfaults) instead of raising."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.core.environment import Altimetry
+        r = np.linspace(0.0, 20000.0, 600)
+        env = Environment(
+            name='a', bathymetry=200.0, ssp=1500.0,
+            altimetry=Altimetry(ranges=r, heights=np.full(r.size, -2.0)),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+        with pytest.raises(ConfigurationError, match="mr=505"):
+            RAM(verbose=False, backend='ramsurf', timeout=600).run(
+                env, self._SRC(), self._RCV())
+
+
+@pytest.mark.requires_binary
+class TestUpslopeSubBottomIsNotStale:
+    """mpiramS rebuilds its sub-bottom arrays when the seafloor index moves.
+
+    ``profl`` fills them at absolute depth indices and ``matrc`` reads them at
+    the current ``iz``, so deferring the rebuild leaves a band of seabed
+    carrying water sound speed below a *rising* seafloor. Downslope is immune
+    (the stale band lands above ``iz``), so the two slopes agreeing is the
+    signature of a correct sub-bottom.
+    """
+
+    @staticmethod
+    def _wedge(depths):
+        from uacpy.core.environment import Bathymetry
+        r = np.linspace(0.0, 6000.0, 61)
+        return Environment(
+            name='wedge', ssp=1500.0,
+            bathymetry=Bathymetry(ranges=r, depths=depths),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.7,
+                                      attenuation=0.5))
+
+    def _disagreement(self, depths):
+        env = self._wedge(depths)
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=[30.0, 70.0],
+                       ranges=np.linspace(500.0, 5000.0, 19))
+        kw = dict(dr=10.0, dz=0.5, zmax=500.0, timeout=600, verbose=False)
+        a = np.asarray(RAM(backend='mpiramS', **kw).run(env, src, rcv).tl)
+        b = np.asarray(RAM(backend='ramgeo', **kw).run(env, src, rcv).tl)
+        return np.abs(a - b)
+
+    def test_upslope_agrees_with_ramgeo(self):
+        up = self._disagreement(np.linspace(200.0, 100.0, 61))
+        assert np.nanmedian(up) < 1.5, (
+            f"mpiramS vs ramgeo median {np.nanmedian(up):.2f} dB on an upslope "
+            f"wedge — the sub-bottom is stale below the rising seafloor")
+
+    def test_upslope_and_downslope_are_symmetric(self):
+        up = np.nanmedian(self._disagreement(np.linspace(200.0, 100.0, 61)))
+        down = np.nanmedian(self._disagreement(np.linspace(100.0, 200.0, 61)))
+        assert abs(up - down) < 1.0, (
+            f"upslope {up:.2f} dB vs downslope {down:.2f} dB — a one-sided "
+            f"error is the sub-bottom staleness signature")

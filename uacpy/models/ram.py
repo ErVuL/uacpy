@@ -1255,33 +1255,47 @@ class RAM(PropagationModel):
 
         return needed, limits['mz'], zmax / (nz_max - 0.5)
 
-    def _check_collins_array_limits(self, env: Environment, kind: str,
-                                    dz: float, zmax: float) -> None:
+    def _check_collins_array_limits(self, kind: str, dz: float, zmax: float,
+                                    bathymetry, surface=None) -> None:
         """Reject a run that would overrun a Collins binary's fixed arrays.
 
-        ``mr`` bounds the bathymetry arrays ``rb``/``zb``; ``mz`` bounds the
-        depth arrays, at the per-backend rate recorded in
-        :data:`_COLLINS_ARRAY_LIMITS`.
+        ``mr`` bounds the range arrays ``rb``/``zb`` (and ``rsrf``/``zsrf`` on
+        ramsurf); ``mz`` bounds the depth arrays, at the per-backend rate
+        recorded in :data:`_COLLINS_ARRAY_LIMITS`.
 
-        Each binary does test its own bounds and ``stop`` with a diagnostic,
-        but exits before writing ``tl.grid``, so the failure would otherwise
-        reach the caller as a ``FileFormatError`` about a truncated file with
-        the real message lost. Only a ``dz`` the caller pinned can get here —
-        an auto-picked grid is coarsened to fit in ``_resolve_collins_grid``.
+        The profiles actually written are passed in rather than re-derived from
+        ``env``: the writer appends a point to reach the last receiver, and the
+        Fortran read loop stores the ``-1 -1`` terminator at index ``N+1``
+        before testing ``i.gt.mr`` (``ramgeo1.5.f:146``, ``ramsurf1.5.f:131``),
+        so the true capacity is ``mr - 1`` written points.
+
+        Each binary does test its own depth bound and ``stop`` with a
+        diagnostic, but exits before writing ``tl.grid``, so the failure would
+        otherwise reach the caller as a ``FileFormatError`` about a truncated
+        file with the real message lost. ``ramsurf`` does not even check its
+        surface arrays — ``ramsurf1.5.f:131`` is fed by the *bathymetry*
+        counter — so an over-long altimetry corrupts memory instead. Only a
+        ``dz`` the caller pinned can reach the depth check; an auto-picked grid
+        is coarsened to fit in ``_resolve_collins_grid``.
         """
         limits = _COLLINS_ARRAY_LIMITS.get(kind)
         if limits is None:
             return
-        bathy = getattr(env, 'bathymetry', None)
-        n_ranges = int(getattr(bathy, 'n_ranges', 0) or 0)
-        if n_ranges > limits['mr']:
-            raise ConfigurationError(
-                f"RAM(backend={kind!r}): the environment has {n_ranges} "
-                f"bathymetry points but the binary's arrays hold "
-                f"{limits['mr']} (mr={limits['mr']}), so it would stop "
-                f"without producing output. Decimate the bathymetry, or use "
-                f"backend='mpiramS' (no fixed limit)."
-            )
+        mr = limits['mr']
+        for label, profile in (('bathymetry', bathymetry),
+                               ('altimetry', surface)):
+            if profile is None:
+                continue
+            # +1 for the terminator the Fortran stores past the last point.
+            if len(profile) + 1 > mr:
+                raise ConfigurationError(
+                    f"RAM(backend={kind!r}): the run writes {len(profile)} "
+                    f"{label} points but the binary's arrays hold {mr} "
+                    f"(mr={mr}, one slot taken by the list terminator), so it "
+                    f"would overrun them. Decimate env.{label} to at most "
+                    f"{mr - 1} points, or use backend='mpiramS' (no fixed "
+                    f"limit)."
+                )
         needed, mz, dz_min = self._collins_mz_budget(kind, zmax)
         if needed(dz) > mz:
             raise ConfigurationError(
@@ -1406,11 +1420,6 @@ class RAM(PropagationModel):
             env, fc, kind, max_range,
             dr_override, dz_override, zmax_override,
         )
-        # Checked here rather than in ``_run_collins`` so the broadband sweep,
-        # which calls this method directly, is covered too — and so the mz
-        # bound sees the grid actually resolved for this frequency.
-        self._check_collins_array_limits(env, kind, dz, zmax)
-
         # Catch receiver depths that exceed the PE computational domain —
         # without this warning the RegularGridInterpolator below silently
         # extrapolates to TL_MAX_DB.
@@ -1438,6 +1447,11 @@ class RAM(PropagationModel):
 
         surface = (self._build_ramsurf_surface(env, max_range)
                    if kind == 'ramsurf' else None)
+
+        # Checked here rather than in ``_run_collins`` so the broadband sweep,
+        # which calls this method directly, is covered too; and after the
+        # profiles are built so the bound sees exactly what gets written.
+        self._check_collins_array_limits(kind, dz, zmax, bathymetry, surface)
 
         # One profile section per range break carries the range-dependent
         # SSP and (layered) bottom; bottom-profile depths are seafloor-

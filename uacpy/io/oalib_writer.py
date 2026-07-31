@@ -28,12 +28,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple, Union
 
 from uacpy.core.environment import Environment
+from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.surface import Surface
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_SOUND_SPEED,
+    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED, DEFAULT_SOUND_SPEED,
 )
 from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
@@ -52,6 +54,15 @@ _BOUNDARY_TYPE_MAP = {
 # over-meshed medium that Kraken / Scooter / Bounce reject. Drop such
 # sub-resolution layers when writing; the medium below becomes the boundary.
 _MIN_LAYER_THICKNESS_M = 0.1
+
+# Water density in the AT g/cm^3 convention (DENSITY_SEAWATER is kg/m^3 and is
+# used elsewhere; the .env format wants g/cm^3, and AT's own default is 1.0).
+WATER_DENSITY_G_CM3 = 1.0
+
+# Thickness of the transparent placeholder medium BOUNCE needs when the seabed
+# is a bare half-space; it carries the reference sound speed, so it does not
+# reflect. Matches AT's own tests/SedAtten/calibBounce.env.
+_BOUNCE_DUMMY_LAYER_M = 1.0
 
 
 def _writable_layers(bottom):
@@ -374,6 +385,15 @@ def resolve_phase_speed_bounds(
       2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
          ``c_high = max(c_max, env.bottom.sound_speed) · C_HIGH_FACTOR``.
 
+    A **vacuum or rigid** bottom has no sound speed — modes above the
+    half-space speed are leaky only when there *is* a half-space to leak into,
+    and a parameter-free ``BoundaryProperties`` still carries the placeholder
+    ``sound_speed`` its constructor defaults to. Capping on that placeholder
+    silently truncates the mode spectrum (a 100 m rigid-bottom guide at 50 Hz
+    keeps 3 of its 7 modes, a 10.6 dB error), so those boundaries resolve to
+    :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
+    limit", the same value ``leaky_modes`` uses.
+
     Useful for model wrappers that want to log the resolved values
     before handing them to the writer.
     """
@@ -381,11 +401,16 @@ def resolve_phase_speed_bounds(
         return float(c_low), float(c_high)
     ssp_pairs = env.ssp.to_pairs()
     c_min = float(ssp_pairs[:, 1].min())
-    hs_c = env.bottom.halfspace_at(range=0.0).sound_speed
-    c_max = max(float(ssp_pairs[:, 1].max()), float(hs_c))
+    halfspace = env.bottom.halfspace_at(range=0.0)
+    if halfspace.acoustic_type in ('vacuum', 'rigid'):
+        c_high_auto = DEFAULT_C_MAX_UNBOUNDED
+    else:
+        c_max = max(float(ssp_pairs[:, 1].max()),
+                    float(halfspace.sound_speed))
+        c_high_auto = c_max * C_HIGH_FACTOR
     return (
         float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
-        float(c_high) if c_high is not None else c_max * C_HIGH_FACTOR,
+        float(c_high) if c_high is not None else c_high_auto,
     )
 
 
@@ -445,19 +470,15 @@ def write_ssp_section(
         if isinstance(env.absorption, ConstantAbsorption)
         else 0.0
     )
+    # AT reads each SSP line as z, alphaR (cp), betaR (cs), rhoR, alphaI
+    # (compressional attenuation), betaI (sspMod.f90:334). All six are pinned
+    # explicitly: Fortran's ``/`` terminator leaves unassigned items at their
+    # previous value, and TopBot's 'A' branch (ReadEnvironmentMod.f90:285)
+    # reads the top half-space into those very module variables first, so a
+    # short form donates the surface's cs/rho/alphaI/betaI to the water.
     for depth, c in env.ssp.extend_to(bottom_depth_rounded).to_pairs():
-        if baseline > 0:
-            # AT reads each SSP line as z, alphaR (cp), betaR (cs), rhoR,
-            # alphaI (compressional attenuation), betaI (sspMod.f90:334), so a
-            # volume-absorption baseline belongs in the *fifth* column. Emitting
-            # it third makes it the water column's shear speed, which Kraken
-            # resolves to an all-NaN field and Scooter segfaults on. cs=0 and
-            # rho=1.0 restate the AT water defaults (sspMod.f90:14), which the
-            # short ``z c /`` form otherwise relies on.
-            f.write(f"  {depth:.6f} {c:.6f} 0.000000 1.000000 "
-                    f"{baseline:.6f} /\n")
-        else:
-            f.write(f"  {depth:.6f} {c:.6f} /\n")
+        f.write(f"  {depth:.6f} {c:.6f} 0.000000 1.000000 "
+                f"{baseline:.6f} 0.000000 /\n")
 
 
 def write_layer_sections(
@@ -1450,22 +1471,58 @@ def write_bounce_input_file(
     BOUNCE uses the KRAKEN ENV format plus cLow/cHigh and RMax (km), and does
     NOT read source/receiver depth blocks — its Fortran driver stops after
     RMax (bounce.f90).
+
+    **The water column is deliberately omitted.** ``bounce.f90:180-201`` shoots
+    the impedance up from the bottom half-space through *every* acoustic medium
+    and forms ``RCmplx`` at the top of medium 1, so including the ocean would
+    return the reflection coefficient of water + seabed seen from above the sea
+    surface — which ``doc/bounce.htm`` warns against in those words, and which
+    is detectable because it makes the result depend on water depth. The
+    sediment stack is therefore medium 1, and the top boundary is an ``'A'``
+    half-space carrying the water sound speed at the seafloor: ``bounce.f90:185``
+    takes its reference speed ``c0`` from ``HSTop%cP`` (falling back to a
+    hardcoded 1500 otherwise), and that is the *only* use of the top
+    half-space — ``BCImpedance`` is called for ``'BOT'`` alone.
     """
     filepath = Path(filepath)
+    seafloor = float(env.depth)
+    layers = _writable_layers(env.bottom) if env.has_layered_bottom else []
+
+    # Reference medium for the incident wave: the water at the seafloor.
+    water_top = BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=float(np.atleast_1d(env.get_sound_speed(seafloor))[0]),
+        density=WATER_DENSITY_G_CM3,
+        attenuation=0.0,
+    )
+    bounce_env = env.copy()
+    bounce_env.surface = Surface(properties=[water_top])
+
     with open(filepath, 'w') as f:
         write_header(
-            f, env, source,
+            f, bounce_env, source,
             ssp_topopt=ssp_topopt,
-            surface_type=surface_type,
+            surface_type=BoundaryType.HALF_SPACE,
+            n_media_override=max(1, len(layers)),
         )
-        write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
-        # Layered sediments (no-op when env.bottom is a plain halfspace).
-        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
+        write_absorption_block(f, bounce_env)
+        if layers:
+            halfspace_top = write_layer_sections(
+                f, bounce_env, seafloor, n_mesh=n_mesh)
+        else:
+            # BOUNCE needs at least one medium. A thin slab at the reference
+            # speed is acoustically transparent, so R still comes out at the
+            # seafloor — the same idiom as AT's own tests/SedAtten/calibBounce.
+            halfspace_top = float(f"{seafloor + _BOUNCE_DUMMY_LAYER_M:.1f}")
+            f.write(f"{n_mesh}  0.0  {halfspace_top:.1f}\n")
+            for z in (seafloor, halfspace_top):
+                f.write(f"  {z:.1f} {water_top.sound_speed:.6f} 0.0 "
+                        f"{WATER_DENSITY_G_CM3:.2f} 0.00 0.00 /\n")
         write_bottom_section(
-            f, env,
+            f, bounce_env,
             bottom_type=bottom_type,
             filepath=filepath,
+            halfspace_depth=halfspace_top,
             verbose=verbose,
         )
         # Phase velocity bounds (define angular coverage).

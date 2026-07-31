@@ -500,3 +500,118 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             _source_spectrum_at(wf, fs, grid, _max_elems=1000),
             _source_spectrum_at(wf, fs, grid),
             rtol=1e-12, atol=1e-15)
+
+
+class TestNarrowBandWindowDoesNotAnnihilate:
+    """np.hanning(2) == [0, 0] and np.hanning(3) == [0, 1, 0], so tapering the
+    *frequency* axis of a 2- or 3-bin band returns silence or a pure tone. The
+    taper exists to soften the band edges; with no interior left there is
+    nothing to soften."""
+
+    @staticmethod
+    def _tf(n_freq):
+        from uacpy.core.results import Field
+        return Field(data=np.ones((1, 1, n_freq), dtype=complex),
+                     coords={'depth': [100.0], 'range': [3000.0],
+                             'frequency': np.linspace(450.0, 550.0, n_freq)})
+
+    def _trace(self, n_freq):
+        from uacpy.core.results.field import _ifft_to_trace
+        return np.asarray(_ifft_to_trace(
+            self._tf(n_freq), depth=100.0, range=3000.0,
+            source_spectrum=np.ones(n_freq, dtype=complex),
+            window='hann', nfft=None, t_start=0.0).data)
+
+    @pytest.mark.parametrize('n_freq', [2, 3])
+    def test_degenerate_band_is_not_zeroed(self, n_freq):
+        with pytest.warns(UserWarning, match="too narrow to taper"):
+            y = self._trace(n_freq)
+        assert np.abs(y).max() > 0.0, "the whole band was multiplied by zero"
+
+    def test_wide_band_is_unaffected(self):
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter('error')
+            y = self._trace(32)
+        assert np.abs(y).max() > 0.0
+
+
+@pytest.mark.requires_binary
+def test_auto_derived_timeseries_grid_resolves_the_band():
+    """A 20 ms burst gives Delta f = 50 Hz, so a 450-550 Hz band derives only
+    3 bins — which the frequency-axis taper then collapses to a CW tone. The
+    derived grid must carry enough bins to represent an arrival."""
+    import warnings as _w
+    from scipy.signal import hilbert
+    from uacpy import (Environment, SoundSpeedProfile, BoundaryProperties,
+                       Source, Receiver, Kraken)
+    from uacpy.models.base import RunMode
+
+    env = Environment(
+        bathymetry=200.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (200.0, 1500.0)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800.0, density=1.8,
+                                  attenuation=0.5))
+    fs, dur = 20000.0, 0.020
+    t = np.arange(0.0, dur, 1.0 / fs)
+    wf = np.hanning(t.size) * np.sin(2 * np.pi * 500.0 * t)
+    with _w.catch_warnings():
+        _w.simplefilter('ignore')
+        r = Kraken(timeout=300).run(
+            env, Source(depths=50.0, frequencies=500.0),
+            Receiver(depths=[100.0], ranges=[3000.0]),
+            run_mode=RunMode.TIME_SERIES, source_waveform=wf, sample_rate=fs)
+    y = np.real(np.asarray(r.data)).ravel()
+    envelope = np.abs(hilbert(y))
+    tt = np.arange(y.size) / fs
+    core = envelope[(tt > 0.05) & (tt < 0.95)]
+    assert core.min() / core.max() < 0.5, (
+        "envelope is flat — the band collapsed to a CW tone rather than an "
+        "impulse response")
+
+
+class TestNoSincSquaredTaperOnTheFieldSpectrum:
+    """Refining df below the transfer function's own spacing has to invent the
+    samples in between, and linear interpolation of the spectrum is a
+    triangular kernel — a sinc^2(pi df_data t) taper that eats arrivals away
+    from its anchor. Two arrivals of known ratio must return at that ratio
+    whatever the frequency spacing."""
+
+    @staticmethod
+    def _two_arrival_trace(df_data, dtau, a2=0.5):
+        from uacpy.core.results import Field
+        from uacpy.core.results.field import _ifft_to_trace
+        freqs = np.arange(50.0, 450.0 + df_data, df_data)
+        # exp(-2i pi f tau) is a unit impulse at t = tau.
+        H = (np.exp(-2j * np.pi * freqs * 0.010)
+             + a2 * np.exp(-2j * np.pi * freqs * (0.010 + dtau)))
+        tf = Field(data=H[None, None, :],
+                   coords={'depth': [50.0], 'range': [1000.0],
+                           'frequency': freqs})
+        tr = _ifft_to_trace(
+            tf, depth=50.0, range=1000.0,
+            source_spectrum=np.ones(freqs.size, dtype=complex),
+            window='none', nfft=None, t_start=0.0)
+        return (np.asarray(tr.coords['time']),
+                np.abs(np.asarray(tr.data)).ravel())
+
+    @pytest.mark.parametrize('dtau', [0.020, 0.040, 0.060])
+    def test_arrival_ratio_survives_a_coarse_grid(self, dtau):
+        t, y = self._two_arrival_trace(10.0, dtau)
+        dt = float(t[1] - t[0])
+        w = max(1, int(0.002 / dt))
+
+        def peak_near(tau):
+            i = int(np.argmin(np.abs(t - tau)))
+            return y[max(0, i - w):i + w + 1].max()
+
+        ratio = peak_near(0.010 + dtau) / peak_near(0.010)
+        assert ratio == pytest.approx(0.5, abs=0.1), (
+            f"second arrival returned at {ratio:.3f} of the first instead of "
+            f"0.5 — a sinc^2 taper is attenuating it with separation")
+
+    def test_record_length_matches_the_grid_it_came_from(self):
+        """1/df_data is the non-aliased extent; anything longer is fabricated."""
+        t, _ = self._two_arrival_trace(10.0, 0.020)
+        assert (t[-1] - t[0]) <= 1.0 / 10.0 + 2 * float(t[1] - t[0])

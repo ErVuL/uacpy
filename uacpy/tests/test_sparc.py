@@ -21,32 +21,28 @@ class TestSPARCBasic:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_sparc_basic_tl(self):
-        """Test basic SPARC TL computation."""
+    def test_sparc_refuses_transmission_loss(self):
+        """SPARC's CW transmission loss was withdrawn: the pulse-to-CW
+        extraction is not quantitative (2.4 dB median with 13 dB excursions on
+        a single-mode guide, against 0.07 dB for Scooter). Only the native
+        time series remains."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
         env = Environment(
             name="sparc_test",
             bathymetry=100.0,
             ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='rigid'),
         )
-        source = Source(depths=50.0, frequencies=50.0)
-        receiver = Receiver(
-            depths=np.linspace(10, 90, 5),
-            ranges=np.linspace(100, 3000, 6)
-        )
+        with pytest.raises(UnsupportedFeatureError) as ei:
+            SPARC(verbose=False).compute_tl(
+                env=env,
+                source=Source(depths=50.0, frequencies=50.0),
+                receiver=Receiver(depths=np.linspace(10, 90, 5),
+                                  ranges=np.linspace(100, 3000, 6)))
+        # The error must name a model that does compute CW TL.
+        assert 'Scooter' in str(ei.value) or 'Kraken' in str(ei.value), (
+            f"refusal does not point anywhere useful: {ei.value}")
 
-        sparc = SPARC(verbose=False)
-        result = sparc.compute_tl(env=env, source=source, receiver=receiver)
-
-        assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.data))
-
-
-class TestSPARCTimeSeries:
-    """SPARC's primary purpose: native time-domain pressure p(t)."""
-
-    @pytest.mark.requires_binary
-    @pytest.mark.slow
     def test_sparc_time_series_returns_time_series_field(self):
         """SPARC TIME_SERIES returns a real-valued Field."""
         env = Environment(
@@ -205,8 +201,8 @@ class TestSPARCRigidifyLayered:
                 Receiver(depths=np.array([50.0]),
                          ranges=np.array([1000.0])),
             )
-        # Got a result of the right type and shape.
-        assert res.data.shape[-1] == 1  # one receiver range
+        # SPARC's only run mode is TIME_SERIES, so the trailing axis is time.
+        assert res.data.ndim >= 2 and res.data.shape[-1] > 1
         # The emitted .env declares the correct NMedia (=2 for one layer).
         env_path = next(tmp_path.glob('**/*.env'))
         first_lines = env_path.read_text().splitlines()
@@ -215,26 +211,6 @@ class TestSPARCRigidifyLayered:
             f"NMedia should be 2 (water + 1 sediment layer); got "
             f"{first_lines[2]!r}"
         )
-
-
-def test_sparc_passes_source_geometry_to_the_transform(monkeypatch):
-    """sparc.py:812 must forward Source.source_type, not the 'R' default."""
-    import uacpy.models.sparc as sparc_mod
-
-    seen = {}
-    original = sparc_mod.sparc_snapshot_to_field
-
-    def spy(*args, **kwargs):
-        seen['source_type'] = kwargs.get('source_type')
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(sparc_mod, 'sparc_snapshot_to_field', spy)
-
-    env = Environment(name='sp_geom', bathymetry=200.0, ssp=1500.0)
-    rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
-    SPARC(output_mode='S').run(
-        env, Source(depths=50, frequencies=200, source_type='line'), rcv)
-    assert seen['source_type'] == 'X'
 
 
 def test_sparc_rejects_geometry_outside_snapshot_mode():

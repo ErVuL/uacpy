@@ -26,7 +26,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field, ResultStack
 from uacpy.core.constants import (
-    DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX, DEFAULT_C_MAX_UNBOUNDED,
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.core.exceptions import (
@@ -1107,8 +1107,8 @@ class Bellhop(PropagationModel):
         source: Source,
         receiver: Receiver,
         c_low: float = DEFAULT_C_MIN,
-        c_high: float = DEFAULT_C_MAX,
-        rmax: float = 10000.0,
+        c_high: Optional[float] = None,
+        rmax: Optional[float] = None,
         run_mode: Optional[RunMode] = None,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
@@ -1155,6 +1155,17 @@ class Bellhop(PropagationModel):
             cleanup=True,
         )
         bounce_work_dir = bounce_fm.create_work_dir()
+        # AT's bounce.htm: "If you are using the reflection coefficient for a
+        # coherent TL calculation then RMax should be the maximum range to
+        # which you are propagating", and CMax must be ~1e9 "for a full 90
+        # degree calculation" — a finite CMax truncates the table at
+        # asin(c_water/CMax) and RefCoef.f90:144-149 then silently returns
+        # R = 0 for every steeper ray. Both default to the run's own geometry.
+        if rmax is None:
+            rmax = float(np.max(np.atleast_1d(receiver.ranges)))
+        if c_high is None:
+            c_high = DEFAULT_C_MAX_UNBOUNDED
+
         bounce = Bounce(
             verbose=self.verbose,
             c_low=c_low,

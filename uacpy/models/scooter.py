@@ -99,7 +99,8 @@ class Scooter(PropagationModel):
     # INCOHERENT_TL is intentionally absent (no modal decomposition here).
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
-        supports={'layered_bottom', 'elastic_media', 'rough_surface'},
+        supports={'layered_bottom', 'elastic_media', 'rough_surface',
+                  'rough_bottom'},
         source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )

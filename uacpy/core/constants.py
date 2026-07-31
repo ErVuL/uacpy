@@ -43,6 +43,13 @@ C_HIGH_FACTOR = 1.05
 DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
 DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
+# "No upper phase-speed limit" for the AT family. A vacuum / rigid boundary
+# traps every mode, so the mode search must not be capped on a half-space
+# speed that does not exist; kraken.htm prescribes this value for the same
+# reason ``leaky_modes`` uses it, and oases_gen.tex says to set CMax to 1E9
+# "for a full 90 degree calculation".
+DEFAULT_C_MAX_UNBOUNDED = 1.0e9
+
 # Sea-ice canopy as a homogeneous elastic surface. Canonical Arctic pack-ice
 # values from Jensen, Kuperman, Porter & Schmidt, *Computational Ocean
 # Acoustics* (the ice cover modelled as a homogeneous elastic medium): cp 3500

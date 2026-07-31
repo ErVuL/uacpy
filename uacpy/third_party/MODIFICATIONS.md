@@ -513,6 +513,54 @@ Added module-level variables to support the extended sediment model:
 
 ### `src/ram.f90` -- bug fixes and range-dependent sediment
 
+#### Sub-bottom refresh on every bathymetry change (upslope staleness)
+
+Upstream deferred rebuilding the sub-bottom arrays until the water depth had
+moved more than 20 m, with an explicitly uncertain comment:
+
+```fortran
+if (abs(izll-iz)*deltaz > 20.0_wp) then
+! The depth has changed by more than 20 m; update the bottom profiles
+! This is mainly for attenuation and density.
+! Don't need to call this for EVERY depth change! (I don't think...)
+```
+
+But `profl` fills `cw`/`cb`/`rhob`/`attn` at **absolute** depth indices and
+`matrc.f90:50-55` reads them at the current `iz`
+(`forall (id=(iz+1):(nz+2)) f1(id)=rhob(id)/alpb(id) … ksq(id)=ksqb(id)`), so
+between rebuilds up to 20 m of seabed immediately below a **rising** seafloor
+still carries **water** sound speed while being treated as bottom. Downslope is
+unaffected: there the stale band lands *above* `iz`, where `matrc` uses the
+water arrays anyway — which is why the defect is one-sided.
+
+**Fix:** rebuild whenever `iz` changes, matching what the SSP branch twenty
+lines below already does (`if (ir/=irl) … iflag=iflag+2`, no threshold).
+
+```diff
+ if (iz/=izl)  then
+      upd=1
+-     if (abs(izll-iz)*deltaz > 20.0_wp) then
+-        iflag=iflag+1
+-        izll=iz
+-     end if
++     iflag=iflag+1
++     izll=iz
+  end if
+```
+
+Measured on a 200 → 100 m wedge over 6 km, 100 Hz, `dr=10 dz=0.5 zmax=500`,
+against ramgeo on the identical grid:
+
+| | median | p90 | max |
+|---|---|---|---|
+| upslope, before | 4.38 dB | 13.58 | 29.59 |
+| upslope, after | **0.17 dB** | 0.39 | 1.11 |
+| downslope (control), after | 0.19 dB | 0.49 | 1.10 |
+
+Upslope and downslope now agree to 0.02 dB median — the asymmetry that
+identified the bug is gone. Cost is one extra `profl` call per range step where
+the seafloor index moves.
+
 #### NaN-safe initialisation (same pattern as matrc/solvetri)
 
 ```diff

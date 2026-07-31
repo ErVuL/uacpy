@@ -277,3 +277,65 @@ class TestWoaWetCellSearch:
         empty = (np.array([]), np.array([]), np.array([]))
         z, t, s, i, j = _nearest_wet_column(lambda i, j: empty, 60, 100, '1.00')
         assert z.size == 0, "a genuinely dry region must not be papered over"
+
+
+class TestDeepSSPExtension:
+    """Analysed T/S products (WOA23, 1 deg) are routinely shallower than
+    bathymetry (GEBCO, 15 arc-sec). Holding the last sound speed drops the
+    whole pressure term: 61 m/s over the bottom 3.3 km in the Izu-Bonin
+    trench."""
+
+    @staticmethod
+    def _profile():
+        from uacpy.core.environment import SoundSpeedProfile
+        # A deep tail at the adiabatic gradient: 1.85 m/s per 100 m.
+        z = np.array([0.0, 1000.0, 5300.0, 5400.0, 5500.0])
+        c = np.array([1540.0, 1484.0, 1547.34, 1549.20, 1551.05])
+        return SoundSpeedProfile.from_pairs(np.column_stack([z, c]))
+
+    def test_extends_along_the_profiles_own_gradient(self):
+        import warnings as _w
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            out = extend_ssp_below_data(self._profile(), 8801.0)
+        c_end = float(np.asarray(out.data)[-1, 0])
+        # UNESCO at 8801 m holding the deepest T/S gives 1611.93 m/s.
+        assert c_end == pytest.approx(1611.93, abs=2.0), (
+            f"deep sound speed {c_end:.2f} m/s — holding the last value would "
+            f"give 1551.05, which is 61 m/s slow")
+        assert float(np.asarray(out.depths)[-1]) == pytest.approx(8801.0)
+
+    def test_long_extrapolation_warns(self):
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        with pytest.warns(UserWarning, match="extrapolated"):
+            extend_ssp_below_data(self._profile(), 8801.0)
+
+    def test_short_extension_is_quiet(self):
+        import warnings as _w
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        with _w.catch_warnings():
+            _w.simplefilter('error')
+            extend_ssp_below_data(self._profile(), 5510.0)
+
+    def test_shallower_target_still_trims(self):
+        import warnings as _w
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            out = extend_ssp_below_data(self._profile(), 2000.0)
+        assert float(np.asarray(out.depths)[-1]) == pytest.approx(2000.0)
+
+    def test_noisy_last_segment_falls_back_to_the_canonical_gradient(self):
+        import warnings as _w
+        from uacpy.core.environment import SoundSpeedProfile
+        from uacpy.data.sound_speed import (extend_ssp_below_data,
+                                            ADIABATIC_GRADIENT)
+        # A strong inversion in the last segment is not the adiabatic trend.
+        p = SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1540.0], [1000.0, 1484.0], [1010.0, 1600.0]]))
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            out = extend_ssp_below_data(p, 3000.0)
+        expected = 1600.0 + ADIABATIC_GRADIENT * (3000.0 - 1010.0)
+        assert float(np.asarray(out.data)[-1, 0]) == pytest.approx(expected)

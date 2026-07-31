@@ -637,7 +637,11 @@ class TestConstantAbsorptionColumn:
             assert float(cols[4]) == pytest.approx(0.5), (
                 f"absorption must be in alphaI (col 5); got {cols}")
 
-    def test_no_absorption_keeps_the_short_form(self, tmp_path):
+    def test_zero_absorption_still_pins_all_six_columns(self, tmp_path):
+        """The short ``z c /`` form is unsafe even at zero absorption: AT's
+        ``/`` terminator leaves the remaining items at their previous value,
+        and ``TopBot`` (ReadEnvironmentMod.f90:285) has already loaded the top
+        half-space into those module variables. All six columns are pinned."""
         import uacpy
         from uacpy.io.oalib_writer import write_ssp_section
         env = uacpy.Environment(name='p', bathymetry=200.0, ssp=1500.0)
@@ -645,8 +649,11 @@ class TestConstantAbsorptionColumn:
         with open(out, 'w') as f:
             write_ssp_section(f, env, bottom_depth=200.0)
         rows = [ln for ln in out.read_text().splitlines() if '/' in ln][1:]
+        assert rows, "no SSP sample rows written"
         for ln in rows:
-            assert len(ln.replace('/', ' ').split()) == 2
+            cols = ln.replace('/', ' ').split()
+            assert len(cols) == 6, f"expected all six AT columns; got {cols}"
+            assert float(cols[2]) == 0.0 and float(cols[4]) == 0.0
 
 
 class TestOaspTrfFrequencyAxis:
@@ -722,3 +729,182 @@ class TestRoughnessGoesToItsOwnInterface:
         import uacpy
         with pytest.raises(TypeError):
             getattr(uacpy, model_name)(roughness=2.0)
+
+
+class TestSSPLinePinsWaterProperties:
+    """AT's ``/`` list-directed terminator leaves unassigned items at their
+    previous value, and ``TopBot`` (ReadEnvironmentMod.f90:285) reads the top
+    half-space into the very module variables (sspMod.f90:14) that a short
+    ``z c /`` SSP line relies on. Every SSP line must therefore pin all six
+    columns explicitly, as bellhop_writer.py already does."""
+
+    @staticmethod
+    def _env(surface=None):
+        from uacpy.core import Environment, BoundaryProperties
+        return Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5),
+            surface=surface)
+
+    @staticmethod
+    def _ssp_rows(path):
+        """The water-column SSP rows: lines between the mesh line and the
+        bottom-option line, which is quoted."""
+        rows = []
+        for line in Path(path).read_text().splitlines():
+            parts = line.split()
+            if parts and parts[-1] == '/' and not line.lstrip().startswith("'"):
+                rows.append(parts[:-1])
+        return rows
+
+    def _write(self, tmp_path, env, name):
+        from uacpy.core import Source, Receiver
+        from uacpy.io.oalib_writer import write_kraken_env_file
+        from uacpy.core.constants import BoundaryType
+        out = tmp_path / f'{name}.env'
+        write_kraken_env_file(
+            out, env,
+            source=Source(depths=25.0, frequencies=100.0),
+            receiver=Receiver(depths=[50.0], ranges=[1000.0]),
+            ssp_topopt='C',
+            surface_type=(BoundaryType.HALF_SPACE if env.surface is not None
+                          else BoundaryType.VACUUM),
+            bottom_type=BoundaryType.HALF_SPACE,
+            frequencies=None, n_mesh=0, rmax_m=5000.0,
+            c_low=1400.0, c_high=1e9)
+        return out
+
+    @pytest.mark.parametrize('with_surface', [False, True])
+    def test_every_ssp_row_carries_all_six_columns(self, tmp_path, with_surface):
+        from uacpy.core import BoundaryProperties
+        surface = (BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=0.9,
+                                      attenuation=1.0)
+                   if with_surface else None)
+        path = self._write(tmp_path, self._env(surface), 'six')
+        rows = self._ssp_rows(path)
+        assert rows, "no SSP rows found in the written .env"
+        water = [r for r in rows if float(r[0]) <= 100.0 and len(r) >= 2
+                 and abs(float(r[1]) - 1500.0) < 1e-6]
+        assert water, f"no water-column rows identified in {rows}"
+        for row in water:
+            assert len(row) == 6, (
+                f"SSP row {row} has {len(row)} columns; a short form lets the "
+                f"top half-space's cs/rho/alphaI/betaI leak into the water")
+            assert float(row[2]) == 0.0, f"water shear speed must be 0: {row}"
+            assert float(row[3]) == 1.0, f"water density must be 1.0: {row}"
+            assert float(row[5]) == 0.0, f"water shear atten must be 0: {row}"
+
+
+@pytest.mark.requires_binary
+def test_surface_halfspace_does_not_leak_into_the_water_column():
+    """End-to-end: a fluid surface half-space must not donate its density and
+    attenuation to the water. Leaked alpha=1 dB/lambda costs ~333 dB at 5 km
+    (333 wavelengths at 100 Hz)."""
+    from uacpy.core import Environment, BoundaryProperties, Source, Receiver
+    from uacpy.models import Kraken
+
+    def tl(surface):
+        env = Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5),
+            surface=surface)
+        return np.asarray(Kraken(timeout=300).run(
+            env, Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=[50.0], ranges=np.linspace(500.0, 5000.0, 10))).tl)
+
+    leaky = tl(BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1600.0, density=0.9,
+                                  attenuation=1.0))
+    assert np.nanmax(leaky) < 120.0, (
+        f"TL reaches {np.nanmax(leaky):.1f} dB over 5 km in a 100 m isovelocity "
+        f"guide — the surface half-space's attenuation leaked into the water")
+
+
+class TestPhaseSpeedBoundsForParameterFreeBottoms:
+    """A vacuum/rigid boundary has no sound speed, but BoundaryProperties still
+    carries the constructor default. Capping c_high on that placeholder
+    truncates the mode spectrum (3 of 7 modes, 10.6 dB, on a 100 m rigid guide
+    at 50 Hz)."""
+
+    @staticmethod
+    def _env(bottom):
+        import uacpy
+        return uacpy.Environment(name='b', bathymetry=100.0, ssp=1500.0,
+                                 bottom=bottom)
+
+    @pytest.mark.parametrize('kind', ['rigid', 'vacuum'])
+    def test_parameter_free_bottom_is_unbounded_above(self, kind):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import DEFAULT_C_MAX_UNBOUNDED
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        _, c_high = resolve_phase_speed_bounds(
+            self._env(BoundaryProperties(acoustic_type=kind)))
+        assert c_high == DEFAULT_C_MAX_UNBOUNDED
+
+    def test_penetrable_bottom_still_caps_on_the_halfspace_speed(self):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import C_HIGH_FACTOR
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        env = self._env(BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1800.0,
+            density=1.8, attenuation=0.5))
+        _, c_high = resolve_phase_speed_bounds(env)
+        assert c_high == pytest.approx(1800.0 * C_HIGH_FACTOR)
+
+    def test_explicit_c_high_always_wins(self):
+        from uacpy.core import BoundaryProperties
+        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
+        _, c_high = resolve_phase_speed_bounds(
+            self._env(BoundaryProperties(acoustic_type='rigid')), c_high=1700.0)
+        assert c_high == 1700.0
+
+
+class TestUserWorkDirIsNeverDestroyed:
+    """``cleanup`` removes uacpy's scratch. A work_dir the *caller* supplied is
+    not uacpy's to delete: neither the directory itself nor anything that was
+    already in it."""
+
+    @staticmethod
+    def _seed(tmp_path):
+        d = tmp_path / 'mine'
+        d.mkdir()
+        (d / 'PRECIOUS.txt').write_text('do not delete')
+        return d
+
+    def test_pinned_work_dir_survives_cleanup_true(self, tmp_path):
+        import uacpy
+        d = self._seed(tmp_path)
+        m = uacpy.Bellhop(work_dir=str(d), cleanup=True, verbose=False)
+        fm = m._setup_file_manager()
+        fm.get_path('scratch.env').write_text('x')
+        fm.cleanup_work_dir()
+        assert d.exists(), "uacpy deleted the caller's directory"
+        assert (d / 'PRECIOUS.txt').exists(), "uacpy deleted a pre-existing file"
+        assert not (d / 'scratch.env').exists(), "uacpy left its own scratch behind"
+
+    def test_copy_onto_a_pinned_work_dir_survives(self, tmp_path):
+        """Model(cleanup=True).copy(work_dir=d) — the _cleanup_explicit path,
+        where the caller's True rides onto a directory they only named later."""
+        import uacpy
+        d = self._seed(tmp_path)
+        m = uacpy.Bellhop(cleanup=True, verbose=False).copy(work_dir=str(d))
+        fm = m._setup_file_manager()
+        fm.get_path('scratch.env').write_text('x')
+        fm.cleanup_work_dir()
+        assert d.exists() and (d / 'PRECIOUS.txt').exists()
+
+    def test_uacpy_owned_temp_dir_is_still_fully_removed(self):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
+        wd = fm.create_work_dir()
+        fm.get_path('scratch.env').write_text('x')
+        assert wd.exists()
+        fm.cleanup_work_dir()
+        assert not wd.exists(), "a uacpy-created temp dir must be removed whole"

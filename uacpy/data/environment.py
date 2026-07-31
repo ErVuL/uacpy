@@ -612,7 +612,8 @@ def fetch_environment(
     depth_max = (float(bathymetry) if np.ndim(bathymetry) == 0
                  else float(np.max(np.asarray(bathymetry)[:, 1])))
     if ssp_fetched:
-        ssp = ssp.extend_to(depth_max)
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        ssp = extend_ssp_below_data(ssp, depth_max)
     # A literal ssp= passes straight to Environment, which coerces a scalar /
     # pairs / SoundSpeedProfile and reconciles its depth to the bathymetry.
 

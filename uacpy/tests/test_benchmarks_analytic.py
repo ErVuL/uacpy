@@ -505,3 +505,72 @@ def test_scaled_cylindrical_removes_exactly_the_spreading_term():
 
     np.testing.assert_allclose(tl('point') - tl('scaled'),
                                10.0 * np.log10(ranges), atol=0.01)
+
+
+@pytest.mark.requires_binary
+class TestBounceReflectsTheSeabedNotTheOcean:
+    """BOUNCE shoots the impedance from the bottom half-space up through every
+    acoustic medium and forms R at the top of medium 1 (bounce.f90:180-201),
+    with the reference speed taken from the top half-space when it is 'A' and
+    hardcoded to 1500 otherwise. So a *seabed* reflection coefficient needs the
+    water column absent and an 'A' top at the water speed — which is exactly
+    what doc/bounce.htm prescribes.
+    """
+
+    C_B, RHO_B, C_W_ALT = 1700.0, 1.8, 1450.0
+
+    def _rc(self, water_depth, c_water):
+        """``(theta_deg, |R|, phase_deg)``. The phase is the discriminating
+        quantity: a lossless isovelocity column near BOUNCE's reference speed
+        is nearly impedance-matched, so the water column it must not contain
+        barely moves |R| but rotates the phase substantially."""
+        from uacpy.models import Bounce
+        env = Environment(
+            bathymetry=float(water_depth),
+            ssp=SoundSpeedProfile.from_pairs(
+                [(0.0, c_water), (float(water_depth), c_water)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=self.C_B, density=self.RHO_B,
+                                      attenuation=0.0))
+        r = Bounce(timeout=300).run(
+            env, Source(depths=1.0, frequencies=200.0),
+            Receiver(depths=[1.0], ranges=[1000.0]))
+        full = r.metadata['full_result']
+        return (np.asarray(full['theta'], dtype=float),
+                np.asarray(full['R'], dtype=float),
+                np.asarray(full['phi'], dtype=float))
+
+    @staticmethod
+    def _wrap(deg):
+        return (np.asarray(deg) + 180.0) % 360.0 - 180.0
+
+    def test_reflection_coefficient_is_independent_of_water_depth(self):
+        """A seabed RC cannot depend on how much water sits above it."""
+        ta, ra, pa = self._rc(100.0, self.C_W_ALT)
+        tb, rb, pb = self._rc(400.0, self.C_W_ALT)
+        for th in (20.0, 45.0, 60.0, 75.0):
+            ia = int(np.argmin(np.abs(ta - th)))
+            ib = int(np.argmin(np.abs(tb - th)))
+            dphase = float(self._wrap(pa[ia] - pb[ib]))
+            assert abs(dphase) < 5.0, (
+                f"phase at {th:.0f} deg moves {dphase:.1f} deg between "
+                f"D=100 m and D=400 m — the water column is inside the "
+                f"reflection coefficient")
+            assert float(ra[ia]) == pytest.approx(float(rb[ib]), abs=0.02)
+
+    def test_matches_rayleigh_at_a_water_speed_other_than_1500(self):
+        """1500 m/s is BOUNCE's hardcoded fallback reference speed, so it is
+        the one water speed that cannot expose a missing 'A' top."""
+        theta, r, phi = self._rc(100.0, self.C_W_ALT)
+        exact = rayleigh_reflection(theta, self.C_W_ALT, self.C_B,
+                                    RHO_WATER, self.RHO_B)
+        keep = (theta > 5.0) & (theta < 85.0)
+        mag_err = np.abs(r[keep] - np.abs(exact[keep]))
+        phase_err = np.abs(self._wrap(
+            phi[keep] - np.degrees(np.angle(exact[keep]))))
+        assert np.median(mag_err) < 0.03, (
+            f"median ||R| error {np.median(mag_err):.3f} vs analytic Rayleigh "
+            f"at c_w={self.C_W_ALT} m/s")
+        assert np.median(phase_err) < 10.0, (
+            f"median phase error {np.median(phase_err):.1f} deg vs analytic "
+            f"Rayleigh at c_w={self.C_W_ALT} m/s")

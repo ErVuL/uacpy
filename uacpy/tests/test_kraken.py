@@ -401,3 +401,98 @@ def test_mode_count_probe_matches_pekeris_theory():
     assert np.all(np.diff(counts) > 0), "mode count must rise with frequency"
     # Everything above propagates, so the sub-cutoff prefix is empty.
     assert m._propagating_frequency_floor(env, src, rcv, freqs, exe) == 0
+
+
+class TestFortranFatalErrorExitsZero:
+    """AT binaries report fatal errors with ``STOP '<string>'``
+    (misc/FatalError.f90:30), which gfortran exits 0 for. Without a post-run
+    check the failure is invisible, and with a pinned work_dir the previous
+    run's output file is still on disk and gets read as this run's answer."""
+
+    @staticmethod
+    def _env(depth, c):
+        return Environment(
+            name='x', bathymetry=float(depth), ssp=float(c),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+
+    _SRC = staticmethod(lambda: Source(depths=25.0, frequencies=500.0))
+    _RCV = staticmethod(lambda: Receiver(depths=[50.0, 60.0],
+                                         ranges=[1000.0, 2000.0]))
+
+    def test_fatal_error_is_raised_not_swallowed(self, tmp_path):
+        """n_mesh=1 at 500 Hz trips 'Mesh is too coarse'
+        (ReadEnvironmentMod.f90:110). The binary exits 0, so only a .prt/stderr
+        scan catches it."""
+        from uacpy.core.exceptions import ModelExecutionError
+        with pytest.raises(ModelExecutionError) as ei:
+            Kraken(work_dir=str(tmp_path / 'w'), n_mesh=1, timeout=300).run(
+                self._env(1000.0, 1480.0), self._SRC(), self._RCV())
+        assert 'FATAL ERROR' in str(ei.value) or 'Fatal Error' in str(ei.value), (
+            f"the Fortran diagnostic never reached the user: {ei.value}")
+
+    def test_stale_output_is_not_returned_as_this_runs_answer(self, tmp_path):
+        """The dangerous case: run 1 succeeds, run 2 fatals on a *different*
+        environment, and the stale .mod/.shd yield run 1's field."""
+        from uacpy.core.exceptions import ModelExecutionError
+        wd = str(tmp_path / 'shared')
+        first = np.asarray(Kraken(work_dir=wd, timeout=300).run(
+            self._env(100.0, 1500.0), self._SRC(), self._RCV()).tl)
+        assert np.all(np.isfinite(first))
+
+        with pytest.raises(ModelExecutionError):
+            Kraken(work_dir=wd, n_mesh=1, timeout=300).run(
+                self._env(1000.0, 1480.0), self._SRC(), self._RCV())
+
+
+class TestElasticCLowDefault:
+    """With cLow=0 on an elastic environment, krakenc.f90:189 folds the shear
+    speeds into cMin and :228-230 drops the search floor to ~0.84x the slowest
+    shear speed, so the solver returns interfacial (Scholte/Stoneley) modes
+    instead of the waterborne field. KRAKEN's docs prescribe the minimum
+    compressional speed."""
+
+    @staticmethod
+    def _elastic_env(cs_layer=400.0):
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        return Environment(
+            name='el', bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=20.0, sound_speed=1700.0,
+                                      density=1.8, attenuation=0.2,
+                                      shear_speed=cs_layer,
+                                      shear_attenuation=0.5)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=2000.0,
+                    density=2.0, attenuation=0.5, shear_speed=600.0,
+                    shear_attenuation=0.5)))
+
+    def test_default_c_low_is_the_min_compressional_speed(self):
+        env = self._elastic_env()
+        # water 1500, layer cp 1700, halfspace cp 2000 -> 1500
+        assert Kraken()._c_low_for(env) == pytest.approx(1500.0)
+
+    def test_fluid_env_still_delegates_to_kraken(self):
+        env = Environment(
+            name='fl', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+        assert Kraken()._c_low_for(env) == 0.0
+
+    def test_explicit_c_low_always_wins(self):
+        assert Kraken(c_low=1234.0)._c_low_for(self._elastic_env()) == 1234.0
+
+    @pytest.mark.parametrize('cs_layer', [400.0, 600.0])
+    def test_elastic_layer_tl_is_physical_by_default(self, cs_layer):
+        """Default run must not return the interfacial-mode field (700+ dB)."""
+        env = self._elastic_env(cs_layer)
+        tl = np.asarray(Kraken(timeout=300).run(
+            env, Source(depths=36.0, frequencies=100.0),
+            Receiver(depths=[20.0, 50.0], ranges=[1000.0, 3000.0])).tl)
+        finite = tl[np.isfinite(tl)]
+        assert finite.size, "no finite TL returned"
+        assert finite.max() < 120.0, (
+            f"max TL {finite.max():.1f} dB — the mode search converged on "
+            f"interfacial modes instead of the waterborne field")

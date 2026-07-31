@@ -584,6 +584,92 @@ def sparc_snapshot_to_field(
     )
 
 
+def sparc_snapshot_to_time_field(
+    grn_data: Dict[str, Any],
+    ranges: np.ndarray,
+    frequency: float,
+    *,
+    source_type: str = 'R',
+    spectrum: str = 'P',
+    source_depth_idx: int = 0,
+) -> Field:
+    """Range-domain time evolution of a SPARC snapshot (``output_mode='S'``).
+
+    ``sparc.f90:580-591`` writes ``Green(Itout, irz, ik)`` — the
+    *wavenumber-domain* field at each output time — and ``WriteHeaderSparc``
+    (``:317-327``) stores the time vector in the ``.grn``'s frequency slot and
+    the phase-speed vector ``sqrt(omega2)/k`` in its range slot.
+    ``doc/sparc.htm`` prescribes running FIELDS afterwards "to convert the
+    '.GRN' file to a '.SHD' file containing the pressure field"; this is that
+    step done in-tree.
+
+    Simpler than :func:`sparc_snapshot_to_field`, which had to recover a *CW*
+    component: the snapshot already is the propagated pulse, so one inverse
+    Hankel transform per output time gives ``p(z, r, t)`` directly — no
+    time-FFT, no frequency selection, and no source deconvolution (exactly as
+    the ``'R'``/``'D'`` modes return their raw received time series).
+
+    The wavenumber grid is taken at the source frequency and is **constant
+    across the time axis** — SPARC's ``k`` does not scale with the ``.grn``'s
+    nominal frequency axis, because that axis holds times.
+
+    Returns a real :class:`Field` with ``coords={'depth', 'range', 'time'}``.
+    """
+    if not grn_data["is_sparc"]:
+        raise ConfigurationError(
+            "sparc_snapshot_to_time_field expects a SPARC GRN; got title "
+            f"{grn_data['title']!r} (no 'SPARC' prefix)."
+        )
+    nsd = grn_data["nsd"]
+    if not (0 <= source_depth_idx < nsd):
+        raise ConfigurationError(
+            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
+        )
+
+    G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
+    tout = np.asarray(grn_data["freqVec"], dtype=float)   # times, not freqs
+    k = _wavenumbers_for_frequency(grn_data, frequency)
+    atten = _stab_attenuation(grn_data, k)                # 0 for SPARC
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+
+    # (nrd, n_ranges) per output time -> (nrd, n_ranges, nt).
+    p_t = np.stack(
+        [_hankel_transform(G[it], k, ranges, atten=atten,
+                           source_type=source_type, spectrum=spectrum)
+         for it in range(G.shape[0])],
+        axis=-1,
+    )
+    # Align with sparc.exe's own 'R'-mode range synthesis (sparc.f90 EXTRACT:
+    # sqrt(2)*dk*sqrt(k)*e^{i(-kr+pi/4)}/sqrt(r)); the fieldsco-style Hankel
+    # above carries 1/sqrt(2*pi*r) and the Scooter -1 prefactor instead. The
+    # difference is exactly -2*sqrt(pi): measured against 'R' on an isovelocity
+    # guide the signed ratio is -3.5449 with std 0.0000 over every significant
+    # sample, and the arrival times already coincide bin-for-bin.
+    p_t = p_t * (-np.sqrt(4.0 * np.pi))
+
+    # The snapshot is a real transient field; the Hankel transform carries the
+    # analytic-signal convention, so the physical pressure is its real part.
+    dt = float(tout[1] - tout[0]) if tout.size > 1 else float('nan')
+
+    return Field(
+        data=np.real(p_t),
+        coords={'depth': grn_data["rd"], 'range': ranges, 'time': tout},
+        model='', backend='',
+        source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
+        frequencies=float(frequency),
+        phase_reference='time_domain_native',
+        metadata={
+            "transform_method": "hankel_per_snapshot_time",
+            "dt": dt,
+            "fs": (1.0 / dt) if dt == dt and dt else float('nan'),
+            "nt": int(tout.size),
+            "t_start": float(tout[0]) if tout.size else 0.0,
+            "source_type": source_type,
+            "spectrum": spectrum,
+        },
+    )
+
+
 def grn_to_transfer_function(
     grn_data: Dict[str, Any],
     ranges: np.ndarray,

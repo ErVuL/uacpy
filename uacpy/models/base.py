@@ -101,6 +101,47 @@ if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COL
 # 'scaled' -> AT 'S', point source with cylindrical spreading removed
 VALID_SOURCE_TYPES: frozenset = frozenset({'point', 'line', 'scaled'})
 
+# Fewest frequencies an auto-derived TIME_SERIES grid may carry. Δf is
+# 1/waveform-duration, so a short pulse over a narrow band can derive 2-3 bins
+# — below what the band-edge taper in ``_ifft_to_trace`` can act on, and too
+# few to represent an arrival. Costs one model run per extra bin.
+_MIN_TIMESERIES_FREQS = 8
+
+
+def _max_roughness(boundaries) -> float:
+    """Largest interfacial sigma over a list of ``BoundaryProperties``."""
+    return max(
+        (float(getattr(b, 'roughness', 0.0) or 0.0)
+         for b in boundaries if b is not None),
+        default=0.0,
+    )
+
+
+def _smooth_surface(surface):
+    """``surface`` with every node's roughness zeroed.
+
+    The nodes are rebuilt rather than assigned through: ``Surface`` serves
+    ``roughness`` by ``__getattr__`` delegation to ``properties[0]``, and a
+    plain attribute write would create an instance attribute that shadows the
+    delegation while ``properties`` — what ``at()``, ``collapse()`` and the
+    repr read — keeps the old value.
+    """
+    smoothed = _copy.deepcopy(surface)
+    for node in smoothed.properties:
+        # Assigned rather than rebuilt: ``dataclasses.replace`` re-runs
+        # ``__post_init__``, which rejects explicit acoustic parameters on a
+        # vacuum / rigid boundary even when they are the values it filled in.
+        object.__setattr__(node, 'roughness', 0.0)
+    return smoothed
+
+
+def _smooth_bottom(bottom):
+    """``bottom`` with every column's half-space roughness zeroed."""
+    smoothed = _copy.deepcopy(bottom)
+    for column in smoothed.columns:
+        object.__setattr__(column.halfspace, 'roughness', 0.0)
+    return smoothed
+
 
 # Capability-flag names a model may advertise. Each maps to a
 # ``_supports_<name>`` instance attribute; the question each answers is "does
@@ -119,6 +160,7 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     'multi_source_depth',
     'source_beam_pattern',
     'rough_surface',
+    'rough_bottom',
 })
 
 
@@ -415,6 +457,10 @@ class PropagationModel(ABC):
         # SPARC's GetPar and Bounce's elastic branch ERROUT on a
         # non-zero SSP%sigma; Kraken/Scooter consume it.
         self._supports_rough_surface: bool = False
+        # Seabed sigma(NMedia+1). Kraken/Scooter apply the Kirchhoff
+        # attenuation; Bellhop's solver ignores the value and RAM's PE
+        # format has nowhere to put it.
+        self._supports_rough_bottom: bool = False
         self._supported_source_types: frozenset = frozenset({'point'})
 
         # When the subclass declares a ModelSpec, apply it now (after the
@@ -877,12 +923,22 @@ class PropagationModel(ABC):
         if f_max <= f_min:
             f_max = f_min + df
         n_freqs = int(round((f_max - f_min) / df)) + 1
-        derived = np.linspace(f_min, f_max, n_freqs)
+        # A short pulse gives a coarse Δf = 1/duration, so a narrow band can
+        # derive only 2-3 bins — too few for the band-edge taper to leave an
+        # interior, and too few to represent an arrival at all. Subdivide Δf
+        # (equivalent to zero-padding the pulse) rather than hand back a grid
+        # the synthesis cannot use.
+        refined = max(n_freqs, _MIN_TIMESERIES_FREQS)
+        derived = np.linspace(f_min, f_max, refined)
+        note = ""
+        if refined != n_freqs:
+            note = (f" Δf refined to {(f_max - f_min) / (refined - 1):.4g} Hz "
+                    f"so the {n_freqs}-bin band resolves an arrival.")
         warnings.warn(
             f"{self.model_name}.run(run_mode=TIME_SERIES): no "
-            f"`frequencies=` passed; auto-derived {n_freqs} freqs from "
+            f"`frequencies=` passed; auto-derived {refined} freqs from "
             f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
-            f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB). Pass "
+            f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB).{note} Pass "
             f"`frequencies=` to silence.",
             UserWarning, stacklevel=3,
         )
@@ -918,14 +974,19 @@ class PropagationModel(ABC):
         a separate ``mkdir`` step.
         """
         if self.work_dir is not None:
-            Path(self.work_dir).mkdir(parents=True, exist_ok=True)
+            # base_dir is the *parent*: FileManager validates that it exists,
+            # while ``adopt_work_dir`` keys ownership on whether work_dir
+            # itself already existed, so it has to do that mkdir itself.
+            parent = Path(self.work_dir).parent
+            parent.mkdir(parents=True, exist_ok=True)
             fm = FileManager(
                 use_tmpfs=False,
-                base_dir=self.work_dir,
+                base_dir=parent,
                 prefix=f'{self.model_name.lower()}_',
                 cleanup=getattr(self, 'cleanup', False),
             )
-            fm.work_dir = Path(self.work_dir)
+            # Adopted, not owned: cleanup may remove only what this run adds.
+            fm.adopt_work_dir(self.work_dir)
         else:
             fm = FileManager(
                 use_tmpfs=self.use_tmpfs,
@@ -1780,15 +1841,27 @@ class PropagationModel(ABC):
                 UserWarning, stacklevel=3,
             )
 
-        surf_sigma = float(getattr(e.surface, 'roughness', 0.0) or 0.0)
+        surf_sigma = _max_roughness(
+            getattr(e.surface, 'properties', None) or [e.surface])
         if surf_sigma and not self._supports_rough_surface:
-            e.surface = _copy.deepcopy(e.surface)
-            e.surface.roughness = 0.0
+            e.surface = _smooth_surface(e.surface)
             warnings.warn(
                 f"{self.model_name} cannot model a rough sea surface "
                 f"(its solver rejects a non-zero interfacial sigma); "
                 f"env.surface.roughness={surf_sigma:g} m dropped. Use Kraken "
                 f"or Scooter to keep it.",
+                UserWarning, stacklevel=3,
+            )
+
+        bot_sigma = _max_roughness(
+            [c.halfspace for c in e.bottom.columns]) if e.bottom else 0.0
+        if bot_sigma and not self._supports_rough_bottom:
+            e.bottom = _smooth_bottom(e.bottom)
+            warnings.warn(
+                f"{self.model_name} does not model seabed interfacial "
+                f"roughness; env.bottom roughness={bot_sigma:g} m dropped "
+                f"(its solver either ignores the value or has no place to put "
+                f"it). Use Kraken or Scooter to keep it.",
                 UserWarning, stacklevel=3,
             )
 
@@ -1924,6 +1997,47 @@ class PropagationModel(ABC):
             f"{exc.args[0]}{block}" if exc.args else f"{exc}{block}")
         exc.args = (head,) + exc.args[1:]
 
+    # ERROUT messages that describe a physical outcome uacpy models
+    # explicitly, not a run failure. Below the modal cutoff KRAKEN calls
+    # ERROUT, but "no trapped modes at this frequency" is a real answer and is
+    # surfaced downstream as a NaN field plus a warning.
+    _BENIGN_FORTRAN_FATALS: tuple = (
+        'No modes for given phase speed interval',
+    )
+
+    def _raise_on_fortran_fatal(self, result, work_dir, base_name):
+        """Raise when a binary reported a fatal error but exited 0.
+
+        Acoustics-Toolbox errors funnel through ``ERROUT``
+        (``misc/FatalError.f90:18,30``), which writes ``*** FATAL ERROR ***``
+        to the ``.prt`` and then ends in ``STOP '<string>'`` — a *character*
+        stop code, which gfortran exits **0** for. A return-code test therefore
+        never fires, and the binary leaves its output file untouched: with a
+        pinned ``work_dir`` the previous run's ``.mod`` / ``.shd`` is still on
+        disk and would be read as this run's answer.
+
+        stderr is the authoritative signal because it belongs to this process;
+        the ``.prt`` is checked too since it names the actual cause.
+        """
+        stderr = result.stderr or ''
+        prt = read_prt(Path(work_dir) / f"{base_name}.prt")
+        # AT ends at ``STOP 'Fatal Error: …'`` and mirrors ``*** FATAL ERROR ***``
+        # into the .prt; OASES writes no .prt at all and stops with its own
+        # banner, e.g. ``STOP *** CONTOURS REQUIRE NRFR>1 ***``. Both exit 0.
+        fatal_stderr = ('Fatal Error' in stderr
+                        or ('STOP' in stderr and '***' in stderr))
+        if not fatal_stderr and (
+                prt is None or '*** FATAL ERROR ***' not in prt):
+            return
+        if prt and any(m in prt for m in self._BENIGN_FORTRAN_FATALS):
+            return
+        exc = ModelExecutionError(
+            self.model_name, return_code=0, stdout=result.stdout,
+            stderr=stderr or "binary reported a fatal error and exited 0",
+        )
+        self._attach_prt_tail(exc, work_dir, base_name)
+        raise exc
+
     def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
                             timeout: Optional[float] = None,
                             env: Optional[dict] = None):
@@ -1931,11 +2045,15 @@ class PropagationModel(ABC):
         ``<base>.prt`` tail to a :class:`ModelExecutionError` on failure and
         logging stdout when verbose. Returns the ``CompletedProcess``. Shared
         by every model's binary-launch wrapper."""
+        # A leftover .prt from an earlier run in a pinned work_dir would be
+        # read as this run's log, so clear it before launching.
+        Path(work_dir).joinpath(f"{base_name}.prt").unlink(missing_ok=True)
         try:
             result = self._run_subprocess(cmd, cwd=work_dir, timeout=timeout, env=env)
         except ModelExecutionError as exc:
             self._attach_prt_tail(exc, work_dir, base_name)
             raise
+        self._raise_on_fortran_fatal(result, work_dir, base_name)
         if result.stdout:
             self._log(f"{self.model_name} output:\n{result.stdout}", level='debug')
         return result

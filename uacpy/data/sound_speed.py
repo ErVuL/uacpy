@@ -542,3 +542,69 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
             j += 1
         j += 1
     return values, depths
+
+
+# Canonical deep-ocean sound-speed gradient (s^-1). Below the thermocline the
+# profile is dominated by the pressure term and is very nearly linear; this is
+# the fallback when a profile's own deepest segment is too noisy to trust.
+ADIABATIC_GRADIENT = 0.0165
+# Physically plausible band for a measured deep gradient. Outside this the
+# last segment is noise (or an inversion) rather than the adiabatic trend.
+_ADIABATIC_BAND = (0.005, 0.030)
+# Below this, holding the last value is close enough to be not worth a warning.
+_EXTRAPOLATION_WARN_M = 50.0
+
+
+def extend_ssp_below_data(ssp, depth_max: float):
+    """Extend ``ssp`` down to ``depth_max`` along its own deep gradient.
+
+    Bathymetry (GEBCO, 15 arc-sec) and analysed T/S (WOA23, 1 deg) come from
+    independent products, so the seafloor routinely sits below the deepest
+    analysed level — by more than 200 m at ~15% of ocean points, and by 3.3 km
+    in a trench. The carrier's generic ``extend_to`` holds the last value,
+    which drops the entire pressure term: at (29.78, 142.77) WOA ends at
+    5500 m / 1551.05 m/s while UNESCO at the 8801 m seafloor gives 1611.93,
+    so a held profile is 61 m/s (3.9%) slow over the bottom 3.3 km — enough to
+    move ray turning depths and convergence-zone structure.
+
+    The gradient is taken from each column's own deepest segment, which tracks
+    the local water mass (measured 0.0185 s^-1 against a UNESCO-derived 0.01844
+    at that trench point) and falls back to :data:`ADIABATIC_GRADIENT` when
+    that segment is absent or outside :data:`_ADIABATIC_BAND`.
+    """
+    depths = np.asarray(ssp.depths, dtype=float)
+    last = float(depths[-1])
+    if depth_max <= last or np.isclose(depth_max, last, rtol=1e-9, atol=1e-9):
+        return ssp.extend_to(depth_max)      # trimming is the carrier's job
+
+    data = np.asarray(ssp.data, dtype=float)
+    span = depth_max - last
+    lo, hi = _ADIABATIC_BAND
+    new_row = np.empty(data.shape[1], dtype=float)
+    for j in range(data.shape[1]):
+        gradient = ADIABATIC_GRADIENT
+        if depths.size >= 2:
+            dz = last - float(depths[-2])
+            if dz > 0:
+                measured = (data[-1, j] - data[-2, j]) / dz
+                if lo <= measured <= hi:
+                    gradient = measured
+        new_row[j] = data[-1, j] + gradient * span
+
+    if span > _EXTRAPOLATION_WARN_M:
+        warnings.warn(
+            f"sound-speed profile ends at {last:.0f} m but the seafloor is at "
+            f"{depth_max:.0f} m; extrapolated the last {span:.0f} m along the "
+            f"profile's deep gradient to {new_row[0]:.1f} m/s. Analysed T/S "
+            f"products are shallower than bathymetry over much of the deep "
+            f"ocean — supply a measured profile if the deep column matters.",
+            UserWarning, stacklevel=3,
+        )
+
+    return type(ssp)(
+        depths=np.append(depths, depth_max),
+        data=np.vstack([data, new_row[None, :]]),
+        ranges=(ssp.ranges.copy() if ssp.ranges is not None else None),
+        shape=ssp.shape,
+        data_sources=ssp.data_sources,
+    )
