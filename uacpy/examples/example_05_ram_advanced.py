@@ -230,7 +230,7 @@ def main():
         fig5, _ = compare_models(
             {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_krakenfield},
             env=env, vmin=40, vmax=100,
-            suptitle='Three-Model Comparison — Sediment Transition + Sloping Shelf',
+            title='Three-Model Comparison — Sediment Transition + Sloping Shelf',
         )
         fig5.savefig(OUTPUT_DIR / 'example_05_comparison.png', dpi=150)
         plt.close(fig5)
@@ -238,11 +238,11 @@ def main():
 
         fig6, axes6 = plt.subplots(1, 3, figsize=(20, 5))
         _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
-                           label='RAM − Bellhop', show_colorbar=True)
+                           title='RAM − Bellhop', show_colorbar=True)
         _plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
-                           label='RAM − Kraken', show_colorbar=True)
+                           title='RAM − Kraken', show_colorbar=True)
         _plot_tl_difference(result_bellhop, result_krakenfield, env,
-                           ax=axes6[2], label='Bellhop − Kraken',
+                           ax=axes6[2], title='Bellhop − Kraken',
                            show_colorbar=True)
         fig6.suptitle('Pairwise Differences (signed, dB)',
                       fontsize=13, fontweight='bold')

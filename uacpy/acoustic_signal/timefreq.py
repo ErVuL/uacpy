@@ -24,6 +24,11 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 
+# Torrence & Compo (1998) Table 2 reconstruction constants, for the default
+# wavelet orders (Morlet w0=6, Paul m=4, DOG m=2).
+_C_DELTA = {"morlet": 0.776, "paul": 1.132, "dog": 3.541}
+_PSI0_ZERO = {"morlet": np.pi ** -0.25, "paul": 1.079, "dog": 0.867}
+
 WignerVilleResult = namedtuple("WignerVilleResult",
                                "times frequencies distribution")
 CWTResult = namedtuple("CWTResult", "frequencies coefficients")
@@ -41,6 +46,7 @@ def analytic_signal(data):
     xr = xa.astype(float)
     if xr.ndim != 1:
         raise ConfigurationError("analytic_signal: data must be 1-D")
+    require_finite_signal(xr, "analytic_signal")
     return hilbert(xr)
 
 
@@ -127,6 +133,7 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     xc = np.asarray(data)
     if xc.ndim != 1:
         raise ConfigurationError("wigner_ville: data must be 1-D")
+    require_finite_signal(xc, "wigner_ville")
     if np.iscomplexobj(xc):
         z = xc
     elif analytic:
@@ -268,12 +275,15 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
 
 def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
                 order=None):
-    """Approximate inverse CWT (Torrence & Compo 1998 reconstruction).
+    """Inverse CWT (Torrence & Compo 1998, eq. 11).
 
-    Recovers the signal by summing ``Re(W)`` over scale. The waveform *shape* is
-    recovered faithfully; absolute amplitude is approximate (it carries the
-    wavelet's reconstruction constant). Pass the same ``frequencies`` /
-    ``wavelet`` / ``w0`` / ``order`` used in :func:`cwt`.
+    ``x_n = dj/(C_delta*psi0(0)) * sum_j Re(W_n(s_j))/sqrt(s_j)`` with ``dj``
+    the log2 scale spacing. ``C_delta`` and ``psi0(0)`` are the Table-2
+    reconstruction constants for the default orders (Morlet ``w0=6``, Paul
+    ``m=4``, DOG ``m=2``). Pass the same ``frequencies`` / ``wavelet`` /
+    ``w0`` / ``order`` used in :func:`cwt`; amplitude is recovered to the
+    accuracy of the scale coverage (a band-limited scale set reconstructs only
+    the band it spans).
 
     Parameters
     ----------
@@ -299,9 +309,11 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     fs = float(sample_rate)
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
     scales = factor * fs / frequencies
-    dln = float(np.mean(np.abs(np.diff(np.log(scales))))) if scales.size > 1 else 1.0
-    c_delta = {"morlet": 0.776, "paul": 1.132, "dog": 3.541}.get(wavelet, 1.0)
-    return np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0) * dln / c_delta
+    dj = float(np.mean(np.abs(np.diff(np.log2(scales))))) if scales.size > 1 else 1.0
+    c_delta = _C_DELTA.get(wavelet, 1.0)
+    psi0_zero = _PSI0_ZERO.get(wavelet, 1.0)
+    return (np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0)
+            * dj / (c_delta * psi0_zero))
 
 
 def _apply_lifter(c, lifter):

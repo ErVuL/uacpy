@@ -96,9 +96,10 @@ class Environment:
           ``SoundSpeedProfile`` built via :meth:`SoundSpeedProfile.from_pairs`.
         * ``SoundSpeedProfile`` instance — used as-is (1-D or 2-D).
         * ``None`` (default) — isovelocity at 1500 m/s.
-    altimetry : array-like, optional
+    altimetry : Altimetry or array-like, optional
         Surface altimetry as ``[(range, height_m), …]`` (height
-        positive up). Default ``None`` (flat surface).
+        positive up), or an :class:`Altimetry`. Default ``None`` (flat
+        surface).
     bottom : Bottom, SeabedColumn, BoundaryProperties, float, or str, optional
         Seabed. Coerced to a :class:`Bottom`: a scalar is a half-space sound
         speed (``bottom=1800``), a string is a material preset
@@ -107,8 +108,12 @@ class Environment:
         (``sound_speed=1600`` m/s, ``density=1.5`` g/cm³,
         ``attenuation=0.5`` dB/wavelength). For a perfectly reflecting bottom,
         pass ``BoundaryProperties(acoustic_type='rigid')``.
-    surface : BoundaryProperties, optional
-        Surface boundary properties. Default vacuum (pressure release).
+    surface : Surface, BoundaryProperties, or list, optional
+        Top boundary. Coerced to a :class:`Surface`: a single
+        ``BoundaryProperties`` is a uniform surface, a
+        ``[(range_m, BoundaryProperties), …]`` list is a range-dependent one
+        (e.g. a marginal ice zone), and a ``Surface`` is used directly.
+        Default vacuum (pressure release).
     absorption : Absorption, optional
         Water-column volume-absorption model — one of
         :class:`uacpy.core.absorption.Thorp`,
@@ -119,6 +124,17 @@ class Environment:
         ``TopOpt`` position 4 and write the supporting per-formula lines.
     name : str, keyword-only
         Environment identifier. Default ``'unnamed'``.
+    location : (float, float), keyword-only
+        Representative site as ``(lat, lon)`` in WGS84 decimal degrees.
+        Default ``None``; falls back to the ``transect`` midpoint when only a
+        transect is given. Stamped by ``uacpy.data.fetch_environment``.
+    transect : ((float, float), (float, float)), keyword-only
+        Great-circle path as ``((lat, lon) start, (lat, lon) end)`` in WGS84
+        decimal degrees, for a range-dependent environment fetched along a
+        track. Default ``None``.
+    date : str or datetime.date, keyword-only
+        The time this environment represents — an ISO ``'YYYY-MM-DD'`` string
+        or a :class:`datetime.date`. Default ``None``.
 
     Examples
     --------
@@ -157,11 +173,16 @@ class Environment:
             np.ndarray,
             SoundSpeedProfile,
         ]] = None,
-        altimetry: Optional[Union[List[Tuple[float, float]], np.ndarray]] = None,
+        altimetry: Optional[Union[
+            Altimetry, List[Tuple[float, float]], np.ndarray,
+        ]] = None,
         bottom: Optional[Union[
             Bottom, SeabedColumn, BoundaryProperties, float, str,
         ]] = None,
-        surface: Optional[BoundaryProperties] = None,
+        surface: Optional[Union[
+            Surface, BoundaryProperties,
+            List[Tuple[float, BoundaryProperties]],
+        ]] = None,
         absorption: Optional['Absorption'] = None,
         *,
         name: str = 'unnamed',
@@ -304,11 +325,12 @@ class Environment:
     def max_range(self) -> float:
         """Range extent in metres across the environment's range-dependent axes.
 
-        The largest range coordinate carried by the bathymetry, SSP or bottom;
-        ``0.0`` for a range-independent environment. Derived (read-only),
-        symmetric with :attr:`depth`. For an environment fetched along a
-        transect this equals the transect's great-circle length, so it sizes a
-        receiver range grid without recomputing the geodesic.
+        The largest range coordinate carried by the bathymetry, SSP, bottom,
+        surface or altimetry; ``0.0`` for a range-independent environment.
+        Derived (read-only), symmetric with :attr:`depth`. For an environment
+        fetched along a transect this equals the transect's great-circle
+        length, so it sizes a receiver range grid without recomputing the
+        geodesic.
         """
         extent = self.bathymetry.range_max
         if self.ssp.is_range_dependent:
@@ -317,6 +339,8 @@ class Environment:
             extent = max(extent, float(self.bottom.ranges[-1]))
         if self.surface.is_range_dependent:
             extent = max(extent, self.surface.range_max)
+        if self.altimetry is not None:
+            extent = max(extent, self.altimetry.range_max)
         return extent
 
     def get_sound_speed(
@@ -378,7 +402,7 @@ class Environment:
     @property
     def has_elastic_surface(self) -> bool:
         """``True`` iff the surface carries non-zero shear at any range."""
-        return self.surface is not None and self.surface.is_elastic
+        return self.surface.is_elastic
 
     @property
     def is_range_dependent(self) -> bool:

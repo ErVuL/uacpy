@@ -33,10 +33,12 @@ from typing import Callable, Optional, Sequence, Union
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.environment import BoundaryProperties, Environment
+from uacpy.core.environment import (
+    Bathymetry, BoundaryProperties, Environment, SoundSpeedProfile,
+)
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
-    Coordinate, as_coordinate, DEFAULT_MAX_TRANSECT_POINTS,
+    Coordinate, as_coordinate, great_circle_km, DEFAULT_MAX_TRANSECT_POINTS,
 )
 from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
@@ -489,20 +491,39 @@ def fetch_environment(
                     UserWarning, stacklevel=2)
             ssp_src = None                          # fall back to the literal ssp
 
+    # Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
+    # products, so their deepest points rarely coincide. Reconcile the SSP to
+    # span exactly the fetched water column with the carrier's own method
+    # (extend short profiles to the seafloor; trim points below it). We do NOT
+    # resample onto a uniform grid — the native levels carry the real sampling,
+    # and each model owns SSP interpolation via its ``interp_ssp`` scheme.
+    # This precedes the bottom: grain-size geoacoustics are a velocity ratio
+    # against the water *at the interface*, so the reference sound speed has to
+    # come from the reconciled profile, not from the deepest analysed level.
+    seafloor = Bathymetry.coerce(bathymetry)
+    depth_max = float(np.max(seafloor.depths))
+    if ssp_fetched:
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        ssp = extend_ssp_below_data(ssp, depth_max)
+    # A literal ssp= passes straight to Environment, which coerces a scalar /
+    # pairs / SoundSpeedProfile and reconciles its depth to the bathymetry.
+
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
     bottom_props, bottom_kw = None, None
     if want_bottom:
         order, bottom_cache_only = _bottom_order(
             bottom_sources if bottom_sources is not None else 'auto')
-        # Scale grain-size geoacoustics to the in-situ near-seabed water sound
-        # speed (the conversion is a velocity ratio; the Hamilton 1510 m/s
+        # Scale grain-size geoacoustics to the in-situ sound speed at the
+        # seafloor (the conversion is a velocity ratio; the Hamilton 1510 m/s
         # reference can be ~100 m/s off on a warm shelf / cold deep site).
-        water_c = _near_seabed_sound_speed(ssp)
+        water_c = _seabed_sound_speed(ssp, seafloor)
         try:
             if rd_bottom:
                 bottom_props, bottom_kw = _fetch_bottom(
                     order, point, transect_to, transect=True,
-                    cache_only=bottom_cache_only, water_sound_speed=water_c,
+                    cache_only=bottom_cache_only,
+                    water_sound_speed=_seabed_sound_speed_along(
+                        ssp, seafloor, (lat, lon)),
                     max_distance_km=max_distance_km,
                     n_points=bottom_n_points, max_points=max_points,
                     timeout=timeout, verbose=verbose,
@@ -526,7 +547,7 @@ def fetch_environment(
                 bottom, water_sound_speed=water_c)
     elif bottom is not None:
         bottom_props = _resolve_bottom(
-            bottom, water_sound_speed=_near_seabed_sound_speed(ssp))
+            bottom, water_sound_speed=_seabed_sound_speed(ssp, seafloor))
 
     # ── Surface (top boundary, optional): fetch sea ice, else literal ──
     # The only fetchable surface is NSIDC sea ice; a point classified as open
@@ -602,20 +623,6 @@ def fetch_environment(
             if altimetry is None:
                 raise
             altimetry_result, altimetry_src = altimetry, None   # literal fallback
-
-    # Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
-    # products, so their deepest points rarely coincide. Reconcile the SSP to
-    # span exactly the fetched water column with the carrier's own method
-    # (extend short profiles to the seafloor; trim points below it). We do NOT
-    # resample onto a uniform grid — the native levels carry the real sampling,
-    # and each model owns SSP interpolation via its ``interp_ssp`` scheme.
-    depth_max = (float(bathymetry) if np.ndim(bathymetry) == 0
-                 else float(np.max(np.asarray(bathymetry)[:, 1])))
-    if ssp_fetched:
-        from uacpy.data.sound_speed import extend_ssp_below_data
-        ssp = extend_ssp_below_data(ssp, depth_max)
-    # A literal ssp= passes straight to Environment, which coerces a scalar /
-    # pairs / SoundSpeedProfile and reconciles its depth to the bathymetry.
 
     kwargs = dict(
         name=name or f"{lat:.3f}, {lon:.3f}",
@@ -963,30 +970,38 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
     raise (data_errs[0] if data_errs else errors[-1])
 
 
-def _near_seabed_sound_speed(ssp):
-    """Deepest in-water sound speed (m/s) from a resolved SSP, or ``None``.
+def _seabed_sound_speed(ssp, seafloor, range_m=0.0):
+    """In-water sound speed (m/s) at the seafloor under ``range_m``, or ``None``.
 
-    Used to scale grain-size geoacoustics to the in-situ near-seabed water
-    instead of the Hamilton 1510 m/s reference. ``ssp`` may be a
-    :class:`SoundSpeedProfile`, a scalar, an array of ``(depth, speed)`` pairs,
-    or ``None``. Returns ``None`` when no usable value can be derived.
+    Scales grain-size geoacoustics to the in-situ water *at the interface*
+    rather than the Hamilton 1510 m/s reference. ``ssp`` takes any form
+    :class:`Environment` accepts (profile, scalar, ``(depth, c)`` pairs);
+    ``seafloor`` is a :class:`Bathymetry`. A profile shallower than the seafloor
+    holds its deepest value (the carrier's constant extrapolation).
     """
     if ssp is None:
         return None
-    if isinstance(ssp, (int, float)):
-        return float(ssp)
-    data = getattr(ssp, 'data', None)
-    if data is not None and getattr(data, 'size', 0) > 0:
-        # SoundSpeedProfile.depths is strictly increasing → deepest row;
-        # take the r = 0 column for range-dependent profiles.
-        return float(np.asarray(data, dtype=float)[-1, 0])
-    try:
-        arr = np.asarray(ssp, dtype=float)
-        if arr.ndim == 2 and arr.shape[1] >= 2:
-            return float(arr[np.argmax(arr[:, 0]), 1])
-    except (ValueError, TypeError):
-        pass
-    return None
+    depth = float(seafloor.eval(range=float(range_m)))
+    profile = SoundSpeedProfile.coerce(ssp, depth_max=depth)
+    return float(profile.eval(depth=depth, range=float(range_m)).value)
+
+
+def _seabed_sound_speed_along(ssp, seafloor, start):
+    """``(lat, lon) -> seabed sound speed`` for the transect bottom fetchers.
+
+    They sample at their own waypoints, so each seabed column is scaled to the
+    water speed at *its* seafloor depth instead of one value from the start
+    point. ``None`` when there is no usable SSP.
+    """
+    if ssp is None:
+        return None
+    lat0, lon0 = start
+
+    def at(lat, lon):
+        return _seabed_sound_speed(
+            ssp, seafloor,
+            range_m=great_circle_km(lat0, lon0, lat, lon) * 1000.0)
+    return at
 
 
 def _resolve_bottom(bottom, *, water_sound_speed=None):

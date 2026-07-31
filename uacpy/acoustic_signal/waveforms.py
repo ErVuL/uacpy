@@ -342,10 +342,8 @@ def tone_burst(
 
     # ``T`` is the requested burst duration in seconds; the sample count
     # ``N`` is the *nearest* integer that keeps ``n_cycles`` faithful at
-    # the given ``sample_rate``. We then build ``time`` with
-    # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly
-    # (the previous ``np.linspace(0, T, N)`` was endpoint-inclusive and
-    # produced ``dt == T / (N - 1) != 1 / sample_rate``).
+    # the given ``sample_rate``. ``time`` is built as
+    # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly.
     if frequency <= 0:
         raise ConfigurationError(
             f"tone_burst: frequency must be > 0; got {frequency}.")

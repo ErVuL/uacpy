@@ -123,7 +123,6 @@ def demo_bellhop_bounce():
     axes[1].set_title('BOUNCE (with shear)', fontsize=11, fontweight='bold')
     axes[1].set_ylabel('')
     _plot_tl_difference(result_bounce, result_hs, env, ax=axes[2],
-                       label='BOUNCE − half-space',
                        diff_vmax=10, show_colorbar=False)
     axes[2].set_title('BOUNCE − half-space', fontsize=11, fontweight='bold')
     axes[2].set_ylabel('')

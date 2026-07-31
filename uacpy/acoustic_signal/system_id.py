@@ -60,6 +60,7 @@ class FRF:
         self.Vinfo = np.array([[0]])
         self.m = m
         self.g = 0  # Impulse response
+        self.selected_order = None  # FIR order chosen by ls_fir order selection
 
     def compute(
         self,
@@ -90,7 +91,8 @@ class FRF:
         m : int or str, optional
             Impulse response length (for TF methods), or an automatic
             order-selection criterion for ``'ls_fir'``: ``'AIC'``,
-            ``'BIC'``, ``'FPE'``, or ``'CP'``.
+            ``'BIC'``, ``'FPE'``, or ``'CP'``. The order the criterion picks is
+            published on ``self.selected_order``.
         method : str, optional
             Method to use ('welch', 'ls_fir', 'etfe', 'p_etfe').
         estimator : str, optional
@@ -182,7 +184,7 @@ class FRF:
             )
         if self.method == "ls_fir":
             self.g = g_i  # For 2D inputs, uses last channel's impulse response
-            self.m = (
+            self.selected_order = (
                 int(np.mean(m_list))
                 if all(mi is not None for mi in m_list) else None
             )
@@ -275,9 +277,8 @@ class FRF:
         x_avg = np.mean(x_reshaped, axis=0)
         y_avg = np.mean(y_reshaped, axis=0)
         X = np.fft.rfft(x_avg) + np.finfo(float).eps
-        Y = np.fft.rfft(y_avg) + np.finfo(float).eps
+        Y = np.fft.rfft(y_avg)
         freqs = np.fft.rfftfreq(period, d=1 / sample_rate)
-        tf = np.zeros_like(X, dtype=complex)
         tf = Y / X
 
         return freqs, tf
@@ -316,7 +317,6 @@ class FRF:
         # Determine frequency grid based on n_freqs
         n_fft = min_len
         freqs = np.fft.rfftfreq(n_fft, d=1 / sample_rate)
-        tf = np.zeros_like(X, dtype=complex)
         tf = Y / X
 
         return freqs, tf

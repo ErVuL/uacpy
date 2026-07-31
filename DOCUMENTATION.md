@@ -529,9 +529,16 @@ date-specific Copernicus biogeochemistry `ph` field, else the cached GLODAP
 climatology when installed (`install.sh --data glodap`), else the open-ocean
 default (8.1).
 
-Default is `None` (no explicit volume absorption). The bare formulas
-`thorp_db_per_km(f)` and `francois_garrison_db_per_km(f, ...)` are available
-for plotting attenuation curves directly.
+Default is `None` (no explicit volume absorption). The bare formulas are
+available for plotting attenuation curves directly, from
+`uacpy.core.absorption` (they are not re-exported on the top-level `uacpy`
+namespace):
+
+```python
+from uacpy.core.absorption import (
+    thorp_db_per_km, francois_garrison_db_per_km, convert_attenuation_units,
+)
+```
 
 ### Real-world environments
 
@@ -657,7 +664,7 @@ Verified against each model's `_supported_modes` / `_supports_*` flags.
 | **Kraken** | MODES, COHERENT_TL, BROADBAND, TIME_SERIES | bathy + SSP (modes) | yes (`krakenc`) | no | yes |
 | **Scooter** | COHERENT_TL, BROADBAND, TIME_SERIES | no (collapsed) | yes | no | yes |
 | **RAM** | COHERENT_TL, BROADBAND, TIME_SERIES | bathy + SSP + bottom + layers | yes (`rams`) | yes (`ramsurf`) | yes |
-| **SPARC** | COHERENT_TL, TIME_SERIES | no (collapsed) | no | no | (native pulse) |
+| **SPARC** | TIME_SERIES | no (collapsed) | no | no | (native pulse) |
 | **OAST** | COHERENT_TL | no (collapsed) | yes | no | no |
 | **OASN** | COVARIANCE, REPLICA | no | yes | no | (multi-freq sweep) |
 | **OASR** | REFLECTION | no | yes | no | (multi-freq sweep) |
@@ -938,6 +945,19 @@ fields: `result.model`, `result.backend`, `result.source_depths`,
 `result.frequencies` (1-D, length-1 for narrowband; `result.f0` is the scalar
 shortcut), `result.phase_reference`, and a free-form `result.metadata` dict.
 
+A result carries its own identity and provenance — never the carriers it was run
+against. The `Environment`, `Source` and `Receiver` stay yours to keep, and the
+plotters take them explicitly:
+
+```python
+tl = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+tl.plot(env=env, source=src, receiver=rcv, title="Transmission Loss")
+```
+
+Pass `env=` whenever you want the depth axis to span the full water column with
+the seabed drawn: on its own, `tl.plot()` can only span the receiver grid it was
+sampled on, which stops short of the seafloor whenever your receivers do.
+
 ### Field — one container, meaning derived from (dtype, coords)
 
 `Field` is the **single** gridded result type. Its physical meaning is not a
@@ -1005,9 +1025,9 @@ construct a model with a **pinned** `work_dir`, the solver's on-disk outputs are
 kept and their paths are recorded there:
 
 ```python
-bellhop = Bellhop(work_dir='/tmp/run1')
-r = bellhop.run(env, src, rcv)
-r.metadata['shd_file']      # '/tmp/run1/.../FIELD.shd'
+ram = RAM(work_dir='/tmp/run1')
+r = ram.run(env, src, rcv)
+r.metadata['psif_file']     # '/tmp/run1/.../psif.dat'
 r.metadata['prt_file']      # diagnostic .prt log
 r.list_metadata()['c0']     # {'value_type': 'float', 'documented_type': 'float',
                             #  'description': 'Reference sound speed (m/s) ...'}
@@ -1236,7 +1256,7 @@ sample_rate`. Build a chirp, push it through a delay, and pulse-compress:
 import numpy as np
 from uacpy.acoustic_signal import lfm_chirp, matched_filter
 
-sig, t = lfm_chirp(fmin=2_000, fmax=6_000, T=0.02, sample_rate=48_000)
+sig, t = lfm_chirp(fmin=2_000, fmax=6_000, duration=0.02, sample_rate=48_000)
 rx = np.concatenate([np.zeros(500), sig, np.zeros(500)])   # echo at 500 samples
 mf = matched_filter(rx, sig)            # peak marks the arrival
 ```
@@ -1313,7 +1333,7 @@ verified bit-exact against CMRE janus-c).
 | Equalization | `DFE`, `lms_equalizer`, `rls_equalizer`, `mmse_equalizer` |
 | Doppler / sync | `estimate_doppler_scale`, `compensate_doppler`, `detect_preamble`, `detect_frames` |
 | Link harness | `simulate_link`, `ber_sweep`, `LinkResult` |
-| Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory`, `eye_diagram` |
+| Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory` |
 | Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `interleave`, `spread`, `despread` |
 | OFDM | `ofdm_modulate`, `ofdm_demodulate`, `schmidl_cox_sync`, `OFDMTransmitter`, `OFDMReceiver` |
 | JANUS | `janus_encode`, `janus_decode`, `janus_modulate`, `janus_detect`, `JanusPacket` |
@@ -1339,8 +1359,11 @@ auditory weighting (Southall 2019). Spectra are in dB re 1 µPa²/Hz.
 | Area | Public names |
 |------|--------------|
 | Wenz spectrum | `WenzNoise`, `compute_windnoise` |
-| Ship radiated noise (ISO 17208) | `radiated_noise_level`, `monopole_source_level`, `nominal_source_depth`, `lloyd_mirror_correction`, `plot_source_level` |
-| Mammal weighting (Southall 2019) | `auditory_weighting`, `apply_weighting`, `weighted_level`, `plot_weighting`, `HEARING_GROUPS`, `WEIGHTING_PARAMS` |
+| Ship radiated noise (ISO 17208) | `radiated_noise_level`, `monopole_source_level`, `nominal_source_depth`, `lloyd_mirror_correction` |
+| Mammal weighting (Southall 2019) | `auditory_weighting`, `apply_weighting`, `weighted_level`, `HEARING_GROUPS`, `WEIGHTING_PARAMS` |
+
+The matching plotters `plot_source_level` and `plot_weighting` live on
+`uacpy.plot` (§9), not on `uacpy.noise`.
 
 ```python
 import numpy as np
@@ -1422,10 +1445,10 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 - This is the 3-D point-source (**spherical-spreading**) convention, and it is
   **the same for every model** (Bellhop, Kraken, Scooter, RAM, SPARC) so that
   TL is directly comparable across them. Each native binary's own normalisation
-  is bridged to it at the `io` boundary: e.g. SPARC's `COHERENT_TL` `'R'` field
-  is divided by `√(4π)` to convert its native **cylindrical**-Hankel RTS output
-  into this spherical convention (SPARC `'D'`/`'S'` are experimental and keep
-  their native scale — see the SPARC parameter table in §18).
+  is bridged to it at the `io` boundary: e.g. SPARC's `'D'` and `'S'` outputs
+  are harmonised onto its `'R'`-native normalisation, which differs between
+  `sparc.f90`'s branches by `√π` and `−√(4π)` (SPARC `'D'`/`'S'` remain
+  experimental — see the SPARC parameter table in §18).
 - A 2-D (line-source) analytic solution differs by the spreading factor
   `|G₃D/G₂D| = √(k/2πr)` — relevant only when comparing against closed-form 2-D
   references (see the ideal-wedge benchmark in `tests/test_benchmarks_analytic.py`).
@@ -1500,7 +1523,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 | TL is `NaN` in places | `NaN` marks no-data cells: `r = 0` (TL undefined at zero range) and, for Bellhop, cells no ray reached (shadow zones). Reductions and `uacpy.metrics` exclude them via `np.isfinite`; plots leave them blank. |
 | OASES tests skipped / `requires_oases` | OASES is academic-licensed and not bundled; fetch it via `install.sh --oases yes`. Run only the rest with `pytest -m "not requires_oases"`. |
 | CUDA backend silently slow | driver/toolkit mismatch falls back to Fortran with a warning — check the emitted backend; pin with `Bellhop(backend="fortran")`. |
-| Wrong Python / missing deps | use the workspace venv (`../pyenv/bin/python`), not system Python; `pip install -e ".[dev]"`. |
+| Wrong Python / missing deps | activate the project venv (`source uacpy_venv/bin/activate`), not system Python; `pip install -e ".[dev]"`. |
 
 ## 17. Examples Index
 
@@ -1676,7 +1699,7 @@ with a warning.
 | `c_high` | m/s | `None` | Upper phase-speed limit; `None` = auto. |
 | `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme. |
-| `output_mode` | — | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. For `COHERENT_TL`, the default **`'R'`** is divided by `√(4π)` to convert SPARC's native cylindrical-Hankel RTS output into uacpy's shared **3-D point-source (spherical) TL** convention, agreeing with Kraken to ~1–4 dB on a Pekeris benchmark. **`'D'` and `'S'` keep SPARC's native normalisation (a `√(4π)` ≈ 11 dB higher level for `'D'`); they are experimental — use `'R'` (or Kraken/Scooter) for absolute levels.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run` for the convention. |
+| `output_mode` | — | `'R'` | Which SPARC output geometry to march: `'R'` horizontal array (one run per receiver depth), `'D'` vertical array (one run per receiver range), `'S'` snapshot. All three return a `TIME_SERIES` `Field` on a shared time grid. **`'D'` and `'S'` are experimental — prefer `'R'`.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run`. |
 | `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. The `'B'` band-pass is not modelled by the CW source-spectrum deconvolution, so it adds a few dB to the `'R'` absolute level; `'PN+N'` (no band-pass) calibrates tighter (~±1.5 dB vs Kraken). |
 | `n_t_out` | count | `512` | Number of output time samples. For `COHERENT_TL` this is **auto-raised** when needed so the output Nyquist clears the pulse band (else the requested CW frequency aliases); `TIME_SERIES` uses it verbatim, but warns (naming the required value) when the resulting Nyquist sits below the source band. |
 | `t_max` | s | `None` | Max time; `None` = auto (2.5 × travel time). |
@@ -1777,7 +1800,7 @@ with a warning.
 | `ny` | count | `1` | Replica grid points in y. |
 | `zmin` / `zmax` | m | `None` | Replica grid depth-bounds; `None` → 10 / `env.depth − 10`. |
 | `nz` | count | `20` | Replica grid points in depth. |
-| `cmin` / `cmax` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.95 × min(c_water) / 1e8. |
+| `c_low` / `c_high` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.95 × min(c_water) / 1e8. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
 | `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
 | `plot_rmin` / `plot_rmax` | m | `None` | TL plot range-axis bounds. |

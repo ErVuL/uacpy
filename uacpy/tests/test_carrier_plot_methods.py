@@ -57,8 +57,8 @@ _FREQS = np.logspace(2, 4, 20)          # 100 Hz – 10 kHz
 
 def test_thorp_plot_frequency_curve():
     fig, ax = Thorp().plot(_FREQS)
-    assert ax.get_xlabel() == 'Frequency [Hz]'
-    assert ax.get_ylabel() == 'Absorption [dB/km]'
+    assert ax.get_xlabel() == 'Frequency (Hz)'
+    assert ax.get_ylabel() == 'Absorption (dB/km)'
     line = ax.lines[0]
     assert np.allclose(line.get_xdata(), _FREQS)
     assert np.all(line.get_ydata() > 0)
@@ -72,7 +72,7 @@ def test_absorption_plot_requires_frequencies():
 def test_francois_garrison_plot_depth_dependent():
     fg = FrancoisGarrison(temperature_c=10, salinity_psu=35, pH=8.0, z_bar_m=0)
     fig, ax = fg.plot(_FREQS, depth=1000.0)
-    assert ax.get_xlabel() == 'Frequency [Hz]'
+    assert ax.get_xlabel() == 'Frequency (Hz)'
     assert np.all(ax.lines[0].get_ydata() > 0)
 
 
@@ -97,3 +97,36 @@ def test_biological_plot_inside_layer_no_warning():
         warnings.simplefilter('error', UserWarning)
         fig, ax = bio.plot(_FREQS, depth=50.0)
     assert np.all(ax.lines[0].get_ydata() > 0)
+
+
+# ── Bathymetry / Altimetry .plot() ───────────────────────────────────────────
+
+def test_bathymetry_plot_points_depth_downward():
+    env = uacpy.Environment(bathymetry=[(0.0, 100.0), (5000.0, 150.0)],
+                            ssp=1500.0)
+    fig, ax = env.bathymetry.plot()
+    assert ax.get_ylabel() == 'Depth (m)'
+    assert ax.get_xlabel() == 'Range (km)'
+    assert ax.yaxis_inverted()
+
+
+def test_altimetry_plot_keeps_height_upward():
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                            altimetry=[(0.0, 0.0), (5000.0, 1.5)])
+    fig, ax = env.altimetry.plot()
+    assert ax.get_ylabel() == 'Sea-surface height (m)'
+    assert not ax.yaxis_inverted()
+
+
+def test_range_profile_plot_accepts_title_and_ax():
+    env = uacpy.Environment(bathymetry=[(0.0, 100.0), (5000.0, 150.0)],
+                            ssp=1500.0)
+    fig, ax = plt.subplots()
+    _, out = env.bathymetry.plot(ax=ax, title='Seafloor')
+    assert out is ax and ax.get_title() == 'Seafloor'
+
+
+def test_flat_bathymetry_plots_as_a_single_level():
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+    fig, ax = env.bathymetry.plot()
+    assert ax.get_ylabel() == 'Depth (m)'

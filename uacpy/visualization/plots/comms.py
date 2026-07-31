@@ -27,7 +27,7 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
         fig = ax[0].figure
     t = np.arange(h.size) / fs * 1e3
     ax[0].stem(t, np.abs(h))
-    ax[0].set_xlabel("Delay [ms]")
+    ax[0].set_xlabel("Delay (ms)")
     ax[0].set_ylabel("|h|")
     ax[0].set_title(title or "Channel impulse response", loc="left")
     ax[0].grid(alpha=0.3)
@@ -37,8 +37,8 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     f = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
     H = 20 * np.log10(np.abs(np.fft.fftshift(np.fft.fft(h, nfft))) + 1e-12)
     ax[1].plot(f, H, **mpl_kw)
-    ax[1].set_xlabel("Frequency [Hz]")
-    ax[1].set_ylabel("|H(f)| [dB]")
+    ax[1].set_xlabel("Frequency (Hz)")
+    ax[1].set_ylabel("|H(f)| (dB)")
     ax[1].set_title("Frequency response", loc="left")
     ax[1].grid(alpha=0.3)
     return fig, ax
@@ -69,7 +69,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     fig, ax = fig_ax(ax, figsize)
     ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **mpl_kw)
     ax.set_xlabel("Symbol index")
-    ax.set_ylabel("MSE [dB]")
+    ax.set_ylabel("MSE (dB)")
     ax.set_title(title or "Equalizer convergence", loc="left")
     ax.grid(alpha=0.3)
     if label:
@@ -103,7 +103,7 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     ax.plot(np.arange(nsc),
             20 * np.log10(np.abs(np.fft.fftshift(H)) + 1e-12), **mpl_kw)
     ax.set_xlabel("Subcarrier index")
-    ax.set_ylabel("|H| [dB]")
+    ax.set_ylabel("|H| (dB)")
     ax.set_title(title or "OFDM subcarrier response", loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
@@ -187,7 +187,7 @@ def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
         fine = np.linspace(ebn0.min(), ebn0.max(), 100)
         ax.semilogy(fine, ber_theory(scheme, fine), "k--",
                     label=f"{scheme} theory")
-    ax.set_xlabel("Eb/N0 [dB]")
+    ax.set_xlabel("Eb/N0 (dB)")
     ax.set_ylabel("BER")
     ax.set_title(title or "Bit error rate", loc="left")
     ax.grid(which="both", alpha=0.3)

@@ -166,9 +166,10 @@ class TestSSPReadWriteRoundtrip:
         # File header advertises 30 profiles.
         assert r['n_prof'] == 30
         assert r['r_prof'].shape == (30,)
-        # First/last ranges in the canonical file are -50 km and 10 km.
-        assert r['r_prof'][0] == -50.0
-        assert r['r_prof'][-1] == 10.0
+        # First/last ranges on disk are -50 km and 10 km; the reader
+        # returns metres (uacpy is SI-internal, km only on disk).
+        assert r['r_prof'][0] == -50_000.0
+        assert r['r_prof'][-1] == 10_000.0
         # File has 2 depth rows.
         assert r['c_mat'].shape == (2, 30)
         # Spot-check one entry against the file.
@@ -223,7 +224,8 @@ class TestSSPReadWriteRoundtrip:
         assert r['Segx'].shape == (27,)
         assert r['Segy'].shape == (3,)
         assert r['Segz'].shape == (7,)
-        np.testing.assert_allclose(r['Segy'], [0.0, 100.0, 200.0])
+        # Segx/Segy are km on disk and returned in metres; Segz is already m.
+        np.testing.assert_allclose(r['Segy'], [0.0, 100_000.0, 200_000.0])
         np.testing.assert_allclose(
             r['Segz'], [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0]
         )

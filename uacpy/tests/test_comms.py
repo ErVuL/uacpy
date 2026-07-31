@@ -486,8 +486,8 @@ class TestJanus:
         # End-to-end convenience path at a non-48 kHz rate (resample-first).
         pkt = self._packet()
         fs = 96000.0
-        wav = comms.janus.transmit(pkt, fs)
-        out, ok = comms.janus.receive(wav, fs)
+        wav = comms.janus_transmit(pkt, fs)
+        out, ok = comms.janus_receive(wav, fs)
         assert ok and out.class_id == 16 and out.mobility == 1
 
 

@@ -65,7 +65,6 @@ from .active import (
     matched_filter,
     processing_gain,
     pulse_compression,
-    shift_to_max_correlation,
 )
 from .transforms import (
     fk_transform,
@@ -137,7 +136,7 @@ __all__ = [
     "mvdr_spectrum", "music_spectrum", "shading_taper",
     # active
     "matched_filter", "pulse_compression", "processing_gain",
-    "ambiguity_function", "AmbiguityResult", "shift_to_max_correlation",
+    "ambiguity_function", "AmbiguityResult",
     # transforms (gather)
     "fk_transform", "inverse_fk",
     "taup_transform", "inverse_taup",

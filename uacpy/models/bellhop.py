@@ -20,13 +20,15 @@ from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
-from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models.base import (
+    PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
+)
 from uacpy.core.environment import Environment, BoundaryProperties, Bottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field, ResultStack
 from uacpy.core.constants import (
-    DEFAULT_C_MIN, DEFAULT_C_MAX, DEFAULT_C_MAX_UNBOUNDED,
+    DEFAULT_C_MIN, DEFAULT_C_MAX_UNBOUNDED,
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.core.exceptions import (
@@ -177,24 +179,6 @@ def delayandsum(
     return rts, time_vector
 
 
-def _validate_arrivals_format(fmt: str) -> None:
-    """Reject any arrivals_format other than ``'ascii'``.
-
-    Bellhop's ``'binary'`` (FORTRAN unformatted) output is not parseable
-    by uacpy's arrivals reader.
-    """
-    if fmt == 'binary':
-        raise ConfigurationError(
-            "Bellhop's binary arrivals format ('a' / FORTRAN unformatted) "
-            "is not currently parseable by uacpy's arrivals reader. "
-            "Use arrivals_format='ascii' instead."
-        )
-    if fmt != 'ascii':
-        raise ConfigurationError(
-            f"arrivals_format must be 'ascii', got {fmt!r}"
-        )
-
-
 _RUN_MODE_TO_BELLHOP_TYPE = {
     RunMode.COHERENT_TL: 'C',
     RunMode.INCOHERENT_TL: 'I',
@@ -252,8 +236,6 @@ class Bellhop(PropagationModel):
         range-dependent SSP's defined extent.
     grid_type : str, optional
         ``'R'`` rectilinear (default) | ``'I'`` irregular (paired depth/range).
-    arrivals_format : str, optional
-        ``'ascii'`` (default). ``'binary'`` is rejected — uacpy can't parse it.
     beam_width_type : str, optional
         Cerveny only. ``'F'`` filling | ``'M'`` match | ``'W'`` waveguide.
     beam_curvature : str, optional
@@ -368,7 +350,6 @@ class Bellhop(PropagationModel):
         interp_ssp: Optional[str] = None,
         interp_bathymetry: str = 'linear',
         interp_altimetry: str = 'linear',
-        arrivals_format: str = 'ascii',
         beam_width_type: str = 'F',
         beam_curvature: str = 'D',
         eps_multiplier: float = 1.0,
@@ -436,10 +417,6 @@ class Bellhop(PropagationModel):
         interp_altimetry : str, optional
             ``.ati`` interpolation. ``'linear'`` (default) or
             ``'curvilinear'``.
-        arrivals_format : str, optional
-            Format for ``RunMode.ARRIVALS`` output. ``'ascii'`` (default) maps
-            to RunType 'A'; ``'binary'`` maps to 'a' (Fortran unformatted).
-            The arrivals reader auto-detects format on read.
         beam_width_type : {'F', 'M', 'W'}, optional
             Cerveny beam width type. 'F' = filling
             (default), 'M' = match, 'W' = waveguide. Only used when
@@ -558,7 +535,7 @@ class Bellhop(PropagationModel):
                 f"frequency-flat, so broadband amplitudes degrade toward the "
                 f"band edges (worst at caustics/ducts). Run sub-bands at "
                 f"different fc for wide bandwidths (Bellhop User Guide §9).",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         # Broadband synthesis window. ``None`` lets ``_run_broadband``
         # auto-derive from the latest arrival + source waveform duration.
@@ -569,8 +546,6 @@ class Bellhop(PropagationModel):
             float(t_start) if t_start is not None else None
         )
         self.auto_bounce = bool(auto_bounce)
-        _validate_arrivals_format(arrivals_format)
-        self.arrivals_format = arrivals_format
         if backend is not None and backend not in ('fortran', 'cxx', 'cuda'):
             raise ConfigurationError(
                 f"Bellhop(backend={backend!r}) is not a known backend. "
@@ -625,7 +600,7 @@ class Bellhop(PropagationModel):
                 f"Bellhop: Cerveny beam knobs {', '.join(ignored)} are "
                 f"ignored for beam_type={self.beam_type!r} (they apply only "
                 f"to Cerveny beams, beam_type 'C' or 'R').",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
     def _find_bellhop_executable(self) -> Path:
@@ -665,7 +640,7 @@ class Bellhop(PropagationModel):
             warnings.warn(
                 f"Bellhop(backend={self.backend!r}): the {self.backend} binary "
                 f"was not found; falling back to the {self.version} binary.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         return path
 
@@ -717,7 +692,7 @@ class Bellhop(PropagationModel):
                 f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
                 f"(Bellhop will then collapse the bottom via its own "
                 f"collapse policy and run with fluid-approximated physics).",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             return self.run_with_bounce(
                 env, source, receiver,
@@ -749,7 +724,7 @@ class Bellhop(PropagationModel):
             f"layered bottoms will be degraded. Set auto_bounce=True "
             f"(default) or call run_with_bounce() for the elastic-correct "
             f"path.",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return None
 
@@ -843,8 +818,6 @@ class Bellhop(PropagationModel):
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
-        _validate_arrivals_format(self.arrivals_format)
-
         # Auto-route through BOUNCE whenever Bellhop's fluid ray-tracer
         # cannot represent the bottom's full reflection physics natively:
         #   - layered columns — Bellhop has no multi-medium .env format;
@@ -887,7 +860,7 @@ class Bellhop(PropagationModel):
                 f"(the external .ssp / 2-D profile); this environment's SSP is "
                 f"range-independent, so falling back to interp_ssp={fallback!r}. "
                 f"Provide a range-dependent SSP to use the quad profile.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             effective_interp = fallback
             interp_for_writer = fallback
@@ -917,7 +890,7 @@ class Bellhop(PropagationModel):
                 f"distance), so that column is NaN. Start ranges at a "
                 f"small positive value (e.g. ``np.linspace(eps, R, N)``) "
                 f"to avoid surprise.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             self._warned_r0_sentinel = True
 
@@ -940,7 +913,6 @@ class Bellhop(PropagationModel):
                 f"Receiver with matched arrays."
             )
         fm = self._setup_file_manager()
-        self.file_manager = fm
 
         extra_writer_kwargs = {
             'interp_ssp': interp_for_writer,
@@ -991,10 +963,7 @@ class Bellhop(PropagationModel):
             self._log("Running Bellhop...")
             self._run_bellhop(base_name, fm.work_dir)
 
-            # Read output based on run type. Uppercase covers 'A'
-            # (ASCII arrivals) and 'a' (binary arrivals) identically
-            # since the arrivals reader auto-detects the format.
-            rt = run_type.upper()
+            rt = run_type
             if rt in ('C', 'I', 'S'):
                 output_file = fm.get_path(f'{base_name}.shd')
                 reader = read_shd_file
@@ -1072,19 +1041,15 @@ class Bellhop(PropagationModel):
                 result.slabs if isinstance(result, ResultStack) else [result]
             )
             for i, slab in enumerate(slabs_to_set):
-                slab.model = self.model_name
-                slab.backend = self.model_name.lower()
-                slab.model_source = self.provenance
+                self._stamp_result(
+                    slab, source, backend=self.version, frequencies=f0,
+                    phase_reference='travelling_wave',
+                )
+                # Each slab of a stack carries its own source depth.
                 if isinstance(result, ResultStack):
                     slab.source_depths = np.array(
                         [float(result.coordinate[i])], dtype=float,
                     )
-                else:
-                    slab.source_depths = np.atleast_1d(np.asarray(
-                        source.depths, dtype=float,
-                    ))
-                slab.frequencies = f0
-                slab.phase_reference = 'travelling_wave'
                 self._attach_output_paths(
                     slab, fm.work_dir, base_name,
                     primary_files=(
@@ -1133,11 +1098,15 @@ class Bellhop(PropagationModel):
         receiver : Receiver
             Receiver array
         c_low : float, optional
-            Minimum phase velocity for reflection table (m/s). Default 1400.
+            Minimum phase velocity for the reflection table (m/s). Default
+            ``DEFAULT_C_MIN``.
         c_high : float, optional
-            Maximum phase velocity for reflection table (m/s). Default 10000.
+            Maximum phase velocity for the reflection table (m/s). ``None``
+            (default) uses ``DEFAULT_C_MAX_UNBOUNDED``, which zeroes BOUNCE's
+            ``kMin`` and so covers grazing angles down to 0.
         rmax : float, optional
-            Maximum range for angular resolution (m). Default 10000.
+            Maximum range for angular resolution (m). ``None`` (default) uses
+            ``receiver.range_max``, the range the table is propagated to.
 
         Returns
         -------
@@ -1348,15 +1317,17 @@ class Bellhop(PropagationModel):
                 "Bellhop.run(run_mode=BROADBAND) returns the complex transfer "
                 "function H(f); the supplied source_waveform is ignored. Use "
                 "run_mode=TIME_SERIES to synthesise p(t).",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        if run_mode == RunMode.TIME_SERIES and frequencies is not None:
+            warnings.warn(
+                "Bellhop.run(run_mode=TIME_SERIES) synthesises p(t) by "
+                "delay-and-sum from a single arrivals run at fc; the supplied "
+                "frequencies= is ignored. Use run_mode=BROADBAND for an "
+                "explicit H(f) grid.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         if run_mode == RunMode.TIME_SERIES:
-
-            if sample_rate is None:
-                raise ConfigurationError(
-                    "sample_rate is required when source_waveform is provided"
-                )
-
             self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
             # Lock the time window from the first cell *with* arrivals so
@@ -1406,8 +1377,9 @@ class Bellhop(PropagationModel):
                     'range': np.asarray(rr, dtype=float),
                     'time': t_vec,
                 },
+                phase_reference='time_domain_native',
                 **self._result_kwargs(
-                    source, backend=self.model_name.lower(), frequencies=fc,
+                    source, backend=self.version, frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
                 ),
@@ -1443,7 +1415,7 @@ class Bellhop(PropagationModel):
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
-                backend=self.model_name.lower(),
+                backend=self.version,
                 frequencies=frequencies,
                 center_frequency=fc,
                 arrivals_field=arr_field,

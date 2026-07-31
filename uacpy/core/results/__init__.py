@@ -1,14 +1,11 @@
 """Result types produced by the propagation models.
 
-A package split by result kind. All public names (and the metadata registries
-the model layer reaches for) are re-exported here, so
+A package split by result kind. All public names are re-exported here, so
 ``from uacpy.core.results import Field`` resolves regardless of submodule.
 """
 
-from uacpy.core.results._base import (  # noqa: F401  (metadata registries re-exported)
+from uacpy.core.results._base import (  # noqa: F401
     Result, PhaseReference,
-    # _UNIVERSAL_METADATA / _DOCUMENTED_METADATA re-exported for the model
-    # layer's metadata registry (imported via this package; see tests/docs).
     _UNIVERSAL_METADATA, _DOCUMENTED_METADATA,
 )
 from uacpy.core.results.field import Field, ResultStack

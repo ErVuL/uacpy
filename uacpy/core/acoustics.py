@@ -36,7 +36,9 @@ import warnings as _warnings
 import numpy as np
 from typing import Union, Optional, Tuple
 
-from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
+from uacpy.core.constants import (
+    DEFAULT_SOUND_SPEED, PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER,
+)
 
 __all__ = [
     'soundspeed',
@@ -367,7 +369,7 @@ def bottom_loss_curve(
     material: Union[str, dict],
     *,
     grazing_angles_deg: Optional[np.ndarray] = None,
-    water_speed: float = 1500.0,
+    water_speed: float = DEFAULT_SOUND_SPEED,
     water_density: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Plane-wave fluid–fluid bottom loss vs grazing angle.

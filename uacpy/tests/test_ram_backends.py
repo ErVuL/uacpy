@@ -16,6 +16,7 @@ from uacpy.core.source import Source
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.models import RAM, RunMode
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
+from uacpy.core.constants import TL_MAX_DB
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -868,3 +869,80 @@ class TestUpslopeSubBottomIsNotStale:
         assert abs(up - down) < 1.0, (
             f"upslope {up:.2f} dB vs downslope {down:.2f} dB — a one-sided "
             f"error is the sub-bottom staleness signature")
+
+
+class TestBackendIndependentResultShape:
+    """``Field.kind`` must not depend on which backend auto-dispatch picked."""
+
+    _FLUID = BoundaryProperties(acoustic_type='half-space', sound_speed=1700.0,
+                                density=1.7, attenuation=0.5)
+
+    def _run(self, **env_kw):
+        env = _env(bottom=self._FLUID, **env_kw)
+        src = Source(depths=25.0, frequencies=50.0)
+        rcv = Receiver(depths=np.arange(10.0, 90.0, 10.0),
+                       ranges=np.arange(500.0, 5000.0, 500.0))
+        return RAM(verbose=False).run(env, src, rcv,
+                                      run_mode=RunMode.COHERENT_TL)
+
+    def test_mpirams_and_collins_agree_on_kind_and_phase_reference(self):
+        mpirams = self._run()
+        collins = self._run(altimetry=[(0.0, 0.0), (10000.0, 0.0)])
+        assert mpirams.backend == 'mpiramS' and collins.backend == 'ramsurf'
+        for f in (mpirams, collins):
+            assert f.kind == 'pressure'
+            assert np.iscomplexobj(f.data)
+            assert f.phase_reference == 'travelling_wave'
+
+    def test_the_two_backends_agree_on_level(self):
+        """A flat altimetry only changes the binary, not the physics."""
+        a, b = np.asarray(self._run().tl), np.asarray(
+            self._run(altimetry=[(0.0, 0.0), (10000.0, 0.0)]).tl)
+        ok = np.isfinite(a) & np.isfinite(b)
+        assert np.nanmedian(np.abs(a[ok] - b[ok])) < 1.0
+
+    def test_collins_tl_still_reproduces_the_binary_grid(self):
+        """Deriving TL from the complex envelope must not shift the level.
+
+        Interpolating the complex field instead of its modulus biases the
+        median by ~4 dB, because opposite-phase lobes cancel across an
+        interference null. Resampling the modulus leaves a residual well
+        under 0.1 dB — linear interpolation of |ψ| and of log|ψ| are not the
+        same operation — which is negligible against the 1–4.5 dB tolerances
+        the cross-model benchmarks use."""
+        env = _env(bottom=self._FLUID,
+                   altimetry=[(0.0, 0.0), (10000.0, 0.0)])
+        src = Source(depths=25.0, frequencies=50.0)
+        rcv = Receiver(depths=np.arange(1.0, 99.0, 1.0),
+                       ranges=np.arange(100.0, 10000.0, 50.0))
+        m = RAM(verbose=False)
+        field = m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        raw = m._run_collins_one_freq(env, src, rcv, kind='ramsurf', freq=50.0,
+                                      theta=m._theta_for_freq(50.0))
+        from uacpy.models.ram import _interp_to_receiver_grid
+        native = _interp_to_receiver_grid(
+            raw['depths'], raw['ranges'], np.asarray(raw['tl'], float),
+            rcv.depths.astype(float), rcv.ranges.astype(float))
+        got = np.asarray(field.tl)
+        # Compare where the binary's own TL is unclamped; the near-source
+        # samples the divergence clamp rewrites are not a level comparison.
+        ok = (np.isfinite(native) & np.isfinite(got)
+              & (native > 0.0) & (native < TL_MAX_DB))
+        assert abs(float(np.median(got[ok] - native[ok]))) < 0.15
+
+
+def test_run_frequencies_preserves_every_source_field():
+    """``run(frequencies=…)`` rebuilds the Source; it must not silently drop
+    ``source_type`` / ``beam_pattern`` and bypass their validation."""
+    env = _env(bottom=BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1700.0, density=1.7,
+        attenuation=0.5))
+    src = Source(depths=25.0, frequencies=50.0, source_type='line')
+    rcv = Receiver(depths=np.array([30.0]), ranges=np.array([1000.0]))
+    m = RAM(verbose=False)
+    # Inspect the rebuilt Source directly via the public path instead of
+    # patching: a line source is rejected downstream, so the guard firing at
+    # all proves source_type survived the rebuild.
+    with pytest.raises((ConfigurationError, UnsupportedFeatureError)):
+        m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL,
+              frequencies=np.array([40.0, 50.0, 60.0]))

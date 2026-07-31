@@ -276,7 +276,7 @@ def main():
             f_kf = results[case_label].get(kf_key)
             if f_ram is not None and f_kf is not None:
                 _plot_tl_difference(f_ram, f_kf, env_plot, ax=ax,
-                                   label=diff_title, show_colorbar=False,
+                                   show_colorbar=False,
                                    diff_vmax=diff_vmax_shared)
                 diff_im = ax.collections[0] if ax.collections else diff_im
             ax.set_title(f'{case_label} — {diff_title}', fontsize=10,

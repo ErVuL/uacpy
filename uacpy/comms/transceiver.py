@@ -30,11 +30,12 @@ import numpy as np
 
 from uacpy.comms.coding import ConvCode
 from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
-from uacpy.comms.equalization import DFE
+from uacpy.comms.equalization import DFE, _slicer
 from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (
     _ofdm_symbol,
     apply_cfo,
+    estimate_channel,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )
@@ -270,13 +271,13 @@ class OFDMReceiver:
             seg = x[b * blk + cp: b * blk + cp + nsc]
             return np.fft.fft(seg) / np.sqrt(nsc)
 
-        h = block_spectrum(1) / (self.pilot_freq + 1e-12)   # pilot channel estimate
+        h = estimate_channel(x[blk:2 * blk], self.pilot_freq, nsc, cp)
         c = self.modulator.constellation
         data = []
         for b in range(2, nblocks):
             d = self._equalize(block_spectrum(b), h)
             # decision-directed common-phase-error correction (residual CFO drift)
-            dec = c[np.argmin(np.abs(d[:, None] - c[None, :]), axis=1)]
+            dec = _slicer(d, c)
             d *= np.exp(-1j * np.angle(np.vdot(dec, d)))
             data.append(d)
         syms = np.concatenate(data) if data else np.array([], dtype=complex)

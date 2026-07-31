@@ -78,11 +78,64 @@ from uacpy.models._segmentation import segment_environment_by_range
 _SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 
 
-class _KrakenBase(PropagationModel):
-    """Base class for all Kraken models with shared functionality
+class Kraken(PropagationModel):
+    """
+    Kraken - Normal modes + field computation (multi-backend).
+
+    One model over the AT Kraken pipeline, mirroring ``RAM``'s
+    ``backend=`` dispatcher. The modes binary is selected by ``backend=``
+    (``'kraken'`` real / ``'krakenc'`` complex, or ``None`` to auto-pick
+    krakenc for elastic / leaky media). ``field.exe`` runs only when the
+    requested run mode produces a field:
+
+    * ``RunMode.MODES`` (``compute_modes``) → runs the modes binary only,
+      returns a :class:`Modes` result (``k``, ``phi``).
+    * ``COHERENT_TL`` / ``BROADBAND`` / ``TIME_SERIES``
+      (``compute_tl`` / ``compute_transfer_function`` / ``compute_time_series``)
+      → modes binary → ``field.exe`` → ``.shd``, returns a :class:`Field`.
+
+    Note that ``run()`` defaults to a field mode (``COHERENT_TL``, or
+    ``BROADBAND`` when a multi-frequency ``frequencies=`` is given) — use
+    ``compute_modes(...)`` (or ``run(run_mode=RunMode.MODES)``) for modes.
+
+    Supports range-independent and range-dependent environments via
+    adiabatic or coupled mode theory (delegated to AT's field.exe); the
+    MODES path is range-independent and samples the r=0 profile of any RD
+    environment (with a warning).
+
+    Note
+    ----
+    Range-dependent bathymetry is supported via environment segmentation
+    (multi-profile .env + field.exe coupled/adiabatic modes). Sea-surface
+    altimetry (non-flat sea surface) is NOT supported; Bellhop is the
+    only uacpy model that supports altimetry.
 
     Parameters
     ----------
+    mode_coupling : str, optional
+        ``'adiabatic'`` (default) or ``'coupled'``. Controls how
+        ``field.exe`` handles range-dependent mode transitions.
+    coherent : bool, optional
+        Coherent mode addition (default ``True``). ``coupled`` +
+        ``coherent=False`` is rejected — ``field.exe`` has no
+        coupled-incoherent path.
+    n_segments : int, optional
+        Range segments for RD scenarios. Default ``None`` lets
+        :func:`_segmentation.segment_environment_by_range` pick segment
+        edges from the union of bathymetry / RD-SSP / RD-bottom
+        change-points, inserting intermediates wherever the gap
+        exceeds ``max_segment_length`` (2 km). Pass an explicit int
+        to override with a uniform linspace decomposition.
+    mode_points_per_meter : float, optional
+        Mode-depth grid density. Default ``1.5`` pts/m.
+    executable, field_executable : Path, optional
+        ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
+    backend : str, optional
+        Force the modes binary: ``'kraken'`` or ``'krakenc'``. ``None``
+        (default) auto-selects — ``krakenc.exe`` for elastic media / leaky
+        modes (complex eigenvalues), ``kraken.exe`` otherwise. Forcing
+        ``'kraken'`` where complex eigenvalues are required raises
+        ``ConfigurationError``.
     c_low : float, optional
         Lower phase speed limit (m/s). None ⇒ 0.0 (``C_LOW_FACTOR_KRAKEN``),
         which makes KRAKEN compute cLow automatically — the modal-solver
@@ -100,15 +153,44 @@ class _KrakenBase(PropagationModel):
         Kraken pick automatically from frequency / wavelength. Default: 0.
         Note: this is NOT a "points per wavelength" density — it is a total
         point count per medium.
+    interp_ssp : str, optional
+        SSP connection scheme written into ``TopOpt(1)``. ``None``
+        (default) resolves to ``'linear'`` (C-linear). Explicit values:
+        ``'linear'``, ``'n2linear'``, ``'pchip'``, ``'cubic'`` /
+        ``'spline'``, ``'analytic'``. ``'quad'`` is Bellhop-only and is
+        rejected with a :class:`ConfigurationError`.
     leaky_modes : bool, optional
-        If True, override ``c_high`` to 1e9 so Kraken attempt to
-        compute leaky modes (trapped modes with phase speeds above the
-        halfspace P-wave speed). Kraken is strongly recommended in this
-        mode because it handles complex wavenumbers. See the Kraken doc:
-        "CHIGH will attempt to compute leaky modes...". Default: False.
+        If True, override ``c_high`` to 1e9 so the modes binary attempts
+        leaky modes (trapped modes with phase speeds above the halfspace
+        P-wave speed). This forces ``backend='krakenc'`` because leaky
+        modes have complex wavenumbers. See the Kraken doc: "CHIGH will
+        attempt to compute leaky modes...". Default: False.
+    top_reflection_file : Path, optional
+        A ``.trc`` top-reflection-coefficient table. Overrides the surface
+        boundary condition to ``'F'`` and is staged next to the ``.env``.
+    rmax_m : float, optional
+        ``RMax`` (m) written into the ``.env`` — it caps the modal
+        phase-speed search and field.exe's interpolation window. ``None``
+        (default) derives it from the outermost receiver range: ×1.05 for
+        narrowband, ×3 for a broadband sweep.
+    mode_depth_grid : ndarray, optional
+        Explicit depth grid (m) the ``.mod`` eigenfunctions are sampled
+        on by ``compute_modes``. ``None`` (default) builds
+        ``max(100, total_media_depth × mode_points_per_meter)`` points
+        spanning water + sediment.
+    use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
+        Standard plumbing (see :class:`PropagationModel`).
 
     Notes
     -----
+    ``field.exe`` ``Opt(3)`` only accepts ``'*'``, ``'O'``, or ``' '``
+    (``field.f90:83-90``); anything else raises FATAL ERROR. Purely
+    elastic component selection (H/V/T/N) is not reachable through
+    ``field.exe`` — an upstream Fortran limitation.
+
+    **Auto-route to krakenc.exe** when ``env`` carries shear (delegates the
+    modes step to the complex-arithmetic binary).
+
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
     - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; KRAKEN computes cLow automatically)
@@ -118,7 +200,54 @@ class _KrakenBase(PropagationModel):
       / ``Biological`` / ``ConstantAbsorption`` / ``None``).
 
     With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
+
+    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
+    RD bathymetry and RD-SSP are honoured natively (segments). Per-model
+    default: ``'bottom_range': 'median'`` (median over RD halfspace
+    samples); the layer stack is kept since Kraken consumes layered
+    seabed columns natively, so a range-dependent layered bottom collapses
+    to the median range with its layers intact.
+
+    Examples
+    --------
+    >>> kraken = Kraken()
+    >>> tl = kraken.compute_tl(env, source, receiver)        # field via field.exe
+
+    >>> modes = kraken.compute_modes(env, source)            # modes only (no receiver)
+
+    >>> # Elastic bottom → complex modes (auto, or force backend='krakenc')
+    >>> modes = Kraken(backend='krakenc').compute_modes(env_elastic, source)
+
+    >>> # Range-dependent with coupled modes
+    >>> kraken = Kraken(mode_coupling='coupled', n_segments=20)
+    >>> tl = kraken.compute_tl(env_rd, source, receiver)
     """
+
+    # Valid source types for field.exe option col 1 (AT field.f90:71-79).
+    # Declarative metadata (see PropagationModel / ModelSpec). Kraken: normal
+    # modes. Segments RD-bathymetry / RD-SSP natively; the bottom (and the RDLB
+    # axis) and a range-dependent *surface* still collapse — the RD .env carries
+    # one global top/bottom boundary, only the SSP varies per range. Honours
+    # layered + elastic bottom. Median across range / mean SSP represent the
+    # per-segment profile.
+    spec = ModelSpec(
+        modes=(
+            RunMode.MODES, RunMode.COHERENT_TL,
+            RunMode.BROADBAND, RunMode.TIME_SERIES,
+        ),
+        supports={
+            'range_dependent_bathymetry',
+            'range_dependent_ssp',
+            'layered_bottom',
+            'elastic_media',
+            'source_beam_pattern',
+            'rough_surface',
+            'rough_bottom',
+        },
+        source_types=frozenset({'point', 'line', 'scaled'}),
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'acoustics_toolbox'
 
     def _max_receiver_depth(self, env) -> float:
         # The Kraken family meshes through fluid sediment layers, so it
@@ -189,7 +318,8 @@ class _KrakenBase(PropagationModel):
                 "'spline'."
             )
 
-    def _build_modes_field(self, modes, n_modes, source, *, backend_exe=None):
+    def _build_modes_field(self, modes, n_modes, source, *, env=None,
+                           backend_exe=None):
         """Wrap a modes-reader payload as a :class:`Modes` Result.
 
         Returns the full mode set the reader produced; callers cap the
@@ -519,100 +649,6 @@ class _KrakenBase(PropagationModel):
         return error_msg
 
 
-class Kraken(_KrakenBase):
-    """
-    Kraken - Normal modes + field computation (multi-backend).
-
-    One model over the AT Kraken pipeline, mirroring ``RAM``'s
-    ``backend=`` dispatcher. The modes binary is selected by ``backend=``
-    (``'kraken'`` real / ``'krakenc'`` complex, or ``None`` to auto-pick
-    krakenc for elastic / leaky media). ``field.exe`` runs only when the
-    requested run mode produces a field:
-
-    * ``RunMode.MODES`` (``compute_modes``) → runs the modes binary only,
-      returns a :class:`Modes` result (``k``, ``phi``).
-    * ``COHERENT_TL`` / ``BROADBAND`` / ``TIME_SERIES``
-      (``compute_tl`` / ``compute_transfer_function`` / ``compute_time_series``)
-      → modes binary → ``field.exe`` → ``.shd``, returns a :class:`Field`.
-
-    Note that ``run()`` defaults to a field mode (``COHERENT_TL``, or
-    ``BROADBAND`` when a multi-frequency ``frequencies=`` is given) — use
-    ``compute_modes(...)`` (or ``run(run_mode=RunMode.MODES)``) for modes.
-
-    Supports range-independent and range-dependent environments via
-    adiabatic or coupled mode theory (delegated to AT's field.exe); the
-    MODES path is range-independent and samples the r=0 profile of any RD
-    environment (with a warning).
-
-    Note
-    ----
-    Range-dependent bathymetry is supported via environment segmentation
-    (multi-profile .env + field.exe coupled/adiabatic modes). Sea-surface
-    altimetry (non-flat sea surface) is NOT supported; Bellhop is the
-    only uacpy model that supports altimetry.
-
-    Parameters
-    ----------
-    mode_coupling : str, optional
-        ``'adiabatic'`` (default) or ``'coupled'``. Controls how
-        ``field.exe`` handles range-dependent mode transitions.
-    coherent : bool, optional
-        Coherent mode addition (default ``True``). ``coupled`` +
-        ``coherent=False`` is rejected — ``field.exe`` has no
-        coupled-incoherent path.
-    n_segments : int, optional
-        Range segments for RD scenarios. Default ``None`` lets
-        :func:`_segmentation.segment_environment_by_range` pick segment
-        edges from the union of bathymetry / RD-SSP / RD-bottom
-        change-points, inserting intermediates wherever the gap
-        exceeds ``max_segment_length`` (2 km). Pass an explicit int
-        to override with a uniform linspace decomposition.
-    mode_points_per_meter : float, optional
-        Mode-depth grid density. Default ``1.5`` pts/m.
-    executable, field_executable : Path, optional
-        ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
-    backend : str, optional
-        Force the modes binary: ``'kraken'`` or ``'krakenc'``. ``None``
-        (default) auto-selects — ``krakenc.exe`` for elastic media / leaky
-        modes (complex eigenvalues), ``kraken.exe`` otherwise. Forcing
-        ``'kraken'`` where complex eigenvalues are required raises
-        ``ConfigurationError``.
-    c_low, c_high, n_mesh, leaky_modes, top_reflection_file : optional
-        Inherited modal-solver knobs from :class:`_KrakenBase`.
-    use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
-        Standard plumbing (see :class:`PropagationModel`).
-
-    Notes
-    -----
-    ``field.exe`` ``Opt(3)`` only accepts ``'*'``, ``'O'``, or ``' '``
-    (``field.f90:83-90``); anything else raises FATAL ERROR. Purely
-    elastic component selection (H/V/T/N) is not reachable through
-    ``field.exe`` — an upstream Fortran limitation.
-
-    **Auto-route to krakenc.exe** when ``env`` carries shear (delegates the
-    modes step to the complex-arithmetic binary).
-
-    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    RD bathymetry and RD-SSP are honoured natively (segments). Per-model
-    default: ``'bottom_range': 'median'`` (median over RD halfspace
-    samples); the layer stack is kept since Kraken consumes layered
-    seabed columns natively, so a range-dependent layered bottom collapses
-    to the median range with its layers intact.
-
-    Examples
-    --------
-    >>> kraken = Kraken()
-    >>> tl = kraken.compute_tl(env, source, receiver)        # field via field.exe
-
-    >>> modes = kraken.compute_modes(env, source)            # modes only (no receiver)
-
-    >>> # Elastic bottom → complex modes (auto, or force backend='krakenc')
-    >>> modes = Kraken(backend='krakenc').compute_modes(env_elastic, source)
-
-    >>> # Range-dependent with coupled modes
-    >>> kraken = Kraken(mode_coupling='coupled', n_segments=20)
-    >>> tl = kraken.compute_tl(env_rd, source, receiver)
-    """
 
     # Valid source types for field.exe option col 1 (AT field.f90:71-79).
     # Declarative metadata (see PropagationModel / ModelSpec). Kraken: normal
@@ -1027,7 +1063,7 @@ class Kraken(_KrakenBase):
             modes = self._read_modes_file(modes_file)
 
             field = self._build_modes_field(
-                modes, n_modes, source, backend_exe=kraken_exe,
+                modes, n_modes, source, env=env, backend_exe=kraken_exe,
             )
             self._attach_output_paths(
                 field, fm.work_dir, base_name,
@@ -1290,7 +1326,7 @@ class Kraken(_KrakenBase):
 
     def _assemble_field_from_shd(self, shd_file, source, receiver, is_rd,
                                  n_profiles, broadband, freq_vec, return_pressure,
-                                 fm, base_name):
+                                 fm, base_name, env=None):
         """Build the result Field from field.exe's ``.shd``: native-broadband
         ``(n_d, n_r, n_f)``, single-frequency complex pressure
         (``return_pressure``), or TL. field.exe's modal sum differs from
@@ -1460,7 +1496,7 @@ class Kraken(_KrakenBase):
 
             field = self._assemble_field_from_shd(
                 shd_file, source, receiver, is_rd, n_profiles,
-                broadband, freq_vec, return_pressure, fm, base_name)
+                broadband, freq_vec, return_pressure, fm, base_name, env=env)
 
             # No-propagation guard: an empty modal sum — Kraken found 0
             # trapped modes (frequency below the waveguide's modal cutoff, or

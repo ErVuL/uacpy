@@ -10,11 +10,12 @@ from typing import Optional, Tuple
 from uacpy.core.environment import Environment
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
-    BOTTOM_LINE_STYLE_FLAT, RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE, _blend,
+    BOTTOM_LINE_STYLE_FLAT, _blend,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, ZORDER_RECEIVERS, ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, typed_plot_error
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, fig_ax, typed_plot_error, invert_yaxis_once
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.io.units import km_to_m, m_to_km
 
 
 # A single half-space is shaded by sound speed on a fixed (absolute) scale so
@@ -74,7 +75,7 @@ def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
     # Per-layer fills (earthy BOTTOM_CMAP by sound speed) + dashed inter-layer
     # edges + hatched half-space + side legend card. Same visual
     # template as the range-dependent layered branch below.
-    cmap, cs_min, cs_max, sm = _layer_cmap_and_norm()
+    cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
     z_top = z_max_layer
     for layer in bottom.layers:
@@ -106,14 +107,13 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
     # Geological cross-section: one column per profile range, dashed
     # vertical boundaries between columns, P# labels above each
     # column, hatched half-space at the column bottom.
-    prof_ranges = np.asarray(bottom.ranges, dtype=float)
-    prof_ranges_km = prof_ranges / 1000.0
+    prof_ranges_km = m_to_km(np.asarray(bottom.ranges, dtype=float))
     boundaries = [prof_ranges_km[0]]
     for i in range(len(prof_ranges_km) - 1):
         boundaries.append(0.5 * (prof_ranges_km[i] + prof_ranges_km[i + 1]))
     boundaries.append(prof_ranges_km[-1])
 
-    cmap, cs_min, cs_max, sm = _layer_cmap_and_norm()
+    cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
 
     max_thickness = max(
@@ -176,7 +176,7 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
     # node owns from the midpoint with its left neighbour to the midpoint with
     # its right; outer nodes reach the bathymetry edges. Tops follow the
     # seafloor so kinks are honoured.
-    bot_r_km = np.asarray(bottom.ranges, dtype=float) / 1000.0
+    bot_r_km = m_to_km(np.asarray(bottom.ranges, dtype=float))
     bathy_r = r_km
     bathy_z = seafloor
     cs = np.asarray(bottom.halfspace_sound_speed, dtype=float)
@@ -293,11 +293,7 @@ def _plot_environment(
         raise ConfigurationError(
             f"_plot_environment: expected an Environment, got "
             f"{type(env).__name__}.")
-    if ax is None:
-        fig, ax_bathy = plt.subplots(1, 1, figsize=figsize)
-    else:
-        ax_bathy = ax
-        fig = ax.figure
+    fig, ax_bathy = fig_ax(ax, figsize)
 
     ssp = env.ssp
 
@@ -307,19 +303,19 @@ def _plot_environment(
     # Falls back to (0, 1) only when nothing carries a range vector.
     candidate_rmaxes = []
     if env.has_range_dependent_bathymetry:
-        candidate_rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
+        candidate_rmaxes.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
-        candidate_rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
+        candidate_rmaxes.append(m_to_km(float(np.max(bottom.ranges))))
     if (receiver is not None and getattr(receiver, 'ranges', None) is not None
             and len(receiver.ranges) > 0):
-        candidate_rmaxes.append(float(np.max(receiver.ranges)) / 1000.0)
+        candidate_rmaxes.append(m_to_km(float(np.max(receiver.ranges))))
     if (env.ssp.is_range_dependent
             and env.ssp.ranges is not None and len(env.ssp.ranges) > 0):
-        candidate_rmaxes.append(float(np.max(env.ssp.ranges)) / 1000.0)
+        candidate_rmaxes.append(m_to_km(float(np.max(env.ssp.ranges))))
     x_max = max(candidate_rmaxes) if candidate_rmaxes else 1.0
 
     if env.has_range_dependent_bathymetry:
-        r_km = env.bathymetry.ranges / 1000.0
+        r_km = m_to_km(env.bathymetry.ranges)
         seafloor = env.bathymetry.depths
     else:
         r_km = np.array([0.0, x_max])
@@ -405,7 +401,7 @@ def _plot_environment(
     # under the seafloor with opaque fills, so we don't need to mask
     # the SSP heatmap.
     if ssp.is_range_dependent:
-        ssp_r_km_b = ssp.ranges / 1000.0
+        ssp_r_km_b = m_to_km(ssp.ranges)
         ax_bathy.pcolormesh(
             ssp_r_km_b, ssp.depths, ssp.data,
             cmap=water_cmap,
@@ -463,10 +459,11 @@ def _plot_environment(
             cb.ax.yaxis.label.set_size(7)
             cb.ax.yaxis.set_major_locator(MaxNLocator(3))
     else:
-        cbar_water = fig.colorbar(
-            water_sm, ax=ax_bathy, label='Water c (m/s)', location='right',
-            fraction=0.046, pad=0.02,
-        )
+        # Also an inset, so a composite (``ax=``) layout keeps the caller's
+        # full axes width and stays aligned with its neighbours.
+        fig.colorbar(water_sm,
+                     cax=ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.98]),
+                     label='Water c (m/s)')
 
     # Seafloor line on top of the bottom rendering.
     if env.has_range_dependent_bathymetry:
@@ -475,31 +472,8 @@ def _plot_environment(
         ax_bathy.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=10)
 
     # Source / receiver markers on the bottom panel.
-    if source is not None and getattr(source, 'depths', None) is not None:
-        for sd in np.atleast_1d(source.depths):
-            ax_bathy.plot([x_range[0]], [float(sd)],
-                          zorder=ZORDER_SOURCE,
-                          **SOURCE_MARKER_STYLE)
-    if receiver is not None and getattr(receiver, 'depths', None) is not None:
-        rr_full = np.atleast_1d(receiver.ranges) / 1000.0
-        rd_full = np.atleast_1d(receiver.depths)
-        # Dense grids form solid bars — decimate each axis independently
-        # so the spatial structure stays readable. Range typically spans
-        # 10× more samples than depth in surveys, so we cap the two axes
-        # differently (20 across, 10 down).
-        max_range_dots = 20
-        max_depth_dots = 10
-        step_r = max(1, rr_full.size // max_range_dots)
-        step_d = max(1, rd_full.size // max_depth_dots)
-        rr = rr_full[::step_r]
-        rd = rd_full[::step_d]
-        RR, RD = np.meshgrid(rr, rd)
-        rcv_style = dict(RECEIVER_MARKER_STYLE)
-        rcv_style['markersize'] = min(
-            rcv_style.get('markersize', 8), 5,
-        )
-        ax_bathy.plot(RR.ravel(), RD.ravel(),
-                      zorder=ZORDER_RECEIVERS, **rcv_style)
+    _draw_geometry(ax_bathy, source, receiver, max_markersize=5,
+                   source_range_m=km_to_m(x_range[0]))
 
     ax_bathy.set_xlim(*x_range)
     # Tight ylim — surface to a small margin past the deepest seafloor.
@@ -510,7 +484,7 @@ def _plot_environment(
     if not ax_bathy.get_xlabel():
         ax_bathy.set_xlabel('Range (km)')
     ax_bathy.set_ylabel('Depth (m)')
-    ax_bathy.invert_yaxis()
+    invert_yaxis_once(ax_bathy)
     ax_bathy.grid(True, alpha=0.3)
     # Read the surface carriers directly: altimetry = surface shape (rough /
     # sloped surface), surface = top boundary properties (ice cover), both
@@ -530,7 +504,8 @@ def _plot_environment(
     return fig, ax_bathy
 
 
-def _plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
+def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
+              figsize=(5, 6)):
     """Plot the sound-speed profile ``c(z)`` as a depth-down line.
 
     Accepts an :class:`~uacpy.core.environment.Environment` or a bare
@@ -549,10 +524,7 @@ def _plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
             f"{type(env_or_ssp).__name__}."
         )
 
-    if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
     depths = np.asarray(ssp.depths, dtype=float)
     data = np.asarray(ssp.data, dtype=float)           # (n_depth, n_range)
@@ -560,7 +532,7 @@ def _plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
     if ssp.is_range_dependent:
         from matplotlib.cm import ScalarMappable
         from matplotlib.colors import Normalize
-        ranges_km = np.asarray(ssp.ranges, dtype=float) / 1000.0
+        ranges_km = m_to_km(np.asarray(ssp.ranges, dtype=float))
         cmap = plt.get_cmap('viridis')
         norm = Normalize(vmin=float(ranges_km.min()),
                          vmax=float(ranges_km.max()) or 1.0)
@@ -574,9 +546,10 @@ def _plot_ssp(env_or_ssp, *, ax=None, figsize=(5, 6)):
 
     ax.set_xlabel('Sound speed (m/s)')
     ax.set_ylabel('Depth (m)')
-    if not ax.yaxis_inverted():
-        ax.invert_yaxis()                               # depth positive down
+    invert_yaxis_once(ax)                               # depth positive down
     ax.grid(True, alpha=0.3)
+    if title:
+        ax.set_title(title)
     return fig, ax
 
 
@@ -623,8 +596,9 @@ def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
     return grid
 
 
-def plot_bottom_properties(env, *, properties=None, figsize=None,
-                           n_range=240, n_depth=200, data_source=True):
+def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
+                           figsize=None, n_range=240, n_depth=200,
+                           data_source=True):
     """Small-multiples cross-sections of the **seabed geoacoustic properties**.
 
     One range × sub-bottom-depth heatmap per property present in
@@ -637,7 +611,8 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
     Works for every ``Bottom`` shape (half-space, layered, range-dependent
     half-space, range-dependent layered); for layered
     seabeds the layers track the bathymetry. Pass ``properties=`` (attribute
-    names or symbols) to restrict the panels. Returns ``(fig, axes)``.
+    names or symbols) to restrict the panels, or ``title=`` to override the
+    figure title. Returns ``(fig, axes)``.
     """
     bottom = env.bottom
     if bottom is None:
@@ -645,9 +620,9 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
 
     rmaxes = []
     if env.has_range_dependent_bathymetry:
-        rmaxes.append(float(env.bathymetry.ranges[-1]) / 1000.0)
+        rmaxes.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
-        rmaxes.append(float(np.max(bottom.ranges)) / 1000.0)
+        rmaxes.append(m_to_km(float(np.max(bottom.ranges))))
     x_max = max(rmaxes) if rmaxes else 1.0
     r_km = np.linspace(0.0, x_max, n_range)
 
@@ -709,11 +684,12 @@ def plot_bottom_properties(env, *, properties=None, figsize=None,
         cb = fig.colorbar(pcm, ax=ax_p, pad=0.015, fraction=0.05)
         cb.ax.tick_params(labelsize=8)
 
-    axes_flat[0].invert_yaxis()                    # shared → inverts all
+    invert_yaxis_once(axes_flat[0])                # shared → inverts all
     for ax_p in axes_flat[n:]:                     # hide unused cells
         ax_p.set_visible(False)
 
-    fig.suptitle(f"Seabed properties — {type(bottom).__name__}",
+    fig.suptitle(title if title is not None
+                 else f"Seabed properties — {type(bottom).__name__}",
                  fontweight='bold', fontsize=13)
     _draw_credit(fig, _credit_attributions(data_source, carrier=env),
                       reserve=False)
@@ -734,12 +710,18 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
     overlay several models.
     """
     frequencies = np.asarray(frequencies, dtype=float)
+    mk = mpl_kw.pop('model_kwargs', None)
+    if absorption is not None and mk:
+        raise ConfigurationError(
+            "plot_absorption: model_kwargs= configures the model= computation "
+            "and has no effect on a pre-computed absorption= array. Drop one "
+            "of the two.")
+    mk = mk or {}
     if absorption is None:
         if model is None:
             raise ConfigurationError(
                 "plot_absorption: pass absorption= (dB/km) or model= "
                 "('thorp' / 'francois_garrison').")
-        mk = mpl_kw.pop('model_kwargs', {})
         m = str(model).lower().replace('-', '_')
         if m == 'thorp':
             from uacpy.core.absorption import thorp_db_per_km
@@ -754,11 +736,10 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
         if label is None:
             label = m
     absorption = np.asarray(absorption, dtype=float)
-    fig, ax = (plt.subplots(1, 1, figsize=figsize) if ax is None
-               else (ax.figure, ax))
+    fig, ax = fig_ax(ax, figsize)
     ax.loglog(frequencies, absorption, label=label, **mpl_kw)
-    ax.set_xlabel("Frequency [Hz]")
-    ax.set_ylabel("Absorption [dB/km]")
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Absorption (dB/km)")
     ax.set_title(title or "Volume absorption", loc="left")
     ax.grid(which="both", alpha=0.3)
     if label is not None:
@@ -766,6 +747,29 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
     return fig, ax
 
 
-# Professional oceanographic depth ramp (shallow → deep): pale aqua through
-# teal and ocean blue to deep navy. A dependency-free stand-in for cmocean
-# 'deep', and the default for plot_bathymetry_map.
+@typed_plot_error
+def _plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
+                        **mpl_kw):
+    """Render a 1-D ``value(range)`` carrier — ``Bathymetry`` (depth, axis
+    down) or ``Altimetry`` (height, axis up). Reached via ``profile.plot()``."""
+    is_depth = hasattr(profile, 'depths')
+    values = profile.depths if is_depth else profile.heights
+    label = 'Depth (m)' if is_depth else 'Sea-surface height (m)'
+    fig, ax = fig_ax(ax, figsize)
+    r_km = m_to_km(np.asarray(profile.ranges, dtype=float))
+    style = {'color': 'saddlebrown' if is_depth else 'steelblue',
+             'linewidth': 1.6}
+    style.update(mpl_kw)
+    if r_km.size == 1:
+        ax.axhline(float(values[0]), **style)
+    else:
+        ax.plot(r_km, np.asarray(values, dtype=float), **style)
+    ax.set_xlabel('Range (km)')
+    ax.set_ylabel(label)
+    ax.grid(True, alpha=0.3)
+    if is_depth:
+        invert_yaxis_once(ax)
+    ax.set_title(title if title is not None
+                 else f"{type(profile).__name__} profile",
+                 fontweight='bold', fontsize=12)
+    return fig, ax

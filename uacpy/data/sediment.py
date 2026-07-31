@@ -14,7 +14,7 @@ class here.
 
 The ϕ → ``sound_speed`` / ``density`` / ``attenuation`` conversion itself lives
 in :mod:`uacpy.core.sediment` (``grain_size_to_geoacoustics``, re-exported here
-for backward compatibility) so it is usable without the data layer. Every
+so a bottom can be built without importing the data layer). Every
 builder below returns a **half-space** bottom usable by all models;
 ``grain_size_phi`` is retained as informational metadata. There is no
 ``'grain-size'`` boundary type.
@@ -38,7 +38,19 @@ __all__ = [
     'bottom_from_grain_size',
     'bottom_from_class',
     'range_dependent_bottom_along',
+    'water_sound_speed_at',
 ]
+
+
+def water_sound_speed_at(water_sound_speed, lat: float, lon: float):
+    """Resolve a ``water_sound_speed`` argument at one transect waypoint.
+
+    A float is used as given; a ``(lat, lon) -> m/s`` callable is evaluated, so
+    a range-dependent water column scales every seabed column to the sound speed
+    over *its* own seafloor. ``None`` keeps the Hamilton reference.
+    """
+    return (water_sound_speed(lat, lon) if callable(water_sound_speed)
+            else water_sound_speed)
 
 
 def bottom_from_grain_size(

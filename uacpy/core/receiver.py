@@ -14,7 +14,8 @@ from uacpy.core._carrier_validate import (
 )
 
 
-@dataclass
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False)
 class Receiver:
     """
     Acoustic receiver definition

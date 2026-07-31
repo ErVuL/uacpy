@@ -28,7 +28,7 @@ from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along,
+    bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
 
 __all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_local',
@@ -273,11 +273,14 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
                                 water_sound_speed=None,
                                 max_distance_km=DEFAULT_MAX_DISTANCE_KM,
                                 timeout=None, verbose=False):
-    """Range-dependent bottom from local samples along ``start`` → ``end``."""
+    """Range-dependent bottom from local samples along ``start`` → ``end``.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed,
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
             max_distance_km=max_distance_km),
         start, end, n_points, source_label='local sediment DB',
         max_points=max_points,

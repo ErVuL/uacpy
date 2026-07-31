@@ -252,6 +252,35 @@ def make_noise_waveform(
     return nts, time
 
 
+def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
+    """4th-order Butterworth bandpass ``(b, a)`` for ``fc +/- bandwidth/2``.
+
+    Band edges are clamped to ``[1 Hz, sample_rate/2 - 1]`` and to normalised
+    frequencies in ``(0, 1)``.
+    """
+    from scipy.signal import butter
+    flow = max(fc - bandwidth / 2, 1.0)
+    fhigh = min(fc + bandwidth / 2, sample_rate / 2 - 1)
+    nyquist = sample_rate / 2
+    low = max(min(flow / nyquist, 0.99), 0.01)
+    high = max(min(fhigh / nyquist, 0.99), 0.02)
+    return butter(4, [low, high], btype='band')
+
+
+def _noise_equivalent_bandwidth(b, a, sample_rate: float, n_freq: int = 8192):
+    """One-sided noise-equivalent bandwidth (Hz) of ``filtfilt(b, a, ...)``.
+
+    ``filtfilt`` applies ``(b, a)`` twice, so the power response is ``|H|**4``
+    and the equivalent rectangular bandwidth is ``∫|H|**4 df / max|H|**4``. This
+    is what a unit-RMS band-limited realisation actually spreads its power over
+    — narrower than the nominal -3 dB ``bandwidth``.
+    """
+    from scipy.signal import freqz
+    f, h = freqz(b, a, worN=int(n_freq), fs=float(sample_rate))
+    p = np.abs(h) ** 4
+    return float(np.trapezoid(p, f) / p.max())
+
+
 def add_noise(
     timeseries: np.ndarray,
     sample_rate: float,
@@ -312,16 +341,17 @@ def add_noise(
     """
     SL = 10.0 ** (source_level / 20.0)
 
-    # Target noise RMS for a one-sided PSD level ``noise_level`` (dB
-    # re Pa²/Hz) over bandwidth ``bandwidth``:
-    #     P_total = S_target · BW = 10^(L/10) · BW   (Pa²)
-    #     RMS     = √P_total                          (Pa)
-    # ``make_bandlimited_noise`` returns unit-RMS noise, so multiplying
-    # by ``A = RMS`` gives a realisation with the requested PSD level.
-    flow = fc - bandwidth / 2
-    fhigh = fc + bandwidth / 2
-    bw = fhigh - flow
-    A = np.sqrt(bw * 10.0 ** (noise_level / 10.0))
+    # Target noise RMS for a one-sided in-band PSD level ``noise_level`` (dB
+    # re Pa²/Hz):
+    #     P_total = S_target · NEB = 10^(L/10) · NEB   (Pa²)
+    #     RMS     = √P_total                            (Pa)
+    # ``make_bandlimited_noise`` returns unit-RMS noise spread over the
+    # zero-phase filter's noise-equivalent bandwidth NEB (not the nominal -3 dB
+    # ``bandwidth``), so multiplying by ``A = RMS`` puts the in-band density at
+    # exactly the requested level.
+    neb = _noise_equivalent_bandwidth(
+        *_bandpass_design(fc, bandwidth, sample_rate), sample_rate)
+    A = np.sqrt(neb * 10.0 ** (noise_level / 10.0))
 
     # Generate band-limited noise — independent realisation per receiver
     # so cross-channel correlation is zero (required for beamforming and
@@ -384,28 +414,12 @@ def make_bandlimited_noise(
     >>> noise, t = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
     """
-    from scipy.signal import butter, filtfilt
+    from scipy.signal import filtfilt
     n_samples = int(duration * sample_rate)
     time = np.arange(n_samples) / sample_rate
     noise = np.random.randn(n_samples)
 
-    # Design bandpass filter
-    flow = fc - bandwidth / 2
-    fhigh = fc + bandwidth / 2
-
-    # Ensure frequencies are valid
-    flow = max(flow, 1.0)  # At least 1 Hz
-    fhigh = min(fhigh, sample_rate / 2 - 1)  # Below Nyquist
-
-    # Normalize frequencies to Nyquist
-    nyquist = sample_rate / 2
-    low = flow / nyquist
-    high = fhigh / nyquist
-
-    # Ensure normalized frequencies are in valid range (0, 1)
-    low = max(min(low, 0.99), 0.01)
-    high = max(min(high, 0.99), 0.02)
-    b, a = butter(4, [low, high], btype='band')
+    b, a = _bandpass_design(fc, bandwidth, sample_rate)
     filtered_noise = filtfilt(b, a, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS

@@ -37,6 +37,14 @@ from uacpy.io.oalib_writer import write_bounce_input_file
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
 _KMIN_CUTOFF_CHIGH = 1.0e6
 
+# Per-medium mesh density for the sediment stack: 20 points per wavelength,
+# floored so a thin layer still gets a usable mesh and capped so a thick stack
+# at high frequency cannot allocate an unbounded difference-equation grid
+# (bounce.f90 sizes B1..B4/rho/cP/cS from the sum of the per-medium counts).
+_MESH_POINTS_PER_WAVELENGTH = 20
+_MIN_MESH_POINTS = 100
+_MAX_MESH_POINTS = 20000
+
 
 class Bounce(PropagationModel):
     """
@@ -255,6 +263,17 @@ class Bounce(PropagationModel):
         if not self._exe.exists():
             raise ExecutableNotFoundError('Bounce', str(self._exe))
 
+    def _validate_geometry(self, env, source, receiver, run_mode=None) -> None:
+        """No-op: BOUNCE reads no source or receiver geometry.
+
+        Its Fortran driver stops after ``TopOpt``, the SSP, ``BotOpt``,
+        ``cLow``/``cHigh`` and ``RMax`` (``bounce.f90``) — it never calls
+        ``ReadSzRz``. The plane-wave reflection coefficient is independent of
+        source position, so the field models' depth and range-coverage checks
+        would reject and warn about geometry that never reaches the binary.
+        ``receiver`` is read only to auto-derive ``rmax``.
+        """
+
     def _validate_phase_speed_bounds(self) -> None:
         """Phase-velocity bounds invariant, enforced at construction AND at
         ``run()`` (a single source of truth for both call sites)."""
@@ -297,9 +316,11 @@ class Bounce(PropagationModel):
         env : Environment
             Ocean environment (bottom properties define the stack).
         source : Source
-            Source definition (frequency is used).
+            Source definition. Only ``frequencies[0]`` is read; BOUNCE
+            consumes no source geometry.
         receiver : Receiver
-            Receiver definition (not used by BOUNCE, but required for API).
+            Read only for ``range_max``, which auto-derives ``rmax`` when the
+            constructor left it ``None``.
         run_mode : RunMode, optional
             Must be ``RunMode.REFLECTION`` (the only mode BOUNCE emits)
             or ``None`` (defaults to REFLECTION). Other values raise
@@ -330,12 +351,24 @@ class Bounce(PropagationModel):
         run_mode = self._resolve_run_mode(run_mode)
         self._validate_phase_speed_bounds()
 
+        # BOUNCE writes one frequency into the .env and returns one table, so a
+        # multi-frequency Source would be silently truncated. RunMode.REFLECTION
+        # itself stays out of ``_SINGLE_FREQUENCY_MODES`` — OASR does sweep.
+        src_freqs = np.atleast_1d(source.frequencies)
+        if len(src_freqs) > 1:
+            raise ConfigurationError(
+                f"Bounce tabulates the reflection coefficient at one "
+                f"frequency; got {len(src_freqs)}: {list(src_freqs)}. Loop "
+                f"over single-frequency Sources, or use OASR for a "
+                f"multi-frequency reflection sweep."
+            )
+
         # Per-call rmax. ``n_angles`` (below) overrides via the inverse of
         # bounce.f90:49  NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π)).
         if self.rmax is not None:
             rmax = float(self.rmax)
         else:
-            recv_rmax = float(receiver.range_max) if receiver is not None else 0.0
+            recv_rmax = float(receiver.range_max)
             if recv_rmax > 0:
                 rmax = recv_rmax
                 self._log(
@@ -381,7 +414,6 @@ class Bounce(PropagationModel):
                 filepath=input_file,
                 env=env,
                 source=source,
-                receiver=receiver,
                 c_low=self.c_low,
                 c_high=self.c_high,
                 rmax=rmax,
@@ -458,12 +490,42 @@ class Bounce(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _resolve_n_mesh(self, env: Environment, frequency: float) -> int:
+        """Mesh-point count per medium of the sediment stack.
+
+        ``write_bounce_input_file`` omits the water column, so medium 1 is a
+        sediment layer (or the transparent dummy slab when the seabed is a
+        bare half-space). The count applies to every medium, so it is sized
+        from the thickest layer at the slowest layer speed — the shortest
+        wavelength across the meshed thickness.
+        """
+        from uacpy.io.oalib_writer import _BOUNCE_DUMMY_LAYER_M
+
+        layers = env.bottom.at(range=0.0).layers
+        if layers:
+            thickness = max(float(lyr.thickness) for lyr in layers)
+            speed = min(float(lyr.sound_speed) for lyr in layers)
+        else:
+            thickness = _BOUNCE_DUMMY_LAYER_M
+            speed = float(np.atleast_1d(env.get_sound_speed(env.depth))[0])
+
+        wavelength = speed / frequency
+        n_mesh = int(np.clip(
+            _MESH_POINTS_PER_WAVELENGTH * thickness / wavelength,
+            _MIN_MESH_POINTS, _MAX_MESH_POINTS,
+        ))
+        self._log(
+            f"n_mesh = {n_mesh} (thickest medium {thickness:.3g} m, "
+            f"c = {speed:.1f} m/s, lambda = {wavelength:.3g} m)",
+            level='debug',
+        )
+        return n_mesh
+
     def _write_bounce_input(
         self,
         filepath: Path,
         env: Environment,
         source: Source,
-        receiver: Receiver,
         c_low: float,
         c_high: float,
         rmax: float,
@@ -485,9 +547,7 @@ class Bounce(PropagationModel):
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
         frequency = float(source.frequencies[0])
-        c_water = float(env.ssp.to_pairs()[0, 1])
-        wavelength = c_water / frequency
-        n_mesh = max(100, int(20 * env.depth / wavelength))
+        n_mesh = self._resolve_n_mesh(env, frequency)
 
         write_bounce_input_file(
             filepath, env, source,

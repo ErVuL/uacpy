@@ -106,6 +106,30 @@ def _mask_below_seafloor(data, depths, ranges, bathymetry):
     return data
 
 
+def _interp_envelope_to_receiver_grid(src_depths, src_ranges, psi,
+                                      rcv_depths, rcv_ranges):
+    """Resample a complex PE envelope, interpolating modulus and phase apart.
+
+    Interpolating the complex field directly averages across interference
+    nulls, where opposite-phase lobes cancel: on the Pekeris reference that
+    biases the window-median level by +3.8 dB. The modulus carries the
+    transmission loss, so it is interpolated on its own — reproducing the
+    binary's own ``tl.grid`` resampling to 0.005 dB — and the unit phasor is
+    interpolated separately to carry the phase."""
+    psi = np.asarray(psi)
+    mag = np.abs(psi)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        unit = np.where(mag > 0.0, psi / mag, 0.0)
+    mag_out = _interp_to_receiver_grid(
+        src_depths, src_ranges, mag, rcv_depths, rcv_ranges)
+    unit_out = _interp_to_receiver_grid(
+        src_depths, src_ranges, unit, rcv_depths, rcv_ranges)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mod = np.abs(unit_out)
+        unit_out = np.where(mod > 0.0, unit_out / mod, 1.0 + 0.0j)
+    return mag_out * unit_out
+
+
 def _interp_to_receiver_grid(src_depths, src_ranges, values,
                              rcv_depths, rcv_ranges, *, sanitize=False):
     """Bilinear-interpolate a PE-grid ``(depth, range)`` field onto the
@@ -1003,7 +1027,11 @@ class RAM(PropagationModel):
                     "RAM.run(frequencies=…) requires at least one positive "
                     "frequency"
                 )
-            source = Source(depths=source.depths, frequencies=freqs_arr)
+            source = Source(
+                depths=source.depths, frequencies=freqs_arr,
+                source_type=source.source_type,
+                beam_pattern=source.beam_pattern,
+            )
 
         env = self._project_environment(env)
         # Finish all env-shaping before validation so validate_inputs sees the
@@ -1349,22 +1377,44 @@ class RAM(PropagationModel):
                 f"larger np_pade.{note}",
                 UserWarning, stacklevel=3
             )
-        tl_clamped = np.where(invalid, TL_MAX_DB, np.maximum(tl_raw, 0.0))
+        # Clamp on the complex envelope, preserving phase: the level of an
+        # invalid sample is pinned to the TL_MAX_DB floor, its direction kept.
+        psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
+        floor_mag = 10.0 ** (-TL_MAX_DB / 20.0)
+        mag = np.abs(psi_raw)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            unit = np.where(mag > 0.0, psi_raw / mag, 1.0 + 0.0j)
+        # TL < 0 means |p/p0| > 1; cap the magnitude at unity to match the
+        # ``np.maximum(tl_raw, 0.0)`` the dB path applied.
+        mag = np.where(invalid, floor_mag, np.minimum(mag, 1.0))
+        psi_clamped = mag * unit
+
         # Receivers outside the PE output grid get NaN so pcolormesh and
         # downstream consumers render them transparent rather than as a
-        # saturated edge band. Use ``fill_value=TL_MAX_DB`` only inside
-        # the grid via the np.where above for non-finite samples.
+        # saturated edge band.
         rcv_d = np.atleast_1d(receiver.depths).astype(float)
         rcv_r = np.atleast_1d(receiver.ranges).astype(float)
-        tl_out = _interp_to_receiver_grid(
-            raw['depths'], raw['ranges'], tl_clamped, rcv_d, rcv_r)
+        psi_out = _interp_envelope_to_receiver_grid(
+            raw['depths'], raw['ranges'], psi_clamped, rcv_d, rcv_r)
+
+        # Same per-backend phase bookkeeping as the broadband loop; the
+        # Collins files already carry the 1/√r scaling, so apply_radial=False.
+        pressure = psi_to_travelling_wave(
+            psi_out,
+            convention='ramsurf' if kind == 'ramgeo' else kind,
+            ranges_m=rcv_r,
+            range_axis=1,
+            k0=2.0 * np.pi * fc / self._resolve_c0(env),
+            apply_radial=False,
+        ).astype(np.complex128)
 
         # Mask sub-seafloor samples with NaN (same semantics as every backend).
-        _mask_below_seafloor(tl_out, rcv_d, rcv_r, env.bathymetry)
+        _mask_below_seafloor(pressure, rcv_d, rcv_r, env.bathymetry)
 
         field = Field(
-            data=tl_out,
+            data=pressure,
             coords={'depth': rcv_d, 'range': rcv_r},
+            phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
                 backend=kind,

@@ -12,7 +12,27 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit
+from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry
+
+
+# Which of ``plot_field``'s knobs each of its three render branches reads.
+# Anything a branch does not read is rejected instead of silently dropped.
+_HEATMAP_ONLY = ('vmin', 'vmax', 'cmap', 'show_colorbar', 'contours',
+                 'source', 'receiver')
+_BRANCH_UNUSED = {
+    'heatmap': ('label', 'stack_offset'),
+    'line': _HEATMAP_ONLY + ('stack_offset',),
+    'stacked': _HEATMAP_ONLY + ('label',),
+}
+_BRANCH_DESCRIPTION = {
+    'heatmap': 'a 2-D heatmap',
+    'line': 'a 1-D line cut',
+    'stacked': 'the stacked-traces view',
+}
+
+# Contour-label unit, keyed by ``value``. Linear pressure ('mag', 'real',
+# 'imag') carries no unit, so its labels are bare numbers.
+_CONTOUR_FMT = {'tl': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
 
 
 def plot_field(
@@ -20,6 +40,8 @@ def plot_field(
     ax=None,
     *,
     env: Optional[Environment] = None,
+    source=None,
+    receiver=None,
     value: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -29,7 +51,7 @@ def plot_field(
     figsize: Tuple[float, float] = (10, 5),
     stacked: bool = False,
     stack_offset: Optional[float] = None,
-    show_colorbar: bool = True,
+    show_colorbar: Optional[bool] = None,
     contours: Optional[Sequence[float]] = None,
     **mpl_kw,
 ):
@@ -51,14 +73,19 @@ def plot_field(
         Existing axes; a new figure is made when omitted.
     env : Environment, optional
         Overlays the seafloor on a 2-D ``(depth, range)`` heatmap.
+    source, receiver : Source / Receiver, optional
+        Draw the run geometry over a 2-D ``(depth, range)`` heatmap — same
+        markers ``Environment.plot`` and the ray plotter use.
     value : str
         ``'tl'`` (default, dB), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
         ``'phase'``, ``'real'``, ``'imag'``.
     vmin, vmax : float, optional
-        Colour limits. ``None`` picks an auto-clip for TL.
+        Colour limits (2-D heatmap only). ``None`` picks an auto-clip for TL.
     cmap : str, optional
-        Override the default colormap.
-    title, label : str, optional
+        Override the default colormap (2-D heatmap only).
+    title : str, optional
+    label : str, optional
+        Legend label for the 1-D line cut.
     figsize : tuple
     stacked : bool
         Only valid on a 2-D field that carries a ``'time'`` axis. Plots
@@ -67,6 +94,14 @@ def plot_field(
     stack_offset : float, optional
         Vertical offset between stacked traces. ``None`` picks
         ``2 × max|data|`` for visual separation.
+    show_colorbar : bool, optional
+        Draw the value colorbar (2-D heatmap only). Default ``True``.
+    contours : sequence of float, optional
+        Contour levels drawn over the 2-D heatmap.
+
+    Knobs that the selected branch cannot use are rejected with a
+    :class:`~uacpy.core.exceptions.ConfigurationError` rather than silently
+    dropped — e.g. ``vmin=`` on a field that reduced to one axis.
     """
     if not isinstance(field, Field):
         raise ConfigurationError(
@@ -85,28 +120,50 @@ def plot_field(
                 "plot_field(stacked=True): requires a 2-D field with a "
                 f"'time' axis; got coords {axes_present}"
             )
-        fig, ax_out = _plot_field_stacked(
-            field, arr, axes_present, ax=ax, title=title,
-            figsize=figsize, offset=stack_offset, **mpl_kw,
-        )
+        branch = 'stacked'
     elif n_axes == 1:
-        fig, ax_out = _plot_field_1d(
-            field, arr, value_label, axes_present[0],
-            ax=ax, title=title, label=label, figsize=figsize, **mpl_kw,
-        )
+        branch = 'line'
     elif n_axes == 2:
-        fig, ax_out = _plot_field_2d(
-            field, arr, value_label, axes_present,
-            ax=ax, env=env,
-            vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
-            figsize=figsize, show_colorbar=show_colorbar,
-            contours=contours, **mpl_kw,
-        )
+        branch = 'heatmap'
     else:
         raise ConfigurationError(
             f"plot_field: cannot plot a {n_axes}-axis field (coords "
             f"{axes_present}); slice it first with .at(...) / .isel(...) "
             "so 1 or 2 axes remain."
+        )
+
+    supplied = {'vmin': vmin, 'vmax': vmax, 'cmap': cmap, 'label': label,
+                'show_colorbar': show_colorbar, 'contours': contours,
+                'stack_offset': stack_offset, 'source': source,
+                'receiver': receiver}
+    unused = [k for k in _BRANCH_UNUSED[branch] if supplied[k] is not None]
+    if unused:
+        raise ConfigurationError(
+            f"plot_field: {', '.join(f'{k}=' for k in unused)} has no effect on "
+            f"{_BRANCH_DESCRIPTION[branch]} (coords {axes_present}). "
+            f"{', '.join(f'{k}=' for k in _HEATMAP_ONLY)} apply to the 2-D "
+            "heatmap, label= to the 1-D line cut, stack_offset= to "
+            "stacked=True."
+        )
+
+    if branch == 'stacked':
+        fig, ax_out = _plot_field_stacked(
+            field, arr, axes_present, ax=ax, title=title,
+            figsize=figsize, offset=stack_offset, **mpl_kw,
+        )
+    elif branch == 'line':
+        fig, ax_out = _plot_field_1d(
+            field, arr, value_label, axes_present[0],
+            ax=ax, title=title, label=label, figsize=figsize, **mpl_kw,
+        )
+    else:
+        fig, ax_out = _plot_field_2d(
+            field, arr, value_label, axes_present,
+            ax=ax, env=env, source=source, receiver=receiver,
+            vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
+            figsize=figsize,
+            show_colorbar=True if show_colorbar is None else show_colorbar,
+            contours=contours, **mpl_kw,
         )
     if ax is None:                       # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
@@ -130,10 +187,7 @@ def _plot_field_stacked(
         peak = float(np.max(np.abs(traces))) if traces.size else 1.0
         offset = 2.0 * peak if peak > 0 else 1.0
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     for i, c in enumerate(other_coord):
         ax.plot(time, traces[i] + i * offset, linewidth=0.8, **mpl_kw)
     ax.set_xlabel(_coord_label('time'))
@@ -150,10 +204,7 @@ def _plot_field_1d(
     field, arr, value_label, axis_name,
     *, ax, title, label, figsize, **mpl_kw,
 ):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     coord = field.coords[axis_name]
     vals = np.asarray(arr).ravel()
     if axis_name == 'depth':
@@ -162,7 +213,7 @@ def _plot_field_1d(
         line, = ax.plot(vals, coord, label=label, **mpl_kw)
         ax.set_xlabel(value_label)
         ax.set_ylabel(_coord_label('depth'))
-        ax.invert_yaxis()
+        invert_yaxis_once(ax)
     else:
         # Range / frequency cut: coordinate on X, value on Y. For TL, put the
         # louder (smaller-dB) end at the top.
@@ -171,7 +222,7 @@ def _plot_field_1d(
         ax.set_xlabel(x_label)
         ax.set_ylabel(value_label)
         if value_label == 'TL (dB)':
-            ax.invert_yaxis()
+            invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -185,7 +236,8 @@ def _plot_field_1d(
 
 def _plot_field_2d(
     field, arr, value_label, axes_present,
-    *, ax, env, vmin, vmax, cmap, value, title, figsize,
+    *, ax, env, vmin, vmax, cmap, value, title, figsize, source=None,
+    receiver=None,
     show_colorbar=True, contours=None, **mpl_kw,
 ):
     if axes_present == ['depth', 'range']:
@@ -237,10 +289,7 @@ def _plot_field_2d(
         if cmap is None:
             cmap = get_cmap_for_field('tl')
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
     x_plot, x_label = _coord_axis(x_coord, x_name)
 
@@ -254,14 +303,15 @@ def _plot_field_2d(
     ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label(y_name))
     if y_name == 'depth':
-        ax.invert_yaxis()
+        invert_yaxis_once(ax)
     if contours:
         cs = ax.contour(
             x_plot, y_coord, Z, levels=list(contours),
             colors='black', linewidths=1.5, alpha=0.8,
             linestyles='solid',
         )
-        ax.clabel(cs, inline=True, fontsize=9, fmt='%g dB')
+        ax.clabel(cs, inline=True, fontsize=9,
+                  fmt=_CONTOUR_FMT.get(value, '%g'))
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=value_label,
                      fraction=0.046, pad=0.02)
@@ -272,8 +322,17 @@ def _plot_field_2d(
         pin = _pinned_subtitle(field)
         if pin:
             ax.set_title(pin)
-    if axes_present == ['depth', 'range'] and env is not None:
-        _overlay_seafloor(ax, env, x_coord)
+    if axes_present == ['depth', 'range']:
+        if env is not None:
+            _overlay_seafloor(ax, env, x_coord)
+        if source is not None or receiver is not None:
+            _draw_geometry(ax, source, receiver, max_markersize=6,
+                           source_range_m=float(np.min(x_coord)))
+    elif source is not None or receiver is not None:
+        raise ConfigurationError(
+            "plot_field: source=/receiver= need a (depth, range) heatmap; "
+            f"this field's axes are {axes_present}."
+        )
     return fig, ax
 
 
@@ -340,12 +399,9 @@ def plot_signal_excess(
             vmax = 1.0
 
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
-    r_km = field.coords['range'] / 1000.0
+    r_km, x_label = _coord_axis(field.coords['range'], 'range')
     depths = field.coords['depth']
     im = ax.pcolormesh(
         r_km, depths, Z, vmin=-vmax, vmax=vmax, cmap=cmap,
@@ -363,9 +419,9 @@ def plot_signal_excess(
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='Signal excess (dB)',
                      fraction=0.046, pad=0.02)
-    ax.set_xlabel('Range (km)')
+    ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label('depth'))
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3, zorder=0)
     if title:
         ax.set_title(title)
@@ -434,12 +490,9 @@ def plot_detection_probability(
 
     Z = np.asarray(field.data, dtype=float)
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
-    r_km = field.coords['range'] / 1000.0
+    r_km, x_label = _coord_axis(field.coords['range'], 'range')
     depths = field.coords['depth']
     im = ax.pcolormesh(
         r_km, depths, Z, vmin=0.0, vmax=1.0, cmap=cmap,
@@ -460,9 +513,9 @@ def plot_detection_probability(
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='Probability of detection',
                      fraction=0.046, pad=0.02)
-    ax.set_xlabel('Range (km)')
+    ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label('depth'))
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3, zorder=0)
     if title:
         ax.set_title(title)
@@ -505,10 +558,7 @@ def compare(
             f"({len(fields)})"
         )
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     if labels is None:
         labels = [getattr(f, 'model', '') or f"#{i}" for i, f in enumerate(fields)]
     common_axis = None
@@ -543,12 +593,12 @@ def compare(
     if common_axis == 'depth':
         ax.set_ylabel(_coord_label(common_axis))
         ax.set_xlabel(vlabel)
-        ax.invert_yaxis()
+        invert_yaxis_once(ax)
     else:
         ax.set_xlabel(x_label)
         ax.set_ylabel(vlabel)
         if value == 'tl':
-            ax.invert_yaxis()
+            invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     ax.legend()
     if title:
@@ -583,7 +633,7 @@ def compare_models(
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    suptitle: Optional[str] = None,
+    title: Optional[str] = None,
     ncols: Optional[int] = None,
     contours: Optional[Sequence[float]] = None,
 ):
@@ -593,8 +643,9 @@ def compare_models(
     used as the per-axes title), or a ``{label: Field}`` dict. Shared
     colour scale; one colorbar per axes.
 
-    ``ncols`` controls the grid width — defaults to ``n`` (single row).
-    ``contours`` adds dB-level contour lines to every panel.
+    ``title`` titles the whole figure; the per-panel titles come from
+    ``labels``. ``ncols`` controls the grid width — defaults to ``n`` (single
+    row). ``contours`` adds dB-level contour lines to every panel.
     """
     if isinstance(fields, dict):
         if labels is None:
@@ -654,27 +705,28 @@ def compare_models(
     for ax in axes_flat[n:]:
         ax.axis('off')
 
-    top = 0.90 if suptitle else 0.95
+    top = 0.90 if title else 0.95
     fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=0.08,
                         wspace=0.22, hspace=0.30)
     if im_last is not None:
         cbar_label = 'TL (dB)' if value == 'tl' else value
         cbar_ax = fig.add_axes([0.905, 0.08, 0.015, top - 0.08])
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=14, fontweight='bold', y=0.97)
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
     _draw_multi_model_credit(fig, fields)
     return fig, axes_flat
 
 
-def plot_field_stack(stack, env: Optional[Environment] = None, *,
-                     ncols: Optional[int] = None,
-                     figsize: Optional[Tuple[float, float]] = None, **kwargs):
+def _plot_field_stack(stack, env: Optional[Environment] = None, *,
+                      ncols: Optional[int] = None,
+                      title: Optional[str] = None,
+                      figsize: Optional[Tuple[float, float]] = None, **kwargs):
     """Grid of TL panels, one per slab of a Field :class:`ResultStack`.
 
     Each panel is a :func:`plot_field` heatmap titled by the slab's stacking
-    coordinate (e.g. ``source_depth=20``). Extra kwargs forward to
-    :func:`plot_field`.
+    coordinate (e.g. ``source_depth=20``); ``title`` titles the whole figure.
+    Extra kwargs forward to :func:`plot_field`.
     """
     n = len(stack)
     ncols = ncols or min(n, 3)
@@ -688,5 +740,7 @@ def plot_field_stack(stack, env: Optional[Environment] = None, *,
     for j in range(n, len(flat)):
         flat[j].axis('off')
     fig.tight_layout()
+    if title:
+        fig.suptitle(title, fontweight='bold')
     _draw_result_credit(fig, stack.slabs[0], env=env)
     return fig, axes

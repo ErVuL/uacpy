@@ -1,11 +1,8 @@
 """Shared input guard for the spectral/time-frequency estimators.
 
-The constant-Q family rejects NaN/Inf input up front (``constant_q._cq_setup``)
-because a single bad sample silently contaminates its averaged output. The
-classic Welch/STFT/cepstral estimators historically did **not**, so one NaN
-would propagate into an all-NaN (or partially-NaN) result with no error. This
-helper gives them the same typed guard so the behaviour is consistent across
-the toolkit.
+Rejects empty and NaN/Inf input with a typed ConfigurationError, so every
+spectral, time-frequency and constant-Q estimator fails the same way instead of
+propagating a single bad sample into an all-NaN result.
 """
 
 import numpy as np

@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
-from uacpy.core.results._base import Result, _complex_to_db
+from uacpy.core.results._base import PhaseReference, Result, _complex_to_db
 
 # Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
 # too-high sample_rate (or a too-fine frequency grid) can silently demand a
@@ -25,6 +25,39 @@ _MAX_SYNTHESIS_NFFT = 1 << 26
 # endpoints, so at 2 bins the window is [0, 0] and at 3 it is [0, 1, 0] — a
 # taper there does not soften the edges, it deletes the band.
 _MIN_TAPERABLE_BINS = 4
+
+_WINDOWS = ('hann', 'hamming', 'blackman', 'tukey', 'none')
+
+
+def _taper(name: str, n: int, *, who: str, stacklevel: int = 4) -> np.ndarray:
+    """Edge taper of ``n`` samples, shared by the tone extractor and the IFFT.
+
+    Returns a flat window for ``'none'`` and for a span too short to keep an
+    interior (warning in the latter case)."""
+    if name not in _WINDOWS:
+        raise ConfigurationError(
+            f"{who}: unknown window={name!r}; "
+            f"valid: {', '.join(repr(w) for w in _WINDOWS)}"
+        )
+    if name == 'none':
+        return np.ones(n)
+    if n < _MIN_TAPERABLE_BINS:
+        warnings.warn(
+            f"{who}: a {n}-sample span is too narrow to taper (a {name!r} "
+            f"window needs at least {_MIN_TAPERABLE_BINS} samples to leave an "
+            f"interior); continuing untapered. Widen the span for a resolved "
+            f"result.",
+            UserWarning, stacklevel=stacklevel,
+        )
+        return np.ones(n)
+    if name == 'hann':
+        return np.hanning(n)
+    if name == 'hamming':
+        return np.hamming(n)
+    if name == 'blackman':
+        return np.blackman(n)
+    from scipy.signal import windows
+    return windows.tukey(n, alpha=0.5)
 
 
 class Field(Result):
@@ -152,8 +185,8 @@ class Field(Result):
         """
         return {
             'kind': self.kind,
-            'data': self.data,
-            'coords': {k: v for k, v in self.coords.items()},
+            'data': self.data.copy(),
+            'coords': {k: v.copy() for k, v in self.coords.items()},
             'pinned': dict(self.pinned),
             'model': self.model,
             'backend': self.backend,
@@ -197,7 +230,9 @@ class Field(Result):
         """Transmission loss in dB at ``data.shape``.
 
         ``-20·log10(|data|)`` if data is complex, otherwise ``data``
-        returned as-is (real data is taken to be already in dB).
+        itself (real data is taken to be already in dB) as a **read-only
+        view** — the dB values are the field, so mutating them in place
+        would corrupt the result.
 
         Raises :class:`AttributeError` for ``kind='time_series'`` —
         a time-domain trace is not transmission loss; use ``.data`` to
@@ -211,7 +246,9 @@ class Field(Result):
             )
         if self.is_complex:
             return _complex_to_db(self.data)
-        return np.asarray(self.data, dtype=float)
+        view = np.asarray(self.data, dtype=float).view()
+        view.flags.writeable = False
+        return view
 
     @property
     def p(self) -> np.ndarray:
@@ -357,13 +394,10 @@ class Field(Result):
         new_source_depths = (
             np.array([pinned['source_depth']], dtype=float)
             if 'source_depth' in pinned_now else self.source_depths)
-        if coords:
-            id_kwargs = self.id_kwargs()
-            id_kwargs['frequencies'] = new_frequencies
-            id_kwargs['source_depths'] = new_source_depths
-            return Field(data=data, coords=coords, pinned=pinned, **id_kwargs)
-        return self._spawn_scalar(
-            data, pinned, new_frequencies, new_source_depths)
+        id_kwargs = self.id_kwargs()
+        id_kwargs['frequencies'] = new_frequencies
+        id_kwargs['source_depths'] = new_source_depths
+        return Field(data=data, coords=coords, pinned=pinned, **id_kwargs)
 
     def max(self) -> "Field":
         """Slice at the loudest field point.
@@ -427,46 +461,15 @@ class Field(Result):
             np.array([new_pinned['source_depth']], dtype=float)
             if 'source_depth' in idx_map else self.source_depths
         )
-        if new_coords:
-            id_kwargs = self.id_kwargs()
-            id_kwargs['frequencies'] = new_frequencies
-            id_kwargs['source_depths'] = new_source_depths
-            return Field(
-                data=new_data,
-                coords=new_coords,
-                pinned=new_pinned,
-                **id_kwargs,
-            )
-        return self._spawn_scalar(
-            new_data, new_pinned, new_frequencies, new_source_depths,
+        id_kwargs = self.id_kwargs()
+        id_kwargs['frequencies'] = new_frequencies
+        id_kwargs['source_depths'] = new_source_depths
+        return Field(
+            data=new_data,
+            coords=new_coords,
+            pinned=new_pinned,
+            **id_kwargs,
         )
-
-    def _spawn_scalar(
-        self, new_data, new_pinned, frequencies=None, source_depths=None,
-    ) -> "Field":
-        # Scalar Field: data is 0-D, coords empty. Re-enter via __init__
-        # by re-adding a phantom singleton coord, then immediately
-        # dropping it — simpler: bypass the dict size check by allowing
-        # empty coords here. We do so by constructing a Field via a
-        # private path.
-        f = Field.__new__(Field)
-        Result.__init__(
-            f,
-            model=self.model,
-            backend=self.backend,
-            source_depths=(
-                source_depths if source_depths is not None
-                else self.source_depths
-            ),
-            frequencies=frequencies,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
-        )
-        f.coords = {}
-        f.data = np.asarray(new_data)
-        f.pinned = new_pinned
-        return f
 
     def to_tl(self) -> "Field":
         """Return a real-dB Field via ``-20·log10(|data|)``.
@@ -483,9 +486,10 @@ class Field(Result):
 
     def id_kwargs(self) -> dict:
         """Identification fields (model, backend, source depths, frequencies,
-        phase reference, metadata) as a kwargs dict, for cloning them onto a
-        :class:`Field` derived from this one. Public so downstream toolkits
-        (e.g. :mod:`uacpy.sonar`) can carry provenance without hand-copying."""
+        phase reference, metadata) as a kwargs dict, for cloning
+        them onto a :class:`Field` derived from this one. Public so downstream
+        toolkits (e.g. :mod:`uacpy.sonar`) can carry provenance without
+        hand-copying."""
         return dict(
             model=self.model,
             backend=self.backend,
@@ -788,28 +792,22 @@ class Field(Result):
                 "['depth', 'range', 'time'] coords; got "
                 f"{list(self.coords)}"
             )
-        if window == 'hann':
-            win = np.hanning(self.n_times)
-        elif window == 'hamming':
-            win = np.hamming(self.n_times)
-        elif window == 'blackman':
-            win = np.blackman(self.n_times)
-        elif window == 'none':
-            win = np.ones(self.n_times)
-        else:
-            raise ConfigurationError(
-                f"Field.extract_tone: unknown window={window!r}"
-            )
+        win = _taper(window, self.n_times, who='Field.extract_tone',
+                     stacklevel=3)
         windowed = self.data * win
         spec = np.fft.rfft(windowed, axis=-1)
         freqs = np.fft.rfftfreq(self.n_times, self.dt)
         k = int(np.argmin(np.abs(freqs - frequency)))
         amp = 2.0 * spec[..., k] / np.sum(win)
+        # The recovered tone is the identity of the returned Field, not the
+        # time-domain parent's frequency list.
+        id_kwargs = self.id_kwargs()
+        id_kwargs['frequencies'] = np.array([float(freqs[k])])
         return Field(
             data=amp,
             coords={'depth': self.coords['depth'], 'range': self.coords['range']},
             pinned={**self.pinned, 'frequency': float(freqs[k])},
-            **self.id_kwargs(),
+            **id_kwargs,
         )
 
 
@@ -834,11 +832,11 @@ class ResultStack:
     ``model``, and ``backend``, and the same identification along
     every axis *except* the stacking axis.
 
-    For gridded results, prefer adding the varying axis to
-    :class:`Field` ``coords`` instead (e.g. multi-source TL as a Field
-    with ``coords={'source_depth', 'depth', 'range'}``); this stack is
-    intended for non-Field results (multi-source ``Rays`` /
-    ``Arrivals``).
+    This is what a multi-source run returns, for gridded (``Field``) and
+    sparse (``Rays`` / ``Arrivals``) results alike. Consumers that need one
+    dense array — matched-field processing, say — accept either this stack or
+    a single :class:`Field` carrying the varying axis in ``coords`` (e.g.
+    ``coords={'source_depth', 'depth', 'range'}``).
 
     Construction
     ------------
@@ -884,21 +882,20 @@ class ResultStack:
 
         first = slabs[0]
 
-        def _arrays_equal(a, b):
-            if a is None and b is None:
-                return True
+        def _equal(a, b):
             if a is None or b is None:
-                return False
-            a = np.asarray(a)
-            b = np.asarray(b)
-            return a.shape == b.shape and np.array_equal(a, b)
+                return a is None and b is None
+            if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+                a = np.asarray(a)
+                b = np.asarray(b)
+                return a.shape == b.shape and np.array_equal(a, b)
+            return bool(a == b)
 
         for attr in shared_attrs:
             ref = getattr(first, attr, None)
-            eq = _arrays_equal if isinstance(ref, np.ndarray) else (lambda a, b: a == b)
             for i, s in enumerate(slabs[1:], start=1):
                 val = getattr(s, attr, None)
-                if not eq(ref, val):
+                if not _equal(ref, val):
                     raise ConfigurationError(
                         f"ResultStack: slabs[0].{attr}={ref!r} but "
                         f"slabs[{i}].{attr}={val!r} — every slab must "
@@ -928,7 +925,9 @@ class ResultStack:
 
     @property
     def metadata(self) -> Dict[str, Any]:
-        return self.slabs[0].metadata
+        """Metadata of the first slab, as a copy. Slabs are not required to
+        agree on metadata — read a specific slab's dict via ``stack[i]``."""
+        return dict(self.slabs[0].metadata)
 
     def __len__(self) -> int:
         return self.n_slabs
@@ -980,11 +979,18 @@ class ResultStack:
         ``(n_slabs, *slab.tl.shape)`` — so generic code can read ``result.tl``
         whether one or many source depths were requested. Requires Field slabs.
         """
-        if not hasattr(self.slabs[0], 'tl'):
+        first = self.slabs[0]
+        if not isinstance(first, Field):
             raise ConfigurationError(
                 f"ResultStack.tl: slabs are {self.slab_type.__name__}, not "
                 f"Field — no transmission loss. Pick a slab with stack[i] or "
                 f"stack.at({self.coordinate_name}=...)."
+            )
+        if first.kind == 'time_series':
+            raise ConfigurationError(
+                "ResultStack.tl: time-domain slabs are not transmission loss; "
+                "read the samples via stack[i].data, or recover a complex "
+                "narrowband field first with stack[i].extract_tone(f)."
             )
         return np.stack([s.tl for s in self.slabs], axis=0)
 
@@ -1028,12 +1034,12 @@ def _ifft_to_trace(
     the source sampling interval); ``None`` synthesizes the
     band-limited impulse response.
 
-    Places each model frequency at bin ``round(f/df)`` (with df capped at
-    1 Hz for a ≥ 1-second window); when ``df`` is finer than the data
-    spacing, demodulates by ``r/c0`` so the spectrum can be interpolated
-    in baseband without ghost echoes, then re-modulates to land the
-    arrival at the requested ``t_start``. Always sizes ``nfft`` so the
-    largest frequency bin sits below Nyquist.
+    Places each model frequency at bin ``round(f / Δf)`` with
+    ``Δf = f[1] - f[0]``, so the record length is exactly ``1/Δf`` — a longer
+    record requires a finer frequency grid, not a larger ``nfft``. The
+    frequency axis must therefore be uniformly spaced and ascending. An
+    auto-sized ``nfft`` always keeps the largest data bin below Nyquist; an
+    explicit ``nfft`` that would not is rejected.
     """
     data = tf.data                                # (n_d, n_r, n_f)
     freqs = np.asarray(tf.coords['frequency'], dtype=float)
@@ -1079,8 +1085,21 @@ def _ifft_to_trace(
     df_data = float(freqs[1] - freqs[0])
     df = df_data
 
+    # Bin placement presumes a uniform ascending grid: off one, frequencies
+    # land at the wrong bins and can collide (the later value overwrites).
+    spacings = np.diff(freqs)
+    if df <= 0 or not np.allclose(spacings, df, rtol=1e-6, atol=0.0):
+        raise ConfigurationError(
+            f"_ifft_to_trace: the frequency axis must be uniformly spaced and "
+            f"ascending; spacing runs from {spacings.min():.6g} Hz to "
+            f"{spacings.max():.6g} Hz against a leading Δf of {df:.6g} Hz. "
+            f"Resample H(f) onto an equispaced grid before synthesising.",
+            remediation="Run the model on an equispaced frequencies= array.",
+        )
+
     bin_indices = np.floor(freqs / df + 0.5).astype(int)
     max_bin = int(bin_indices[-1])
+    explicit_nfft = nfft is not None
 
     if nfft is None:
         nfft_min = max(int(tf.metadata.get('n_samples', 0)) or 0, 4 * n_freq)
@@ -1102,45 +1121,28 @@ def _ifft_to_trace(
                 remediation="A typical fix is a smaller sample_rate.",
             )
 
-    if window not in ('hann', 'hamming', 'blackman', 'tukey', 'none'):
+    if explicit_nfft and max_bin >= nfft // 2:
         raise ConfigurationError(
-            f"_ifft_to_trace: unknown window={window!r}; "
-            "valid: 'hann', 'hamming', 'blackman', 'tukey', 'none'"
+            f"_ifft_to_trace: nfft={nfft} puts the highest data bin "
+            f"({max_bin}, {freqs[-1]:.6g} Hz at Δf = {df:.6g} Hz) at or above "
+            f"Nyquist (bin {nfft // 2}); those bins fold into the "
+            f"negative-frequency half and alias onto the wrong frequencies. "
+            f"Use nfft >= {2 * max_bin + 2}, or drop nfft= to size it "
+            f"automatically.",
+            remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
         )
-    if window != 'none' and n_freq < _MIN_TAPERABLE_BINS:
-        # The taper softens the band *edges*; below this there is no interior
-        # left to keep. np.hanning(2) is [0, 0] and np.hanning(3) is [0, 1, 0],
-        # so tapering would return silence or a single-bin CW tone rather than
-        # an impulse response.
-        warnings.warn(
-            f"_ifft_to_trace: {n_freq}-bin band is too narrow to taper "
-            f"(a {window!r} window needs at least {_MIN_TAPERABLE_BINS} bins "
-            f"to leave an interior); continuing untapered. Widen the band or "
-            f"pass more frequencies for a resolved impulse response.",
-            UserWarning, stacklevel=3,
-        )
-        win = np.ones(n_freq)
-    elif window == 'hann':
-        win = np.hanning(n_freq)
-    elif window == 'hamming':
-        win = np.hamming(n_freq)
-    elif window == 'blackman':
-        win = np.blackman(n_freq)
-    elif window == 'tukey':
-        from scipy.signal import windows
-        win = windows.tukey(n_freq, alpha=0.5)
-    else:
-        win = np.ones(n_freq)
+
+    win = _taper(window, n_freq, who='_ifft_to_trace', stacklevel=4)
 
     dt = 1.0 / (nfft * df)
 
     if t_start is None:
         T_window = nfft * dt
         lead = min(0.5 * T_window, 0.25)
-        anchor_speed = float(tf.metadata.get(
-            'c_min',
-            tf.metadata.get('c0', DEFAULT_SOUND_SPEED),
-        ))
+        anchor_speed = float(
+            tf.metadata.get('c_min') or tf.metadata.get('c0')
+            or DEFAULT_SOUND_SPEED
+        )
         t_start = max(0.0, actual_range / anchor_speed - lead)
 
     spectrum = spectrum * win
@@ -1150,7 +1152,9 @@ def _ifft_to_trace(
     padded = np.zeros(nfft, dtype=complex)
 
     spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
-    valid = (bin_indices >= 0) & (bin_indices < nfft)
+    # Only the positive-frequency half is physical here: 2·Re(ifft) folds
+    # anything at or above Nyquist onto the wrong frequency.
+    valid = (bin_indices >= 0) & (bin_indices < nfft // 2)
     padded[bin_indices[valid]] = spectrum[valid]
 
     # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
@@ -1165,7 +1169,8 @@ def _ifft_to_trace(
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
-        phase_reference=tf.phase_reference,
+        # The payload is p(t) from here on, whatever convention H(f) carried.
+        phase_reference=PhaseReference.TIME_DOMAIN_NATIVE,
         model_source=tf.model_source,
         # Carry the source Field's metadata forward (output paths attached
         # under a pinned work_dir, c0/c_min, …) — every other derived-Field
@@ -1257,7 +1262,6 @@ def _synthesize_time_series(
         # t_dur evaluate as < when they should be ==. Real wraparound
         # has t_dft short by *many* samples.
         if t_dft < t_dur - 1.0 / float(sample_rate):
-            import warnings
             warnings.warn(
                 f"synthesize_time_series: DFT period 1/Δf = {t_dft:.4f}s "
                 f"is shorter than the source-waveform duration "
@@ -1302,12 +1306,10 @@ def _synthesize_time_series(
     # arrivals for ranges further out than the window can hold wrap back
     # into early bins (DFT periodicity) — flag it rather than alias silently.
     if n_r > 1 and time_vec is not None and time_vec.size > 1:
-        c0 = float(tf.metadata.get('c0', DEFAULT_SOUND_SPEED) or
-                   DEFAULT_SOUND_SPEED)
+        c0 = float(tf.metadata.get('c0') or DEFAULT_SOUND_SPEED)
         span_s = float(ranges.max() - ranges.min()) / c0
         window_s = float(time_vec[-1] - time_vec[0])
         if span_s > window_s:
-            import warnings
             warnings.warn(
                 f"synthesize_time_series: the receiver range span "
                 f"({ranges.max() - ranges.min():.0f} m ≈ {span_s:.2f}s of "
@@ -1325,7 +1327,8 @@ def _synthesize_time_series(
         backend=tf.backend,
         source_depths=tf.source_depths,
         frequencies=tf.frequencies,
-        phase_reference=tf.phase_reference,
+        # The payload is p(t) from here on, whatever convention H(f) carried.
+        phase_reference=PhaseReference.TIME_DOMAIN_NATIVE,
         model_source=tf.model_source,
         # Carry the source Field's metadata forward (see _ifft_to_trace).
         metadata={**dict(tf.metadata),

@@ -102,8 +102,7 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
     fs = float(sample_rate)
     if n_samples is None:
         n_samples = 2 * (f.size - 1) if f.size > 1 else 2
-    n_rfft = n_samples // 2 + 1
-    grid = np.linspace(0.0, fs / 2.0, n_rfft)
+    grid = np.fft.rfftfreq(int(n_samples), d=1.0 / fs)
     Hr = (np.interp(grid, f, Hc.real, left=0.0, right=0.0)
           + 1j * np.interp(grid, f, Hc.imag, left=0.0, right=0.0))
     h = np.fft.irfft(Hr, n=n_samples)

@@ -15,7 +15,7 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, PhaseReference
+from uacpy.core.results import Field, Modes, PhaseReference
 from uacpy.models.sources import model_source
 
 _FREQS = np.linspace(100.0, 300.0, 32)
@@ -163,3 +163,90 @@ def test_environment_plot_accepts_title():
     env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
     fig, ax = env.plot(title='My environment')
     assert ax.get_title() == 'My environment'
+
+
+# ── env= governs the plotted depth extent ────────────────────────────────────
+
+def _tl_field(max_depth=20.0):
+    """A (depth, range) TL field whose receiver grid stops above the seabed."""
+    z = np.linspace(1.0, max_depth, 12)
+    r = np.linspace(1.0, 2000.0, 20)
+    rng = np.random.default_rng(0)
+    return Field(
+        data=60.0 + 10.0 * rng.random((z.size, r.size)),
+        coords={'depth': z, 'range': r},
+        model='Synthetic', frequencies=np.array([1000.0]),
+    )
+
+
+def test_env_extends_depth_axis_to_the_seabed():
+    """A receiver grid ending above the seafloor still plots the full water
+    column once the environment is supplied."""
+    env = uacpy.Environment(bathymetry=30.0, ssp=1500.0)
+    fig, ax = _tl_field().plot(env=env)
+    assert max(ax.get_ylim()) > 30.0
+
+
+def test_without_env_the_plot_spans_only_the_data():
+    """A result carries no environment, so on its own it can only span the
+    grid it was sampled on."""
+    fig, ax = _tl_field().plot()
+    assert max(ax.get_ylim()) < 21.0
+
+
+def test_env_on_a_view_that_cannot_use_it_raises():
+    """Silently swallowing env= would look like it had an effect."""
+    modes = Modes(
+        k=np.array([0.4, 0.3, 0.2]) + 0j,
+        phi=np.random.default_rng(0).random((8, 3)),
+        depths=np.linspace(0.0, 100.0, 8),
+        model='Synthetic', frequencies=np.array([100.0]),
+    )
+    with pytest.raises(ConfigurationError, match='env='):
+        modes.plot(env=uacpy.Environment(bathymetry=100.0, ssp=1500.0))
+
+
+# ── depth-axis inversion is idempotent under ax= composition ─────────────────
+
+def test_repeated_plots_into_one_ax_keep_depth_pointing_down():
+    """``invert_yaxis`` toggles; ``ax=`` is the documented overlay hook."""
+    f = _tl_field()
+    fig, ax = plt.subplots()
+    f.at(range=1.0).plot(ax=ax)
+    f.at(range=2000.0).plot(ax=ax)
+    assert ax.yaxis_inverted()
+
+
+# ── source= / receiver= geometry on a TL heatmap ─────────────────────────────
+
+def _geometry():
+    src = uacpy.Source(depths=20.0, frequencies=1000.0)
+    rcv = uacpy.Receiver(depths=np.linspace(1.0, 20.0, 12),
+                         ranges=np.linspace(1.0, 2000.0, 20))
+    return src, rcv
+
+
+def test_plot_field_draws_source_and_receiver():
+    """The same geometry ``env.plot`` and the ray plotter draw is available on
+    a TL heatmap."""
+    src, rcv = _geometry()
+    env = uacpy.Environment(bathymetry=30.0, ssp=1500.0)
+    bare = _tl_field().plot(env=env)[1]
+    with_geom = _tl_field().plot(env=env, source=src, receiver=rcv)[1]
+    assert len(with_geom.lines) > len(bare.lines)
+
+
+def test_geometry_markers_land_at_the_source_depth():
+    src, rcv = _geometry()
+    fig, ax = _tl_field().plot(source=src)
+    ys = [float(ln.get_ydata()[0]) for ln in ax.lines if len(ln.get_ydata())]
+    assert any(abs(y - 20.0) < 1e-9 for y in ys)
+
+
+@pytest.mark.parametrize('kwargs', [{'source': True}, {'receiver': True}])
+def test_geometry_on_a_1d_cut_is_rejected_not_ignored(kwargs):
+    src, rcv = _geometry()
+    real = {'source': src, 'receiver': rcv}
+    key = next(iter(kwargs))
+    with pytest.raises(ConfigurationError, match=f'{key}='):
+        _tl_field().at(depth=10.0).plot(**{key: real[key]})

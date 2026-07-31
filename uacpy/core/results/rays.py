@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
@@ -68,7 +69,7 @@ class Arrivals(Result):
     of origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell
     runs can be filtered back to one cell if needed.
 
-    Mirrors the :class:`Rays` API surface: filter / chain / table.
+    Mirrors the :class:`Rays` API surface: filter / chain / sort.
     """
     field_type = "arrivals"
 
@@ -131,15 +132,6 @@ class Arrivals(Result):
                         })
         return out
 
-    # Plot helpers — :func:`uacpy.visualization.plots._plot_arrivals` uses these.
-    @property
-    def depths(self) -> np.ndarray:
-        return self.receiver_depths
-
-    @property
-    def ranges(self) -> np.ndarray:
-        return self.receiver_ranges
-
     def __len__(self) -> int:
         return len(self.arrivals)
 
@@ -183,9 +175,9 @@ class Arrivals(Result):
             backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
             model_source=self.model_source,
-            metadata={k: v for k, v in self.metadata.items()
-                      if k != 'arrivals_by_receiver'},
+            metadata=dict(self.metadata),
         )
 
     def filter(self, predicate) -> 'Arrivals':
@@ -329,7 +321,6 @@ class Rays(Result):
         if self.rays and not any(
             'n_top_bounces' in r or 'n_bot_bounces' in r for r in self.rays
         ):
-            import warnings
             warnings.warn(
                 "Rays.filter_by_bounces: rays carry no bounce counts "
                 "(binary .ray files don't store them) — every ray "
@@ -352,7 +343,6 @@ class Rays(Result):
     ) -> 'Rays':
         """Keep rays whose launch angle ``alpha`` is within ``[min_deg, max_deg]``."""
         if self.rays and not any('alpha' in r for r in self.rays):
-            import warnings
             warnings.warn(
                 "Rays.filter_by_launch_angle: rays carry no launch "
                 "angles (binary .ray files don't store them) — the "
@@ -514,6 +504,7 @@ class Rays(Result):
             backend=self.backend,
             source_depths=self.source_depths,
             frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
             model_source=self.model_source,
             metadata=dict(self.metadata),
         )

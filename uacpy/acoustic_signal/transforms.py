@@ -220,9 +220,9 @@ def inverse_fk(FK):
     """
     if FK is None:
         raise ConfigurationError(
-            "inverse_fk: spectrum is None — an averaged f-k panel (nperseg<nt) "
-            "has no phase and cannot be inverted. Re-run fk_transform with "
-            "nperseg=None for an invertible spectrum.")
+            "inverse_fk: spectrum is None — an f-k panel averaged over more "
+            "than one segment has no phase and cannot be inverted. Re-run "
+            "fk_transform with nperseg=None for an invertible spectrum.")
     if isinstance(FK, tuple):
         raise ConfigurationError(
             "inverse_fk: pass the complex spectrum (the .spectrum field / 4th "
@@ -242,13 +242,14 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     wavenumber ``k = 2π·ν`` in **rad/m** (the package-wide ``k = ω/c``
     convention), so a wave of speed ``c`` sits on the line ``ω = c·k``.
     ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``normalize=True``
-    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. With
-    ``nperseg=None`` the whole record is one
-    segment and ``spectrum`` is the complex (fftshifted) panel for
-    :func:`inverse_fk`. With ``nperseg < nt`` the time axis is split into
-    overlapping segments, ``|FK|^2`` is averaged across them (variance ~1/sqrt(N);
-    a single-snapshot f-k panel is an inconsistent estimator), and ``spectrum`` is
-    ``None`` — an averaged power panel has no single phase and is not invertible.
+    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. Whenever the
+    settings yield a single segment (``nperseg=None``, i.e. the whole record, or
+    an ``nperseg``/``noverlap`` pair that fits only one block) ``spectrum`` is
+    that segment's complex (fftshifted) panel for :func:`inverse_fk`. With
+    several segments the time axis is split into overlapping blocks, ``|FK|^2``
+    is averaged across them (variance ~1/sqrt(N); a single-snapshot f-k panel is
+    an inconsistent estimator), and ``spectrum`` is ``None`` — an averaged power
+    panel has no single phase and is not invertible.
 
     Parameters
     ----------
@@ -309,5 +310,5 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     # the package-wide convention k = ω/c used by the models: a wave of speed c
     # lies on the line ω = c·k (i.e. f = c·k/2π — the acoustic "sound cone").
     wavenumbers = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
-    spectrum = last_spectrum if nperseg is None else None
+    spectrum = last_spectrum if n_seg == 1 else None
     return FKResult(freqs, wavenumbers, power, spectrum)

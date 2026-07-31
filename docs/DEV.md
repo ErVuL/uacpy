@@ -6,7 +6,6 @@ extending or modifying any of them. It is a complement to:
 
 - `README.md` — user-facing intro + quick start.
 - `DOCUMENTATION.md` — public API reference (signatures, kwargs, units).
-- `CLAUDE.md` — high-density architectural notes for AI assistants.
 
 If you want to add a model, hook a new I/O format, or change shared
 plumbing, start here.
@@ -25,6 +24,9 @@ uacpy/
     ├── core/                Physics-agnostic dataclasses + invariants
     ├── models/              One PropagationModel subclass per engine
     ├── io/                  File-format readers/writers + FileManager
+    ├── data/                External-data fetch layer (GPS → Environment)
+    ├── comms/               Underwater communications (modem PHY, JANUS)
+    ├── sonar/               Sonar equation, reverberation, detection, MFP
     ├── acoustic_signal/     psd/ppsd/sel, fk_transform/taup/radon, spectrogram, FRF
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_bottom_properties / … (+ result.plot())
@@ -286,7 +288,7 @@ These are the physics-agnostic primitives every model consumes:
     one node, so it stands in for a single boundary everywhere.
 - `source.py` / `receiver.py` — `Source(depths, frequencies)`,
   `Receiver(depths, ranges)` (input param carriers; no grid-library slicing).
-- `results.py` — `Result` base + `Field`, `Arrivals`, `Rays`, `Modes`,
+- `results/` — `Result` base (`_base.py`) + `Field`, `Arrivals`, `Rays`, `Modes`,
   `Covariance`, `Replicas`, `ReflectionCoefficient`, plus
   `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /
   `'time_domain_native'`).
@@ -395,7 +397,7 @@ objects (typically `Field`) or raw arrays.
   `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
   `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
 - `noise/noise.py` — `compute_windnoise`, Wenz curves, ship noise.
-- `visualization/plots.py` — every result/carrier plots via `.plot()`,
+- `visualization/plots/` — every result/carrier plots via `.plot()`,
   which dispatches through `plot_result(result, env=…)` to the private
   per-type renderers (`_plot_rays`, `_plot_arrivals`, `_plot_mode_functions`,
   `_plot_environment`, `_plot_ssp`, …). Public free functions remain for the
@@ -427,7 +429,7 @@ Module map (one per concern):
 - `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` core
   dep, lazy-imported; needs a free Copernicus account + `copernicusmarine login`).
 - `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
-- `seabed.py` / `lithology.py` — EMODnet (CC-BY) and Dutkiewicz (CC-BY-NC) bottom.
+- `seabed.py` — EMODnet (CC-BY) and Diesing (CC-BY) seabed substrate.
 - `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
 - `environment.py` — `fetch_environment(...)`, the orchestrator + dispatch.
 
@@ -478,8 +480,8 @@ carriers (`_aggregate_data_sources`, dedup by `r.source.id`) into
 un-stamped layer's bare catalogue id in `DataProvenance(source=…)` so the tuple
 stays uniform. `uacpy.data.citations(env)` (or a carrier, id, `DataSource`, or
 `DataProvenance`) renders the licence/attribution/citation plus the fetched
-date/coords. Non-commercial sources (Dutkiewicz) emit a runtime `UserWarning`
-whenever fetched, so they are never returned silently.
+date/coords. Non-commercial / unlicensed sources (currently CRUST1.0) emit a
+runtime `UserWarning` whenever fetched, so they are never returned silently.
 
 ---
 
@@ -497,7 +499,10 @@ Markers (registered in `pyproject.toml`):
 - `slow` — long broadband or large-grid runs.
 - `requires_binary` — needs a compiled native binary under `uacpy/bin/`.
 - `requires_oases` — needs OASES binaries (separate install).
-- `integration` — multi-subsystem end-to-end.
+- `requires_network` — hits a live external service (`uacpy.data`
+  fetchers); deselected by default via `addopts`.
+- `benchmark` — validates output against a closed-form analytic or
+  canonical published reference.
 
 `tests/conftest.py` autouse fixtures: force `matplotlib.use("Agg")`,
 seed `numpy.random` to `0xACED`, close all figures after each test,
@@ -511,9 +516,10 @@ flake8 uacpy/ --exclude=uacpy/third_party,uacpy/uacpy/third_party \
 ```
 
 CI runs on Ubuntu + Python 3.12 + `--bellhop cxx --oases yes`. macOS,
-WSL, Python 3.10/3.11/3.13, the CUDA build, and the no-OASES partial
-install are advertised but not validated by CI — test locally before
-submitting patches that touch those paths.
+WSL, Python 3.13, the CUDA build, and the no-OASES partial install are
+advertised but not validated by CI — test locally before submitting
+patches that touch those paths. (`requires-python` is `>=3.12`; 3.10 and
+3.11 are not supported.)
 
 ---
 
@@ -525,9 +531,11 @@ UACPY vendors:
   Bounce (Porter, NRL/HLS).
 - `oases/` — Schmidt's OASES family. Academic license, **not**
   redistributable; `install.sh --oases yes` downloads it on demand.
-- `mpiramS/` — Lytaev's MPI-parallel RAM-S branch.
-- `rams0.5/`, `ramsurf1.5/` — Collins's elastic + variable-surface RAM
-  variants.
+- `mpiramS/` — Dushaw's MPI-parallel broadband RAM (CC-BY-4.0).
+- `ramsurf/` — Collins's RAM family: `rams0.5.f` (elastic) and
+  `ramsurf1.5.f` (variable sea surface).
+- `ramgeo/` — Collins's RAMGEO range-dependent layered-fluid PE.
+- `bellhopcuda/` — git submodule pinned to upstream `v1.5`, unmodified.
 - `arlpy/` — partial vendor of arlpy.uwa (BSD-3-Clause). See
   `third_party/arlpy/NOTICE` for the list of adapted functions.
 

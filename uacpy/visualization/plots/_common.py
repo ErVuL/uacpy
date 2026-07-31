@@ -11,12 +11,22 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.io.units import m_to_km
-from uacpy.visualization.style import BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
+from uacpy.visualization.style import (
+    BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
+    RECEIVER_MARKER_STYLE,
+)
+
+
+def _close_figures_since(before) -> None:
+    """Close every pyplot figure opened after the ``before`` snapshot."""
+    import matplotlib.pyplot as plt
+    for num in set(plt.get_fignums()) - before:
+        plt.close(num)
 
 
 def typed_plot_error(plotter):
     """Decorator: surface a plotter's raw degenerate-input exceptions as a typed
-    :class:`~uacpy.core.exceptions.ConfigurationError`.
+    :class:`~uacpy.core.exceptions.ConfigurationError`, leaving no figure behind.
 
     Many plotters pass arrays straight to matplotlib (or index ``[0]``/``[-1]``
     for axis limits, or reduce with ``.max()``), so empty / mismatched-length /
@@ -25,17 +35,28 @@ def typed_plot_error(plotter):
     converts those (and only those) into a clear ``ConfigurationError`` while
     letting an already-typed ``ConfigurationError`` pass through unchanged.
     ``TypeError`` is deliberately not caught — a genuine wrong-type call should
-    surface as itself, not be relabelled an input error."""
+    surface as itself, not be relabelled an input error.
+
+    Several plotters build their figure before the operation that can raise, so
+    any figure opened during a failed call is closed before the exception
+    propagates — a rejected call leaves pyplot's registry exactly as it found
+    it."""
     @functools.wraps(plotter)
     def wrapper(*args, **kwargs):
+        import matplotlib.pyplot as plt
+        before = set(plt.get_fignums())
         try:
             return plotter(*args, **kwargs)
         except (IndexError, ValueError) as exc:
+            _close_figures_since(before)
             raise ConfigurationError(
                 f"{plotter.__name__}: invalid plot input "
                 f"({type(exc).__name__}: {exc}). Check the arrays are non-empty "
                 f"and their lengths/shapes match the plotter's expected inputs."
             ) from exc
+        except Exception:
+            _close_figures_since(before)
+            raise
     return wrapper
 
 
@@ -47,6 +68,16 @@ def fig_ax(ax, figsize):
     if ax is None:
         return plt.subplots(figsize=figsize)
     return ax.figure, ax
+
+
+def invert_yaxis_once(ax) -> None:
+    """Point the y axis downward (depth, or TL in dB), idempotently.
+
+    ``Axes.invert_yaxis`` toggles, so calling a plotter twice into the same
+    ``ax=`` would flip the axis back to increasing-upward. Every plotter goes
+    through here so overlays compose."""
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
 
 
 ZORDER_SEDIMENT = 2
@@ -64,6 +95,52 @@ ZORDER_RECEIVERS = 11
 
 
 ZORDER_SOURCE = 12
+
+
+# Dense receiver grids render as solid bars — decimate each axis independently
+# so the lattice stays readable. Range typically spans ~10x more samples than
+# depth in a survey, so the two axes are capped differently.
+_MAX_RECEIVER_RANGE_DOTS = 20
+_MAX_RECEIVER_DEPTH_DOTS = 10
+
+
+def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
+                   max_markersize=8, source_markersize_bonus=0):
+    """Draw the source and receiver markers on a (depth, range) cross-section.
+
+    Shared by the environment, ray and field plotters so the geometry reads
+    identically wherever it is shown. ``source_range_m`` places the source
+    marker (the x origin of the panel); ``receiver`` is decimated by
+    :func:`_draw_receiver_grid`."""
+    from uacpy.visualization.style import SOURCE_MARKER_STYLE
+    if receiver is not None and getattr(receiver, 'depths', None) is not None:
+        _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
+                            max_markersize=max_markersize)
+    if source is not None and getattr(source, 'depths', None) is not None:
+        style = dict(SOURCE_MARKER_STYLE)
+        if source_markersize_bonus:
+            style['markersize'] = (style.get('markersize', 15)
+                                   + source_markersize_bonus)
+        x = m_to_km(np.atleast_1d(source_range_m))[0]
+        for sd in np.atleast_1d(source.depths):
+            ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
+
+
+def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
+                        zorder=ZORDER_RECEIVERS):
+    """Draw the decimated receiver lattice; return the full range axis in km.
+
+    Markers keep default clipping so a later user zoom hides out-of-view
+    receivers instead of painting them across the figure."""
+    rr_km = m_to_km(np.atleast_1d(ranges_m))
+    rd = np.atleast_1d(depths)
+    step_r = max(1, rr_km.size // _MAX_RECEIVER_RANGE_DOTS)
+    step_d = max(1, rd.size // _MAX_RECEIVER_DEPTH_DOTS)
+    RR, RD = np.meshgrid(rr_km[::step_r], rd[::step_d])
+    style = dict(RECEIVER_MARKER_STYLE)
+    style['markersize'] = min(style.get('markersize', 8), max_markersize)
+    ax.plot(RR.ravel(), RD.ravel(), zorder=zorder, **style)
+    return rr_km
 
 
 # ─────────────────────────────────────────────────────────────────────────────

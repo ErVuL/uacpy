@@ -150,7 +150,10 @@ class ReflectionCoefficient(Result):
             theta=theta, R=R, phi=phi,
             model=self.model, backend=self.backend,
             source_depths=self.source_depths,
-            frequencies=freqs, metadata=dict(self.metadata),
+            frequencies=freqs,
+            phase_reference=self.phase_reference,
+            model_source=self.model_source,
+            metadata=dict(self.metadata),
         )
 
     def _select(self, angle, frequency, *, method) -> "ReflectionCoefficient":
@@ -180,15 +183,3 @@ class ReflectionCoefficient(Result):
             R, phi = R[:, fi], phi[:, fi]
             freqs = float(self.frequencies[fi])
         return self._build(theta, R, phi, freqs)
-
-    @property
-    def data(self) -> np.ndarray:
-        return self.R
-
-    @property
-    def ranges(self) -> np.ndarray:   # convenience alias — angles double as the abscissa for plot helpers
-        return self.theta
-
-    @property
-    def depths(self) -> np.ndarray:
-        return np.array([0.0])

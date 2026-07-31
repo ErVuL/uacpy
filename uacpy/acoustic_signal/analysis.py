@@ -70,6 +70,7 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
             raise ConfigurationError(
                 "ppsd: data must be 1-D, 2-D, or a list of 1-D arrays; "
                 f"got ndim={data.ndim}")
+    signals = [require_finite_signal(s, "ppsd") for s in signals]
 
     chunk_size = int(seg_duration * sample_rate)
     overlap_samples = int(chunk_size * overlap_pct / 100)

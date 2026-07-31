@@ -18,7 +18,6 @@ from __future__ import annotations
 from collections import namedtuple
 
 import numpy as np
-import scipy.signal as _sig
 from scipy.signal import fftconvolve
 
 from uacpy.core.exceptions import ConfigurationError
@@ -128,41 +127,3 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
     amp /= energy
     lags = (np.arange(2 * n - 1) - (n - 1)) / fs
     return AmbiguityResult(lags, doppler_hz, amp)
-
-
-def shift_to_max_correlation(x, y):
-    """
-    Shift two signals based on the maximum cross-correlation.
-
-    Computes the cross-correlation between the signals `x` and `y`,
-    extracts the lag that maximizes the correlation, and shifts one of
-    the signals accordingly.
-
-    Parameters
-    ----------
-    x : ndarray
-        First signal to be shifted.
-    y : ndarray
-        Second signal to be shifted.
-
-    Returns
-    -------
-    x : ndarray
-        Shifted first signal.
-    y : ndarray
-        Shifted second signal.
-    """
-
-    correlation = _sig.correlate(x, y, mode="full")
-    lags = _sig.correlation_lags(x.size, y.size, mode="full")
-    lag = lags[np.argmax(correlation)]
-
-    if lag < 0:
-        y = y[-lag:]
-        x = x[:lag]
-    elif lag > 0:
-        x = x[lag:]
-        y = y[:-lag]
-    # lag == 0: signals already aligned, no trimming (y[:-0] would empty y).
-
-    return x, y

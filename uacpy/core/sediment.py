@@ -69,6 +69,10 @@ def _hamilton_kp(impedance: float) -> float:
     ``α(dB/m) = k_p · f(kHz)``; ``impedance`` is ρ·c in 10³ kg m⁻² s⁻¹. The
     piecewise fit (ESAB supplement, after Fig. 18 of Hamilton 1980) peaks
     (~0.78) in medium sand and tails to ~0.46 for coarse / ~0.07 for fine.
+
+    The first and last branches are unreachable through
+    :func:`grain_size_to_geoacoustics` (ϕ clamped to ``_MODEL_RANGE`` maps to
+    z ∈ ≈[2212, 3689]); they are kept for fidelity to the published curve.
     """
     z = impedance
     if z < 1784.0:
@@ -119,7 +123,12 @@ def _apl_velocity_ratio(mz: float) -> float:
 
 
 def _apl_alpha_over_f(mz: float) -> float:
-    """APL-UW attenuation ``α₂/f`` in dB m⁻¹ kHz⁻¹ (peaks in fine sand)."""
+    """APL-UW attenuation ``α₂/f`` in dB m⁻¹ kHz⁻¹ (peaks in fine sand).
+
+    The final branch is unreachable through :func:`grain_size_to_geoacoustics`
+    (ϕ is clamped to ≤ 9.0 by ``_MODEL_RANGE``); it is kept for fidelity to
+    TR 9407 §IV.A.4.
+    """
     if mz < 0.0:
         return 0.4556
     if mz < 2.6:

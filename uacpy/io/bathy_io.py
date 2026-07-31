@@ -12,6 +12,8 @@ Reflection coefficients (`.brc`, `.irc`, `.trc`) and source beam patterns
 (`.sbp`) live in :mod:`uacpy.io.refl_io`.
 """
 
+import re
+
 import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
@@ -76,71 +78,55 @@ def read_boundary_3d(
       - 'C': Curvilinear approximation
     - Lines 2-3: X-vector specification in km (uses read_vector format)
     - Lines 4-5: Y-vector specification in km (uses read_vector format)
-    - Remaining lines: Z-values in row-major order (n_x × n_y values),
-      depths in metres positive downward.
-
-    The Z-matrix is read as (n_x, n_y) and transposed to (n_y, n_x)
-    to match standard grid indexing conventions.
+    - Remaining lines: Z-values as n_y rows of n_x values, depths in metres
+      positive downward.
     """
-    try:
-        with open(filename, "r") as fid:
-            bdry_type_line = fid.readline().strip()
+    with open(filename, "r") as fid:
+        bdry_type_line = fid.readline().strip()
 
-            import re
+        match = re.search(r"'(.)'", bdry_type_line)
+        if match:
+            bdry_type = match.group(1)
+        else:
+            raise FileFormatError(f"Cannot parse boundary type from: {bdry_type_line}")
 
-            match = re.search(r"'(.)'", bdry_type_line)
-            if match:
-                bdry_type = match.group(1)
-            else:
-                raise FileFormatError(f"Cannot parse boundary type from: {bdry_type_line}")
-
-            if bdry_type == "R":
-                log_message('bathy_io',
-                            "Piecewise-linear approximation to boundary",
-                            verbose=verbose)
-            elif bdry_type == "C":
-                log_message('bathy_io',
-                            "Curvilinear approximation to boundary",
-                            verbose=verbose)
-            else:
-                raise FileFormatError(f"Unknown boundary type: {bdry_type}")
-
-            x_bot, n_x = read_vector(fid)
-
+        if bdry_type == "R":
             log_message('bathy_io',
-                        f"Number of boundary points in x = {n_x}",
+                        "Piecewise-linear approximation to boundary",
                         verbose=verbose)
-            log_message('bathy_io', f"x (km): {_summarize_axis(x_bot)}",
-                        verbose=verbose, level='debug')
-
-            y_bot, n_y = read_vector(fid)
-
+        elif bdry_type == "C":
             log_message('bathy_io',
-                        f"Number of boundary points in y = {n_y}",
+                        "Curvilinear approximation to boundary",
                         verbose=verbose)
-            log_message('bathy_io', f"y (km): {_summarize_axis(y_bot)}",
-                        verbose=verbose, level='debug')
+        else:
+            raise FileFormatError(f"Unknown boundary type: {bdry_type}")
 
-            z_values = []
-            for line in fid:
-                values = [float(v) for v in line.split() if v]
-                z_values.extend(values)
+        x_bot, n_x = read_vector(fid)
 
-            # Bellhop3D writes the depth grid as ny rows of nx values
-            # each (bdry3DMod.f90: DO iy = 1, NbtyPts(2); READ Bot(:, iy)).
-            z_bot = np.array(z_values).reshape(n_y, n_x)
+        log_message('bathy_io',
+                    f"Number of boundary points in x = {n_x}",
+                    verbose=verbose)
+        log_message('bathy_io', f"x (km): {_summarize_axis(x_bot)}",
+                    verbose=verbose, level='debug')
 
-    except FileNotFoundError as e:
-        raise FileFormatError(f"Boundary file not found: {filename}") from e
-    except Exception as e:
-        raise FileFormatError(
-            f"Malformed 3-D boundary file {filename}: {e}"
-        ) from e
+        y_bot, n_y = read_vector(fid)
 
-    x_bot = km_to_m(x_bot)
-    y_bot = km_to_m(y_bot)
+        log_message('bathy_io',
+                    f"Number of boundary points in y = {n_y}",
+                    verbose=verbose)
+        log_message('bathy_io', f"y (km): {_summarize_axis(y_bot)}",
+                    verbose=verbose, level='debug')
 
-    return x_bot, y_bot, z_bot, n_x, n_y
+        z_values = []
+        for line in fid:
+            values = [float(v) for v in line.split() if v]
+            z_values.extend(values)
+
+        # Bellhop3D writes the depth grid as ny rows of nx values
+        # each (bdry3DMod.f90: DO iy = 1, NbtyPts(2); READ Bot(:, iy)).
+        z_bot = np.array(z_values).reshape(n_y, n_x)
+
+    return km_to_m(x_bot), km_to_m(y_bot), z_bot, n_x, n_y
 
 
 @typed_format_error
@@ -202,7 +188,7 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         bty_type = bty_type[:1].upper()
         if bty_type not in ["L", "C"]:
-            raise ConfigurationError(
+            raise FileFormatError(
                 f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
             )
 
@@ -306,7 +292,7 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
         # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
         ati_type = ati_type[:1].upper()
         if ati_type not in ["L", "C"]:
-            raise ConfigurationError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
+            raise FileFormatError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
 
         if ati_type == "L":
             log_message('bathy_io',

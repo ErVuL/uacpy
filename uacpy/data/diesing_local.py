@@ -31,7 +31,7 @@ from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along,
+    bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
 
 __all__ = ['download_diesing_db', 'fetch_seafloor_lithology',
@@ -183,11 +183,14 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   water_sound_speed: Optional[float] = None,
                                   timeout=None, verbose: Union[bool, str] = False
                                   ) -> Bottom:
-    """Range-dependent bottom from the Diesing 2020 map along a transect."""
+    """Range-dependent bottom from the Diesing 2020 map along a transect.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_diesing(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
         start, end, n_points, source_label='Diesing 2020',
         max_points=max_points,
     )

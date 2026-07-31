@@ -529,7 +529,7 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
     the Doppler compensation — use it only for clean, Doppler-free
     recordings. The 144 data chips are detected non-coherently
     and decoded. Parse the 64 bits with :meth:`JanusPacket.from_bits`, or use
-    :func:`receive`.
+    :func:`janus_receive`.
     """
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)
@@ -567,12 +567,12 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
     return bits64, crc_ok
 
 
-def transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
+def janus_transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
     """Convenience: a :class:`JanusPacket` -> real JANUS waveform."""
     return janus_modulate(packet.to_bits(), sample_rate, **kwargs)
 
 
-def receive(waveform, sample_rate=48000.0, **kwargs):
+def janus_receive(waveform, sample_rate=48000.0, **kwargs):
     """Convenience: a JANUS waveform -> ``(JanusPacket, crc_ok)``."""
     bits64, crc_ok = janus_demodulate(waveform, sample_rate, **kwargs)
     pkt, _ = JanusPacket.from_bits(bits64)

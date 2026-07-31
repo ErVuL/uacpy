@@ -111,7 +111,7 @@ def main() -> None:
 
     fig_cmp, _ = compare_models(
         results, env=env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
-        suptitle='Same RD env collapsed four ways via collapse={…}',
+        title='Same RD env collapsed four ways via collapse={…}',
     )
     out_cmp = OUTPUT_DIR / 'example_23_collapse_methods.png'
     fig_cmp.savefig(out_cmp, dpi=150, bbox_inches='tight')

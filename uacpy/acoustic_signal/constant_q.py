@@ -46,6 +46,7 @@ from scipy.signal import get_window
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.acoustics import power_to_db
+from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 CQTResult = namedtuple("CQTResult", "frequencies coefficients")
 CQPSDResult = namedtuple("CQPSDResult", "frequencies power")
@@ -75,9 +76,10 @@ def _cq_kernels(frequencies, Q, fs, window):
     """List of ``(N_k, kernel, density_factor)`` per bin.
 
     ``kernel = w·exp(-2j·pi·Q·n/N_k) / Σw`` (so ``|X|**2`` is band power, the
-    'spectrum' scaling). ``density_factor = 2·(Σw)**2 / (fs·Σw**2)`` converts
-    that band power to a one-sided PSD (per Hz), matching ``scipy.signal.welch``
-    density scaling.
+    'spectrum' scaling). ``density_factor = (Σw)**2 / (fs·Σw**2)`` converts that
+    band power to a one-sided PSD (per Hz), matching ``scipy.signal.welch``
+    density scaling; the one-sided factor 2 is applied in
+    :func:`_cq_power_frames`.
     """
     kernels = []
     for fk in frequencies:
@@ -160,10 +162,7 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
     x = np.asarray(data, dtype=float)
     if x.ndim != 1:
         raise ConfigurationError(f"{caller}: data must be 1-D")
-    if x.size and not np.all(np.isfinite(x)):
-        raise ConfigurationError(
-            f"{caller}: data contains NaN or Inf, which would silently "
-            "contaminate the constant-Q average; clean the signal first.")
+    require_finite_signal(x, caller)
     fs = float(sample_rate)
     if fmax is None:
         fmax = fs / 2.0

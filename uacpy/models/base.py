@@ -29,6 +29,14 @@ from uacpy.core.source import Source
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_prt
 
+# ``warnings.warn(..., skip_file_prefixes=USER_FRAME_SKIP)`` reports the first
+# frame outside ``uacpy/models``, so a warning raised from a nested helper
+# still points at the user's ``run()`` / constructor call. Hand-counted
+# ``stacklevel`` cannot do that: it breaks the moment a check moves one frame
+# deeper, and collapses distinct call sites onto one uacpy line in the
+# warnings module's dedup key.
+USER_FRAME_SKIP = (str(Path(__file__).parent) + os.sep,)
+
 
 class RunMode(Enum):
     """
@@ -234,30 +242,30 @@ class ModelSpec:
                 )
         bad_flags = set(self.supports) - _CAPABILITY_FLAGS
         if bad_flags:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{model_name}.spec.supports has unknown capability flags: "
                 f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
             )
         bad_types = set(self.source_types) - VALID_SOURCE_TYPES
         if bad_types:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{model_name}.spec.source_types has unknown geometries: "
                 f"{sorted(bad_types)}. Valid: {sorted(VALID_SOURCE_TYPES)}."
             )
         if not self.source_types:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{model_name}.spec.source_types is empty; every model must "
                 f"accept at least one source geometry."
             )
         unknown = set(self.collapse) - set(DEFAULT_COLLAPSE)
         if unknown:
-            raise ValueError(
+            raise ConfigurationError(
                 f"{model_name}.spec.collapse has unknown keys: "
                 f"{sorted(unknown)}. Valid keys: {sorted(DEFAULT_COLLAPSE)}."
             )
         for key, value in self.collapse.items():
             if value not in VALID_COLLAPSE_METHODS[key]:
-                raise ValueError(
+                raise ConfigurationError(
                     f"{model_name}.spec.collapse[{key!r}] = {value!r} is "
                     f"invalid. Valid: {sorted(VALID_COLLAPSE_METHODS[key])}."
                 )
@@ -283,6 +291,12 @@ class PropagationModel(ABC):
     work_dir : str or Path, optional
         Working directory for files. If ``None``, a temporary directory is
         created per run.
+    cleanup : bool, optional
+        Delete the run's scratch files when ``run()`` returns. ``None``
+        (default) resolves to ``work_dir is None``, i.e. uacpy removes only
+        directories it created. ``cleanup=False`` with an unpinned
+        ``work_dir`` keeps the temp directory (and the ``*_file`` metadata
+        paths that point into it); the caller then owns its removal.
 
     Attributes
     ----------
@@ -292,8 +306,6 @@ class PropagationModel(ABC):
         Whether tmpfs is used.
     verbose : bool or str
         Verbose-output gate (see constructor).
-    file_manager : FileManager
-        File manager instance (populated during ``run``).
     """
 
     # The leading positional run() parameters every wrapper must carry, in
@@ -302,10 +314,10 @@ class PropagationModel(ABC):
     # has to fail with TypeError at the call site, not be silently swallowed.
     _RUN_POSITIONAL = ('self', 'env', 'source', 'receiver', 'run_mode')
 
-    # Declarative metadata. ``None`` keeps the legacy path (subclass sets
-    # ``_supported_modes`` / ``_supports_*`` / collapse defaults by hand in
-    # ``__init__``). When a subclass declares a :class:`ModelSpec`, the base
-    # validates it at class-definition time and applies it in ``__init__``.
+    # Declarative metadata. When a subclass declares a :class:`ModelSpec`, the
+    # base validates it at class-definition time and applies it in
+    # ``__init__``. A subclass without one keeps the base defaults and sets
+    # ``_supported_modes`` / ``_supports_*`` / collapse by hand in ``__init__``.
     spec: Optional['ModelSpec'] = None
 
     # Provenance/licence: ``id`` of this engine's entry in
@@ -329,7 +341,7 @@ class PropagationModel(ABC):
         if cls.source is not None:
             from uacpy.models.sources import MODEL_SOURCES
             if cls.source not in MODEL_SOURCES:
-                raise ValueError(
+                raise ConfigurationError(
                     f"{cls.__name__}.source = {cls.source!r} is not a known "
                     f"model source. Valid: {sorted(MODEL_SOURCES)}."
                 )
@@ -423,7 +435,6 @@ class PropagationModel(ABC):
                     )
             self._collapse.update(collapse)
             self._user_collapse = dict(collapse)
-        self.file_manager = None
 
         # Subclasses override to declare the run modes they support.
         self._supported_modes: List[RunMode] = [RunMode.COHERENT_TL]
@@ -502,7 +513,7 @@ class PropagationModel(ABC):
         warnings.warn(
             f"{self.model_name} uses {src.name} ({src.license}). {src.note} "
             f"Cite: {src.citation}",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     def _apply_spec(self) -> None:
@@ -609,7 +620,7 @@ class PropagationModel(ABC):
             f"{self.model_name}.run(run_mode="
             f"{getattr(run_mode, 'name', run_mode)}): ignoring "
             f"{', '.join(ignored)} — {reason}.",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     @property
@@ -940,7 +951,7 @@ class PropagationModel(ABC):
             f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
             f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB).{note} Pass "
             f"`frequencies=` to silence.",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return derived
 
@@ -972,6 +983,11 @@ class PropagationModel(ABC):
         Auto-creates the user-pinned ``work_dir`` if it doesn't exist
         yet, so callers can construct ``Model(work_dir='./out')`` without
         a separate ``mkdir`` step.
+
+        ``self.cleanup`` drives the manager on both branches, so it stays the
+        single decision :meth:`_attach_output_paths` keys the ``*_file``
+        metadata on: a directory that survives the run always has valid paths
+        attached, and a wiped one never does.
         """
         if self.work_dir is not None:
             # base_dir is the *parent*: FileManager validates that it exists,
@@ -979,11 +995,18 @@ class PropagationModel(ABC):
             # itself already existed, so it has to do that mkdir itself.
             parent = Path(self.work_dir).parent
             parent.mkdir(parents=True, exist_ok=True)
+            if self.use_tmpfs:
+                self._log(
+                    f"use_tmpfs=True is not applied to the pinned work_dir "
+                    f"{self.work_dir} — a named directory cannot be relocated "
+                    f"to /dev/shm.",
+                    level='debug',
+                )
             fm = FileManager(
                 use_tmpfs=False,
                 base_dir=parent,
                 prefix=f'{self.model_name.lower()}_',
-                cleanup=getattr(self, 'cleanup', False),
+                cleanup=self.cleanup,
             )
             # Adopted, not owned: cleanup may remove only what this run adds.
             fm.adopt_work_dir(self.work_dir)
@@ -992,7 +1015,7 @@ class PropagationModel(ABC):
                 use_tmpfs=self.use_tmpfs,
                 base_dir=None,
                 prefix=f'{self.model_name.lower()}_',
-                cleanup=True,
+                cleanup=self.cleanup,
             )
             fm.create_work_dir()
 
@@ -1041,6 +1064,12 @@ class PropagationModel(ABC):
             frequencies, if ``source.source_type`` is outside
             ``_supported_source_types``, or if ``source.beam_pattern`` is set
             on a model that does not read one.
+
+        Notes
+        -----
+        The source/receiver geometry checks live in
+        :meth:`_validate_geometry`, which a model that reads no geometry
+        (:class:`~uacpy.models.bounce.Bounce`) overrides to a no-op.
         """
         if (run_mode is not None
                 and run_mode in self._SINGLE_FREQUENCY_MODES
@@ -1051,14 +1080,6 @@ class PropagationModel(ABC):
                 f"{list(source.frequencies)}. For broadband H(f) use "
                 f"RunMode.BROADBAND, and for time-domain p(t) use "
                 f"RunMode.TIME_SERIES."
-            )
-
-        if (not self._supports_multi_source_depth
-                and len(np.atleast_1d(source.depths)) > 1):
-            raise ConfigurationError(
-                f"{self.model_name} takes a single source depth per run; "
-                f"got {len(source.depths)}: {list(source.depths)}. Loop "
-                f"over Sources externally for multi-depth runs."
             )
 
         if source.source_type not in self._supported_source_types:
@@ -1073,6 +1094,28 @@ class PropagationModel(ABC):
             raise ConfigurationError(
                 f"{self.model_name} does not read a source beam pattern; "
                 f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
+            )
+
+        self._validate_geometry(env, source, receiver, run_mode)
+
+    def _validate_geometry(
+        self,
+        env: Environment,
+        source: Source,
+        receiver: Receiver,
+        run_mode: Optional['RunMode'] = None,
+    ) -> None:
+        """Check the source/receiver geometry against what the model resolves.
+
+        Split out of :meth:`validate_inputs` so a model that reads no
+        geometry at all can opt out wholesale.
+        """
+        if (not self._supports_multi_source_depth
+                and len(np.atleast_1d(source.depths)) > 1):
+            raise ConfigurationError(
+                f"{self.model_name} takes a single source depth per run; "
+                f"got {len(source.depths)}: {list(source.depths)}. Loop "
+                f"over Sources externally for multi-depth runs."
             )
 
         # receiver_type='line' is honoured by the input-side checks (seafloor
@@ -1119,7 +1162,7 @@ class PropagationModel(ABC):
                 f"pressure-release sea surface, where the field is ~0 — the "
                 f"result is degenerate (null / saturated TL, model-dependent). "
                 f"Use a small positive depth (e.g. 1 m).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if receiver.depth_min < 0:
@@ -1152,7 +1195,7 @@ class PropagationModel(ABC):
                 f"accepted; the result there reflects the model's "
                 f"below-domain behaviour (transmitted / evanescent field, "
                 f"or NaN inside a PE absorbing layer).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
     def _check_per_range_receiver_depth(
@@ -1195,7 +1238,7 @@ class PropagationModel(ABC):
                 f"seafloor ({sf:.1f} m). Results at that point will "
                 f"reflect the model's below-bottom behaviour (e.g. "
                 f"infinite TL, PE absorbing layer).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
     def _warn_on_range_coverage(
@@ -1217,7 +1260,7 @@ class PropagationModel(ABC):
                     f"({axis_max:.1f} m) is shorter than receiver.range_max "
                     f"({r_target:.1f} m); values beyond {axis_max:.1f} m are "
                     f"constant-extrapolated from the last sample.",
-                    UserWarning, stacklevel=3,
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
 
         if env.has_range_dependent_bathymetry:
@@ -1423,6 +1466,9 @@ class PropagationModel(ABC):
         Model-specific mode computation implementation.
 
         Caller (compute_modes) already guaranteed RunMode.MODES is supported.
+        This fallback stands the depth grid up from a placeholder receiver;
+        Kraken — the only in-tree model declaring ``RunMode.MODES`` — overrides
+        it with a dense grid, so the hook exists for future mode solvers.
         """
         dummy_receiver = Receiver(depths=[0.0], ranges=[0.0])
         return self.run(
@@ -1828,7 +1874,7 @@ class PropagationModel(ABC):
             warnings.warn(
                 f"{self.model_name} does not support sea-surface altimetry; "
                 f"using flat surface (collapse['altimetry']={method!r}).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if e.surface.is_range_dependent and not self._supports_range_dependent_surface:
@@ -1838,7 +1884,7 @@ class PropagationModel(ABC):
                 f"{self.model_name} does not support range-dependent surface "
                 f"properties (e.g. a marginal ice zone); collapsed to a single "
                 f"boundary (collapse['surface']={method!r}).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         surf_sigma = _max_roughness(
@@ -1850,7 +1896,7 @@ class PropagationModel(ABC):
                 f"(its solver rejects a non-zero interfacial sigma); "
                 f"env.surface.roughness={surf_sigma:g} m dropped. Use Kraken "
                 f"or Scooter to keep it.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         bot_sigma = _max_roughness(
@@ -1862,7 +1908,7 @@ class PropagationModel(ABC):
                 f"roughness; env.bottom roughness={bot_sigma:g} m dropped "
                 f"(its solver either ignores the value or has no place to put "
                 f"it). Use Kraken or Scooter to keep it.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if e.has_range_dependent_bathymetry and not self._supports_range_dependent_bathymetry:
@@ -1880,7 +1926,7 @@ class PropagationModel(ABC):
                 f"(method={method!r}, range {min_d:.1f}–{max_d:.1f} m). "
                 f"Override via `collapse={{'bathymetry': "
                 f"'min'|'median'|'mean'|'max'|'initial'}}`.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if e.has_range_dependent_ssp and not self._supports_range_dependent_ssp:
@@ -1889,7 +1935,7 @@ class PropagationModel(ABC):
             warnings.warn(
                 f"{self.model_name} does not support range-dependent SSP; "
                 f"collapsed to 1-D (collapse['ssp']={method!r}).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         # Bottom: two orthogonal axes. Collapse the range axis first (to a
@@ -1903,7 +1949,7 @@ class PropagationModel(ABC):
                 f"{self.model_name} does not support range-dependent bottoms; "
                 f"reduced to a single column "
                 f"(collapse['bottom_range']={method!r}).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if e.bottom.is_layered and not self._supports_layered_bottom:
@@ -1913,7 +1959,7 @@ class PropagationModel(ABC):
                 f"{self.model_name} does not support layered (depth-dependent) "
                 f"bottoms; flattened each column to a half-space "
                 f"(collapse['bottom_layers']={method!r}).",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         if not self._supports_elastic_media:
@@ -1935,7 +1981,7 @@ class PropagationModel(ABC):
                     f"{self.model_name} does not support elastic media; "
                     f"collapsed shear properties on {where} "
                     f"(collapse['elastic']={method!r}).",
-                    UserWarning, stacklevel=3,
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
 
         return e
@@ -1984,8 +2030,7 @@ class PropagationModel(ABC):
         round-trip that ``run_parallel`` relies on — the rebuilt message is
         re-derived from ``stderr``), keeping ``exc.args`` in sync.
         """
-        from pathlib import Path as _Path
-        tail = read_prt(_Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
+        tail = read_prt(Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
         if tail is None:
             return
         block = f"\n\n.prt tail:\n{tail}"
@@ -2183,7 +2228,7 @@ class PropagationModel(ABC):
                 f"semi-infinite halfspace). Add sediment layers (a layered "
                 f"SeabedColumn) to place receivers below the seafloor.",
                 UserWarning,
-                stacklevel=2,
+                skip_file_prefixes=USER_FRAME_SKIP,
             )
         return receiver
 

@@ -209,10 +209,9 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     s = bpsk_modulate(s_m, fc, sample_rate, chips_per_sec)
 
     # Whole m-sequence periods that fit after the leader, counted in samples so
-    # the probe lands at exactly target_n. Counting the leader (the previous
-    # rep-count ignored it) is what keeps the probe inside T_tot; a period is
-    # never truncated, since a partial m-sequence loses the two-valued
-    # autocorrelation the probe exists for.
+    # the probe lands at exactly target_n. Counting the leader is what keeps the
+    # probe inside T_tot; a period is never truncated, since a partial
+    # m-sequence loses the two-valued autocorrelation the probe exists for.
     leader = np.zeros(int(lead_time * sample_rate))
     target_n = int(round(T_tot * sample_rate))
     Nreps = (target_n - leader.size) // len(s)

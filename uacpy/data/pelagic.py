@@ -34,6 +34,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.data._geo import Coordinate, as_coordinate
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 
 __all__ = ['pelagic_lithology', 'pelagic_grain_size', 'fetch_bottom_pelagic',
@@ -117,11 +118,14 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   cache_only: bool = False, timeout=None,
                                   verbose: Union[bool, str] = False
                                   ) -> Bottom:
-    """Range-dependent bottom from the pelagic model along ``start`` → ``end``."""
+    """Range-dependent bottom from the pelagic model along ``start`` → ``end``.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_pelagic(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed,
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
             cache_only=cache_only, timeout=timeout),
         start, end, n_points, source_label='pelagic model',
         max_points=max_points,

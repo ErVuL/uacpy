@@ -142,6 +142,8 @@ def write_bellhop_env_file(
     For range-dependent bathymetry, automatically generates a .bty file.
     For range-dependent SSP with Quad interpolation, generates a .ssp file.
     """
+    filepath = Path(filepath)
+
     if n_beams is None:
         n_beams = 0
 
@@ -282,8 +284,7 @@ def write_bellhop_env_file(
             if ssp_ranges.size and ssp_ranges.min() >= 0.0:
                 ssp_ranges = np.insert(ssp_ranges, 0, -1.1 * r_box)
                 ssp_data = np.column_stack([ssp_data[:, 0], ssp_data])
-            # write_ssp (.ssp file format) expects ranges in km.
-            write_ssp(ssp_file, m_to_km(ssp_ranges), ssp_data)
+            write_ssp(ssp_file, ssp_ranges, ssp_data)
             log_message('bellhop_writer',
                         f"wrote range-dependent SSP file: {ssp_file}",
                         verbose=verbose)

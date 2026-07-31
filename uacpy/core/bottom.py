@@ -108,7 +108,7 @@ class BoundaryProperties:
     acoustic_type : str, optional
         Boundary type: 'vacuum', 'rigid', 'half-space', 'file'.
         Inferred from the supplied parameters when omitted: ``reflection_file``
-        → ``'file'``, any **explicitly passed** cp/ρ/α/cs/roughness →
+        → ``'file'``, any **explicitly passed** cp/ρ/α/cs →
         ``'half-space'`` (even a value equal to the documented default —
         passing ``sound_speed=1600`` means a 1600 m/s half-space, never a
         vacuum), nothing → ``'vacuum'``. Pass ``acoustic_type='rigid'``
@@ -122,7 +122,10 @@ class BoundaryProperties:
     attenuation : float
         Compressional attenuation (dB/wavelength)
     roughness : float
-        RMS roughness (m)
+        RMS interfacial roughness (m). An interface property of *every*
+        boundary type (a rough pressure-release sea surface is
+        ``BoundaryProperties(roughness=2.0)``), so it never drives the
+        ``acoustic_type`` inference.
     shear_speed : float
         Shear wave speed (m/s), 0 = fluid bottom
     shear_attenuation : float
@@ -206,10 +209,12 @@ class BoundaryProperties:
 
         # Explicitly passed acoustic params drive both the auto-inference
         # (when acoustic_type is None) and the explicit-conflict guard below.
+        # ``roughness`` is excluded: it is an interface property every boundary
+        # type carries (SSP%sigma), not a half-space acoustic parameter.
         half_space_offenders = [
             f"{name}={getattr(self, name):g}"
             for name in ('sound_speed', 'density', 'attenuation',
-                         'shear_speed', 'shear_attenuation', 'roughness')
+                         'shear_speed', 'shear_attenuation')
             if name in explicit
         ]
 
@@ -260,17 +265,16 @@ class BoundaryProperties:
 
     def __repr__(self) -> str:
         if self.acoustic_type in ('vacuum', 'rigid'):
-            return f"BoundaryProperties({self.acoustic_type})"
-        if self.acoustic_type == 'file':
-            return (
-                f"BoundaryProperties(file={self.reflection_file!r})"
-            )
-        bits = [self.acoustic_type,
-                f"cp={self.sound_speed:g} m/s",
-                f"ρ={self.density:g}",
-                f"α={self.attenuation:g}"]
-        if self.shear_speed > 0:
-            bits.append(f"cs={self.shear_speed:g} m/s")
+            bits = [self.acoustic_type]
+        elif self.acoustic_type == 'file':
+            bits = [f"file={self.reflection_file!r}"]
+        else:
+            bits = [self.acoustic_type,
+                    f"cp={self.sound_speed:g} m/s",
+                    f"ρ={self.density:g}",
+                    f"α={self.attenuation:g}"]
+            if self.shear_speed > 0:
+                bits.append(f"cs={self.shear_speed:g} m/s")
         if self.roughness > 0:
             bits.append(f"σ={self.roughness:g} m")
         return f"BoundaryProperties({', '.join(bits)})"
@@ -349,6 +353,37 @@ class BoundaryProperties:
         return cls(**kwargs)
 
 
+def _reduce_boundaries(props: List[BoundaryProperties], reducer
+                       ) -> BoundaryProperties:
+    """Reduce a list of :class:`BoundaryProperties` to a single one.
+
+    ``reducer(values) -> float`` folds the per-node values of each numeric
+    acoustic field (the keys of ``BoundaryProperties._ACOUSTIC_DEFAULTS``):
+    ``np.mean`` / ``np.median`` for a collapse, ``np.interp`` for a
+    range-interpolated blend. The non-blendable fields (``acoustic_type``,
+    ``grain_size_phi``, ``reflection_file``, ``name``, ``data_sources``) come
+    from the first node. ``'vacuum'`` / ``'rigid'`` carry no acoustic
+    parameters, so only their interfacial ``roughness`` is reduced.
+
+    The single home for "many boundaries → one", shared by
+    :meth:`Bottom.halfspace_at`, :meth:`Bottom.select_range` and
+    :meth:`uacpy.core.surface.Surface.collapse`.
+    """
+    p0 = props[0]
+    values = {name: float(reducer([getattr(p, name) for p in props]))
+              for name in BoundaryProperties._ACOUSTIC_DEFAULTS}
+    if p0.acoustic_type in ('vacuum', 'rigid'):
+        return BoundaryProperties(
+            acoustic_type=p0.acoustic_type, roughness=values['roughness'],
+            name=p0.name, data_sources=p0.data_sources)
+    return BoundaryProperties(
+        acoustic_type=p0.acoustic_type,
+        grain_size_phi=p0.grain_size_phi,
+        reflection_file=p0.reflection_file,
+        name=p0.name, data_sources=p0.data_sources,
+        **values)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Unified bottom carrier — one ``Bottom`` (range as an optional axis), mirroring
 # ``SoundSpeedProfile``. A ``SeabedColumn`` is "layers over a half-space" at one
@@ -378,6 +413,11 @@ class SeabedColumn:
         if self.layers is None:
             self.layers = []
         self.layers = list(self.layers)
+        for la in self.layers:
+            if not isinstance(la, SedimentLayer):
+                raise ConfigurationError(
+                    "SeabedColumn: every layer must be a SedimentLayer; got "
+                    f"{type(la).__name__}")
         if not isinstance(self.halfspace, BoundaryProperties):
             raise ConfigurationError(
                 "SeabedColumn: halfspace must be a BoundaryProperties; "
@@ -557,7 +597,8 @@ class SeabedColumn:
     def sample_at_depths(
         self, n_points: int = 4, max_thickness: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample ``(cs, rho, attn)`` at ``n_points`` evenly-spaced depths in
+        """Sample ``(cp, rho, attn)`` — compressional speed (m/s), density
+        (g/cm³) and attenuation (dB/λ) — at ``n_points`` evenly-spaced depths in
         ``[0, max_thickness]`` (defaults to this column's own thickness). Used
         by RAM to map arbitrary layers onto its fixed sediment grid."""
         max_thick = (float(max_thickness) if max_thickness is not None
@@ -565,15 +606,15 @@ class SeabedColumn:
         if max_thick <= 0:
             max_thick = 1.0
         sample_depths = np.linspace(0, max_thick, n_points)
-        cs = np.empty(n_points)
+        cp = np.empty(n_points)
         rho = np.empty(n_points)
         attn = np.empty(n_points)
         for i, d in enumerate(sample_depths):
             layer = self._layer_at(d)
             src = layer if layer is not None else self.halfspace
-            cs[i], rho[i], attn[i] = (src.sound_speed, src.density,
+            cp[i], rho[i], attn[i] = (src.sound_speed, src.density,
                                       src.attenuation)
-        return cs, rho, attn
+        return cp, rho, attn
 
     @classmethod
     def from_halfspace(
@@ -644,7 +685,8 @@ class SeabedColumn:
         return cls(layers=sediment_layers, halfspace=hs)
 
 
-@dataclass
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False)
 class Bottom:
     """Unified seabed carrier — one or more :class:`SeabedColumn` columns with
     an optional ``ranges`` axis (metres). ``ranges=None`` ⇒ range-independent
@@ -672,7 +714,8 @@ class Bottom:
                     "Bottom: range-independent bottom (ranges=None) needs "
                     f"exactly one column; got {len(self.columns)}")
         else:
-            self.ranges = np.asarray(self.ranges, dtype=float).ravel()
+            self.ranges = np.array(self.ranges, dtype=float).ravel()
+            _require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
             _require_strictly_increasing(self.ranges, "Bottom.ranges")
             if len(self.ranges) != len(self.columns):
                 raise ConfigurationError(
@@ -758,7 +801,8 @@ class Bottom:
         """Half-space ``BoundaryProperties`` at ``range`` (m). ``interp=None``
         auto-resolves: **linear** when every column is a pure half-space
         (the only case where blending properties is well-defined), else
-        **nearest**."""
+        **nearest**. The non-blendable fields (``reflection_file``,
+        ``grain_size_phi``) come from the r = 0 column."""
         if interp is None:
             interp = 'nearest' if self.is_layered else 'linear'
         if self.ranges is None or interp == 'nearest':
@@ -767,35 +811,25 @@ class Bottom:
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
                 f"None; got {interp!r}")
-        hs = [c.halfspace for c in self.columns]
-        if hs[0].acoustic_type in ('vacuum', 'rigid'):
-            # Parameter-free types have nothing to blend.
-            return _copy.deepcopy(self.at(range=range).halfspace)
-        return BoundaryProperties(
-            acoustic_type=hs[0].acoustic_type,
-            sound_speed=float(np.interp(range, self.ranges,
-                                        [h.sound_speed for h in hs])),
-            density=float(np.interp(range, self.ranges,
-                                    [h.density for h in hs])),
-            attenuation=float(np.interp(range, self.ranges,
-                                        [h.attenuation for h in hs])),
-            shear_speed=float(np.interp(range, self.ranges,
-                                        [h.shear_speed for h in hs])),
-            shear_attenuation=float(np.interp(range, self.ranges,
-                                              [h.shear_attenuation for h in hs])),
-        )
+        return _reduce_boundaries(
+            [c.halfspace for c in self.columns],
+            lambda values: np.interp(range, self.ranges, values))
 
     def max_total_thickness(self) -> float:
         """Maximum sediment thickness across all columns (0 if all half-space)."""
         return max(c.total_thickness() for c in self.columns)
 
     def all_sound_speeds(self) -> List[float]:
-        """Every compressional speed in the seabed (all layers + half-spaces),
-        for c₀ / grid sizing."""
+        """Every *real* compressional speed in the seabed (all layers, plus the
+        half-spaces that carry geoacoustics), for c₀ / grid sizing.
+
+        ``'vacuum'`` / ``'rigid'`` / ``'file'`` half-spaces are skipped: their
+        ``sound_speed`` is the placeholder ``__post_init__`` resolved, not a
+        seabed speed, and feeding it to a c₀ or dz estimate is meaningless."""
         speeds: List[float] = []
         for c in self.columns:
             speeds.extend(float(la.sound_speed) for la in c.layers)
-            if getattr(c.halfspace, 'sound_speed', None):
+            if c.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
                 speeds.append(float(c.halfspace.sound_speed))
         return speeds
 
@@ -852,23 +886,10 @@ class Bottom:
                 "bottom (layer stacks can't be averaged); use 'r0', 'rmax' "
                 "or 'median'.")
         reduce = np.mean if method == 'mean' else np.median
-        hs0 = self.columns[0].halfspace
-        if hs0.acoustic_type in ('vacuum', 'rigid'):
-            # Parameter-free types have nothing to average.
-            return Bottom(columns=[SeabedColumn(
-                layers=[], halfspace=BoundaryProperties(
-                    acoustic_type=hs0.acoustic_type))], ranges=None)
-        return Bottom(columns=[SeabedColumn(layers=[], halfspace=(
-            BoundaryProperties(
-                acoustic_type=hs0.acoustic_type,
-                sound_speed=float(reduce(self.halfspace_sound_speed)),
-                density=float(reduce(self.halfspace_density)),
-                attenuation=float(reduce(self.halfspace_attenuation)),
-                shear_speed=float(reduce(self.halfspace_shear_speed)),
-                shear_attenuation=float(
-                    reduce(self.halfspace_shear_attenuation)),
-                roughness=float(reduce(self.halfspace_roughness)),
-            )))], ranges=None)
+        return Bottom(columns=[SeabedColumn(
+            layers=[],
+            halfspace=_reduce_boundaries(
+                [c.halfspace for c in self.columns], reduce))], ranges=None)
 
     def collapse(self, *, range: Optional[str] = None,
                  layers: Optional[str] = None) -> 'Bottom':
@@ -941,8 +962,9 @@ class Bottom:
     ) -> 'Bottom':
         """Range-dependent half-space bottom from parallel property arrays.
 
-        ``roughness`` (RMS, m) is a scalar applied to every range break or a
-        per-range array; default 0."""
+        Every property is either a scalar applied to every range break or a
+        per-range array of the same length as ``ranges``. ``shear_speed`` /
+        ``shear_attenuation`` / ``roughness`` default to 0."""
         # RD bottoms always carry user cp/ρ/α, so 'half-space' is the coherent
         # default — never infer vacuum just because a sample happens to equal
         # the BoundaryProperties defaults.
@@ -950,24 +972,28 @@ class Bottom:
             acoustic_type = 'half-space'
         ranges = np.asarray(ranges, dtype=float).ravel()
         n = len(ranges)
-        cp = np.asarray(sound_speed, dtype=float).ravel()
-        rho = np.asarray(density, dtype=float).ravel()
-        alpha = np.asarray(attenuation, dtype=float).ravel()
-        cs = (np.zeros(n) if shear_speed is None
-              else np.asarray(shear_speed, dtype=float).ravel())
-        a_s = (np.zeros(n) if shear_attenuation is None
-               else np.asarray(shear_attenuation, dtype=float).ravel())
-        rough = (np.zeros(n) if roughness is None
-                 else np.asarray(roughness, dtype=float).ravel())
-        if rough.size == 1:
-            rough = np.full(n, rough[0])
-        for name, arr in (('sound_speed', cp), ('density', rho),
-                          ('attenuation', alpha), ('shear_speed', cs),
-                          ('shear_attenuation', a_s), ('roughness', rough)):
-            if len(arr) != n:
+
+        def _per_range(name, value, default=None):
+            if value is None:
+                if default is None:
+                    raise ConfigurationError(
+                        f"Bottom.from_halfspaces: {name} is required")
+                return np.full(n, float(default))
+            arr = np.asarray(value, dtype=float).ravel()
+            if arr.size == 1:
+                return np.full(n, arr[0])
+            if arr.size != n:
                 raise ConfigurationError(
-                    f"Bottom.from_halfspaces: {name} length ({len(arr)}) must "
+                    f"Bottom.from_halfspaces: {name} length ({arr.size}) must "
                     f"match ranges length ({n})")
+            return arr
+
+        cp = _per_range('sound_speed', sound_speed)
+        rho = _per_range('density', density)
+        alpha = _per_range('attenuation', attenuation)
+        cs = _per_range('shear_speed', shear_speed, 0.0)
+        a_s = _per_range('shear_attenuation', shear_attenuation, 0.0)
+        rough = _per_range('roughness', roughness, 0.0)
         columns = [
             SeabedColumn(layers=[], halfspace=BoundaryProperties(
                 acoustic_type=acoustic_type, sound_speed=float(cp[i]),

@@ -222,7 +222,7 @@ def main():
         fig3, _ = compare_models(
             results, env=env, ncols=3, vmin=50, vmax=110,
             contours=[70, 90],
-            suptitle='All Models — TL with 70/90 dB contours',
+            title='All Models — TL with 70/90 dB contours',
         )
         fig3.savefig(OUTPUT_DIR / 'example_07_models.png', dpi=150)
         plt.close(fig3)

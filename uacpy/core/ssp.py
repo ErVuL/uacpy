@@ -8,9 +8,11 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
-    _require_positive, _require_strictly_increasing, _coerce_data_sources,
+    _require_positive, _require_non_negative, _require_strictly_increasing,
+    _coerce_data_sources,
 )
 
 
@@ -19,7 +21,8 @@ _VALID_SSP_SHAPES = (
 )
 
 
-@dataclass
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False)
 class SoundSpeedProfile:
     """
     Unified sound-speed profile (1-D or 2-D).
@@ -85,6 +88,8 @@ class SoundSpeedProfile:
                     f"SoundSpeedProfile: ranges length ({self.ranges.size}) must "
                     f"match data columns ({self.data.shape[1]})"
                 )
+            _require_non_negative(
+                self.ranges, "SoundSpeedProfile.ranges", hint="metres")
             _require_strictly_increasing(
                 self.ranges, "SoundSpeedProfile.ranges",
             )
@@ -138,7 +143,7 @@ class SoundSpeedProfile:
         return int(self.data.shape[1])
 
     def to_pairs(self) -> np.ndarray:
-        """Return ``(N, 2)`` ``(depth, c)`` view of the 1-D form.
+        """Return ``(N, 2)`` ``(depth, c)`` array of the 1-D form.
 
         For range-dependent profiles, returns the range-0 column. Use
         ``at(range=)`` / ``eval(range=)`` for an explicit slice or
@@ -332,7 +337,7 @@ class SoundSpeedProfile:
         ``depth_max`` (m) sets the column extent for the isovelocity cases.
         """
         if value is None:
-            return cls.from_isovelocity(depth_max, 1500.0)
+            return cls.from_isovelocity(depth_max, DEFAULT_SOUND_SPEED)
         if isinstance(value, SoundSpeedProfile):
             return value
         if isinstance(value, (int, float, np.integer, np.floating)):
@@ -347,7 +352,7 @@ class SoundSpeedProfile:
 
     @classmethod
     def from_isovelocity(
-        cls, depth_max: float, sound_speed: float = 1500.0
+        cls, depth_max: float, sound_speed: float = DEFAULT_SOUND_SPEED
     ) -> 'SoundSpeedProfile':
         """Constant-``sound_speed`` (m/s) profile spanning 0 to ``depth_max`` (m)."""
         return cls(

@@ -70,7 +70,6 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
     for k in range(nsteps):
         rx = c[k * n:(k + 1) * n]
         npm = [INF] * n_states
-        nbit = np.zeros(n_states, dtype=np.int8)
         for st in range(n_states):
             if pm[st] == INF:
                 continue
@@ -79,7 +78,6 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
                 metric = pm[st] + int(np.count_nonzero(rx ^ ow))
                 if metric < npm[nxt]:
                     npm[nxt] = metric
-                    nbit[nxt] = bit
                     back[k, nxt] = st
         pm = npm
     # The K-1 zero flush bits force the encoder to end in state 0, so the

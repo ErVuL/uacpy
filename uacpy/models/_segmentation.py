@@ -10,6 +10,7 @@ import numpy as np
 from typing import List, Tuple, Optional
 
 from uacpy.core.environment import Environment
+from uacpy.core.exceptions import ConfigurationError
 
 
 def segment_environment_by_range(
@@ -25,7 +26,8 @@ def segment_environment_by_range(
     env : Environment
         Range-dependent environment to segment
     n_segments : int, optional
-        Number of segments. If None, automatically determined.
+        Number of evenly spaced segments (``>= 2``). If None, automatically
+        determined from the environment's change points.
     max_segment_length : float
         Maximum segment length in metres (default 2000 m).
 
@@ -34,10 +36,16 @@ def segment_environment_by_range(
     segments : list of (range, Environment)
         List of ``(range in metres, environment)`` tuples for each segment.
 
+    Raises
+    ------
+    ConfigurationError
+        If ``n_segments`` is given and smaller than 2.
+
     Notes
     -----
     Segments are created at bathymetry / SSP / RD-bottom change points and
-    at regular intervals if those vary slowly.
+    at regular intervals if those vary slowly. The first segment always sits
+    at r=0 so no receiver range falls shoreward of every profile.
     """
     if not env.is_range_dependent:
         return [(0.0, env)]
@@ -54,6 +62,13 @@ def segment_environment_by_range(
         return [(0.0, env)]
 
     if n_segments is not None:
+        if n_segments < 2:
+            raise ConfigurationError(
+                f"n_segments must be >= 2 to describe a range-dependent "
+                f"environment (got {n_segments}); 1 collapses the run to a "
+                f"single profile at r=0. Pass n_segments=None for automatic "
+                f"segmentation at the environment's change points."
+            )
         segment_ranges_m = np.linspace(0, max_range_m, n_segments)
     else:
         # Automatic segmentation: union the change-point ranges from
@@ -66,6 +81,11 @@ def segment_environment_by_range(
         if env.bottom.is_range_dependent:
             key_ranges_m.update(env.bottom.ranges.tolist())
         key_ranges_m = sorted(key_ranges_m)
+        # A profile axis that starts beyond r=0 would leave everything
+        # shoreward of its first sample without a segment; anchor at 0 and let
+        # the constant extrapolation every carrier already does fill it.
+        if key_ranges_m[0] > 0:
+            key_ranges_m.insert(0, 0.0)
 
         segment_ranges_m = [key_ranges_m[0]]
         for i in range(1, len(key_ranges_m)):

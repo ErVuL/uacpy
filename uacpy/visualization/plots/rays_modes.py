@@ -4,14 +4,14 @@ from __future__ import annotations
 
 
 import numpy as np
-import matplotlib.pyplot as plt
 from typing import Optional, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
-from uacpy.visualization.style import RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit, typed_plot_error
+from uacpy.io.units import m_to_km
+from uacpy.visualization.style import SOURCE_MARKER_STYLE
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_SOURCE, _overlay_seafloor, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
 
 
 def _plot_rays(
@@ -38,10 +38,7 @@ def _plot_rays(
     if not isinstance(rays, Rays):
         raise ConfigurationError(f"_plot_rays: expected Rays, got {type(rays).__name__}")
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
     color_map = {
         'direct': '#e53935',
@@ -57,7 +54,7 @@ def _plot_rays(
         z = np.asarray(ray.get('z', []))
         if r.size == 0:
             continue
-        max_r_km = max(max_r_km, float(np.max(r)) / 1000.0)
+        max_r_km = max(max_r_km, m_to_km(float(np.max(r))))
         max_z = max(max_z, float(np.max(z)))
         n_top = int(ray.get('n_top_bounces', 0) or 0)
         n_bot = int(ray.get('n_bot_bounces', 0) or 0)
@@ -71,11 +68,11 @@ def _plot_rays(
             kind = 'direct'
         bounce_counts[kind] += 1
         color = color_map[kind] if color_by == 'bounces' else color_map['bottom']
-        ax.plot(r / 1000.0, z, color=color, alpha=alpha,
+        ax.plot(m_to_km(r), z, color=color, alpha=alpha,
                 linewidth=linewidth, solid_capstyle='round',
                 zorder=ZORDER_RAYS, **mpl_kw)
 
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     depth_for_lim = max_z
     if env is not None:
         depth_for_lim = max(depth_for_lim, float(env.depth))
@@ -97,31 +94,13 @@ def _plot_rays(
         _overlay_seafloor(ax, env, ranges_for_overlay)
 
     if show_receivers and rays.receiver_ranges is not None and rays.receiver_depths is not None:
-        rr_full = np.atleast_1d(rays.receiver_ranges) / 1000.0
-        rd_full = np.atleast_1d(rays.receiver_depths)
-        # Dense receiver grids drown out the rays — decimate each axis
-        # independently to keep the lattice visible (10 down × 20 across
-        # max, matching the env cross-section).
-        max_range_dots = 20
-        max_depth_dots = 10
-        step_r = max(1, rr_full.size // max_range_dots)
-        step_d = max(1, rd_full.size // max_depth_dots)
-        rr = rr_full[::step_r]
-        rd = rd_full[::step_d]
-        RR, RD = np.meshgrid(rr, rd)
-        # Slightly shrink the marker for ray-fan plots — receivers are
-        # sampling points, not the visual focus — but keep them clearly
-        # readable against the ray fan.
-        rcv_style = dict(RECEIVER_MARKER_STYLE)
-        rcv_style['markersize'] = min(rcv_style.get('markersize', 8), 7)
-        ax.plot(RR.ravel(), RD.ravel(),
-                zorder=ZORDER_RECEIVERS, **rcv_style)
+        # Markers are slightly smaller than on the env cross-section —
+        # receivers are sampling points here, not the visual focus.
+        rr_km = _draw_receiver_grid(ax, rays.receiver_ranges,
+                                    rays.receiver_depths, max_markersize=7)
         # x-axis spans the receiver extent with a small right margin so a
         # receiver sitting at the max range isn't clipped to the spine.
-        # Markers keep default clipping (clip_on=True) so a later user zoom
-        # (e.g. ax.set_xlim(...)) correctly hides out-of-view receivers rather
-        # than painting them across the whole figure.
-        r_max = float(np.max(rr_full))
+        r_max = float(np.max(rr_km))
         ax.set_xlim(0.0, r_max * 1.03 if r_max > 0 else 1.0)
     if show_source and rays.source_depths is not None and rays.source_depths.size:
         src_style = dict(SOURCE_MARKER_STYLE)
@@ -167,10 +146,7 @@ def _plot_arrivals(
             f"_plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     color_map = {
         'direct': '#e53935',
         'surface': '#43a047',
@@ -231,10 +207,7 @@ def _plot_mode_functions(
             f"_plot_mode_functions: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     n_modes = modes.n_modes if n_modes is None else min(int(n_modes), modes.n_modes)
     for m in range(n_modes):
         psi = np.asarray(modes.phi[:, m])
@@ -243,7 +216,7 @@ def _plot_mode_functions(
         ax.plot(psi, modes.depths, label=f"m={m+1}", linewidth=1.0)
     ax.set_xlabel(r'$\psi_m(z)$')
     ax.set_ylabel('Depth (m)')
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if n_modes <= 12:
         ax.legend(fontsize=8, loc='best')
@@ -266,10 +239,7 @@ def plot_mode_wavenumbers(
             f"plot_mode_wavenumbers: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     idx = np.arange(1, modes.n_modes + 1)
     k = np.asarray(modes.k)
     ax.plot(idx, k.real, 'o-', label=r'$\mathrm{Re}(k_m)$')
@@ -309,10 +279,7 @@ def plot_modes_heatmap(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     if mode_range is not None:
         start, stop = mode_range
         stop = min(stop, modes.n_modes)
@@ -345,7 +312,7 @@ def plot_modes_heatmap(
     )
     ax.set_xlabel('Mode index')
     ax.set_ylabel('Depth (m)')
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     f0 = modes.f0 if modes.f0 is not None else 0.0
     ax.set_title(
         title or f'Mode shapes — {n_plot} modes @ {f0:.1f} Hz',
@@ -379,10 +346,7 @@ def _plot_reflection_coefficient(
         )
     if rc.is_broadband:
         _owns_fig = ax is None
-        if _owns_fig:
-            fig, ax = plt.subplots(figsize=figsize)
-        else:
-            fig = ax.figure
+        fig, ax = fig_ax(ax, figsize)
         im = ax.pcolormesh(
             rc.frequencies / 1000.0, rc.theta, rc.R,
             shading='nearest', cmap='viridis',
@@ -396,10 +360,7 @@ def _plot_reflection_coefficient(
         return fig, ax
 
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     ax.plot(rc.theta, rc.R, label='|R|', color='C0')
     ax.set_xlabel('Grazing angle (°)')
     ax.set_ylabel('|R|', color='C0')
@@ -437,10 +398,7 @@ def _plot_covariance(
             f"_plot_covariance: expected Covariance, got {type(cov).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     C = np.abs(cov.covariance[freq_idx])
     im = ax.imshow(C, cmap='viridis', aspect='auto', origin='upper')
     fig.colorbar(im, ax=ax, label='|C|')
@@ -472,10 +430,7 @@ def _plot_replicas(
             f"_plot_replicas: expected Replicas, got {type(rep).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     R = np.abs(rep.replicas[freq_idx, :, :, 0, sensor_idx])
     im = ax.pcolormesh(
         rep.replica_x, rep.replica_z, R,
@@ -484,7 +439,7 @@ def _plot_replicas(
     fig.colorbar(im, ax=ax, label='|R|')
     ax.set_xlabel('x (m)')
     ax.set_ylabel('z (m)')
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     if title:
         ax.set_title(title)
     if _owns_fig:

@@ -35,6 +35,11 @@ def mmse_equalizer(rx, h, snr_linear):
     Frequency-domain ``W(f) = H*(f) / (|H(f)|^2 + 1/snr)``. ``snr_linear`` is the
     operating SNR; ``snr_linear -> inf`` gives the zero-forcing inverse.
 
+    The FFT makes the equalization **circular**: ``rx`` must carry a cyclic
+    prefix of at least ``len(h)-1`` samples, or the first ``len(h)-1`` outputs
+    (which wrap the linear-convolution tail) must be discarded. For the
+    CP-based path see :func:`uacpy.comms.ofdm.ofdm_demodulate`.
+
     Returns the equalized signal only (a single ndarray). Unlike the *adaptive*
     :func:`lms_equalizer` / :func:`rls_equalizer`, which return
     ``(equalized, mse)`` because they converge over symbols, this is a one-shot

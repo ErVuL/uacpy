@@ -53,21 +53,33 @@ from uacpy.visualization.plots.noise import (
 
 
 def plot_result(result, env: Optional[Environment] = None, **kwargs):
-    """Type-dispatch to the right plotter. Used by :meth:`Result.plot`."""
+    """Type-dispatch to the right plotter. Used by :meth:`Result.plot`.
+
+    A result carries no carriers, so ``env`` is only ever what the caller
+    passes: supply it to draw the seabed and span the full water column.
+    """
     if isinstance(result, ResultStack):
         if issubclass(result.slab_type, Field):
-            from uacpy.visualization.plots.fields import plot_field_stack
-            return plot_field_stack(result, env=env, **kwargs)
+            from uacpy.visualization.plots.fields import _plot_field_stack
+            return _plot_field_stack(result, env=env, **kwargs)
         raise ConfigurationError(
             f"plot_result: this ResultStack holds {result.slab_type.__name__} "
             "slabs — pick one with stack[i] or stack.at(...) before plotting."
         )
     if isinstance(result, Field):
         return plot_field(result, env=env, **kwargs)
-    if isinstance(result, Arrivals):
-        return _plot_arrivals(result, **kwargs)
     if isinstance(result, Rays):
         return _plot_rays(result, env=env, **kwargs)
+
+    # Plotters with no spatial cross-section to overlay an environment on.
+    # Accepting env= silently would look like it had an effect.
+    if env is not None:
+        raise ConfigurationError(
+            f"{type(result).__name__}.plot: env= has no effect on this view — "
+            "only Field and Rays plots draw the environment. Drop env=."
+        )
+    if isinstance(result, Arrivals):
+        return _plot_arrivals(result, **kwargs)
     if isinstance(result, Modes):
         return _plot_mode_functions(result, **kwargs)
     if isinstance(result, Covariance):

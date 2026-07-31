@@ -105,8 +105,8 @@ def plot_bathymetry_map(
     else:
         cm = cm.with_extremes(bad='#d9cdb8')
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
-        ax.set_xlabel("Longitude [°E]")
-        ax.set_ylabel("Latitude [°N]")
+        ax.set_xlabel("Longitude (°E)")
+        ax.set_ylabel("Latitude (°N)")
         ax.set_aspect(aspect if aspect is not None else 'equal')
 
     if contours is not None and contours is not False and dm.count() > 1:
@@ -131,7 +131,7 @@ def plot_bathymetry_map(
         sp = proj(s_lat, s_lon)
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
-    fig.colorbar(pc, ax=ax, label="Water depth [m]")
+    fig.colorbar(pc, ax=ax, label="Water depth (m)")
     ax.set_title(title or "Bathymetry", loc='left', fontsize=11, fontweight='bold')
     if own_fig:
         credit = _credit_attributions(data_source)

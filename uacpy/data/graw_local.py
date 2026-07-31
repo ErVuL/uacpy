@@ -25,7 +25,9 @@ from uacpy.core.sediment import _HB_PHI, _HB_RHO, grain_size_to_geoacoustics
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
 from uacpy.data._netcdf import NetcdfGrid
-from uacpy.data.sediment import range_dependent_bottom_along
+from uacpy.data.sediment import (
+    range_dependent_bottom_along, water_sound_speed_at,
+)
 
 __all__ = ['download_graw_db', 'fetch_seabed_density',
            'fetch_seabed_density_transect', 'fetch_bottom_graw',
@@ -154,11 +156,14 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
 def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
                                roughness=0.0, water_sound_speed=None,
                                timeout=None, verbose=False):
-    """Range-dependent bottom from the Graw grid along ``start`` → ``end``."""
+    """Range-dependent bottom from the Graw grid along ``start`` → ``end``.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_graw(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
         start, end, n_points, source_label='Graw density grid',
         max_points=max_points,
     )

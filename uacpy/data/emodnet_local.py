@@ -30,6 +30,7 @@ from uacpy.data._http import http_get
 from uacpy.data.seabed import EMODNET_WFS_URL, EMODNET_LAYER, _FOLK5_TO_BOTTOM
 from uacpy.data.sediment import (
     bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 
 __all__ = ['download_emodnet_db', 'fetch_seabed_local', 'fetch_bottom_local',
@@ -190,11 +191,14 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
                                 water_sound_speed: Optional[float] = None,
                                 timeout=None, verbose: Union[bool, str] = False
                                 ) -> Bottom:
-    """Range-dependent bottom from the offline EMODnet polygons along a transect."""
+    """Range-dependent bottom from the offline EMODnet polygons along a transect.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
         start, end, n_points, source_label='EMODnet (offline)',
         max_points=max_points,
     )

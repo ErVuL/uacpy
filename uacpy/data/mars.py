@@ -30,7 +30,7 @@ from uacpy.data._geo import (
 )
 from uacpy.data._http import http_get
 from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along,
+    bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
 from uacpy._log import log_message
 
@@ -210,11 +210,14 @@ def fetch_bottom_mars_transect(
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
 ) -> Bottom:
-    """Range-dependent bottom from MARS samples along ``start`` → ``end``."""
+    """Range-dependent bottom from MARS samples along ``start`` → ``end``.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_mars(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed,
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
             max_distance_km=max_distance_km, layer=layer, base_url=base_url,
             timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='AusSeabed MARS',

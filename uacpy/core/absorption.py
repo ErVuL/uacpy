@@ -38,7 +38,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
 
-from uacpy.core.constants import NEPER_TO_DB
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, NEPER_TO_DB
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -143,7 +143,7 @@ def convert_attenuation_units(
     frequency: float,
     from_unit: str,
     to_unit: str,
-    sound_speed: float = 1500.0,
+    sound_speed: float = DEFAULT_SOUND_SPEED,
 ) -> np.ndarray:
     """Convert volume attenuation between unit conventions.
 

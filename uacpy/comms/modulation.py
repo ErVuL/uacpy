@@ -116,7 +116,10 @@ def dpsk_modulate(bits, M: int = 2):
         bits = np.concatenate([bits, np.zeros(bps - bits.size % bps, dtype=int)])
     groups = bits.reshape(-1, bps)
     sym = (groups @ (1 << np.arange(bps - 1, -1, -1)))
-    dphi = 2 * np.pi * np.array([_gray(int(s)) for s in sym]) / M
+    # Gray constellation: bit-label `l` sits on phase point `p` with gray(p) = l,
+    # the same labelling as the coherent `_psk_lut`.
+    point = {_gray(p): p for p in range(M)}
+    dphi = 2 * np.pi * np.array([point[int(s)] for s in sym]) / M
     phase = np.cumsum(np.concatenate([[0.0], dphi]))
     return np.exp(1j * phase)  # length len(sym)+1 (incl. reference symbol)
 
@@ -129,8 +132,7 @@ def dpsk_demodulate(symbols, M: int = 2):
     dphi = np.angle(s[1:] * np.conj(s[:-1])) % (2 * np.pi)
     sym = np.round(dphi / (2 * np.pi / M)).astype(int) % M
     bps = int(np.log2(M))
-    inv = np.array([_gray(i) for i in range(M)])
-    label = np.array([np.where(inv == v)[0][0] for v in sym])
+    label = np.array([_gray(int(p)) for p in sym])
     bits = ((label[:, None] >> np.arange(bps - 1, -1, -1)) & 1)
     return bits.ravel()
 

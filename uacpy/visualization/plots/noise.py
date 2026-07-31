@@ -39,7 +39,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
                            f'{wenz.shipping_level} traffic, '
                            f'{wenz.wind_speed:g} kn, {wenz.rain_rate} rain)'),
                     **mpl_kw)
-    ax.set_xlabel('Frequency [Hz]')
+    ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel(r'Noise Level [dB re 1$\mu$Pa$^2$/Hz]')
     ax.set_title(title or 'WENZ noise level estimate', loc='left')
     ax.set_xlim((f[0], f[-1]))
@@ -60,8 +60,8 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
     fig, ax = fig_ax(ax, figsize)
     for g in groups:
         ax.semilogx(f, auditory_weighting(f, g), label=f"{g.upper()}", **mpl_kw)
-    ax.set_xlabel("Frequency [Hz]")
-    ax.set_ylabel("Weighting W(f) [dB]")
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Weighting W(f) (dB)")
     ax.set_title(title or "Marine-mammal auditory weighting", loc="left")
     ax.set_ylim(-40, 5)
     ax.grid(which="both", alpha=0.3)
@@ -77,8 +77,8 @@ def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
     lv = np.asarray(level_db, dtype=float)
     fig, ax = fig_ax(ax, figsize)
     ax.semilogx(f, lv, marker="o", label=label, **mpl_kw)
-    ax.set_xlabel("Decidecade band centre [Hz]")
-    ax.set_ylabel("Source level [dB re 1 µPa·m]")
+    ax.set_xlabel("Decidecade band centre (Hz)")
+    ax.set_ylabel("Source level (dB re 1 µPa·m)")
     ax.set_title(title or "Ship radiated noise", loc="left")
     ax.grid(which="both", alpha=0.3)
     if label:

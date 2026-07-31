@@ -211,8 +211,11 @@ class TestFRF:
         frf = FRF()
         _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m=criterion)
         assert np.isfinite(tf).all()
-        # every criterion recovers the true order-3 FIR at this SNR
-        assert frf.m == 3
+        # every criterion recovers the true order-3 FIR at this SNR; the
+        # criterion itself stays on .m, the chosen order is published
+        # separately so a reused FRF re-selects instead of pinning.
+        assert frf.selected_order == 3
+        assert frf.m == criterion
 
     def test_cp_recovers_order_six_fir(self):
         """Mallows' Cp recovers the true order-6 FIR at moderate SNR. Cp scales
@@ -231,7 +234,8 @@ class TestFRF:
         frf = FRF()
         _, tf = frf.compute(u, y, 1000.0, method='ls_fir', m='CP')
         assert np.isfinite(tf).all()
-        assert frf.m == order
+        assert frf.selected_order == order
+        assert frf.m == 'CP'
 
 
 def test_degenerate_input_guards_raise_configurationerror():

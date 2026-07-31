@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _require_strictly_increasing
-from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.bottom import BoundaryProperties, _reduce_boundaries
 
 
 _SURFACE_DELEGATED = frozenset({
@@ -30,7 +30,8 @@ _SURFACE_DELEGATED = frozenset({
 })
 
 
-@dataclass
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False)
 class Surface:
     """Surface acoustic properties, optionally range-dependent.
 
@@ -70,6 +71,15 @@ class Surface:
         elif len(self.properties) != 1:
             raise ConfigurationError(
                 "Surface: multiple boundaries require a matching ranges= axis.")
+
+    def __repr__(self) -> str:
+        if not self.is_range_dependent:
+            return f"Surface({self.properties[0]!r})"
+        r_lo = float(self.ranges[0]) / 1000
+        r_hi = float(self.ranges[-1]) / 1000
+        types = sorted({p.acoustic_type for p in self.properties})
+        return (f"Surface(range-dependent, n={len(self.properties)}, "
+                f"range=[{r_lo:g}, {r_hi:g}] km, types={types})")
 
     @property
     def data_sources(self) -> tuple:
@@ -181,23 +191,8 @@ class Surface:
                 f"average; got {sorted(types)}. Boundary types cannot be "
                 f"blended — use 'r0' or 'rmax' (e.g. for a marginal ice zone).")
         reduce = np.mean if method == 'mean' else np.median
-
-        def _pull(attr):
-            return float(reduce([getattr(p, attr) for p in self.properties]))
-        p0 = self.properties[0]
-        if p0.acoustic_type in ('vacuum', 'rigid'):
-            # Parameter-free types have nothing to average.
-            return Surface(properties=[BoundaryProperties(
-                acoustic_type=p0.acoustic_type)])
-        return Surface(properties=[BoundaryProperties(
-            acoustic_type=p0.acoustic_type,
-            sound_speed=_pull('sound_speed'),
-            density=_pull('density'),
-            attenuation=_pull('attenuation'),
-            shear_speed=_pull('shear_speed'),
-            shear_attenuation=_pull('shear_attenuation'),
-            roughness=_pull('roughness'),
-        )])
+        return Surface(properties=[
+            _reduce_boundaries(self.properties, reduce)])
 
     def __getattr__(self, name):
         # Uniform-surface compatibility: forward BoundaryProperties reads to the

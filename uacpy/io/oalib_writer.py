@@ -23,6 +23,8 @@ Adoption across uacpy model wrappers:
   ``write_surface_halfspace``: all AT-family wrappers including Bellhop.
 """
 
+import shutil
+
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple, Union
@@ -146,7 +148,7 @@ def write_surface_halfspace(f, env: Environment) -> None:
     )
 
 
-def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> None:
+def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -> None:
     """
     Write sound speed profile matrix to file.
 
@@ -154,8 +156,9 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     ----------
     filepath : str or Path
         SSP file path
-    r_km : ndarray
-        Range vector in kilometers, shape (N,)
+    ranges_m : ndarray
+        Range vector in metres, shape (N,), converted to the km the
+        ``.ssp`` format expects at this boundary (``sspMod.f90:417-422``).
     c : ndarray
         Sound speed profiles in m/s, shape (n_depth, N)
         Each column is the SSP at the corresponding range
@@ -175,12 +178,13 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
     Examples
     --------
     >>> # Create range-dependent SSP
-    >>> r_km = np.array([0, 10, 20, 30])
+    >>> ranges_m = np.array([0, 10000, 20000, 30000])
     >>> z = np.linspace(0, 100, 11)
     >>> c = 1500 - 0.1 * z[:, np.newaxis]  # Simple gradient
-    >>> write_ssp('test.ssp', r_km, c)
+    >>> write_ssp('test.ssp', ranges_m, c)
     """
     filepath = Path(filepath)
+    r_km = m_to_km(ranges_m)
     Npts = len(r_km)
 
     # Validate range vector vs SSP matrix shape — each column of ``c``
@@ -193,7 +197,7 @@ def write_ssp(filepath: Union[str, Path], r_km: np.ndarray, c: np.ndarray) -> No
         )
     if c.shape[1] != Npts:
         raise ConfigurationError(
-            f"write_ssp: len(r_km) = {Npts} does not match c.shape[1] = "
+            f"write_ssp: len(ranges_m) = {Npts} does not match c.shape[1] = "
             f"{c.shape[1]} (each column of c must be one profile)"
         )
 
@@ -605,26 +609,30 @@ def write_bottom_section(
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
 
     if bottom_code == 'F':
-        if hs.reflection_file and filepath is not None:
-            import shutil
-            brc_source = Path(hs.reflection_file)
-            if brc_source.exists():
-                brc_dest = filepath.with_suffix('.brc')
-                shutil.copy(brc_source, brc_dest)
-                log_message('oalib_writer',
-                            f"copied reflection file: {brc_source} -> {brc_dest}",
-                            verbose=verbose)
-            else:
-                raise FileNotFoundError(
-                    f"at_env_writer: reflection coefficient file not found: "
-                    f"{hs.reflection_file}; "
-                    f"generate it via BOUNCE or OASR first."
-                )
-        elif hs.reflection_file is None:
+        if hs.reflection_file is None:
             raise ConfigurationError(
-                "at_env_writer: acoustic_type='file' requires reflection_file= "
-                "on the bottom BoundaryProperties (path to a .brc file)."
+                "write_bottom_section: acoustic_type='file' requires "
+                "reflection_file= on the bottom BoundaryProperties (path to a "
+                ".brc file)."
             )
+        if filepath is None:
+            raise RuntimeError(
+                "write_bottom_section: acoustic_type='file' needs filepath= so "
+                "the .brc table can be staged beside the .env; the model would "
+                "otherwise declare 'F' with no reflection file for AT to open."
+            )
+        brc_source = Path(hs.reflection_file)
+        if not brc_source.exists():
+            raise ConfigurationError(
+                f"write_bottom_section: reflection coefficient file not found: "
+                f"{hs.reflection_file}; generate it via BOUNCE or OASR first."
+            )
+        brc_dest = Path(filepath).with_suffix('.brc')
+        if brc_source.resolve() != brc_dest.resolve():
+            shutil.copy(brc_source, brc_dest)
+        log_message('oalib_writer',
+                    f"staged reflection file: {brc_source} -> {brc_dest}",
+                    verbose=verbose)
 
         if emit_reflection_table_block:
             if c_low is None or c_high is None or rmax is None:
@@ -764,7 +772,7 @@ def write_multi_profile_env(
     def _total_depth(env_seg):
         d = env_seg.depth
         if env_seg.has_layered_bottom:
-            for layer in env_seg.bottom.columns[0].layers:
+            for layer in _writable_layers(env_seg.bottom):
                 d += layer.thickness
         return d
 
@@ -786,7 +794,7 @@ def write_multi_profile_env(
     interp_ssp = kwargs.get('interp_ssp', 'linear')
 
     with open(filepath, 'w') as f:
-        for i, (_range_km, env_seg) in enumerate(segments):
+        for _range_km, env_seg in segments:
             ssp_topopt = resolve_ssp_topopt(env_seg, interp_ssp)
             surface_obj = getattr(env_seg, 'surface', None)
             if surface_obj is not None:
@@ -826,7 +834,7 @@ def write_multi_profile_env(
             real_layers = []
 
             if env_seg.has_layered_bottom:
-                for layer in env_seg.bottom.columns[0].layers:
+                for layer in _writable_layers(env_seg.bottom):
                     top = current_depth
                     bot = float(f"{current_depth + layer.thickness:.1f}")
                     real_layers.append((top, bot, layer))
@@ -1250,11 +1258,13 @@ def write_field3dflp(
 
                 f.write(f"{x_coord:8.2f} {y_coord:8.2f} {modfil}\n")
 
-        # Elements (triangular mesh)
+        # Elements (triangular mesh). FIELD3D indexes the node arrays
+        # directly with these values (``x( Node1 )``, field3d.f90:285-291),
+        # so they are 1-based.
         nelts = 2 * (nx - 1) * (ny - 1)
         f.write(f"{nelts:5d}\n")
 
-        inode = 0
+        inode = 1
         for iy in range(ny - 1):
             for ix in range(nx - 1):
                 # Two triangles per grid cell
@@ -1301,6 +1311,7 @@ def write_kraken_env_file(
         write_bottom_section(
             f, env,
             bottom_type=bottom_type,
+            filepath=Path(filepath),
             emit_reflection_table_block=False,
         )
         write_phase_speed_and_rmax(f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high)
@@ -1396,10 +1407,11 @@ def write_sparc_env_file(
         # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
         f.write(f"'{env.name}'\n")
         f.write(f"{source.frequencies[0]:.6f}\n")
-        # NMedia = water column + one medium per sediment layer.
+        # NMedia = water column + one medium per sediment layer actually
+        # emitted by write_layer_sections below.
         n_media = 1
         if env.has_layered_bottom:
-            n_media += len(env.bottom.columns[0].layers)
+            n_media += len(_writable_layers(env.bottom))
         f.write(f"{n_media}\n")
 
         surface_code = surface_type.to_acoustics_toolbox_code()

@@ -11,7 +11,7 @@ Provides:
 * ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII or binary)
 * ``.ssp`` — :func:`read_ssp_2d`, :func:`read_ssp_3d`
 * ``.flp`` — :func:`read_flp`, :func:`read_flp3d`
-* ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, binary)
+* ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, ASCII)
 * ``.ts``  — :func:`read_ts` (generic time series, ASCII)
 """
 
@@ -26,7 +26,8 @@ from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import (
-    read_vector as _read_vector, detect_endian, typed_format_error)
+    read_vector as _read_vector, detect_endian, typed_format_error,
+    strip_fortran_comment as _strip_fortran_comment)
 from uacpy.io.units import km_to_m
 
 
@@ -322,6 +323,7 @@ def read_shd_bin(
     }
 
 
+@typed_format_error
 def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read ASCII shade file produced by acoustic models.
@@ -371,53 +373,51 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     >>> # print(f"Frequency: {data['freq0']} Hz")
     """
     filepath = Path(filepath)
-    try:
-        fid = open(filepath, "r")
-    except FileNotFoundError as e:
+    if not filepath.exists():
         raise FileNotFoundError(
             f"ASCII shade file not found: {filepath}. Run a model first to "
             "produce it."
-        ) from e
-    title = fid.readline().strip()
-    plot_type = fid.readline().strip()
+        )
+    with open(filepath, "r") as fid:
+        title = fid.readline().strip()
+        plot_type = fid.readline().strip()
 
-    line = fid.readline()
-    vals = np.array(line.split(), dtype=float)
-    Nfreq = int(vals[0])
-    Ntheta = int(vals[1])
-    Nsd = int(vals[2])
-    Nrd = int(vals[3])
-    Nrr = int(vals[4])
+        line = fid.readline()
+        vals = np.array(line.split(), dtype=float)
+        Nfreq = int(vals[0])
+        Ntheta = int(vals[1])
+        Nsd = int(vals[2])
+        Nrd = int(vals[3])
+        Nrr = int(vals[4])
 
-    line = fid.readline()
-    vals = np.array(line.split()[:2], dtype=float)
-    freq0 = vals[0]
-    atten = vals[1]
-    freq_vec = np.zeros(Nfreq)
-    for i in range(Nfreq):
-        freq_vec[i] = float(fid.readline().strip())
+        line = fid.readline()
+        vals = np.array(line.split()[:2], dtype=float)
+        freq0 = vals[0]
+        atten = vals[1]
+        freq_vec = np.zeros(Nfreq)
+        for i in range(Nfreq):
+            freq_vec[i] = float(fid.readline().strip())
 
-    theta = np.zeros(Ntheta)
-    for i in range(Ntheta):
-        theta[i] = float(fid.readline().strip())
+        theta = np.zeros(Ntheta)
+        for i in range(Ntheta):
+            theta[i] = float(fid.readline().strip())
 
-    s_z = np.zeros(Nsd)
-    for i in range(Nsd):
-        s_z[i] = float(fid.readline().strip())
+        s_z = np.zeros(Nsd)
+        for i in range(Nsd):
+            s_z[i] = float(fid.readline().strip())
 
-    r_z = np.zeros(Nrd)
-    for i in range(Nrd):
-        r_z[i] = float(fid.readline().strip())
+        r_z = np.zeros(Nrd)
+        for i in range(Nrd):
+            r_z[i] = float(fid.readline().strip())
 
-    r_r = np.zeros(Nrr)
-    for i in range(Nrr):
-        r_r[i] = float(fid.readline().strip())
-    temp = np.zeros((2 * Nrr, Nrd))
-    for j in range(Nrd):
-        for i in range(2 * Nrr):
-            temp[i, j] = float(fid.readline().strip())
+        r_r = np.zeros(Nrr)
+        for i in range(Nrr):
+            r_r[i] = float(fid.readline().strip())
+        temp = np.zeros((2 * Nrr, Nrd))
+        for j in range(Nrd):
+            for i in range(2 * Nrr):
+                temp[i, j] = float(fid.readline().strip())
 
-    fid.close()
     pressure = temp[0::2, :].T + 1j * temp[1::2, :].T
     # Exact complex zero = cell the engine never wrote (see read_shd_bin);
     # surface as NaN, uacpy's no-data convention.
@@ -879,7 +879,8 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     ssp_data : dict
         Dictionary containing:
         - 'n_prof' : int - Number of profiles (ranges)
-        - 'r_prof' : ndarray - Range values in km, shape (n_prof,)
+        - 'r_prof' : ndarray - Range values in metres, shape (n_prof,).
+          Stored on disk in km (``sspMod.f90:417-422``) and converted here.
         - 'c_mat' : ndarray - Sound speed matrix in m/s, shape (n_depth, n_prof)
         - 'n_depth' : int - Number of depth points per profile
 
@@ -903,7 +904,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     --------
     >>> ssp = read_ssp_2d('range_dependent.ssp')
     >>> print(f"Number of profiles: {ssp['n_prof']}")
-    >>> print(f"Ranges: {ssp['r_prof']} km")
+    >>> print(f"Ranges: {ssp['r_prof']} m")
     >>> print(f"SSP matrix shape: {ssp['c_mat'].shape}")
     >>> # Sound speed at depth index 10, range index 5
     >>> c = ssp['c_mat'][10, 5]
@@ -913,8 +914,6 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     #   Line 1            : NProf (integer)
     #   Line 2            : NProf range values (single list-directed record)
     #   Lines 3..NSSP+2   : one SSP row per depth, each with NProf values
-    # The previous implementation read the range vector one value per line,
-    # which mismatched the canonical AT files (e.g. tests/Munk/MunkB_geo_rot.ssp).
     with open(filepath, "r") as fid:
         n_prof = int(fid.readline().strip())
         r_prof = np.array(fid.readline().split()[:n_prof], dtype=float)
@@ -941,9 +940,11 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
         c_mat = np.array(rows)  # shape (n_depth, n_prof)
         n_depth = c_mat.shape[0]
 
-    return {"n_prof": n_prof, "r_prof": r_prof, "c_mat": c_mat, "n_depth": n_depth}
+    return {"n_prof": n_prof, "r_prof": km_to_m(r_prof), "c_mat": c_mat,
+            "n_depth": n_depth}
 
 
+@typed_format_error
 def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read 3D sound speed profile file used by BELLHOP3D.
@@ -963,9 +964,11 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
         - 'Nx' : int - Number of x segments
         - 'Ny' : int - Number of y segments
         - 'Nz' : int - Number of depth points
-        - 'Segx' : ndarray - X segment boundaries, shape (Nx,)
-        - 'Segy' : ndarray - Y segment boundaries, shape (Ny,)
-        - 'Segz' : ndarray - Depth values, shape (Nz,)
+        - 'Segx' : ndarray - X segment boundaries in metres, shape (Nx,).
+          Stored on disk in km (``sspMod.f90:614-615``) and converted here.
+        - 'Segy' : ndarray - Y segment boundaries in metres, shape (Ny,).
+          Also km on disk.
+        - 'Segz' : ndarray - Depth values in metres, shape (Nz,)
         - 'c_mat' : ndarray - Sound speed in m/s, shape (Nz, Ny, Nx)
 
     Notes
@@ -1031,13 +1034,14 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
         "Nx": Nx,
         "Ny": Ny,
         "Nz": Nz,
-        "Segx": Segx,
-        "Segy": Segy,
+        "Segx": km_to_m(Segx),
+        "Segy": km_to_m(Segy),
         "Segz": Segz,
         "c_mat": c_mat,
     }
 
 
+@typed_format_error
 def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
     """
     Read field parameters file (.flp) for KRAKEN/FIELD programs.
@@ -1142,7 +1146,7 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         # it verbatim rather than inventing a "P" default that wasn't in
         # the file — downstream code can distinguish ' ' vs 'P'.
         comp = opt[2]
-        M_limit = int(f.readline().strip())
+        M_limit = int(_strip_fortran_comment(f.readline()))
         log_message('oalib_reader', f"MLimit = {M_limit}", verbose=verbose)
         r_prof, N_prof = _read_vector(f)
         log_message('oalib_reader', f"Number of profiles, NProf = {N_prof}",
@@ -1157,8 +1161,9 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         r_rcv, _ = _read_vector(f)
         r_rcv = km_to_m(r_rcv)
         pos_temp = _read_sz_rz(f)
+        # Rro is read by AT with Units='m' (KrakenField/field.f90:147), so the
+        # column is already metres on disk — no conversion.
         r_offsets, N_offsets = _read_vector(f)
-        r_offsets = km_to_m(r_offsets)
 
         log_message('oalib_reader',
                     f"Number of receiver range offsets = {N_offsets}",
@@ -1193,31 +1198,51 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
     }
 
 
+@typed_format_error
 def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
     """
-    Read 3D field parameters file (.flp) for FIELD3D program.
+    Read a 3-D field parameters file (.flp) for the FIELD3D program.
 
     Parameters
     ----------
     fileroot : str or Path
-        File root name (without .flp extension)
+        File root name (``.flp`` appended when the path has no suffix).
 
     Returns
     -------
     flp3d_data : dict
-        Dictionary containing 3D field parameters including:
-        - 'title': str - Title
-        - 'opt': str - Options
-        - 'comp': str - Component
-        - 'M_limit': int - Mode limit
-        - 'N_prof': int - Number of profiles
-        - 'r_prof': ndarray - Profile ranges (m)
-        - 'theta_prof': ndarray - Profile bearings (degrees)
-        - 'pos': dict - 3D position data
+        Dictionary containing:
+
+        - 'title': str — Title.
+        - 'opt': str — FIELD3D option string. ``opt[0:3]`` selects the
+          field algorithm (``'STD'``/``'PAR'``/``'GBT'``), ``opt[3]`` is
+          ``'T'`` to run the tesselation check, ``opt[6]`` is the ``.sbp``
+          beam-pattern flag (``field3d.f90:54``, ``:96``, ``:210``).
+        - 'M_limit': int — Maximum number of modes to use.
+        - 'pos': dict — Source/receiver geometry:
+
+          * ``'s'``: ``'x'``/``'y'`` source coordinates in m, ``'z'``
+            source depths in m.
+          * ``'r'``: ``'z'`` receiver depths in m, ``'r'`` receiver ranges
+            in m, ``'theta'`` receiver bearings in degrees.
+          * ``'Nsx'``/``'Nsy'``: source x/y counts.
+        - 'nodes': dict — Triangulation nodes: ``'x'``/``'y'`` in m and
+          ``'mode_files'`` (list of per-node mode-file names).
+        - 'elements': ndarray, shape (n_elts, 3), int — 1-based node
+          indices of each triangle, as FIELD3D indexes them
+          (``field3d.f90:285-291``).
 
     Notes
     -----
-    Similar to read_flp but for 3D cylindrical geometry used by FIELD3D.
+    Read order follows ``KrakenField/field3d.f90`` ``READIN``: title,
+    option, Mlimit, ``Sx`` (km), ``Sy`` (km), ``Sz``/``Rz`` (m), ``Rr``
+    (km), ``theta`` (degrees), node block, element block. Axes on disk in
+    km are returned in metres.
+
+    See Also
+    --------
+    write_field3dflp : Write 3-D field parameters
+    read_flp : Read 2-D field parameters
     """
     fileroot = Path(fileroot)
     if not fileroot.suffix:
@@ -1225,52 +1250,64 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
     else:
         filepath = fileroot
 
+    def _quoted(line: str) -> str:
+        line = line.strip()
+        if "'" in line:
+            start = line.find("'") + 1
+            return line[start:line.find("'", start)]
+        return _strip_fortran_comment(line)
+
     with open(filepath, "r") as f:
-        title = f.readline().strip()
-        if "'" in title:
-            start = title.find("'") + 1
-            end = title.find("'", start)
-            title = title[start:end]
-        opt = f.readline().strip()
-        if "'" in opt:
-            start = opt.find("'") + 1
-            end = opt.find("'", start)
-            opt = opt[start:end]
+        title = _quoted(f.readline())
+        opt = _quoted(f.readline())
+        M_limit = int(_strip_fortran_comment(f.readline()))
 
-        if len(opt) <= 2:
-            opt += " "
-        if len(opt) <= 3:
-            opt += "C"
-
-        # See read_flp: column 3 is the elastic component / SBP flag.
-        comp = opt[2]
-        M_limit = int(f.readline().strip())
-        r_prof, N_r_prof = _read_vector(f)
-        theta_prof, N_theta_prof = _read_vector(f)
+        s_x, n_sx = _read_vector(f)
+        s_y, n_sy = _read_vector(f)
+        pos_temp = _read_sz_rz(f)
         r_rcv, _ = _read_vector(f)
         theta_rcv, _ = _read_vector(f)
-        pos_temp = _read_sz_rz(f)
-        r_offsets, N_offsets = _read_vector(f)
+
+        n_nodes = int(_strip_fortran_comment(f.readline()))
+        node_x = np.zeros(n_nodes)
+        node_y = np.zeros(n_nodes)
+        mode_files = []
+        for i in range(n_nodes):
+            parts = _strip_fortran_comment(f.readline()).split()
+            node_x[i] = float(parts[0])
+            node_y[i] = float(parts[1])
+            mode_files.append(parts[2].strip("'\""))
+
+        n_elts = int(_strip_fortran_comment(f.readline()))
+        elements = np.zeros((n_elts, 3), dtype=int)
+        for i in range(n_elts):
+            elements[i] = [int(v) for v in
+                           _strip_fortran_comment(f.readline()).split()[:3]]
 
     return {
         "title": title,
         "opt": opt,
-        "comp": comp,
         "M_limit": M_limit,
-        "N_r_prof": N_r_prof,
-        "N_theta_prof": N_theta_prof,
-        "r_prof": km_to_m(r_prof),
-        "theta_prof": theta_prof,
         "pos": {
-            "s": {"z": pos_temp["sz"]},
+            "s": {
+                "x": km_to_m(s_x),
+                "y": km_to_m(s_y),
+                "z": pos_temp["sz"],
+            },
             "r": {
                 "z": pos_temp["rz"],
                 "r": km_to_m(r_rcv),
                 "theta": theta_rcv,
-                "ro": km_to_m(r_offsets),
             },
-            "Nro": N_offsets,
+            "Nsx": n_sx,
+            "Nsy": n_sy,
         },
+        "nodes": {
+            "x": km_to_m(node_x),
+            "y": km_to_m(node_y),
+            "mode_files": mode_files,
+        },
+        "elements": elements,
     }
 
 
@@ -1471,8 +1508,8 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read time-series file from acoustic models.
 
-    This is a simple ASCII time series format, different from the binary
-    RTS format used by SPARC. Used by some AT models for time-domain output.
+    This is a simple ASCII time series format, different from the RTS
+    format used by SPARC. Used by some AT models for time-domain output.
 
     Parameters
     ----------
@@ -1498,7 +1535,7 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     - Following lines: time RTS[0,:] RTS[1,:] ... (nt rows)
       First column is time, remaining columns are RTS values at each depth
 
-    This format is simpler than the binary .rts format used by SPARC.
+    This format is simpler than the .rts format used by SPARC.
 
     Translated from OALIB read_ts.m
 
@@ -1518,7 +1555,7 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     See Also
     --------
-    read_rts_file : Read binary RTS format from SPARC
+    read_rts_file : Read the ASCII RTS format from SPARC
     """
     filepath = Path(filepath)
     if filepath.suffix == '.mat':

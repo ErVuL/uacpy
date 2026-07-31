@@ -27,6 +27,7 @@ from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
 from uacpy.data.sediment import (
     bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 from uacpy._log import log_message
 
@@ -169,11 +170,12 @@ def fetch_bottom_transect(
     :func:`uacpy.data.fetch_ssp_transect`.
 
     Points outside EMODnet coverage hold the nearest covered value; the call
-    raises only if *no* point along the transect is covered.
+    raises only if *no* point along the transect is covered. ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
-                                    water_sound_speed=water_sound_speed,
+                                    water_sound_speed=water_sound_speed_at(
+                                        water_sound_speed, la, lo),
                                     layer=layer, base_url=base_url,
                                     timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='EMODnet', max_points=max_points,

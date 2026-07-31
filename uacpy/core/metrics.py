@@ -36,12 +36,13 @@ def _validate_tl_pair_and_window(
     range_window: Optional[Tuple[float, float]],
     depth_window: Optional[Tuple[float, float]],
     fname: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """Shared validation for TL-pair metrics.
 
     Both inputs must be 2-D ``(depth, range)`` fields. TL is pulled from
-    ``.tl`` (handles complex → dB conversion). Returns
-    ``(da, db, region_mask, finite)``.
+    ``.tl`` (handles complex → dB conversion). Returns ``(diff, finite)`` —
+    the signed TL difference and the boolean mask of finite cells inside the
+    requested window.
     """
     for label, f in (('field_a', field_a), ('field_b', field_b)):
         if not isinstance(f, Field):
@@ -92,7 +93,7 @@ def _validate_tl_pair_and_window(
             f"{fname}: window contains no finite cells "
             f"(range_window={range_window}, depth_window={depth_window})"
         )
-    return da, db, region_mask, finite
+    return diff, finite
 
 
 def tl_rmse(
@@ -124,10 +125,9 @@ def tl_rmse(
     float
         RMSE in dB over the windowed grid, ignoring non-finite cells.
     """
-    da, db, _, finite = _validate_tl_pair_and_window(
+    diff, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_rmse'
     )
-    diff = da - db
     return float(np.sqrt(np.mean(diff[finite] ** 2)))
 
 
@@ -138,10 +138,9 @@ def tl_max_error(
     depth_window: Optional[Tuple[float, float]] = None,
 ) -> float:
     """Maximum absolute TL difference between two TL fields."""
-    da, db, _, finite = _validate_tl_pair_and_window(
+    diff, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_max_error'
     )
-    diff = da - db
     return float(np.max(np.abs(diff[finite])))
 
 
@@ -155,10 +154,9 @@ def tl_bias(
 
     Positive values mean ``field_a`` reports higher TL (more attenuation)
     than ``field_b`` on average."""
-    da, db, _, finite = _validate_tl_pair_and_window(
+    diff, finite = _validate_tl_pair_and_window(
         field_a, field_b, range_window, depth_window, fname='tl_bias'
     )
-    diff = da - db
     return float(np.mean(diff[finite]))
 
 

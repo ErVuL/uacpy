@@ -45,6 +45,16 @@ def typed_format_error(reader):
     return wrapper
 
 
+def strip_fortran_comment(line: str) -> str:
+    """Drop a Fortran trailing comment (``! …``) and surrounding whitespace.
+
+    AT's list-directed ``READ`` stops at the first ``!``, so its own example
+    files and uacpy's writers annotate every scalar line (``999999   ! Mlimit``).
+    Readers must do the same before ``int()``/``float()``.
+    """
+    return line.split('!', 1)[0].strip()
+
+
 _ENDIAN_WARN_EMITTED = False
 
 
@@ -230,11 +240,10 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
     [   0.  250.  500.  750. 1000.]
     """
     # Read number of values
-    line = fid.readline()
-    Nx = int(line.strip())
+    Nx = int(strip_fortran_comment(fid.readline()))
 
     # Read values line
-    line = fid.readline()
+    line = strip_fortran_comment(fid.readline())
 
     if "/" in line:
         # Extract numbers before '/'

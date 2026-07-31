@@ -1,5 +1,5 @@
 """Result base class, phase-reference enum and the metadata registries shared
-by every result type. Split out of the former single ``core/results.py``."""
+by every result type."""
 
 from __future__ import annotations
 
@@ -60,6 +60,20 @@ _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
     'prt_file': (
         str, 'Acoustics-Toolbox / RAM diagnostic .prt log (only when '
         'work_dir is pinned).'
+    ),
+    # Attached by the shared Field synthesis helpers (``to_time_trace`` /
+    # ``synthesize_time_series``), so they are model-independent.
+    'window': (
+        str, "Band-edge taper applied to H(f) before the IFFT: 'hann', "
+        "'hamming', 'blackman', 'tukey' or 'none'."
+    ),
+    'source_model': (
+        str, 'Model that produced the H(f) the time-domain trace was '
+        'synthesised from.'
+    ),
+    'source_waveform_sample_rate': (
+        float, 'Sample rate (Hz) of the source waveform passed to '
+        'Field.synthesize_time_series.'
     ),
 }
 
@@ -139,9 +153,9 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "cylindrical spreading removed)."
     ),
     ('Scooter', 'spectrum'): (
-        'ndarray',
-        'Wavenumber-domain spectrum the transform consumed (one slice '
-        'per frequency for broadband; one array for narrowband).'
+        str,
+        "Wavenumber-branch selector the Hankel transform consumed: 'P' "
+        "positive branch, 'N' negative branch, 'B' both."
     ),
     ('Scooter', 'center_frequency'): (
         float, 'Centre frequency (Hz) of the broadband sweep — picked '
@@ -183,14 +197,18 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     # path computes p(z, r) via time-FFT + Hankel transform.
     ('SPARC', 'transform_method'): (
         str, "Hankel-transform method used to convert the k-domain "
-        "snapshot to r-domain pressure ('time_fft+hankel')."
+        "snapshot to r-domain pressure: 'hankel_per_snapshot_time' for "
+        "the time-evolving snapshot, 'time_fft+hankel' for the "
+        "single-frequency steady-state snapshot."
     ),
     ('SPARC', 'source_type'): (
         str, "Source type ('R' / 'X' / 'S') consumed by the Hankel "
         "transform."
     ),
     ('SPARC', 'spectrum'): (
-        'ndarray', 'k-domain G(k) consumed by the Hankel transform.'
+        str,
+        "Wavenumber-branch selector the Hankel transform consumed: 'P' "
+        "positive branch, 'N' negative branch, 'B' both."
     ),
     ('SPARC', 'snapshot_freq_bin'): (
         float, "FFT-bin frequency (Hz) the snapshot was extracted at "
@@ -312,13 +330,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASP', 'freq_max'): (
         float, 'Maximum frequency (Hz) of the OASP broadband sweep.'
     ),
-    ('OASP', 'source_waveform'): (
-        'ndarray',
-        'User-supplied time-domain source waveform (TIME_SERIES path).'
-    ),
-    ('OASP', 'sample_rate'): (
-        float, 'Sample rate (Hz) for source_waveform (TIME_SERIES path).'
-    ),
     ('OASP', 'frequencies_available'): (
         'ndarray',
         'Full frequency axis available in the .trf, kept on a '
@@ -363,9 +374,9 @@ class Result:
         Model-specific extras (Q, T, dr, dz, n_modes, …).
     """
 
-    # Lower-case tag used by ``visualization.plots.plot_result`` to dispatch
-    # rendering and by callers that want a string discriminator. ``isinstance``
-    # is the preferred check.
+    # Lower-case string discriminator naming the result kind, for callers and
+    # printouts that want a tag. ``isinstance`` is the preferred check —
+    # ``visualization.plots.plot_result`` dispatches on type, not on this.
     field_type: str = ""
 
     def __init__(
@@ -468,8 +479,6 @@ class Result:
         out: Dict[str, Dict[str, Any]] = {}
         for key, value in self.metadata.items():
             doc = _DOCUMENTED_METADATA.get((self.model, key))
-            if doc is None:
-                doc = _DOCUMENTED_METADATA.get((self.backend, key))
             if doc is None:
                 doc = _UNIVERSAL_METADATA.get(key)
             if doc is not None:

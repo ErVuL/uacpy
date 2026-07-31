@@ -276,6 +276,72 @@ class TestField:
         assert field.shape == (10, 20)
 
 
+class TestFieldValueAccessorsAreWriteGuarded:
+    """``Field`` copies on ingest, so no accessor may hand back a writable
+    alias of ``data``: ``p = field.p; p *= k`` would otherwise corrupt the
+    stored result. Real ``.tl`` is the common path (RAM / OAST /
+    Bellhop-incoherent all return real dB)."""
+
+    @staticmethod
+    def _real():
+        return Field(data=np.array([[60.0, 70.0], [80.0, 90.0]]),
+                     coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]})
+
+    @staticmethod
+    def _complex():
+        return Field(data=np.array([[1 + 1j, 2 + 0j], [0 + 3j, 4 - 1j]]),
+                     coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]})
+
+    def test_real_tl_is_read_only(self):
+        f = self._real()
+        tl = f.tl
+        assert not tl.flags.writeable
+        with pytest.raises(ValueError):
+            tl[0, 0] = -999.0
+        np.testing.assert_array_equal(f.data, [[60.0, 70.0], [80.0, 90.0]])
+
+    def test_real_tl_still_reads_the_stored_dB_values(self):
+        f = self._real()
+        np.testing.assert_array_equal(np.asarray(f.tl), f.data)
+
+    def test_scalar_tl_is_read_only_and_castable(self):
+        f = self._real().at(depth=0.0, range=1.0)
+        assert not f.tl.flags.writeable
+        assert float(f.tl) == 70.0
+
+    def test_complex_tl_is_a_fresh_array(self):
+        f = self._complex()
+        tl = f.tl
+        assert not np.shares_memory(tl, f.data)
+        tl[0, 0] = -999.0                       # derived array: safe to write
+        assert f.data[0, 0] == 1 + 1j
+
+    def test_p_is_read_only(self):
+        f = self._complex()
+        with pytest.raises(ValueError):
+            f.p[0, 0] = 5.0
+        assert f.data[0, 0] == 1 + 1j
+
+    def test_magnitude_and_phase_are_fresh_arrays(self):
+        f = self._complex()
+        mag, ph = f.magnitude, f.phase
+        assert not np.shares_memory(mag, f.data)
+        assert not np.shares_memory(ph, f.data)
+        mag[0, 0] = -1.0
+        ph[0, 0] = -1.0
+        assert f.data[0, 0] == 1 + 1j
+        np.testing.assert_allclose(f.magnitude, np.abs(f.data))
+        np.testing.assert_allclose(f.phase, np.angle(f.data))
+
+    def test_to_dict_does_not_alias_the_field(self):
+        f = self._real()
+        d = f.to_dict()
+        d['data'][1, 1] = -1.0
+        d['coords']['depth'][0] = 99.0
+        assert f.data[1, 1] == 90.0
+        assert f.coords['depth'][0] == 0.0
+
+
 class TestPublicReexports:
     """Public namespace contract."""
 
@@ -598,6 +664,26 @@ class TestReflectionCoefficientChainAccessors:
         )
         with pytest.raises(ConfigurationError, match="broadband"):
             rc.at(frequency=100.0)
+
+    @pytest.mark.parametrize('slice_call', [
+        lambda rc: rc.at(frequency=100.0),
+        lambda rc: rc.at(angle=45.0),
+        lambda rc: rc.isel(frequency=1),
+        lambda rc: rc.isel(angle=10),
+        lambda rc: rc.eval(frequency=120.0),
+    ])
+    def test_slicing_keeps_provenance(self, slice_call):
+        """Every slice carries ``model_source`` (the plot credit) and
+        ``phase_reference`` — the same invariant ``Field.id_kwargs``
+        enforces."""
+        from uacpy.models.sources import model_source
+        src = model_source('acoustics_toolbox')
+        rc = self._broadband_rc()
+        rc.model_source = src
+        rc.phase_reference = 'travelling_wave'
+        sliced = slice_call(rc)
+        assert sliced.model_source is src
+        assert sliced.phase_reference == 'travelling_wave'
 
     def test_at_theta_is_synonym_for_angle(self):
         rc = self._broadband_rc()
