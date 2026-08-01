@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Union
 
 from uacpy._log import log_message
+from uacpy.core.absorption import ConstantAbsorption
+from uacpy.core.constants import AttenuationUnits
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -24,10 +26,11 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.io.oalib_writer import (
-    _BOUNDARY_TYPE_MAP, get_top_bc_code,
-    write_receiver_depths, write_receiver_ranges, write_source_depths,
-    write_surface_halfspace,
+    _BOUNDARY_TYPE_MAP, get_top_bc_code, resolve_ssp_topopt,
+    write_absorption_block, write_receiver_depths, write_receiver_ranges,
+    write_source_depths, write_ssp, write_surface_halfspace,
 )
+from uacpy.io.refl_io import stage_reflection_file
 from uacpy.io.units import m_to_km
 
 
@@ -168,7 +171,6 @@ def write_bellhop_env_file(
         # Number of media (1 for simple case)
         f.write("1\n")
 
-        from uacpy.io.oalib_writer import resolve_ssp_topopt
         interp_char = resolve_ssp_topopt(env, interp_ssp)
 
         _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
@@ -190,7 +192,6 @@ def write_bellhop_env_file(
 
         # TopOpt(3) = 'W' (dB/wavelength, uacpy convention).
         # TopOpt(4) from env.absorption.
-        from uacpy.core.constants import AttenuationUnits
         atten_unit_char = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
         vol_atten_char = (
             env.absorption.topopt_code() if env.absorption is not None else ' '
@@ -209,7 +210,6 @@ def write_bellhop_env_file(
 
         write_surface_halfspace(f, env)
 
-        from uacpy.io.oalib_writer import write_absorption_block
         write_absorption_block(f, env)
 
         # env.altimetry is positive-up; Bellhop's .ati is positive-down.
@@ -229,32 +229,16 @@ def write_bellhop_env_file(
                         f"wrote altimetry file: {ati_filepath}",
                         verbose=verbose)
 
-        # If the surface boundary is a reflection file ('F'), copy the
-        # .trc file alongside the .env so Bellhop can read it by base
-        # name (mirroring the '.brc' flow for the bottom).
+        # A surface reflection file ('F') is read by base name, so it has to
+        # sit next to the .env as <base>.trc.
         if top_bc == 'F':
-            refl_path = getattr(env.surface, 'reflection_file', None)
-            if not refl_path:
-                from uacpy.core.exceptions import ConfigurationError
-                raise ConfigurationError(
-                    "surface.acoustic_type='file' requires "
-                    "reflection_file= on the surface BoundaryProperties."
-                )
-            import shutil
-            src = Path(refl_path)
-            if not src.exists():
-                raise FileNotFoundError(
-                    f"Top reflection file not found: {refl_path}"
-                )
-            dest = filepath.with_suffix('.trc')
-            shutil.copy(src, dest)
-            log_message('bellhop_writer',
-                        f"copied top reflection file: {src} -> {dest}",
-                        verbose=verbose)
+            stage_reflection_file(
+                getattr(env.surface, 'reflection_file', None),
+                filepath, boundary='top', verbose=verbose,
+            )
 
         # Handle range-dependent SSP if using Quad interpolation
         if interp_char == 'Q' and env.has_range_dependent_ssp:
-            from uacpy.io.oalib_writer import write_ssp
             ssp_file = filepath.with_suffix('.ssp')
             ssp_ranges = np.asarray(env.ssp.ranges, dtype=float)
             ssp_data = np.asarray(env.ssp.data, dtype=float)
@@ -322,7 +306,6 @@ def write_bellhop_env_file(
         # SSP row: z alphaR betaR rhoR alphaI betaI /
         # Emit all 6 columns so an elastic top halfspace doesn't leak ice
         # properties into the water column via Fortran's READ.
-        from uacpy.core.absorption import ConstantAbsorption
         alpha_i = (
             env.absorption.value_db_per_wavelength
             if isinstance(env.absorption, ConstantAbsorption)
@@ -377,31 +360,13 @@ def write_bellhop_env_file(
             f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
-        if bottom_type == "F":  # Reflection coefficient from file
+        if bottom_type == "F":
+            # Bellhop finds the .brc by name convention (same base name as the
+            # .env), so staging it beside the file is the whole job — no extra
+            # lines go into the env.
             hs = env.bottom.halfspace_at(range=0.0)
-            if hs.reflection_file:
-                import shutil
-                brc_source = Path(hs.reflection_file)
-                if brc_source.exists():
-                    brc_dest = filepath.with_suffix('.brc')
-                    shutil.copy(brc_source, brc_dest)
-                    log_message('bellhop_writer',
-                                f"copied reflection file: {brc_source} -> {brc_dest}",
-                                verbose=verbose)
-                else:
-                    raise FileNotFoundError(
-                        f"bellhop_writer: reflection coefficient file not found: "
-                        f"{hs.reflection_file}; "
-                        f"generate it via BOUNCE or OASR first."
-                    )
-            else:
-                raise ConfigurationError(
-                    "bellhop_writer: acoustic_type='file' requires reflection_file= "
-                    "on the bottom BoundaryProperties (path to a .brc file)."
-                )
-
-            # For 'F' type, Bellhop finds the .brc file by name convention
-            # (same base name as .env). No additional lines needed in the env file.
+            stage_reflection_file(hs.reflection_file, filepath,
+                                  boundary='bottom', verbose=verbose)
         elif bottom_type == "A":  # Acousto-elastic halfspace
             # Per ReadEnvironmentBell.f90:474 the row is
             # READ(ENVFile,*) zTemp, alphaR, betaR, rhoR, alphaI, betaI

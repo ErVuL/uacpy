@@ -286,12 +286,12 @@ The full API reference lives in a single file:
 per-model signatures, visualization, signal processing, noise, units, and
 troubleshooting.
 
-Inside `uacpy/uacpy/examples/` you will find 38 example scripts numbered
+Inside `uacpy/examples/` you will find 38 example scripts numbered
 sequentially (`example_01_*.py` through `example_38_*.py`) — from a first TL
 field to communications modems, a standards-based noise-impact assessment, a
 GPS-to-modelled-field real-world pipeline, and matched-field source
 localization. See the
-[examples index](./DOCUMENTATION.md#12-examples-index) for a description
+[examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
 
 ## 🧪 Testing
@@ -329,7 +329,7 @@ Tests use custom markers to allow selective execution:
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
 - `requires_network` -- Tests that hit a live external service (the `uacpy.data`
-  fetchers); **auto-skipped when offline**
+  fetchers); **deselected by default** by `addopts` in `pyproject.toml`
 
 ``` bash
 
@@ -342,8 +342,8 @@ pytest uacpy/tests/ -m "not requires_binary"
 # Skip OASES tests (if OASES is not installed)
 pytest uacpy/tests/ -m "not requires_oases"
 
-# Skip all internet-dependent tests (also auto-skipped offline)
-pytest uacpy/tests/ -m "not requires_network"
+# Run the live-service tests (deselected by default)
+pytest uacpy/tests/ -m requires_network
 
 ```
 
@@ -449,13 +449,13 @@ when redistributing or modifying UACPY or its outputs.
 | Component                  | Location                           | How it ships                                     | License                                          |
 |----------------------------|------------------------------------|--------------------------------------------------|--------------------------------------------------|
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
-| Acoustics Toolbox (Porter) | `third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
-| bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
-| mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
-| ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
-| ramgeo (Collins, NRL)      | `third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
+| Acoustics Toolbox (Porter) | `uacpy/third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
+| bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
+| mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
+| ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
+| ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
-| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+| OASES (Schmidt, MIT)       | `uacpy/third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 
 ### Python dependencies
@@ -472,6 +472,7 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **shapely** | EMODnet seabed-substrate polygon lookups | BSD-3-Clause |
 | **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
 | **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
+| **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
 | **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
 
 Test/development tooling (`pytest`, `pytest-xdist`, `pytest-cov`, `black`,

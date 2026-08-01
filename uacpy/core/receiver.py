@@ -2,6 +2,7 @@
 Receiver class for defining hydrophones and receiver arrays
 """
 
+import copy as _copy
 import warnings
 
 import numpy as np
@@ -164,9 +165,5 @@ class Receiver:
                 f"type='{self.receiver_type}')")
 
     def copy(self):
-        """Return a deep copy of the receiver."""
-        return Receiver(
-            depths=self.depths.copy(),
-            ranges=self.ranges.copy(),
-            receiver_type=self.receiver_type,
-        )
+        """Deep copy (symmetric with the other carriers)."""
+        return _copy.deepcopy(self)

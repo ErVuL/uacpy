@@ -81,12 +81,12 @@ def test_copy_preserves_collapse(cls):
 
 @pytest.mark.requires_binary
 def test_copy_preserves_parent_class_knobs():
-    """KrakenField inherits its spectral knobs from ``_KrakenBase``; ``copy``
-    must carry them (and ``field_executable``), not reset them to defaults."""
+    """``copy`` must carry Kraken's spectral knobs (and ``field_executable``),
+    not reset them to defaults."""
     try:
         model = Kraken(verbose=False, c_high=2000.0, n_mesh=30)
     except ExecutableNotFoundError:
-        pytest.skip("KrakenField binary not installed")
+        pytest.skip("Kraken binary not installed")
     twin = model.copy()
     assert twin.c_high == 2000.0
     assert twin.n_mesh == 30

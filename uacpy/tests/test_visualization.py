@@ -487,7 +487,7 @@ class TestOverview:
         src = uacpy.Source(depths=50.0, frequencies=100.0)
         fig, axes = plots.plot_overview(
             env, self._grid(), transect=((42, 4), (38.3, 6)),
-            tl=tl_field, source=src, suptitle='ov')
+            tl=tl_field, source=src, title='ov')
         assert fig is not None and len(axes) == 3
         ax_map, ax_tl, ax_env = axes
         assert ax_map.has_data() and ax_tl.has_data() and ax_env.has_data()

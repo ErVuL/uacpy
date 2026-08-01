@@ -171,13 +171,7 @@ class Arrivals(Result):
             arrivals=arrivals,
             receiver_depths=self.receiver_depths,
             receiver_ranges=self.receiver_ranges,
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
+            **self.id_kwargs(),
         )
 
     def filter(self, predicate) -> 'Arrivals':
@@ -500,11 +494,5 @@ class Rays(Result):
             is_eigen=self.is_eigen,
             receiver_depths=self.receiver_depths,
             receiver_ranges=self.receiver_ranges,
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
+            **self.id_kwargs(),
         )

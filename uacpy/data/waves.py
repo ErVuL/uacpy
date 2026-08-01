@@ -39,9 +39,10 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
     Returns ``{'hs', 'tp', 'source'}`` (``tp`` may be ``None``; ``source`` is the
     catalogue id that answered). ``source='auto'`` tries Copernicus WAVERYS
     (full history) then WaveWatch III (recent). Raises ``DataFetchError`` when no
-    source yields a value.
+    source yields a value. ``timeout`` bounds the WaveWatch III request; the
+    Copernicus session owns its own (see :mod:`uacpy.data.copernicus`).
     """
-    lat, lon = as_coordinate(point)
+    as_coordinate(point)                       # validate before any request
     order = _resolve_order(source)
     errors = []
     for name in order:
@@ -49,7 +50,7 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
             if name == 'copernicus':
                 from uacpy.data.copernicus import fetch_waves_operational
                 extra = {} if max_days is None else {'max_days': max_days}
-                out = fetch_waves_operational(point, date=date, timeout=timeout,
+                out = fetch_waves_operational(point, date=date,
                                               verbose=verbose, **extra)
             else:
                 from uacpy.data.ww3_live import fetch_hs

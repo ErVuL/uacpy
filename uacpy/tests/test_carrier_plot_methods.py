@@ -114,7 +114,10 @@ def test_altimetry_plot_keeps_height_upward():
     env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
                             altimetry=[(0.0, 0.0), (5000.0, 1.5)])
     fig, ax = env.altimetry.plot()
-    assert ax.get_ylabel() == 'Sea-surface height (m)'
+    # The exact wording comes from the carrier's own ``_VALUE_LABEL``; what
+    # matters here is that it is a height in metres and that the axis is NOT
+    # inverted (altimetry is positive up, unlike bathymetry).
+    assert ax.get_ylabel().lower().endswith('height (m)')
     assert not ax.yaxis_inverted()
 
 

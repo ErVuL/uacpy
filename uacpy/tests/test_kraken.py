@@ -266,7 +266,8 @@ class TestKrakenSourceGeometry:
         model = Kraken()
         codes = {
             t: model._build_field_option(
-                False, Source(depths=50, frequencies=100, source_type=t))[0]
+                False, Source(depths=50, frequencies=100, source_type=t),
+                RunMode.COHERENT_TL)[0]
             for t in ('point', 'line', 'scaled')
         }
         assert codes == {'point': 'R', 'line': 'X', 'scaled': 'S'}
@@ -275,9 +276,10 @@ class TestKrakenSourceGeometry:
         model = Kraken()
         pat = np.array([[-90.0, -20.0], [90.0, 0.0]])
         omni = model._build_field_option(
-            False, Source(depths=50, frequencies=100))
+            False, Source(depths=50, frequencies=100), RunMode.COHERENT_TL)
         directional = model._build_field_option(
-            False, Source(depths=50, frequencies=100, beam_pattern=pat))
+            False, Source(depths=50, frequencies=100, beam_pattern=pat),
+            RunMode.COHERENT_TL)
         assert omni[2] == ' '
         assert directional[2] == '*'
 
@@ -496,3 +498,390 @@ class TestElasticCLowDefault:
         assert finite.max() < 120.0, (
             f"max TL {finite.max():.1f} dB — the mode search converged on "
             f"interfacial modes instead of the waterborne field")
+
+
+class TestRangeDependentElasticMesh:
+    """A range-dependent seabed collapses to one column (``collapse
+    ['bottom_range']='median'``), and a median over columns whose shear speeds
+    straddle fluid and elastic — ``[0, 0, 400, 600]`` → 200 m/s — yields an
+    elastic sediment with a *short* shear wavelength. AT meshes an elastic
+    medium on its shear speed (``misc/ReadEnvironmentMod.f90:99-104``), so a
+    mesh sized on the compressional speed is rejected with the fatal
+    'Mesh is too coarse'."""
+
+    @staticmethod
+    def _env(shear):
+        from uacpy.core.ssp import SoundSpeedProfile
+        from uacpy.core.bottom import Bottom
+        bottom = Bottom.from_halfspaces(
+            np.array([0.0, 6000.0, 12000.0, 18000.0]),
+            sound_speed=np.array([1600.0, 1650.0, 1750.0, 1800.0]),
+            density=np.array([1.5, 1.7, 2.0, 2.2]),
+            attenuation=np.array([0.8, 0.5, 0.3, 0.2]),
+            shear_speed=np.asarray(shear, dtype=float),
+            acoustic_type='half-space')
+        return Environment(
+            name='rd_mixed',
+            ssp=SoundSpeedProfile.from_pairs(np.array(
+                [[0, 1520.0], [50, 1505.0], [100, 1495.0],
+                 [200, 1490.0], [400, 1485.0]])),
+            bathymetry=np.array([[0, 100.0], [8000, 120.0], [10000, 150.0],
+                                 [15000, 250.0], [20000, 400.0]]),
+            bottom=bottom)
+
+    _SRC = staticmethod(lambda: Source(depths=50.0, frequencies=50.0))
+    _RCV = staticmethod(lambda: Receiver(depths=np.linspace(5.0, 380.0, 60),
+                                         ranges=np.linspace(100.0, 20000.0, 100)))
+
+    def test_mesh_is_sized_on_the_shear_speed(self):
+        """``_fixed_mesh_points`` must mesh the elastic medium on ``cs``, not
+        ``cp`` — the number AT compares against is ~8x larger."""
+        model = Kraken(verbose=False)
+        env = self._env([0.0, 0.0, 400.0, 600.0])
+        segments, _, _, max_total_depth = model._segment_env_for_field(
+            model._project_environment(env))
+        n = model._fixed_mesh_points(segments, max_total_depth, 50.0)
+        # AT: Nneeded = span / (c / f / 20) per medium, fataling below
+        # Nneeded/2. The seabed media span 400.1 - 100 m at the median shear
+        # speed of 200 m/s, so AT wants 1500 points.
+        assert n >= 1500, (
+            f"mesh of {n} points is below AT's 'Mesh is too coarse' floor for "
+            f"a 200 m/s shear medium at 50 Hz")
+        # Each medium class is bounded by its own span, so the shared value
+        # tracks AT's own number instead of over-meshing every medium.
+        assert n < 2 * 1500, f"mesh of {n} points over-shoots AT's 1500"
+
+    def test_fluid_bottom_mesh_is_unchanged(self):
+        """The shear term must not inflate the mesh for a fluid seabed."""
+        model = Kraken(verbose=False)
+        segments, _, _, max_total_depth = model._segment_env_for_field(
+            model._project_environment(self._env([0.0, 0.0, 0.0, 0.0])))
+        assert model._fixed_mesh_points(segments, max_total_depth, 50.0) == 500
+
+    @pytest.mark.slow
+    def test_mixed_fluid_elastic_bottom_runs(self):
+        """The whole point: a fluid→elastic transition across range must give
+        a field, not a raw Fortran fatal."""
+        result = Kraken(verbose=False, mode_coupling='adiabatic',
+                        n_segments=5, timeout=600).run(
+            self._env([0.0, 0.0, 400.0, 600.0]), self._SRC(), self._RCV())
+        tl = np.asarray(result.tl)
+        finite = tl[np.isfinite(tl)]
+        assert finite.size, "no finite TL returned"
+        assert finite.max() < 200.0, (
+            f"max TL {finite.max():.1f} dB — not a physical waterborne field")
+        # TL must grow with range, not sit at a constant or run backwards.
+        at_source_depth = np.asarray(result.at(depth=50.0).tl)
+        assert at_source_depth[-1] > at_source_depth[4] + 10.0
+
+    @pytest.mark.slow
+    def test_uniformly_elastic_bottom_still_runs(self):
+        """The all-elastic case (which never had the short-shear median) must
+        not regress from the larger mesh."""
+        result = Kraken(verbose=False, mode_coupling='adiabatic',
+                        n_segments=5, timeout=600).run(
+            self._env([300.0, 400.0, 500.0, 600.0]), self._SRC(), self._RCV())
+        finite = np.asarray(result.tl)[np.isfinite(result.tl)]
+        assert finite.size and finite.max() < 200.0
+
+
+class TestBroadbandSingleFrequency:
+    """``run_mode=BROADBAND`` with a one-element ``frequencies=`` grid must
+    honour the run-mode contract — complex ``H(f)`` on a frequency axis at the
+    *requested* frequency — not silently fall back to ``source.frequencies[0]``
+    with no frequency coordinate."""
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='bb1', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+
+    _SRC = staticmethod(lambda: Source(depths=50.0, frequencies=50.0))
+    _RCV = staticmethod(lambda: Receiver(depths=np.array([30.0, 70.0]),
+                                         ranges=np.linspace(1000.0, 5000.0, 6)))
+
+    def test_one_element_grid_keeps_the_frequency_axis(self):
+        result = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.BROADBAND, frequencies=np.array([137.0]))
+        assert result.kind == 'transfer_function'
+        assert list(result.coords) == ['depth', 'range', 'frequency']
+        assert result.data.shape == (2, 6, 1)
+        assert np.iscomplexobj(result.data)
+        # The requested frequency, NOT the source's 50 Hz.
+        assert result.frequencies == pytest.approx([137.0])
+        assert result.coords['frequency'] == pytest.approx([137.0])
+
+    @pytest.mark.slow
+    def test_one_element_grid_matches_the_native_broadband_bin(self):
+        """The narrowband lift and kraken's native multi-frequency ``.mod``
+        must agree on the shared bin."""
+        one = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.BROADBAND, frequencies=np.array([137.0]))
+        two = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.BROADBAND, frequencies=np.array([100.0, 137.0]))
+        assert np.nanmax(np.abs(
+            np.asarray(one.tl)[:, :, 0] - np.asarray(two.tl)[:, :, 1])) < 0.5
+
+    def test_one_element_grid_can_synthesize_a_time_series(self):
+        """The 2-D fallback made ``synthesize_time_series`` raise on its
+        canonical-coords check; a real frequency axis feeds it."""
+        result = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.BROADBAND, frequencies=np.array([137.0]))
+        assert result.phase_reference == 'travelling_wave'
+
+
+class TestIncoherentTL:
+    """An incoherent modal sum is a *magnitude* sum: AT parks it in the complex
+    ``.shd`` slot, where its phase is an artefact of the storage. The result
+    must therefore be real dB TL with no phase reference, never a complex
+    travelling-wave pressure."""
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='inc', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+
+    _SRC = staticmethod(lambda: Source(depths=50.0, frequencies=150.0))
+    _RCV = staticmethod(lambda: Receiver(depths=np.array([30.0, 70.0]),
+                                         ranges=np.linspace(1000.0, 5000.0, 9)))
+
+    def test_incoherent_is_real_tl_without_a_phase_reference(self):
+        result = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.INCOHERENT_TL)
+        assert result.kind == 'tl'
+        assert not np.iscomplexobj(result.data)
+        assert result.phase_reference is None
+
+    def test_coherent_stays_complex_travelling_wave_pressure(self):
+        result = Kraken(verbose=False).run(
+            self._env(), self._SRC(), self._RCV(),
+            run_mode=RunMode.COHERENT_TL)
+        assert result.kind == 'pressure'
+        assert np.iscomplexobj(result.data)
+        assert result.phase_reference == 'travelling_wave'
+
+    def test_incoherent_smooths_the_interference_pattern(self):
+        """Physical check that Opt(4:4) actually reached field.exe: summing
+        magnitudes removes the modal interference nulls."""
+        common = (self._env(), self._SRC(), self._RCV())
+        coh = np.asarray(Kraken(verbose=False).run(
+            *common, run_mode=RunMode.COHERENT_TL).tl)[0]
+        inc = np.asarray(Kraken(verbose=False).run(
+            *common, run_mode=RunMode.INCOHERENT_TL).tl)[0]
+        assert np.ptp(inc) < np.ptp(coh), (
+            "incoherent TL is no smoother than coherent — Opt(4:4)='I' "
+            "never took effect")
+
+    def test_incoherent_run_mode_is_declared(self):
+        assert RunMode.INCOHERENT_TL in Kraken.spec.modes
+
+    def test_coupled_incoherent_is_refused_up_front(self):
+        """field.f90 ERROUTs on Opt(2:2)='C' + Opt(4:4)='I', which surfaces as
+        an opaque missing-.shd error. Refuse with a typed error instead."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.core.ssp import SoundSpeedProfile
+        env = Environment(
+            name='rd', ssp=SoundSpeedProfile.from_pairs(
+                np.array([[0, 1500.0], [100, 1490.0]])),
+            bathymetry=np.array([[0, 100.0], [5000, 150.0]]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        with pytest.raises(ConfigurationError, match='incoherent'):
+            Kraken(verbose=False, mode_coupling='coupled').run(
+                env, self._SRC(), self._RCV(),
+                run_mode=RunMode.INCOHERENT_TL)
+
+
+class TestModeCountProbeCleanup:
+    """``_count_modes_at_freq`` runs O(log N) throwaway probes per broadband
+    sub-cutoff recovery. Each allocates a work dir holding an .env/.mod/.prt;
+    without a ``finally`` they accumulate for the life of the process."""
+
+    def test_probe_removes_its_work_dir(self):
+        env = Environment(
+            name='probe', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        source = Source(depths=50.0, frequencies=100.0)
+        receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+
+        from uacpy.io.file_manager import FileManager
+
+        model = Kraken(verbose=False)
+        created = []
+        create = FileManager.create_work_dir
+
+        def _record(self):
+            path = create(self)
+            created.append(path)
+            return path
+
+        # ``work_dir`` is cleared on cleanup, so the path has to be captured
+        # where it is handed out.
+        FileManager.create_work_dir = _record
+        try:
+            # One propagating probe and one below cutoff — both must clean up.
+            for freq in (100.0, 1.0):
+                model._count_modes_at_freq(env, source, receiver, freq,
+                                           model._select_kraken_exe(env))
+        finally:
+            FileManager.create_work_dir = create
+
+        assert len(created) == 2
+        leaked = [str(p) for p in created if p.exists()]
+        assert not leaked, f"probe work dirs left on disk: {leaked}"
+
+
+class TestKrakenClassBody:
+    """``Kraken`` was hand-merged from a ``_KrakenBase`` + subclass pair, which
+    left ``spec`` and ``source`` defined twice in the class body. Python takes
+    the last definition, so a duplicate is dead code that silently ignores any
+    edit to the earlier copy."""
+
+    @staticmethod
+    def _class_body_assignments():
+        import ast
+        import inspect
+        import uacpy.models.kraken as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        cls = next(n for n in tree.body
+                   if isinstance(n, ast.ClassDef) and n.name == 'Kraken')
+        names = []
+        for stmt in cls.body:
+            targets = (stmt.targets if isinstance(stmt, ast.Assign)
+                       else [stmt.target] if isinstance(stmt, ast.AnnAssign)
+                       else [])
+            names.extend(t.id for t in targets if isinstance(t, ast.Name))
+        return names
+
+    @pytest.mark.parametrize('name', ['spec', 'source'])
+    def test_defined_exactly_once(self, name):
+        names = self._class_body_assignments()
+        assert names.count(name) == 1, (
+            f"Kraken defines {name!r} {names.count(name)} times in its class "
+            f"body; only the last one is live")
+
+
+class TestResolvedPhaseSpeedBoundsMetadata:
+    """Every Kraken result that ran the solver records the resolved ``c_low`` /
+    ``c_high`` / ``rmax`` the deck was written with, so a user can see the
+    bounds their run actually used (they are usually auto-derived, not
+    supplied). Mirrors what ``Bounce`` already reports."""
+
+    KEYS = ('c_low', 'c_high', 'rmax')
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='bounds', bathymetry=200.0,
+            ssp=[(0.0, 1500.0), (200.0, 1520.0)],
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.3))
+
+    @staticmethod
+    def _geometry():
+        return (Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=np.array([25.0, 100.0, 175.0]),
+                         ranges=np.linspace(500.0, 5000.0, 6)))
+
+    def _assert_sane(self, result, *, rmax_floor):
+        for key in self.KEYS:
+            assert key in result.metadata, (
+                f"{result.model} result is missing metadata[{key!r}]")
+            assert isinstance(result.metadata[key], float)
+        assert result.metadata['c_low'] < result.metadata['c_high']
+        # c_high brackets the whole medium (SSP max 1520, half-space 1600).
+        assert result.metadata['c_high'] >= 1600.0
+        # RMax must clear the outermost receiver for the modal-sum interpolation.
+        assert result.metadata['rmax'] > rmax_floor
+
+    @pytest.mark.parametrize('run_mode', [
+        RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+    ])
+    def test_narrowband_paths_record_bounds(self, run_mode):
+        source, receiver = self._geometry()
+        result = Kraken(verbose=False).run(
+            self._env(), source, receiver, run_mode=run_mode)
+        assert isinstance(result, Modes if run_mode is RunMode.MODES else Field)
+        self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
+
+    @pytest.mark.slow
+    def test_broadband_path_records_bounds(self):
+        source, receiver = self._geometry()
+        result = Kraken(verbose=False).run(
+            self._env(), source, receiver, run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(80.0, 120.0, 5))
+        assert result.metadata['native_broadband'] is True
+        self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
+
+    @pytest.mark.slow
+    def test_sub_cutoff_zero_fill_keeps_bounds(self):
+        """The broadband recovery path rebuilds the Field around the
+        propagating sub-band, so it must not drop the bounds on the way."""
+        env = Environment(
+            name='bounds_cut', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.3))
+        source = Source(depths=50.0, frequencies=20.0)
+        receiver = Receiver(depths=np.array([25.0, 75.0]),
+                            ranges=np.array([1000.0, 3000.0]))
+        with pytest.warns(UserWarning, match="below the modal cutoff"):
+            result = Kraken(verbose=False).run(
+                env, source, receiver, run_mode=RunMode.BROADBAND,
+                frequencies=np.array([2.0, 5.0, 10.0, 20.0, 40.0]))
+        assert np.allclose(result.data[:, :, :2], 0.0)
+        self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
+
+    def test_range_dependent_field_path_records_bounds(self):
+        from uacpy.core.ssp import SoundSpeedProfile
+
+        env = Environment(
+            name='bounds_rd', bathymetry=200.0,
+            ssp=SoundSpeedProfile(
+                depths=[0.0, 200.0],
+                data=[[1500.0, 1500.0], [1520.0, 1560.0]],
+                ranges=[0.0, 5000.0]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.3))
+        source, receiver = self._geometry()
+        result = Kraken(verbose=False, n_segments=3).run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL)
+        assert result.metadata['n_profiles'] == 3
+        self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
+
+    def test_pinned_bounds_are_reported_verbatim(self):
+        source, receiver = self._geometry()
+        result = Kraken(verbose=False, c_low=1400.0, c_high=1700.0,
+                        rmax_m=9000.0).run(
+            self._env(), source, receiver, run_mode=RunMode.COHERENT_TL)
+        assert result.metadata['c_low'] == 1400.0
+        assert result.metadata['c_high'] == 1700.0
+        assert result.metadata['rmax'] == 9000.0
+
+    def test_list_metadata_describes_the_bounds(self):
+        """The user-facing payoff: the keys are self-describing on the result."""
+        source, receiver = self._geometry()
+        result = Kraken(verbose=False).run(
+            self._env(), source, receiver, run_mode=RunMode.COHERENT_TL)
+        described = result.list_metadata()
+        for key in self.KEYS:
+            assert described[key]['documented_type'] == 'float'
+            assert described[key]['value_type'] == 'float'
+            assert described[key]['description']

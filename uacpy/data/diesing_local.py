@@ -185,7 +185,8 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   ) -> Bottom:
     """Range-dependent bottom from the Diesing 2020 map along a transect.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
+    so each column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_diesing(

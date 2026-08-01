@@ -275,7 +275,8 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
                                 timeout=None, verbose=False):
     """Range-dependent bottom from local samples along ``start`` → ``end``.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
+    so each column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(

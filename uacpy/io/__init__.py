@@ -38,6 +38,7 @@ from uacpy.io.oalib_writer import (
     write_header, write_absorption_block,
     write_fg_params, write_bio_layers, write_broadband_freqs,
     write_ssp_section, write_layer_sections, write_bottom_section,
+    writable_layers,
     write_source_depths, write_receiver_depths, write_receiver_ranges,
     write_multi_profile_env,
     write_kraken_env_file, write_scooter_env_file, write_sparc_env_file,
@@ -56,13 +57,13 @@ from uacpy.io.bathy_io import (
 from uacpy.io.refl_io import (
     read_reflection_coefficient, read_source_beam_pattern,
     write_reflection_coefficient, write_source_beam_pattern,
-    stage_source_beam_pattern,
+    stage_reflection_file, stage_source_beam_pattern,
     dedupe_reflection_file,
 )
 from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.grn_reader import (
     read_grn_file, grn_to_field, grn_to_transfer_function,
-    sparc_snapshot_to_field,
+    sparc_snapshot_to_field, sparc_snapshot_to_time_field,
 )
 from uacpy.io.utils import equally_spaced
 from uacpy.io.oases_writer import (
@@ -101,7 +102,8 @@ __all__ = [
     "read_modes", "read_modes_bin", "read_modes_asc", "get_component",
     # Scooter / SPARC outputs
     "read_grn_file",
-    "grn_to_field", "grn_to_transfer_function", "sparc_snapshot_to_field",
+    "grn_to_field", "grn_to_transfer_function",
+    "sparc_snapshot_to_field", "sparc_snapshot_to_time_field",
     # OASES outputs
     "read_oast_tl", "read_oasn_covariance", "read_oasn_replicas",
     "read_oasp_trf", "read_oasr_reflection_coefficients",
@@ -114,6 +116,7 @@ __all__ = [
     "write_header", "write_absorption_block",
     "write_fg_params", "write_bio_layers", "write_broadband_freqs",
     "write_ssp_section", "write_layer_sections", "write_bottom_section",
+    "writable_layers",
     "write_source_depths", "write_receiver_depths", "write_receiver_ranges",
     "write_multi_profile_env",
     "write_kraken_env_file", "write_scooter_env_file", "write_sparc_env_file",
@@ -125,7 +128,7 @@ __all__ = [
     "write_bty_file", "write_bty_long_format", "write_bty_3d",
     "write_ati_file",
     "write_reflection_coefficient", "write_source_beam_pattern",
-    "stage_source_beam_pattern",
+    "stage_reflection_file", "stage_source_beam_pattern",
     # Bellhop writer
     "write_bellhop_env_file",
     # OASES writers

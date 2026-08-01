@@ -14,7 +14,9 @@ Endpoints (no auth):
 import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    as_coordinate, nearest_indices, normalize_lon,
+)
 from uacpy.data._http import http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid',
@@ -102,28 +104,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
 
     lats = np.linspace(la0, la1, n_lat)
     lons = np.linspace(lo0, lo1, n_lon)
-    ri = _nearest_indices(glat, lats)
-    ci = _nearest_indices(glon, lons)
+    ri = nearest_indices(glat, lats)
+    ci = nearest_indices(glon, lons)
     block = gz[np.ix_(ri, ci)]
     depth = np.where(block < 0.0, -block, np.nan)
     return lats, lons, depth
-
-
-def _nearest_indices(axis, queries):
-    """Nearest-node index into ``axis`` for each query, any axis orientation.
-
-    GMRT COARDS latitude is commonly stored descending, so a plain
-    ``searchsorted`` (ascending-only, and an insertion index rather than the
-    nearest node) is both biased and wrong on a descending axis. Sort once,
-    bracket with ``searchsorted``, then pick the closer of the two neighbours,
-    and map back to the original (possibly descending) ordering.
-    """
-    axis = np.asarray(axis, dtype=float)
-    order = np.argsort(axis)
-    sorted_axis = axis[order]
-    pos = np.searchsorted(sorted_axis, queries)
-    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
-    hi = np.clip(pos, 0, sorted_axis.size - 1)
-    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
-    nearest_sorted = np.where(pick_hi, hi, lo)
-    return order[nearest_sorted]

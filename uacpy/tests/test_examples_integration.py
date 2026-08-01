@@ -199,3 +199,37 @@ def test_example_runs(example, tmp_path):
         f"--- stderr ---\n{result.stderr[-2000:]}"
     )
     _check_pngs_well_formed(workdir)
+    _check_no_swallowed_failure(example, result)
+
+
+# Examples wrap optional sections in broad ``except Exception`` handlers so a
+# missing binary or absent network degrades gracefully instead of killing the
+# script. That also means a stale API call cannot fail the run — it prints a
+# warning, skips its figure, and still exits 0. Catch that here.
+_SWALLOW_MARKERS = ("! Warning: Could not", "✗ ", "Traceback (most recent call last)")
+
+
+def _check_no_swallowed_failure(example: Path, result) -> None:
+    """Fail if an example degraded silently instead of doing its work.
+
+    A handler that reports a *precondition* (no binary, no network, no
+    licence) is legitimate; one reporting a ``TypeError`` / ``AttributeError``
+    / ``ModelExecutionError`` is a real defect the handler is hiding."""
+    # Exception class names, plus the message shapes a handler prints when it
+    # renders ``str(exc)`` instead of the type — which is the common case and
+    # is what let a Fortran fatal hide behind "✗ Kraken error: ...".
+    real_defect = (
+        "TypeError", "AttributeError", "ValueError", "KeyError",
+        "ModelExecutionError", "ConfigurationError", "UnboundLocalError",
+        "IndexError", "NameError", "ZeroDivisionError",
+        "execution failed", "unexpected keyword", "has no attribute",
+        "object is not", "not enough values", "too many values",
+    )
+    for line in result.stdout.splitlines():
+        if not any(m in line for m in _SWALLOW_MARKERS):
+            continue
+        if any(sig in line for sig in real_defect):
+            raise AssertionError(
+                f"{example.name}: a broad handler swallowed a real defect, so "
+                f"the example exited 0 without doing its work:\n  {line.strip()}"
+            )

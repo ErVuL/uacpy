@@ -30,7 +30,7 @@ _EXPECTED = {
     ),
     'Kraken': (
         lambda: Kraken(),
-        {RunMode.MODES, RunMode.COHERENT_TL,
+        {RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
          RunMode.BROADBAND, RunMode.TIME_SERIES},
     ),
     'Scooter': (

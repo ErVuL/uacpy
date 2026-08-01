@@ -107,6 +107,46 @@ class TestProcessing:
         assert np.all(np.isfinite(n))
         assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
 
+    def test_make_noise_waveform_unresolvable_duration_raises(self):
+        """``T*bandwidth_hz < 1`` gives a zero-length white-noise draw, which
+        scipy.signal.resample cannot consume. Reject it up front."""
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            make_noise_waveform(fc=1000.0, bandwidth_hz=500.0, T=1e-4,
+                                sample_rate=10_000.0)
+
+    def test_noise_generators_are_reproducible_from_a_seeded_rng(self):
+        """Every noise generator takes an ``rng=``, like the ``uacpy.comms``
+        side, so a realisation can be reproduced independently of global
+        numpy state."""
+        from uacpy.acoustic_signal.noise_synthesis import (
+            synthesize_noise_from_psd)
+        fs, dur = 10_000.0, 0.1
+        kw = dict(fc=1000.0, bandwidth=500.0, duration=dur, sample_rate=fs)
+        a = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[0]
+        b = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[0]
+        c = make_bandlimited_noise(**kw, rng=np.random.default_rng(8))[0]
+        assert np.array_equal(a, b) and not np.array_equal(a, c)
+
+        wkw = dict(fc=1000.0, bandwidth_hz=500.0, T=dur, sample_rate=fs)
+        assert np.array_equal(
+            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[0],
+            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[0])
+
+        nkw = dict(sample_rate=fs, source_level=120.0, noise_level=80.0,
+                   fc=1000.0, bandwidth=200.0)
+        assert np.array_equal(
+            add_noise(np.zeros(1024), **nkw, rng=np.random.default_rng(7)),
+            add_noise(np.zeros(1024), **nkw, rng=np.random.default_rng(7)))
+
+        f = np.logspace(1, 3, 32)
+        pkw = dict(duration=0.05, n_fft=1024, sample_rate=fs)
+        assert np.array_equal(
+            synthesize_noise_from_psd(1e-6 / (1 + (f / 100) ** 2), f, **pkw,
+                                      rng=np.random.default_rng(7))[1],
+            synthesize_noise_from_psd(1e-6 / (1 + (f / 100) ** 2), f, **pkw,
+                                      rng=np.random.default_rng(7))[1])
+
 
 class TestDecidecadeBands:
     def test_standard_iso_centre_frequencies_and_ratio(self):
@@ -236,6 +276,75 @@ class TestFRF:
         assert np.isfinite(tf).all()
         assert frf.selected_order == order
         assert frf.m == 'CP'
+
+    @pytest.mark.parametrize("criterion", ['AIC', 'BIC', 'FPE', 'CP'])
+    def test_order_selection_is_amplitude_scale_invariant(self, criterion):
+        """The selected order must depend on the data, not on its units: a
+        pressure record in Pa and the same record in MPa must give the same
+        FIR order. All four criteria compare log(sse) or sse ratios, so only
+        the exact-fit cutoff can break the invariance."""
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(0)
+        u = rng.standard_normal(400)
+        g = np.array([1.0, 0.5, -0.3])
+        y = np.convolve(u, g)[:u.size] + 0.01 * rng.standard_normal(400)
+        orders = []
+        for scale in (1.0, 1e-3, 1e-6, 1e-9):
+            frf = FRF()
+            frf.compute(scale * u, scale * y, 1000.0, method='ls_fir',
+                        m=criterion, m_max=60)
+            orders.append(frf.selected_order)
+        assert orders == [3, 3, 3, 3]
+
+    @pytest.mark.parametrize("criterion", ['AIC', 'BIC', 'FPE', 'CP'])
+    def test_exact_fit_selects_lowest_explaining_order(self, criterion):
+        """A pure-gain loopback y = 2*u is fitted exactly at order 1; the
+        search must return that order instead of discarding every candidate."""
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(3)
+        u = rng.standard_normal(400)
+        frf = FRF()
+        _, tf = frf.compute(u, 2.0 * u, 1000.0, method='ls_fir', m=criterion,
+                            m_max=60)
+        assert np.isfinite(tf).all()
+        assert frf.selected_order == 1
+        assert np.asarray(frf.g) == pytest.approx([2.0])
+
+    def test_unfittable_input_raises_configurationerror(self):
+        """An all-zero input is singular at every order: typed error, not a
+        ValueError out of scipy.signal.freqz on a None filter."""
+        from uacpy.acoustic_signal.system_id import FRF
+        from uacpy.core.exceptions import ConfigurationError
+        rng = np.random.default_rng(4)
+        y = rng.standard_normal(300)
+        with pytest.raises(ConfigurationError):
+            FRF().compute(np.zeros(300), y, 1000.0, method='ls_fir', m='AIC',
+                          m_max=40)
+
+    def test_zero_row_input_raises_configurationerror(self):
+        """A 2-D input with no measurement rows must not fall through the
+        per-measurement loop and hit an UnboundLocalError on the frequency
+        axis."""
+        from uacpy.acoustic_signal.system_id import FRF
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            FRF().compute(np.zeros((0, 100)), np.zeros((0, 100)), 1000.0,
+                          method='ls_fir', m=4)
+
+    def test_method_switch_clears_ls_fir_state(self):
+        """``selected_order``/``g`` are ls_fir-only and ``coh`` is welch-only;
+        a reused FRF must not report the previous method's values."""
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(11)
+        u = rng.standard_normal(4096)
+        y = np.convolve(u, [1.0, 0.5, -0.3])[:u.size]
+        frf = FRF()
+        frf.compute(u, y, 1000.0, method='ls_fir', m='AIC', m_max=40)
+        assert frf.selected_order is not None
+        assert frf.coh is None
+        frf.compute(u, y, 1000.0, method='welch', nperseg=512)
+        assert frf.selected_order is None and frf.g == 0
+        assert frf.coh is not None and frf.coh.shape == frf.frequencies.shape
 
 
 def test_degenerate_input_guards_raise_configurationerror():

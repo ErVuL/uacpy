@@ -1,132 +1,13 @@
-"""
-Professional matplotlib styling for UACPY visualizations.
-
-Styling is opt-in: call ``apply_professional_style()`` explicitly
-(importing ``uacpy.visualization`` does not change rcParams). Note the
-call starts from ``matplotlib.rcdefaults()``, wiping any rcParams you
-set beforehand — apply your own tweaks after, not before. Revert with
-``matplotlib.rcdefaults()``.
-"""
-import matplotlib as mpl
+"""Shared colour scheme for uacpy plots: field colormaps, marker styles and
+the sediment palette. Importing this module does not touch ``rcParams``."""
 
 
 # Professional color schemes
-COLORS = {
-    'primary': '#2E86AB',      # Professional blue
-    'secondary': '#A23B72',    # Accent purple
-    'success': '#06A77D',      # Success green
-    'warning': '#F18F01',      # Warning orange
-    'danger': '#C73E1D',       # Danger red
-    'dark': '#2D3142',         # Dark gray
-    'light': '#F5F5F5',        # Light gray
-    'grid': '#E0E0E0',         # Grid color
-}
-
-# Professional colormaps
 COLORMAPS = {
     'tl': 'jet_r',             # Transmission loss: blue (low TL/good) → red (high TL/poor)
                                # Matches Acoustic Toolbox standard: flipud(jet)
-    'ssp': 'RdYlBu_r',         # Sound speed profile (temperature-like)
     'pressure': 'seismic',     # Pressure field
-    'phase': 'twilight',       # Phase data
-    'modes': 'cividis',        # Mode shapes
-    'bathymetry': 'terrain',   # Bathymetry
 }
-
-
-def apply_professional_style(dpi: int = 150):
-    """
-    Apply professional matplotlib styling globally.
-
-    Parameters
-    ----------
-    dpi : int, optional
-        Dots per inch for figure resolution. Default is 150 (high quality).
-        Use 300 for publication-quality figures.
-    """
-    mpl.rcdefaults()
-
-    style_dict = {
-        'figure.dpi': dpi,
-        'figure.figsize': (10, 6),
-        'figure.facecolor': 'white',
-        'figure.edgecolor': 'white',
-        'figure.autolayout': False,
-
-        'axes.facecolor': 'white',
-        'axes.edgecolor': COLORS['dark'],
-        'axes.linewidth': 1.2,
-        'axes.grid': True,
-        'axes.axisbelow': True,
-        'axes.labelsize': 12,
-        'axes.titlesize': 14,
-        'axes.titleweight': 'bold',
-        'axes.labelweight': 'normal',
-        'axes.spines.top': False,
-        'axes.spines.right': False,
-        'axes.prop_cycle': mpl.cycler(color=[
-            COLORS['primary'], COLORS['success'], COLORS['secondary'],
-            COLORS['warning'], COLORS['danger']
-        ]),
-
-        'grid.color': COLORS['grid'],
-        'grid.linestyle': '-',
-        'grid.linewidth': 0.5,
-        'grid.alpha': 0.6,
-
-        'lines.linewidth': 2.0,
-        'lines.markersize': 6,
-        'lines.markeredgewidth': 0.0,
-
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif'],
-        'font.size': 11,
-        'font.weight': 'normal',
-
-        'text.color': COLORS['dark'],
-        'text.antialiased': True,
-
-        'legend.fontsize': 10,
-        'legend.frameon': True,
-        'legend.framealpha': 0.9,
-        'legend.facecolor': 'white',
-        'legend.edgecolor': COLORS['grid'],
-        'legend.shadow': False,
-        'legend.fancybox': False,
-
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
-        'xtick.direction': 'out',
-        'ytick.direction': 'out',
-        'xtick.major.size': 5,
-        'ytick.major.size': 5,
-        'xtick.minor.size': 3,
-        'ytick.minor.size': 3,
-        'xtick.major.width': 1.0,
-        'ytick.major.width': 1.0,
-        'xtick.color': COLORS['dark'],
-        'ytick.color': COLORS['dark'],
-
-        'savefig.dpi': dpi,
-        'savefig.facecolor': 'white',
-        'savefig.edgecolor': 'white',
-        'savefig.bbox': 'tight',
-        'savefig.pad_inches': 0.1,
-        'savefig.transparent': False,
-
-        'image.cmap': 'RdYlBu_r',
-        'image.interpolation': 'bilinear',
-        'image.origin': 'upper',
-
-        # TrueType fonts in PDF/PS (avoids Type 3 embedding for ACM/IEEE).
-        'pdf.fonttype': 42,
-        'ps.fonttype': 42,
-
-        # Embed fonts in SVG.
-        'svg.fonttype': 'none',
-    }
-
-    mpl.rcParams.update(style_dict)
 
 
 # ── Sediment colour — single source of truth ─────────────────────────────

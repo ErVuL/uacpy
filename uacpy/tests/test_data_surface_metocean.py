@@ -227,6 +227,47 @@ def test_fetch_sea_surface_wind_fallback(monkeypatch):
     assert src == 'nbs' and alt.shape == (32, 2)
 
 
+def test_fetch_sea_surface_local_reads_the_cached_climatology(wind_cache,
+                                                              monkeypatch):
+    """source='local' must reach the installed wind grid without the network."""
+    def boom(url, **kw):
+        raise AssertionError(f"network call in a local sea-state fetch: {url}")
+
+    monkeypatch.setattr(wind_live, 'http_get', boom)
+    alt, src = sea_surface.fetch_sea_surface(
+        (0.6, 0.6), date='2021-03-15', max_range=5000.0, n_points=32, seed=3,
+        source='local')
+    assert src == 'nbs' and alt.shape == (32, 2)
+
+
+def test_fetch_sea_surface_auto_falls_back_to_the_climatology(wind_cache,
+                                                              monkeypatch):
+    """'auto' ends on the cached climatology when waves and live wind fail."""
+    monkeypatch.setattr(waves_mod, 'fetch_waves',
+                        lambda point, **kw: (_ for _ in ()).throw(DataFetchError("no waves")))
+    monkeypatch.setattr(
+        wind_live, '_wind_speed',
+        lambda *a, **kw: (_ for _ in ()).throw(DataFetchError("erddap down")))
+    alt, src = sea_surface.fetch_sea_surface(
+        (0.6, 0.6), date='2021-03-15', max_range=5000.0, n_points=32, seed=4,
+        source='auto')
+    assert src == 'nbs' and alt.shape == (32, 2)
+
+
+def test_fetch_environment_altimetry_local(wind_cache, monkeypatch):
+    """The installed wind climatology is reachable through fetch_environment."""
+    def boom(url, **kw):
+        raise AssertionError(f"network call in a local sea-state fetch: {url}")
+
+    monkeypatch.setattr(wind_live, 'http_get', boom)
+    env = env_mod.fetch_environment(
+        (0.6, 0.6), bathymetry=2000.0, ssp=1500.0, date='2021-03-15',
+        transect_to=(0.9, 0.9), altimetry_sources='local',
+        sea_surface_n_points=32, sea_surface_seed=5)
+    assert env.altimetry is not None
+    assert 'nbs' in [s.source.id for s in env.data_sources]
+
+
 # ── fetch_environment altimetry integration ───────────────────────────────────
 
 def test_altimetry_requires_transect():

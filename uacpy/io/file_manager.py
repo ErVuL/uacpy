@@ -94,30 +94,23 @@ class FileManager:
         shm_path = Path('/dev/shm')
         return shm_path.exists() and os.access(shm_path, os.W_OK)
 
-    def create_work_dir(self, name: Optional[str] = None) -> Path:
+    def create_work_dir(self) -> Path:
         """
-        Create a working directory for model files.
+        Create a uniquely-named scratch directory under ``base_dir``.
 
-        Parameters
-        ----------
-        name : str, optional
-            Directory name. If ``None``, a unique name is generated.
+        The directory is uacpy's, so :meth:`cleanup_work_dir` removes it whole.
+        Use :meth:`adopt_work_dir` for a directory the caller names.
 
         Returns
         -------
         work_dir : Path
             Path to the working directory.
         """
-        if name is not None:
-            self.work_dir = self.base_dir / name
-            self.work_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            self._temp_dir = tempfile.mkdtemp(
-                prefix=self.prefix,
-                dir=str(self.base_dir)
-            )
-            self.work_dir = Path(self._temp_dir)
-
+        self._temp_dir = tempfile.mkdtemp(
+            prefix=self.prefix,
+            dir=str(self.base_dir)
+        )
+        self.work_dir = Path(self._temp_dir)
         self._owns_work_dir = True
         self._preexisting = None
         return self.work_dir

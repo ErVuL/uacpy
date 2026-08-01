@@ -23,12 +23,13 @@ Adoption across uacpy model wrappers:
   ``write_surface_halfspace``: all AT-family wrappers including Bellhop.
 """
 
-import shutil
-
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple, Union
 
+from uacpy.core.absorption import (
+    Biological, ConstantAbsorption, FrancoisGarrison,
+)
 from uacpy.core.environment import Environment
 from uacpy.core.bottom import BoundaryProperties
 from uacpy.core.surface import Surface
@@ -39,9 +40,9 @@ from uacpy.core.constants import (
     parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED, DEFAULT_SOUND_SPEED,
 )
-from uacpy._log import log_message
 from uacpy.io.utils import equally_spaced
 from uacpy.io.units import m_to_km
+from uacpy.io.refl_io import stage_reflection_file
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -67,7 +68,7 @@ WATER_DENSITY_G_CM3 = 1.0
 _BOUNCE_DUMMY_LAYER_M = 1.0
 
 
-def _writable_layers(bottom):
+def writable_layers(bottom):
     """Sediment layers (of a range-independent ``Bottom`` or a
     ``SeabedColumn``) thick enough to be a distinct AT medium (≥ the ``.1f``
     depth resolution); sub-resolution layers are dropped as degenerate (they
@@ -200,14 +201,26 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
             f"write_ssp: len(ranges_m) = {Npts} does not match c.shape[1] = "
             f"{c.shape[1]} (each column of c must be one profile)"
         )
+    if Npts < 2:
+        # sspMod.f90:410-412 — "You must have at least two profiles in your 2D
+        # SSP field". A 1-column .ssp is rejected inside the Bellhop run.
+        raise ConfigurationError(
+            f"write_ssp: a Quad .ssp needs at least 2 range profiles; got "
+            f"{Npts}.",
+            remediation="Give the range-dependent SSP two or more range "
+                        "nodes, or use a range-independent interp_ssp.",
+        )
 
     # AT/bellhopcuda's LDIFile reader treats each line as a separate
     # list-directed record (`LIST(SSPFile)` resets to the next line before
     # each read), so Npts and the range vector must live on different lines.
     with open(filepath, "w") as fid:
         fid.write(f"{Npts}\n")
+        # 6 decimals of km = mm on the range axis. Bellhop's Quad segment
+        # search needs SSP%Seg%r strictly increasing (sspMod.f90), so a
+        # coarser format would collapse neighbouring profiles into duplicates.
         for r in r_km:
-            fid.write(f"{r:6.3f}  ")
+            fid.write(f"{r:.6f}  ")
         fid.write("\n")
         # Sub-decimetre precision so Munk-style SSPs (e.g. 1502.345 m/s)
         # are not silently rounded; Acoustics-Toolbox parses free-format
@@ -272,7 +285,7 @@ def write_header(
     else:
         n_media = 1
         if env.has_layered_bottom:
-            n_media += len(_writable_layers(env.bottom))
+            n_media += len(writable_layers(env.bottom))
     f.write(f"{n_media}\n")
 
     ssp_code = ssp_topopt
@@ -298,7 +311,6 @@ def write_absorption_block(f: TextIO, env: Environment) -> None:
     count followed by one ``Z1 Z2 f0 Q a0`` record per layer. Other
     absorption types (Thorp, ConstantAbsorption, None) emit nothing.
     """
-    from uacpy.core.absorption import Biological, FrancoisGarrison
     absorption = env.absorption
     if isinstance(absorption, FrancoisGarrison):
         write_fg_params(f, absorption.as_at_tuple())
@@ -459,7 +471,6 @@ def write_ssp_section(
     ``bottom_depth``, or extends by constant extrapolation when it falls
     short.
     """
-    from uacpy.core.absorption import ConstantAbsorption
     bottom_depth_rounded = float(f"{bottom_depth:.1f}")
     # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
     # (ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
@@ -523,7 +534,7 @@ def write_layer_sections(
     # requires the last SSP depth to exactly match the mesh max depth.
     current_depth = float(f"{seafloor_depth:.1f}")
 
-    for layer in _writable_layers(layered):
+    for layer in writable_layers(layered):
         top_depth = current_depth
         bottom_depth = float(f"{current_depth + layer.thickness:.1f}")
         f.write(f"{n_mesh}  0.0  {bottom_depth:.1f}\n")
@@ -609,30 +620,14 @@ def write_bottom_section(
         f.write(f"'{bottom_code}' {sigma:.1f}\n")
 
     if bottom_code == 'F':
-        if hs.reflection_file is None:
-            raise ConfigurationError(
-                "write_bottom_section: acoustic_type='file' requires "
-                "reflection_file= on the bottom BoundaryProperties (path to a "
-                ".brc file)."
-            )
         if filepath is None:
             raise RuntimeError(
                 "write_bottom_section: acoustic_type='file' needs filepath= so "
                 "the .brc table can be staged beside the .env; the model would "
                 "otherwise declare 'F' with no reflection file for AT to open."
             )
-        brc_source = Path(hs.reflection_file)
-        if not brc_source.exists():
-            raise ConfigurationError(
-                f"write_bottom_section: reflection coefficient file not found: "
-                f"{hs.reflection_file}; generate it via BOUNCE or OASR first."
-            )
-        brc_dest = Path(filepath).with_suffix('.brc')
-        if brc_source.resolve() != brc_dest.resolve():
-            shutil.copy(brc_source, brc_dest)
-        log_message('oalib_writer',
-                    f"staged reflection file: {brc_source} -> {brc_dest}",
-                    verbose=verbose)
+        stage_reflection_file(hs.reflection_file, filepath,
+                              boundary='bottom', verbose=verbose)
 
         if emit_reflection_table_block:
             if c_low is None or c_high is None or rmax is None:
@@ -651,7 +646,7 @@ def write_bottom_section(
             z_bottom = env.depth
             if env.has_layered_bottom:
                 z_bottom = float(f"{z_bottom:.1f}")
-                for layer in _writable_layers(env.bottom):
+                for layer in writable_layers(env.bottom):
                     z_bottom = float(f"{z_bottom + layer.thickness:.1f}")
         if halfspace_alpha_s_source == 'env':
             alpha_s = getattr(hs, 'shear_attenuation', 0.0)
@@ -748,20 +743,17 @@ def write_multi_profile_env(
     def _n_media(env_seg):
         n = 1
         if env_seg.has_layered_bottom:
-            n += len(_writable_layers(env_seg.bottom))
+            n += len(writable_layers(env_seg.bottom))
         return n
 
-    max_n_media = max(_n_media(seg) for _, seg in segments)
-
-    # AT multi-profile kraken requires NMedia >= 2 for range-
-    # dependent environments.  When all segments are NMedia=1
-    # (water + halfspace only), we must add a sediment layer so
-    # that total media depth can be held constant across profiles
-    # even though the water column depth varies.  This matches the
-    # AT convention (see tests/wedge: NMedia=2, constant total
+    # One medium beyond the deepest layer stack is always reserved. Every
+    # profile is stretched to a common total media depth (see below), and that
+    # stretch must land on a transparent pad carrying the halfspace properties
+    # — never on a real SedimentLayer, whose thickness is physical. Reserving
+    # the medium also satisfies AT multi-profile kraken's NMedia >= 2 for
+    # range-dependent environments (see tests/wedge: NMedia=2, constant total
     # depth for all 51 profiles).
-    if max_n_media < 2:
-        max_n_media = 2
+    max_n_media = max(_n_media(seg) for _, seg in segments) + 1
 
     # Compute max total media depth across all profiles.
     # ALL profiles will be extended to this depth (constant total
@@ -772,7 +764,7 @@ def write_multi_profile_env(
     def _total_depth(env_seg):
         d = env_seg.depth
         if env_seg.has_layered_bottom:
-            for layer in _writable_layers(env_seg.bottom):
+            for layer in writable_layers(env_seg.bottom):
                 d += layer.thickness
         return d
 
@@ -834,7 +826,7 @@ def write_multi_profile_env(
             real_layers = []
 
             if env_seg.has_layered_bottom:
-                for layer in _writable_layers(env_seg.bottom):
+                for layer in writable_layers(env_seg.bottom):
                     top = current_depth
                     bot = float(f"{current_depth + layer.thickness:.1f}")
                     real_layers.append((top, bot, layer))
@@ -866,15 +858,15 @@ def write_multi_profile_env(
                 )
                 current_depth = pad_bot
 
-            # Extend the LAST extra medium to max_total_depth so
-            # that all profiles have the same total media depth.
-            if all_extra_media:
-                last = all_extra_media[-1]
-                if last[1] < max_total_rounded:
-                    all_extra_media[-1] = (
-                        last[0], max_total_rounded,
-                        last[2], last[3], last[4], last[5], last[6]
-                    )
+            # Extend the last extra medium — a pad, by construction of
+            # max_n_media — to max_total_depth so that all profiles share one
+            # total media depth.
+            last = all_extra_media[-1]
+            if last[1] < max_total_rounded:
+                all_extra_media[-1] = (
+                    last[0], max_total_rounded,
+                    last[2], last[3], last[4], last[5], last[6]
+                )
 
             # Write all extra media
             for top, bot, cp, cs, rho_v, ap, as_ in all_extra_media:
@@ -887,10 +879,7 @@ def write_multi_profile_env(
                         f"{ap:.2f} {as_:.2f} /\n")
 
             # Halfspace depth = bottom of all media
-            if all_extra_media:
-                hs_depth = all_extra_media[-1][1]
-            else:
-                hs_depth = seafloor
+            hs_depth = all_extra_media[-1][1]
 
             write_bottom_section(
                 f, env_seg, bottom_type=bottom_type,
@@ -908,6 +897,35 @@ def write_multi_profile_env(
 
             write_source_depths(f, source)
             write_receiver_depths(f, receiver)
+
+
+#: ``field.exe`` option columns it validates itself and ERROUTs on
+#: (``KrakenField/field.f90:70-99``). Column 2 (mode coupling) is read by
+#: ReadModes rather than gated here.
+_FLP_OPTION_ALPHABET = {
+    1: (set('XRS'), 'source type (X line / R point / S scaled cylindrical)'),
+    3: (set('*O '), 'source beam pattern (* file / O or blank omnidirectional)'),
+    4: (set('CI '), 'mode addition (C coherent / I incoherent)'),
+}
+
+#: ``field3d.exe`` dispatches on ``Option(1:3)`` (``field3d.f90:96-107``).
+_FLP3D_EVALUATORS = {'STD', 'PDQ', 'GBT'}
+
+
+def _validate_flp_option(option: str) -> None:
+    """Reject a ``.flp`` option string ``field.exe`` would ERROUT on.
+
+    Without this the deck only fails inside the Fortran run, with the error
+    buried in the ``.prt``.
+    """
+    padded = f"{option:<4s}"
+    for col, (allowed, description) in _FLP_OPTION_ALPHABET.items():
+        char = padded[col - 1]
+        if char not in allowed:
+            raise ConfigurationError(
+                f"write_fieldflp: option position {col} ({description}) must be "
+                f"one of {sorted(allowed)}; got {char!r} in {option!r}."
+            )
 
 
 def write_fieldflp(
@@ -979,6 +997,8 @@ def write_fieldflp(
     filepath = Path(filepath)
     if filepath.suffix != ".flp":
         filepath = filepath.with_suffix(".flp")
+
+    _validate_flp_option(option)
 
     r_ranges = m_to_km(pos["r"]["r"])
     s_depths = pos["s"]["z"]
@@ -1160,6 +1180,13 @@ def write_field3dflp(
     if filepath.suffix != ".flp":
         filepath = filepath.with_suffix(".flp")
 
+    if option[:3].upper() not in _FLP3D_EVALUATORS:
+        raise ConfigurationError(
+            f"write_field3dflp: option positions 1-3 pick the field3d "
+            f"evaluator and must be one of {sorted(_FLP3D_EVALUATORS)}; got "
+            f"{option[:3]!r} in {option!r}."
+        )
+
     s_x = m_to_km(pos["s"]["x"])
     s_y = m_to_km(pos["s"]["y"])
     s_z = pos["s"]["z"]
@@ -1256,7 +1283,9 @@ def write_field3dflp(
                 else:
                     modfil = "'DUMMY'"
 
-                f.write(f"{x_coord:8.2f} {y_coord:8.2f} {modfil}\n")
+                # 6 decimals of km = mm, matching Sx/Sy/Rr on this same file
+                # and write_bty_3d; %8.2f would quantise the node grid to 10 m.
+                f.write(f"{x_coord:.6f} {y_coord:.6f} {modfil}\n")
 
         # Elements (triangular mesh). FIELD3D indexes the node arrays
         # directly with these values (``x( Node1 )``, field3d.f90:285-291),
@@ -1411,7 +1440,7 @@ def write_sparc_env_file(
         # emitted by write_layer_sections below.
         n_media = 1
         if env.has_layered_bottom:
-            n_media += len(_writable_layers(env.bottom))
+            n_media += len(writable_layers(env.bottom))
         f.write(f"{n_media}\n")
 
         surface_code = surface_type.to_acoustics_toolbox_code()
@@ -1498,7 +1527,7 @@ def write_bounce_input_file(
     """
     filepath = Path(filepath)
     seafloor = float(env.depth)
-    layers = _writable_layers(env.bottom) if env.has_layered_bottom else []
+    layers = writable_layers(env.bottom) if env.has_layered_bottom else []
 
     # Reference medium for the incident wave: the water at the seafloor.
     water_top = BoundaryProperties(

@@ -35,8 +35,8 @@ from uacpy.data._geo import (
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 
-__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'fetch_bathy_grid',
-           'transect_length']
+__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_plan',
+           'fetch_bathy_grid', 'transect_length']
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
 DEFAULT_DATASET = 'gebco2020'
@@ -171,35 +171,27 @@ def fetch_bathy_transect(
         The service fails, or any sampled point falls on land.
     """
     _check_source(source)
-    length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    plan = bathy_transect_plan(start, end, n_points=n_points,
+                               max_points=max_points)
+    n = plan['n_points']
+    lats, lons, ranges_m = plan['lats'], plan['lons'], plan['ranges_m']
+    length_km = ranges_m[-1] / 1000.0
     if n_points == 'auto':
-        # Bathymetry is a continuous (bilinearly served) field — no duplicate
-        # samples to collapse — so 'auto' targets native resolution, bounded
-        # by max_points.
-        native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
-        n = min(native, int(max_points))
-        if native > max_points:
+        if plan['native_points'] > max_points:
             warnings.warn(
                 f"fetch_bathy_transect: native GEBCO resolution over "
-                f"{length_km:.0f} km needs ~{native} points; capped to "
-                f"max_points={max_points} (~{length_km / max(max_points, 1):.1f}"
-                f" km spacing). Raise max_points, or use GMRT / a self-hosted "
-                f"OpenTopoData for finer sampling.",
+                f"{length_km:.0f} km needs ~{plan['native_points']} points; "
+                f"capped to max_points={max_points} "
+                f"(~{length_km / max(max_points, 1):.1f} km spacing). Raise "
+                f"max_points, or use GMRT / a self-hosted OpenTopoData for "
+                f"finer sampling.",
                 UserWarning, stacklevel=2)
-    else:
-        if int(n_points) < 2:
-            raise ConfigurationError(
-                f"fetch_bathy_transect: n_points must be >= 2, got {n_points}.",
-                remediation="Pass n_points>=2 (or 'auto') to define a transect.",
-            )
-        n = min(int(n_points), int(max_points))
-        if int(n_points) > int(max_points):
-            warnings.warn(
-                f"fetch_bathy_transect: n_points={n_points} exceeds "
-                f"max_points={max_points}; sampling {max_points}.",
-                UserWarning, stacklevel=2)
+    elif int(n_points) > int(max_points):
+        warnings.warn(
+            f"fetch_bathy_transect: n_points={n_points} exceeds "
+            f"max_points={max_points}; sampling {max_points}.",
+            UserWarning, stacklevel=2)
 
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n)
     log_message(
         'bathymetry', f"sampling {n} GEBCO depths along "
         f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
@@ -228,20 +220,31 @@ def bathy_transect_plan(
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
 ) -> dict:
     """Resolve how many bathymetry samples a transect would take, and where,
-    without fetching. Returns ``{'n_points', 'lats', 'lons', 'ranges_m'}``.
+    without fetching. Returns ``{'n_points', 'native_points', 'lats', 'lons',
+    'ranges_m'}``; ``native_points`` is the uncapped native-resolution count,
+    which is what :func:`fetch_bathy_transect` warns about when ``max_points``
+    binds.
 
     Bathymetry is continuous, so ``'auto'`` targets GEBCO native resolution
     (``length / GEBCO_NATIVE_KM``) bounded by ``max_points`` — there is no
-    duplicate-collapse step (cf. :func:`ssp_transect_plan`).
+    duplicate-collapse step (cf. :func:`ssp_transect_plan`). This is where
+    :func:`fetch_bathy_transect` resolves its sampling, so the two can never
+    disagree.
     """
     length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
     if n_points == 'auto':
-        n = min(int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1, int(max_points))
+        n = min(native, int(max_points))
     else:
-        n = max(2, min(int(n_points), int(max_points)))
+        if int(n_points) < 2:
+            raise ConfigurationError(
+                f"bathy_transect_plan: n_points must be >= 2, got {n_points}.",
+                remediation="Pass n_points>=2 (or 'auto') to define a transect.",
+            )
+        n = min(int(n_points), int(max_points))
     lats, lons, ranges_m = geodesic_waypoints(start, end, n)
-    return {'n_points': int(n), 'lats': lats, 'lons': lons,
-            'ranges_m': ranges_m}
+    return {'n_points': int(n), 'native_points': native, 'lats': lats,
+            'lons': lons, 'ranges_m': ranges_m}
 
 
 def fetch_bathy_grid(

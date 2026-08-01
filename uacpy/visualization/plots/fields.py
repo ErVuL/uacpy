@@ -12,22 +12,25 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry
+from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
 # Anything a branch does not read is rejected instead of silently dropped.
-_HEATMAP_ONLY = ('vmin', 'vmax', 'cmap', 'show_colorbar', 'contours',
-                 'source', 'receiver')
+_HEATMAP_ONLY = ('vmin', 'vmax', 'cmap', 'show_colorbar', 'contours')
+# The environment and the run geometry can only be drawn over a physical
+# (depth, range) cross-section, so they key on the axes, not just the branch.
+_CROSS_SECTION_ONLY = ('env', 'source', 'receiver')
 _BRANCH_UNUSED = {
     'heatmap': ('label', 'stack_offset'),
-    'line': _HEATMAP_ONLY + ('stack_offset',),
-    'stacked': _HEATMAP_ONLY + ('label',),
+    'line': _HEATMAP_ONLY + _CROSS_SECTION_ONLY + ('stack_offset',),
+    'stacked': _HEATMAP_ONLY + _CROSS_SECTION_ONLY + ('label',),
 }
 _BRANCH_DESCRIPTION = {
     'heatmap': 'a 2-D heatmap',
     'line': 'a 1-D line cut',
     'stacked': 'the stacked-traces view',
+    'other_heatmap': 'a heatmap that is not a (depth, range) cross-section',
 }
 
 # Contour-label unit, keyed by ``value``. Linear pressure ('mag', 'real',
@@ -35,6 +38,7 @@ _BRANCH_DESCRIPTION = {
 _CONTOUR_FMT = {'tl': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
 
 
+@typed_plot_error
 def plot_field(
     field: Field,
     ax=None,
@@ -134,16 +138,22 @@ def plot_field(
 
     supplied = {'vmin': vmin, 'vmax': vmax, 'cmap': cmap, 'label': label,
                 'show_colorbar': show_colorbar, 'contours': contours,
-                'stack_offset': stack_offset, 'source': source,
+                'stack_offset': stack_offset, 'env': env, 'source': source,
                 'receiver': receiver}
-    unused = [k for k in _BRANCH_UNUSED[branch] if supplied[k] is not None]
+    reject_branch = branch
+    unused = list(_BRANCH_UNUSED[branch])
+    if branch == 'heatmap' and axes_present != ['depth', 'range']:
+        reject_branch = 'other_heatmap'
+        unused += list(_CROSS_SECTION_ONLY)
+    unused = [k for k in unused if supplied[k] is not None]
     if unused:
         raise ConfigurationError(
             f"plot_field: {', '.join(f'{k}=' for k in unused)} has no effect on "
-            f"{_BRANCH_DESCRIPTION[branch]} (coords {axes_present}). "
+            f"{_BRANCH_DESCRIPTION[reject_branch]} (coords {axes_present}). "
             f"{', '.join(f'{k}=' for k in _HEATMAP_ONLY)} apply to the 2-D "
-            "heatmap, label= to the 1-D line cut, stack_offset= to "
-            "stacked=True."
+            f"heatmap, {', '.join(f'{k}=' for k in _CROSS_SECTION_ONLY)} to a "
+            "(depth, range) cross-section, label= to the 1-D line "
+            "cut, stack_offset= to stacked=True."
         )
 
     if branch == 'stacked':
@@ -322,20 +332,21 @@ def _plot_field_2d(
         pin = _pinned_subtitle(field)
         if pin:
             ax.set_title(pin)
+    # env / source / receiver are rejected before the figure exists (see
+    # _CROSS_SECTION_ONLY), so reaching here with them set means this really
+    # is a (depth, range) cross-section.
     if axes_present == ['depth', 'range']:
         if env is not None:
             _overlay_seafloor(ax, env, x_coord)
         if source is not None or receiver is not None:
+            # Range is measured from the source, so the source sits at r = 0
+            # even when the field's own grid starts further out.
             _draw_geometry(ax, source, receiver, max_markersize=6,
-                           source_range_m=float(np.min(x_coord)))
-    elif source is not None or receiver is not None:
-        raise ConfigurationError(
-            "plot_field: source=/receiver= need a (depth, range) heatmap; "
-            f"this field's axes are {axes_present}."
-        )
+                           source_range_m=0.0)
     return fig, ax
 
 
+@typed_plot_error
 def plot_signal_excess(
     field: Field,
     ax=None,
@@ -438,6 +449,7 @@ def plot_signal_excess(
     return fig, ax
 
 
+@typed_plot_error
 def plot_detection_probability(
     field: Field,
     ax=None,
@@ -533,6 +545,7 @@ def plot_detection_probability(
     return fig, ax
 
 
+@typed_plot_error
 def compare(
     fields: Sequence[Field],
     labels: Optional[Sequence[str]] = None,
@@ -623,6 +636,7 @@ def _draw_multi_model_credit(fig, fields):
         _draw_credit(fig, (), model=attrs)
 
 
+@typed_plot_error
 def compare_models(
     fields,
     labels: Optional[Sequence[str]] = None,
@@ -718,6 +732,7 @@ def compare_models(
     return fig, axes_flat
 
 
+@typed_plot_error
 def _plot_field_stack(stack, env: Optional[Environment] = None, *,
                       ncols: Optional[int] = None,
                       title: Optional[str] = None,

@@ -72,8 +72,12 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
         return _plot_rays(result, env=env, **kwargs)
 
     # Plotters with no spatial cross-section to overlay an environment on.
-    # Accepting env= silently would look like it had an effect.
-    if env is not None:
+    # Accepting env= silently would look like it had an effect. Checked after
+    # the type is known to be one we render, so an unregistered type still
+    # reports that it has no plotter rather than blaming env=.
+    if env is not None and isinstance(
+            result, (Arrivals, Modes, Covariance, Replicas,
+                     ReflectionCoefficient)):
         raise ConfigurationError(
             f"{type(result).__name__}.plot: env= has no effect on this view — "
             "only Field and Rays plots draw the environment. Drop env=."

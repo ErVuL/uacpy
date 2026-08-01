@@ -6,17 +6,24 @@ re-implementing network error handling. No third-party HTTP dependency.
 """
 
 import http.client
+import os
+import shutil
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Union
+
+import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy._log import log_message
 
-__all__ = ['http_get', 'checked_member_size', 'MAX_MEMBER_BYTES']
+__all__ = ['http_get', 'curl_download', 'erddap_last_value',
+           'checked_member_size', 'MAX_MEMBER_BYTES']
 
 # HTTP status codes worth retrying (transient rate-limit / availability /
 # gateway hiccups — the urllib3/requests default transient set).
@@ -154,6 +161,51 @@ def _read_capped(response, url: str, max_bytes: int) -> bytes:
                         "request, or point base_url= at a mirror.",
         )
     return data
+
+
+def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
+    """Fetch ``url`` → ``out`` with curl; ``True`` on success.
+
+    ``False`` when curl is absent or fails, so the caller can fall back to
+    :func:`http_get`. The large static grid hosts (NCEI/Akamai, Zenodo, GLODAP)
+    throttle Python urllib to a trickle but serve curl at full speed, so this is
+    the preferred path for them. Downloads to ``<out>.part`` and moves it into
+    place only on success, so an interrupted transfer never leaves a truncated
+    ``out`` for the cache to accept.
+    """
+    curl = shutil.which('curl')
+    if not curl:
+        return False
+    part = Path(str(out) + '.part')
+    try:
+        subprocess.run(
+            [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
+             '-o', str(part), url],
+            check=True, capture_output=not verbose)
+    except (subprocess.SubprocessError, OSError):
+        part.unlink(missing_ok=True)
+        return False
+    if not (part.exists() and part.stat().st_size > 0):
+        part.unlink(missing_ok=True)
+        return False
+    os.replace(part, out)
+    return True
+
+
+def erddap_last_value(body: str) -> float:
+    """Last numeric field of an ERDDAP griddap ``.csv`` point response.
+
+    The body is a header row, a units row, then one data row whose final column
+    is the requested variable. Returns ``NaN`` when the value is missing or the
+    service returned no data row.
+    """
+    rows = [ln for ln in body.splitlines() if ln.strip()]
+    if len(rows) < 3:
+        return np.nan
+    try:
+        return float(rows[-1].split(',')[-1])
+    except (ValueError, IndexError):
+        return np.nan
 
 
 def checked_member_size(

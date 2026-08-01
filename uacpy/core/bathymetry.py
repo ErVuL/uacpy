@@ -1,8 +1,8 @@
 """Bathymetry shape carrier: seafloor depth as a function of range.
 
 A 1-D profile (``depth`` vs ``range``), the seafloor analogue of
-:class:`uacpy.core.ssp.SoundSpeedProfile`. Split out of
-:mod:`uacpy.core.environment`; re-exported from there for stable import paths.
+:class:`uacpy.core.ssp.SoundSpeedProfile`. Re-exported from
+:mod:`uacpy.core.environment` for stable import paths.
 """
 
 import numpy as np
@@ -39,6 +39,7 @@ class Bathymetry(_RangeProfile):
 
     _VALUE_FIELD = 'depths'
     _VALUE_LABEL = 'depth'
+    _AXIS_DOWN = True
 
     def __post_init__(self):
         self.data_sources = _coerce_data_sources(self.data_sources, "Bathymetry")

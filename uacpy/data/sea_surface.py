@@ -7,7 +7,8 @@ Pierson-Moskowitz wind ``U = √(Hs / 0.021)`` and handed to
 :func:`uacpy.core.ssp.generate_sea_surface`, so the realization reproduces the
 observed ``Hs`` regardless of whether the sea is fully developed. When no wave
 source is available it falls back to the fetched 10 m wind, scaled to the
-19.5 m PM reference height (a fully-developed assumption).
+19.5 m PM reference height (a fully-developed assumption) — the live NBS field
+first, then the cached NBS monthly climatology.
 """
 
 import numpy as np
@@ -19,7 +20,13 @@ from uacpy.data._geo import as_coordinate
 
 __all__ = ['fetch_sea_surface', 'hs_to_pm_wind', 'SEA_SURFACE_SOURCES']
 
-SEA_SURFACE_SOURCES = ('waves', 'wind', 'auto')
+SEA_SURFACE_SOURCES = ('waves', 'wind', 'local', 'auto')
+#: Wind backends tried per source token. ``'local'`` is the cached NBS monthly
+#: climatology (``install.sh --data wind``) — a mean state, not the day's, so
+#: it is the last rung of ``'auto'`` rather than the cache-first rung the other
+#: axes use: for sea state the date-specific product is the better answer.
+_WIND_BACKENDS = {'wind': ('erddap',), 'local': ('local',),
+                  'auto': ('erddap', 'local')}
 #: Pierson-Moskowitz fully-developed significant wave height Hs = 0.021·U²
 #: (U at the 19.5 m reference height), the relation used by
 #: :func:`generate_sea_surface`.
@@ -51,10 +58,12 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
         Range samples in the returned altimetry. Default 500.
     seed : int, optional
         Random seed for the surface realization (reproducibility).
-    source : {'auto', 'waves', 'wind'}, optional
+    source : {'auto', 'waves', 'wind', 'local'}, optional
         ``'waves'`` builds from the fetched significant wave height; ``'wind'``
-        from the fetched 10 m wind (fully-developed assumption); ``'auto'``
-        (default) tries waves, then wind.
+        from the live 10 m wind (fully-developed assumption); ``'local'`` from
+        the cached NBS monthly wind climatology (no network — a mean state, so
+        it understates day-to-day sea state); ``'auto'`` (default) tries waves,
+        then live wind, then the climatology.
     max_days : int, optional
         Time tolerance forwarded to the wave source.
 
@@ -65,7 +74,7 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
         ``source_id`` is the catalogue id that supplied the sea state
         (``'waverys'`` / ``'ww3'`` / ``'nbs'``).
     """
-    lat, lon = as_coordinate(point)
+    as_coordinate(point)                       # validate before any request
     if source not in SEA_SURFACE_SOURCES:
         raise ConfigurationError(
             f"fetch_sea_surface: unknown source {source!r}.",
@@ -86,15 +95,18 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
                 raise
             errors.append(exc)
     # Wind-driven (explicit, or the 'auto' fallback when waves are unavailable).
-    try:
-        from uacpy.data.wind_live import fetch_wind
-        u10 = fetch_wind(point, date=date, timeout=timeout, verbose=verbose)
+    from uacpy.data.wind_live import fetch_wind
+    for backend in _WIND_BACKENDS[source]:
+        try:
+            u10 = fetch_wind(point, date=date, source=backend, timeout=timeout,
+                             verbose=verbose)
+        except (DataFetchError, ConfigurationError) as exc:
+            errors.append(exc)
+            continue
         u = u10 * _U10_TO_U195
-        log_message('wind', f"U10 {u10:.1f} m/s (nbs) → PM wind {u:.1f} m/s",
-                    verbose=verbose)
+        log_message('wind', f"U10 {u10:.1f} m/s (nbs {backend}) → PM wind "
+                    f"{u:.1f} m/s", verbose=verbose)
         return _surface(max_range, u, n_points, seed), 'nbs'
-    except (DataFetchError, ConfigurationError) as exc:
-        errors.append(exc)
     data_errs = [e for e in errors if isinstance(e, DataFetchError)]
     raise (data_errs[0] if data_errs else errors[-1])
 

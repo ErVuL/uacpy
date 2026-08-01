@@ -21,13 +21,15 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
+from uacpy.acoustic_signal.waveforms import sparc_pulse
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import (
     read_vector as _read_vector, detect_endian, typed_format_error,
-    strip_fortran_comment as _strip_fortran_comment)
+    strip_fortran_comment as _strip_fortran_comment,
+    strip_fortran_quotes as _strip_fortran_quotes)
 from uacpy.io.units import km_to_m
 
 
@@ -336,13 +338,14 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     Returns
     -------
     result : dict
-        Dictionary containing:
+        Same keys as :func:`read_shd_bin`, so a caller can switch between
+        the ASCII and binary readers without remapping:
         - 'title': str, plot title
-        - 'plot_type': str, plot type
-        - 'freq_vec': ndarray, frequency vector in Hz
+        - 'PlotType': str, plot type
+        - 'freqVec': ndarray, frequency vector in Hz
         - 'freq0': float, reference frequency in Hz
         - 'atten': float, stabilizing attenuation in dB/wavelength
-        - 'pos': dict with position information:
+        - 'Pos': dict with position information:
           - 'theta': ndarray, bearing angles in degrees
           - 's': dict with 'z' (source depths in m)
           - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m)
@@ -425,11 +428,11 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     return {
         "title": title,
-        "plot_type": plot_type,
-        "freq_vec": freq_vec,
+        "PlotType": plot_type,
+        "freqVec": freq_vec,
         "freq0": freq0,
         "atten": atten,
-        "pos": {"theta": theta, "s": {"z": s_z}, "r": {"z": r_z, "r": r_r}},
+        "Pos": {"theta": theta, "s": {"z": s_z}, "r": {"z": r_z, "r": r_r}},
         "pressure": pressure,
     }
 
@@ -476,138 +479,123 @@ def read_arr_file(filepath: Union[str, Path]):
     """
     filepath = Path(filepath)
 
+    # Check if binary or ASCII format. The ASCII arrivals file always begins
+    # with a quoted "'2D'" or "'3D'" tag at the very start of the first line.
+    # The binary format is a Fortran unformatted stream whose first bytes are a
+    # 4-byte record marker (typically \x04\x00\x00\x00 for a 4-byte record, but
+    # compilers may emit other marker lengths). Prefer the positive ASCII test
+    # and fall back to binary otherwise.
     with open(filepath, "rb") as f:
-        # Check if binary or ASCII format. The ASCII arrivals file always
-        # begins with a quoted "'2D'" or "'3D'" tag at the very start of the
-        # first line. The binary format is a Fortran unformatted stream whose
-        # first bytes are a 4-byte record marker (typically \x04\x00\x00\x00
-        # for a 4-byte record, but compilers may emit other marker lengths).
-        # Prefer the positive ASCII test and fall back to binary otherwise.
         head = f.read(16)
-        f.seek(0)
-        try:
-            head_text = head.decode('ascii')
-        except UnicodeDecodeError:
-            head_text = ''
-        if head_text.lstrip().startswith(("'2D'", "'3D'")):
-            is_binary = False
-        else:
-            is_binary = True
+    try:
+        head_text = head.decode('ascii')
+    except UnicodeDecodeError:
+        head_text = ''
 
-        if is_binary:
-            from uacpy.core.exceptions import ConfigurationError
-            raise ConfigurationError(
-                "Binary arrivals format (.arr written by RunType 'a') is "
-                "not supported. Re-run Bellhop with "
-                "arrivals_format='ascii' (RunType 'A'). See "
-                "ArrMod.f90:WriteArrivalsBinary for the record layout."
-            )
+    if not head_text.lstrip().startswith(("'2D'", "'3D'")):
+        raise ConfigurationError(
+            "Binary arrivals format (.arr written by RunType 'a') is not "
+            "supported; see ArrMod.f90:WriteArrivalsBinary for the record "
+            "layout.",
+            remediation="Re-run Bellhop with RunType 'A' (ASCII), which is "
+                        "what uacpy's own runs emit.",
+        )
+    is_3d = head_text.lstrip().startswith("'3D'")
 
-        f.seek(0)
-        text_content = f.read(10).decode('ascii', errors='ignore')
+    if not is_3d:
+        # ArrMod.f90 writes each Fortran record (freq, nsd+sz, nrd+rz,
+        # nrr+rr, max-narr, narr, and each 8-tuple arrival) via
+        # list-directed WRITE, which different Fortran runtimes may wrap
+        # at different column widths. Walk the file as a token stream so
+        # the parser is independent of how those records are line-broken.
+        with open(filepath, 'r') as f:
+            f.readline()  # skip the '2D' / '3D' flag line
+            tokens = []
+            for line in f:
+                tokens.extend(line.split())
 
-        if "'2D'" in text_content:
-            is_3d = False
-        elif "'3D'" in text_content:
-            is_3d = True
-        else:
-            raise FileFormatError(f"Not a valid arrivals file: {repr(text_content)}")
+        def _next_floats(t_iter, n):
+            return [float(next(t_iter)) for _ in range(n)]
 
-        if not is_3d:
-            f.close()
-            # ArrMod.f90 writes each Fortran record (freq, nsd+sz, nrd+rz,
-            # nrr+rr, max-narr, narr, and each 8-tuple arrival) via
-            # list-directed WRITE, which different Fortran runtimes may wrap
-            # at different column widths. Walk the file as a token stream so
-            # the parser is independent of how those records are line-broken.
-            with open(filepath, 'r') as f:
-                f.readline()  # skip the '2D' / '3D' flag line
-                tokens = []
-                for line in f:
-                    tokens.extend(line.split())
+        def _next_int(t_iter):
+            # Some writers emit counts as floats; tolerate either.
+            return int(float(next(t_iter)))
 
-            def _next_floats(t_iter, n):
-                return [float(next(t_iter)) for _ in range(n)]
+        t_iter = iter(tokens)
+        freq = float(next(t_iter))
 
-            def _next_int(t_iter):
-                # Some writers emit counts as floats; tolerate either.
-                return int(float(next(t_iter)))
+        nsd = _next_int(t_iter)
+        sz = np.array(_next_floats(t_iter, nsd))
 
-            t_iter = iter(tokens)
-            freq = float(next(t_iter))
+        nrd = _next_int(t_iter)
+        rz = np.array(_next_floats(t_iter, nrd))
 
-            nsd = _next_int(t_iter)
-            sz = np.array(_next_floats(t_iter, nsd))
+        nrr = _next_int(t_iter)
+        rr = np.array(_next_floats(t_iter, nrr))
 
-            nrd = _next_int(t_iter)
-            rz = np.array(_next_floats(t_iter, nrd))
+        arrivals_by_receiver = []
 
-            nrr = _next_int(t_iter)
-            rr = np.array(_next_floats(t_iter, nrr))
+        for isd in range(nsd):
+            sd_list = []
+            # Skip the per-source max-narr value.
+            _next_int(t_iter)
 
-            arrivals_by_receiver = []
+            for irz in range(nrd):
+                rd_list = []
+                for irr in range(nrr):
+                    narr = _next_int(t_iter)
 
-            for isd in range(nsd):
-                sd_list = []
-                # Skip the per-source max-narr value.
-                _next_int(t_iter)
+                    rcv_arrivals = {
+                        "amplitudes": np.array([], dtype='float64'),
+                        "phases": np.array([], dtype='float64'),
+                        "delays": np.array([], dtype='float64'),
+                        "delays_imag": np.array([], dtype='float64'),
+                        "src_angles": np.array([], dtype='float64'),
+                        "rcv_angles": np.array([], dtype='float64'),
+                        "n_top_bounces": np.array([], dtype='int32'),
+                        "n_bot_bounces": np.array([], dtype='int32'),
+                        "n_arrivals": 0,
+                    }
 
-                for irz in range(nrd):
-                    rd_list = []
-                    for irr in range(nrr):
-                        narr = _next_int(t_iter)
+                    if narr > 0:
+                        amps = []
+                        phases = []
+                        delays_r = []
+                        delays_i = []
+                        src_angs = []
+                        rcv_angs = []
+                        n_tops = []
+                        n_bots = []
+
+                        for ia in range(narr):
+                            values = _next_floats(t_iter, 8)
+
+                            amps.append(values[0])
+                            phases.append(values[1])
+                            delays_r.append(values[2])
+                            delays_i.append(values[3])
+                            src_angs.append(values[4])
+                            rcv_angs.append(values[5])
+                            n_tops.append(int(values[6]))
+                            n_bots.append(int(values[7]))
 
                         rcv_arrivals = {
-                            "amplitudes": np.array([], dtype='float64'),
-                            "phases": np.array([], dtype='float64'),
-                            "delays": np.array([], dtype='float64'),
-                            "delays_imag": np.array([], dtype='float64'),
-                            "src_angles": np.array([], dtype='float64'),
-                            "rcv_angles": np.array([], dtype='float64'),
-                            "n_top_bounces": np.array([], dtype='int32'),
-                            "n_bot_bounces": np.array([], dtype='int32'),
-                            "n_arrivals": 0,
+                            "amplitudes": np.array(amps),
+                            "phases": np.array(phases),
+                            "delays": np.array(delays_r),
+                            "delays_imag": np.array(delays_i),
+                            "src_angles": np.array(src_angs),
+                            "rcv_angles": np.array(rcv_angs),
+                            "n_top_bounces": np.array(n_tops, dtype='int32'),
+                            "n_bot_bounces": np.array(n_bots, dtype='int32'),
+                            "n_arrivals": narr,
                         }
 
-                        if narr > 0:
-                            amps = []
-                            phases = []
-                            delays_r = []
-                            delays_i = []
-                            src_angs = []
-                            rcv_angs = []
-                            n_tops = []
-                            n_bots = []
-
-                            for ia in range(narr):
-                                values = _next_floats(t_iter, 8)
-
-                                amps.append(values[0])
-                                phases.append(values[1])
-                                delays_r.append(values[2])
-                                delays_i.append(values[3])
-                                src_angs.append(values[4])
-                                rcv_angs.append(values[5])
-                                n_tops.append(int(values[6]))
-                                n_bots.append(int(values[7]))
-
-                            rcv_arrivals = {
-                                "amplitudes": np.array(amps),
-                                "phases": np.array(phases),
-                                "delays": np.array(delays_r),
-                                "delays_imag": np.array(delays_i),
-                                "src_angles": np.array(src_angs),
-                                "rcv_angles": np.array(rcv_angs),
-                                "n_top_bounces": np.array(n_tops, dtype='int32'),
-                                "n_bot_bounces": np.array(n_bots, dtype='int32'),
-                                "n_arrivals": narr,
-                            }
-
-                        rd_list.append(rcv_arrivals)
-                    sd_list.append(rd_list)
-                arrivals_by_receiver.append(sd_list)
-        else:
-            raise NotImplementedError("3D arrivals format not yet implemented")
+                    rd_list.append(rcv_arrivals)
+                sd_list.append(rd_list)
+            arrivals_by_receiver.append(sd_list)
+    else:
+        raise NotImplementedError("3D arrivals format not yet implemented")
 
     if nsd == 1:
         return Arrivals(
@@ -1119,17 +1107,9 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         filepath = fileroot
 
     with open(filepath, "r") as f:
-        title = f.readline().strip()
-        if "'" in title:
-            start = title.find("'") + 1
-            end = title.find("'", start)
-            title = title[start:end]
+        title = _strip_fortran_quotes(f.readline())
         log_message('oalib_reader', f"Title: {title}", verbose=verbose)
-        opt = f.readline().strip()
-        if "'" in opt:
-            start = opt.find("'") + 1
-            end = opt.find("'", start)
-            opt = opt[start:end]
+        opt = _strip_fortran_quotes(f.readline())
         log_message('oalib_reader', f"Options: {opt}", verbose=verbose)
 
         # Fill missing option columns with reasonable placeholders.
@@ -1250,16 +1230,9 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
     else:
         filepath = fileroot
 
-    def _quoted(line: str) -> str:
-        line = line.strip()
-        if "'" in line:
-            start = line.find("'") + 1
-            return line[start:line.find("'", start)]
-        return _strip_fortran_comment(line)
-
     with open(filepath, "r") as f:
-        title = _quoted(f.readline())
-        opt = _quoted(f.readline())
+        title = _strip_fortran_quotes(f.readline())
+        opt = _strip_fortran_quotes(f.readline())
         M_limit = int(_strip_fortran_comment(f.readline()))
 
         s_x, n_sx = _read_vector(f)
@@ -1375,11 +1348,7 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     # multiple lines. Flattening the whole stream and walking token by
     # token makes parsing independent of line wrapping.
     with open(filepath, "r") as f:
-        line1 = f.readline().strip()
-        if line1.startswith("'") and line1.endswith("'"):
-            title = line1[1:-1]
-        else:
-            title = line1
+        title = _strip_fortran_quotes(f.readline())
         raw_tokens = []
         for line in f:
             raw_tokens.extend(line.strip().split())
@@ -1440,8 +1409,10 @@ def rts_to_pressure(
     suitable for wrapping in a complex narrowband :class:`Field`
     (``coords={'depth', 'range'}``, ``phase_reference='travelling_wave'``).
 
-    Used by :class:`uacpy.models.SPARC` to project the native
-    time-domain pressure onto a steady-state field at the source frequency.
+    A post-processing utility for a ``.rts`` read by :func:`read_rts_file`;
+    :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. The
+    projection is not a calibrated substitute for Kraken/Scooter TL — see the
+    module docstring of ``uacpy/tests/test_sparc_output_modes.py``.
     """
     p = rts_data["p"]
     dt = rts_data["dt"]
@@ -1460,7 +1431,6 @@ def rts_to_pressure(
         # Kraken/Scooter — it is not a calibrated replacement for them.
         # Use the RECTANGULAR DFT (no taper): a window breaks the convolution
         # theorem and would null the transient source pulse (first few samples).
-        from uacpy.acoustic_signal.waveforms import sparc_pulse
         t = np.asarray(rts_data["time"], dtype=float)
         s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
         freqs = np.fft.rfftfreq(nt, dt)

@@ -20,7 +20,7 @@ from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
+from uacpy.core.results import Field, Result
 from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import write_scooter_env_file
@@ -283,13 +283,7 @@ class Scooter(PropagationModel):
         )
 
         env = self._project_environment(env)
-
-        # Clip receiver depths to the modelled media (water + sediment
-        # layers); the field is resolved through the sediment, not only
-        # the water column.
-        receiver = self._clip_receiver_depths(
-            receiver, self._total_media_depth(env)
-        )
+        media_depth = self._total_media_depth(env)
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
@@ -307,7 +301,6 @@ class Scooter(PropagationModel):
                       f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
 
         fm = self._setup_file_manager()
-        self.file_manager = fm
 
         try:
             base_name = 'model'
@@ -321,48 +314,10 @@ class Scooter(PropagationModel):
                 run_mode=run_mode,
             )
 
-            self._log("Running...")
-            self._run_scooter(base_name, fm.work_dir)
+            grn_data = self._run_and_read_grn(fm, base_name)
+            result = self._assemble_field_from_grn(
+                grn_data, source, receiver, broadband_mode)
 
-            grn_file = fm.get_path(f'{base_name}.grn')
-            if not grn_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"Scooter did not produce {grn_file}; "
-                        f"check {fm.work_dir}/{base_name}.prt for diagnostics."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
-
-            self._log("Reading Green's function...")
-            grn_data = read_grn_file(grn_file)
-
-            if grn_data['nk'] == 0:
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0,
-                    stdout=None,
-                    stderr="Scooter produced empty Green's function (nk=0)",
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
-
-            transform_kwargs = dict(
-                source_type=_SOURCE_TYPE_CODE[source.source_type],
-                spectrum=self._spectrum_code,
-            )
-            if broadband_mode:
-                self._log(f"Transforming {grn_data['nfreq']} frequencies to range domain...")
-                result = grn_to_transfer_function(
-                    grn_data, receiver.ranges, **transform_kwargs,
-                )
-            else:
-                self._log("Transforming to range domain (FFT-based Hankel transform)...")
-                result = grn_to_field(
-                    grn_data, receiver.ranges, method='fft_hankel',
-                    **transform_kwargs,
-                )
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
             self._stamp_result(result, source, backend='scooter',
                                frequencies=freqs, phase_reference='travelling_wave')
@@ -378,7 +333,8 @@ class Scooter(PropagationModel):
                     source_waveform=source_waveform,
                     sample_rate=sample_rate,
                 )
-            return result
+            return self._mask_unresolvable_depths(
+                result, receiver, media_depth)
 
         finally:
             if fm.cleanup:
@@ -386,6 +342,81 @@ class Scooter(PropagationModel):
 
     def _max_receiver_depth(self, env) -> float:
         return self._total_media_depth(env)
+
+    def _run_and_read_grn(self, fm, base_name):
+        """Run the binary and read back its Green's function.
+
+        A missing ``.grn`` and an ``nk=0`` one are both run failures the binary
+        does not report through its exit status, so each is turned into a typed
+        error carrying the ``.prt`` diagnostics.
+        """
+        self._log("Running...")
+        self._run_scooter(base_name, fm.work_dir)
+
+        grn_file = fm.get_path(f'{base_name}.grn')
+        if not grn_file.exists():
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(
+                    f"Scooter did not produce {grn_file}; "
+                    f"check {fm.work_dir}/{base_name}.prt for diagnostics."
+                ),
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+
+        self._log("Reading Green's function...")
+        grn_data = read_grn_file(grn_file)
+        if grn_data['nk'] == 0:
+            exc = ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr="Scooter produced empty Green's function (nk=0)",
+            )
+            self._attach_prt_tail(exc, fm.work_dir, base_name)
+            raise exc
+        return grn_data
+
+    def _assemble_field_from_grn(self, grn_data, source, receiver,
+                                 broadband_mode):
+        """Hankel-transform the Green's function onto the receiver ranges.
+
+        Broadband transforms every frequency in the ``.grn`` at once; the
+        narrowband path takes the single-frequency FFT-Hankel route.
+        """
+        transform_kwargs = dict(
+            source_type=_SOURCE_TYPE_CODE[source.source_type],
+            spectrum=self._spectrum_code,
+        )
+        if broadband_mode:
+            self._log(f"Transforming {grn_data['nfreq']} frequencies to "
+                      f"range domain...")
+            return grn_to_transfer_function(
+                grn_data, receiver.ranges, **transform_kwargs)
+        self._log("Transforming to range domain (FFT-based Hankel transform)...")
+        return grn_to_field(
+            grn_data, receiver.ranges, method='fft_hankel', **transform_kwargs)
+
+    def _mask_unresolvable_depths(self, result, receiver, media_depth):
+        """Restore the caller's depth axis, NaN below ``media_depth``.
+
+        The finite-element mesh stops at the deepest modelled interface, so
+        ``scooter.exe`` clamps any deeper receiver onto it. Handing those cells
+        back under the depth that was asked for would misreport where the
+        field was evaluated — they are no-data.
+        """
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        d = result.to_dict()
+        data = d['data']
+        if data.shape[0] != depths.size:
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(f"Scooter returned {data.shape[0]} depth rows for "
+                        f"{depths.size} requested receiver depths; the depth "
+                        f"axis cannot be reattached."),
+            )
+        data[depths > media_depth, ...] = np.nan
+        d['coords'] = {**d['coords'], 'depth': depths}
+        return Field.from_dict(d)
 
     def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
         """Pick the effective ``rmax_multiplier`` for this run.
@@ -454,4 +485,5 @@ class Scooter(PropagationModel):
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""
-        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)
+        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name,
+                                 stale_outputs=('.grn',))

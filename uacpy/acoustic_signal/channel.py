@@ -52,11 +52,15 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     fs = float(sample_rate)
     pos = d * fs
     if n_samples is None:
-        n_samples = int(np.ceil(pos.max())) + 2 if pos.size else 1
+        if pos.size:
+            n_samples = int(np.floor(pos.max()) + 2 if fractional
+                            else np.round(pos.max()) + 1)
+        else:
+            n_samples = 1
     dtype = complex if np.iscomplexobj(a) else float
     h = np.zeros(int(n_samples), dtype=dtype)
     for amp, p in zip(a, pos):
-        i0 = int(np.floor(p))
+        i0 = int(np.floor(p)) if fractional else int(np.round(p))
         if i0 < 0 or i0 >= n_samples:
             continue
         if fractional and i0 + 1 < n_samples:

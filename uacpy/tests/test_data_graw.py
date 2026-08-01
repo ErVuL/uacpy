@@ -15,6 +15,7 @@ netCDF4 = pytest.importorskip('netCDF4')
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import gebco_local, graw_local, woa23_local
+from uacpy.data import _http
 
 
 def _write_graw(cache, *, value=1.962):
@@ -184,15 +185,14 @@ def test_graw_interrupted_curl_no_final_file(tmp_path, monkeypatch):
     """A curl killed mid-transfer must not poison the cache with a truncated
     grid at the final path."""
     from pathlib import Path
-    from uacpy.data import globsed_local
     dest = tmp_path / 'o'
 
     def fake_run(cmd, **kw):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'truncated')
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(globsed_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(globsed_local.subprocess, 'run', fake_run)
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
     with pytest.raises(KeyboardInterrupt):
         graw_local.download_graw_db(cache_dir=str(dest))
     assert not (dest / graw_local.GRAW_FILE).exists()

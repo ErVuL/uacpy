@@ -248,7 +248,7 @@ def _sea_ice_overview(plt):
         map_title="Arctic sea ice (NSIDC climatology)",
         tl_title=f"Transmission loss (Bellhop, {FREQ_HZ:g} Hz)",
         env_title=f"Under-ice environment A→B ({int(np.nanmean(conc) * 100)}% ice)",
-        suptitle="uacpy — under-ice environment, central Arctic (international waters)")
+        title="uacpy — under-ice environment, central Arctic (international waters)")
     out = OUTPUT_DIR / 'example_37_sea_ice.png'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -322,7 +322,7 @@ def _rdlb_overview(env, grid, plt):
         map_title="North Sea — Norwegian Trench (GEBCO)",
         tl_title=f"TL · range-dependent layered seabed (RAM→mpiramS, {RDLB_FREQ_HZ:g} Hz)",
         env_title="Range-dependent LAYERED bottom A→B",
-        suptitle="uacpy — modelled range-dependent layered bottom",
+        title="uacpy — modelled range-dependent layered bottom",
         map_kwargs=dict(contours=True, aspect=1, coastline_resolution=COASTLINE_RES,
                         graticule=GRATICULE_DEG, graticule_minor=GRATICULE_MINOR_DEG))
     out = OUTPUT_DIR / 'example_37_rdlb.png'
@@ -422,7 +422,7 @@ def main():
         map_title="North Sea — Norwegian Trench (GEBCO)",
         tl_title=f"Transmission loss (Bellhop, {FREQ_HZ:g} Hz)",
         env_title="Range-dependent environment A→B",
-        suptitle="uacpy — real-world environment from GPS, modelled & plotted",
+        title="uacpy — real-world environment from GPS, modelled & plotted",
         map_kwargs=dict(contours=True, aspect=1, coastline_resolution=COASTLINE_RES,
                         graticule=GRATICULE_DEG, graticule_minor=GRATICULE_MINOR_DEG))
     # plot_overview annotates the data provenance (Bathy/SSP/Seabed) by default.

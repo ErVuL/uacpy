@@ -1,6 +1,6 @@
 """Seafloor / boundary carriers: sediment layers, half-space and layered
-bottom properties, and their range-dependent variants. Split out of
-:mod:`uacpy.core.environment`; re-exported from there for stable import paths.
+bottom properties, and their range-dependent variants. Re-exported from
+:mod:`uacpy.core.environment` for stable import paths.
 """
 
 import copy as _copy
@@ -353,6 +353,41 @@ class BoundaryProperties:
         return cls(**kwargs)
 
 
+_COLUMN_COLLAPSE_METHODS = ('halfspace', 'top_layer', 'volume_average')
+
+# Numeric acoustic fields a SedimentLayer shares with BoundaryProperties.
+# ``roughness`` is absent: it is an interface property, not a bulk one.
+_LAYER_ACOUSTIC_FIELDS = ('density', 'sound_speed', 'attenuation',
+                          'shear_speed', 'shear_attenuation')
+
+
+def _boundary_from_values(template: BoundaryProperties, values: dict
+                          ) -> BoundaryProperties:
+    """Build a :class:`BoundaryProperties` from reduced numeric ``values``.
+
+    ``values`` supplies the numeric acoustic fields (the keys of
+    ``BoundaryProperties._ACOUSTIC_DEFAULTS``); the non-blendable fields
+    (``acoustic_type``, ``grain_size_phi``, ``reflection_file``, ``name``,
+    ``data_sources``) come from ``template``. ``'vacuum'`` / ``'rigid'`` carry
+    no acoustic parameters — passing them alongside is a construction-time
+    error — so only the interfacial ``roughness`` survives for those types.
+
+    The single home for "reduced numbers → one boundary", shared by
+    :func:`_reduce_boundaries` and :meth:`SeabedColumn.collapse`.
+    """
+    if template.acoustic_type in ('vacuum', 'rigid'):
+        return BoundaryProperties(
+            acoustic_type=template.acoustic_type,
+            roughness=values['roughness'],
+            name=template.name, data_sources=template.data_sources)
+    return BoundaryProperties(
+        acoustic_type=template.acoustic_type,
+        grain_size_phi=template.grain_size_phi,
+        reflection_file=template.reflection_file,
+        name=template.name, data_sources=template.data_sources,
+        **values)
+
+
 def _reduce_boundaries(props: List[BoundaryProperties], reducer
                        ) -> BoundaryProperties:
     """Reduce a list of :class:`BoundaryProperties` to a single one.
@@ -360,28 +395,16 @@ def _reduce_boundaries(props: List[BoundaryProperties], reducer
     ``reducer(values) -> float`` folds the per-node values of each numeric
     acoustic field (the keys of ``BoundaryProperties._ACOUSTIC_DEFAULTS``):
     ``np.mean`` / ``np.median`` for a collapse, ``np.interp`` for a
-    range-interpolated blend. The non-blendable fields (``acoustic_type``,
-    ``grain_size_phi``, ``reflection_file``, ``name``, ``data_sources``) come
-    from the first node. ``'vacuum'`` / ``'rigid'`` carry no acoustic
-    parameters, so only their interfacial ``roughness`` is reduced.
+    range-interpolated blend. The non-blendable fields come from the first
+    node (see :func:`_boundary_from_values`).
 
     The single home for "many boundaries → one", shared by
     :meth:`Bottom.halfspace_at`, :meth:`Bottom.select_range` and
     :meth:`uacpy.core.surface.Surface.collapse`.
     """
-    p0 = props[0]
     values = {name: float(reducer([getattr(p, name) for p in props]))
               for name in BoundaryProperties._ACOUSTIC_DEFAULTS}
-    if p0.acoustic_type in ('vacuum', 'rigid'):
-        return BoundaryProperties(
-            acoustic_type=p0.acoustic_type, roughness=values['roughness'],
-            name=p0.name, data_sources=p0.data_sources)
-    return BoundaryProperties(
-        acoustic_type=p0.acoustic_type,
-        grain_size_phi=p0.grain_size_phi,
-        reflection_file=p0.reflection_file,
-        name=p0.name, data_sources=p0.data_sources,
-        **values)
+    return _boundary_from_values(props[0], values)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,7 +513,8 @@ class SeabedColumn:
             sound_speed=layer.sound_speed, density=layer.density,
             attenuation=layer.attenuation,
             shear_speed=layer.shear_speed,
-            shear_attenuation=layer.shear_attenuation)
+            shear_attenuation=layer.shear_attenuation,
+            name=layer.name)
 
     def isel(self, *, layer: int) -> SedimentLayer:
         """The :class:`SedimentLayer` at integer index ``layer`` — the
@@ -551,30 +575,28 @@ class SeabedColumn:
         ``'halfspace'`` → the deep half-space; ``'top_layer'`` → topmost
         layer's properties (half-space when there are no layers);
         ``'volume_average'`` → thickness-weighted mean (half-space alone when
-        there are no layers)."""
+        there are no layers).
+
+        The half-space is the template for the non-blendable fields, so a
+        ``'vacuum'`` / ``'rigid'`` column collapses back to that parameter-free
+        type carrying only its ``roughness``."""
+        if method not in _COLUMN_COLLAPSE_METHODS:
+            raise ConfigurationError(
+                f"SeabedColumn.collapse: unknown method={method!r}; "
+                f"valid: {_COLUMN_COLLAPSE_METHODS}"
+            )
         if method == 'halfspace' or not self.layers:
-            if method not in ('halfspace', 'top_layer', 'volume_average'):
-                raise ConfigurationError(
-                    f"SeabedColumn.collapse: unknown method={method!r}; "
-                    "valid: 'halfspace', 'top_layer', 'volume_average'"
-                )
             return _copy.deepcopy(self.halfspace)
         if method == 'top_layer':
             top = self.layers[0]
-            return BoundaryProperties(
-                acoustic_type=self.halfspace.acoustic_type,
-                density=top.density, sound_speed=top.sound_speed,
-                attenuation=top.attenuation, shear_speed=top.shear_speed,
-                shear_attenuation=top.shear_attenuation,
-                roughness=self.halfspace.roughness,
-            )
-        if method == 'volume_average':
+            values = {name: float(getattr(top, name))
+                      for name in _LAYER_ACOUSTIC_FIELDS}
+        else:
             # Thickness-weighted mean over the finite layers plus the
             # half-space. The semi-infinite half-space has no finite thickness,
             # so it is weighted by the deepest layer's thickness — a pragmatic
             # choice that keeps it comparable to the adjacent layer rather than
-            # dominating (∞ weight) or vanishing (0). (Layers are non-empty
-            # here; the no-layer case returned the half-space above.)
+            # dominating (∞ weight) or vanishing (0).
             weights = np.array([float(la.thickness) for la in self.layers])
             weights = np.append(weights, float(weights[-1]))
 
@@ -582,17 +604,11 @@ class SeabedColumn:
                 vals = np.array([getattr(la, field) for la in self.layers]
                                 + [getattr(self.halfspace, field)])
                 return float(np.average(vals, weights=weights))
-            return BoundaryProperties(
-                acoustic_type=self.halfspace.acoustic_type,
-                sound_speed=_avg('sound_speed'), density=_avg('density'),
-                attenuation=_avg('attenuation'), shear_speed=_avg('shear_speed'),
-                shear_attenuation=_avg('shear_attenuation'),
-                roughness=self.halfspace.roughness,
-            )
-        raise ConfigurationError(
-            f"SeabedColumn.collapse: unknown method={method!r}; "
-            "valid: 'halfspace', 'top_layer', 'volume_average'"
-        )
+            values = {name: _avg(name) for name in _LAYER_ACOUSTIC_FIELDS}
+        # Roughness is an interface property of the seabed surface, not of a
+        # buried layer, so it always comes from the half-space.
+        values['roughness'] = float(self.halfspace.roughness)
+        return _boundary_from_values(self.halfspace, values)
 
     def sample_at_depths(
         self, n_points: int = 4, max_thickness: Optional[float] = None,
@@ -695,6 +711,11 @@ class Bottom:
     Construct via the ``from_*`` factories or let ``Environment(bottom=...)``
     coerce a scalar cp, preset name, ``BoundaryProperties``, ``SeabedColumn``
     or ``Bottom``.
+
+    `Bottom` and :class:`~uacpy.core.surface.Surface` are the two carriers
+    without a ``.plot()``: placing the sub-bottom depth axis needs a seafloor
+    depth, which lives on ``env.bathymetry``. Plot one with
+    ``uacpy.plots.plot_bottom_properties(env)``.
     """
     columns: List[SeabedColumn]
     ranges: Optional[np.ndarray] = None
@@ -803,14 +824,14 @@ class Bottom:
         (the only case where blending properties is well-defined), else
         **nearest**. The non-blendable fields (``reflection_file``,
         ``grain_size_phi``) come from the r = 0 column."""
+        if interp not in (None, 'linear', 'nearest'):
+            raise ConfigurationError(
+                f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
+                f"None; got {interp!r}")
         if interp is None:
             interp = 'nearest' if self.is_layered else 'linear'
         if self.ranges is None or interp == 'nearest':
             return _copy.deepcopy(self.at(range=range).halfspace)
-        if interp != 'linear':
-            raise ConfigurationError(
-                f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
-                f"None; got {interp!r}")
         return _reduce_boundaries(
             [c.halfspace for c in self.columns],
             lambda values: np.interp(range, self.ranges, values))

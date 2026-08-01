@@ -320,14 +320,19 @@ def optimize_grid(
         favourable value (try :func:`optimal_c0`), or shrink
         ``theta_max`` / ``x_max``.
     """
+    if dz_floor > dz_ceiling:
+        raise ValueError(
+            f"dz_floor={dz_floor:.3g} m exceeds dz_ceiling={dz_ceiling:.3g} m, "
+            f"so the Δz ladder is empty. Raise dz_ceiling above the floor."
+        )
     c0_use = float(c0)
     k0 = 2.0 * np.pi * freq / c0_use
     theta_max_rad = np.deg2rad(float(theta_max))
     xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
     xi_max = (c0_use / c_min) ** 2 - 1.0
 
-    # Default candidate ladders. We scan from coarse → fine and stop at
-    # the first pair that satisfies the budget.
+    # Default candidate ladders, scanned in full; the pair maximising
+    # ``dx·dz`` among those inside the budget wins.
     if dx_candidates is None:
         dx_top = float(min(x_max * 0.5, dx_ceiling) if dx_ceiling else x_max * 0.5)
         # Geometric ladder from ~λ/8 up to dx_top, ratio 2.
@@ -388,6 +393,38 @@ def optimize_grid(
         p=int(p),
         **best,
     )
+
+
+def grid_error(
+    *,
+    dr: float,
+    dz: float,
+    freq: float,
+    c_min: float,
+    c_max: float,
+    x_max: float,
+    c0: float,
+    theta_max: float = 30.0,
+    p: int = 6,
+    alpha: float = 0.0,
+) -> float:
+    """Accumulated Padé error ``τ · n_steps`` at an arbitrary ``(dr, dz)``.
+
+    :func:`optimize_grid` reports this for the pair it selected; callers
+    that adjust the grid afterwards (stability floors, array-size caps,
+    seafloor snapping) use this to describe the grid they actually march.
+    Same units and conventions as :func:`optimize_grid`.
+    """
+    c0_use = float(c0)
+    k0 = 2.0 * np.pi * freq / c0_use
+    theta_max_rad = np.deg2rad(float(theta_max))
+    xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
+    xi_max = (c0_use / c_min) ** 2 - 1.0
+    tau = combined_error(
+        float(dr), float(dz), k0, int(p), xi_min, xi_max, theta_max_rad,
+        alpha=float(alpha),
+    )
+    return float(tau * int(np.ceil(float(x_max) / float(dr))))
 
 
 def rams_dz_floor(c_shear_min: float, freq: float, factor: float = 0.55) -> float:

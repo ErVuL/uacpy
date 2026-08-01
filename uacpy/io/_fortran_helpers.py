@@ -1,9 +1,15 @@
 """
-Low-level Fortran-record helpers shared by the AT/Bellhop output readers.
+Low-level Fortran helpers shared by the AT/Bellhop readers.
 
-These functions read fragments of the binary ``.shd``/``.mod`` formats —
-record-length-prefixed vectors, source/receiver depth blocks, bearing/angle
-arrays. They are private to ``uacpy.io`` and not part of the public surface.
+Two families, both private to ``uacpy.io`` and outside the public surface:
+
+* binary record framing for the ``.shd``/``.mod`` formats — endianness
+  detection and record-length-prefixed payload reads;
+* list-directed text parsing for the ``.env``/``.flp``/``.bty`` decks —
+  :func:`read_vector` and :func:`strip_fortran_comment`.
+
+:func:`typed_format_error` and :data:`PARSE_ERRORS` give both families one
+typed failure mode.
 """
 
 import functools
@@ -16,6 +22,15 @@ import numpy as np
 from uacpy.core.exceptions import FileFormatError
 
 
+#: Exceptions a malformed or truncated file can legitimately raise out of a
+#: reader's ``int()``/``float()``/``struct``/indexing operations. Deliberately
+#: excludes ``AttributeError``/``TypeError``/``NameError``: those signal a uacpy
+#: defect, and rewrapping them as :class:`FileFormatError` sends users to debug
+#: a file that is fine.
+PARSE_ERRORS = (ValueError, IndexError, KeyError, StopIteration, EOFError,
+                ZeroDivisionError, OverflowError, struct.error)
+
+
 def typed_format_error(reader):
     """Decorator: surface a reader's raw parse/truncation exceptions as a typed
     :class:`~uacpy.core.exceptions.FileFormatError`.
@@ -24,15 +39,15 @@ def typed_format_error(reader):
     line iterators, and index binary records — so a malformed or truncated file
     leaks a bare ``ValueError``/``IndexError``/``StopIteration``/``struct.error``
     instead of the typed, remediated error the rest of ``io`` raises. This
-    converts those (and only those) while letting an already-typed
-    ``FileFormatError``/``ConfigurationError`` pass through unchanged.
+    converts :data:`PARSE_ERRORS` (and only those) while letting an
+    already-typed ``FileFormatError``/``ConfigurationError`` pass through
+    unchanged.
     """
     @functools.wraps(reader)
     def wrapper(*args, **kwargs):
         try:
             return reader(*args, **kwargs)
-        except (ValueError, IndexError, KeyError, StopIteration,
-                struct.error) as exc:
+        except PARSE_ERRORS as exc:
             target = args[0] if args else '<stream>'
             raise FileFormatError(
                 f"{reader.__name__}: could not parse {target} — the file is "
@@ -53,6 +68,23 @@ def strip_fortran_comment(line: str) -> str:
     Readers must do the same before ``int()``/``float()``.
     """
     return line.split('!', 1)[0].strip()
+
+
+def strip_fortran_quotes(line: str) -> str:
+    """Return the contents of a Fortran quoted string, or the bare line.
+
+    AT writes titles and option words as ``'…'`` character literals, but its
+    list-directed ``READ`` also accepts an unquoted token — so readers must
+    handle both. Falls back to :func:`strip_fortran_comment` when the line
+    carries no quotes.
+    """
+    line = line.strip()
+    start = line.find("'")
+    if start >= 0:
+        end = line.find("'", start + 1)
+        if end > start:
+            return line[start + 1:end]
+    return strip_fortran_comment(line)
 
 
 _ENDIAN_WARN_EMITTED = False
@@ -183,16 +215,35 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     return struct.unpack(endian + fmt, payload)
 
 
+def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:
+    """Collect the value tokens of one AT ``ReadVector`` record.
+
+    ``READ( ENVFile, * ) x( 1 : Nx )`` is list-directed: it keeps consuming
+    records until ``Nx`` values have been read, or until a ``/`` terminates the
+    read early. Returns the values collected and whether a ``/`` ended them.
+    """
+    values = []
+    while len(values) < Nx:
+        line = fid.readline()
+        if line == '':
+            break
+        line = strip_fortran_comment(line)
+        if '/' in line:
+            head = line.split('/', 1)[0]
+            values.extend(float(tok) for tok in head.split())
+            return np.array(values[:Nx], dtype=float), True
+        values.extend(float(tok) for tok in line.split())
+    return np.array(values[:Nx], dtype=float), False
+
+
 def read_vector(fid) -> Tuple[np.ndarray, int]:
     """
-    Read a vector from BELLHOP environment file with Fortran-style input.
+    Read a vector from an Acoustics Toolbox / Bellhop input file.
 
-    This routine emulates Fortran capability that allows '/' to terminate input
-    and create equally-spaced vectors. Supports three input formats:
-
-    1. Explicit values: N / v1 v2 v3 ... vN
-    2. Linear spacing: N / v_start v_end / (creates N points between start and end)
-    3. Replicate value: N / v / (creates N copies of v)
+    Mirrors AT's ``ReadVector`` (``misc/SourceReceiverPositions.f90:221``)
+    followed by ``SubTab`` (``misc/subtabulate.f90``): a list-directed
+    ``READ`` of ``Nx`` values that continues across records until ``Nx`` are
+    consumed, with ``/`` terminating early to trigger a generated vector.
 
     Parameters
     ----------
@@ -208,26 +259,29 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
 
     Notes
     -----
-    Examples of input formats:
+    Format 1 (linear spacing) — two values then ``/``::
 
-    Format 1 (linear spacing):
         5
         0 1000 /
+
     Creates: [0, 250, 500, 750, 1000]
 
-    Format 2 (explicit values):
+    Format 2 (explicit values) — ``Nx`` values, on one record or wrapped
+    across several::
+
         5
-        0 100 300 700 1000
+        0 100 300
+        700 1000
+
     Creates: [0, 100, 300, 700, 1000]
 
-    Format 3 (replicate):
+    Format 3 (replicate) — one value then ``/``::
+
         501
         0.0 /
-    Creates: [0, 0, ..., 0] (501 zeros)
 
-    The '/' character terminates reading and triggers vector generation.
-
-    Translated from OALIB readvector.m
+    Creates: [0, 0, ..., 0] (501 zeros). ``SubTab`` reaches this through
+    ``x(2) == x(1)``, so the generated spacing is zero.
 
     Examples
     --------
@@ -239,98 +293,66 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
     >>> print(x)
     [   0.  250.  500.  750. 1000.]
     """
-    # Read number of values
     Nx = int(strip_fortran_comment(fid.readline()))
+    if Nx <= 0:
+        return np.array([]), Nx
 
-    # Read values line
-    line = strip_fortran_comment(fid.readline())
+    values, slash_terminated = _read_vector_values(fid, Nx)
 
-    if "/" in line:
-        # Extract numbers before '/'
-        nums_str = line.split("/")[0].strip()
-        if nums_str:
-            values = np.array(nums_str.split(), dtype=float)
-        else:
-            values = np.array([])
-
-        if Nx == 1:
-            if len(values) < 1:
-                warnings.warn(
-                    "read_vector: Nx=1 record had no values; using 0.0.",
-                    UserWarning, stacklevel=2,
-                )
-                x = 0.0
-            else:
-                x = values[0]
-        elif Nx == 2:
-            if len(values) >= 2:
-                x = values[:2]
-            elif len(values) == 1:
-                warnings.warn(
-                    f"read_vector: Nx=2 record had 1 value; broadcasting "
-                    f"{values[0]} to both slots.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.array([values[0], values[0]])
-            else:
-                warnings.warn(
-                    "read_vector: Nx=2 record had no values; using zeros.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.zeros(2)
-        elif Nx > 2:
-            # AT semantics: either exactly 2 values (linspace shorthand)
-            # or exactly Nx values (explicit list). Other lengths fall back
-            # with a warning rather than silently producing wrong numbers.
-            if len(values) == Nx:
-                x = values
-            elif len(values) == 2:
-                x = np.linspace(values[0], values[1], Nx)
-            elif len(values) > 1:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had {len(values)} values "
-                    f"(expected 2 or {Nx}); falling back to linspace "
-                    f"between {values[0]} and {values[-1]}.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.linspace(values[0], values[-1], Nx)
-            elif len(values) == 1:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had 1 value; broadcasting "
-                    f"{values[0]} to all slots.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.full(Nx, values[0])
-            else:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had no values; using zeros.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.zeros(Nx)
-        else:
-            x = np.array([])
-    else:
-        # Read explicit values (no '/' terminator → the record should carry all
-        # Nx values; a short record is malformed). Warn + pad rather than
-        # silently returning a length-mismatched array (mirrors the '/' branch).
-        values = np.array(line.split(), dtype=float)
-        if values.size >= Nx:
-            x = values[:Nx]
-        else:
+    if len(values) == Nx:
+        x = values
+    elif not slash_terminated:
+        # No '/' and the file ran out before Nx values: the record is truncated.
+        raise FileFormatError(
+            f"read_vector: expected {Nx} values but the file ended after "
+            f"{len(values)}.",
+            remediation="Verify the file was written completely by the "
+                        "matching model/writer.",
+        )
+    elif Nx == 1:
+        warnings.warn(
+            "read_vector: Nx=1 record had no values; using 0.0.",
+            UserWarning, stacklevel=2,
+        )
+        x = 0.0
+    elif Nx == 2:
+        # SubTab only generates for Nx >= 3, so a '/' before both values is a
+        # malformed record — AT leaves x(2) at ReadVector's -999.9 pre-fill.
+        if len(values) == 1:
             warnings.warn(
-                f"read_vector: explicit record had {values.size} value(s) "
-                f"(expected Nx={Nx}); padding to {Nx}.",
+                f"read_vector: Nx=2 record had 1 value; broadcasting "
+                f"{values[0]} to both slots.",
                 UserWarning, stacklevel=2,
             )
-            if values.size == 0:
-                x = np.zeros(Nx)
-            elif values.size == 1:
-                x = np.full(Nx, values[0])
-            else:
-                x = np.concatenate(
-                    [values, np.full(Nx - values.size, values[-1])])
+            x = np.array([values[0], values[0]])
+        else:
+            warnings.warn(
+                "read_vector: Nx=2 record had no values; using zeros.",
+                UserWarning, stacklevel=2,
+            )
+            x = np.zeros(2)
+    elif len(values) == 2:
+        # SubTab's two-value branch: equally spaced from x(1) to x(2).
+        x = np.linspace(values[0], values[1], Nx)
+    elif len(values) == 1:
+        # SubTab's replicate branch (x(2) defaults to x(1) ⇒ zero spacing).
+        x = np.full(Nx, values[0])
+    elif len(values) == 0:
+        warnings.warn(
+            f"read_vector: Nx={Nx} record had no values; using zeros.",
+            UserWarning, stacklevel=2,
+        )
+        x = np.zeros(Nx)
+    else:
+        # More than 2 values but fewer than Nx before the '/'. SubTab does not
+        # generate for this case and AT leaves x(4:Nx) uninitialised, so there
+        # is no correct reading to recover.
+        raise FileFormatError(
+            f"read_vector: Nx={Nx} record was terminated by '/' after "
+            f"{len(values)} values; only 1 (replicate) or 2 (equally spaced) "
+            f"values generate a vector.",
+            remediation="Give either 2 values before the '/' or all "
+                        f"{Nx} values.",
+        )
 
-    # Ensure x is a 1D array
-    x = np.atleast_1d(x)
-
-    return x, Nx
+    return np.atleast_1d(x), Nx

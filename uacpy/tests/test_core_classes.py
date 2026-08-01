@@ -275,6 +275,25 @@ class TestField:
         assert 'Field' in repr_str
         assert field.shape == (10, 20)
 
+    def test_resample_to_is_keyword_only_and_depth_first(self):
+        """The two axis vectors are interchangeable in type and only
+        distinguishable by name, so a positional call that swapped them would
+        silently resample onto a transposed, mostly-NaN grid instead of
+        raising. Keyword-only makes that unrepresentable."""
+        ranges = np.linspace(0.0, 1000.0, 5)
+        depths = np.linspace(0.0, 100.0, 3)
+        # value == depth, so a transposed result is obvious in the numbers.
+        data = np.repeat(depths[:, None], ranges.size, axis=1)
+        field = self._tl_field(data, ranges, depths)
+
+        with pytest.raises(TypeError):
+            field.resample_to(ranges, depths)
+
+        out = field.resample_to(depths=[25.0, 75.0], ranges=[250.0, 750.0])
+        assert list(out.coords) == ['depth', 'range']
+        assert out.shape == (2, 2)
+        np.testing.assert_allclose(out.data, [[25.0, 25.0], [75.0, 75.0]])
+
 
 class TestFieldValueAccessorsAreWriteGuarded:
     """``Field`` copies on ingest, so no accessor may hand back a writable
@@ -761,6 +780,58 @@ class TestSoundSpeedProfileNearestVsInterp:
             ssp.isel(depth=9)
 
 
+class TestSoundSpeedProfileDepthOnlySliceOf2D:
+    """A depth-only slice of a range-dependent profile is ambiguous.
+
+    Silently returning the r = 0 column is wrong physics on exactly the
+    profiles the 2-D carrier exists for, so ``at`` / ``eval`` / ``isel``
+    require the range to be pinned (or the range axis collapsed first).
+    """
+
+    def _ssp2d(self):
+        from uacpy.core.environment import SoundSpeedProfile
+        return SoundSpeedProfile.from_2d(
+            depths=[0.0, 100.0], ranges=[0.0, 5000.0],
+            matrix=[[1500.0, 1400.0], [1490.0, 1390.0]])
+
+    @pytest.mark.parametrize('call', [
+        lambda s: s.at(depth=50.0),
+        lambda s: s.eval(depth=50.0),
+        lambda s: s.isel(depth=0),
+    ])
+    def test_depth_only_slice_raises(self, call):
+        with pytest.raises(ConfigurationError, match='range-dependent'):
+            call(self._ssp2d())
+
+    def test_pinning_the_range_works(self):
+        s = self._ssp2d()
+        assert s.at(depth=0.0, range=5000.0).value == pytest.approx(1400.0)
+        assert s.eval(depth=0.0, range=2500.0).value == pytest.approx(1450.0)
+        assert s.isel(depth=0, range=1).value == pytest.approx(1400.0)
+
+    def test_collapsing_the_range_axis_works(self):
+        assert self._ssp2d().collapse('mean').at(depth=0.0).value == \
+            pytest.approx(1450.0)
+
+    def test_range_only_and_1d_paths_unaffected(self):
+        from uacpy.core.environment import SoundSpeedProfile
+        assert self._ssp2d().eval(range=5000.0).data.shape == (2, 1)
+        flat = SoundSpeedProfile.from_isovelocity(100.0, 1500.0)
+        assert flat.at(depth=50.0).value == pytest.approx(1500.0)
+
+    @pytest.mark.parametrize('call', [
+        lambda s: s.eval(range=0.0, method='bogus'),
+        lambda s: s.eval(depth=50.0, method='bogus'),
+    ])
+    def test_interp_method_validated_on_every_path(self, call):
+        """The membership check runs on entry, so the range-independent
+        shortcut cannot swallow a bad method name."""
+        from uacpy.core.environment import SoundSpeedProfile
+        flat = SoundSpeedProfile.from_isovelocity(100.0, 1500.0)
+        with pytest.raises(ConfigurationError, match='interpolation method'):
+            call(flat)
+
+
 class TestSoundSpeedProfileExtendTo:
     """``SoundSpeedProfile.extend_to(z_max)`` is the canonical alignment
     hook used by every env writer. Must extend OR truncate so that
@@ -998,7 +1069,7 @@ class TestResultStackInvariants:
 
     @staticmethod
     def _slab(*, depths=2, ranges=3, frequencies=100.0, model='Test',
-              source_depth=50.0):
+              source_depth=50.0, model_source=None, phase_reference=None):
         from uacpy.core.results import Field
         return Field(
             data=np.ones((depths, ranges), dtype=complex),
@@ -1009,6 +1080,8 @@ class TestResultStackInvariants:
             model=model,
             frequencies=frequencies,
             source_depths=np.array([float(source_depth)]),
+            model_source=model_source,
+            phase_reference=phase_reference,
         )
 
     def test_requires_at_least_one_slab(self):
@@ -1114,6 +1187,85 @@ class TestResultStackInvariants:
             ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
                         coordinate_name='wind_speed')
 
+    def test_forwards_the_whole_identity_surface(self):
+        """A stack forwards every identity field a slab carries, not just
+        model/backend — the plotters read ``model_source`` for the
+        model-credit footnote."""
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0, model_source='engine-provenance',
+                       phase_reference='travelling_wave')
+        b = self._slab(source_depth=20.0, model_source='engine-provenance',
+                       phase_reference='travelling_wave')
+        stack = ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+        # Every field of the shared identity surface, so a field added to
+        # ``Result.__init__`` cannot silently stop at the stack boundary.
+        missing = [k for k in a.id_kwargs() if not hasattr(stack, k)]
+        assert not missing, f"ResultStack does not forward {missing}"
+        assert stack.model_source == 'engine-provenance'
+        assert stack.phase_reference == 'travelling_wave'
+        # The stacking axis reads back as the stack coordinate; the other
+        # axis reads through from the (verified identical) slabs.
+        np.testing.assert_array_equal(stack.source_depths, [10.0, 20.0])
+        np.testing.assert_array_equal(stack.frequencies, [100.0])
+
+    def test_frequency_stack_forwards_the_frequency_axis(self):
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=50.0, frequencies=100.0)
+        b = self._slab(source_depth=50.0, frequencies=200.0)
+        stack = ResultStack(slabs=[a, b], coordinate=[100.0, 200.0],
+                            coordinate_name='frequency')
+        np.testing.assert_array_equal(stack.frequencies, [100.0, 200.0])
+        np.testing.assert_array_equal(stack.source_depths, [50.0])
+
+
+class TestResultIngestCopiesArrays:
+    """Every ``Result`` copies on ingest, and ``Field.to_dict`` is a real
+    snapshot — a caller mutating their source array can never reach inside a
+    result, and a cached dict never aliases the field it came from."""
+
+    @staticmethod
+    def _field():
+        from uacpy.core.results import Field
+        return Field(
+            data=np.ones((2, 3), dtype=complex),
+            coords={'depth': np.array([10.0, 20.0]),
+                    'range': np.array([100.0, 200.0, 300.0])},
+            model='Test', source_depths=np.array([50.0]),
+            frequencies=np.array([100.0]))
+
+    def test_result_copies_identity_arrays_on_ingest(self):
+        from uacpy.core.results import Field
+        sd = np.array([50.0])
+        fr = np.array([100.0])
+        f = Field(data=np.ones((1, 1)), coords={'depth': [0.0], 'range': [0.0]},
+                  source_depths=sd, frequencies=fr)
+        sd[0] = 999.0
+        fr[0] = 999.0
+        assert f.source_depths[0] == 50.0
+        assert f.frequencies[0] == 100.0
+
+    def test_to_dict_is_a_snapshot(self):
+        f = self._field()
+        d = f.to_dict()
+        for key, live in (('data', f.data), ('frequencies', f.frequencies),
+                          ('source_depths', f.source_depths)):
+            assert not np.shares_memory(d[key], live), key
+        for name, vec in f.coords.items():
+            assert not np.shares_memory(d['coords'][name], vec), name
+
+    def test_covariance_and_replicas_copy_on_ingest(self):
+        from uacpy.core.results import Covariance, Replicas
+        cov_src = np.zeros((1, 2, 2), dtype=complex)
+        cov = Covariance(covariance=cov_src, model='OASN')
+        cov_src[0, 0, 0] = 99.0
+        assert cov.covariance[0, 0, 0] == 0.0
+
+        rep_src = np.zeros((1, 1, 1, 1, 2), dtype=complex)
+        rep = Replicas(replicas=rep_src, replica_z=[0.0], replica_x=[0.0],
+                       replica_y=[0.0], model='OASN')
+        rep_src[0, 0, 0, 0, 0] = 7.0
+        assert rep.replicas[0, 0, 0, 0, 0] == 0.0
+
 
 class TestCopyAndGeolocation:
     """`.copy()` is universal across carriers + results; Environment carries
@@ -1136,6 +1288,28 @@ class TestCopyAndGeolocation:
         for o in objs:
             c = o.copy()
             assert type(c) is type(o) and c is not o
+
+    def test_source_and_receiver_copy_the_whole_attribute_surface(self):
+        """``Source`` / ``Receiver`` deep-copy like every other carrier, so an
+        attribute added to either is carried across without editing
+        ``copy()``, and no array is shared with the original."""
+        import uacpy
+        objs = [
+            uacpy.Source(depths=[10., 50.], frequencies=[100., 200.],
+                         source_type='line',
+                         beam_pattern=np.array([[-90., -20.], [90., 0.]])),
+            uacpy.Receiver(depths=[100., 200.], ranges=[1000., 2000.]),
+        ]
+        for o in objs:
+            c = o.copy()
+            assert vars(c).keys() == vars(o).keys(), type(o).__name__
+            for name, val in vars(o).items():
+                new = getattr(c, name)
+                if isinstance(val, np.ndarray):
+                    np.testing.assert_array_equal(new, val)
+                    assert not np.shares_memory(new, val), name
+                else:
+                    assert new == val, name
 
     def test_result_copy_is_independent(self):
         import uacpy

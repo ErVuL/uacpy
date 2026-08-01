@@ -117,9 +117,11 @@ def range_dependent_bottom_along(
 
     With ``n_points='auto'`` the transect is probed at ``max_points`` points and
     consecutive identical seabeds are collapsed to one column each (endpoints
-    anchored) — the seabed analogue of the SSP 'auto'. **Unlike the SSP/bathy
-    grids, there is no analytic identity here**, so 'auto' calls ``point_bottom``
-    once per probe point: cheap for the local sample DBs, but up to
+    anchored) — the seabed analogue of the SSP 'auto'. Identity is the
+    sediment's own (see :func:`_seabed_identity`), not the water-scaled
+    geoacoustics. **Unlike the SSP/bathy grids, there is no analytic identity
+    here**, so 'auto' calls ``point_bottom`` once per probe point: cheap for
+    the local sample DBs, but up to
     ``max_points`` network calls for the live EMODnet WFS — hence bottom fetches
     default to an explicit small ``n_points`` and opt into 'auto'. An explicit
     integer samples exactly that many points (capped at ``max_points``).
@@ -146,11 +148,7 @@ def range_dependent_bottom_along(
         )
     props = _backfill_leading(props)
     if n_points == 'auto':
-        # Identity = the geoacoustic tuple; collapse consecutive equal seabeds.
-        keys = [(p.sound_speed, p.density, p.attenuation,
-                 p.shear_speed, p.shear_attenuation, p.roughness)
-                for p in props]
-        reps = run_representative_indices(keys)
+        reps = run_representative_indices([_seabed_identity(p) for p in props])
     else:
         reps = list(range(len(props)))
     props = [props[r] for r in reps]
@@ -164,6 +162,23 @@ def range_dependent_bottom_along(
         shear_attenuation=np.array([p.shear_attenuation for p in props]),
         roughness=np.array([p.roughness for p in props]),
     )
+
+
+def _seabed_identity(props: BoundaryProperties):
+    """Collapse key for the ``'auto'`` reduction: the seabed's own identity.
+
+    Where the source reports a grain size, ϕ *is* that identity — the sound
+    speed, density and attenuation it yields are ratios against the overlying
+    seawater, so they track the water column and vary continuously along a
+    transect over a single uniform sediment. Keying on them would make every
+    probe point distinct and collapse nothing. Sources that report no grain
+    size (absolute crustal properties) key on the geoacoustic tuple.
+    """
+    if props.grain_size_phi is not None:
+        return (props.grain_size_phi, props.shear_speed,
+                props.shear_attenuation, props.roughness)
+    return (props.sound_speed, props.density, props.attenuation,
+            props.shear_speed, props.shear_attenuation, props.roughness)
 
 
 def _backfill_leading(values: List) -> List:

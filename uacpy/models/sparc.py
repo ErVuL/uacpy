@@ -27,7 +27,9 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_time_field
-from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models.base import (
+    PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
+)
 from uacpy.io.oalib_reader import read_rts_file
 from uacpy.io.oalib_writer import write_sparc_env_file
 
@@ -442,31 +444,53 @@ class SPARC(PropagationModel):
         )
         env = self._project_environment(env)
         env = self._sparc_rigidify_halfspace(env)
-        receiver = self._clip_receiver_depths(
-            receiver, self._total_media_depth(env)
-        )
+        media_depth = self._total_media_depth(env)
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
 
         fm = self._setup_file_manager()
-        self.file_manager = fm
 
         try:
             base_name = 'model'
             freq = source.frequencies[0]
 
             if self.output_mode == 'D':
-                return self._run_vertical(fm, env, source, receiver,
-                                          base_name, freq)
-            if self.output_mode == 'S':
-                return self._run_snapshot(fm, env, source, receiver,
-                                          base_name, freq)
-            return self._run_range_native(fm, env, source, receiver,
-                                          base_name, freq)
+                result = self._run_vertical(fm, env, source, receiver,
+                                            base_name, freq)
+            elif self.output_mode == 'S':
+                result = self._run_snapshot(fm, env, source, receiver,
+                                            base_name, freq)
+            else:
+                result = self._run_range_native(fm, env, source, receiver,
+                                                base_name, freq)
+            return self._mask_unresolvable_depths(
+                result, receiver, media_depth)
 
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
+
+    def _mask_unresolvable_depths(self, result, receiver, media_depth):
+        """Restore the caller's depth axis, NaN below ``media_depth``.
+
+        The finite-difference mesh stops at the deepest modelled interface, so
+        ``sparc.exe`` clamps any deeper receiver onto it. Handing those cells
+        back under the depth that was asked for would misreport where the
+        field was evaluated — they are no-data.
+        """
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        d = result.to_dict()
+        data = d['data']
+        if data.shape[0] != depths.size:
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(f"SPARC returned {data.shape[0]} depth rows for "
+                        f"{depths.size} requested receiver depths; the depth "
+                        f"axis cannot be reattached."),
+            )
+        data[depths > media_depth, ...] = np.nan
+        d['coords'] = {**d['coords'], 'depth': depths}
+        return Field.from_dict(d)
 
     def _reject_oversized_loop_axis(self, n_runs: int, axis: str,
                                     mode_label: str) -> None:
@@ -725,7 +749,7 @@ class SPARC(PropagationModel):
             "elastic), use Bellhop / Kraken / Scooter / OASES. To "
             "suppress this warning, set the bottom acoustic_type to "
             "'rigid' (or 'vacuum') before constructing the env.",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         e = env.copy()
         for col in e.bottom.columns:
@@ -821,12 +845,16 @@ class SPARC(PropagationModel):
         when the resulting grid cannot resolve the pulse band.
 
         The native ``p(t)`` sampling is the caller's to choose, so the value is
-        kept verbatim. But a grid whose Nyquist ``0.5 · n_t_out / (t_max -
-        t_start)`` sits below ``f_max`` aliases silently: the returned p(t)
-        looks perfectly plausible at the wrong frequency. Say so, and name the
-        ``n_t_out`` that fixes it.
+        kept verbatim. But a grid whose Nyquist ``0.5 · n_t_out / t_max`` sits
+        below ``f_max`` aliases silently: the returned p(t) looks perfectly
+        plausible at the wrong frequency. Say so, and name the ``n_t_out``
+        that fixes it.
+
+        The window is ``[0, t_max]`` — the *output* window the writer emits
+        (``oalib_writer``), not ``t_start``, which only sets where the
+        integration begins.
         """
-        window = t_max - self.t_start
+        window = float(t_max)
         if window > 0 and f_max > 0:
             fs = self.n_t_out / window
             if f_max > 0.5 * fs:
@@ -837,9 +865,9 @@ class SPARC(PropagationModel):
                     f"{fs:.1f} Hz (Nyquist {fs / 2:.1f} Hz) over a "
                     f"{window:.2f} s window, below the {f_max:.0f} Hz "
                     f"source band — p(t) will alias. Set n_t_out>="
-                    f"{n_needed} (or shorten the window via t_start / "
-                    f"receiver range).",
-                    UserWarning, stacklevel=3,
+                    f"{n_needed}, lower f_max, or shorten the window via "
+                    f"t_max / receiver.ranges.max().",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
         return self.n_t_out
 
@@ -855,4 +883,4 @@ class SPARC(PropagationModel):
         """
         self._run_and_attach_prt(
             [str(self._exe), base_name], work_dir, base_name,
-            timeout=self.timeout)
+            timeout=self.timeout, stale_outputs=('.grn', '.rts'))

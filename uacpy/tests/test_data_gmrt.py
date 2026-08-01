@@ -78,8 +78,9 @@ def test_nearest_indices_ascending_and_descending():
     asc = np.array([10.0, 11.0, 12.0, 13.0])
     desc = asc[::-1].copy()
     q = np.array([11.4, 12.6])                     # nearest nodes: 11.0, 13.0
-    ia = gmrt_live._nearest_indices(asc, q)
-    idesc = gmrt_live._nearest_indices(desc, q)
+    from uacpy.data._geo import nearest_indices
+    ia = nearest_indices(asc, q)
+    idesc = nearest_indices(desc, q)
     assert asc[ia].tolist() == [11.0, 13.0]
     assert desc[idesc].tolist() == [11.0, 13.0]
 

@@ -19,7 +19,7 @@ from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._netcdf import open_netcdf
 
-__all__ = ['column']
+__all__ = ['column', 'close']
 
 # Resolution → WOA file-resolution code (mirror of sound_speed._GRIDS).
 _CODE = {'1.00': '01', '0.25': '04'}
@@ -34,6 +34,22 @@ def _open(path):
     return _DATASETS[key]
 
 
+def close():
+    """Close the open WOA23 handles and drop them; the next read reopens.
+
+    A monthly SSP touches up to 24 files per resolution and they stay open for
+    the process lifetime. Every other cached grid in this layer is dropped by
+    its own downloader, but WOA23 is installed out-of-band
+    (``install.sh --data woa23``), so refreshing it mid-process needs this hook.
+    """
+    for ds in _DATASETS.values():
+        try:
+            ds.close()
+        except (RuntimeError, OSError):        # already closed / file vanished
+            pass
+    _DATASETS.clear()
+
+
 def _field(period, var, *, resolution, decade):
     code = _CODE[resolution]
     fname = f"woa23_{decade}_{var}{period:02d}_{code}.nc"
@@ -41,12 +57,21 @@ def _field(period, var, *, resolution, decade):
 
 
 def _read(path, var, lat_idx, lon_idx):
+    """One depth axis + variable column, masked/fill cells mapped to ``NaN``.
+
+    netCDF4 returns a masked array wherever ``_FillValue`` is set, so the mask
+    is what identifies no-data. Resolving it here keeps the seafloor truncation
+    independent of the fill's magnitude: a product filling with -999 rather
+    than WOA's 9.96921e36 is still cut, not read as a real temperature.
+    """
     ds = _open(path)
     names = {n.lower(): n for n in ds.variables}
     try:
-        depth = np.asarray(ds.variables[names['depth']][:], dtype=float)
-        an = np.asarray(ds.variables[names[var]][0, :, lat_idx, lon_idx],
-                        dtype=float)
+        depth = np.ma.filled(
+            np.ma.asarray(ds.variables[names['depth']][:], dtype=float), np.nan)
+        an = np.ma.filled(
+            np.ma.asarray(ds.variables[names[var]][0, :, lat_idx, lon_idx],
+                          dtype=float), np.nan)
     except KeyError as exc:
         raise DataFetchError(
             f"Local WOA23 file {path.name} is missing variable {exc}; "

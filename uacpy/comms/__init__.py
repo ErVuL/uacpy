@@ -117,11 +117,14 @@ __all__ = [
     "bit_error_rate", "symbol_error_rate", "evm", "ber_theory",
     # channel models
     "awgn", "multipath_channel", "apply_channel", "fading_taps",
-    "apply_fading_channel", # equalization
-    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", # doppler
+    "apply_fading_channel",
+    # equalization
+    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer",
+    # doppler
     "doppler_from_speed", "compensate_doppler", "estimate_doppler_scale",
     # sync
-    "matched_filter_metric", "detect_preamble", "detect_frames", # link
+    "matched_filter_metric", "detect_preamble", "detect_frames",
+    # link
     "simulate_link", "ber_sweep", "LinkResult",
     # framing (real payloads)
     "bytes_to_bits", "bits_to_bytes", "pack_frame", "unpack_frame",
@@ -136,7 +139,8 @@ __all__ = [
     # channel estimation
     "ls_estimate", "omp_estimate",
     # ofdm
-    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble", "schmidl_cox_sync", "apply_cfo", "estimate_channel",
+    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble",
+    "schmidl_cox_sync", "apply_cfo", "estimate_channel",
     # coding
     "ConvCode", "conv_encode", "viterbi_decode", "interleave", "deinterleave",
     # DSSS

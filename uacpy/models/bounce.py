@@ -37,10 +37,12 @@ from uacpy.io.oalib_writer import write_bounce_input_file
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
 _KMIN_CUTOFF_CHIGH = 1.0e6
 
-# Per-medium mesh density for the sediment stack: 20 points per wavelength,
-# floored so a thin layer still gets a usable mesh and capped so a thick stack
-# at high frequency cannot allocate an unbounded difference-equation grid
-# (bounce.f90 sizes B1..B4/rho/cP/cS from the sum of the per-medium counts).
+# Mesh density applied to every medium of the sediment stack: 20 points per
+# wavelength, floored so a thin layer still gets a usable mesh and capped so a
+# single thick medium at high frequency cannot allocate an unbounded
+# difference-equation grid (bounce.f90 sizes B1..B4/rho/cP/cS from the sum over
+# media, so the ceiling on the total is N_media x _MAX_MESH_POINTS). Hitting
+# the cap under-resolves the mesh, so ``_resolve_n_mesh`` says so.
 _MESH_POINTS_PER_WAVELENGTH = 20
 _MIN_MESH_POINTS = 100
 _MAX_MESH_POINTS = 20000
@@ -368,6 +370,13 @@ class Bounce(PropagationModel):
         if self.rmax is not None:
             rmax = float(self.rmax)
         else:
+            if receiver is None:
+                raise TypeError(
+                    "Bounce.run(receiver=None): a Receiver is required to "
+                    "auto-derive rmax (the range the reflection table is "
+                    "propagated to). Pass a Receiver, or pin the range with "
+                    "Bounce(rmax=...)."
+                )
             recv_rmax = float(receiver.range_max)
             if recv_rmax > 0:
                 rmax = recv_rmax
@@ -510,10 +519,18 @@ class Bounce(PropagationModel):
             speed = float(np.atleast_1d(env.get_sound_speed(env.depth))[0])
 
         wavelength = speed / frequency
-        n_mesh = int(np.clip(
-            _MESH_POINTS_PER_WAVELENGTH * thickness / wavelength,
-            _MIN_MESH_POINTS, _MAX_MESH_POINTS,
-        ))
+        wanted = _MESH_POINTS_PER_WAVELENGTH * thickness / wavelength
+        n_mesh = int(np.clip(wanted, _MIN_MESH_POINTS, _MAX_MESH_POINTS))
+        if wanted > _MAX_MESH_POINTS:
+            self._log(
+                f"mesh clipped to {_MAX_MESH_POINTS} points "
+                f"({wanted:.0f} wanted for {thickness:.3g} m at "
+                f"{frequency:.4g} Hz) — that medium is resolved at "
+                f"{n_mesh * wavelength / thickness:.1f} points per wavelength "
+                f"instead of {_MESH_POINTS_PER_WAVELENGTH}. Reduce the "
+                f"frequency or split the layer for a converged R(theta).",
+                level='warn',
+            )
         self._log(
             f"n_mesh = {n_mesh} (thickest medium {thickness:.3g} m, "
             f"c = {speed:.1f} m/s, lambda = {wavelength:.3g} m)",

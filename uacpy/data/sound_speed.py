@@ -39,7 +39,9 @@ from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
-__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'fetch_ts_profile']
+__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
+           'fetch_ts_profile', 'assemble_range_dependent',
+           'extend_ssp_below_data']
 
 DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
@@ -441,12 +443,16 @@ def _truncate_column(z, t, s) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Trim a raw WOA column to its valid (surface-to-seafloor) extent.
 
     WOA columns are valid from the surface to the seafloor, then fill-valued;
-    truncate at the first fill (``cut == 0`` means the cell is on land).
+    truncate at the first fill (``cut == 0`` means the cell is on land). A
+    level is invalid either as a raw above-threshold fill (the OPeNDAP ASCII
+    path, which has no mask to read) or as ``NaN`` (the local reader, which
+    resolves ``_FillValue`` through the netCDF mask).
     """
     z, t, s = np.asarray(z, float), np.asarray(t, float), np.asarray(s, float)
     n = min(z.size, t.size, s.size)
     z, t, s = z[:n], t[:n], s[:n]
-    valid = (t < WOA_FILL_THRESHOLD) & (s < WOA_FILL_THRESHOLD)
+    valid = (np.isfinite(t) & np.isfinite(s)
+             & (t < WOA_FILL_THRESHOLD) & (s < WOA_FILL_THRESHOLD))
     cut = valid.size if valid.all() else int(np.argmax(~valid))
     return z[:cut], t[:cut], s[:cut]
 

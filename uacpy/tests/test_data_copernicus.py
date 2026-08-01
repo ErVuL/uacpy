@@ -66,7 +66,7 @@ def _install_fake_toolbox(monkeypatch, dataset):
 
 def test_extract_ts_truncates_at_seafloor():
     ds = _DSStub(_DEPTH, [22.0, 15.0, np.nan, np.nan], [36.0, 36.2, np.nan, np.nan])
-    z, t, s = copernicus._extract_ts(ds, 30.0, -40.0, '2020-06-01')
+    z, t, s, _ = copernicus._extract_ts(ds, 30.0, -40.0, '2020-06-01')
     assert z.tolist() == [0.0, 100.0]
     assert t.tolist() == [22.0, 15.0]
 
@@ -259,6 +259,96 @@ def test_fetch_ssp_transect_operational_stamps_provenance(monkeypatch):
     ssp = copernicus.fetch_ssp_transect_operational(
         (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4)
     assert [p.source.id for p in ssp.data_sources] == ['copernicus']
+
+
+class _SnappedDAStub(_DAStub):
+    """DataArray stub exposing the time/lat/lon coords ``sel`` snapped to."""
+    def __init__(self, values, time, lat, lon):
+        super().__init__(values)
+        self.coords = {'time': _Coord(time), 'latitude': _Scalar(lat),
+                       'longitude': _Scalar(lon)}
+
+    def __getitem__(self, key):
+        return self.coords[key]
+
+
+class _Scalar:
+    def __init__(self, value):
+        self.values = np.asarray(value, dtype=float)
+
+
+class _SnappedDSStub:
+    """Dataset stub whose nearest-neighbour selection lands on a fixed cell."""
+    def __init__(self, time, lat, lon):
+        self._vars = {
+            'depth': _DAStub(_DEPTH),
+            'thetao': _SnappedDAStub(_T, time, lat, lon),
+            'so': _SnappedDAStub(_S, time, lat, lon),
+        }
+
+    def __getitem__(self, key):
+        return self._vars[key]
+
+
+def test_provenance_records_the_snapped_date_and_cell(monkeypatch):
+    """The daily mean snaps to a day and a 1/12° cell; both must be recorded."""
+    _install_fake_toolbox(
+        monkeypatch, _SnappedDSStub('2020-06-14', 30.0417, -40.0417))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    prov = ssp.data_sources[0]
+    assert prov.data_date == '2020-06-14'
+    assert prov.data_point == pytest.approx((30.0417, -40.0417))
+    assert prov.requested_date == '2020-06-15'
+    assert prov.offset_km == pytest.approx(6.1, abs=0.5)
+
+
+def test_transect_provenance_records_the_snapped_date_and_cell(monkeypatch):
+    _install_fake_toolbox(
+        monkeypatch, _SnappedDSStub('2020-06-14', 30.0417, -40.0417))
+    ssp = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=3)
+    prov = ssp.data_sources[0]
+    assert prov.data_date == '2020-06-14'
+    assert prov.data_point == pytest.approx((30.0417, -40.0417))
+
+
+def test_citations_reports_the_fetched_line(monkeypatch):
+    """A Copernicus-sourced profile must render a ``Fetched:`` line."""
+    from uacpy.data.sources import citations
+    _install_fake_toolbox(
+        monkeypatch, _SnappedDSStub('2020-06-14', 30.0417, -40.0417))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    text = citations(ssp)
+    assert 'Fetched:' in text
+    assert '2020-06-14' in text
+
+
+def test_no_snapping_coords_leaves_provenance_unstamped(monkeypatch):
+    """A dataset exposing no time/lat/lon coords records nothing it did not get."""
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    prov = ssp.data_sources[0]
+    assert prov.data_date is None
+    assert prov.data_point is None
+
+
+# ── timeout ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('name', [
+    'fetch_ssp_operational', 'fetch_ssp_transect_operational',
+    'fetch_ts_profile_operational', 'fetch_waves_operational',
+    'fetch_ph_operational',
+])
+def test_fetchers_expose_no_timeout(name):
+    """The copernicusmarine session owns the timeout; no fetcher may pretend to.
+
+    Accepting a ``timeout=`` it cannot honour is worse than not offering one —
+    the toolbox reads ``COPERNICUSMARINE_HTTPS_TIMEOUT`` at import and exposes
+    no per-call knob.
+    """
+    import inspect
+    sig = inspect.signature(getattr(copernicus, name))
+    assert 'timeout' not in sig.parameters
 
 
 def test_assemble_range_dependent_aggregates_provenance():

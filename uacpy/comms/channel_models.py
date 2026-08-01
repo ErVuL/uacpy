@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.acoustic_signal.channel import impulse_response
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -34,23 +35,17 @@ def awgn(signal, snr_db, *, rng=None):
     return x + noise
 
 
-def multipath_channel(delays_s, gains, sample_rate):
-    """Static FIR impulse response from sparse arrivals ``(delay, gain)``.
+def multipath_channel(gains, delays_s, sample_rate, *, fractional=False):
+    """Static FIR tap vector from sparse arrivals ``(gain, delay)``.
 
-    Returns the complex tap vector ``h`` (nearest-sample placement). ``gains``
-    may be complex (carry per-path phase).
+    Adapter over :func:`uacpy.acoustic_signal.impulse_response` — same
+    arguments, returning only the complex tap vector that :func:`apply_channel`
+    and the equalizers consume. ``gains`` may be complex (carry per-path
+    phase). A tap-delay line is an integer-tap FIR, hence ``fractional=False``
+    by default.
     """
-    d = np.asarray(delays_s, dtype=float)
-    g = np.asarray(gains)
-    if d.shape != g.shape:
-        raise ConfigurationError("multipath_channel: delays and gains shape mismatch")
-    idx = np.round(d * float(sample_rate)).astype(int)
-    if np.any(idx < 0):
-        raise ConfigurationError("multipath_channel: delays must be >= 0")
-    h = np.zeros(int(idx.max()) + 1, dtype=complex)
-    for i, gg in zip(idx, g):
-        h[i] += gg
-    return h
+    _, h = impulse_response(gains, delays_s, sample_rate, fractional=fractional)
+    return h.astype(complex)
 
 
 def apply_channel(signal, h):

@@ -15,8 +15,19 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.models import RAM, RunMode
-from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
+from uacpy.core.exceptions import (
+    ConfigurationError,
+    ModelExecutionError,
+    UnsupportedFeatureError,
+)
 from uacpy.core.constants import TL_MAX_DB
+
+
+class _FakeProc:
+    """A subprocess that reported success without writing anything."""
+    returncode = 0
+    stdout = ''
+    stderr = ''
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -103,6 +114,37 @@ class TestCollinsDepthReference:
         assert depths[0] == pytest.approx(100.0)        # seafloor (absolute)
         assert depths[1] == pytest.approx(115.0)        # layer bottom
         assert max(depths) == pytest.approx(400.0)      # zmax (absolute)
+
+
+@pytest.mark.requires_binary
+class TestBackendScopedKnobWarnings:
+    """Row 5 of ``ram.in`` holds ``ns rs`` on the fluid Collins codes and
+    ``irot theta`` on rams0.5 — mutually exclusive, so overriding the pair
+    the selected backend does not read is discarded silently unless warned.
+    """
+
+    @pytest.mark.parametrize('backend,kw,expect', [
+        ('rams', dict(ns_stability=5, rs_stability=1234.0),
+         'ns_stability, rs_stability'),
+        ('rams', dict(rams_theta=60.0), None),
+        ('ramgeo', dict(rams_theta=60.0, rams_irot=0),
+         'rams_theta, rams_irot'),
+        ('ramgeo', dict(ns_stability=5, rs_stability=1234.0), None),
+        ('mpiramS', dict(rams_theta=60.0), 'rams_theta'),
+        ('ramsurf', dict(rams_irot=0), 'rams_irot'),
+    ])
+    def test_unreadable_knobs_warn(self, backend, kw, expect):
+        import warnings as _w
+        m = RAM(verbose=False, **kw)
+        with _w.catch_warnings(record=True) as w:
+            _w.simplefilter('always')
+            m._warn_on_mpirams_only_overrides(backend)
+        hits = [str(x.message) for x in w if 'ignores these' in str(x.message)]
+        if expect is None:
+            assert not hits, f"{backend} reads {kw} but warned: {hits}"
+        else:
+            assert any(expect in h for h in hits), \
+                f"{backend} discards {kw} without warning; got {hits}"
 
 
 # ─── Backend selection (no binary needed) ─────────────────────────────────
@@ -689,6 +731,38 @@ class TestCollinsArrayLimits:
         needed, mz, _ = m._collins_mz_budget('ramgeo', zmax)
         assert needed(dz) <= mz
 
+    def test_broadband_auto_dz_is_coarsened_like_narrowband(self):
+        """The broadband sweep hands its own Lytaev ``dz`` down as an
+        override; that is still uacpy's choice, so it is coarsened to fit
+        ``mz`` rather than raising a ConfigurationError telling the user to
+        coarsen a value they never pinned."""
+        env = Environment(
+            name='deep-slope',
+            bathymetry=[(0.0, 50.0), (10000.0, 5000.0)], ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.7,
+                                      attenuation=0.5))
+        src = Source(depths=25.0, frequencies=500.0)
+        rcv = Receiver(depths=np.array([100.0]),
+                       ranges=np.array([5000.0, 10000.0]))
+        m = RAM(verbose=False, backend='ramgeo', Q=50.0, T=0.02)
+        with pytest.warns(UserWarning, match="fit the binary's depth arrays"):
+            field = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
+        needed, mz, _ = m._collins_mz_budget('ramgeo', field.metadata['zmax'])
+        assert needed(field.metadata['dz']) <= mz
+
+    def test_broadband_pinned_dz_past_mz_is_still_rejected(self):
+        """Coarsening applies only to an auto grid; a pinned ``dz`` the
+        binary cannot hold is still an error the caller must resolve."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.models.base import RunMode
+        src = Source(depths=50.0, frequencies=50.0)
+        rcv = Receiver(depths=100.0, ranges=np.array([5000.0]))
+        with pytest.raises(ConfigurationError, match="mz=20002"):
+            RAM(verbose=False, backend='ramgeo', dz=0.005,
+                Q=50.0, T=0.02).run(self._fluid_env(), src, rcv,
+                                    run_mode=RunMode.BROADBAND)
+
     def test_broadband_path_also_checks_the_limits(self):
         """The narrowband entry point is not the only way in — the broadband
         sweep calls the per-frequency runner directly."""
@@ -931,6 +1005,93 @@ class TestBackendIndependentResultShape:
         assert abs(float(np.median(got[ok] - native[ok]))) < 0.15
 
 
+@pytest.mark.requires_binary
+class TestCollinsBroadbandLevel:
+    """The BROADBAND sweep resamples the same envelope as COHERENT_TL.
+
+    The Collins output grid is ``dr·ndr``-spaced, sized for Padé accuracy
+    and unrelated to the envelope's range Nyquist. With the default
+    ``c0`` (Lytaev Eq. 15, ~1687 m/s against a 1500 m/s water column) ψ
+    turns >90° between adjacent output samples, so interpolating the
+    complex field averages across opposite-phase lobes and raises the
+    median TL by ~1.5-2.3 dB on this reference.
+    """
+
+    _ENV = dict(
+        bathymetry=[(0.0, 100.0), (10000.0, 100.0)],
+        ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1700.0, density=1.7,
+                                  attenuation=0.5),
+    )
+
+    def _setup(self):
+        env = Environment(name='pekeris', **self._ENV)
+        src = Source(depths=36.0, frequencies=250.0)
+        rcv = Receiver(depths=np.array([36.0]),
+                       ranges=np.linspace(200.0, 8000.0, 50))
+        return env, src, rcv
+
+    def test_broadband_fc_slice_matches_the_binary_grid(self):
+        env, src, rcv = self._setup()
+        m = RAM(backend='ramgeo', Q=8.0, T=0.05, verbose=False)
+        bb = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
+        got = np.asarray(bb.at(frequency=250.0).to_tl().data, dtype=float)
+
+        # Re-run the binary on the sweep's own numerics and dB-interpolate
+        # its tl.grid — the reference the COHERENT_TL test uses.
+        rmax = float(np.max(rcv.ranges))
+        fc, Q, T = m._resolve_broadband_grid(src)
+        bw, df = fc / Q, 1.0 / T
+        nf1 = max(1, int((bw - df) / df) + 1)
+        freqs = np.array([(i - nf1) * df + fc for i in range(2 * nf1 + 1)])
+        freqs = freqs[freqs > 0.0]
+        dr_b, _ = m._compute_grid_lytaev(env, float(freqs[0]),
+                                         max_range=rmax, kind='ramgeo')
+        _, dz_b = m._compute_grid_lytaev(env, float(freqs[-1]),
+                                         max_range=rmax, kind='ramgeo')
+        raw = m._run_collins_one_freq(
+            env, src, rcv, kind='ramgeo', freq=250.0,
+            theta=m._theta_for_freq(250.0), dr_override=dr_b,
+            dz_override=dz_b,
+            zmax_override=m._compute_zmax(env, float(freqs[0])))
+
+        from uacpy.models.ram import _interp_to_receiver_grid
+        native = _interp_to_receiver_grid(
+            raw['depths'], raw['ranges'], np.asarray(raw['tl'], float),
+            rcv.depths.astype(float), rcv.ranges.astype(float))
+        ok = (np.isfinite(native) & np.isfinite(got)
+              & (native > 0.0) & (native < TL_MAX_DB))
+        bias = float(np.median(got[ok] - native[ok]))
+        assert abs(bias) < 0.15, (
+            f"BROADBAND fc slice is {bias:+.3f} dB off the binary's own "
+            f"tl.grid — the envelope is being resampled as a complex field")
+
+    def test_broadband_fc_slice_matches_the_narrowband_run(self):
+        env, src, rcv = self._setup()
+        bb = RAM(backend='ramgeo', Q=8.0, T=0.05, verbose=False).run(
+            env, src, rcv, run_mode=RunMode.BROADBAND)
+        nb = RAM(backend='ramgeo', verbose=False).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        got = np.asarray(bb.at(frequency=250.0).to_tl().data, dtype=float)
+        ref = np.asarray(nb.tl, dtype=float)
+        ok = np.isfinite(got) & np.isfinite(ref)
+        bias = float(np.median(got[ok] - ref[ok]))
+        assert abs(bias) < 0.25, (
+            f"BROADBAND fc slice sits {bias:+.3f} dB off the COHERENT_TL "
+            f"run of the same environment")
+
+    def test_metadata_c_min_is_the_environment_minimum(self):
+        """``c_min`` documents the slowest speed the solver brackets, not
+        the Padé reference ``c0`` — which on this env is 1687 m/s against a
+        1500 m/s water column."""
+        env, src, rcv = self._setup()
+        m = RAM(backend='ramgeo', Q=8.0, T=0.05, verbose=False)
+        field = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert field.metadata['c_min'] == pytest.approx(1500.0)
+        assert field.metadata['c0'] != pytest.approx(1500.0)
+
+
 def test_run_frequencies_preserves_every_source_field():
     """``run(frequencies=…)`` rebuilds the Source; it must not silently drop
     ``source_type`` / ``beam_pattern`` and bypass their validation."""
@@ -946,3 +1107,62 @@ def test_run_frequencies_preserves_every_source_field():
     with pytest.raises((ConfigurationError, UnsupportedFeatureError)):
         m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL,
               frequencies=np.array([40.0, 50.0, 60.0]))
+
+
+@pytest.mark.requires_binary
+class TestStaleOutputsAreCleared:
+    """The Collins and mpiramS binaries write fixed filenames with no
+    run-specific stem, so a pinned ``work_dir`` holding a previous run's
+    ``tl.grid`` / ``pcomplex.bin`` / ``psif.dat`` would be read back as this
+    run's answer. Each launch clears them first."""
+
+    def _setup(self, tmp_path, **kw):
+        env = _env(bottom=_fluid_bottom(), **kw)
+        src = Source(depths=25.0, frequencies=50.0)
+        rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+        return env, src, rcv
+
+    def test_collins_stale_grid_is_not_returned(self, tmp_path, monkeypatch):
+        env, src, rcv = self._setup(tmp_path)
+        for name in ('tl.grid', 'pcomplex.bin'):
+            (tmp_path / name).write_bytes(b'\x00' * 4096)
+        m = RAM(backend='ramgeo', verbose=False, work_dir=str(tmp_path),
+                cleanup=False)
+        monkeypatch.setattr(type(m), '_run_subprocess',
+                            lambda self, *a, **k: _FakeProc())
+        with pytest.raises(ModelExecutionError, match='tl.grid'):
+            m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        assert not (tmp_path / 'tl.grid').exists()
+        assert not (tmp_path / 'pcomplex.bin').exists()
+
+    def test_mpirams_stale_psif_is_not_returned(self, tmp_path, monkeypatch):
+        env, src, rcv = self._setup(tmp_path)
+        (tmp_path / 'psif.dat').write_bytes(b'\x00' * 4096)
+        m = RAM(backend='mpiramS', verbose=False, work_dir=str(tmp_path),
+                cleanup=False)
+        monkeypatch.setattr(type(m), '_run_subprocess',
+                            lambda self, *a, **k: _FakeProc())
+        with pytest.raises(ModelExecutionError, match='psif.dat'):
+            m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        assert not (tmp_path / 'psif.dat').exists()
+
+
+@pytest.mark.requires_binary
+def test_warnings_are_attributed_to_the_callers_frame():
+    """Ten frames separate ``_compute_grid_lytaev`` from user code, so a
+    hand-counted ``stacklevel`` cannot span it. ``skip_file_prefixes`` skips
+    all of ``uacpy/models/`` instead."""
+    import warnings as _warnings
+    env = _env(bottom=_fluid_bottom())
+    src = Source(depths=25.0, frequencies=50.0)
+    rcv = Receiver(depths=np.array([50.0, 500.0]), ranges=np.array([1000.0]))
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter('always')
+        RAM(backend='ramgeo', accuracy=1e-6, verbose=False).run(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL)
+    ram_warnings = [w for w in caught if str(w.message).startswith('RAM')]
+    assert ram_warnings, 'expected at least one RAM warning'
+    for w in ram_warnings:
+        assert w.filename == __file__, (
+            f"{str(w.message)[:60]!r} was attributed to {w.filename}, "
+            f"not the caller's frame")

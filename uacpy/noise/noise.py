@@ -60,7 +60,8 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         If True, return the band-integrated SPL (dB re 1 µPa²) where each
         band's bandwidth is set by the midpoints between consecutive
         input frequencies. Default False — return the spectral level
-        (dB re 1 µPa²/Hz).
+        (dB re 1 µPa²/Hz). Use the band form to pair wind noise with a
+        band-integrated source level; :class:`WenzNoise` is spectral-only.
 
     Returns
     -------
@@ -329,6 +330,12 @@ class WenzNoise:
     (``WIND_MODELS['mine'] = fn``) or pass a callable directly. Each component
     is exposed as a typed attribute; plotting lives in
     :func:`uacpy.visualization.plot_wenz`.
+
+    Every level here is a **spectral** level (dB re 1 µPa²/Hz). Differencing
+    one against a band-integrated source level in the sonar equation is a
+    ``10·log10(w)`` error — 20 dB over a 100 Hz band; see
+    :func:`uacpy.sonar.noise_background` for the rule and
+    :func:`compute_windnoise` (``band_integrate=True``) for a band level.
 
     Parameters
     ----------

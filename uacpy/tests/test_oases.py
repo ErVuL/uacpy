@@ -8,6 +8,11 @@ import numpy as np
 import pytest
 
 
+class _FakeProc:
+    """A subprocess that reported success without writing anything."""
+    returncode = 0
+    stdout = ''
+    stderr = ''
 
 
 class TestOasesKeepsTheFullSSP:
@@ -207,3 +212,122 @@ def test_oases_stop_banner_exiting_zero_is_raised_with_its_own_message():
     msg = str(ei.value)
     assert '.prt' not in msg or 'writes no .prt' in msg, (
         f"error still points at a .prt OASES never writes: {msg[:200]}")
+
+
+def _pekeris_env():
+    import uacpy
+    return uacpy.Environment(
+        bathymetry=100.0,
+        ssp=uacpy.SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1700.0, density=1.7,
+                                        attenuation=0.5))
+
+
+@pytest.mark.requires_binary
+def test_oasp_run_frequencies_honours_the_lower_band_edge():
+    """``frequencies=`` sets an (fmin, fmax, N) triple; dropping fmin made
+    OASP sweep from DC and cost several times the requested bins."""
+    import uacpy
+    import warnings as _w
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    with _w.catch_warnings():
+        _w.simplefilter('ignore')
+        field = OASP(n_time_samples=512).run(
+            _pekeris_env(), uacpy.Source(depths=25.0, frequencies=150.0),
+            uacpy.Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0, 2000.0])),
+            run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(100.0, 200.0, 21))
+    f = np.asarray(field.coords['frequency'], dtype=float)
+    assert f.min() >= 99.0, f"band starts at {f.min():.2f} Hz, below the request"
+    assert f.max() <= 201.0
+
+
+@pytest.mark.requires_binary
+def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
+    import uacpy
+    import warnings as _w
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    with _w.catch_warnings(record=True) as w:
+        _w.simplefilter('always')
+        OASP(n_time_samples=512, freq_min=10.0).run(
+            _pekeris_env(), uacpy.Source(depths=25.0, frequencies=150.0),
+            uacpy.Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0, 2000.0])),
+            run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(100.0, 200.0, 21))
+    assert any('freq_min' in str(x.message) for x in w), \
+        "silently overrode the constructor's freq_min"
+
+
+@pytest.mark.requires_binary
+def test_oasp_coherent_tl_carries_the_same_phase_reference_as_broadband():
+    """COHERENT_TL is one frequency slice of the same .trf array, so it
+    must not come back with the phase reference dropped."""
+    import uacpy
+    import warnings as _w
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    env = _pekeris_env()
+    src = uacpy.Source(depths=25.0, frequencies=150.0)
+    rcv = uacpy.Receiver(depths=np.array([50.0]),
+                         ranges=np.array([1000.0, 2000.0]))
+    with _w.catch_warnings():
+        _w.simplefilter('ignore')
+        m = OASP(n_time_samples=512)
+        nb = m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        bb = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
+    assert nb.phase_reference == bb.phase_reference == 'travelling_wave'
+    assert nb.kind == 'pressure' and np.iscomplexobj(nb.data)
+    assert nb.data.dtype == np.complex128
+
+
+@pytest.mark.requires_binary
+class TestStaleOutputsAreCleared:
+    """Every OASES sub-model names its output files after ``base_name``,
+    which is a hard-coded literal — so a pinned ``work_dir`` holding a
+    previous run's output would be read back as this run's answer. Each
+    sub-model declares its outputs and ``_execute`` clears them first."""
+
+    @staticmethod
+    def _env():
+        import uacpy
+        return (
+            uacpy.Environment(
+                bathymetry=100.0, ssp=1500.0,
+                bottom=uacpy.BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1700.0,
+                    density=1.7, attenuation=0.5)),
+            uacpy.Source(depths=25.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+        )
+
+    def test_oast_stale_plt_is_not_returned(self, tmp_path, monkeypatch):
+        from uacpy.models.oases import OAST
+        from uacpy.core.exceptions import ModelExecutionError
+        (tmp_path / 'oast_run.plt').write_text('stale garbage\n' * 100)
+        model = OAST(verbose=False, work_dir=str(tmp_path), cleanup=False)
+        monkeypatch.setattr(type(model), '_run_subprocess',
+                            lambda self, *a, **k: _FakeProc())
+        with pytest.raises(ModelExecutionError, match='did not produce'):
+            model.run(*self._env())
+        assert not (tmp_path / 'oast_run.plt').exists()
+
+    def test_oasp_stale_trf_is_not_returned(self, tmp_path, monkeypatch):
+        from uacpy.models.oases import OASP
+        from uacpy.core.exceptions import ModelExecutionError
+        (tmp_path / 'oasp_run.trf').write_bytes(b'\x00' * 4096)
+        model = OASP(verbose=False, work_dir=str(tmp_path), cleanup=False)
+        monkeypatch.setattr(type(model), '_run_subprocess',
+                            lambda self, *a, **k: _FakeProc())
+        with pytest.raises(ModelExecutionError, match='did not produce'):
+            model.run(*self._env())
+        assert not (tmp_path / 'oasp_run.trf').exists()
+
+    def test_every_sub_model_declares_its_outputs(self):
+        from uacpy.models.oases import OAST, OASN, OASR, OASP
+        for cls in (OAST, OASN, OASR, OASP):
+            assert cls._OUTPUT_SUFFIXES, f'{cls.__name__} declares no outputs'

@@ -100,6 +100,15 @@ def _read_lz_records(
     return lz, np.stack(columns, axis=1)
 
 
+def _grid_axes(lz, n_ranges, dr, ndr, dz, ndz, depth_index_offset):
+    """Range and depth axes (m) shared by ``tl.grid`` and ``pcomplex.bin``,
+    which are written on the same (z, r) grid."""
+    ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
+    depths = (depth_index_offset
+              + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
+    return ranges, depths
+
+
 def read_tl_grid(
     filepath: Union[str, Path],
     *,
@@ -139,9 +148,8 @@ def read_tl_grid(
     """
     lz, tl = _read_lz_records(filepath, dtype='f4')
     tl = tl.astype(float)
-    n_ranges = tl.shape[1]
-    ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
+    ranges, depths = _grid_axes(lz, tl.shape[1], dr, ndr, dz, ndz,
+                                depth_index_offset)
     return ranges, depths, tl
 
 
@@ -180,7 +188,6 @@ def read_pcomplex_grid(
     """
     lz, p = _read_lz_records(filepath, dtype='c8')
     p = p.astype(complex)
-    n_ranges = p.shape[1]
-    ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = (depth_index_offset + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
+    ranges, depths = _grid_axes(lz, p.shape[1], dr, ndr, dz, ndz,
+                                depth_index_offset)
     return ranges, depths, p

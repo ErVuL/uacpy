@@ -10,7 +10,8 @@ from uacpy.core.exceptions import ConfigurationError
 __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
-    'run_representative_indices', 'DEFAULT_MAX_TRANSECT_POINTS',
+    'nearest_indices', 'run_representative_indices',
+    'DEFAULT_MAX_TRANSECT_POINTS',
     'depth_to_pressure_dbar',
 ]
 
@@ -139,6 +140,26 @@ def geodesic_waypoints(
 
     ranges_m = f * ang * EARTH_RADIUS_M
     return lats, lons, ranges_m
+
+
+def nearest_indices(axis, queries) -> np.ndarray:
+    """Nearest-node index into ``axis`` for each query, any axis orientation.
+
+    A COARDS latitude axis is commonly stored **descending** (GMRT, EMODnet
+    DTM), so a plain ``searchsorted`` (ascending-only, and an insertion index
+    rather than the nearest node) is both biased and wrong. Sort once, bracket
+    with ``searchsorted``, then pick the closer of the two neighbours, and map
+    back to the original (possibly descending) ordering.
+    """
+    axis = np.asarray(axis, dtype=float)
+    order = np.argsort(axis)
+    sorted_axis = axis[order]
+    pos = np.searchsorted(sorted_axis, queries)
+    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
+    hi = np.clip(pos, 0, sorted_axis.size - 1)
+    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
+    nearest_sorted = np.where(pick_hi, hi, lo)
+    return order[nearest_sorted]
 
 
 def run_representative_indices(keys) -> 'list[int]':

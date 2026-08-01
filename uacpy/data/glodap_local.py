@@ -12,8 +12,6 @@ letting :func:`uacpy.data.fetch_environment` build absorption from measured pH.
 """
 
 import os
-import shutil
-import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
@@ -40,31 +38,6 @@ _DEPTH_VARS = ('depth', 'depth_surface')
 _GRID = {}   # path -> _GlodapGrid
 
 
-def _curl_download(url, out, *, timeout, verbose):
-    """Fetch ``url`` → ``out`` with curl; ``True`` on success, ``False`` if curl
-    is absent or fails. The GLODAP host serves curl at full speed; mirrors the
-    GlobSed/curl-first pattern for the large static grids. Downloads to
-    ``<out>.part`` and moves it into place only on success, so an interrupted
-    transfer never leaves a truncated ``out``."""
-    curl = shutil.which('curl')
-    if not curl:
-        return False
-    part = Path(str(out) + '.part')
-    try:
-        subprocess.run(
-            [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(part), url],
-            check=True, capture_output=not verbose)
-    except (subprocess.SubprocessError, OSError):
-        part.unlink(missing_ok=True)
-        return False
-    if not (part.exists() and part.stat().st_size > 0):
-        part.unlink(missing_ok=True)
-        return False
-    os.replace(part, out)
-    return True
-
-
 def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
     """Download the GLODAPv2.2016b Mapped pH field into the cache.
 
@@ -73,7 +46,7 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
     rest, then returns the path. Uses curl when available, falling back to the
     urllib fetcher.
     """
-    from uacpy.data._http import http_get
+    from uacpy.data._http import curl_download, http_get
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('glodap')
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / GLODAP_FILE
@@ -81,8 +54,8 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
                 verbose=verbose)
     with tempfile.TemporaryDirectory() as tmp:
         tar_path = Path(tmp) / GLODAP_TARBALL
-        if not _curl_download(GLODAP_URL, tar_path, timeout=timeout,
-                              verbose=verbose):
+        if not curl_download(GLODAP_URL, tar_path, timeout=timeout,
+                             verbose=verbose):
             part = Path(str(tar_path) + '.part')
             part.write_bytes(http_get(GLODAP_URL, timeout=timeout,
                                       verbose=verbose, source='glodap'))

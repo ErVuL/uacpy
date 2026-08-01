@@ -54,7 +54,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     ax.plot(s * 1e3, p / (p.max() + 1e-12), **mpl_kw)
     best = s[int(np.argmax(p))] * 1e3
     ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
-    ax.set_xlabel("Doppler scale a [×10⁻³]")
+    ax.set_xlabel("Doppler scale a (×10⁻³)")
     ax.set_ylabel("Norm. peak correlation")
     ax.set_title(title or "Doppler ambiguity", loc="left")
     ax.grid(alpha=0.3)
@@ -62,6 +62,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
                      **mpl_kw):
     """Equalizer learning curve (MSE vs symbol index, dB)."""
@@ -77,6 +78,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     return fig, ax
 
 
+@typed_plot_error
 def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Synchronization metric vs sample index."""
@@ -94,6 +96,7 @@ def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Channel magnitude across the OFDM subcarriers."""
@@ -109,6 +112,7 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
                  **mpl_kw):
     """Constellation/scatter plot of received ``symbols``; optional ``ideal``
@@ -133,6 +137,7 @@ def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
     return fig, ax
 
 
+@typed_plot_error
 def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
                        title=None, figsize=(5, 5), **mpl_kw):
     """Plot an ideal Gray-labeled constellation."""
@@ -154,6 +159,7 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
     return fig, ax
 
 
+@typed_plot_error
 def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
                      title=None, figsize=(7, 4), **mpl_kw):
     """Eye diagram: overlay ``n_symbols``-wide windows of the real signal."""
@@ -175,6 +181,7 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
     return fig, ax
 
 
+@typed_plot_error
 def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
                    label="measured", title=None, figsize=(7, 5), **mpl_kw):
     """Measured BER vs Eb/N0 (semilog-y) with optional theory overlay."""

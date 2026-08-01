@@ -26,6 +26,7 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
+from uacpy.acoustic_signal.waveforms import sparc_pulse
 from uacpy.core.results import Field
 from uacpy.io._fortran_helpers import detect_endian, typed_format_error
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
@@ -530,7 +531,6 @@ def sparc_snapshot_to_field(
         # both: a taper would break the convolution theorem and would null the
         # transient source pulse (which lives in the first few samples, where a
         # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
-        from uacpy.acoustic_signal.waveforms import sparc_pulse
         s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
         S_at_f0 = np.fft.fft(s_t)[f_idx]
         if S_at_f0 == 0:
@@ -603,7 +603,7 @@ def sparc_snapshot_to_time_field(
     '.GRN' file to a '.SHD' file containing the pressure field"; this is that
     step done in-tree.
 
-    Simpler than :func:`sparc_snapshot_to_field`, which had to recover a *CW*
+    Simpler than :func:`sparc_snapshot_to_field`, which recovers a *CW*
     component: the snapshot already is the propagated pulse, so one inverse
     Hankel transform per output time gives ``p(z, r, t)`` directly — no
     time-FFT, no frequency selection, and no source deconvolution (exactly as

@@ -10,8 +10,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.io.units import m_to_km
-from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_SOURCE, _overlay_seafloor, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
 
 
 def _plot_rays(
@@ -103,10 +102,9 @@ def _plot_rays(
         r_max = float(np.max(rr_km))
         ax.set_xlim(0.0, r_max * 1.03 if r_max > 0 else 1.0)
     if show_source and rays.source_depths is not None and rays.source_depths.size:
-        src_style = dict(SOURCE_MARKER_STYLE)
-        src_style['markersize'] = src_style.get('markersize', 15) + 2
-        for sd in rays.source_depths:
-            ax.plot([0.0], [float(sd)], zorder=ZORDER_SOURCE, **src_style)
+        # Slightly larger star than the other panels — it has to read against
+        # a dense ray fan.
+        _draw_geometry(ax, rays.source_depths, source_markersize_bonus=2)
 
     if show_legend and color_by == 'bounces':
         import matplotlib.lines as mlines
@@ -200,20 +198,32 @@ def _plot_mode_functions(
     *,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
+    show_imaginary: bool = False,
 ):
-    """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves."""
+    """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves.
+
+    ``show_imaginary`` overlays ``Im(ψ_m)`` as a dashed line in the matching
+    colour — meaningful only for a complex-arithmetic solve (``backend=
+    'krakenc'``), where leaky modes carry a non-zero imaginary part."""
     if not isinstance(modes, Modes):
         raise ConfigurationError(
             f"_plot_mode_functions: expected Modes, got {type(modes).__name__}"
+        )
+    if show_imaginary and not np.iscomplexobj(modes.phi):
+        raise ConfigurationError(
+            "_plot_mode_functions: show_imaginary=True needs complex mode "
+            "functions; this Modes result is real (use backend='krakenc')."
         )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
     n_modes = modes.n_modes if n_modes is None else min(int(n_modes), modes.n_modes)
     for m in range(n_modes):
         psi = np.asarray(modes.phi[:, m])
-        if np.iscomplexobj(psi):
-            psi = psi.real
-        ax.plot(psi, modes.depths, label=f"m={m+1}", linewidth=1.0)
+        line, = ax.plot(psi.real if np.iscomplexobj(psi) else psi,
+                        modes.depths, label=f"m={m+1}", linewidth=1.0)
+        if show_imaginary:
+            ax.plot(psi.imag, modes.depths, linestyle='--', linewidth=0.9,
+                    color=line.get_color())
     ax.set_xlabel(r'$\psi_m(z)$')
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)

@@ -41,8 +41,8 @@ uacpy/
 
 `uacpy/` (the source package) is installed editable via
 `pip install -e ".[dev]"`. The native binaries (`bin/oalib/`,
-`bin/bellhopcuda/`, `bin/mpirams/`, `bin/ramsurf/`, `bin/oases/`) are
-built separately by `install.sh` — see the README.
+`bin/bellhopcuda/`, `bin/mpirams/`, `bin/ramsurf/`, `bin/ramgeo/`,
+`bin/oases/`) are built separately by `install.sh` — see the README.
 
 ---
 
@@ -61,9 +61,11 @@ result = Model(...).run(env, source, receiver, run_mode=None, *,
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site.
-The only sanctioned extensions are `n_modes=` on Kraken and
+The only sanctioned extensions are `n_modes=` on Kraken,
 `output_duration=` on the broadband
-synthesizers (Bellhop, RAM, Scooter, Kraken, OASP). Model configuration is
+synthesizers (Bellhop, RAM, Scooter, Kraken, OASP), and the keyword-only
+`c_low`/`c_high`/`rmax` of `Bellhop.run_with_bounce`, which tabulate the BOUNCE
+reflection table a single call consumes. Model configuration is
 **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.
 There is no `set_params()`. To sweep, build one instance per parameter
@@ -183,8 +185,8 @@ are direct attributes on `Result`, **not** metadata.
    - store every constructor argument as `self.<name>` so
      `model.copy()` can introspect them.
 2. Implement `run(self, env, source, receiver, run_mode=None, *,
-   frequencies=None, source_waveform=None, sample_rate=None)` — the
-   fixed signature, no `**kwargs`:
+   frequencies=None, source_waveform=None, sample_rate=None,
+   output_duration=None)` — the fixed signature, no `**kwargs`:
    - call `self._resolve_run_mode(run_mode)` first;
    - call `env = self._project_environment(env)` to apply the collapse
      policy;
@@ -315,9 +317,13 @@ These are the physics-agnostic primitives every model consumes:
   factors (`C_LOW_FACTOR` for FFP solvers, `C_LOW_FACTOR_KRAKEN` for
   the modal solver, `C_HIGH_FACTOR`). Promote any new "magic number"
   to this module rather than embedding it.
-- `exceptions.py` — `ConfigurationError`, `ExecutableNotFoundError`,
-  `ModelExecutionError`, `UnsupportedFeatureError`. Use these instead
-  of bare `ValueError` / `TypeError`.
+- `exceptions.py` — `UACPYError` (the base every other one derives
+  from, so `except UACPYError` is the catch-all) plus
+  `ConfigurationError`, `ExecutableNotFoundError`, `ModelExecutionError`,
+  `UnsupportedFeatureError`, `InvalidDepthError`, `FileFormatError`,
+  `DataFetchError`. Use these instead of bare `ValueError` /
+  `TypeError`; see DOCUMENTATION §4 for which one each situation calls
+  for.
 
 Public API attribute names: distances in **metres**, sound speeds in
 **m/s**, densities in **g/cm³**, attenuations in **dB/wavelength**,
@@ -419,10 +425,14 @@ ocean databases. Sits *upstream* of the models — it produces carrier inputs,
 never touches model internals. **Data is fetched on demand, never bundled or
 redistributed** (same rule as OASES, §9).
 
-Module map (one per concern):
+Module map. The core modules carry the shared machinery; alongside them sits
+one file per dataset, named by suffix — `*_local.py` reads a cached grid
+downloaded by `install.sh --data`, `*_live.py` calls a web service:
 
 - `_http.py` — `http_get(url, …)`, the only network call (stdlib `urllib`),
   wraps failures in `DataFetchError`. No third-party HTTP dep.
+- `_cache.py`, `_geo.py`, `_netcdf.py`, `_time.py` — cache dir resolution,
+  great-circle / transect geometry, netCDF read helpers, date normalisation.
 - `bathymetry.py` — GEBCO via OpenTopoData (`fetch_bathy`, `fetch_bathy_transect`).
 - `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
   + the shared `assemble_range_dependent(columns, ranges)` helper.
@@ -432,6 +442,12 @@ Module map (one per concern):
 - `seabed.py` — EMODnet (CC-BY) and Diesing (CC-BY) seabed substrate.
 - `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
 - `environment.py` — `fetch_environment(...)`, the orchestrator + dispatch.
+- Per-dataset modules — bathymetry `gebco_local`, `gmrt_live`,
+  `emodnet_bathy_live`; seabed `emodnet_local`, `diesing_local`,
+  `globsed_local`, `crust1_local`, `graw_local`, `mars`, `pelagic`,
+  `sediment_db`; water column `woa23_local`, `argo`, `glodap_local`;
+  surface `sea_surface`, `seaice_local`, `wind_local`, `wind_live`,
+  `waves`, `ww3_live`; plus `absorption.py` (site Francois–Garrison).
 
 Conventions: every fetcher shares the `(base_url, timeout, verbose)` trio,
 raises `DataFetchError`/`ConfigurationError` only, logs via `log_message`, and
@@ -512,7 +528,7 @@ Lint (CI parity — real-bug subset only):
 
 ```bash
 flake8 uacpy/ --exclude=uacpy/third_party,uacpy/uacpy/third_party \
-       --count --select=E9,F63,F7,F82 --show-source --statistics
+       --count --select=E9,F63,F7,F82,F401,F811 --show-source --statistics
 ```
 
 CI runs on Ubuntu + Python 3.12 + `--bellhop cxx --oases yes`. macOS,

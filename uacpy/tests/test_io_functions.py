@@ -910,3 +910,557 @@ class TestUserWorkDirIsNeverDestroyed:
         assert wd.exists()
         fm.cleanup_work_dir()
         assert not wd.exists(), "a uacpy-created temp dir must be removed whole"
+
+
+class TestBellhopWriterReflectionStaging:
+    """``write_bellhop_env_file``'s user-error contracts and its ``.brc``/``.trc``
+    staging, which has to tolerate a table already sitting beside the ``.env``."""
+
+    @staticmethod
+    def _sr():
+        source = uacpy.Source(frequencies=100, depths=25)
+        receiver = uacpy.Receiver(depths=np.array([50.0]),
+                                  ranges=np.linspace(100.0, 5000.0, 20))
+        return source, receiver
+
+    @staticmethod
+    def _brc(path):
+        from uacpy.io import write_reflection_coefficient
+        theta = np.linspace(0.0, 90.0, 91)
+        coeffs = np.column_stack([0.5 * np.ones(91), np.zeros(91)])
+        write_reflection_coefficient(path, theta, coeffs)
+        return path
+
+    @pytest.mark.parametrize('kwargs', [
+        {'interp_bathymetry': 'bogus'},
+        {'interp_altimetry': 'bogus'},
+    ])
+    def test_bad_geometry_interp_raises_configurationerror(self, tmp_path, kwargs):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver,
+                                   **kwargs)
+
+    def test_bottom_file_without_reflection_file_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(acoustic_type='file'))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+    def test_brc_already_beside_the_env_is_kept(self, tmp_path):
+        """A BOUNCE-produced ``run.brc`` in a pinned work_dir that Bellhop then
+        writes ``run.env`` into: source and destination are the same file."""
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        brc = self._brc(tmp_path / 'run.brc')
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(acoustic_type='file',
+                                            reflection_file=str(brc)))
+        source, receiver = self._sr()
+        write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+        assert brc.exists() and brc.stat().st_size > 0
+        assert "'F'" in (tmp_path / 'run.env').read_text()
+
+    def test_trc_already_beside_the_env_is_kept(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        trc = self._brc(tmp_path / 'run.trc')
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            surface=uacpy.BoundaryProperties(acoustic_type='file',
+                                             reflection_file=str(trc)))
+        source, receiver = self._sr()
+        write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+        assert trc.exists() and trc.stat().st_size > 0
+
+    def test_surface_file_without_reflection_file_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            surface=uacpy.BoundaryProperties(acoustic_type='file'))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+    def test_missing_reflection_file_raises_configurationerror(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='file',
+                reflection_file=str(tmp_path / 'nope.brc')))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='not found'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+
+class TestOASNWavenumberSampling:
+    """``nw_samples`` reaches every OASN integration block. The replica and
+    discrete-source wavenumber lines (``NWSIN``/``NWDIN``, unoasn22.f:227 and
+    oasnun22.f:291) are what OASN samples the field on."""
+
+    @staticmethod
+    def _env_src_rcv():
+        env = uacpy.Environment(name='oasn', bathymetry=100, ssp=1500)
+        source = uacpy.Source(frequencies=100, depths=50)
+        receiver = uacpy.Receiver(depths=np.array([30.0, 50.0, 70.0]),
+                                  ranges=np.array([0.0]))
+        return env, source, receiver
+
+    @staticmethod
+    def _write(tmp_path, **kwargs):
+        import warnings
+        from uacpy.io.oases_writer import write_oasn_input
+        env, source, receiver = TestOASNWavenumberSampling._env_src_rcv()
+        path = tmp_path / 'oasn.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            write_oasn_input(path, env, source, receiver, **kwargs)
+        return path.read_text().splitlines()
+
+    def test_replica_block_honours_nw_samples(self, tmp_path):
+        lines = self._write(tmp_path, options='N R J', nw_samples=512)
+        assert lines[-1].split() == ['512', '1', '512']
+
+    def test_replica_block_defaults_to_automatic(self, tmp_path):
+        lines = self._write(tmp_path, options='N R J', nw_samples=-1)
+        assert lines[-1].split()[0] == '-1'
+
+    def test_discrete_source_block_honours_nw_samples(self, tmp_path):
+        lines = self._write(
+            tmp_path, options='N J', nw_samples=256,
+            discrete_sources=[{'depth': 40.0, 'x': 1.0, 'y': 0.0,
+                               'level': 180.0}])
+        assert lines[-1].split() == ['256', '1', '256']
+
+
+class TestBathyIOTypedErrors:
+    """``bathy_io``'s failure typing: a malformed file is a parse error, a bad
+    user-supplied interpolation code is a configuration error."""
+
+    def test_read_boundary_3d_malformed_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.bathy_io import read_boundary_3d
+        from uacpy.core.exceptions import FileFormatError
+        bad = tmp_path / 'bad.bty'
+        bad.write_text("'R'\n2\n0.0 1.0\n2\n0.0 1.0\nqqq qqq\nqqq qqq\n")
+        with pytest.raises(FileFormatError):
+            read_boundary_3d(str(bad))
+
+    def test_read_boundary_3d_short_grid_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.bathy_io import read_boundary_3d
+        from uacpy.core.exceptions import FileFormatError
+        bad = tmp_path / 'short.bty'
+        bad.write_text("'R'\n3\n0.0 1.0 2.0\n2\n0.0 1.0\n1.0 2.0\n")
+        with pytest.raises(FileFormatError):
+            read_boundary_3d(str(bad))
+
+    @pytest.mark.parametrize('writer', ['bty', 'bty_long', 'ati', 'bty_3d'])
+    def test_bad_interp_type_raises_configurationerror(self, tmp_path, writer):
+        from uacpy.core.bottom import Bottom
+        from uacpy.io.bathy_io import (
+            write_bty_file, write_bty_long_format, write_ati_file, write_bty_3d)
+        pairs = np.array([[0.0, 100.0], [1000.0, 120.0]])
+        path = tmp_path / 'x.bty'
+        with pytest.raises(ConfigurationError):
+            if writer == 'bty':
+                write_bty_file(path, pairs, interp_type='bogus')
+            elif writer == 'ati':
+                write_ati_file(path, pairs, interp_type='bogus')
+            elif writer == 'bty_long':
+                rd = Bottom.from_halfspaces(
+                    np.array([0.0, 1000.0]),
+                    sound_speed=np.array([1600.0, 1700.0]),
+                    density=np.array([1.7, 1.9]),
+                    attenuation=np.array([0.4, 0.6]))
+                write_bty_long_format(path, pairs, rd, interp_type='bogus')
+            else:
+                write_bty_3d(path, np.array([0.0, 1.0]), np.array([0.0, 1.0]),
+                             np.zeros((2, 2)), interp_type='bogus')
+
+    def test_long_format_bty_round_trips_geoacoustics(self, tmp_path):
+        from uacpy.core.bottom import Bottom
+        from uacpy.io.bathy_io import write_bty_long_format, read_bathymetry
+        bathy = np.array([[0.0, 100.0], [5000.0, 150.0], [10000.0, 120.0]])
+        rd = Bottom.from_halfspaces(
+            np.array([0.0, 10000.0]),
+            sound_speed=np.array([1600.0, 1700.0]),
+            density=np.array([1.7, 1.9]),
+            attenuation=np.array([0.4, 0.6]))
+        path = tmp_path / 'long.bty'
+        write_bty_long_format(path, bathy, rd, interp_type='L')
+        bty, bty_type = read_bathymetry(path)
+        assert bty_type == 'L'
+        assert bty.shape[0] == 7, "long format must return the geoacoustic rows"
+        assert np.allclose(bty[2, 1:-1], [1600.0, 1650.0, 1700.0])
+        assert np.allclose(bty[4, 1:-1], [1.7, 1.8, 1.9])
+        assert np.allclose(bty[5, 1:-1], [0.4, 0.5, 0.6])
+        # ±infinity extension holds every row constant.
+        assert bty[0, 0] == -1e50 and bty[0, -1] == 1e50
+        assert bty[2, 0] == bty[2, 1] and bty[2, -1] == bty[2, -2]
+
+
+class TestReadVectorFortranSemantics:
+    """``read_vector`` mirrors AT's ``ReadVector`` + ``SubTab``
+    (SourceReceiverPositions.f90:221, subtabulate.f90)."""
+
+    @staticmethod
+    def _read(text):
+        import io as _io
+        from uacpy.io._fortran_helpers import read_vector
+        return read_vector(_io.StringIO(text))
+
+    def test_explicit_vector_wrapped_across_records(self):
+        """A list-directed READ continues across records until Nx values are
+        consumed; Fortran-written files wrap at the runtime column width."""
+        x, nx = self._read("5\n10.0 20.0 30.0\n40.0 50.0\n")
+        assert nx == 5
+        assert np.allclose(x, [10.0, 20.0, 30.0, 40.0, 50.0])
+
+    def test_replicate_idiom_does_not_warn(self):
+        """``write_fieldflp`` emits ``N`` / ``0.0 /`` for the Rro block."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            x, nx = self._read("9\n0.0 /\n")
+        assert nx == 9 and np.allclose(x, np.zeros(9))
+
+    def test_two_value_shorthand_is_equally_spaced(self):
+        x, _ = self._read("5\n0 1000 /\n")
+        assert np.allclose(x, [0.0, 250.0, 500.0, 750.0, 1000.0])
+
+    def test_truncated_record_raises_fileformaterror(self):
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError):
+            self._read("5\n10 20\n")
+
+    def test_ungeneratable_slash_record_raises_fileformaterror(self):
+        """3 values before the '/' — SubTab does not generate for this, and AT
+        leaves x(4:Nx) uninitialised."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError):
+            self._read("5\n10 20 30 /\n")
+
+
+class TestMultiProfileEnvKeepsLayerThickness:
+    """``write_multi_profile_env`` holds every profile to one total media depth.
+    That stretch must land on a transparent halfspace-property pad, never on a
+    real ``SedimentLayer`` whose thickness is physical."""
+
+    @staticmethod
+    def _segments():
+        from uacpy.core.bottom import (
+            SeabedColumn, SedimentLayer, BoundaryProperties)
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
+                                density=2.0, attenuation=0.5)
+        layers = [
+            SedimentLayer(thickness=5.0, sound_speed=1600, density=1.6,
+                          attenuation=0.2),
+            SedimentLayer(thickness=6.0, sound_speed=1650, density=1.8,
+                          attenuation=0.3),
+        ]
+        return [
+            (0.0, uacpy.Environment(name='deep', bathymetry=200.0, ssp=1500,
+                                    bottom=SeabedColumn(layers=[], halfspace=hs))),
+            (5000.0, uacpy.Environment(
+                name='mid', bathymetry=180.0, ssp=1500,
+                bottom=SeabedColumn(layers=layers[:1], halfspace=hs))),
+            (10000.0, uacpy.Environment(
+                name='shallow', bathymetry=150.0, ssp=1500,
+                bottom=SeabedColumn(layers=layers, halfspace=hs))),
+        ]
+
+    def test_shallow_segment_layers_keep_their_thickness(self, tmp_path):
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        env_file = tmp_path / 'multi.env'
+        source = uacpy.Source(frequencies=100, depths=50)
+        receiver = uacpy.Receiver(depths=np.linspace(10, 140, 14),
+                                  ranges=np.array([1000.0]))
+        write_multi_profile_env(env_file, self._segments(), source, receiver,
+                                n_mesh=500, rmax_m=20000.0)
+        text = env_file.read_text()
+        shallow = text[text.index("'shallow'"):]
+        # Media interfaces: 150 (seafloor) → 155 (5 m layer) → 161 (6 m layer).
+        assert '  150.0 1600.000000' in shallow
+        assert '  155.0 1600.000000' in shallow
+        assert '  155.0 1650.000000' in shallow
+        assert '  161.0 1650.000000' in shallow, \
+            "the 6 m sediment layer was stretched to the global max depth"
+        # The pad that absorbs the stretch carries halfspace properties.
+        assert '  161.0 1800.000000' in shallow
+
+    def test_every_profile_declares_the_same_nmedia_and_total_depth(self, tmp_path):
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        env_file = tmp_path / 'multi.env'
+        source = uacpy.Source(frequencies=100, depths=50)
+        receiver = uacpy.Receiver(depths=np.linspace(10, 140, 14),
+                                  ranges=np.array([1000.0]))
+        write_multi_profile_env(env_file, self._segments(), source, receiver,
+                                n_mesh=500, rmax_m=20000.0)
+        lines = env_file.read_text().splitlines()
+        n_media = [int(lines[i + 2]) for i, line in enumerate(lines)
+                   if line.startswith("'") and line.endswith("'")
+                   and line[1:-1] in ('deep', 'mid', 'shallow')]
+        assert len(n_media) == 3 and len(set(n_media)) == 1
+        halfspace_depths = [line.split()[0] for line in lines
+                            if line.startswith('  200.30')]
+        assert len(halfspace_depths) == 3
+
+
+class TestSSPRangeAxisPrecision:
+    """``write_ssp``'s range axis feeds Bellhop's Quad segment search, which
+    needs ``SSP%Seg%r`` strictly increasing (sspMod.f90)."""
+
+    def test_sub_metre_ranges_survive_the_round_trip(self, tmp_path):
+        from uacpy.io.oalib_writer import write_ssp
+        from uacpy.io.oalib_reader import read_ssp_2d
+        ranges = np.array([0.0, 0.4, 0.8, 1.2])
+        c = np.tile(np.array([[1500.0], [1490.0]]), (1, 4))
+        path = tmp_path / 'fine.ssp'
+        write_ssp(path, ranges, c)
+        r_back = np.asarray(read_ssp_2d(str(path))['r_prof'])
+        assert len(np.unique(r_back)) == 4, "range axis collapsed to duplicates"
+        assert np.allclose(r_back, ranges)
+
+    def test_single_profile_ssp_is_rejected(self, tmp_path):
+        from uacpy.io.oalib_writer import write_ssp
+        with pytest.raises(ConfigurationError, match='at least 2'):
+            write_ssp(tmp_path / 'one.ssp', np.array([0.0]),
+                      np.array([[1500.0], [1490.0]]))
+
+
+class TestFlpOptionValidation:
+    """``field.exe`` ERROUTs on an option character outside its alphabet
+    (field.f90:70-99); catch it before writing a deck that only fails inside
+    the Fortran run."""
+
+    @staticmethod
+    def _pos():
+        return {'s': {'z': np.array([50.0])},
+                'r': {'z': np.array([10.0, 20.0, 30.0]),
+                      'r': np.linspace(100.0, 1000.0, 5)}}
+
+    @pytest.mark.parametrize('option', ['ZC C', 'RCXC', 'RC X'])
+    def test_bad_option_raises_configurationerror(self, tmp_path, option):
+        from uacpy.io.oalib_writer import write_fieldflp
+        with pytest.raises(ConfigurationError, match='option position'):
+            write_fieldflp(tmp_path / 'bad.flp', option, self._pos())
+
+    @pytest.mark.parametrize('option', ['RC C', 'XA*I', 'SC C'])
+    def test_valid_options_are_accepted(self, tmp_path, option):
+        from uacpy.io.oalib_writer import write_fieldflp
+        write_fieldflp(tmp_path / 'good.flp', option, self._pos())
+        assert (tmp_path / 'good.flp').exists()
+
+    def test_bad_3d_evaluator_raises_configurationerror(self, tmp_path):
+        from uacpy.io.oalib_writer import write_field3dflp
+        pos = {'s': {'x': np.array([0.0]), 'y': np.array([0.0]),
+                     'z': np.array([50.0])},
+               'r': {'z': np.linspace(0, 100, 11),
+                     'r': np.linspace(0, 5000, 11),
+                     'theta': np.linspace(0, 350, 36)},
+               'Nsx': 1, 'Nsy': 1}
+        bathy = {'X': np.linspace(0, 10000, 4), 'Y': np.linspace(0, 10000, 3),
+                 'depth': 100 * np.ones((3, 4))}
+        with pytest.raises(ConfigurationError, match='evaluator'):
+            write_field3dflp(tmp_path / 'bad3d.flp', 'ZZZFM', pos, bathy)
+
+
+class TestShdReaderKeysAgree:
+    """``read_shd_bin`` and ``read_shd_asc`` describe the same payload, so a
+    caller switching between them must not have to remap keys."""
+
+    def test_ascii_reader_uses_the_binary_reader_keys(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_asc
+        p = tmp_path / 'tiny.shd.asc'
+        p.write_text(
+            "title\nrectilin\n1 1 1 1 2\n100.0 0.0\n100.0\n0.0\n50.0\n"
+            "10.0\n0.0\n1000.0\n1.0\n0.5\n2.0\n0.25\n"
+        )
+        out = read_shd_asc(p)
+        assert set(out) >= {'title', 'PlotType', 'freqVec', 'Pos', 'pressure'}
+        assert 'r' in out['Pos'] and 'z' in out['Pos']['r']
+
+
+class TestOASESWriterKnobsReachTheDeck:
+    """Every OASES writer takes ``**kwargs``, so a knob no block reads would be
+    dropped without a trace and the run would quietly use the default."""
+
+    @staticmethod
+    def _args():
+        env = uacpy.Environment(name='oases', bathymetry=100, ssp=1500)
+        source = uacpy.Source(frequencies=100, depths=50)
+        receiver = uacpy.Receiver(depths=np.array([30.0, 50.0, 70.0]),
+                                  ranges=np.linspace(100.0, 5000.0, 10))
+        return env, source, receiver
+
+    @pytest.mark.parametrize('writer_name,options,bad', [
+        ('write_oast_input', None, 'replica_nz'),
+        ('write_oasn_input', 'N J', 'vrec'),
+        ('write_oasn_input', 'N J', 'plot_rmax'),
+        ('write_oasp_input', None, 'nw_sample'),
+        ('write_oasr_input', None, 'nw_samples'),
+    ])
+    def test_unread_parameter_raises(self, tmp_path, writer_name, options, bad):
+        import warnings
+        from uacpy.io import oases_writer
+        writer = getattr(oases_writer, writer_name)
+        env, source, receiver = self._args()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with pytest.raises(ConfigurationError, match='not read by this deck'):
+                writer(tmp_path / 'x.dat', env, source, receiver,
+                       options=options, **{bad: 1.0})
+
+    def test_documented_knobs_are_accepted(self, tmp_path):
+        import warnings
+        from uacpy.io.oases_writer import write_oasn_input
+        env, source, receiver = self._args()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            write_oasn_input(tmp_path / 'ok.dat', env, source, receiver,
+                             options='N R J', nw_samples=256, c_low=1400.0,
+                             c_high=1.0e8, replica_nz=8, integration_offset=0.0)
+        assert (tmp_path / 'ok.dat').exists()
+
+
+class TestSourceBeamPatternRoundTrip:
+    """``.sbp`` levels are dB on disk (``beampattern.f90:59`` converts to a
+    linear amplitude only after reading), and dB is what
+    :attr:`uacpy.Source.beam_pattern` carries."""
+
+    def test_write_then_read_returns_the_written_db(self, tmp_path):
+        from uacpy.io.refl_io import (
+            read_source_beam_pattern, write_source_beam_pattern)
+        angles = np.array([-90.0, -30.0, 0.0, 30.0, 90.0])
+        levels = np.array([-20.0, -6.0, 0.0, -6.0, -20.0])
+        path = tmp_path / 'beam.sbp'
+        write_source_beam_pattern(path, angles, levels)
+        back = read_source_beam_pattern(path, sbp_option='*')
+        assert np.allclose(back[:, 0], angles)
+        assert np.allclose(back[:, 1], levels)
+
+    def test_omni_default_is_zero_db(self):
+        from uacpy.io.refl_io import read_source_beam_pattern
+        back = read_source_beam_pattern('unused', sbp_option='O')
+        assert np.allclose(back[:, 1], 0.0)
+
+    def test_root_name_without_extension_resolves(self, tmp_path):
+        from uacpy.io.refl_io import (
+            read_source_beam_pattern, write_source_beam_pattern)
+        write_source_beam_pattern(tmp_path / 'beam.sbp', np.array([0.0]),
+                                  np.array([-3.0]))
+        back = read_source_beam_pattern(tmp_path / 'beam', sbp_option='*')
+        assert np.allclose(back[:, 1], [-3.0])
+
+
+class TestBinaryArrivalsRejected:
+    """``read_arr_file`` only parses the ASCII ``.arr``; the binary layout
+    (RunType 'a') is a configuration error, not a parse error."""
+
+    def test_binary_arrivals_raises_configurationerror(self, tmp_path):
+        from uacpy.io.oalib_reader import read_arr_file
+        p = tmp_path / 'run.arr'
+        p.write_bytes(b'\x04\x00\x00\x00' + b'\x00' * 32)
+        with pytest.raises(ConfigurationError, match="RunType 'A'"):
+            read_arr_file(p)
+
+
+class TestOASNNoiseWavenumberCounts:
+    """The surface- and deep-noise blocks have no automatic-sampling branch:
+    ``NOIPAR`` reads three explicit counts and sums them into ``NWVNON`` /
+    ``NWVNOP`` (oasnun22.f:312, :359). A negative count makes that total
+    negative and the block integrates nothing — the covariance silently
+    collapses to the white-noise identity."""
+
+    @staticmethod
+    def _last_line(tmp_path, **kwargs):
+        import warnings
+        from uacpy.io.oases_writer import write_oasn_input
+        env = uacpy.Environment(name='oasn', bathymetry=100, ssp=1500)
+        source = uacpy.Source(frequencies=100, depths=50)
+        receiver = uacpy.Receiver(depths=np.array([30.0, 50.0, 70.0]),
+                                  ranges=np.array([0.0]))
+        path = tmp_path / 'oasn.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            write_oasn_input(path, env, source, receiver, options='N J',
+                             **kwargs)
+        return path.read_text().splitlines()[-1]
+
+    @pytest.mark.parametrize('block', [
+        {'surface_noise_level': 70.0},
+        {'deep_noise_level': 70.0},
+    ])
+    @pytest.mark.parametrize('nw', [-1, 0, None])
+    def test_automatic_falls_back_to_positive_counts(self, tmp_path, block, nw):
+        counts = [int(v) for v in
+                  self._last_line(tmp_path, nw_samples=nw, **block).split()]
+        assert len(counts) == 3
+        assert sum(counts) > 0, "a non-positive total integrates nothing"
+
+    @pytest.mark.parametrize('block', [
+        {'surface_noise_level': 70.0},
+        {'deep_noise_level': 70.0},
+    ])
+    def test_pinned_count_reaches_the_block(self, tmp_path, block):
+        line = self._last_line(tmp_path, nw_samples=800, **block)
+        assert line.split()[:2] == ['800', '800']
+
+
+class TestAltimetryLongFormat:
+    """``ReadATI`` accepts the same long format as ``ReadBTY``
+    (``bdryMod.f90:80-110``), so ``read_altimetry`` must not truncate a
+    ``TYPE(2:2) == 'L'`` ``.ati`` to two columns."""
+
+    LONG_ATI = (
+        "'LL'\n3\n"
+        "0.000000 0.000000 3500.000 1800.000 0.900 0.100000 0.200000\n"
+        "2.500000 2.000000 3400.000 1750.000 0.910 0.110000 0.210000\n"
+        "5.000000 0.000000 3300.000 1700.000 0.920 0.120000 0.220000\n"
+    )
+
+    def test_long_format_returns_the_geoacoustic_rows(self, tmp_path):
+        from uacpy.io.bathy_io import read_altimetry
+        p = tmp_path / 'ice.ati'
+        p.write_text(self.LONG_ATI)
+        ati, ati_type = read_altimetry(p)
+        assert ati_type == 'L'
+        assert ati.shape == (7, 5)
+        assert np.allclose(ati[0, 1:-1], [0.0, 2500.0, 5000.0]), "km -> m"
+        assert np.allclose(ati[2, 1:-1], [3500.0, 3400.0, 3300.0])
+        assert np.allclose(ati[3, 1:-1], [1800.0, 1750.0, 1700.0])
+        assert np.allclose(ati[4, 1:-1], [0.9, 0.91, 0.92])
+        assert ati[0, 0] == -1e50 and ati[0, -1] == 1e50
+
+    def test_short_format_still_two_rows(self, tmp_path):
+        from uacpy.io.bathy_io import read_altimetry, write_ati_file
+        pairs = np.array([[0.0, 0.0], [2500.0, 2.0], [5000.0, 0.0]])
+        p = tmp_path / 'flat.ati'
+        write_ati_file(p, pairs, interp_type='C')
+        ati, ati_type = read_altimetry(p)
+        assert ati_type == 'C'
+        assert ati.shape == (2, 5)
+        assert np.allclose(ati[0, 1:-1], pairs[:, 0])
+        assert np.allclose(ati[1, 1:-1], pairs[:, 1])
+
+    def test_short_row_in_a_long_file_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.bathy_io import read_altimetry
+        from uacpy.core.exceptions import FileFormatError
+        p = tmp_path / 'bad.ati'
+        p.write_text("'LL'\n1\n0.0 0.0 3500.0\n")
+        with pytest.raises(FileFormatError, match='columns'):
+            read_altimetry(p)
+
+    def test_unknown_interp_type_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.bathy_io import read_altimetry
+        from uacpy.core.exceptions import FileFormatError
+        p = tmp_path / 'bad.ati'
+        p.write_text("'ZS'\n1\n0.0 0.0\n")
+        with pytest.raises(FileFormatError, match='altimetry type'):
+            read_altimetry(p)

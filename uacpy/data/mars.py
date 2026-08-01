@@ -3,8 +3,9 @@
 The Australian counterpart of :mod:`uacpy.data.seabed` (EMODnet, European
 seas): Geoscience Australia's Marine Sediments (MARS) database serves ~100k
 quality-controlled seabed samples through a public no-auth WFS. Coverage is the
-Australian margin; outside it the fetch raises ``DataFetchError`` and the
-``'auto'`` bottom chain falls through.
+Australian margin; a point outside :data:`_COVERAGE_BOX` raises
+``DataFetchError`` without issuing a request, so the ``'auto'`` bottom chain
+falls through for free.
 
 Each sample is converted to a mean grain size (ϕ) by the first usable of:
 
@@ -45,6 +46,13 @@ DEFAULT_MAX_DISTANCE_KM = 100.0
 # small box; the final rung is max_distance_km itself.
 _SEARCH_RADII_KM = (10.0, 30.0)
 _MAX_FEATURES = 2000
+#: ``(lat_min, lat_max, lon_min, lon_max)`` enclosing Australia's marine
+#: jurisdiction (mainland margin, the Indian/Southern Ocean external
+#: territories and the Australian Antarctic Territory). Deliberately far wider
+#: than the sampled area: it exists only so a point on another ocean's shelf
+#: fails without a request, which matters because MARS sits in the ``'auto'``
+#: bottom chain and its search is a three-rung radius ladder.
+_COVERAGE_BOX = (-90.0, 0.0, 40.0, 180.0)
 
 # Representative ϕ per end-member fraction (matches the DECK41 lithology map).
 _GRAVEL_PHI, _SAND_PHI, _MUD_PHI = -2.0, 1.5, 7.5
@@ -80,6 +88,26 @@ def _phi_from_properties(p: Dict) -> Optional[Dict]:
     if folk in _FOLK_TO_PHI:
         return {'phi': _FOLK_TO_PHI[folk], 'via': 'folk_class'}
     return None
+
+
+def _require_coverage(lat, lon, max_distance_km):
+    """Raise ``DataFetchError`` for a point outside :data:`_COVERAGE_BOX`.
+
+    The box is padded by ``max_distance_km`` so the guard can never reject a
+    point whose nearest admissible sample could lie inside it.
+    """
+    lat_min, lat_max, lon_min, lon_max = _COVERAGE_BOX
+    pad = float(max_distance_km) / 111.0
+    lon = normalize_lon(lon)
+    if (lat_min - pad <= lat <= lat_max + pad
+            and lon_min - pad <= lon <= lon_max + pad):
+        return
+    raise DataFetchError(
+        f"AusSeabed MARS does not cover {lat:.3f}, {lon:.3f} (coverage is the "
+        "Australian margin).",
+        remediation="Pick a covered point, use another bottom source, or let "
+                    "the 'auto' bottom chain fall through.",
+    )
 
 
 def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
@@ -135,6 +163,7 @@ def fetch_mars_sediment(
         (coverage is the Australian margin).
     """
     lat, lon = as_coordinate(point)
+    _require_coverage(lat, lon, max_distance_km)
     radii = [r for r in _SEARCH_RADII_KM if r < max_distance_km]
     radii.append(max_distance_km)
     best = None
@@ -212,7 +241,8 @@ def fetch_bottom_mars_transect(
 ) -> Bottom:
     """Range-dependent bottom from MARS samples along ``start`` → ``end``.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
+    so each column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_mars(

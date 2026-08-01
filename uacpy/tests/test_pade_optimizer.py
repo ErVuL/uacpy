@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from uacpy.models._pade_optimizer import (
+    grid_error,
     optimal_c0,
     pade_error,
     numerov_error,
@@ -130,6 +131,39 @@ class TestOptimizeGrid:
                 c0=1500.0, theta_max=60.0, eps=1e-12, p=2,
                 alpha=0.0,
             )
+
+    def test_floor_above_ceiling_blames_the_ceiling(self):
+        """An empty Δz ladder is a bounds error, not an accuracy failure —
+        reachable with a fast-shear rams seabed (cs=1500 m/s at 50 Hz →
+        floor 16.5 m against the default 5 m ceiling)."""
+        with pytest.raises(ValueError, match="dz_ceiling"):
+            optimize_grid(
+                freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+                c0=1600.0, theta_max=30.0, eps=1e-3, p=6,
+                dz_floor=16.5,
+            )
+
+
+class TestGridError:
+    """``grid_error`` describes any grid, including one the optimiser did
+    not choose — the adjustments RAM applies afterwards (stability floors,
+    array caps, seafloor snapping) leave ``predicted_error`` stale."""
+
+    _KW = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+               c0=1600.0, theta_max=30.0, p=6)
+
+    def test_reproduces_the_optimizers_own_number(self):
+        res = optimize_grid(eps=1e-3, **self._KW)
+        assert grid_error(dr=res['dr'], dz=res['dz'], **self._KW) == \
+            pytest.approx(res['predicted_error'], rel=1e-12)
+
+    def test_reports_the_floor_raised_grid_honestly(self):
+        """Raising dz to the rams shear floor costs orders of magnitude."""
+        res = optimize_grid(eps=1e-3, **self._KW)
+        floor = rams_dz_floor(c_shear_min=400.0, freq=50.0)
+        shipped = grid_error(dr=res['dr'], dz=floor, **self._KW)
+        assert floor > res['dz']
+        assert shipped > 1000.0 * res['predicted_error']
 
 
 class TestRamsDzFloor:

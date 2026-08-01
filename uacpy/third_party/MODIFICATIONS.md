@@ -8,8 +8,8 @@ code shipped with uacpy, with exact diffs.
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
 Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
-`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). One source
-patch is applied:
+`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). Two source
+patches are applied:
 
 ### `KrakenField/field.f90` -- out-of-bounds sentinel fix
 
@@ -216,16 +216,22 @@ Same shape as `ramsurf1.5.f` — open unit 11 in the main, mirror `lz`
 header into it, declare a local complex `urg(mz)` in `outpt`, store
 `ur/sqrt(r+eps)`, write the array per range step, close unit 11.
 
-The driver `uacpy.models.ram._run_collins_broadband` consumes
-`pcomplex.bin` via `read_pcomplex_grid` and assembles
-`Field(field_type='transfer_function')` by looping the binary over the
-Q/T-derived frequency vector. The complex envelope is bit-exact w.r.t.
-the existing `tl.grid` magnitude (`-20·log10(|pcomplex|)` reproduces
-`tl.grid` to 0.0000 dB on a Pekeris reference run).
+Both Collins drivers consume `pcomplex.bin` via `read_pcomplex_grid`:
+`uacpy.models.ram.RAM._run_collins` for narrowband `COHERENT_TL`, and
+`RAM._run_collins_broadband` for `BROADBAND` / `TIME_SERIES`, which loops
+the binary over the Q/T-derived frequency vector and assembles a
+broadband `Field` (complex `data` over `coords={depth, range,
+frequency}`, so `.kind == 'transfer_function'`). Every Collins-backend
+run returns complex pressure, so a binary built from unpatched sources
+does not degrade to real TL — it fails outright, with the wrapper
+naming `pcomplex.bin` and telling the user to rebuild. The complex
+envelope is bit-exact w.r.t. the existing `tl.grid` magnitude
+(`-20·log10(|pcomplex|)` reproduces `tl.grid` to 0.0000 dB on a Pekeris
+reference run).
 
 `rams0.5.f` and `ramsurf1.5.f` store *different* envelopes despite the
 identical-looking `outpt` patch: rams0.5's `solve(... g0)` multiplies
-the field by `g0 = exp(i k₀ Δr)` at every range step (`rams0.5.f:830-831`),
+the field by `g0 = exp(i k₀ Δr)` at every range step (`rams0.5.f:849-850`),
 so its `u` accumulates the full `exp(+i k₀ r)` carrier — same
 convention as mpiramS' `psif`. ramsurf1.5's `solve` has no `g0`
 argument (`ramsurf1.5.f:310`); the carrier is absorbed into the
@@ -241,6 +247,28 @@ engineering travelling-wave convention.
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
 waveguide modal dispersion ~20 ms).
+
+### `ramsurf1.5.f` — enlarged array dimensions
+
+Stock dimensions are too small for uacpy's fine Lytaev range/depth grids — the
+same problem the ramgeo section describes, and `ramsurf1.5.f` is the file
+ramgeo's enlargement was matched *to*. The declaration now reads:
+
+```fortran
+      parameter (mr=505,mz=20002,mp=10)   ! ramsurf1.5.f:24
+```
+
+giving a usable depth grid of `nz ≤ 20000` (the code indexes to `nz+2`, as the
+other fluid backends do). The stock depth dimension is `mz=8000`, still visible
+on `ram1.5.f:53` — Collins's original fluid PE, vendored alongside as an
+unbuilt reference.
+
+Upstream's own bounds checks (`Need to increase parameter …`,
+`ramsurf1.5.f:124-132`) are left as they are: their conditions are written
+against `nz+2` / `np` / `i`, so they keep working at the larger dimensions and
+still stop the run rather than overrun. `uacpy.models.ram._COLLINS_ARRAY_LIMITS`
+carries the matching per-backend limit and `tests/test_ram_backends.py` asserts
+the two agree by parsing these guard expressions out of the source.
 
 ### `rams0.5.f` — enlarged array dimensions and bounds checks
 
@@ -350,8 +378,9 @@ envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
 `tl.grid`'s record geometry — **the identical envelope and convention as
 `ramsurf1.5.f`** (carrier `exp(+i k0 r)` factored out; the Python wrapper
 applies the same `'ramsurf'` correction in `psi_to_travelling_wave`). This
-is what lets a forced `RAM(backend='ramgeo')` serve `BROADBAND` /
-`TIME_SERIES`, not just `COHERENT_TL`.
+is what lets `RAM(backend='ramgeo')` return complex pressure for
+`COHERENT_TL` and serve `BROADBAND` / `TIME_SERIES` — every mode reads
+`pcomplex.bin`, so an unpatched binary fails all three.
 
 ```diff
        open(unit=3,status='unknown',file='tl.grid',form='unformatted')
@@ -1201,67 +1230,3 @@ modified version wraps it in `if (iflat==1)`.
 +    deallocate(eps)
 +  end if
 ```
-
----
-
-## Wrapper-only patches (no vendored-source change) — 2026-05-08
-
-The following landed in this session as compensations on the Python
-wrapper side; the Fortran/C in `third_party/` was unchanged. Logged
-here so the lineage is in one place.
-
-### mpiramS dz floor (λ_p / 16) — runtime cap
-
-`models/ram.py:_compute_grid_lytaev` now applies the same `λ_p / 16`
-acoustic dz floor to mpiramS that already gated rams0.5 / ramsurf1.5.
-Unlike the Collins backends, mpiramS is numerically stable at any dz
-— the floor is a *runtime cost* cap, not a stability constraint.
-Lytaev's accuracy budget at default ε=1e-3 can demand dz ≈ λ_p/444 at
-100 Hz / 100 m / 5 km, which makes mpiramS unusably slow on small
-problems (>30 min wall-clock).
-
-- `models/ram.py:1712-1716` — `kind in ('mpiramS', 'rams', 'ramsurf')`
-- `models/ram.py:1836-1841` — warning string differentiates the
-  reason: `mpiramS runtime cap (λ_p / 16)` vs `acoustic stability
-  (λ_p / 16)` for Collins backends. The accuracy budget is no longer
-  honoured; users override via `dr=`/`dz=` for accuracy-sensitive runs.
-
-### `RAM(Q, T)` constructor defaults None → resolve-by-mode
-
-`models/ram.py` — `Q` and `T` now default to `None` on the
-constructor. The single-frequency TL path (`_run_tl`) resolves the
-sentinel to `Q=1e6, T=1.0` (single-bin, narrowband); the broadband
-paths (`_compute_qt_for_broadband`, `_run_broadband`) resolve to
-`Q=2.0, T=10.0`. Restores the documented "Ignored in COHERENT_TL mode
-(set internally to large value)" behaviour that had drifted away from
-the docstring. Hardcoded `Q=2.0, T=10.0` had silently forced mpiramS
-to sweep ~500 frequencies per COHERENT_TL call.
-
-- `models/ram.py:200-201` — constructor `Q=None, T=None`
-- `models/ram.py:1947-2002` — `_run_tl` resolves to (1e6, 1.0)
-- `models/ram.py:2180-2202` — broadband resolves to (2.0, 10.0)
-
-### Scooter BRC RMax — wrapper bug fix
-
-`models/scooter.py:_write_scooter_env` derives Scooter's spectral
-RMax from `receiver.ranges.max() * rmax_multiplier` for all bottom
-types, matching `ReadEnvironmentMod.f90:133-140`. Scooter's RMax
-sets the wavenumber-integration grid via `Δk = π / RMax`, so the
-value must reflect the receiver geometry, not any tabulation-side
-parameter.
-
-For `acoustic_type='file'` bottoms, the phase-velocity window
-(`c_low`, `c_high`) is set on the consuming model
-(`Scooter(c_low=…, c_high=…)`); it is independent of the BRC
-tabulation grid.
-
-- `models/scooter.py` — unconditional spectral RMax derivation
-- `tests/test_elastic_boundaries.py` — regression test gating this
-
-### `output_reader.py` shim removed
-
-`io/output_reader.py` was a backward-compat shim re-exporting symbols
-from `oalib_reader` / `modes_reader` / the auxiliary boundary I/O
-modules. Removed; four model wrappers (`bellhop.py`, `kraken.py`,
-`scooter.py`, `bounce.py`) now import directly from the topic modules
-(`oalib_reader`, `modes_reader`, `bathy_io`, `refl_io`).

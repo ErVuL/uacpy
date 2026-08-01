@@ -147,3 +147,58 @@ def test_range_dependent_bottom_preserves_roughness():
         lambda la, lo: bp, (0.0, 0.0), (0.0, 0.1), 4, source_label='test')
     for col in bottom.columns:
         assert col.halfspace.roughness == pytest.approx(0.3)
+
+
+def _phi_bottom(phi, water_sound_speed):
+    def point_bottom(lat, lon):
+        return sediment.bottom_from_grain_size(
+            phi(lat) if callable(phi) else phi,
+            water_sound_speed=sediment.water_sound_speed_at(
+                water_sound_speed, lat, lon))
+    return point_bottom
+
+
+@pytest.mark.parametrize('water_sound_speed', [
+    None,
+    1500.0,
+    lambda la, lo: 1500.0,
+    lambda la, lo: 1480.0 + 40.0 * (la - 40.0),     # varies along the transect
+])
+def test_auto_collapses_uniform_seabed_under_varying_water_speed(
+        water_sound_speed):
+    """'auto' collapses a uniform seabed to one column whatever the water does.
+
+    The grain-size geoacoustics are a ratio against the overlying water, so a
+    range-dependent ``water_sound_speed`` callable makes every probe point's
+    sound speed distinct. The collapse keys on the sediment (ϕ), not on that.
+    """
+    bottom = sediment.range_dependent_bottom_along(
+        _phi_bottom(5.0, water_sound_speed), (40.0, -30.0), (41.0, -30.0),
+        'auto', source_label='test', max_points=200)
+    assert len(bottom.columns) == 1
+
+
+def test_auto_still_splits_on_a_real_sediment_change():
+    """The collapse must not merge distinct sediments (ϕ 3 → ϕ 7)."""
+    bottom = sediment.range_dependent_bottom_along(
+        _phi_bottom(lambda la: 3.0 if la < 40.5 else 7.0,
+                    lambda la, lo: 1480.0 + 40.0 * (la - 40.0)),
+        (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
+        max_points=200)
+    assert len(bottom.columns) == 2
+    assert (bottom.columns[0].halfspace.sound_speed
+            > bottom.columns[1].halfspace.sound_speed)
+
+
+def test_auto_keys_on_geoacoustics_without_a_grain_size():
+    """Sources reporting no ϕ (absolute crustal properties) key on the tuple."""
+    def crustal(lat, lon):
+        return BoundaryProperties(
+            acoustic_type='half-space',
+            sound_speed=1600.0 if lat < 40.5 else 2200.0,
+            density=2.0, attenuation=0.2)
+
+    bottom = sediment.range_dependent_bottom_along(
+        crustal, (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
+        max_points=200)
+    assert [c.halfspace.sound_speed for c in bottom.columns] == [1600.0, 2200.0]

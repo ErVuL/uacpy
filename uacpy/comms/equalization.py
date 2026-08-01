@@ -22,7 +22,7 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 
-def _slicer(x, constellation):
+def slicer(x, constellation):
     """Nearest constellation point(s) to ``x``."""
     c = np.asarray(constellation, dtype=complex)
     x = np.atleast_1d(np.asarray(x, dtype=complex))
@@ -46,8 +46,14 @@ def mmse_equalizer(rx, h, snr_linear):
     block (Wiener) solution with no per-symbol learning curve.
     """
     r = np.asarray(rx, dtype=complex)
+    snr = float(snr_linear)
+    if not snr > 0.0:
+        raise ConfigurationError(
+            f"mmse_equalizer: snr_linear must be > 0 (linear power ratio, not "
+            f"dB); got {snr_linear!r}. A non-positive value makes the Wiener "
+            "regularizer 1/snr zero or negative, which un-damps the inverse.")
     H = np.fft.fft(np.asarray(h, dtype=complex), r.size)
-    W = np.conj(H) / (np.abs(H) ** 2 + 1.0 / float(snr_linear))
+    W = np.conj(H) / (np.abs(H) ** 2 + 1.0 / snr)
     return np.fft.ifft(np.fft.fft(r) * W)
 
 
@@ -133,7 +139,7 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
         # the de-rotated constellation domain (Stojanovic-Proakis 1994).
         ur = np.concatenate([uff * np.exp(-1j * theta), ufb])
         d_hat = np.vdot(w, ur)               # w^H u
-        d = train[k] if k < ntrain else _slicer(d_hat, c)[0]
+        d = train[k] if k < ntrain else slicer(d_hat, c)[0]
         e = d - d_hat
         mse[k] = abs(e) ** 2
         if use_rls:

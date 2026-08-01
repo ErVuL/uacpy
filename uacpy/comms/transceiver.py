@@ -30,10 +30,10 @@ import numpy as np
 
 from uacpy.comms.coding import ConvCode
 from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
-from uacpy.comms.equalization import DFE, _slicer
+from uacpy.comms.equalization import DFE, slicer
 from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (
-    _ofdm_symbol,
+    ofdm_symbol,
     apply_cfo,
     estimate_channel,
     schmidl_cox_preamble,
@@ -200,9 +200,9 @@ class OFDMTransmitter:
         nsc = self.n_subcarriers
         if sym.size % nsc:
             sym = np.concatenate([sym, np.zeros(nsc - sym.size % nsc, dtype=complex)])
-        data = [_ofdm_symbol(sym[i:i + nsc], nsc, self.cp_len)
+        data = [ofdm_symbol(sym[i:i + nsc], nsc, self.cp_len)
                 for i in range(0, sym.size, nsc)]
-        pilot = _ofdm_symbol(self.pilot_freq, nsc, self.cp_len)
+        pilot = ofdm_symbol(self.pilot_freq, nsc, self.cp_len)
         guard = np.zeros(nsc + self.cp_len, dtype=complex)   # protects the last block
         return np.concatenate([self.preamble, pilot] + data + [guard])
 
@@ -277,7 +277,7 @@ class OFDMReceiver:
         for b in range(2, nblocks):
             d = self._equalize(block_spectrum(b), h)
             # decision-directed common-phase-error correction (residual CFO drift)
-            dec = _slicer(d, c)
+            dec = slicer(d, c)
             d *= np.exp(-1j * np.angle(np.vdot(dec, d)))
             data.append(d)
         syms = np.concatenate(data) if data else np.array([], dtype=complex)

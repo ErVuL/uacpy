@@ -1,6 +1,5 @@
 """Sound-speed-profile shape carrier and the rough sea-surface generator.
-Split out of :mod:`uacpy.core.environment`; re-exported from there for stable
-import paths.
+Re-exported from :mod:`uacpy.core.environment` for stable import paths.
 """
 
 import copy as _copy
@@ -160,6 +159,9 @@ class SoundSpeedProfile:
         fabricates** a value (the grid-library invariant shared with
         ``Field.at`` et al.). For interpolated evaluation use :meth:`eval`;
         for an integer-index slice use :meth:`isel`.
+
+        On a range-dependent profile a depth-only slice is ambiguous and
+        raises: pin the range too, or :meth:`collapse` the range axis first.
         """
         return self._slice(depth=depth, range=range, interp='nearest')
 
@@ -172,15 +174,33 @@ class SoundSpeedProfile:
         ``method`` is the interpolation scheme — ``'linear'`` (default),
         ``'nearest'``, or ``'cubic'`` — with constant extrapolation outside
         ``[ranges[0], ranges[-1]]``. The interpolating counterpart of
-        :meth:`at` (which is always nearest).
+        :meth:`at` (which is always nearest), and subject to the same
+        pin-the-range rule on a range-dependent profile.
         """
         return self._slice(depth=depth, range=range, interp=method)
+
+    def _require_pinned_range(self, caller: str) -> None:
+        """Guard a depth-only slice of a range-dependent profile.
+
+        Silently returning the r = 0 column would be wrong physics on exactly
+        the profiles the 2-D carrier exists for, so the caller must pin the
+        range or collapse the axis.
+        """
+        if self.is_range_dependent:
+            raise ConfigurationError(
+                f"SoundSpeedProfile.{caller}: a depth-only slice of a "
+                f"range-dependent profile is ambiguous ({self.n_ranges} range "
+                f"columns). Pin the range too ({caller}(depth=…, range=…)) or "
+                f"collapse the range axis first (collapse('r0'|'mean'|…))."
+            )
 
     def isel(
         self, *, depth: Optional[int] = None, range: Optional[int] = None,
     ) -> 'SoundSpeedProfile':
         """Integer-index slice on the depth and/or range axis — the positional
-        counterpart of :meth:`at`."""
+        counterpart of :meth:`at`, subject to the same pin-the-range rule."""
+        if depth is not None and range is None:
+            self._require_pinned_range('isel')
         sliced = self
         if range is not None:
             ridx = int(range)
@@ -207,7 +227,13 @@ class SoundSpeedProfile:
     def _slice(
         self, *, depth: Optional[float], range: Optional[float], interp: str,
     ) -> 'SoundSpeedProfile':
-        from uacpy.core._grid import collapse_axis
+        from uacpy.core._grid import collapse_axis, INTERP_METHODS
+        if interp not in INTERP_METHODS:
+            raise ConfigurationError(
+                f"SoundSpeedProfile: interpolation method must be one of "
+                f"{INTERP_METHODS}; got {interp!r}")
+        if depth is not None and range is None:
+            self._require_pinned_range('at' if interp == 'nearest' else 'eval')
         data = self.data
         if range is not None:
             if not self.is_range_dependent:

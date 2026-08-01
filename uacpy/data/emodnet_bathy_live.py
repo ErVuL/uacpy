@@ -18,8 +18,10 @@ import urllib.parse
 import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._http import http_get
+from uacpy.data._geo import (
+    as_coordinate, nearest_indices, normalize_lon,
+)
+from uacpy.data._http import erddap_last_value, http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid', 'ERDDAP_URL',
            'DATASETS']
@@ -50,22 +52,7 @@ def _elevation(lat, lon, dataset, *, timeout, verbose):
     url = _griddap_url(dataset, f"[({lat})][({normalize_lon(lon)})]")
     body = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return _parse_point_csv(body)
-
-
-def _parse_point_csv(body):
-    """Last elevation value from an ERDDAP griddap ``.csv`` point response.
-
-    The body is ``latitude,longitude,elevation`` then a units row then one data
-    row; return the elevation, or ``NaN`` if it is missing / ``NaN``.
-    """
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
+    return erddap_last_value(body)
 
 
 def _elevation_any(lat, lon, *, timeout, verbose):
@@ -130,8 +117,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
 
     lats = np.linspace(la0, la1, n_lat)
     lons = np.linspace(lo0, lo1, n_lon)
-    ri = _nearest_indices(glat, lats)
-    ci = _nearest_indices(glon, lons)
+    ri = nearest_indices(glat, lats)
+    ci = nearest_indices(glon, lons)
     block = gz[np.ix_(ri, ci)]
     depth = np.where(block < 0.0, -block, np.nan)
     return lats, lons, depth
@@ -198,16 +185,3 @@ def _parse_grid_csv(body):
     for la, lo, elev in lat_lon_z:
         z[lat_idx[la], lon_idx[lo]] = elev
     return lats, lons, z
-
-
-def _nearest_indices(axis, queries):
-    """Nearest-node index into ``axis`` for each query, any axis orientation."""
-    axis = np.asarray(axis, dtype=float)
-    order = np.argsort(axis)
-    sorted_axis = axis[order]
-    pos = np.searchsorted(sorted_axis, queries)
-    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
-    hi = np.clip(pos, 0, sorted_axis.size - 1)
-    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
-    nearest_sorted = np.where(pick_hi, hi, lo)
-    return order[nearest_sorted]

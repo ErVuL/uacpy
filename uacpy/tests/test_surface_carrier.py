@@ -159,3 +159,61 @@ class TestSurfaceValidation:
                                                         density=0.9, shear_speed=1800.0))])
         with pytest.raises(ConfigurationError, match="single boundary type"):
             s.collapse('mean')
+
+
+class TestRangeAxisFiniteness:
+    """Every range axis goes through the shared ``_require_non_negative``
+    validator, which checks finiteness first — ``+inf`` passes a bare
+    ``< 0`` test and a strictly-increasing check, and NaN passes both."""
+
+    @pytest.mark.parametrize('bad', [np.inf, np.nan])
+    def test_surface_ranges_reject_non_finite(self, bad):
+        with pytest.raises(ConfigurationError, match='finite'):
+            Surface(properties=[BoundaryProperties(), BoundaryProperties()],
+                    ranges=[0.0, bad])
+
+    def test_surface_ranges_reject_negative(self):
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            Surface(properties=[BoundaryProperties(), BoundaryProperties()],
+                    ranges=[-1.0, 5.0])
+
+
+class TestAltimetryProvenance:
+    """``Altimetry`` carries ``data_sources`` like every other shape carrier,
+    so a fetched sea surface keeps the date/coords the fetcher returned."""
+
+    @staticmethod
+    def _record():
+        from uacpy.data.sources import DataProvenance, DataSource
+        return DataProvenance(source=DataSource(
+            id='test-altimetry', name='Test', used_for='altimetry',
+            license='x', attribution='x', citation='x', url='x',
+            commercial_use=True))
+
+    def test_altimetry_carries_data_sources(self):
+        alt = Altimetry(ranges=[0.0, 100.0], heights=[0.1, -0.2],
+                        data_sources=(self._record(),))
+        assert [r.source.id for r in alt.data_sources] == ['test-altimetry']
+
+    def test_env_aggregates_altimetry_provenance(self):
+        import uacpy
+        alt = Altimetry(ranges=[0.0, 100.0], heights=[0.1, -0.2],
+                        data_sources=(self._record(),))
+        env = uacpy.Environment(name='t', bathymetry=100.0, ssp=1500.0,
+                                altimetry=alt)
+        assert [r.source.id for r in env.data_sources] == ['test-altimetry']
+
+    def test_altimetry_rejects_bare_data_source(self):
+        from uacpy.data.sources import DataSource
+        bare = DataSource(id='x', name='x', used_for='x', license='x',
+                          attribution='x', citation='x', url='x',
+                          commercial_use=True)
+        with pytest.raises(ConfigurationError, match='DataProvenance'):
+            Altimetry(ranges=[0.0], heights=[0.0], data_sources=(bare,))
+
+    def test_bathymetry_sibling_still_aggregates(self):
+        import uacpy
+        bathy = Bathymetry(ranges=[0.0, 100.0], depths=[100.0, 90.0],
+                           data_sources=(self._record(),))
+        env = uacpy.Environment(name='t', bathymetry=bathy, ssp=1500.0)
+        assert [r.source.id for r in env.data_sources] == ['test-altimetry']

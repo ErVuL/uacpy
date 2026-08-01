@@ -148,12 +148,7 @@ class ReflectionCoefficient(Result):
     def _build(self, theta, R, phi, freqs) -> "ReflectionCoefficient":
         return ReflectionCoefficient(
             theta=theta, R=R, phi=phi,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=freqs,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
+            **dict(self.id_kwargs(), frequencies=freqs),
         )
 
     def _select(self, angle, frequency, *, method) -> "ReflectionCoefficient":

@@ -270,11 +270,7 @@ def main():
             modes_field = modes_shallow
 
             # plot_mode_wavenumbers - complex k-plane scatter plot
-            fig2b, ax2b = plot_mode_wavenumbers(
-                modes_field,
-                annotate_modes=True,
-                max_annotations=15
-            )
+            fig2b, ax2b = plot_mode_wavenumbers(modes_field)
             ax2b.set_title('Mode Wavenumbers in Complex k-Plane\n' +
                            f'Shallow Water - {M_s} modes',
                            fontsize=14, fontweight='bold')
@@ -287,10 +283,8 @@ def main():
 
         # Use plot_modes with show_imaginary=True
         try:
-            fig2c, (ax_modes, ax_k) = modes_field.plot(
-                show_imaginary=True  # Show imaginary parts as dashed lines
-            )
-            fig2c.suptitle('Mode Shapes with Imaginary Parts\n' +
+            fig2c, ax2c = modes_field.plot(show_imaginary=True)
+            ax2c.set_title('Mode Shapes with Imaginary Parts\n'
                            'Shallow Water (solid=real, dashed=imaginary)',
                            fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_mode_shapes.png', dpi=150, bbox_inches='tight')

@@ -180,3 +180,17 @@ def test_default_run_does_not_warn_about_its_own_accuracy_target():
         RAM(verbose=False, accuracy=1e-3).run(env, src, rcv)
     budget = [x for x in w if 'accuracy budget' in str(x.message)]
     assert budget, "an explicitly pinned accuracy that is not met must warn"
+
+
+def test_copy_preserves_the_unpinned_accuracy_default():
+    """``copy()`` rebuilds from the stored constructor arguments, so a
+    materialised default would come back as a caller-pinned value and flip
+    the dz-floor message from status to warning on the round-trip."""
+    m = RAM(verbose=False)
+    c, cc = m.copy(), m.copy().copy()
+    assert (m.accuracy, c.accuracy, cc.accuracy) == (None, None, None)
+    assert not any(x._accuracy_explicit for x in (m, c, cc))
+    assert all(x._accuracy == 1e-3 for x in (m, c, cc))
+
+    p = RAM(verbose=False, accuracy=1e-6)
+    assert p.copy()._accuracy_explicit and p.copy()._accuracy == 1e-6

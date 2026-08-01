@@ -115,13 +115,13 @@ class TestTimeFrequency:
     def test_wigner_ville_localises_tone(self):
         f0 = 250.0
         x = np.cos(2 * np.pi * f0 * np.arange(256) / FS)
-        t, f, W = wigner_ville(x, FS)
+        f, t, W = wigner_ville(x, FS)
         peak_f = f[np.argmax(W.mean(axis=1))]
         assert peak_f == pytest.approx(f0, abs=FS / 256)
 
     def test_wigner_ville_nfft_grows_frequency_axis(self):
         x = np.cos(2 * np.pi * 250.0 * np.arange(256) / FS)
-        t, f, W = wigner_ville(x, FS, nfft=512)
+        f, t, W = wigner_ville(x, FS, nfft=512)
         assert W.shape == (512, 256) and f.size == 512
         assert f[np.argmax(W.mean(axis=1))] == pytest.approx(250.0, abs=FS / 512)
 
@@ -131,7 +131,7 @@ class TestTimeFrequency:
         nfft_n = 256
         nn = np.arange(nfft_n)
         x = np.cos(2 * np.pi * 150.0 * nn / FS) + np.cos(2 * np.pi * 400.0 * nn / FS)
-        _, f, W_plain = wigner_ville(x, FS)
+        f, _, W_plain = wigner_ville(x, FS)
         _, _, W_smooth = wigner_ville(x, FS, freq_window=65, time_window=33)
         mid = np.argmin(np.abs(f - 275.0))   # cross-term location
         band = slice(mid - 2, mid + 3)
@@ -140,6 +140,20 @@ class TestTimeFrequency:
         cross_plain = np.abs(W_plain[band]).mean()
         cross_smooth = np.abs(W_smooth[band]).mean()
         assert cross_smooth < 0.5 * cross_plain
+
+    def test_wigner_ville_axis_order_matches_siblings(self):
+        """All three time-frequency results carry an ``(n_freq, n_time)``
+        payload, so all three must name their axes in that order — otherwise a
+        square distribution transposes silently."""
+        from uacpy.acoustic_signal.constant_q import constant_q_spectrogram
+        from uacpy.acoustic_signal.timefreq import (
+            SpectrogramResult, WignerVilleResult, spectrogram)
+        assert (WignerVilleResult._fields[:2]
+                == SpectrogramResult._fields[:2] == ("frequencies", "times"))
+        x = np.cos(2 * np.pi * 250.0 * np.arange(1024) / FS)
+        for res in (wigner_ville(x[:256], FS), spectrogram(x, FS, nperseg=256),
+                    constant_q_spectrogram(x, FS, fmin=200.0, fmax=2000.0)):
+            assert res[2].shape == (res.frequencies.size, res.times.size)
 
     def test_wigner_ville_nfft_truncation_raises(self):
         with pytest.raises(ConfigurationError):
@@ -256,3 +270,44 @@ class TestCWT:
     def test_icwt_bad_shape_raises(self):
         with pytest.raises(ConfigurationError):
             inverse_cwt(np.zeros((3, 10)), np.array([1.0, 2.0]), FS)
+
+    @pytest.mark.parametrize("wavelet,kw", [
+        ("morlet", {"w0": 4.0}), ("morlet", {"w0": 6.0}), ("morlet", {"w0": 12.0}),
+        ("paul", {"order": 2}), ("paul", {"order": 4}), ("paul", {"order": 8}),
+        ("dog", {"order": 2}), ("dog", {"order": 4}), ("dog", {"order": 8}),
+    ])
+    def test_icwt_amplitude_holds_for_nondefault_orders(self, wavelet, kw):
+        """``inverse_cwt`` must reconstruct at the right amplitude for whatever
+        ``w0``/``order`` :func:`cwt` was run with — pinned reconstruction
+        constants mis-scale non-default orders by up to 2x and, for DOG m=4,
+        invert the sign."""
+        n = 2048
+        t = np.arange(n) / FS
+        x = (1.7 * np.sin(2 * np.pi * 450.0 * t)
+             + 0.8 * np.sin(2 * np.pi * 1500.0 * t))
+        f, W = cwt(x, FS, wavelet=wavelet, n_freqs=200, **kw)
+        xr = inverse_cwt(W, f, FS, wavelet=wavelet, **kw)
+        mid = slice(n // 4, 3 * n // 4)      # outside the cone of influence
+        assert np.std(xr[mid]) / np.std(x[mid]) == pytest.approx(1.0, rel=0.06)
+
+    @pytest.mark.parametrize("wavelet,w0,order,c_delta,psi0", [
+        ("morlet", 6.0, 2, 0.776, 0.7511),
+        ("paul", 6.0, 4, 1.132, 1.079),
+        ("dog", 6.0, 2, 3.541, 0.867),
+    ])
+    def test_reconstruction_constants_match_torrence_compo(
+            self, wavelet, w0, order, c_delta, psi0):
+        """The derived constants must agree with Torrence & Compo (1998)
+        Table 2 at the three tabulated orders."""
+        from uacpy.acoustic_signal.timefreq import _reconstruction_constants
+        cd, p0 = _reconstruction_constants(wavelet, w0, order)
+        assert cd == pytest.approx(c_delta, rel=0.03)
+        assert p0 == pytest.approx(psi0, rel=0.01)
+
+    @pytest.mark.parametrize("order", [1, 3, 5])
+    def test_icwt_odd_dog_order_raises(self, order):
+        """An odd DOG is an odd function: psi0(0) = 0 and the eq.-11 inverse
+        does not exist. Reject it instead of dividing by a pinned constant."""
+        f, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_freqs=16)
+        with pytest.raises(ConfigurationError):
+            inverse_cwt(W, f, FS, wavelet="dog", order=order)

@@ -8,15 +8,15 @@ Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
 """
 
 import os
-import struct
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
+from uacpy.core.acoustics import pekeris_root
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
-from uacpy.io._fortran_helpers import detect_endian
+from uacpy.io._fortran_helpers import PARSE_ERRORS, detect_endian
 
 
 def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
@@ -304,7 +304,7 @@ def read_modes_asc(
 
     except FileNotFoundError as e:
         raise FileFormatError(f"Mode file not found: {filename}") from e
-    except Exception as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(
             f"Malformed Kraken mode file {filename}: {e}"
         ) from e
@@ -341,8 +341,7 @@ def read_modes_bin(
         raise
     except FileNotFoundError as e:
         raise FileFormatError(f"Mode file not found: {filename}") from e
-    except (IndexError, ValueError, struct.error, EOFError, OSError,
-            ZeroDivisionError, OverflowError) as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(
             f"Malformed Kraken mode file {filename}: {e}"
         ) from e
@@ -636,7 +635,6 @@ def read_modes(
     >>> # ASCII format
     >>> modes = read_modes('test.moa')
     """
-    from uacpy.core.acoustics import pekeris_root
     fileroot, ext = os.path.splitext(filename)
 
     if not ext:

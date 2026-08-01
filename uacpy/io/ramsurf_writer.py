@@ -1,19 +1,16 @@
 """
 Writer for the Collins-style ``ram.in`` text input shared by the RAM family
-binaries uacpy actually dispatches to:
+binaries uacpy dispatches to:
 
+- ``ramgeo``      — fluid PE, flat surface, range-dependent layered bottom
 - ``ramsurf1.5``  — fluid PE, *variable* surface (rough surface / beach)
 - ``rams0.5``     — *elastic* PE (RAMS), flat surface, layered elastic bottom
-
-uacpy doesn't build the original Collins ``ram1.5`` (mpiramS handles fluid
-+ flat with broadband and range-dependent layered bottom), so this writer
-only emits the two formats actually consumed.
 
 Format reference: ``third_party/ramsurf/readme.orig`` and the upstream
 ``setup`` subroutines. RAMS swaps row-5's ``ns, rs`` fields for ``irot,
 theta`` and adds two profile blocks per range (shear speed + shear
 attenuation). RAMSurf inserts a surface ``(range, depth)`` block right
-after row 5.
+after row 5; ``ramgeo`` uses the base layout.
 """
 
 from __future__ import annotations

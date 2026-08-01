@@ -190,8 +190,9 @@ class Field(Result):
             'pinned': dict(self.pinned),
             'model': self.model,
             'backend': self.backend,
-            'source_depths': self.source_depths,
-            'frequencies': self.frequencies,
+            'source_depths': self.source_depths.copy(),
+            'frequencies': (None if self.frequencies is None
+                            else self.frequencies.copy()),
             'phase_reference': self.phase_reference,
             'model_source': self.model_source,
             'metadata': dict(self.metadata),
@@ -484,22 +485,6 @@ class Field(Result):
             **self.id_kwargs(),
         )
 
-    def id_kwargs(self) -> dict:
-        """Identification fields (model, backend, source depths, frequencies,
-        phase reference, metadata) as a kwargs dict, for cloning
-        them onto a :class:`Field` derived from this one. Public so downstream
-        toolkits (e.g. :mod:`uacpy.sonar`) can carry provenance without
-        hand-copying."""
-        return dict(
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
-        )
-
     # ── (depth, range) operations ─────────────────────────────────────
 
     def mask_below_seafloor(self, bathymetry) -> "Field":
@@ -541,24 +526,28 @@ class Field(Result):
 
     def resample_to(
         self,
-        ranges: np.ndarray,
-        depths: np.ndarray,
         *,
+        depths: np.ndarray,
+        ranges: np.ndarray,
         method: str = 'linear',
     ) -> "Field":
         """Linearly resample onto a new ``(depth, range)`` grid.
 
         Requires the canonical 2-D layout ``coords == {'depth', 'range'}``.
         Complex data is interpolated component-wise. Out-of-bound queries
-        return NaN."""
+        return NaN.
+
+        Keyword-only and depth-first, like every other axis pair on a
+        :class:`Field`: passing the two vectors the other way round would
+        otherwise resample onto a transposed grid that is mostly NaN."""
         if list(self.coords) != ['depth', 'range']:
             raise ConfigurationError(
                 "Field.resample_to: requires canonical ['depth', 'range'] "
                 f"coords; got {list(self.coords)}"
             )
         from scipy.interpolate import RegularGridInterpolator
-        new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
+        new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         DD, RR = np.meshgrid(new_depths, new_ranges, indexing='ij')
         query = np.stack([DD.ravel(), RR.ravel()], axis=-1)
         if self.is_complex:
@@ -922,6 +911,33 @@ class ResultStack:
     @property
     def backend(self) -> str:
         return self.slabs[0].backend
+
+    @property
+    def model_source(self):
+        """Engine provenance of the first slab — what the plotters read for the
+        model-credit footnote."""
+        return self.slabs[0].model_source
+
+    @property
+    def phase_reference(self) -> Optional[str]:
+        return self.slabs[0].phase_reference
+
+    @property
+    def frequencies(self) -> Optional[np.ndarray]:
+        """Frequencies (Hz) the stack covers: the stacking coordinate when
+        stacking by frequency, else the value every slab agrees on."""
+        return self._identity_axis('frequencies')
+
+    @property
+    def source_depths(self) -> np.ndarray:
+        """Source depths (m) the stack covers: the stacking coordinate when
+        stacking by source depth, else the value every slab agrees on."""
+        return self._identity_axis('source_depths')
+
+    def _identity_axis(self, attr: str):
+        if _RESULTSTACK_VARYING_ATTR.get(self.coordinate_name) == attr:
+            return self.coordinate.copy()
+        return getattr(self.slabs[0], attr)
 
     @property
     def metadata(self) -> Dict[str, Any]:
@@ -1333,5 +1349,6 @@ def _synthesize_time_series(
         # Carry the source Field's metadata forward (see _ifft_to_trace).
         metadata={**dict(tf.metadata),
                   'source_waveform_sample_rate': sample_rate,
-                  'window': window},
+                  'window': window,
+                  'source_model': tf.model},
     )

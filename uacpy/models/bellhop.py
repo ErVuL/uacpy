@@ -188,6 +188,19 @@ _RUN_MODE_TO_BELLHOP_TYPE = {
     RunMode.ARRIVALS: 'A',
 }
 
+# RunType letter -> (metadata key, suffix, reader). A run writes exactly one of
+# these, so only the resolved entry is read and attached; the other two would be
+# an earlier run's leftovers in a pinned work_dir.
+_BELLHOP_OUTPUT = {
+    'C': ('shd_file', '.shd', read_shd_file),
+    'I': ('shd_file', '.shd', read_shd_file),
+    'S': ('shd_file', '.shd', read_shd_file),
+    'A': ('arr_file', '.arr', read_arr_file),
+    'R': ('ray_file', '.ray', read_ray_file),
+    'E': ('ray_file', '.ray', read_ray_file),
+}
+_BELLHOP_OUTPUT_SUFFIXES = ('.shd', '.arr', '.ray')
+
 
 class Bellhop(PropagationModel):
     """
@@ -656,6 +669,7 @@ class Bellhop(PropagationModel):
                 depths=float(sd),
                 frequencies=source.frequencies,
                 source_type=source.source_type,
+                beam_pattern=source.beam_pattern,
             )
             slabs.append(self.run(
                 env, single, receiver, run_mode=run_mode,
@@ -963,18 +977,8 @@ class Bellhop(PropagationModel):
             self._log("Running Bellhop...")
             self._run_bellhop(base_name, fm.work_dir)
 
-            rt = run_type
-            if rt in ('C', 'I', 'S'):
-                output_file = fm.get_path(f'{base_name}.shd')
-                reader = read_shd_file
-            elif rt == 'A':
-                output_file = fm.get_path(f'{base_name}.arr')
-                reader = read_arr_file
-            elif rt in ('R', 'E'):
-                output_file = fm.get_path(f'{base_name}.ray')
-                reader = read_ray_file
-            else:
-                raise ConfigurationError(f"Unknown run_type: {run_type}")
+            output_key, output_suffix, reader = _BELLHOP_OUTPUT[run_type]
+            output_file = fm.get_path(f'{base_name}{output_suffix}')
 
             if not output_file.exists():
                 exc = ModelExecutionError(
@@ -1005,7 +1009,7 @@ class Bellhop(PropagationModel):
             # bias exactly (4.78 deg vs 4.79 deg).
             _shd_phase = {'point': -1.0 + 0j,
                           'line': np.exp(-1j * np.pi / 4.0)}
-            if rt in ('C', 'I', 'S'):
+            if run_type in ('C', 'I', 'S'):
                 _corr = _shd_phase[source.source_type]
                 for _slab in (result.slabs
                               if isinstance(result, ResultStack) else [result]):
@@ -1020,7 +1024,7 @@ class Bellhop(PropagationModel):
                 if real_sds.size == result.n_slabs:
                     result.coordinate = real_sds
 
-            if rt in ('R', 'E'):
+            if run_type in ('R', 'E'):
                 # The .ray file format is identical for fan and
                 # eigenray runs; only the wrapper knows which one
                 # produced it. Same goes for the receiver geometry.
@@ -1030,7 +1034,7 @@ class Bellhop(PropagationModel):
                     result.slabs if isinstance(result, ResultStack) else [result]
                 )
                 for slab in ray_slabs:
-                    slab.is_eigen = (rt == 'E')
+                    slab.is_eigen = (run_type == 'E')
                     slab.receiver_depths = rcv_d
                     slab.receiver_ranges = rcv_r
 
@@ -1052,11 +1056,7 @@ class Bellhop(PropagationModel):
                     )
                 self._attach_output_paths(
                     slab, fm.work_dir, base_name,
-                    primary_files=(
-                        ('shd_file', '.shd'),
-                        ('arr_file', '.arr'),
-                        ('ray_file', '.ray'),
-                    ),
+                    primary_files=((output_key, output_suffix),),
                 )
 
             self._log("Simulation complete")
@@ -1071,10 +1071,11 @@ class Bellhop(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
+        *,
+        run_mode: Optional[RunMode] = None,
         c_low: float = DEFAULT_C_MIN,
         c_high: Optional[float] = None,
         rmax: Optional[float] = None,
-        run_mode: Optional[RunMode] = None,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
@@ -1097,6 +1098,10 @@ class Bellhop(PropagationModel):
             Acoustic source
         receiver : Receiver
             Receiver array
+        run_mode : RunMode, optional
+            Bellhop mode for the second (field) pass; same values ``run()``
+            takes. Keyword-only, like every argument after ``receiver``, so
+            it cannot bind to a BOUNCE knob by position.
         c_low : float, optional
             Minimum phase velocity for the reflection table (m/s). Default
             ``DEFAULT_C_MIN``.
@@ -1141,6 +1146,7 @@ class Bellhop(PropagationModel):
             c_high=c_high,
             rmax=rmax,
             collapse=dict(self._user_collapse) or None,
+            timeout=self.timeout,
             work_dir=bounce_work_dir,
             cleanup=False,            # we own bounce_work_dir; cleaned up below
         )
@@ -1290,34 +1296,26 @@ class Bellhop(PropagationModel):
             else (0.0 if output_duration is not None else None)
         )
 
-        # Step 1: Run Bellhop in arrivals mode. Bellhop traces rays at the
-        # single carrier fc, so the arrivals run uses a single-frequency source
-        # (ARRIVALS does not accept a multi-frequency band).
-        self._log("Running in arrivals mode (broadband path)...")
-        arr_source = Source(
-            depths=source.depths,
-            frequencies=fc,
-            source_type=source.source_type,
-        )
-        arr_field = self.run(env, arr_source, receiver, run_mode=RunMode.ARRIVALS)
-
-        arrivals_by_rcv = arr_field.by_receiver
-        rz = arr_field.receiver_depths
-        rr = arr_field.receiver_ranges  # in meters
-
-        nrd = len(rz)
-        nrr = len(rr)
-
-        # ── Path A: time-domain delay-and-sum with source waveform ──
-        # Branch on the contracted mode, not on the presence of a waveform:
-        # BROADBAND must return H(f) even if a waveform is supplied (the
-        # waveform is meaningful only for the p(t) synthesis of TIME_SERIES).
-        if run_mode == RunMode.BROADBAND and source_waveform is not None:
-            warnings.warn(
-                "Bellhop.run(run_mode=BROADBAND) returns the complex transfer "
-                "function H(f); the supplied source_waveform is ignored. Use "
-                "run_mode=TIME_SERIES to synthesise p(t).",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        # Report the keywords this branch will not consume before spending a
+        # ray trace on the run. Branch on the contracted mode, not on the
+        # presence of a waveform: BROADBAND must return H(f) even when one is
+        # supplied (a waveform is meaningful only for TIME_SERIES synthesis).
+        if run_mode == RunMode.BROADBAND:
+            if source_waveform is not None:
+                warnings.warn(
+                    "Bellhop.run(run_mode=BROADBAND) returns the complex "
+                    "transfer function H(f); the supplied source_waveform is "
+                    "ignored. Use run_mode=TIME_SERIES to synthesise p(t).",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
+            # sample_rate / output_duration size the delay-and-sum time axis,
+            # which only the TIME_SERIES branch builds.
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                reason=('BROADBAND returns the transfer function H(f); the '
+                        'time-axis keywords apply to TIME_SERIES only'),
+                sample_rate=sample_rate,
+                output_duration=output_duration,
             )
         if run_mode == RunMode.TIME_SERIES and frequencies is not None:
             warnings.warn(
@@ -1327,6 +1325,34 @@ class Bellhop(PropagationModel):
                 "explicit H(f) grid.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
+
+        # Step 1: Run Bellhop in arrivals mode. Bellhop traces rays at the
+        # single carrier fc, so the arrivals run uses a single-frequency source
+        # (ARRIVALS does not accept a multi-frequency band).
+        self._log("Running in arrivals mode (broadband path)...")
+        arr_source = Source(
+            depths=source.depths,
+            frequencies=fc,
+            source_type=source.source_type,
+            beam_pattern=source.beam_pattern,
+        )
+        arr_field = self.run(env, arr_source, receiver, run_mode=RunMode.ARRIVALS)
+        # The synthesised result is built entirely from this inner run, so it
+        # inherits its file paths: they are the only handle on the scratch dir
+        # that survives when ``cleanup=False``.
+        arr_paths = {
+            key: value for key, value in arr_field.metadata.items()
+            if key.endswith('_file')
+        }
+
+        arrivals_by_rcv = arr_field.by_receiver
+        rz = arr_field.receiver_depths
+        rr = arr_field.receiver_ranges  # in meters
+
+        nrd = len(rz)
+        nrr = len(rr)
+
+        # ── Path A: time-domain delay-and-sum with source waveform ──
         if run_mode == RunMode.TIME_SERIES:
             self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
@@ -1382,6 +1408,7 @@ class Bellhop(PropagationModel):
                     source, backend=self.version, frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
+                    arrivals_field=arr_field, **arr_paths,
                 ),
             )
 
@@ -1420,6 +1447,7 @@ class Bellhop(PropagationModel):
                 center_frequency=fc,
                 arrivals_field=arr_field,
                 c0=c0,
+                **arr_paths,
             ),
         )
 
@@ -1493,7 +1521,14 @@ class Bellhop(PropagationModel):
         stderr. If the child exits non-zero, we append the tail of the .prt
         file (up to 2000 chars) to the raised ``ModelExecutionError`` so the
         diagnostic surface to the user instead of a blank stderr.
+
+        The three mutually-exclusive outputs are cleared first: a pinned
+        work_dir carries the previous run's ``.shd`` / ``.arr`` / ``.ray``,
+        and this run writes only one of them.
         """
         cmd = self._build_command(base_name)
-        self._run_and_attach_prt(cmd, work_dir, base_name)
+        self._run_and_attach_prt(
+            cmd, work_dir, base_name,
+            stale_outputs=_BELLHOP_OUTPUT_SUFFIXES,
+        )
 

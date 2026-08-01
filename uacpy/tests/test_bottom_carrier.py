@@ -344,3 +344,70 @@ def test_from_halfspaces_roughness_length_mismatch():
         Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
                                density=[1.5, 1.6], attenuation=[0.5, 0.4],
                                roughness=[0.1, 0.2, 0.3])
+
+
+# ─── collapse over a parameter-free half-space ─────────────────────────────
+
+@pytest.mark.parametrize('kind', ['vacuum', 'rigid'])
+@pytest.mark.parametrize('method', ['halfspace', 'top_layer', 'volume_average'])
+def test_collapse_over_parameter_free_halfspace(kind, method):
+    """A layered column over a ``'vacuum'``/``'rigid'`` half-space collapses
+    back to that parameter-free type instead of raising.
+
+    Those types carry no acoustic parameters, so handing the reduced cp/rho/a
+    to ``BoundaryProperties`` trips its explicit-conflict guard. Only the
+    interfacial ``roughness`` survives.
+    """
+    col = SeabedColumn(
+        layers=_layers(),
+        halfspace=BoundaryProperties(acoustic_type=kind, roughness=1.5))
+    out = col.collapse(method)
+    assert out.acoustic_type == kind
+    assert out.roughness == pytest.approx(1.5)
+
+
+def test_collapse_over_file_halfspace_keeps_reflection_file():
+    """A ``'file'`` half-space keeps its ``reflection_file`` — the type is
+    meaningless without it."""
+    col = SeabedColumn(
+        layers=_layers(),
+        halfspace=BoundaryProperties(acoustic_type='file',
+                                     reflection_file='bottom.brc'))
+    for method in ('halfspace', 'top_layer', 'volume_average'):
+        out = col.collapse(method)
+        assert out.acoustic_type == 'file'
+        assert out.reflection_file == 'bottom.brc'
+
+
+def test_collapse_halfspace_values_unchanged():
+    """Regression guard on the numeric reduction itself: thickness-weighted
+    mean over 1600(10 m), 1700(20 m) and the half-space at the deepest layer's
+    weight (20 m) = 1720 m/s."""
+    col = SeabedColumn(layers=_layers(), halfspace=_hs(cp=1800.0))
+    assert col.collapse('top_layer').sound_speed == pytest.approx(1600.0)
+    assert col.collapse('volume_average').sound_speed == pytest.approx(1720.0)
+    assert col.collapse('halfspace').sound_speed == pytest.approx(1800.0)
+
+
+@pytest.mark.parametrize('layers', [[], _layers()])
+def test_collapse_rejects_unknown_method_in_both_branches(layers):
+    """The method name is validated once on entry, so the no-layer shortcut
+    rejects a typo just like the layered path."""
+    col = SeabedColumn(layers=layers, halfspace=_hs())
+    with pytest.raises(ConfigurationError, match='unknown method'):
+        col.collapse('bogus')
+
+
+def test_at_depth_carries_layer_name():
+    col = SeabedColumn(
+        layers=[SedimentLayer.from_preset('sand', thickness=10.0)],
+        halfspace=_hs())
+    assert col.at(depth=5.0).name == 'sand'
+
+
+def test_halfspace_at_rejects_bad_interp_on_range_independent_bottom():
+    """The ``interp`` guard runs before the range-independent shortcut, so a
+    typo cannot be silently accepted."""
+    b = Bottom.from_halfspace(BoundaryProperties(sound_speed=1700.0))
+    with pytest.raises(ConfigurationError, match='interp'):
+        b.halfspace_at(range=0.0, interp='bogus')

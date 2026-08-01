@@ -61,6 +61,9 @@ class FRF:
         self.m = m
         self.g = 0  # Impulse response
         self.selected_order = None  # FIR order chosen by ls_fir order selection
+        self.coh = None  # Coherence, welch only
+        self.frequencies = None
+        self.tf = None
 
     def compute(
         self,
@@ -142,6 +145,9 @@ class FRF:
                 f"got x.shape[0]={x.shape[0]}, y.shape[0]={y.shape[0]}"
             )
         n_meas = x.shape[0]
+        if n_meas == 0:
+            raise ConfigurationError(
+                "FRF.compute: x and y hold no measurements (zero rows)")
         m_list, tf_list, coh_list = [], [], []
 
         for i in range(n_meas):
@@ -173,21 +179,17 @@ class FRF:
         freqs = freqs_i
         tf = np.mean(tf_list, axis=0)
 
-        # Update object state
+        # Update object state; every run rewrites the method-specific
+        # attributes so a reused FRF cannot report a previous method's result.
         self.frequencies = freqs
         self.tf = tf
-        if self.method == "welch":
-            self.coh = (
-                np.mean(coh_list, axis=0)
-                if all(c is not None for c in coh_list)
-                else None
-            )
+        self.coh = np.mean(coh_list, axis=0) if self.method == "welch" else None
         if self.method == "ls_fir":
             self.g = g_i  # For 2D inputs, uses last channel's impulse response
-            self.selected_order = (
-                int(np.mean(m_list))
-                if all(mi is not None for mi in m_list) else None
-            )
+            self.selected_order = int(np.mean(m_list))
+        else:
+            self.g = 0
+            self.selected_order = None
 
         return freqs, tf
 
@@ -368,6 +370,9 @@ class FRF:
             best_m = 1
             best_g = None
             count = 0
+            # "Numerically exact fit" is judged against the output power, so the
+            # decision is invariant to the amplitude scale of the data.
+            exact_tol = np.finfo(float).eps * float(np.mean(y[:N] ** 2))
 
             if m == "CP":
                 # Mallows' Cp: σ̂² is the residual variance of a low-bias
@@ -423,8 +428,12 @@ class FRF:
                     residuals = y[:N] - y_hat
                     sse = np.sum(residuals**2) / (N - m_candidate)
 
-                    if sse < 1e-9:
-                        continue  # Avoid log issues
+                    if sse <= exact_tol:
+                        # Residual at the rounding floor: this order explains
+                        # the data exactly, and it is the lowest one that does.
+                        best_m = m_candidate
+                        best_g = g
+                        break
 
                     if m == "AIC":  # AICF
                         # Finite-sample AIC variant: log(sse) scaled by
@@ -459,12 +468,20 @@ class FRF:
                     else:
                         count += 1
 
-                    if count >= stop_count:
+                    if best_g is not None and count >= stop_count:
                         break  # Stop search early
 
                 except np.linalg.LinAlgError:
                     continue  # Skip singular matrices
 
+            if best_g is None:
+                raise ConfigurationError(
+                    f"FRF.compute_lsfir: no FIR order in 1..{m_max} could be "
+                    f"fitted with criterion {m!r} — every candidate gave a "
+                    "singular information matrix. The input u is degenerate "
+                    "(constant, all-zero, or too short); use a persistently "
+                    "exciting input, or pass an explicit integer m."
+                )
             m = best_m
 
             # Recompute Minfo and Vinfo for the best m

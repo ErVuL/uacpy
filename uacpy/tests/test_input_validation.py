@@ -249,7 +249,7 @@ def test_oalib_writer_drops_subresolution_layers():
     so the AT writer never emits a degenerate (top==bottom) zero-thickness
     medium (which makes Kraken/Scooter/Bounce fail). Regression for a CRUST1
     bare-rock column rescaled to a ~1e-5 m sliver."""
-    from uacpy.io.oalib_writer import _writable_layers, _MIN_LAYER_THICKNESS_M
+    from uacpy.io.oalib_writer import writable_layers, _MIN_LAYER_THICKNESS_M
     hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
                             density=2.0, attenuation=0.1)
     lb = SeabedColumn(
@@ -259,7 +259,7 @@ def test_oalib_writer_drops_subresolution_layers():
                               attenuation=0.4)],
         halfspace=hs)
     assert _MIN_LAYER_THICKNESS_M == 0.1
-    kept = _writable_layers(lb)
+    kept = writable_layers(lb)
     assert [round(lyr.thickness, 1) for lyr in kept] == [20.0]
 
 
@@ -397,7 +397,7 @@ def test_bty_long_format_uses_union_of_range_grids(tmp_path):
     assert by_range[9.0][2] == pytest.approx(1800.0)    # constant-extended
 
 
-@pytest.mark.requires_binary  # constructs Scooter/KrakenField/Bellhop (resolves their binaries)
+@pytest.mark.requires_binary  # constructs Scooter/Kraken/Bellhop (resolves their binaries)
 def test_receiver_depth_accepted_across_models_harmonized():
     """A below-seafloor receiver never raises — it is accepted on every
     model, returning that model's below-domain value. Within its resolvable
@@ -500,7 +500,7 @@ def test_per_range_receiver_below_seafloor_emits_warning_not_error():
 
 
 def test_kraken_segmentation_unions_distinct_axes():
-    """KrakenField builds its segment list from the union of bathy / SSP
+    """Kraken builds its segment list from the union of bathy / SSP
     / bottom change-points, so a bathy with 3 ranges and an SSP with 5
     ranges should yield at least 5 segments."""
     from uacpy.models._segmentation import segment_environment_by_range

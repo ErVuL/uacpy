@@ -25,7 +25,9 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 # Southall et al. (2019) Table 5: a, b, f1 [kHz], f2 [kHz], C [dB] (weighting)
-# and K [dB] (TTS/PTS exposure-function position).
+# and K [dB] (TTS/PTS exposure-function position). Only a/b/f1/f2/C enter
+# :func:`auditory_weighting`; K is carried as published reference for callers
+# setting their own exposure criteria.
 WEIGHTING_PARAMS = {
     "LF":  {"a": 1.0, "b": 2, "f1": 0.20, "f2": 19.0,  "C": 0.13, "K": 179},
     "HF":  {"a": 1.6, "b": 2, "f1": 8.8,  "f2": 110.0, "C": 1.20, "K": 177},

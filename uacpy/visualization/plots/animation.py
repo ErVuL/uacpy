@@ -377,7 +377,7 @@ def plot_time_snapshots(
                 ax.set_ylim(depths[-1], depths[0])
             if field.source_depths is not None and len(field.source_depths):
                 ax.plot([0.0], [float(field.source_depths[0])],
-                        zorder=6, **SOURCE_MARKER_STYLE)
+                        zorder=ZORDER_SOURCE, **SOURCE_MARKER_STYLE)
             ax.set_xlim(0, ranges[-1] / 1000)
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)

@@ -14,8 +14,8 @@ netCDF4 = pytest.importorskip('netCDF4')
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import (
-    _cache, crust1_local, emodnet_local, gebco_local, globsed_local, sediment_db,
-    sound_speed, woa23_local,
+    _cache, crust1_local, emodnet_local, gebco_local, globsed_local, pelagic,
+    sediment_db, sound_speed, woa23_local,
 )
 
 _FILL = 9.96921e36
@@ -199,6 +199,50 @@ def test_gebco_masked_cell_raises(tmp_path, monkeypatch):
         gebco_local.point_depth((30.0, 40.0))
 
 
+def test_gebco_missing_variable_raises_typed(tmp_path, monkeypatch):
+    # A GEBCO file whose schema changed must surface as DataFetchError naming
+    # the install flag, like every sibling grid — not a bare KeyError.
+    root = tmp_path / 'schema_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    gebco_local._GRID.clear()
+    gdir = root / 'gebco'; gdir.mkdir(parents=True)
+    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
+    ds.createDimension('lat', 3); ds.createDimension('lon', 3)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = [-1.0, 0.0, 1.0]
+    ds.createVariable('lon', 'f8', ('lon',))[:] = [-1.0, 0.0, 1.0]
+    ds.createVariable('bathymetry', 'f4', ('lat', 'lon'))[:] = -1500.0
+    ds.close()
+    with pytest.raises(DataFetchError, match='install.sh --data gebco'):
+        gebco_local.point_depth((0.0, 0.0))
+
+
+def test_gebco_region_across_the_antimeridian(cache):
+    # An eastward range crossing 180° splits into a high-index and a low-index
+    # column run. Reading min..max would pull the whole globe; the result must
+    # equal the point-wise depths and each slab must stay narrow.
+    grid = gebco_local._grid()
+    widths = []
+    raw = grid._elev
+
+    class _Spy:
+        def __getitem__(self, key):
+            block = raw[key]
+            widths.append(np.shape(block)[1])
+            return block
+
+    grid._elev = _Spy()
+    try:
+        lats, lons, depth = gebco_local.region_grid((-3, 3), (179, -179), 7, 7)
+    finally:
+        grid._elev = raw
+    assert lons[0] == 179.0 and lons[-1] == pytest.approx(-179.0)
+    expected = np.array([[gebco_local.point_depth((la, lo)) for lo in lons]
+                         for la in lats])
+    assert np.allclose(depth, expected)
+    # Two runs, each a handful of columns — never the 360-column full width.
+    assert len(widths) == 2 and max(widths) <= 10
+
+
 def test_bathymetry_sources_local(cache):
     assert data.fetch_bathy((12.0, 34.0), source='local') == 1500.0
     t = data.fetch_bathy_transect((1.0, 1.0), (2.0, 2.0), n_points=4, source='local')
@@ -223,6 +267,43 @@ def test_woa_local_ts_column(cache):
     # raw T/S surface values come through untouched.
     z, t, s = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
     assert t[0] == 18.0 and s[0] == 36.0 and z[0] == 0.0
+
+
+def test_woa_local_reads_fill_through_the_mask(tmp_path, monkeypatch):
+    # The reader must resolve _FillValue via the netCDF mask, not rely on the
+    # fill being numerically huge: a product filling with -999 would otherwise
+    # enter the column as a real temperature.
+    root = tmp_path / 'fill_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    woa23_local.close()
+    wdir = root / 'woa23'; wdir.mkdir(parents=True)
+    depth = np.array([0, 50, 100, 500, 1000.0])
+    for var, vals in (('t00', [18, 16, 13, -999.0, -999.0]),
+                      ('s00', [36, 36.1, 36.2, -999.0, -999.0])):
+        ds = netCDF4.Dataset(wdir / f'woa23_decav_{var}_01.nc', 'w')
+        for d, n in [('time', 1), ('depth', depth.size), ('lat', 180),
+                     ('lon', 360)]:
+            ds.createDimension(d, n)
+        ds.createVariable('depth', 'f4', ('depth',))[:] = depth
+        name = 't_an' if var[0] == 't' else 's_an'
+        v = ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'),
+                              fill_value=-999.0)
+        v[:] = np.ma.masked_equal(np.full((1, depth.size, 180, 360), -999.0),
+                                  -999.0)
+        v[0, :, 120, 139] = np.ma.masked_equal(np.asarray(vals), -999.0)
+        ds.close()
+    z, t, s = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
+    assert z.tolist() == [0.0, 50.0, 100.0]        # truncated at the fill
+    assert t.min() > 0.0 and s.min() > 0.0         # no -999 admitted as data
+
+
+def test_woa_close_releases_the_handles(cache):
+    sound_speed.fetch_ssp((30.5, -40.5), source='local')
+    assert woa23_local._DATASETS                   # opened once, kept open
+    woa23_local.close()
+    assert woa23_local._DATASETS == {}
+    # The next read reopens transparently.
+    assert sound_speed.fetch_ssp((30.5, -40.5), source='local').depths[0] == 0.0
 
 
 # ── sediment local ──────────────────────────────────────────────────────────
@@ -306,17 +387,33 @@ def test_fetch_environment_cache_preset(cache):
 
 def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
     # 'local' must never reach the network. With an empty cache and literal
-    # bathy/ssp, the bottom 'local' chain (incl. the pelagic last resort, whose
-    # depth lookup would otherwise fall back to the live API) must fail fast with
-    # the install hint rather than touching the net.
+    # bathy/ssp, the bottom 'local' chain falls through every cached source to
+    # the pelagic last resort, which classifies off the *supplied* bathymetry
+    # instead of looking up its own — so the environment builds with no fetch.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
     gebco_local._GRID.clear()
     from uacpy.data import bathymetry
     monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("ssp_sources/bottom_sources='local' hit the live API")))
+    env = data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
+                                 bottom_sources='local')
+    assert [s.source.id for s in env.data_sources] == ['pelagic']
+    # 3000 m is above the CCD at this latitude → calcareous ooze (ϕ 7.5).
+    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.489, abs=1e-3)
+
+
+def test_pelagic_without_a_supplied_depth_still_needs_the_cache(tmp_path,
+                                                                monkeypatch):
+    # The depth lookup is only skipped when the caller supplies one. Called
+    # directly with cache_only and no depth=, pelagic must still fail fast on
+    # the missing GEBCO cache rather than falling back to the live API.
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    gebco_local._GRID.clear()
+    from uacpy.data import bathymetry
+    monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("cache_only pelagic hit the live API")))
     with pytest.raises(ConfigurationError, match='install.sh --data'):
-        data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
-                               bottom_sources='local')
+        pelagic.fetch_bottom_pelagic((30.5, -40.5), cache_only=True)
 
 
 def test_cache_preset_ssp_no_cache_raises(tmp_path, monkeypatch):

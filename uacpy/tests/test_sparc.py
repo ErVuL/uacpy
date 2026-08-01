@@ -261,3 +261,33 @@ def test_time_series_does_not_warn_when_adequately_sampled():
         SPARC(verbose=False, n_t_out=4096).run(
             env, src, rcv, run_mode=RunMode.TIME_SERIES)
     assert not [x for x in w if 'alias' in str(x.message)]
+
+
+class TestSPARCReceiverDepthAxis:
+    """Same below-domain policy as Scooter and the Kraken family: the caller's
+    depth axis comes back intact, with the depths the finite-difference mesh
+    cannot resolve marked no-data rather than clamped onto the deepest
+    interface."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
+        column = SeabedColumn(
+            layers=[SedimentLayer(thickness=20.0, sound_speed=1600.0,
+                                  density=1.8, attenuation=0.5)],
+            halfspace=BoundaryProperties(acoustic_type='rigid'))
+        return Environment(name='media', bathymetry=200.0, ssp=1500.0,
+                           bottom=Bottom(columns=[column]))
+
+    def test_requested_depths_are_returned_with_below_mesh_as_nan(self):
+        receiver = Receiver(depths=np.array([50.0, 150.0, 300.0]),
+                            ranges=np.array([1000.0, 2000.0]))
+        result = SPARC(verbose=False).run(
+            self._env(), Source(depths=50.0, frequencies=50.0), receiver,
+            run_mode=RunMode.TIME_SERIES)
+        assert np.asarray(result.coords['depth']) == pytest.approx(
+            receiver.depths)
+        data = np.asarray(result.data)
+        assert data.shape[0] == receiver.depths.size
+        assert np.all(np.isfinite(data[:2]))
+        assert np.all(np.isnan(data[2]))

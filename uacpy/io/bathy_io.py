@@ -23,7 +23,10 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.io.units import km_to_m, m_to_km
-from uacpy.io._fortran_helpers import read_vector, typed_format_error
+from uacpy.io._fortran_helpers import (
+    read_vector, strip_fortran_comment, strip_fortran_quotes,
+    typed_format_error,
+)
 
 
 def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
@@ -36,8 +39,9 @@ def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
     return f"[{body}, …, {tail}] ({n} pts)"
 
 
+@typed_format_error
 def read_boundary_3d(
-    filename: str, verbose: bool = False
+    filename: Union[str, Path], verbose: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Read 3D boundary (bathymetry/altimetry) file for BELLHOP3D.
@@ -47,7 +51,7 @@ def read_boundary_3d(
 
     Parameters
     ----------
-    filename : str
+    filename : str or Path
         Boundary filename (.bty for bathymetry, .ati for altimetry)
         Extension should be included
     verbose : bool, optional
@@ -129,6 +133,73 @@ def read_boundary_3d(
     return km_to_m(x_bot), km_to_m(y_bot), z_bot, n_x, n_y
 
 
+def _read_boundary_2d(
+    filepath: Union[str, Path], suffix: str, kind: str, verbose: bool,
+) -> Tuple[np.ndarray, str]:
+    """Read a BELLHOP 2-D boundary file (``.bty`` or ``.ati``).
+
+    ``ReadATI`` and ``ReadBTY`` (``bdryMod.f90:61-110`` / ``:161-215``) are the
+    same parser on two units, down to the long-format branch, so one reader
+    serves both.
+    """
+    filepath = Path(filepath)
+    if filepath.suffix != suffix:
+        filepath = filepath.with_suffix(suffix)
+
+    with open(filepath, "r") as fid:
+        log_message('bathy_io', f"Reading {kind} file", verbose=verbose)
+
+        type_str = strip_fortran_quotes(fid.readline()).upper()
+
+        # TYPE is up to 2 chars: TYPE(1:1) sets the interpolation, TYPE(2:2)
+        # selects short (geometry only) or long (geometry + geoacoustics).
+        interp_type = type_str[:1]
+        is_long = type_str[1:2] == "L"
+        if interp_type not in ("L", "C"):
+            raise FileFormatError(
+                f"Unknown {kind} type: {interp_type} (must be 'L' or 'C')"
+            )
+
+        approx = "Piecewise-linear" if interp_type == "L" else "Curvilinear"
+        log_message('bathy_io', f"{approx} approximation to {kind}",
+                    verbose=verbose)
+
+        n_pts = int(strip_fortran_comment(fid.readline()))
+        log_message('bathy_io', f"Number of {kind} points = {n_pts}",
+                    verbose=verbose)
+
+        n_cols = 7 if is_long else 2
+        rows = []
+        for _ in range(n_pts):
+            parts = fid.readline().split()
+            if len(parts) < n_cols:
+                raise FileFormatError(
+                    f"{kind.capitalize()} file {filepath}: a '{type_str}' row "
+                    f"needs {n_cols} columns, got {len(parts)} "
+                    f"({' '.join(parts)!r})."
+                )
+            rows.append([float(v) for v in parts[:n_cols]])
+
+        data = np.array(rows).T
+
+        log_message('bathy_io', f"range (km): {_summarize_axis(data[0])}",
+                    verbose=verbose, level='debug')
+        log_message('bathy_io', f"depth (m): {_summarize_axis(data[1])}",
+                    verbose=verbose, level='debug')
+
+    data[0, :] = km_to_m(data[0, :])
+
+    # Extend to ±infinity by holding every row constant.
+    out = np.zeros((n_cols, n_pts + 2))
+    out[:, 1:-1] = data
+    out[:, 0] = data[:, 0]
+    out[:, -1] = data[:, -1]
+    out[0, 0] = -1e50
+    out[0, -1] = 1e50
+
+    return out, interp_type
+
+
 @typed_format_error
 def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
     """
@@ -147,10 +218,21 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     Returns
     -------
     bty : ndarray
-        Bathymetry data array of shape (2, N+2) where:
+        Bathymetry data array of shape (n_cols, N+2) where:
         - bty[0, :] = range in meters (extended to ±1e50 at endpoints)
         - bty[1, :] = depth in meters
-        First and last points are extended to -infinity and +infinity.
+
+        A long-format file (``TYPE(2:2) == 'L'``, written by
+        :func:`write_bty_long_format`) carries per-range geoacoustics in the
+        remaining rows, in ``bdryMod.f90:200-201`` column order:
+        - bty[2, :] = compressional speed (m/s)
+        - bty[3, :] = shear speed (m/s)
+        - bty[4, :] = density (g/cm³)
+        - bty[5, :] = compressional attenuation
+        - bty[6, :] = shear attenuation
+
+        First and last points are extended to -infinity and +infinity, every
+        row held constant across the extension.
     bty_type : str
         Interpolation type:
         - 'L' : Piecewise-linear
@@ -161,79 +243,16 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     - Input file ranges are in km, converted to meters on output
     - Bathymetry is extended to ±infinity using constant extrapolation
     - File format:
-        Line 1: 'L' or 'C' (in quotes)
+        Line 1: TYPE in quotes — position 1 is 'L' or 'C' (interpolation),
+        position 2 is 'S' (short) or 'L' (long, with geoacoustics)
         Line 2: Number of points
-        Lines 3+: range(km) depth(m) pairs
+        Lines 3+: range(km) depth(m) [cp cs rho alpha_p alpha_s]
 
     References
     ----------
     Based on BELLHOP/readbty.m
     """
-    filepath = Path(filepath)
-    if filepath.suffix != ".bty":
-        filepath = filepath.with_suffix(".bty")
-
-    with open(filepath, "r") as fid:
-        log_message('bathy_io', "Reading bottom-bathymetry file",
-                    verbose=verbose)
-
-        line = fid.readline().strip()
-        if "'" in line:
-            start = line.index("'") + 1
-            end = line.index("'", start)
-            bty_type = line[start:end].strip()
-        else:
-            bty_type = line.strip()
-
-        # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
-        bty_type = bty_type[:1].upper()
-        if bty_type not in ["L", "C"]:
-            raise FileFormatError(
-                f"Unknown bathymetry type: {bty_type} (must be 'L' or 'C')"
-            )
-
-        if bty_type == "L":
-            log_message('bathy_io',
-                        "Piecewise-linear approximation to bathymetry",
-                        verbose=verbose)
-        else:
-            log_message('bathy_io',
-                        "Curvilinear approximation to bathymetry",
-                        verbose=verbose)
-
-        n_pts = int(fid.readline().strip())
-        log_message('bathy_io', f"Number of bathymetry points = {n_pts}",
-                    verbose=verbose)
-
-        bty_data = []
-        for _ in range(n_pts):
-            parts = fid.readline().split()
-            range_km, depth = float(parts[0]), float(parts[1])
-            bty_data.append([range_km, depth])
-
-        bty_data = np.array(bty_data).T
-
-        log_message('bathy_io',
-                    f"range (km): {_summarize_axis(bty_data[0])}",
-                    verbose=verbose, level='debug')
-        log_message('bathy_io',
-                    f"depth (m): {_summarize_axis(bty_data[1])}",
-                    verbose=verbose, level='debug')
-
-    bty_data[0, :] = km_to_m(bty_data[0, :])
-
-    n_pts_extended = n_pts + 2
-    bty = np.zeros((2, n_pts_extended))
-
-    bty[0, 0] = -1e50
-    bty[1, 0] = bty_data[1, 0]
-
-    bty[:, 1:-1] = bty_data
-
-    bty[0, -1] = 1e50
-    bty[1, -1] = bty_data[1, -1]
-
-    return bty, bty_type
+    return _read_boundary_2d(filepath, ".bty", "bathymetry", verbose)
 
 
 @typed_format_error
@@ -254,10 +273,14 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
     Returns
     -------
     ati : ndarray
-        Altimetry data array of shape (2, N+2) where:
+        Altimetry data array of shape (n_cols, N+2) where:
         - ati[0, :] = range in meters (extended to ±1e50 at endpoints)
         - ati[1, :] = depth in meters
-        First and last points are extended to -infinity and +infinity.
+
+        ``ReadATI`` accepts the same long format as ``ReadBTY``
+        (``bdryMod.f90:80-110``), so a ``TYPE(2:2) == 'L'`` file carries
+        per-range top geoacoustics — an ice cover, typically — in rows 2..6
+        with the column order documented on :func:`read_bathymetry`.
     ati_type : str
         Interpolation type:
         - 'L' : Piecewise-linear
@@ -273,73 +296,12 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
     ----------
     Based on BELLHOP/readati.m
     """
-    filepath = Path(filepath)
-    if filepath.suffix != ".ati":
-        filepath = filepath.with_suffix(".ati")
-
-    with open(filepath, "r") as fid:
-        log_message('bathy_io', "Reading top-altimetry file",
-                    verbose=verbose)
-
-        line = fid.readline().strip()
-        if "'" in line:
-            start = line.index("'") + 1
-            end = line.index("'", start)
-            ati_type = line[start:end].strip()
-        else:
-            ati_type = line.strip()
-
-        # AT TYPE is up to 2 chars ('LS'/'CS'); only TYPE(1:1) sets interp.
-        ati_type = ati_type[:1].upper()
-        if ati_type not in ["L", "C"]:
-            raise FileFormatError(f"Unknown altimetry type: {ati_type} (must be 'L' or 'C')")
-
-        if ati_type == "L":
-            log_message('bathy_io',
-                        "Piecewise-linear approximation to altimetry",
-                        verbose=verbose)
-        else:
-            log_message('bathy_io',
-                        "Curvilinear approximation to altimetry",
-                        verbose=verbose)
-
-        n_pts = int(fid.readline().strip())
-        log_message('bathy_io', f"Number of altimetry points = {n_pts}",
-                    verbose=verbose)
-
-        ati_data = []
-        for _ in range(n_pts):
-            parts = fid.readline().split()
-            range_km, depth = float(parts[0]), float(parts[1])
-            ati_data.append([range_km, depth])
-
-        ati_data = np.array(ati_data).T
-
-        log_message('bathy_io',
-                    f"range (km): {_summarize_axis(ati_data[0])}",
-                    verbose=verbose, level='debug')
-        log_message('bathy_io',
-                    f"depth (m): {_summarize_axis(ati_data[1])}",
-                    verbose=verbose, level='debug')
-
-    ati_data[0, :] = km_to_m(ati_data[0, :])
-
-    n_pts_extended = n_pts + 2
-    ati = np.zeros((2, n_pts_extended))
-
-    ati[0, 0] = -1e50
-    ati[1, 0] = ati_data[1, 0]
-
-    ati[:, 1:-1] = ati_data
-
-    ati[0, -1] = 1e50
-    ati[1, -1] = ati_data[1, -1]
-
-    return ati, ati_type
+    return _read_boundary_2d(filepath, ".ati", "altimetry", verbose)
 
 
 def _validate_interp_type(interp_type: str) -> str:
-    """Return a single-character interpolation code or raise ValueError.
+    """Return a single-character interpolation code, or raise
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
 
     Only the first character of TYPE ('L' piecewise linear or 'C'
     curvilinear) is user-selectable; the second character (format flag)
@@ -348,7 +310,7 @@ def _validate_interp_type(interp_type: str) -> str:
     """
     t = str(interp_type).strip().upper()
     if t not in ("L", "C"):
-        raise FileFormatError(
+        raise ConfigurationError(
             f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
         )
     return t

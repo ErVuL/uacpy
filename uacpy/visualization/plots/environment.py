@@ -750,24 +750,29 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
 @typed_plot_error
 def _plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
                         **mpl_kw):
-    """Render a 1-D ``value(range)`` carrier — ``Bathymetry`` (depth, axis
-    down) or ``Altimetry`` (height, axis up). Reached via ``profile.plot()``."""
-    is_depth = hasattr(profile, 'depths')
-    values = profile.depths if is_depth else profile.heights
-    label = 'Depth (m)' if is_depth else 'Sea-surface height (m)'
+    """Render a 1-D ``value(range)`` carrier — :class:`Bathymetry` or
+    :class:`Altimetry`. Reached via ``profile.plot()``.
+
+    The carrier declares what it holds: ``_values``, ``_VALUE_LABEL`` /
+    ``_VALUE_UNIT`` for the axis label, and ``_AXIS_DOWN`` for the
+    orientation. A new range-profile carrier is drawn correctly without
+    touching this function."""
+    axis_down = profile._AXIS_DOWN
+    values = np.asarray(profile._values, dtype=float)
+    label = f"{profile._VALUE_LABEL.capitalize()} ({profile._VALUE_UNIT})"
     fig, ax = fig_ax(ax, figsize)
     r_km = m_to_km(np.asarray(profile.ranges, dtype=float))
-    style = {'color': 'saddlebrown' if is_depth else 'steelblue',
+    style = {'color': 'saddlebrown' if axis_down else 'steelblue',
              'linewidth': 1.6}
     style.update(mpl_kw)
     if r_km.size == 1:
         ax.axhline(float(values[0]), **style)
     else:
-        ax.plot(r_km, np.asarray(values, dtype=float), **style)
+        ax.plot(r_km, values, **style)
     ax.set_xlabel('Range (km)')
     ax.set_ylabel(label)
     ax.grid(True, alpha=0.3)
-    if is_depth:
+    if axis_down:
         invert_yaxis_once(ax)
     ax.set_title(title if title is not None
                  else f"{type(profile).__name__} profile",

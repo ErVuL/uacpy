@@ -109,20 +109,23 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
     """Draw the source and receiver markers on a (depth, range) cross-section.
 
     Shared by the environment, ray and field plotters so the geometry reads
-    identically wherever it is shown. ``source_range_m`` places the source
-    marker (the x origin of the panel); ``receiver`` is decimated by
+    identically wherever it is shown. ``source`` is a :class:`Source` (or any
+    object exposing ``depths``) or a bare array of source depths;
+    ``source_range_m`` is where the source sits — 0 by the package convention
+    that range is measured from it. ``receiver`` is decimated by
     :func:`_draw_receiver_grid`."""
     from uacpy.visualization.style import SOURCE_MARKER_STYLE
     if receiver is not None and getattr(receiver, 'depths', None) is not None:
         _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
                             max_markersize=max_markersize)
-    if source is not None and getattr(source, 'depths', None) is not None:
+    source_depths = getattr(source, 'depths', source)
+    if source_depths is not None and np.size(source_depths):
         style = dict(SOURCE_MARKER_STYLE)
         if source_markersize_bonus:
             style['markersize'] = (style.get('markersize', 15)
                                    + source_markersize_bonus)
         x = m_to_km(np.atleast_1d(source_range_m))[0]
-        for sd in np.atleast_1d(source.depths):
+        for sd in np.atleast_1d(source_depths):
             ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
 
 
@@ -165,10 +168,12 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
     if value == 'mag_db':
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
         return -field.tl, '|H| (dB)'
-    if value == 'mag':
-        return field.magnitude, '|p|'
-    if value == 'phase':
-        return field.phase, 'Phase (rad)'
+    if value in ('mag', 'phase'):
+        if not field.is_complex:
+            raise ConfigurationError(
+                f"plot_field: value={value!r} requires complex data")
+        return ((field.magnitude, '|p|') if value == 'mag'
+                else (field.phase, 'Phase (rad)'))
     if value == 'real':
         return field.data.real if field.is_complex else field.data, 'Re(p)'
     if value == 'imag':

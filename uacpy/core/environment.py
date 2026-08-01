@@ -1,8 +1,9 @@
 """Top-level ocean :class:`Environment` carrier.
 
 The seafloor/boundary classes and the sound-speed-profile carrier live in
-:mod:`uacpy.core.bottom` and :mod:`uacpy.core.ssp`; they are re-exported here so
-``from uacpy.core.environment import BoundaryProperties`` (etc.) keeps working.
+:mod:`uacpy.core.bottom` and :mod:`uacpy.core.ssp`; they are re-exported here,
+so ``from uacpy.core.environment import BoundaryProperties`` (etc.) is a valid
+import path for every carrier an :class:`Environment` holds.
 """
 
 import copy as _copy
@@ -262,8 +263,9 @@ class Environment:
         # Harmonised provenance: the union of each carrier's own ``data_sources``
         # (every fetched carrier carries dated/located ``DataProvenance`` records;
         # literal carriers carry none), de-duplicated by source id in axis order
-        # bathymetry → ssp → bottom → surface. ``fetch_environment`` may refine
-        # this (e.g. fall back to a bare catalogue id for an un-stamped layer).
+        # bathymetry → ssp → bottom → surface → altimetry. ``fetch_environment``
+        # may refine this (e.g. fall back to a bare catalogue id for an
+        # un-stamped layer).
         self.data_sources = self._aggregate_data_sources()
 
     def _aggregate_data_sources(self) -> tuple:
@@ -271,7 +273,8 @@ class Environment:
         order). The single home for ``env.data_sources``, mirrored per-carrier
         by ``Bottom``/``Surface``/``SeabedColumn``."""
         seen, out = set(), []
-        for carrier in (self.bathymetry, self.ssp, self.bottom, self.surface):
+        for carrier in (self.bathymetry, self.ssp, self.bottom, self.surface,
+                        self.altimetry):
             for r in getattr(carrier, 'data_sources', ()) or ():
                 if r.source.id not in seen:
                     seen.add(r.source.id)

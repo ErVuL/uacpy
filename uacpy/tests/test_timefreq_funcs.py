@@ -29,8 +29,8 @@ def test_timefreq_plots():
     fig, ax = plot_cwt(fr, W, fs)
     assert ax.collections
     plt.close(fig)
-    t, f, wv = wigner_ville(x[:256], fs)
-    fig, ax = plot_wigner_ville(t, f, wv)
+    f, t, wv = wigner_ville(x[:256], fs)
+    fig, ax = plot_wigner_ville(f, t, wv)
     plt.close(fig)
     c = cepstrum(x)
     fig, ax = plot_cepstrum(c, sample_rate=fs)

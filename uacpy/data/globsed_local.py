@@ -11,8 +11,6 @@ texture. Pair it with :mod:`uacpy.data.crust1_local` for a layered bottom.
 """
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +19,7 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import curl_download, http_get
 from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['download_globsed_db', 'fetch_sediment_thickness',
@@ -32,32 +30,6 @@ GLOBSED_URL = ('https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/'
                '1.1/data/0-data/GlobSed/GlobSed_package3/GlobSed-v3.nc')
 
 _GRID = {}   # path -> _GlobSedGrid
-
-
-def _curl_download(url, out, *, timeout, verbose):
-    """Fetch ``url`` → ``out`` with curl; ``True`` on success, ``False`` if curl
-    is absent or fails. NCEI/Akamai throttles Python urllib to a trickle but
-    serves curl at full speed, so this is the preferred path for the grid.
-    Downloads to ``<out>.part`` and moves it into place only on success, so an
-    interrupted transfer never leaves a truncated ``out`` for the cache to
-    accept."""
-    curl = shutil.which('curl')
-    if not curl:
-        return False
-    part = Path(str(out) + '.part')
-    try:
-        subprocess.run(
-            [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(part), url],
-            check=True, capture_output=not verbose)
-    except (subprocess.SubprocessError, OSError):
-        part.unlink(missing_ok=True)
-        return False
-    if not (part.exists() and part.stat().st_size > 0):
-        part.unlink(missing_ok=True)
-        return False
-    os.replace(part, out)
-    return True
 
 
 def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -71,7 +43,7 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     out = dest / GLOBSED_FILE
     log_message('globsed', "downloading GlobSed v3 sediment thickness (~11 MB)",
                 verbose=verbose)
-    if not _curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
+    if not curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
         part = Path(str(out) + '.part')
         part.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
                                   source='globsed'))

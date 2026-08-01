@@ -50,7 +50,10 @@ def spread(symbols, code):
 
 
 def despread(chips, code):
-    """Correlate chips against ``code`` per symbol period -> symbol estimates."""
+    """Correlate chips against ``code`` per symbol period -> symbol estimates.
+
+    A trailing partial symbol (fewer than ``len(code)`` chips) is dropped.
+    """
     c = np.asarray(code, dtype=complex).ravel()
     x = np.asarray(chips, dtype=complex).ravel()
     n = c.size

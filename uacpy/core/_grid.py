@@ -89,12 +89,20 @@ class _RangeProfile:
     :meth:`_validate_values`.
     """
 
+    # Declaration hooks: a subclass states what it holds, so ``__repr__`` and
+    # ``_plot_range_profile`` tell the carriers apart by declaration rather
+    # than by type-sniffing a concrete field name. ``_VALUE_FIELD`` names the
+    # value vector; ``_VALUE_LABEL`` is the noun for it, capitalised into the
+    # plot's y-label; ``_AXIS_DOWN`` is True when the value grows downward
+    # (depth), which inverts that axis.
     _VALUE_FIELD: str = ''
     _VALUE_LABEL: str = ''
     _VALUE_UNIT: str = 'm'
+    _AXIS_DOWN: bool = False
 
     @property
     def _values(self) -> np.ndarray:
+        """The value vector, whatever ``_VALUE_FIELD`` names it."""
         return getattr(self, self._VALUE_FIELD)
 
     def _validate_values(self) -> None:
@@ -175,7 +183,7 @@ class _RangeProfile:
         return float(out) if idx.ndim == 0 else out
 
     def _query(self, range, method):
-        return query_profile(self.ranges, self._values, range, method)
+        return _query_profile(self.ranges, self._values, range, method)
 
     def plot(self, ax=None, *, title=None, figsize=(10, 4), **mpl_kw):
         """Plot the profile against range.
@@ -188,7 +196,7 @@ class _RangeProfile:
                                    figsize=figsize, **mpl_kw)
 
 
-def query_profile(ranges, values, query, method='linear'):
+def _query_profile(ranges, values, query, method='linear'):
     """Sample a 1-D ``(range -> value)`` profile at ``query`` range(s).
 
     Shared by the :class:`Bathymetry` / :class:`Altimetry` carriers (seafloor

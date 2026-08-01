@@ -50,14 +50,13 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
     Writes ``<cache>/graw/Dataset_S2.nc`` (~37 MB, Zenodo) and returns the
     path. Uses curl when available, falling back to the urllib fetcher.
     """
-    from uacpy.data._http import http_get
-    from uacpy.data.globsed_local import _curl_download
+    from uacpy.data._http import curl_download, http_get
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('graw')
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / GRAW_FILE
     log_message('graw', "downloading Graw 2021 seabed density grid (~37 MB)",
                 verbose=verbose)
-    if not _curl_download(GRAW_URL, out, timeout=timeout, verbose=verbose):
+    if not curl_download(GRAW_URL, out, timeout=timeout, verbose=verbose):
         part = Path(str(out) + '.part')
         part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
                                   source='graw'))
@@ -158,7 +157,10 @@ def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
                                timeout=None, verbose=False):
     """Range-dependent bottom from the Graw grid along ``start`` → ``end``.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
+    column scales to the water over its own seafloor. ``timeout``/``verbose``
+    are accepted (and ignored — this backend is offline) for signature
+    uniformity with the network bottom fetchers.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_graw(

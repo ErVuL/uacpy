@@ -41,7 +41,9 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models.base import (
+    PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
+)
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -104,7 +106,7 @@ def _oases_resample_frequencies(
                 f"Result.frequencies will be the resampled grid, not "
                 f"your input. Pass an equispaced vector (or "
                 f"freq_min/freq_max/n_frequencies) to suppress.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
     return fmin, fmax, n, resampled
 
@@ -222,6 +224,13 @@ class OASES(PropagationModel):
 
     _FOR_FILES: dict = {}
 
+    # Files this sub-model's binary writes: suffixes appended to
+    # ``base_name``, plus the bare ``fort.NN`` names some OASES builds emit
+    # instead. Both are cleared before launch so a pinned ``work_dir``
+    # cannot return an earlier run's output as this run's answer.
+    _OUTPUT_SUFFIXES: tuple = ()
+    _OUTPUT_FORT_FILES: tuple = ()
+
     def __new__(cls, *args, **kwargs):
         if cls is OASES:
             raise ConfigurationError(
@@ -258,11 +267,40 @@ class OASES(PropagationModel):
             )
         return target(**kwargs)
 
-    def _execute(self, input_file, work_dir: Path):
+    def _require_output(self, candidates, work_dir: Path, base_name: str, *,
+                        what: str, hint: str = '') -> Path:
+        """First of ``candidates`` that exists and is non-empty.
+
+        None of them means the binary failed: OASES writes no ``.prt``, so
+        its own diagnostics only reach the user through the tail
+        :meth:`_attach_prt_tail` appends to the raised
+        :class:`ModelExecutionError`.
+        """
+        for candidate in candidates:
+            path = Path(candidate)
+            if path.exists() and path.stat().st_size > 0:
+                return path
+        checked = ', '.join(str(c) for c in candidates)
+        exc = ModelExecutionError(
+            self.model_name, return_code=0, stdout=None,
+            stderr=(
+                f"{self.model_name} did not produce {what}. Checked: "
+                f"{checked}. OASES writes no .prt; its own message goes to "
+                f"stderr and is attached above." + (f" {hint}" if hint else "")
+            ),
+        )
+        self._attach_prt_tail(exc, work_dir, base_name)
+        raise exc
+
+    def _execute(self, base_name: str, work_dir: Path):
         """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
-        base_name = input_file if isinstance(input_file, str) else input_file.stem
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
-        self._run_and_attach_prt([str(self._exe)], work_dir, base_name, env=env)
+        for name in self._OUTPUT_FORT_FILES:
+            Path(work_dir).joinpath(name).unlink(missing_ok=True)
+        self._run_and_attach_prt(
+            [str(self._exe)], work_dir, base_name, env=env,
+            stale_outputs=self._OUTPUT_SUFFIXES,
+        )
 
 
 class OAST(OASES):
@@ -277,15 +315,20 @@ class OAST(OASES):
     executable : Path, optional
         Path to OAST binary. Auto-detected if ``None``.
     compute_contour : bool, optional
-        Add ``'C'`` option (range-depth contour plot). Default ``False``.
+        Add ``'C'`` option (range-depth contour plot). Effective default
+        ``False``.
     compute_depth_average : bool, optional
-        Add ``'A'`` option (depth-averaged TL). Default ``False``.
+        Add ``'A'`` option (depth-averaged TL). Effective default ``False``.
     complex_contour : bool, optional
-        ``'J'`` option (complex integration contour). Default ``True``.
+        ``'J'`` option (complex integration contour). Effective default
+        ``True``.
     options : str, optional
-        Raw OASES options string (e.g. ``'N J T C'``); ``None`` derives
-        it from ``compute_contour`` / ``compute_depth_average`` /
-        ``complex_contour``.
+        Raw OASES options string (e.g. ``'N J T C'``), written verbatim;
+        ``None`` derives it from ``compute_contour`` /
+        ``compute_depth_average`` / ``complex_contour``. Combining a raw
+        string with any of those three flags raises
+        ``ConfigurationError`` — the string replaces the whole option
+        line, so a flag passed alongside it would be discarded.
     integration_offset : float
         Wavenumber-integration contour offset (dB/wavelength). Default 0.
     nw_samples : int
@@ -302,6 +345,13 @@ class OAST(OASES):
     columns natively. **Collapse defaults (overrides of
     :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'``,
     ``'bottom_range': 'median'`` (the layer stack is kept).
+
+    ``COHERENT_TL`` here returns ``Field.kind == 'tl'`` (real dB), not the
+    ``'pressure'`` the other OASES sub-model returns for the same run mode:
+    OAST's ``.plt`` carries only real TL, so there is no complex pressure to
+    hand back and no phase reference to tag. Use :class:`OASP` when the
+    consumer needs complex pressure — coherent array processing, phase, or
+    off-grid receiver ranges through sharp interference nulls.
 
     Examples
     --------
@@ -323,9 +373,9 @@ class OAST(OASES):
     def __init__(
         self,
         executable: Optional[Path] = None,
-        compute_contour: bool = False,
-        compute_depth_average: bool = False,
-        complex_contour: bool = True,
+        compute_contour: Optional[bool] = None,
+        compute_depth_average: Optional[bool] = None,
+        complex_contour: Optional[bool] = None,
         options: Optional[str] = None,
         integration_offset: float = 0.0,
         nw_samples: int = -1,
@@ -342,13 +392,30 @@ class OAST(OASES):
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
-        self.compute_contour = bool(compute_contour)
-        self.compute_depth_average = bool(compute_depth_average)
-        self.complex_contour = bool(complex_contour)
+        # Kept as passed so ``copy()`` round-trips and so an explicit flag
+        # alongside a raw ``options`` string is distinguishable from the
+        # default. Resolved by ``_resolve_options``.
+        self.compute_contour = compute_contour
+        self.compute_depth_average = compute_depth_average
+        self.complex_contour = complex_contour
         # Raw OASES option string (e.g. ``'N J T C'``). ``None`` lets the
         # wrapper derive it from compute_contour / compute_depth_average /
-        # complex_contour.
+        # complex_contour; a raw string replaces the deck's option line
+        # outright, so the two ways of specifying it are exclusive.
         self.options = options
+        if options is not None:
+            pinned = [n for n in ('compute_contour', 'compute_depth_average',
+                                  'complex_contour')
+                      if getattr(self, n) is not None]
+            if pinned:
+                raise ConfigurationError(
+                    f"OAST: options={options!r} replaces the whole option "
+                    f"line, so {', '.join(pinned)} would be discarded "
+                    f"silently. Pass either the raw string or the typed "
+                    f"flags, not both — note the derived string includes "
+                    f"'J' (complex integration contour) by default, which a "
+                    f"raw string must repeat to keep."
+                )
         self.integration_offset = float(integration_offset)
         # ``-1`` lets the OASES kernel pick its own wavenumber sample count.
         self.nw_samples = int(nw_samples)
@@ -371,6 +438,24 @@ class OAST(OASES):
 
         if not self._exe.exists():
             raise ExecutableNotFoundError('OAST', str(self._exe))
+
+    def _resolve_options(self) -> str:
+        """The OASES option line for this run.
+
+        A raw ``options`` string is written verbatim; otherwise the letters
+        are derived from the typed flags on top of ``'N T'`` (normal stress
+        + TL table). The constructor rejects the two being combined.
+        """
+        if self.options is not None:
+            return self.options
+        opt = ['N', 'T']
+        if self.complex_contour is None or self.complex_contour:
+            opt.append('J')
+        if self.compute_contour:
+            opt.append('C')
+        if self.compute_depth_average:
+            opt.append('A')
+        return ' '.join(opt)
 
     def run(
         self,
@@ -414,20 +499,7 @@ class OAST(OASES):
             base_name = 'oast_run'
             input_file = fm.get_path(f'{base_name}.dat')
 
-            # OAST option letters: raw ``self.options`` wins; otherwise
-            # derive from the typed compute_contour / compute_depth_average
-            # / complex_contour flags.
-            if self.options is not None:
-                user_options = self.options
-            else:
-                opt = ['N', 'T']                            # Normal stress + TL table
-                if self.complex_contour:
-                    opt.append('J')
-                if self.compute_contour:
-                    opt.append('C')
-                if self.compute_depth_average:
-                    opt.append('A')
-                user_options = ' '.join(opt)
+            user_options = self._resolve_options()
 
             self._log(f"Writing OAST input file: {input_file} (options={user_options})")
             writer_kwargs: dict = {
@@ -447,27 +519,16 @@ class OAST(OASES):
                 **writer_kwargs,
             )
 
-            self._execute(input_file, fm.work_dir)
+            self._execute(base_name, fm.work_dir)
 
             # Read output - OAST creates .plt (data) and .plp (metadata) files
             # Per OASES documentation: FOR019 -> .plp, FOR020 -> .plt
-            plt_file = fm.get_path(f'{base_name}.plt')
-
-            # Check if output files exist
-            if not plt_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"OAST did not produce {plt_file} (FOR020 .plt). "
-                        f"OASES writes no .prt; its own message goes to stderr and is "
-                        f"attached above. Compare against the reference decks "
-                        f"in third_party/oases/tloss/."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
-
-            output_file = plt_file
+            output_file = self._require_output(
+                [fm.get_path(f'{base_name}.plt')], fm.work_dir, base_name,
+                what='a TL table (FOR020 .plt)',
+                hint=('Compare against the reference decks in '
+                      'third_party/oases/tloss/.'),
+            )
 
             self._log(f"Reading OAST output: {output_file}")
             tl_data, native_depths, native_ranges, metadata = read_oast_tl(
@@ -509,9 +570,10 @@ class OAST(OASES):
                     "between −40 dB neighbours reads back ≈ −50 dB). Align "
                     "receiver.ranges to the native grid, or use OASP (.trf "
                     "complex pressure) when null depth matters.",
-                    UserWarning, stacklevel=2,
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
-                result = native.resample_to(receiver_ranges, receiver_depths)
+                result = native.resample_to(
+                    ranges=receiver_ranges, depths=receiver_depths)
                 result.metadata['oast_native_ranges'] = native_ranges
                 result.metadata['interpolated'] = True
 
@@ -531,6 +593,7 @@ class OAST(OASES):
         'FOR002': 'src',  # Source file
         'FOR023': 'trc',  # Optional reflection-coef table
     }
+    _OUTPUT_SUFFIXES = ('.plt',)
 
 
 class OASN(OASES):
@@ -765,16 +828,11 @@ class OASN(OASES):
             'surface_noise_level': self.surface_noise_level,
             'white_noise_level': self.white_noise_level,
             'deep_noise_level': self.deep_noise_level,
-            'vrec': self.vrec,
         }
         if self.deep_source_depth is not None:
             kw['deep_source_depth'] = self.deep_source_depth
         if self.offdb is not None:
             kw['offdb'] = self.offdb
-        if self.plot_rmin is not None:
-            kw['plot_rmin'] = self.plot_rmin
-        if self.plot_rmax is not None:
-            kw['plot_rmax'] = self.plot_rmax
 
         # Phase-speed bounds applied identically to OASN's noise and
         # replica integrations (singular on the public API, plural-with-
@@ -873,7 +931,7 @@ class OASN(OASES):
                 "OASN: receiver.ranges is ignored — OASN models a vertical "
                 "array at x = y = 0 (depths only). Use the replica grid "
                 "(xmin/xmax/...) for horizontal apertures.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         env = self._project_environment(env)
@@ -914,20 +972,10 @@ class OASN(OASES):
             self._execute(base_name, fm.work_dir)
 
             if run_mode == RunMode.COVARIANCE:
-                xsm_file = fm.get_path(f'{base_name}.xsm')
-                fort16_file = fm.get_path('fort.16')
-                cov_path = xsm_file if xsm_file.exists() else fort16_file
-                if not cov_path.exists():
-                    exc = ModelExecutionError(
-                        self.model_name, return_code=0, stdout=None,
-                        stderr=(
-                            f"OASN did not produce a covariance file. "
-                            f"Checked: {xsm_file}, {fort16_file}. "
-                            f"OASES writes no .prt; its stderr is attached above."
-                        ),
-                    )
-                    self._attach_prt_tail(exc, fm.work_dir, base_name)
-                    raise exc
+                cov_path = self._require_output(
+                    [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')],
+                    fm.work_dir, base_name, what='a covariance file',
+                )
                 self._log(f"Reading OASN covariance file: {cov_path}")
                 cov_data = read_oasn_covariance(cov_path)
 
@@ -959,21 +1007,12 @@ class OASN(OASES):
                 return cov_result
 
             # RunMode.REPLICA
-            rpo_file = fm.get_path(f'{base_name}.rpo')
-            fort14_file = fm.get_path('fort.14')
-            rep_path = rpo_file if rpo_file.exists() else fort14_file
-            if not rep_path.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"OASN did not produce a replica file. Checked: "
-                        f"{rpo_file}, {fort14_file}. Set the replica grid "
-                        "via OASN(xmin=…, xmax=…, nx=…, zmin=…, zmax=…, "
-                        "nz=…) on the constructor."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
+            rep_path = self._require_output(
+                [fm.get_path(f'{base_name}.rpo'), fm.get_path('fort.14')],
+                fm.work_dir, base_name, what='a replica file',
+                hint=('Set the replica grid via OASN(xmin=…, xmax=…, nx=…, '
+                      'zmin=…, zmax=…, nz=…) on the constructor.'),
+            )
             self._log(f"Reading OASN replica file: {rep_path}")
             rep_data = read_oasn_replicas(rep_path)
             # x/y come back in km from the .rpo file; expose metres.
@@ -1014,6 +1053,8 @@ class OASN(OASES):
         'FOR016': 'xsm',  # Covariance matrix (unit 16)
         'FOR026': 'chk',  # Checkpoint file (per oasn wrapper)
     }
+    _OUTPUT_SUFFIXES = ('.xsm', '.rpo', '.plt')
+    _OUTPUT_FORT_FILES = ('fort.14', 'fort.16')
 
 
 class OASR(OASES):
@@ -1032,9 +1073,10 @@ class OASR(OASES):
         ``'grazing'`` (OASES native, default) | ``'incidence'``
         (converted via ``grazing = 90 - incidence``).
     reflection_type : str, optional
-        ``'P-P'`` (default) | ``'P-SV'`` | ``'P-Slow'`` (Biot only) |
-        ``'transmission'``. Translates to OASR option letter
-        (``'N'`` / ``'S'`` / ``'B'`` / ``'t'``).
+        ``'P-P'`` (effective default) | ``'P-SV'`` | ``'P-Slow'`` (Biot
+        only) | ``'transmission'``. Translates to OASR option letter
+        (``'N'`` / ``'S'`` / ``'B'`` / ``'t'``). Mutually exclusive with
+        a raw ``options`` string.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -1074,7 +1116,7 @@ class OASR(OASES):
         executable: Optional[Path] = None,
         angles: Optional[np.ndarray] = None,
         angle_type: str = 'grazing',
-        reflection_type: str = 'P-P',
+        reflection_type: Optional[str] = None,
         options: Optional[str] = None,
         angle_output_increment: Optional[int] = None,
         interface_roughness: Optional[list] = None,
@@ -1098,12 +1140,14 @@ class OASR(OASES):
             ``grazing = 90 - incidence`` before being written to the input
             file). Default: 'grazing'.
         reflection_type : str, optional
-            One of 'P-P' (default), 'P-SV', 'P-Slow' (Biot only), or
-            'transmission'. Translates to the OASR option letter
-            ('N' / 'S' / 'B' / 't').
+            One of 'P-P' (effective default), 'P-SV', 'P-Slow' (Biot
+            only), or 'transmission'. Translates to the OASR option
+            letter ('N' / 'S' / 'B' / 't').
         options : str, optional
-            Raw OASES option string. ``None`` lets the wrapper derive
-            it from ``reflection_type``.
+            Raw OASES option string, written verbatim. ``None`` lets the
+            wrapper derive it from ``reflection_type``. Passing both
+            raises ``ConfigurationError`` — the deck would run whichever
+            reflection the raw string selects, not the named one.
         angle_output_increment : int, optional
             Decimation factor for the output angle table. ``None`` keeps
             every sample.
@@ -1119,8 +1163,18 @@ class OASR(OASES):
             np.asarray(angles, dtype=float) if angles is not None else None
         )
         self.angle_type = angle_type
+        # Kept as passed so ``copy()`` round-trips and so an explicit value
+        # alongside a raw ``options`` string is distinguishable from the
+        # default. Resolved by ``_resolve_reflection_type``.
         self.reflection_type = reflection_type
         self.options = options
+        if options is not None and reflection_type is not None:
+            raise ConfigurationError(
+                f"OASR: options={options!r} replaces the whole option line, "
+                f"so reflection_type={reflection_type!r} would be recorded "
+                f"in the result metadata without ever reaching the deck. "
+                f"Pass either the raw string or reflection_type, not both."
+            )
         self.angle_output_increment = (
             int(angle_output_increment)
             if angle_output_increment is not None else None
@@ -1146,6 +1200,22 @@ class OASR(OASES):
 
         if not self._exe.exists():
             raise ExecutableNotFoundError('OASR', str(self._exe))
+
+    def _resolve_reflection_type(self) -> str:
+        """The reflection the deck actually computes.
+
+        Derived from the raw ``options`` letters when one is pinned, so
+        the recorded provenance describes the run rather than an unused
+        constructor argument. Falls back to ``'P-P'``, OASES' own default
+        when no reflection letter appears.
+        """
+        if self.options is None:
+            return self.reflection_type or 'P-P'
+        from uacpy.io.oases_writer import _REFL_TYPE_TO_OPTION
+        chars = set(str(self.options)) - set(' \t\n')
+        named = [name for name, letter in _REFL_TYPE_TO_OPTION.items()
+                 if letter in chars]
+        return named[0] if len(named) == 1 else 'P-P'
 
     def run(
         self,
@@ -1239,11 +1309,11 @@ class OASR(OASES):
                 receiver=receiver,
                 angles=angles,
                 angle_type=self.angle_type,
-                reflection_type=self.reflection_type,
+                reflection_type=self._resolve_reflection_type(),
                 **writer_kwargs,
             )
 
-            self._execute(input_file, fm.work_dir)
+            self._execute(base_name, fm.work_dir)
 
             # OASR writes a grazing-angle table to .trc and a slowness
             # table to .rco. Both files may be present even though the
@@ -1259,24 +1329,12 @@ class OASR(OASES):
             search = ['.rco', '.trc'] if wants_slowness else ['.trc', '.rco']
             search += ['.023', 'fort.023']
 
-            output_file = None
-            for ext in search:
-                candidate = (
-                    fm.get_path(f'{base_name}{ext}')
-                    if not ext.startswith('fort')
-                    else fm.get_path(ext)
-                )
-                if candidate.exists() and candidate.stat().st_size > 0:
-                    output_file = candidate
-                    break
-
-            if output_file is None:
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=f"OASR did not produce an output file. Checked: {search}",
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
+            output_file = self._require_output(
+                [fm.get_path(ext if ext.startswith('fort')
+                             else f'{base_name}{ext}') for ext in search],
+                fm.work_dir, base_name,
+                what='a reflection-coefficient table',
+            )
 
             self._log(f"Reading OASR output: {output_file}")
             data = read_oasr_reflection_coefficients(output_file)
@@ -1289,7 +1347,7 @@ class OASR(OASES):
                     backend='oasr',
                     frequencies=freqs_arr if len(freqs_arr) else None,
                     sampling_type=data.get('sampling_type', 'angle'),
-                    reflection_type=self.reflection_type,
+                    reflection_type=self._resolve_reflection_type(),
                 ),
             )
             self._attach_output_paths(
@@ -1313,6 +1371,8 @@ class OASR(OASES):
         'FOR022': 'rco',  # Reflection-coef table (slowness)
         'FOR023': 'trc',  # Reflection-coef table (angle)
     }
+    _OUTPUT_SUFFIXES = ('.rco', '.trc', '.023', '.plt')
+    _OUTPUT_FORT_FILES = ('fort.023',)
 
 
 class OASP(OASES):
@@ -1507,8 +1567,18 @@ class OASP(OASES):
         """
         n_time_samples = self.n_time_samples
         freq_max = self.freq_max
+        freq_min = self.freq_min
 
         run_mode = self._resolve_run_mode(run_mode)
+        if run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+            # BROADBAND is covered inside ``_prepare_timeseries``; warning
+            # here too would double up.
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                output_duration=output_duration,
+            )
         source_waveform, frequencies = self._prepare_timeseries(
             run_mode, source, frequencies, source_waveform, sample_rate,
             output_duration,
@@ -1589,6 +1659,14 @@ class OASP(OASES):
             fmin_user, freq_max, n_user, _ = _oases_resample_frequencies(
                 freqs_arr, 'OASP',
             )
+            if self.freq_min and abs(self.freq_min - fmin_user) > 1e-9:
+                warnings.warn(
+                    f"OASP.run(frequencies=…) sets the sweep's lower edge to "
+                    f"{fmin_user:.3f} Hz, overriding the constructor's "
+                    f"freq_min={self.freq_min:.3f} Hz.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
+            freq_min = fmin_user
             if n_user > 1:
                 # df implied by the equispaced (fmin, fmax, N) grid that
                 # OASES will actually run.
@@ -1627,7 +1705,7 @@ class OASP(OASES):
         writer_kwargs: dict = {
             'integration_offset': self.integration_offset,
             'nw_samples': self.nw_samples,
-            'freq_min': self.freq_min,
+            'freq_min': freq_min,
         }
         if self.center_frequency is not None:
             writer_kwargs['center_frequency'] = self.center_frequency
@@ -1653,26 +1731,14 @@ class OASP(OASES):
             )
 
             # Run executable
-            self._execute(input_file, fm.work_dir)
-            trf_file = fm.get_path(f'{base_name}.trf')
-            plt_file = fm.get_path(f'{base_name}.plt')
-
-            if trf_file.exists():
-                self._log(f"Reading OASP output: {trf_file}")
-                trf_data = read_oasp_trf(trf_file)
-            elif plt_file.exists():
-                self._log(f"Reading OASP output: {plt_file}")
-                trf_data = read_oasp_trf(plt_file)
-            else:
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"OASP did not produce {trf_file} or {plt_file}; "
-                        "OASES writes no .prt; its stderr is attached above."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
+            self._execute(base_name, fm.work_dir)
+            output_file = self._require_output(
+                [fm.get_path(f'{base_name}.trf'),
+                 fm.get_path(f'{base_name}.plt')],
+                fm.work_dir, base_name, what='a transfer-function file',
+            )
+            self._log(f"Reading OASP output: {output_file}")
+            trf_data = read_oasp_trf(output_file)
 
             transfer_func = trf_data['transfer_function']  # shape: (n_frequencies, n_range, n_depth)
 
@@ -1713,7 +1779,10 @@ class OASP(OASES):
                     freq_diff = np.abs(trf_data['freq'] - source.frequencies[0])
                     freq_idx = np.argmin(freq_diff)
 
-                p_at_freq = transfer_func[freq_idx, :, :].T  # (n_d, n_r)
+                # One frequency slice of the same .trf array the BROADBAND
+                # branch returns, so it carries the same phase reference.
+                p_at_freq = transfer_func[freq_idx, :, :].T.astype(
+                    np.complex128)  # (n_d, n_r)
 
                 result = Field(
                     data=p_at_freq,
@@ -1721,6 +1790,7 @@ class OASP(OASES):
                         'depth': trf_data['depths'],
                         'range': trf_data['ranges'],
                     },
+                    phase_reference='travelling_wave',
                     **self._result_kwargs(
                         source,
                         backend='oasp',
@@ -1748,3 +1818,4 @@ class OASP(OASES):
     _FOR_FILES = {
         'FOR002': 'src',
     }
+    _OUTPUT_SUFFIXES = ('.trf', '.plt')

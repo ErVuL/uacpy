@@ -40,7 +40,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
                            f'{wenz.wind_speed:g} kn, {wenz.rain_rate} rain)'),
                     **mpl_kw)
     ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel(r'Noise Level [dB re 1$\mu$Pa$^2$/Hz]')
+    ax.set_ylabel(r'Noise Level (dB re 1$\mu$Pa$^2$/Hz)')
     ax.set_title(title or 'WENZ noise level estimate', loc='left')
     ax.set_xlim((f[0], f[-1]))
     ax.set_ylim((ymin, ymax))
@@ -49,6 +49,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
     return fig, ax
 
 
+@typed_plot_error
 def plot_weighting(group, ax=None, *, frequency=None, title=None,
                    figsize=(8, 4), **mpl_kw):
     """Plot marine-mammal auditory weighting curve(s). ``group`` is a name or a

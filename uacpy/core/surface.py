@@ -20,7 +20,9 @@ from typing import List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
+from uacpy.core._carrier_validate import (
+    _require_non_negative, _require_strictly_increasing,
+)
 from uacpy.core.bottom import BoundaryProperties, _reduce_boundaries
 
 
@@ -62,10 +64,7 @@ class Surface:
                 raise ConfigurationError(
                     f"Surface: ranges ({self.ranges.size}) and properties "
                     f"({len(self.properties)}) must have the same length.")
-            if np.any(self.ranges < 0):
-                raise ConfigurationError(
-                    f"Surface: ranges must be non-negative (m); got "
-                    f"{self.ranges.tolist()}")
+            _require_non_negative(self.ranges, "Surface.ranges", hint="metres")
             if self.ranges.size > 1:
                 _require_strictly_increasing(self.ranges, "Surface.ranges")
         elif len(self.properties) != 1:

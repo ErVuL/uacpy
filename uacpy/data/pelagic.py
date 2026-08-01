@@ -115,18 +115,23 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
-                                  cache_only: bool = False, timeout=None,
+                                  depth=None, cache_only: bool = False,
+                                  timeout=None,
                                   verbose: Union[bool, str] = False
                                   ) -> Bottom:
     """Range-dependent bottom from the pelagic model along ``start`` → ``end``.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
+    column scales to the water over its own seafloor. ``depth`` likewise takes
+    a ``(lat, lon) -> m`` callable, so a caller holding the transect's
+    bathymetry supplies it instead of paying for a second fetch per waypoint.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_pelagic(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            cache_only=cache_only, timeout=timeout),
+            depth=depth(la, lo) if callable(depth) else depth,
+            cache_only=cache_only, timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='pelagic model',
         max_points=max_points,
     )

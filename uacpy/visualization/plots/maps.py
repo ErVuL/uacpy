@@ -10,7 +10,7 @@ import matplotlib.collections as _mcoll
 from typing import Optional, Tuple
 
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution
+from uacpy.visualization.plots._common import _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution, typed_plot_error
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
@@ -23,6 +23,7 @@ BATHYMETRY_CMAP = _mcolors.LinearSegmentedColormap.from_list('uacpy_bathy', [
 ])
 
 
+@typed_plot_error
 def plot_bathymetry_map(
     lats,
     lons,
@@ -140,6 +141,7 @@ def plot_bathymetry_map(
     return fig, ax
 
 
+@typed_plot_error
 def plot_overview(
     env,
     map_args,
@@ -153,7 +155,7 @@ def plot_overview(
     map_title: str = "Map",
     tl_title: str = "Transmission loss",
     env_title: str = "Environment",
-    suptitle: Optional[str] = None,
+    title: Optional[str] = None,
     data_source=True,
     sea_ice=None,
     map_kwargs: Optional[dict] = None,
@@ -185,8 +187,10 @@ def plot_overview(
         A transmission-loss result; if ``None`` the TL panel is left blank.
     source, receiver : optional
         Marked on the environment panel (and the source on the TL panel).
-    map_title, tl_title, env_title, suptitle : str, optional
-        Panel titles and an optional figure suptitle.
+    map_title, tl_title, env_title : str, optional
+        Per-panel titles.
+    title : str, optional
+        Figure-level title over all three panels.
     data_source : default ``True``
         Data-source credit shown as a footnote under the map. ``True`` uses
         ``env.data_sources``; ``None`` / ``False`` hides it; or pass an explicit
@@ -227,17 +231,14 @@ def plot_overview(
         # both panels keep the full gridspec cell and line up.
         tl_kw = dict(tl_kwargs or {})
         tl_kw.pop('show_colorbar', None)
-        plot_field(tl, ax=ax_tl, env=env, title=tl_title, show_colorbar=False,
-                   **tl_kw)
+        plot_field(tl, ax=ax_tl, env=env, source=source, receiver=receiver,
+                   title=tl_title, show_colorbar=False, **tl_kw)
         tl_mappable = next(c for c in ax_tl.collections
                            if isinstance(c, _mcoll.QuadMesh))
         tl_cax = ax_tl.inset_axes([1.04, 0.0, 0.03, 1.0])
         fig.colorbar(tl_mappable, cax=tl_cax, label='TL (dB)')
         if sea_ice is not None:
             _draw_sea_ice(ax_tl, sea_ice)
-        if source is not None and getattr(source, 'depths', None) is not None:
-            ax_tl.plot(0.0, float(np.atleast_1d(source.depths)[0]), marker='*',
-                       ms=13, color='red', mec='k', zorder=ZORDER_SOURCE)
     else:
         ax_tl.text(0.5, 0.5, "no TL result", ha='center', va='center',
                    transform=ax_tl.transAxes)
@@ -260,11 +261,12 @@ def plot_overview(
                  model=_model_attribution(tl) if tl is not None else None,
                  center_ax=ax_map)
 
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=13, fontweight='bold')
+    if title:
+        fig.suptitle(title, fontsize=13, fontweight='bold')
     return fig, (ax_map, ax_tl, ax_env)
 
 
+@typed_plot_error
 def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
                      cmap='Blues_r', graticule: float = 5.0, zoom: bool = True,
                      concentration_label='Sea-ice concentration (fraction)',

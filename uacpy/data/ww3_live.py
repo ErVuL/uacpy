@@ -13,7 +13,7 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import erddap_last_value, http_get
 from uacpy.data._time import parse_date
 
 __all__ = ['fetch_hs', 'ERDDAP_URL', 'DATASET']
@@ -36,16 +36,6 @@ def _griddap_url(var, when, lat, lon):
     return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
 
 
-def _last_value(body):
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
-
-
 def fetch_hs(point, *, date, timeout=60.0, verbose=False):
     """Significant wave height (m) at a ``(lat, lon)`` point and date from WW3.
 
@@ -60,7 +50,7 @@ def fetch_hs(point, *, date, timeout=60.0, verbose=False):
                             user_agent=_USER_AGENT).decode('utf-8', 'replace')
         except DataFetchError:
             continue                              # variable / range miss — next
-        hs = _last_value(body)
+        hs = erddap_last_value(body)
         if np.isfinite(hs):
             return abs(hs)
     raise DataFetchError(

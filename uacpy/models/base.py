@@ -966,7 +966,19 @@ class PropagationModel(ABC):
 
         Bellhop validates the pulse directly and resolves its own grid, and
         SPARC uses ``pulse_type`` instead, so neither calls this.
+
+        ``sample_rate`` / ``output_duration`` size the synthesised time axis
+        and are read only on the TIME_SERIES branch, so a BROADBAND run that
+        was handed either warns here rather than dropping it in silence.
         """
+        if run_mode == RunMode.BROADBAND:
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                reason=('BROADBAND returns the transfer function H(f); the '
+                        'time-axis keywords apply to TIME_SERIES only'),
+                sample_rate=sample_rate,
+                output_duration=output_duration,
+            )
         self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
         source_waveform = self._pad_waveform_to_duration(
             source_waveform, sample_rate, output_duration,
@@ -996,11 +1008,12 @@ class PropagationModel(ABC):
             parent = Path(self.work_dir).parent
             parent.mkdir(parents=True, exist_ok=True)
             if self.use_tmpfs:
-                self._log(
-                    f"use_tmpfs=True is not applied to the pinned work_dir "
-                    f"{self.work_dir} — a named directory cannot be relocated "
-                    f"to /dev/shm.",
-                    level='debug',
+                warnings.warn(
+                    f"{self.model_name}(use_tmpfs=True) is ignored for the "
+                    f"pinned work_dir {self.work_dir} — a named directory "
+                    f"cannot be relocated to /dev/shm. Drop work_dir= for "
+                    f"RAM-backed I/O, or point work_dir at a tmpfs mount.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
             fm = FileManager(
                 use_tmpfs=False,
@@ -1067,8 +1080,9 @@ class PropagationModel(ABC):
 
         Notes
         -----
-        The source/receiver geometry checks live in
-        :meth:`_validate_geometry`, which a model that reads no geometry
+        The source/receiver geometry checks — including the source's angular
+        geometry, i.e. its beam pattern — live in :meth:`_validate_geometry`,
+        which a model that reads no geometry
         (:class:`~uacpy.models.bounce.Bounce`) overrides to a no-op.
         """
         if (run_mode is not None
@@ -1089,13 +1103,6 @@ class PropagationModel(ABC):
                 f"{sorted(self._supported_source_types)}."
             )
 
-        if (source.beam_pattern is not None
-                and not self._supports_source_beam_pattern):
-            raise ConfigurationError(
-                f"{self.model_name} does not read a source beam pattern; "
-                f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
-            )
-
         self._validate_geometry(env, source, receiver, run_mode)
 
     def _validate_geometry(
@@ -1108,8 +1115,18 @@ class PropagationModel(ABC):
         """Check the source/receiver geometry against what the model resolves.
 
         Split out of :meth:`validate_inputs` so a model that reads no
-        geometry at all can opt out wholesale.
+        geometry at all can opt out wholesale. The source's angular geometry
+        (its beam pattern) belongs here for that reason: a reflection-only
+        engine never launches a ray fan, so rejecting a pattern it simply
+        ignores would break reusing one ``Source`` across models.
         """
+        if (source.beam_pattern is not None
+                and not self._supports_source_beam_pattern):
+            raise ConfigurationError(
+                f"{self.model_name} does not read a source beam pattern; "
+                f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
+            )
+
         if (not self._supports_multi_source_depth
                 and len(np.atleast_1d(source.depths)) > 1):
             raise ConfigurationError(
@@ -1465,15 +1482,19 @@ class PropagationModel(ABC):
         """
         Model-specific mode computation implementation.
 
-        Caller (compute_modes) already guaranteed RunMode.MODES is supported.
-        This fallback stands the depth grid up from a placeholder receiver;
-        Kraken — the only in-tree model declaring ``RunMode.MODES`` — overrides
-        it with a dense grid, so the hook exists for future mode solvers.
+        Caller (compute_modes) already guaranteed RunMode.MODES is supported,
+        so a model reaching this base implementation declares the mode without
+        implementing the hook. There is no usable generic fallback: normal
+        modes are receiver-independent, so the depth grid is the solver's to
+        choose, and ``n_modes`` is not part of the ``run()`` contract
+        signature :meth:`__init_subclass__` enforces — a mode solver written
+        to that signature could not receive it.
         """
-        dummy_receiver = Receiver(depths=[0.0], ranges=[0.0])
-        return self.run(
-            env, source, dummy_receiver,
-            run_mode=RunMode.MODES, n_modes=n_modes,
+        raise NotImplementedError(
+            f"{self.model_name} declares RunMode.MODES but does not override "
+            f"_compute_modes_impl(env, source, n_modes). Implement it: pick "
+            f"the depth grid the mode solver needs and dispatch to the "
+            f"binary from there."
         )
 
     def compute_eigenrays(
@@ -1996,10 +2017,15 @@ class PropagationModel(ABC):
     ) -> None:
         """Attach work-dir output paths to ``result.metadata``.
 
-        When ``self.cleanup`` is True the work dir will be wiped immediately
-        after ``run()`` returns, so no keys are written: the absence of a
-        ``*_file`` / ``prt_file`` key is the documented signal that the
-        directory has been cleaned up (DOCUMENTATION.md §6).
+        The paths are recorded iff the run's scratch survives, i.e. iff
+        ``self.cleanup`` is False. With ``cleanup=True`` the work dir is wiped
+        immediately after ``run()`` returns, so no keys are written: the
+        absence of a ``*_file`` / ``prt_file`` key is the documented signal
+        that the directory has been cleaned up (DOCUMENTATION.md §8).
+
+        ``primary_files`` must name only the outputs *this* run produces —
+        passing every suffix a model can emit would re-attach an earlier
+        run's leftovers in a pinned work dir.
 
         Otherwise, for each ``(key, suffix)`` in ``primary_files`` set
         ``result.metadata[key] = str(work_dir / f'{base_name}{suffix}')``
@@ -2043,12 +2069,9 @@ class PropagationModel(ABC):
         exc.args = (head,) + exc.args[1:]
 
     # ERROUT messages that describe a physical outcome uacpy models
-    # explicitly, not a run failure. Below the modal cutoff KRAKEN calls
-    # ERROUT, but "no trapped modes at this frequency" is a real answer and is
-    # surfaced downstream as a NaN field plus a warning.
-    _BENIGN_FORTRAN_FATALS: tuple = (
-        'No modes for given phase speed interval',
-    )
+    # explicitly, rather than a run failure. Empty here: which messages are
+    # benign is solver-specific, so each model declares its own.
+    _BENIGN_FORTRAN_FATALS: tuple = ()
 
     def _raise_on_fortran_fatal(self, result, work_dir, base_name):
         """Raise when a binary reported a fatal error but exited 0.
@@ -2085,14 +2108,22 @@ class PropagationModel(ABC):
 
     def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
                             timeout: Optional[float] = None,
-                            env: Optional[dict] = None):
+                            env: Optional[dict] = None,
+                            stale_outputs: tuple = ()):
         """Run a Fortran/AT binary via :meth:`_run_subprocess`, appending the
         ``<base>.prt`` tail to a :class:`ModelExecutionError` on failure and
         logging stdout when verbose. Returns the ``CompletedProcess``. Shared
-        by every model's binary-launch wrapper."""
-        # A leftover .prt from an earlier run in a pinned work_dir would be
-        # read as this run's log, so clear it before launching.
-        Path(work_dir).joinpath(f"{base_name}.prt").unlink(missing_ok=True)
+        by every model's binary-launch wrapper.
+
+        ``stale_outputs`` lists the suffixes (``'.shd'``, ``'.arr'``, …) this
+        binary may write under ``base_name``. They are removed before launch
+        so a pinned work dir cannot hand an earlier run's output back as this
+        run's answer — the same reason the ``.prt`` is cleared.
+        """
+        # Anything left under base_name by an earlier run in a pinned work_dir
+        # would be read as this run's, so clear it before launching.
+        for suffix in ('.prt',) + tuple(stale_outputs):
+            Path(work_dir).joinpath(f"{base_name}{suffix}").unlink(missing_ok=True)
         try:
             result = self._run_subprocess(cmd, cwd=work_dir, timeout=timeout, env=env)
         except ModelExecutionError as exc:
@@ -2117,10 +2148,14 @@ class PropagationModel(ABC):
         ``frequencies`` is auto-wrapped to a 1-D ndarray (length ≥ 1) when
         scalar; ``None`` is preserved for time-domain results. Anything in
         ``extra`` is stored on the result's ``metadata`` ad-hoc bag.
+
+        ``backend`` names the concrete binary that ran and is lowercase
+        across the package (``'scooter'``, ``'oast'``, ``'mpiramS'``, …), so
+        the default lowercases the class name rather than mixing conventions.
         """
         kw = dict(
             model=self.model_name,
-            backend=backend or self.model_name,
+            backend=backend or self.model_name.lower(),
             source_depths=np.atleast_1d(np.asarray(
                 getattr(source, 'depths', []), dtype=float
             )),
@@ -2174,63 +2209,6 @@ class PropagationModel(ABC):
         if env.bottom.is_layered:
             depth += env.bottom.max_total_thickness()
         return depth
-
-    def _clip_receiver_depths(
-        self, receiver: 'Receiver', media_depth: float, margin: float = 3.0
-    ) -> 'Receiver':
-        """
-        Clip receiver depths to the modelled media, with a safety margin.
-
-        Parameters
-        ----------
-        receiver : Receiver
-            Input receiver array
-        media_depth : float
-            Deepest modelled interface (m); see :meth:`_total_media_depth`.
-            Only receivers *below* this boundary lie inside the semi-infinite
-            halfspace, where the field is not resolved; those are pulled up to
-            ``media_depth - margin``. Receivers anywhere in the water column or
-            sediment layers (``depth <= media_depth``) are kept untouched.
-        margin : float
-            Landing margin above the halfspace boundary (m) for the receivers
-            that must be pulled out of the halfspace. Default 3.0.
-
-        Returns
-        -------
-        Receiver
-            Receiver with clipped depths (unchanged if all depths are valid)
-        """
-        max_receiver_depth = receiver.depths.max()
-        if max_receiver_depth > media_depth:
-            # Only the sub-halfspace receivers are unresolvable; pull just
-            # those up to a margin above the boundary and leave every
-            # in-medium receiver alone. A full-column receiver grid
-            # (depths up to env.depth) is therefore returned unchanged, so
-            # its depth axis matches the ray/normal-mode models rather than
-            # silently losing the deepest sample to a clip-and-dedup.
-            ceiling = media_depth - margin
-            clipped = np.where(
-                receiver.depths > media_depth, ceiling, receiver.depths,
-            )
-            if receiver.receiver_type == 'grid':
-                new_depths = np.unique(clipped)
-            else:
-                new_depths = clipped
-            receiver = Receiver(
-                depths=new_depths,
-                ranges=receiver.ranges,
-                receiver_type=receiver.receiver_type,
-            )
-            warnings.warn(
-                f"{self.model_name}: receiver depths below the deepest "
-                f"modelled interface ({media_depth:.1f} m) pulled up to "
-                f"{ceiling:.1f} m (the field is not resolved inside the "
-                f"semi-infinite halfspace). Add sediment layers (a layered "
-                f"SeabedColumn) to place receivers below the seafloor.",
-                UserWarning,
-                skip_file_prefixes=USER_FRAME_SKIP,
-            )
-        return receiver
 
     def __repr__(self) -> str:
         """``ClassName(arg=val, …)`` showing only constructor params whose

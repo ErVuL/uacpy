@@ -2,6 +2,7 @@
 Source class for defining acoustic sources in underwater environments
 """
 
+import copy as _copy
 import numpy as np
 from pathlib import Path
 from typing import Union, List, Optional
@@ -157,13 +158,5 @@ class Source:
         return (f"Source({depth_str}, {freq_str}, type='{self.source_type}')")
 
     def copy(self):
-        """Return a deep copy of the source."""
-        pattern = self.beam_pattern
-        if isinstance(pattern, np.ndarray):
-            pattern = pattern.copy()
-        return Source(
-            depths=self.depths.copy(),
-            frequencies=self.frequencies.copy(),
-            source_type=self.source_type,
-            beam_pattern=pattern,
-        )
+        """Deep copy (symmetric with the other carriers)."""
+        return _copy.deepcopy(self)

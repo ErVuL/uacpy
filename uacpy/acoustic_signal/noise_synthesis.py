@@ -10,7 +10,8 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
-                              n_fft=65536, sample_rate=None, interp='linear'):
+                              n_fft=65536, sample_rate=None, interp='linear',
+                              rng=None):
     """
     Spectral Synthesis of Random Processes.
 
@@ -38,6 +39,9 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
         broadband PSDs spanning many decades. Frequencies outside
         ``[Fxx[0], Fxx[-1]]`` are set to zero.
+    rng : numpy.random.Generator, optional
+        Random generator for the spectral draw. Pass a seeded generator for a
+        reproducible realisation.
 
     Returns
     -------
@@ -112,10 +116,11 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
 
     x_total = np.zeros(samples_needed)
     t_total = np.arange(samples_needed) / sample_rate
+    rng = np.random.default_rng() if rng is None else rng
 
     for i in range(num_chunks):
-        vi = np.random.randn(N)
-        vq = np.random.randn(N)
+        vi = rng.standard_normal(N)
+        vq = rng.standard_normal(N)
         w = (vi + 1j * vq) * np.sqrt(v)
         spectrum = np.concatenate(([0.0], w, [0.0]))
         chunk = np.fft.irfft(spectrum, chunk_size) * chunk_size
@@ -188,7 +193,7 @@ def _closest_power_of_two(x):
 
 
 def make_noise_waveform(
-    fc: float, bandwidth_hz: float, T: float, sample_rate: float
+    fc: float, bandwidth_hz: float, T: float, sample_rate: float, *, rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate bandpass-filtered Gaussian random noise waveform.
@@ -206,6 +211,9 @@ def make_noise_waveform(
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the white-noise draw. Pass a seeded generator for
+        a reproducible realisation.
 
     Returns
     -------
@@ -239,8 +247,14 @@ def make_noise_waveform(
     # 1/sample_rate) can yield N±1 samples from float accumulation).
     time = np.arange(N) / sample_rate
     N2 = int(T * bandwidth_hz)
+    if N < 1 or N2 < 1:
+        raise ConfigurationError(
+            f"make_noise_waveform: T*sample_rate ({N}) and T*bandwidth_hz "
+            f"({N2}) must each resolve to at least one sample; got T={T}, "
+            f"sample_rate={sample_rate}, bandwidth_hz={bandwidth_hz}")
 
-    nts = np.random.randn(N2)  # Gaussian white noise
+    rng = np.random.default_rng() if rng is None else rng
+    nts = rng.standard_normal(N2)  # Gaussian white noise
 
     # Resample to sample_rate rate
     from scipy.signal import resample
@@ -287,7 +301,9 @@ def add_noise(
     source_level: float,
     noise_level: float,
     fc: float,
-    bandwidth: float
+    bandwidth: float,
+    *,
+    rng=None
 ) -> np.ndarray:
     """
     Incorporate source level and noise into existing time series.
@@ -310,6 +326,9 @@ def add_noise(
         Center frequency for band-limited noise in Hz
     bandwidth : float
         Bandwidth for band-limited noise in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the noise realisation(s). Pass a seeded generator
+        for a reproducible result.
 
     Returns
     -------
@@ -357,14 +376,16 @@ def add_noise(
     # so cross-channel correlation is zero (required for beamforming and
     # array-gain assertions).
     T = len(timeseries) / sample_rate
+    rng = np.random.default_rng() if rng is None else rng
 
     if timeseries.ndim == 1:
-        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0] * A
+        noise_ts = make_bandlimited_noise(
+            fc, bandwidth, T, sample_rate, rng=rng)[0] * A
         rts = timeseries * SL + noise_ts
     else:
         n_rcv = timeseries.shape[1]
         noise_block = np.column_stack([
-            make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0]
+            make_bandlimited_noise(fc, bandwidth, T, sample_rate, rng=rng)[0]
             for _ in range(n_rcv)
         ]) * A
         rts = timeseries * SL + noise_block
@@ -376,7 +397,9 @@ def make_bandlimited_noise(
     fc: float,
     bandwidth: float,
     duration: float,
-    sample_rate: float
+    sample_rate: float,
+    *,
+    rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate band-limited Gaussian noise.
@@ -393,6 +416,9 @@ def make_bandlimited_noise(
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the white-noise draw. Pass a seeded generator for
+        a reproducible realisation.
 
     Returns
     -------
@@ -417,7 +443,8 @@ def make_bandlimited_noise(
     from scipy.signal import filtfilt
     n_samples = int(duration * sample_rate)
     time = np.arange(n_samples) / sample_rate
-    noise = np.random.randn(n_samples)
+    rng = np.random.default_rng() if rng is None else rng
+    noise = rng.standard_normal(n_samples)
 
     b, a = _bandpass_design(fc, bandwidth, sample_rate)
     filtered_noise = filtfilt(b, a, noise)

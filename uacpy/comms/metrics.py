@@ -46,9 +46,15 @@ def evm(rx_symbols, ref_symbols):
     r = np.asarray(rx_symbols, dtype=complex).ravel()
     s = np.asarray(ref_symbols, dtype=complex).ravel()
     n = min(r.size, s.size)
+    if n == 0:
+        raise ConfigurationError("evm: empty input")
     err = np.mean(np.abs(r[:n] - s[:n]) ** 2)
     ref = np.mean(np.abs(s[:n]) ** 2)
     return float(np.sqrt(err / ref))
+
+
+_BER_PSK_ORDERS = {"8psk": 8, "16psk": 16}
+_BER_QAM_ORDERS = {"16qam": 16, "64qam": 64, "256qam": 256}
 
 
 def ber_theory(scheme, ebn0_db):
@@ -61,13 +67,15 @@ def ber_theory(scheme, ebn0_db):
     s = scheme.lower()
     if s in ("bpsk", "qpsk"):
         return _q(np.sqrt(2.0 * ebn0))
-    if s.endswith("psk"):
-        M = {"8psk": 8, "16psk": 16}[s]
+    if s in _BER_PSK_ORDERS:
+        M = _BER_PSK_ORDERS[s]
         k = np.log2(M)
         return (2.0 / k) * _q(np.sqrt(2.0 * k * ebn0) * np.sin(np.pi / M))
-    if s.endswith("qam"):
-        M = {"16qam": 16, "64qam": 64, "256qam": 256}[s]
+    if s in _BER_QAM_ORDERS:
+        M = _BER_QAM_ORDERS[s]
         k = np.log2(M)
         c = 4.0 / k * (1.0 - 1.0 / np.sqrt(M))
         return c * _q(np.sqrt(3.0 * k / (M - 1.0) * ebn0))
-    raise ConfigurationError(f"ber_theory: unsupported scheme {scheme!r}")
+    valid = ("bpsk", "qpsk", *_BER_PSK_ORDERS, *_BER_QAM_ORDERS)
+    raise ConfigurationError(
+        f"ber_theory: unsupported scheme {scheme!r}; valid: {', '.join(valid)}")

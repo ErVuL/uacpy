@@ -4,7 +4,7 @@ Every model writes its primary output paths (and ``prt_file``) into
 ``result.metadata`` only when the work dir survives the run, i.e. when
 ``cleanup=False``. With ``cleanup=True`` the work dir is wiped after
 the wrapper returns and the ``*_file`` keys are absent from metadata
-— the absence is the documented signal (DOCUMENTATION.md §6) that
+— the absence is the documented signal (DOCUMENTATION.md §8) that
 nothing is on disk to read.
 
 These tests use representative models that don't require multi-second
@@ -12,6 +12,8 @@ binary runs at slow scale.
 """
 
 import os
+import re
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -248,6 +250,50 @@ def test_bounce_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
 
 
 @pytest.mark.requires_binary
+def test_bellhop_second_run_does_not_inherit_first_output(tmp_path):
+    """Bellhop writes exactly one of .shd/.arr/.ray per run under a fixed
+    base name, so a second run into the same pinned work_dir must neither
+    advertise nor keep the first run's primary output."""
+    env, src, rcv = _basic_setup()
+    work = tmp_path / 'mode_switch'
+    bh = Bellhop(verbose=False, work_dir=work, cleanup=False)
+
+    field = bh.run(env, src, rcv)
+    assert 'shd_file' in field.metadata
+    shd_path = field.metadata['shd_file']
+
+    arrivals = bh.run(env, src, rcv, run_mode=uacpy.RunMode.ARRIVALS)
+    assert 'arr_file' in arrivals.metadata
+    assert 'shd_file' not in arrivals.metadata, (
+        "ARRIVALS result inherited the previous run's pressure-field path"
+    )
+    assert 'ray_file' not in arrivals.metadata
+    assert not os.path.exists(shd_path), (
+        "the previous run's .shd survived into this run's work_dir"
+    )
+
+
+@pytest.mark.requires_binary
+def test_bellhop_broadband_records_its_scratch(tmp_path):
+    """The broadband paths build the result from an inner ARRIVALS run; with
+    the scratch surviving (cleanup=False) that directory must stay reachable
+    from the returned Field, not leak unreferenced."""
+    env, src, rcv = _basic_setup()
+    bh = Bellhop(verbose=False, cleanup=False)
+    hf = bh.run(env, src, rcv, run_mode=uacpy.RunMode.BROADBAND)
+    assert 'arr_file' in hf.metadata
+    assert os.path.exists(hf.metadata['arr_file'])
+
+    ts = bh.run(
+        env, src, rcv, run_mode=uacpy.RunMode.TIME_SERIES,
+        source_waveform=np.sin(2 * np.pi * 50 * np.arange(256) / 1000.0),
+        sample_rate=1000.0,
+    )
+    assert 'arr_file' in ts.metadata
+    assert os.path.exists(ts.metadata['arr_file'])
+
+
+@pytest.mark.requires_binary
 def test_pinned_work_dir_cleanup_false_dir_persists(tmp_path):
     """Negative control: work_dir pinned + cleanup=False (default for
     pinned dir) ⇒ directory survives the call. Sanity-check the dual."""
@@ -338,4 +384,41 @@ def test_metadata_keys_are_all_documented(
         f"that are not registered in _DOCUMENTED_METADATA. "
         f"Add an entry per (model, key) in uacpy/core/results.py or fix the "
         f"wrapper to drop the unregistered key."
+    )
+
+
+def test_documented_metadata_has_no_dead_rows():
+    """Reverse direction: every registered ``(model, key)`` must be written
+    somewhere in the source tree.
+
+    ``test_metadata_keys_are_all_documented`` only checks emitted → registered,
+    so a row for a key no wrapper writes any more is invisible to it. This
+    static scan closes that gap without needing a binary: it greps the emitters
+    (``uacpy/models``, ``uacpy/io``, ``uacpy/core``, ``uacpy/sonar``) for the
+    two forms a key is written in — ``key=value`` (most keys reach metadata as
+    keyword arguments to ``_result_kwargs``) and a quoted ``'key'`` (dict
+    literals, ``metadata['key'] = …``, ``primary_files``).
+    """
+    from uacpy.core.results import _DOCUMENTED_METADATA, _UNIVERSAL_METADATA
+
+    root = Path(uacpy.__file__).parent
+    registry = root / 'core' / 'results' / '_base.py'
+    sources = [
+        p for sub in ('models', 'io', 'core', 'sonar')
+        for p in (root / sub).rglob('*.py')
+        if p != registry
+    ]
+    blob = '\n'.join(p.read_text(encoding='utf-8') for p in sources)
+
+    def _written(key: str) -> bool:
+        k = re.escape(key)
+        return bool(re.search(rf'\b{k}\s*=', blob)
+                    or re.search(rf'''['"]{k}['"]''', blob))
+
+    keys = {k for (_m, k) in _DOCUMENTED_METADATA} | set(_UNIVERSAL_METADATA)
+    dead = sorted(k for k in keys if not _written(k))
+    assert not dead, (
+        f"_DOCUMENTED_METADATA registers key(s) {dead} that nothing in "
+        f"uacpy/{{models,io,core,sonar}} writes. Delete the stale row(s), or "
+        f"fix the emitter that was supposed to attach them."
     )

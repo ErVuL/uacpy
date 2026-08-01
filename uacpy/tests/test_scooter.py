@@ -114,3 +114,46 @@ class TestScooterBroadband:
 def test_scooter_constructor_no_longer_accepts_source_type():
     with pytest.raises(TypeError):
         Scooter(source_type='R')
+
+
+class TestScooterReceiverDepthAxis:
+    """The settled below-domain policy (``PropagationModel.validate_inputs``):
+    receivers are outputs, so a receiver below the deepest modelled interface
+    is accepted and returns the model's below-domain value. The returned depth
+    axis must therefore be the one the caller asked for — moving receivers onto
+    the mesh and de-duplicating them silently misaligns every row a caller
+    indexes against its own depth array."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
+        column = SeabedColumn(
+            layers=[SedimentLayer(thickness=20.0, sound_speed=1600.0,
+                                  density=1.8, attenuation=0.5)],
+            halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=2.0, attenuation=0.8))
+        return Environment(name='media', bathymetry=200.0, ssp=1500.0,
+                           bottom=Bottom(columns=[column]))
+
+    def test_requested_depths_are_returned_verbatim(self):
+        # 200 m water + 20 m sediment ⇒ resolvable to 220 m; 300 and 400 are
+        # below it and would previously have collapsed onto one 217 m row.
+        receiver = Receiver(depths=np.array([50.0, 150.0, 300.0, 400.0]),
+                            ranges=np.linspace(500.0, 5000.0, 5))
+        result = Scooter(verbose=False).run(
+            self._env(), Source(depths=50.0, frequencies=100.0), receiver)
+        assert result.data.shape[0] == receiver.depths.size
+        assert np.asarray(result.coords['depth']) == pytest.approx(
+            receiver.depths)
+
+    def test_unresolvable_depths_are_no_data(self):
+        """Below the mesh the binary clamps onto the deepest interface; that
+        value belongs to a different depth, so it must not be handed back."""
+        receiver = Receiver(depths=np.array([50.0, 150.0, 300.0, 400.0]),
+                            ranges=np.linspace(500.0, 5000.0, 5))
+        data = np.asarray(Scooter(verbose=False).run(
+            self._env(), Source(depths=50.0, frequencies=100.0), receiver).data)
+        assert np.all(np.isfinite(data[:2]))
+        assert np.all(np.isnan(data[2:]))

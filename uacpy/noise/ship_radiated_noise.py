@@ -32,6 +32,8 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
 # Combined RNL measurement uncertainty by band (ISO 17208-2:2019 §5), in dB.
+# Reference figures to report alongside a measured level; no function here
+# applies them, since the uncertainty of a *modelled* level is the model's.
 RNL_UNCERTAINTY_DB = {
     "low": 5.0,     # 10 Hz - 100 Hz bands
     "mid": 3.0,     # 125 Hz - 16 kHz bands

@@ -58,19 +58,6 @@ class Modes(Result):
     def _repr_extra(self) -> str:
         return f"n_modes={self.n_modes}, n_z={self.depths.size}"
 
-    def _id_kwargs(self) -> dict:
-        """Identification fields carried onto every derived :class:`Modes`
-        (and onto the :class:`Field` the modal sum builds)."""
-        return dict(
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            phase_reference=self.phase_reference,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
-        )
-
     def first_n(self, n: int) -> "Modes":
         """Return a new :class:`Modes` containing only the first ``n`` modes.
 
@@ -86,7 +73,7 @@ class Modes(Result):
             k=new_k,
             phi=new_phi,
             depths=self.depths,
-            **self._id_kwargs(),
+            **self.id_kwargs(),
         )
 
     def compute_phase_speeds(self) -> np.ndarray:
@@ -258,7 +245,7 @@ class Modes(Result):
         new_k = kr + 1j * alpha_m
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
-            **self._id_kwargs(),
+            **self.id_kwargs(),
         )
 
     def modal_propagation_loss(
@@ -347,7 +334,7 @@ class Modes(Result):
         rho_s = float(source_density) * 1000.0  # g/cm³ → kg/m³
         pref = 1j * np.exp(-1j * np.pi / 4.0) / (rho_s * np.sqrt(8.0 * np.pi))
         P = pref * P / sqrt_r[None, :]
-        id_kwargs = self._id_kwargs()
+        id_kwargs = self.id_kwargs()
         id_kwargs['backend'] = 'modal_sum'
         id_kwargs['source_depths'] = np.array([z_s])
         return Field(

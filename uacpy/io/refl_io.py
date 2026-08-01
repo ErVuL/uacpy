@@ -13,7 +13,7 @@ import shutil
 
 import numpy as np
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
@@ -23,7 +23,7 @@ from uacpy.io._fortran_helpers import typed_format_error
 
 @typed_format_error
 def read_reflection_coefficient(
-    filename: str, boundary: str = "bottom"
+    filename: Union[str, Path], boundary: str = "bottom"
 ) -> Dict[str, np.ndarray]:
     """
     Read reflection coefficient data from file (.trc or .brc).
@@ -34,7 +34,7 @@ def read_reflection_coefficient(
 
     Parameters
     ----------
-    filename : str
+    filename : str or Path
         Path to reflection coefficient file (.trc for top, .brc for bottom).
         Extension is added automatically if not present.
     boundary : str, optional
@@ -65,10 +65,11 @@ def read_reflection_coefficient(
     # write_reflection_coefficient with a literal path round-trips); otherwise
     # apply the AT extension (.trc top / .brc bottom) so a bare base name still
     # resolves to the conventional file.
-    if not Path(filename).exists():
+    filename = Path(filename)
+    if not filename.exists():
         ext = ".trc" if boundary.lower() == "top" else ".brc"
-        if not filename.endswith(ext):
-            filename = filename + ext
+        if filename.suffix != ext:
+            filename = filename.with_name(filename.name + ext)
 
     try:
         with open(filename, "r") as fid:
@@ -113,12 +114,12 @@ def read_reflection_coefficient(
 
             return {"theta": theta, "R": R, "phi": phi, "n_pts": n_pts}
 
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise FileNotFoundError(
             f"Reflection coefficient file not found: {filename}. "
             "Run Bounce or OASR first to generate the .brc/.trc file, "
             "or pass an explicit reflection_file= path to the model."
-        )
+        ) from e
 
 
 def read_source_beam_pattern(
@@ -132,7 +133,8 @@ def read_source_beam_pattern(
     Parameters
     ----------
     filepath : str or Path
-        Source beam pattern file root name (without .sbp extension)
+        Source beam pattern file; a root name without the ``.sbp`` extension
+        also resolves.
     sbp_option : str, optional
         Option flag:
         - '*': Read beam pattern from file
@@ -143,7 +145,7 @@ def read_source_beam_pattern(
     beam_pattern : ndarray
         Beam pattern array, shape (N, 2):
         - Column 0: Angles in degrees
-        - Column 1: amplitude (linear, = 10^(dB/20))
+        - Column 1: level in dB re peak
 
     Notes
     -----
@@ -151,14 +153,13 @@ def read_source_beam_pattern(
     - Line 1: Number of points
     - Subsequent lines: angle (degrees), level (dB)
 
-    Disk levels are converted from dB to a linear *amplitude* (field)
-    factor on output (the 1/20 exponent, matching ``bellhop.f90:132``):
-        amplitude = 10^(dB / 20)
+    Levels stay in **dB**, the unit both the file and
+    :attr:`uacpy.Source.beam_pattern` use, so this round-trips
+    :func:`write_source_beam_pattern`. The engines convert to a linear
+    amplitude factor (``10**(dB/20)``, ``beampattern.f90:59``) themselves
+    after reading.
 
-    This is an amplitude, not a power (``10^(dB/10)``) — squaring it to
-    "get amplitude" would double-apply the exponent.
-
-    For omni-directional pattern, creates [-180°, 180°] with 0 dB (=1.0).
+    For an omni-directional pattern, creates [-180°, 180°] at 0 dB.
 
     Translated from OALIB readpat.m
     """
@@ -166,9 +167,13 @@ def read_source_beam_pattern(
         log_message('refl_io', "Reading source beam pattern file",
                     verbose=verbose)
 
-        filepath = Path(filepath)
-        sbp_file = str(filepath) + ".sbp"
-        if not Path(sbp_file).exists():
+        # Take the path as given when it already exists; otherwise apply the
+        # AT extension so a bare base name still resolves (mirrors
+        # read_reflection_coefficient).
+        sbp_file = Path(filepath)
+        if not sbp_file.exists():
+            sbp_file = sbp_file.with_name(sbp_file.name + ".sbp")
+        if not sbp_file.exists():
             raise FileNotFoundError(
                 f"Source beam pattern file not found: {sbp_file}. "
                 "Provide the .sbp file next to the env, or pass "
@@ -193,16 +198,13 @@ def read_source_beam_pattern(
             )
             log_message(
                 'refl_io',
-                f"power (dB): {beam_pattern[:, 1].tolist()}",
+                f"level (dB): {beam_pattern[:, 1].tolist()}",
                 verbose=verbose, level='debug',
             )
 
     else:
         # Omni-directional pattern
         beam_pattern = np.array([[-180.0, 0.0], [180.0, 0.0]])
-
-    # Convert dB to linear amplitude (field) factor — /20, not /10.
-    beam_pattern[:, 1] = 10.0 ** (beam_pattern[:, 1] / 20.0)
 
     return beam_pattern
 
@@ -279,7 +281,7 @@ def write_source_beam_pattern(
         Beam pattern level in dB relative to peak, shape (N,)
         (typically 0 dB at peak, negative elsewhere).  Bellhop
         converts dB -> linear via 10**(SrcBmPat(:,2)/20) at load time
-        (bellhop.f90:132).
+        (beampattern.f90:59, bellhop.f90:131).
 
     Notes
     -----
@@ -300,6 +302,62 @@ def write_source_beam_pattern(
         # Write angle, amplitude pairs
         for i in range(n_angles):
             f.write(f"{angles[i]:8.2f} {pattern[i]:12.6f}\n")
+
+
+_REFLECTION_SUFFIX = {'bottom': '.brc', 'top': '.trc'}
+
+
+def stage_reflection_file(
+    reflection_file: Optional[Union[str, Path]],
+    env_path: Union[str, Path],
+    boundary: str = 'bottom',
+    verbose: bool = False,
+) -> Path:
+    """Place a reflection-coefficient table beside the ``.env`` that names it.
+
+    AT and Bellhop open the table by base-name convention (``<env>.brc`` for
+    the bottom, ``<env>.trc`` for the top), so a table produced elsewhere has
+    to be copied next to the environment file. A table already at the
+    destination — a BOUNCE run whose ``.brc`` sits in the same pinned
+    ``work_dir`` the ``.env`` is written into — is kept as is.
+
+    Parameters
+    ----------
+    reflection_file : str or Path or None
+        Source table; ``None`` is the caller's configuration error.
+    env_path : str or Path
+        Path of the ``.env`` being written.
+    boundary : {'bottom', 'top'}
+        Which table this is, selecting the destination suffix.
+    verbose : bool, optional
+        Log the staging step.
+
+    Returns
+    -------
+    Path
+        The staged destination path.
+    """
+    suffix = _REFLECTION_SUFFIX[boundary]
+    if not reflection_file:
+        raise ConfigurationError(
+            f"acoustic_type='file' requires reflection_file= on the {boundary} "
+            f"BoundaryProperties (path to a {suffix} table).",
+            remediation="Generate the table via BOUNCE or OASR and pass its "
+                        "path as reflection_file=.",
+        )
+    src = Path(reflection_file)
+    if not src.exists():
+        raise ConfigurationError(
+            f"Reflection coefficient file not found: {src}",
+            remediation="Generate it via BOUNCE or OASR first, or correct the "
+                        "reflection_file= path.",
+        )
+    dest = Path(env_path).with_suffix(suffix)
+    if src.resolve() != dest.resolve():
+        shutil.copy(src, dest)
+    log_message('refl_io', f"staged {boundary} reflection file: {src} -> {dest}",
+                verbose=verbose)
+    return dest
 
 
 def stage_source_beam_pattern(

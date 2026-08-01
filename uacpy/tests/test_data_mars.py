@@ -143,10 +143,49 @@ def test_bottom_transect(monkeypatch):
 
 # ── registry wiring ─────────────────────────────────────────────────────────
 
-def test_mars_in_auto_chain_before_diesing():
+def test_mars_in_auto_chain_after_diesing():
+    """MARS is live-only, so the installed Diesing raster is consulted first."""
     order = list(_AUTO_BOTTOM_ORDER)
     assert 'mars' in order
-    assert order.index('emodnet') < order.index('mars') < order.index('diesing')
+    assert order.index('diesing') < order.index('mars') < order.index('pelagic')
+
+
+# ── coverage guard ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('point', [
+    (43.2, 7.5),            # Ligurian Sea
+    (36.0, -70.0),          # North Atlantic
+    (26.0, -90.0),          # Gulf of Mexico shelf
+    (60.0, 150.0),          # Sea of Okhotsk (right longitude, wrong hemisphere)
+])
+def test_out_of_coverage_never_hits_the_network(monkeypatch, point):
+    def boom(url, **kw):
+        raise AssertionError(f"MARS issued a request for {point}: {url}")
+
+    monkeypatch.setattr(mars, 'http_get', boom)
+    with pytest.raises(DataFetchError, match='does not cover'):
+        mars.fetch_mars_sediment(point)
+
+
+def test_auto_chain_reaches_no_mars_request_outside_australia(monkeypatch,
+                                                              tmp_path):
+    """The 'auto' bottom chain must not call AusSeabed for a Ligurian point."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    import uacpy.data.pelagic as pelagic_mod
+    import uacpy.data.seabed as seabed_mod
+
+    def no_emodnet(point, **kw):
+        raise DataFetchError("European seas only")
+
+    def boom(url, **kw):
+        raise AssertionError(f"MARS issued a request: {url}")
+
+    monkeypatch.setattr(seabed_mod, 'fetch_bottom', no_emodnet)
+    monkeypatch.setattr(pelagic_mod, '_water_depth', lambda *a, **k: 5000.0)
+    monkeypatch.setattr(mars, 'http_get', boom)
+    env = data.fetch_environment((43.2, 7.5), bathymetry=2000.0, ssp=1500.0,
+                                 bottom_sources='auto')
+    assert env.data_sources[-1].source.id == 'pelagic'
 
 
 def test_fetch_environment_bottom_sources_mars(monkeypatch, tmp_path):

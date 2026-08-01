@@ -14,6 +14,7 @@ netCDF4 = pytest.importorskip('netCDF4')
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import gebco_local, glodap_local, sediment_db, woa23_local
+from uacpy.data import _http
 
 _FILL = 9.96921e36
 
@@ -175,10 +176,10 @@ def test_curl_interrupt_leaves_no_destination(tmp_path, monkeypatch):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
     with pytest.raises(KeyboardInterrupt):
-        glodap_local._curl_download('http://x', out, timeout=5.0, verbose=False)
+        _http.curl_download('http://x', out, timeout=5.0, verbose=False)
     assert not out.exists()
 
 
@@ -191,9 +192,9 @@ def test_curl_failure_leaves_no_destination(tmp_path, monkeypatch):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
         raise subprocess.SubprocessError("curl died")
 
-    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
-    assert glodap_local._curl_download('http://x', out, timeout=5.0,
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
+    assert _http.curl_download('http://x', out, timeout=5.0,
                                        verbose=False) is False
     assert not out.exists()
 

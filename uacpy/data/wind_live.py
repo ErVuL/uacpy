@@ -17,7 +17,7 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import erddap_last_value, http_get
 from uacpy.data._time import parse_date
 
 __all__ = ['fetch_wind', 'fetch_wind_transect', 'ERDDAP_URL', 'WIND_SOURCES']
@@ -56,22 +56,11 @@ def _griddap_url(var, when, lat, lon):
     return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
 
 
-def _last_value(body):
-    """Last numeric field of an ERDDAP griddap ``.csv`` point response."""
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
-
-
 def _fetch_var(var, when, lat, lon, *, timeout, verbose):
     url = _griddap_url(var, when, lat, lon)
     body = http_get(url, timeout=timeout, verbose=verbose, source='wind',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return _last_value(body)
+    return erddap_last_value(body)
 
 
 def _wind_speed(lat, lon, when, *, timeout, verbose):

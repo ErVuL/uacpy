@@ -7,6 +7,8 @@ backend. Unlike the API, there is no per-request rate limit, so arbitrarily
 large grids and transects sample instantly once downloaded.
 """
 
+from pathlib import Path
+
 import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
@@ -23,8 +25,15 @@ class _GebcoGrid(NetcdfGrid):
     """Nearest-cell accessor over the GEBCO ``elevation`` variable."""
 
     def __init__(self, path):
-        super().__init__(path)
-        self._elev = self.var('elevation', 'z')
+        try:
+            super().__init__(path)
+            self._elev = self.var('elevation', 'z')
+        except KeyError as exc:
+            raise DataFetchError(
+                f"GEBCO NetCDF {Path(path).name} is missing an expected "
+                f"variable ({exc}); its schema may have changed.",
+                remediation="Re-run ./install.sh --data gebco.",
+            ) from exc
 
     def elevation(self, lat, lon):
         elev = self.cell(self._elev, self.row(lat), self.col(lon))
@@ -46,11 +55,21 @@ class _GebcoGrid(NetcdfGrid):
         lons = lon_linspace(lon_range[0], lon_range[1], n_lon)
         rows = [self.row(v) for v in lats]
         cols = [self.col(v) for v in lons]
-        block = np.asarray(self._elev[min(rows):max(rows) + 1,
-                                      min(cols):max(cols) + 1], dtype=float)
-        ri = [r - min(rows) for r in rows]
-        ci = [c - min(cols) for c in cols]
-        return lats, lons, block[np.ix_(ri, ci)]
+        r0, r1 = min(rows), max(rows)
+        ri = [r - r0 for r in rows]
+        # Eastward longitudes give non-decreasing column indices with at most
+        # one wrap back to 0; slicing min..max across that wrap would read all
+        # 86 400 columns, so read each contiguous run and stitch.
+        wrap = next((i for i in range(1, len(cols)) if cols[i] < cols[i - 1]),
+                    None)
+        runs = [cols] if wrap is None else [cols[:wrap], cols[wrap:]]
+        blocks = []
+        for run in runs:
+            c0 = min(run)
+            slab = np.asarray(self._elev[r0:r1 + 1, c0:max(run) + 1],
+                              dtype=float)
+            blocks.append(slab[np.ix_(ri, [c - c0 for c in run])])
+        return lats, lons, np.hstack(blocks)
 
 
 def _grid():

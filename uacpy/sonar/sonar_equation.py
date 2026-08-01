@@ -17,6 +17,9 @@ point. ``DT`` is the detection threshold (recognition differential) — see
 (``processing_loss_db``); ``AG`` optionally replaces ``DI`` for
 non-isotropic noise.
 
+``SL``, ``NL`` and ``RL`` must all share one band reference — see
+:func:`noise_background`, which states the rule for the whole module.
+
 The ``*_field`` variants (:func:`passive_signal_excess_field`,
 :func:`active_signal_excess_field`, :func:`probability_of_detection_field`,
 :func:`detection_range_by_depth`) evaluate the same budgets over a model TL
@@ -40,6 +43,18 @@ def echo_level(source_level, tl, target_strength):
 
 def noise_background(noise_level, directivity_index=None, *, array_gain=None):
     """Noise masking background: ``NL - DI`` (dB), or ``NL - AG``.
+
+    **Band convention (this module's single statement of it).** ``NL`` has to
+    share its reference with the ``SL`` (and ``RL``) it is differenced against:
+    either *all* spectral levels (dB re 1 µPa²/Hz, SL dB re 1 µPa²·m²/Hz) or
+    *all* band levels over the processing band (dB re 1 µPa², SL dB re
+    1 µPa²·m²). The two differ by ``10*log10(w)`` — 20 dB at a 100 Hz band —
+    and the ``DT`` from
+    :func:`uacpy.sonar.detection.detection_threshold_energy` is a unitless
+    power ratio valid only for a matched pair. The two :mod:`uacpy.noise`
+    products sit on opposite sides: :attr:`uacpy.noise.WenzNoise.total` is
+    spectral, :func:`uacpy.noise.radiated_noise_level` is a decidecade band
+    level; convert one before combining them.
 
     ``array_gain`` replaces the directivity index when given — AG is the
     measured/estimated gain of the receiver against the *actual* noise
@@ -67,8 +82,9 @@ def passive_signal_excess(
 ):
     """Passive signal excess ``SE = SL - TL - (NL - DI) - DT - L_sp`` (dB).
 
-    ``source_level`` is the *target* radiated level. ``SE >= 0`` means
-    the detector achieves its design ``(P_D, P_F)`` operating point.
+    ``source_level`` is the *target* radiated level, in the same band
+    reference as ``noise_level`` (see :func:`noise_background`). ``SE >= 0``
+    means the detector achieves its design ``(P_D, P_F)`` operating point.
     ``array_gain`` replaces ``directivity_index`` for non-isotropic
     noise (see :func:`noise_background`); ``processing_loss_db`` is the
     implementation/system loss ``L_sp >= 0`` (windowing, scalloping,
@@ -112,7 +128,8 @@ def active_signal_excess(
     :func:`uacpy.sonar.reverberation.boundary_reverberation`).
     ``array_gain`` replaces ``directivity_index`` for non-isotropic
     noise; ``processing_loss_db`` is the implementation loss
-    ``L_sp >= 0`` subtracted from the budget.
+    ``L_sp >= 0`` subtracted from the budget. ``SL``, ``NL`` and ``RL``
+    share one band reference — see :func:`noise_background`.
     """
     if noise_level is None and reverberation_level is None:
         raise ConfigurationError(
@@ -141,7 +158,8 @@ def figure_of_merit(
 
     Equals the maximum allowable one-way TL (passive), or two-way TL when
     ``TS = 0`` (active). ``array_gain`` / ``processing_loss_db`` as in
-    :func:`passive_signal_excess`.
+    :func:`passive_signal_excess`; ``source_level`` and ``noise_level`` share
+    one band reference — see :func:`noise_background`.
     """
     return (
         np.asarray(source_level, float)
@@ -228,9 +246,10 @@ def passive_signal_excess_field(
         One-way TL field from any model run (e.g.
         ``run_mode=RunMode.COHERENT_TL``).
     source_level : float
-        Target radiated level SL (dB re 1 µPa @ 1 m).
+        Target radiated level SL, at 1 m.
     noise_level : float
-        Ambient noise level NL (dB re 1 µPa²/Hz at the array).
+        Ambient noise level NL at the array, in the same band reference as
+        ``source_level`` — see :func:`noise_background`.
     directivity_index : float, optional
         Receiving directivity index DI (dB). Default 0.
     detection_threshold : float, optional
@@ -299,12 +318,13 @@ def active_signal_excess_field(
     tl_field : Field
         One-way TL field from any model run.
     source_level : float
-        Projector source level SL (dB re 1 µPa @ 1 m).
+        Projector source level SL, at 1 m.
     target_strength : float
         Target strength TS (dB).
     noise_level : float, optional
-        Ambient noise level NL (dB). Provide this and/or
-        ``reverberation_level``.
+        Ambient noise level NL, in the same band reference as ``source_level``
+        and ``reverberation_level`` (see :func:`noise_background`). Provide
+        this and/or ``reverberation_level``.
     reverberation_level : float or array, optional
         Reverberation level RL (dB) — a scalar, or a 1-D per-range array
         matching the field's ``'range'`` axis (e.g. from

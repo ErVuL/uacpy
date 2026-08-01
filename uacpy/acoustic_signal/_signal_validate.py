@@ -11,7 +11,7 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 def require_finite_signal(data, caller: str):
-    """Validate and return a real float ndarray of a non-empty, finite signal.
+    """Validate a non-empty, finite signal and return it as an ndarray.
 
     Rejects an empty signal and any NaN/Inf with a typed
     :class:`~uacpy.core.exceptions.ConfigurationError`. Does **not** reject

@@ -17,6 +17,7 @@ netCDF4 = pytest.importorskip('netCDF4')
 from uacpy.core.environment import SeabedColumn, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import crust1_local, globsed_local
+from uacpy.data import _http
 
 
 def _write_globsed(root):
@@ -183,7 +184,7 @@ def test_globsed_download(tmp_path, monkeypatch):
     ds.close()
     blob = src.read_bytes()
     # Force the urllib fallback (no real curl to NCEI) and mock the fetch.
-    monkeypatch.setattr(globsed_local, '_curl_download', lambda *a, **k: False)
+    monkeypatch.setattr(globsed_local, 'curl_download', lambda *a, **k: False)
     monkeypatch.setattr(globsed_local, 'http_get', lambda url, **kw: blob)
     out = globsed_local.download_globsed_db(cache_dir=str(tmp_path / 'o'))
     assert out.exists() and out.name == 'GlobSed-v3.nc'
@@ -211,8 +212,8 @@ def test_globsed_interrupted_curl_no_final_file(tmp_path, monkeypatch):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'truncated')
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(globsed_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(globsed_local.subprocess, 'run', fake_run)
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
     with pytest.raises(KeyboardInterrupt):
         globsed_local.download_globsed_db(cache_dir=str(dest))
     assert not (dest / globsed_local.GLOBSED_FILE).exists()

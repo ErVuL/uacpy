@@ -741,3 +741,103 @@ class TestBellhopSourceGeometry:
         sbp = list(tmp_path.rglob('*.sbp'))
         assert sbp, "no .sbp written for Source(beam_pattern=...)"
         assert sbp[0].read_text().split()[0] == '3'
+
+
+class TestBeamPatternReachesEveryPath:
+    """``Source.beam_pattern`` must survive every internal ``Source`` rebuild.
+
+    The broadband paths and multi-depth EIGENRAYS construct their own Source
+    from the caller's; dropping the pattern there launches an omnidirectional
+    fan while ``validate_inputs`` still accepts the request.
+    """
+
+    PATTERN = np.array([[-180.0, -100.0], [-5.0, -100.0],
+                        [-2.0, 0.0], [2.0, 0.0],
+                        [5.0, -100.0], [180.0, -100.0]])
+
+    @staticmethod
+    def _env():
+        return Environment(bathymetry=200.0, ssp=1500.0)
+
+    @staticmethod
+    def _rcv():
+        return Receiver(depths=np.array([100.0]),
+                        ranges=np.linspace(500, 2000, 4))
+
+    def _run(self, tmp_path, run_mode, **kwargs):
+        model = Bellhop(verbose=False, work_dir=tmp_path, cleanup=False)
+        src = Source(depths=50.0, frequencies=200.0,
+                     beam_pattern=self.PATTERN)
+        result = model.run(self._env(), src, self._rcv(),
+                           run_mode=run_mode, **kwargs)
+        sbp = list(tmp_path.rglob('*.sbp'))
+        assert sbp, f"no .sbp staged for run_mode={run_mode}"
+        return result
+
+    def test_broadband_stages_sbp(self, tmp_path):
+        self._run(tmp_path, RunMode.BROADBAND)
+
+    def test_time_series_stages_sbp(self, tmp_path):
+        self._run(
+            tmp_path, RunMode.TIME_SERIES,
+            source_waveform=np.sin(2 * np.pi * 200 * np.arange(256) / 4000.0),
+            sample_rate=4000.0,
+        )
+
+    def test_multi_depth_eigenrays_stages_sbp(self, tmp_path):
+        model = Bellhop(verbose=False, work_dir=tmp_path, cleanup=False)
+        src = Source(depths=[30.0, 60.0], frequencies=200.0,
+                     beam_pattern=self.PATTERN)
+        model.run(self._env(), src,
+                  Receiver(depths=[100.0], ranges=[1500.0]),
+                  run_mode=RunMode.EIGENRAYS)
+        assert list(tmp_path.rglob('*.sbp')), \
+            "no .sbp staged for multi-depth EIGENRAYS"
+
+    def test_broadband_pattern_changes_the_field(self, tmp_path):
+        """The pattern must reach the physics, not just the file: a ±2°
+        aperture cannot produce the omnidirectional transfer function."""
+        model = Bellhop(verbose=False)
+        env, rcv = self._env(), self._rcv()
+        plain = model.run(env, Source(depths=50.0, frequencies=200.0), rcv,
+                          run_mode=RunMode.BROADBAND)
+        shaded = model.run(
+            env,
+            Source(depths=50.0, frequencies=200.0, beam_pattern=self.PATTERN),
+            rcv, run_mode=RunMode.BROADBAND,
+        )
+        assert not np.allclose(np.abs(plain.data), np.abs(shaded.data)), \
+            "beam_pattern did not change BROADBAND H(f)"
+
+
+class TestAutoBounceWithBeamPattern:
+    """``Bellhop(auto_bounce=True)`` + a beam-pattern Source must not raise
+    from inside the spawned Bounce: BOUNCE reads no source geometry, and
+    Bellhop — the model the user called — supports beam patterns."""
+
+    def test_elastic_bottom_auto_route_accepts_beam_pattern(self):
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            name='elastic', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0, density=1.8,
+                attenuation=0.2, shear_speed=400.0, shear_attenuation=0.5,
+            ),
+        )
+        src = Source(depths=50.0, frequencies=100.0,
+                     beam_pattern=np.array([[-180.0, -20.0], [0.0, 0.0],
+                                            [180.0, -20.0]]))
+        rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+        result = Bellhop(verbose=False).run(env, src, rcv)
+        assert 'bounce_result' in result.metadata
+
+    def test_bounce_accepts_beam_pattern_source_directly(self):
+        """The guard lives in ``_validate_geometry``, which Bounce no-ops —
+        so a Source can be reused across models without stripping it."""
+        from uacpy.models import Bounce
+        env = Environment(name='e', bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=50.0, frequencies=100.0,
+                     beam_pattern=np.array([[-90.0, -10.0], [90.0, -10.0]]))
+        rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+        Bounce(verbose=False).validate_inputs(
+            env, src, rcv, run_mode=RunMode.REFLECTION)

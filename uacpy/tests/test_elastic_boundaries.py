@@ -2,13 +2,13 @@
 Tests for Elastic Boundary Handling
 
 Tests both workflows for elastic boundaries:
-1. KrakenField Auto-Detection (→ KrakenC)
+1. Kraken auto-detection of elastic media (→ backend='krakenc')
 2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN
 
 According to Acoustics Toolbox documentation:
 - BOUNCE generates .brc (bottom reflection coef) and .irc (internal reflection coef)
-- BELLHOP, SCOOTER, KRAKENC: Use .brc files
-- KRAKEN: Uses .irc files (NOT .brc)
+- BELLHOP, SCOOTER, Kraken(backend='krakenc'): Use .brc files
+- Kraken(backend='kraken'): Uses .irc files (NOT .brc)
 - SPARC: Does not support reflection files
 """
 
@@ -22,7 +22,7 @@ from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy import Field
 from uacpy.models import Kraken, Bounce, Scooter
 
-# Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
+# Tests in this module spawn the kraken/krakenc/bounce/scooter/bellhop binaries
 pytestmark = pytest.mark.requires_binary
 
 
@@ -51,8 +51,8 @@ def elastic_env():
 class TestElasticOverFluidHalfspaceGuard:
     """`krakenc.exe` spins forever in setup on a solid-over-liquid bottom
     interface (an elastic ``SeabedColumn`` layer over a fluid halfspace).
-    `_KrakenBase` rejects it up front so all three Kraken-family models fail
-    fast with a typed error instead of hanging for ``timeout`` seconds."""
+    `Kraken` rejects it up front so the run fails fast with a typed error
+    instead of hanging for ``timeout`` seconds."""
 
     @staticmethod
     def _src_rcv():
@@ -99,7 +99,7 @@ class TestElasticOverFluidHalfspaceGuard:
         assert modes.k.shape[0] > 0
 
     def test_receiver_in_elastic_subbottom_returns_nan(self):
-        """KrakenField: where the modes solve succeeds (elastic-over-elastic),
+        """Where the modes solve succeeds (elastic-over-elastic),
         receivers below the water column — which field.exe cannot evaluate in
         elastic media — are returned as NaN, the water-column receivers as
         finite values. No raise (the harmonized below-domain policy)."""
@@ -116,7 +116,7 @@ class TestElasticOverFluidHalfspaceGuard:
 
 
 class TestElasticBoundaryAutoDetection:
-    """Test automatic elastic boundary detection in KrakenField."""
+    """Test automatic elastic boundary detection in Kraken."""
 
     @pytest.fixture
     def fluid_env(self):
@@ -143,7 +143,7 @@ class TestElasticBoundaryAutoDetection:
         )
 
     def test_krakenfield_detects_elastic_bottom(self, elastic_env, source, receiver_small):
-        """Test that KrakenField detects elastic bottom and uses KrakenC."""
+        """Test that Kraken detects an elastic bottom and dispatches to krakenc."""
         krakenfield = Kraken(verbose=False)
 
         # This should automatically detect elastic boundary and use KrakenC
@@ -159,7 +159,7 @@ class TestElasticBoundaryAutoDetection:
         assert np.all(result.tl < 200)  # Reasonable TL range
 
     def test_krakenfield_fluid_bottom(self, fluid_env, source, receiver_small):
-        """Test that KrakenField works with fluid bottom (uses regular Kraken)."""
+        """Test that Kraken works with a fluid bottom (dispatches to kraken.exe)."""
         krakenfield = Kraken(verbose=False)
 
         result = krakenfield.compute_tl(fluid_env, source, receiver_small)
@@ -313,7 +313,7 @@ class TestBounceToScooterWorkflow:
 
 
 class TestWorkflowComparison:
-    """Compare KrakenField auto-detection vs BOUNCE→SCOOTER workflows."""
+    """Compare Kraken auto-detection vs BOUNCE→SCOOTER workflows."""
 
     @pytest.fixture
     def receiver_small(self):
@@ -324,7 +324,7 @@ class TestWorkflowComparison:
 
     def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
         """Compare results from both elastic boundary workflows."""
-        # Approach 1: KrakenField auto-detection
+        # Approach 1: Kraken auto-detection
         krakenfield = Kraken(verbose=False)
         result_krakenfield = krakenfield.compute_tl(elastic_env, source, receiver_small)
 

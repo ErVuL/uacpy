@@ -67,7 +67,7 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     return freq.ravel()
 
 
-def _ofdm_symbol(freq, n_sc, cp):
+def ofdm_symbol(freq, n_sc, cp):
     """One CP-prefixed OFDM time-domain symbol from a length-``n_sc`` spectrum."""
     t = np.fft.ifft(freq) * np.sqrt(n_sc)
     return np.concatenate([t[n_sc - cp:], t])
@@ -85,7 +85,7 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
     freq = np.zeros(nsc, dtype=complex)
     even = np.arange(0, nsc, 2)
     freq[even] = np.exp(1j * np.pi / 2 * rng.integers(0, 4, even.size)) * np.sqrt(2)
-    return _ofdm_symbol(freq, nsc, int(cp_len))
+    return ofdm_symbol(freq, nsc, int(cp_len))
 
 
 def schmidl_cox_sync(rx, n_subcarriers, cp_len):

@@ -100,5 +100,42 @@ class TestOASPOptionGuard:
             self._run(options)
 
 
+@pytest.mark.requires_binary
+class TestRawOptionsVoidTypedKnobs:
+    """A raw ``options`` string replaces the whole option line, so a typed
+    knob passed alongside it never reaches the deck. Dropping ``'J'`` this
+    way silently switches OASES off the complex integration contour."""
+
+    def test_oast_rejects_options_with_a_typed_flag(self):
+        with pytest.raises(ConfigurationError, match="complex_contour"):
+            OAST(options='N T', complex_contour=True)
+        with pytest.raises(ConfigurationError, match="compute_contour"):
+            OAST(options='N T', compute_contour=True)
+
+    def test_oast_typed_flags_still_derive_the_option_line(self):
+        assert OAST()._resolve_options() == 'N T J'
+        assert OAST(complex_contour=False)._resolve_options() == 'N T'
+        assert OAST(compute_contour=True,
+                    compute_depth_average=True)._resolve_options() == 'N T J C A'
+        assert OAST(options='N T')._resolve_options() == 'N T'
+
+    def test_oast_copy_round_trips_the_option_line(self):
+        for m in (OAST(), OAST(options='N T'), OAST(complex_contour=False)):
+            assert m.copy()._resolve_options() == m._resolve_options()
+
+    def test_oasr_rejects_options_with_reflection_type(self):
+        with pytest.raises(ConfigurationError, match="reflection_type"):
+            OASR(options='S T', reflection_type='P-P')
+
+    def test_oasr_provenance_follows_the_option_letters(self):
+        """``options='S T'`` runs P-SV; recording 'P-P' would make the
+        metadata state something the deck never computed."""
+        assert OASR(options='S T')._resolve_reflection_type() == 'P-SV'
+        assert OASR(options='t T')._resolve_reflection_type() == 'transmission'
+        assert OASR()._resolve_reflection_type() == 'P-P'
+        assert OASR(reflection_type='P-SV')._resolve_reflection_type() == 'P-SV'
+        assert OASR(options='S T').copy()._resolve_reflection_type() == 'P-SV'
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

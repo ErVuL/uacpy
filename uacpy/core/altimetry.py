@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._grid import _RangeProfile
-from uacpy.core._carrier_validate import _require_finite
+from uacpy.core._carrier_validate import _require_finite, _coerce_data_sources
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -31,15 +31,20 @@ class Altimetry(_RangeProfile):
         Range axis in metres, monotonically increasing.
     heights : ndarray, shape (N,)
         Surface height in metres at each range (positive up; any sign).
+    data_sources : tuple
+        Provenance of a fetched surface (tuple of ``DataProvenance``); empty
+        for a literal/hand-built one. Aggregated by ``env.data_sources``.
     """
 
     ranges: np.ndarray
     heights: np.ndarray
+    data_sources: tuple = ()
 
     _VALUE_FIELD = 'heights'
-    _VALUE_LABEL = 'height'
+    _VALUE_LABEL = 'sea-surface height'
 
     def __post_init__(self):
+        self.data_sources = _coerce_data_sources(self.data_sources, "Altimetry")
         self._init_range_profile()
 
     def _validate_values(self) -> None:

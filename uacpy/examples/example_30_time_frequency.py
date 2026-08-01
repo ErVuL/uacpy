@@ -77,7 +77,7 @@ def main():
     sig = (np.sin(2 * np.pi * 150 * t) * np.exp(-0.5 * ((t - 0.20) / 0.03) ** 2)
            + np.sin(2 * np.pi * 500 * t) * np.exp(-0.5 * ((t - 0.40) / 0.03) ** 2))
     freqs, W = cwt(sig, fs, wavelet='morlet', n_freqs=140)
-    tvw, fvw, Wv = wigner_ville(sig, fs)
+    fvw, tvw, Wv = wigner_ville(sig, fs)
 
     # --- (E) broadband pulse + echo for the cepstrum ---
     t0, width, fc = 0.06, 0.004, 250.0

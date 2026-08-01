@@ -185,6 +185,32 @@ def test_bottom_auto_falls_back_to_pelagic(tmp_path, monkeypatch, stub_fetchers)
     env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='auto')
     assert env.bottom is not None
     assert env.data_sources[-1].source.id == 'pelagic'
+    # The classification uses the environment's own 2000 m bathymetry (above
+    # the CCD → calcareous ooze), not the 5000 m its own lookup would return.
+    assert env.bottom.columns[0].halfspace.grain_size_phi == pytest.approx(7.5)
+
+
+def test_pelagic_never_refetches_the_bathymetry(tmp_path, monkeypatch,
+                                                stub_fetchers):
+    # fetch_environment already holds the depth, so the pelagic model must be
+    # handed it rather than issuing its own GEBCO lookup per waypoint.
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    import uacpy.data.pelagic as pelagic_mod
+    monkeypatch.setattr(pelagic_mod, '_water_depth', lambda *a, **k: (
+        pytest.fail("pelagic re-fetched the bathymetry")))
+    point = env_mod.fetch_environment((43.2, 7.5), bottom_sources='pelagic')
+    assert point.bottom.columns[0].halfspace.grain_size_phi == pytest.approx(7.5)
+    # A transect crossing the CCD (4500 m) must classify each column at *its
+    # own* range: calcareous ooze inshore, pelagic clay beyond the crossing.
+    monkeypatch.setattr(
+        env_mod, 'fetch_bathy_transect',
+        lambda a, b, **kw: np.column_stack([np.linspace(0.0, 50e3, 21),
+                                            np.linspace(3000.0, 5500.0, 21)]))
+    transect = env_mod.fetch_environment(
+        (43.2, 7.5), transect_to=(42.8, 8.1), bottom_sources='pelagic',
+        range_dependent_bottom=True, bottom_n_points='auto', max_points=40)
+    speeds = [c.halfspace.sound_speed for c in transect.bottom.columns]
+    assert len(speeds) == 2 and speeds[0] > speeds[1]   # ooze, then clay
 
 
 def test_range_dependent_bottom(monkeypatch, stub_fetchers):
@@ -215,6 +241,28 @@ def test_with_absorption(monkeypatch, stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
     assert isinstance(env.absorption, FrancoisGarrison)
     assert env.absorption.temperature_c == 18.0
+
+
+@pytest.mark.parametrize('resolution', ['1.00', '0.25'])
+def test_with_absorption_uses_the_requested_woa_grid(monkeypatch, stub_fetchers,
+                                                     resolution):
+    """The T/S column must come from the same WOA23 grid as the SSP.
+
+    A 0.25° SSP against a 1.00° absorption column is a different cell — up to
+    ~50 km away at mid latitudes.
+    """
+    import uacpy.data.sound_speed as ss_mod
+    seen = {}
+
+    def fake_ts(point, **kw):
+        seen.update(kw)
+        return (np.array([0.0, 50.0]), np.array([18.0, 16.0]),
+                np.array([36.0, 36.1]))
+
+    monkeypatch.setattr(ss_mod, 'fetch_ts_profile', fake_ts)
+    env_mod.fetch_environment((43.2, 7.5), with_absorption=True,
+                              resolution=resolution)
+    assert seen['resolution'] == resolution
 
 
 def test_copernicus_requires_date(stub_fetchers):

@@ -26,7 +26,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.units import m_to_km
-from uacpy.io.oalib_writer import _writable_layers
+from uacpy.io.oalib_writer import writable_layers
 
 
 def _oases_option_chars(options: str) -> set:
@@ -127,7 +127,7 @@ def _emit_bottom_layers(
     if env.has_layered_bottom:
         lb = env.bottom.columns[0]
         current_depth = water_depth
-        for layer in _writable_layers(lb):
+        for layer in writable_layers(lb):
             layer_as = getattr(layer, 'shear_attenuation', 0.0)
             f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
                     f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
@@ -224,10 +224,10 @@ def _oases_wavenumber_bounds(
 def _count_bottom_layers(env: Environment) -> int:
     """Number of sediment layers (not counting halfspace) when env.bottom is layered.
 
-    Sub-resolution layers are excluded — see ``_writable_layers`` — so the count
+    Sub-resolution layers are excluded — see ``writable_layers`` — so the count
     matches what the writer actually emits."""
     if env.has_layered_bottom:
-        return len(_writable_layers(env.bottom))
+        return len(writable_layers(env.bottom))
     return 0
 
 
@@ -263,12 +263,71 @@ def _noise_cmax(kwargs) -> float:
 
 
 def _noise_nw(kwargs) -> str:
-    """``NW*C NW*D NW*E`` wavenumber-sample counts for a noise block."""
+    """``NW*C NW*D NW*E`` wavenumber-sample counts for a noise block.
+
+    Unlike the replica and discrete-source blocks, the surface- and deep-noise
+    blocks have no automatic-sampling branch: NOIPAR reads three explicit counts
+    and sums them into ``NWVNON``/``NWVNOP`` (oasnun22.f:312, :358). A negative
+    count would make that total negative and the block would contribute nothing,
+    so ``nw_samples <= 0`` falls back to the manual's counts.
+    """
     nw = kwargs.get('nw_samples')
-    if nw:
+    if nw and int(nw) > 0:
         n = int(nw)
         return f"{n} {n} {max(1, n // 4)}"
     return " ".join(str(v) for v in _OASN_NOISE_SAMPLES)
+
+
+def _oases_nw_line(nw_samples, icut2_auto: int) -> str:
+    """``NW ICUT1 ICUT2`` wavenumber-sampling line.
+
+    ``NW < 0`` selects OASES's automatic sampling — AUTSMN then recomputes
+    ICUT1/ICUT2 (unoasn22.f:239, oasnun22.f:432) so the trailing values are
+    inert. A pinned ``NW`` is clamped by ``ICUT2 = MIN0(NW, ICUT2)``
+    (oast.tex:73-75), so emit ``ICUT2 = NW`` to keep the whole spectrum.
+    """
+    nw = int(nw_samples) if nw_samples else -1
+    if nw <= 0:
+        return f"-1 1 {icut2_auto}"
+    return f"{nw} 1 {nw}"
+
+
+#: Keys each OASES writer's deck actually reads. Every writer takes
+#: ``**kwargs``, so an unread key would otherwise be dropped without a trace and
+#: the run would quietly use the default.
+_OAST_KWARGS = frozenset({
+    'integration_offset', 'offdb', 'nw_samples', 'plot_rmin', 'plot_rmax',
+    'vrec',
+})
+_OASN_KWARGS = frozenset({
+    'surface_noise_level', 'white_noise_level', 'deep_noise_level',
+    'deep_source_depth', 'discrete_sources',
+    'integration_offset', 'offdb', 'nw_samples', 'c_low', 'c_high',
+    'cmins_discrete', 'cmaxs_discrete', 'cmins_replica', 'cmaxs_replica',
+    'replica_zmin', 'replica_zmax', 'replica_nz',
+    'replica_xmin', 'replica_xmax', 'replica_nx',
+    'replica_ymin', 'replica_ymax', 'replica_ny',
+})
+_OASP_KWARGS = frozenset({
+    'center_frequency', 'freq_min', 'freq_max', 'freq_output_increment',
+    'n_time_samples', 'time_step', 'range_start', 'range_step',
+    'integration_offset', 'nw_samples',
+})
+_OASR_KWARGS = frozenset({
+    'freq_min', 'freq_max', 'n_frequencies', 'freq_output_increment',
+    'angle_min', 'angle_max', 'n_angles', 'angle_output_increment',
+})
+
+
+def _reject_unknown_kwargs(writer: str, kwargs: dict, known: frozenset) -> None:
+    """Raise on a writer knob no block of this deck reads."""
+    unknown = sorted(set(kwargs) - known)
+    if unknown:
+        raise ConfigurationError(
+            f"{writer}: parameter(s) {unknown} are not read by this deck.",
+            remediation=f"Drop them, or check they belong to this OASES "
+                        f"program; it reads {sorted(known)}.",
+        )
 
 
 _OAST_PLOT_AXIS_CM = 20
@@ -459,6 +518,7 @@ def write_oast_input(
     ...                     ranges=np.linspace(100,10000,100))
     >>> write_oast_input('test.dat', env, source, receiver)
     """
+    _reject_unknown_kwargs('write_oast_input', kwargs, _OAST_KWARGS)
     filepath = Path(filepath)
 
     # Extract parameters
@@ -587,12 +647,9 @@ def write_oast_input(
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
         # NW IC1 IC2 — automatic sampling (NW=-1) ignores IC1/IC2 per
-        # oast.tex:541-549. When NW>0 the constraint IC2 ≤ NW (oast.tex:74)
+        # oast.tex:541-549. When NW>0 the constraint IC2 ≤ NW (oast.tex:73-75)
         # must hold, so clamp.
-        if nw_samples is None or nw_samples <= 0:
-            f.write(f"{nw_samples} 1 1\n")
-        else:
-            f.write(f"{nw_samples} 1 {nw_samples}\n")
+        f.write(f"{_oases_nw_line(nw_samples, 1)}\n")
 
         # Block VIII (unoast31.f:234): XLEFT XRIGHT XAXIS XINC, all km except
         # XAXIS. XLEFT/XRIGHT set the FFT output grid, not merely a plot window
@@ -690,10 +747,29 @@ def write_oasn_input(
             Surface noise source strength in dB (default: 0, disabled)
         - white_noise_level : float
             White noise level in dB (default: 0, disabled)
+        - deep_noise_level : float
+            Deep broad-area source strength in dB (default: 0, disabled)
+        - deep_source_depth : float
+            Depth (m) of the deep source sheet (default: half the water depth)
         - discrete_sources : list of dict
-            List of discrete sources with 'depth', 'x', 'y', 'level'
-        - n_modes : int
-            Number of modes to compute (optional)
+            List of discrete sources with 'depth' (m), 'x', 'y' (km), 'level'
+        - integration_offset, offdb : float
+            Wavenumber-integration contour offset in dB/wavelength; ``offdb``
+            wins when both are given (default: 0)
+        - nw_samples : int
+            Number of wavenumber samples for every integration block;
+            ``<= 0`` selects OASES's automatic sampling (default: -1)
+        - c_low, c_high : float
+            Phase-speed bounds (m/s) for the surface/deep noise blocks
+        - cmins_discrete, cmaxs_discrete, cmins_replica, cmaxs_replica : float
+            Per-block phase-speed bounds for the discrete-source and replica
+            integrations
+        - replica_zmin, replica_zmax, replica_nz : float, float, int
+            Replica depth grid (m)
+        - replica_xmin, replica_xmax, replica_nx : float, float, int
+            Replica x grid (km)
+        - replica_ymin, replica_ymax, replica_ny : float, float, int
+            Replica y grid (km)
 
     Notes
     -----
@@ -720,6 +796,7 @@ def write_oasn_input(
     >>> write_oasn_input('test.dat', env, source, receiver,
     ...                  options='N J', surface_noise_level=70)
     """
+    _reject_unknown_kwargs('write_oasn_input', kwargs, _OASN_KWARGS)
     filepath = Path(filepath)
 
     # Extract parameters
@@ -750,6 +827,7 @@ def write_oasn_input(
 
     # Integration parameters
     integration_offset = kwargs.get('integration_offset', 0)
+    nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
 
     freq_min_b, freq_max_b, nfreq = _resolve_freq_sweep(source, freq)
 
@@ -757,7 +835,7 @@ def write_oasn_input(
         _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
         # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF
-        # (unoasn22.f:142 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
+        # (unoasn22.f:141 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
         # ``integration_offset`` name the same OASES field, so an explicit
         # ``offdb`` wins rather than being silently dropped.
         _emit_oases_freq_line(
@@ -849,7 +927,8 @@ def write_oasn_input(
             cmins = kwargs.get('cmins_discrete', c_water_min * 0.95)
             cmaxs = kwargs.get('cmaxs_discrete', 1.0e8)
             f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
-            f.write("-1 1 2000\n")
+            # NWDIN ICUT1D ICUT2D (oasnun22.f:420-421).
+            f.write(f"{_oases_nw_line(nw_samples, 2000)}\n")
 
         # Block X: Replica parameters (if option 'R' is present)
         if _oases_option_chars(options) & {'R', 'r'}:
@@ -875,7 +954,8 @@ def write_oasn_input(
             cmins = kwargs.get('cmins_replica', c_water_min * 0.95)
             cmaxs = kwargs.get('cmaxs_replica', 1.0e8)
             f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
-            f.write("-1 1 2000\n")
+            # NWSIN ICUT1S ICUT2S (unoasn22.f:226-227).
+            f.write(f"{_oases_nw_line(nw_samples, 2000)}\n")
 
 
 def write_oasp_input(
@@ -957,6 +1037,7 @@ def write_oasp_input(
     ...                     ranges=np.linspace(1000,5000,5))
     >>> write_oasp_input('pulse.dat', env, source, receiver)
     """
+    _reject_unknown_kwargs('write_oasp_input', kwargs, _OASP_KWARGS)
     filepath = Path(filepath)
 
     # Extract parameters
@@ -1208,6 +1289,7 @@ def write_oasr_input(
     >>> write_oasr_input('test.dat', env, source, receiver,
     ...                  angle_min=0, angle_max=90, n_angles=91)
     """
+    _reject_unknown_kwargs('write_oasr_input', kwargs, _OASR_KWARGS)
     filepath = Path(filepath)
 
     # Extract parameters

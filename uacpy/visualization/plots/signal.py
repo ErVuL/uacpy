@@ -163,7 +163,7 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     ax.semilogx(frequencies, psd_db, label=label, **mpl_kw)
     ax.set_title(title or "Power spectral density", loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel(f"Level [dB re {_ref_label(ref)}Pa²/Hz]")
+    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
     ax.grid(which="both", alpha=0.75)
@@ -172,6 +172,7 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     return fig, ax
 
 
+@typed_plot_error
 def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
               cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
               **mpl_kw):
@@ -185,7 +186,7 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax,
-                     label=f"Probability Density [{result.binwidth_db:.1f} dB/bin]")
+                     label=f"Probability Density ({result.binwidth_db:.1f} dB/bin)")
     ax.plot(result.frequencies, result.mean_db, "k-", label="Mean level", lw=1.5)
     ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
             label="Mean level ± STD")
@@ -212,7 +213,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     ax.bar(Fedges[:-1], power_to_db(np.asarray(sel_pa2s), ref), width=width,
            align="edge", edgecolor="black", **mpl_kw)
     ax.set_title(title or f"SEL ({duration}s)", loc="left")
-    ax.set_ylabel(f"Level [dB re {_ref_label(ref)}Pa²·s]")
+    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²·s)")
     if band_type != "linear":
         ax.set_xscale("log")
     ax.set_xlabel(f"Frequency ({band_type}) (Hz)")
@@ -235,7 +236,7 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     pcm = ax.pcolormesh(times, frequencies, Sxx_db, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
-        fig.colorbar(pcm, ax=ax, label=f"Level [dB re {_ref_label(ref)}Pa²/Hz]")
+        fig.colorbar(pcm, ax=ax, label=f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_title(title or "Spectrogram", loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
@@ -246,6 +247,7 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
 
 # ── Constant-Q (Brown 1991) ─────────────────────────────────────────────────
 
+@typed_plot_error
 def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
                                 ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
                                 vmin=0, vmax=200, cmap="jet", title=None,
@@ -260,7 +262,7 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     pcm = ax.pcolormesh(times, frequencies, power_db, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
-        fig.colorbar(pcm, ax=ax, label=f"Level [dB re {unit}]")
+        fig.colorbar(pcm, ax=ax, label=f"Level (dB re {unit})")
     ax.set_title(title or "Constant-Q spectrogram", loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
@@ -286,7 +288,7 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     ax.set_title(title or ("Constant-Q PSD" if scaling == "density"
                            else "Constant-Q band power"), loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel(f"Level [dB re {unit}]")
+    ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
     ax.grid(which="both", alpha=0.75)
@@ -295,6 +297,7 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     return fig, ax
 
 
+@typed_plot_error
 def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
                          ymax=200, vmin=0, vmax=None, cmap="jet", title=None,
                          figsize=(10, 6), show_colorbar=True, **mpl_kw):
@@ -313,14 +316,14 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax,
-                     label=f"Probability Density [{result.binwidth_db:.1f} dB/bin]")
+                     label=f"Probability Density ({result.binwidth_db:.1f} dB/bin)")
     ax.plot(result.frequencies, result.mean_db, "k-", label="Mean level", lw=1.5)
     ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
             label="Mean level ± STD")
     ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
     ax.set_title(title or "Constant-Q PPSD", loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel(f"Level [dB re {unit}]")
+    ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_xscale("log")
     ax.set_xlim((np.max((result.frequencies[0], 1)), result.frequencies[-1]))
     ax.set_ylim((ymin, ymax))
@@ -329,6 +332,7 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
     return fig, ax
 
 
+@typed_plot_error
 def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
              figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Scalogram ``|W|`` (time on x, frequency on y). Consumes :func:`cwt`
@@ -345,10 +349,11 @@ def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
     return fig, ax
 
 
-def plot_wigner_ville(times, frequencies, W, ax=None, *, cmap="jet", title=None,
+@typed_plot_error
+def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
                       figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Wigner-Ville distribution image. Consumes :func:`wigner_ville` output
-    ``(t, f, W)``."""
+    ``(frequencies, times, W)``."""
     fig, ax = fig_ax(ax, figsize)
     pcm = ax.pcolormesh(times, frequencies, np.real(np.asarray(W)), cmap=cmap,
                         shading="auto", **mpl_kw)
@@ -360,6 +365,7 @@ def plot_wigner_ville(times, frequencies, W, ax=None, *, cmap="jet", title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
                   **mpl_kw):
     """Line plot of a cepstrum vs quefrency. Consumes :func:`cepstrum` output."""
@@ -395,7 +401,7 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
     ax.set_xticks(ticks)
     ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
     ax.set_xlabel("Decidecade band centre (Hz)")
-    ax.set_ylabel(f"Band level [dB re {ref_label}]")
+    ax.set_ylabel(f"Band level (dB re {ref_label})")
     ax.set_title(title or "Decidecade band levels", loc="left")
     ax.grid(alpha=0.3, axis="y")
     return fig, ax
@@ -490,6 +496,7 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_impulse_response_info(Minfo, Vinfo, g, *, title=None, figsize=(12, 8)):
     """LS-FIR diagnostics: information matrix, vector, and impulse response."""
     from matplotlib.gridspec import GridSpec

@@ -43,7 +43,8 @@ from uacpy.data._time import parse_date
 
 __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
            'fetch_sea_ice_concentration_transect', 'sea_ice_grid',
-           'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface']
+           'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface',
+           'sea_ice_surface_transect']
 
 INDEX_FILE = 'seaice_climatology.pkl'
 _BASE_URL = 'https://noaadata.apps.nsidc.org/NOAA/G02135'

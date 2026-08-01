@@ -40,7 +40,9 @@ class Covariance(Result):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        cov = np.asarray(covariance)
+        # Copy on ingest so a caller mutating their source array can't silently
+        # corrupt this result.
+        cov = np.array(covariance)
         if cov.ndim != 3 or cov.shape[1] != cov.shape[2]:
             raise ConfigurationError(
                 f"Covariance.covariance: must be 3-D (n_freq, n_rcv, n_rcv); "
@@ -48,7 +50,7 @@ class Covariance(Result):
             )
         self.covariance = cov
         if receiver_positions is not None:
-            rp = np.asarray(receiver_positions, dtype=float)
+            rp = np.array(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != cov.shape[1]:
                 raise ConfigurationError(
                     f"Covariance.receiver_positions: must have shape "
@@ -179,16 +181,18 @@ class Replicas(Result):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        rep = np.asarray(replicas)
+        # Copy on ingest so a caller mutating their source array can't silently
+        # corrupt this result.
+        rep = np.array(replicas)
         if rep.ndim != 5:
             raise ConfigurationError(
                 f"Replicas.replicas: must be 5-D "
                 f"(n_freq, n_zr, n_xr, n_yr, n_rcv); got shape {rep.shape}"
             )
         self.replicas = rep
-        self.replica_z = np.atleast_1d(np.asarray(replica_z, dtype=float))
-        self.replica_x = np.atleast_1d(np.asarray(replica_x, dtype=float))
-        self.replica_y = np.atleast_1d(np.asarray(replica_y, dtype=float))
+        self.replica_z = np.atleast_1d(np.array(replica_z, dtype=float))
+        self.replica_x = np.atleast_1d(np.array(replica_x, dtype=float))
+        self.replica_y = np.atleast_1d(np.array(replica_y, dtype=float))
         expected = (
             len(self.replica_z), len(self.replica_x), len(self.replica_y),
         )
@@ -198,7 +202,7 @@ class Replicas(Result):
                 f"(n_zr, n_xr, n_yr) = {expected}"
             )
         if receiver_positions is not None:
-            rp = np.asarray(receiver_positions, dtype=float)
+            rp = np.array(receiver_positions, dtype=float)
             if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != rep.shape[4]:
                 raise ConfigurationError(
                     f"Replicas.receiver_positions: must have shape "

@@ -170,7 +170,9 @@ def fetch_bottom_transect(
     :func:`uacpy.data.fetch_ssp_transect`.
 
     Points outside EMODnet coverage hold the nearest covered value; the call
-    raises only if *no* point along the transect is covered. ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each column scales to the water over its own seafloor.
+    raises only if *no* point along the transect is covered.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
+    column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom((la, lo), roughness=roughness,

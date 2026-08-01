@@ -71,12 +71,25 @@ class TestMetrics:
         b = np.array([0, 1, 0, 1])
         assert comms.bit_error_rate(b, 1 - b) == pytest.approx(1.0)
 
+    @pytest.mark.parametrize("scheme", ["4psk", "32qam", "2qam", "fsk", "psk"])
+    def test_ber_theory_unsupported_order_is_typed(self, scheme):
+        """'4psk'/'32qam' are the near-misses a user types; the PSK/QAM
+        branches must not leak a raw KeyError past the typed guard."""
+        with pytest.raises(ConfigurationError):
+            comms.ber_theory(scheme, 8.0)
+
+    def test_evm_rejects_empty_input_like_its_siblings(self):
+        """bit_error_rate/symbol_error_rate raise on empty input; evm must not
+        silently return nan."""
+        with pytest.raises(ConfigurationError):
+            comms.evm([], [])
+
 
 class TestEqualization:
     def test_dfe_opens_closed_eye(self):
         rng = np.random.default_rng(0xACED)
-        h = comms.multipath_channel([0.0, 1 / 8000, 2 / 8000],
-                                    [1.0, 0.6, 0.3], 8000)
+        h = comms.multipath_channel([1.0, 0.6, 0.3],
+                                    [0.0, 1 / 8000, 2 / 8000], 8000)
         raw = comms.simulate_link("qpsk", 16.0, 40000, channel=h, rng=rng).ber
         dfe = comms.DFE(n_ff=12, n_fb=6, forget=0.995)
         eq = comms.simulate_link("qpsk", 16.0, 40000, channel=h,
@@ -95,6 +108,14 @@ class TestEqualization:
         assert comms.bit_error_rate(
             mod.demodulate(tx), mod.demodulate(eq)[: 2 * tx.size]) < 1e-3
 
+    @pytest.mark.parametrize("snr_linear", [0.0, -1.0])
+    def test_mmse_equalizer_rejects_nonpositive_snr(self, snr_linear):
+        """1/snr is the Wiener regularizer: zero divides, negative un-damps
+        the inverse. Neither may pass silently."""
+        with pytest.raises(ConfigurationError):
+            comms.mmse_equalizer(np.ones(8, complex), np.array([1.0, 0.3]),
+                                 snr_linear)
+
 
 class TestDoppler:
     def test_estimate_and_compensate(self):
@@ -110,6 +131,13 @@ class TestDoppler:
         # estimate returns +v/c; compensate_doppler(received, best) recovers template
         assert best == pytest.approx(a_true, abs=2e-4)
 
+    def test_doppler_from_speed_is_the_v_over_c_scale(self):
+        """The estimator's output is the same quantity a platform speed maps
+        to, so the two are directly comparable."""
+        c = 1500.0
+        assert comms.doppler_from_speed(3.0, c) == pytest.approx(3.0 / c)
+        assert comms.doppler_from_speed(-3.0, c) == pytest.approx(-3.0 / c)
+
 
 class TestSync:
     def test_preamble_detected_at_offset(self):
@@ -120,6 +148,43 @@ class TestSync:
                              0.1 * (rng.standard_normal(300) + 1j * rng.standard_normal(300))])
         k, metric = comms.detect_preamble(rx, pre, threshold=0.5)
         assert abs(k - offset) <= 1
+
+
+class TestMultipathChannel:
+    def test_shares_the_acoustic_signal_primitive(self):
+        """``comms.multipath_channel`` and
+        ``acoustic_signal.impulse_response`` are one primitive with one
+        argument order — a reversed ``(delays, gains)`` call is silent, since
+        both arguments are same-length float arrays."""
+        from uacpy.acoustic_signal import impulse_response
+        fs = 8000.0
+        gains, delays = [1.0, 0.6, 0.3], [0.0, 1 / fs, 2 / fs]
+        h = comms.multipath_channel(gains, delays, fs)
+        _, h_ref = impulse_response(gains, delays, fs, fractional=False)
+        assert np.array_equal(h, h_ref.astype(complex))
+        assert h.dtype == complex
+
+    def test_complex_gains_carry_path_phase(self):
+        fs = 8000.0
+        g = np.array([1.0, 0.6 * np.exp(1j * 1.1)])
+        h = comms.multipath_channel(g, [0.0, 3 / fs], fs)
+        assert h[0] == g[0] and h[3] == g[1]
+
+    def test_nearest_sample_placement_rounds(self):
+        """``fractional=False`` promises *nearest*-sample placement; floor
+        placement puts a 0.7-sample arrival one tap early."""
+        from uacpy.acoustic_signal import impulse_response
+        fs = 8000.0
+        _, h = impulse_response([1.0], [0.7 / fs], fs, fractional=False)
+        assert np.argmax(np.abs(h)) == 1
+        _, hf = impulse_response([1.0], [0.7 / fs], fs, fractional=True)
+        assert hf == pytest.approx([0.3, 0.7])
+
+    @pytest.mark.parametrize("gains,delays", [([1.0, 0.5], [0.0]),
+                                              ([1.0], [-1e-3])])
+    def test_bad_arrivals_raise_configurationerror(self, gains, delays):
+        with pytest.raises(ConfigurationError):
+            comms.multipath_channel(gains, delays, 8000.0)
 
 
 class TestFadingChannelConvention:

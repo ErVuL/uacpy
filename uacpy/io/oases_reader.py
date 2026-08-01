@@ -22,6 +22,7 @@ import struct
 
 from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
+    PARSE_ERRORS,
     read_fortran_record_marker as _read_fortran_record_marker,
     read_fortran_record as _read_fortran_record,
     detect_endian,
@@ -253,7 +254,7 @@ def _parse_oast_plp(plp_file: Path) -> Dict:
 
     except (FileFormatError, UnsupportedFeatureError):
         raise
-    except Exception as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(f"Failed to parse OAST .plp file: {e}") from e
 
 
@@ -396,7 +397,7 @@ def read_oasn_covariance(
 
     except (FileFormatError, UnsupportedFeatureError):
         raise
-    except Exception as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(f"Failed to read OASN covariance file {filepath}: {e}") from e
 
 
@@ -562,7 +563,7 @@ def read_oasn_replicas(
 
     except (FileFormatError, UnsupportedFeatureError):
         raise
-    except Exception as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
@@ -618,14 +619,14 @@ def read_oasp_trf(
     errors = []
     try:
         return _read_oasp_trf_binary(filepath)
-    except Exception as e:
+    except (FileFormatError,) + PARSE_ERRORS as e:
         errors.append(('fortran-unformatted', e))
 
     # ASCII path always raises NotImplemented, but wrap so the binary
     # error surfaces when both paths fail.
     try:
         return _read_oasp_trf_ascii(filepath)
-    except Exception as e:
+    except (FileFormatError, UnsupportedFeatureError) + PARSE_ERRORS as e:
         errors.append(('ascii', e))
 
     err_msg = '\n'.join(f"  {k}: {v}" for k, v in errors)
@@ -979,5 +980,5 @@ def read_oasr_reflection_coefficients(
 
     except (FileFormatError, UnsupportedFeatureError):
         raise
-    except Exception as e:
+    except PARSE_ERRORS as e:
         raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e

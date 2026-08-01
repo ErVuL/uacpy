@@ -289,6 +289,46 @@ class TestRAM:
 
 
 @pytest.mark.requires_binary
+@pytest.mark.requires_binary
+class TestBasePlumbing:
+    """Shared ``PropagationModel`` behaviour that no single wrapper owns."""
+
+    def test_use_tmpfs_with_pinned_work_dir_warns(self, tmp_path):
+        """An ignored user knob is user-facing: it warns, it does not vanish
+        into a debug log line the default verbosity never prints."""
+        model = Bellhop(verbose=False, work_dir=tmp_path / 'pinned',
+                        use_tmpfs=True)
+        with pytest.warns(UserWarning, match='use_tmpfs=True'):
+            model._setup_file_manager()
+
+    def test_use_tmpfs_without_work_dir_is_silent(self):
+        """Dual: the knob is honoured when uacpy owns the directory."""
+        import warnings as _warnings
+        model = Bellhop(verbose=False, use_tmpfs=True)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter('always')
+            fm = model._setup_file_manager()
+        fm.cleanup_work_dir()
+        assert not any('use_tmpfs' in str(w.message) for w in caught)
+
+    def test_default_backend_is_the_lowercase_binary_name(self, simple_env,
+                                                          source,
+                                                          receiver_small):
+        """``result.backend`` names the binary that ran, lowercase across the
+        package; a model passing no explicit value must not report the
+        capitalised class name."""
+        from uacpy.core import Environment, BoundaryProperties
+        env = Environment(
+            name='elastic', bathymetry=simple_env.depth,
+            ssp=float(simple_env.ssp.data[0, 0]),
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600, density=1.8,
+                attenuation=0.2, shear_speed=400, shear_attenuation=0.5),
+        )
+        result = Bounce(verbose=False).run(env, source, receiver_small)
+        assert result.backend == 'bounce'
+
+
 class TestModelConsistency:
     """Tests for consistency between different models."""
 

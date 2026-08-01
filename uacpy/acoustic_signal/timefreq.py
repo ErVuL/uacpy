@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import math
 from collections import namedtuple
+from functools import lru_cache
 
 import numpy as np
+from scipy.integrate import cumulative_trapezoid
 from scipy.signal import hilbert
 from scipy.special import gamma
 import scipy.signal as _sig
@@ -24,13 +26,8 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 
-# Torrence & Compo (1998) Table 2 reconstruction constants, for the default
-# wavelet orders (Morlet w0=6, Paul m=4, DOG m=2).
-_C_DELTA = {"morlet": 0.776, "paul": 1.132, "dog": 3.541}
-_PSI0_ZERO = {"morlet": np.pi ** -0.25, "paul": 1.079, "dog": 0.867}
-
 WignerVilleResult = namedtuple("WignerVilleResult",
-                               "times frequencies distribution")
+                               "frequencies times distribution")
 CWTResult = namedtuple("CWTResult", "frequencies coefficients")
 SpectrogramResult = namedtuple("SpectrogramResult", "frequencies times power")
 
@@ -93,7 +90,7 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
                  freq_window=None, time_window=None, nfft=None):
     """Discrete (smoothed-pseudo-) Wigner-Ville distribution of a 1-D signal.
 
-    Returns a :class:`WignerVilleResult` ``(times, frequencies, distribution)``
+    Returns a :class:`WignerVilleResult` ``(frequencies, times, distribution)``
     with the distribution real, shape ``(NF, n)``; ``f`` spans
     ``[0, fs/2)``. The kernel ``z(t+tau)z*(t-tau)`` doubles the apparent
     frequency, so the physical frequency axis is ``k*fs/(2*NF)``.
@@ -127,8 +124,9 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     Returns
     -------
     WignerVilleResult
-        ``(times, frequencies, distribution)``: time axis (s), frequency axis
-        (Hz), and the distribution ``(NF, n)``.
+        ``(frequencies, times, distribution)``: frequency axis (Hz), time axis
+        (s), and the distribution ``(NF, n)`` — the same axis order as
+        :class:`SpectrogramResult`.
     """
     xc = np.asarray(data)
     if xc.ndim != 1:
@@ -171,7 +169,7 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
         W[:, ti] = np.real(np.fft.fft(kernel))
     f = np.arange(NF) * fs / (2.0 * NF)
     t = np.arange(n) / fs
-    return WignerVilleResult(t, f, W)
+    return WignerVilleResult(f, t, W)
 
 
 def _wavelet_fourier(wavelet, s, omega, w0, order):
@@ -199,6 +197,42 @@ def _wavelet_fourier(wavelet, s, omega, w0, order):
             f"cwt: unknown wavelet {wavelet!r}; choose 'morlet', 'paul', or 'dog'"
         )
     return psi, factor
+
+
+@lru_cache(maxsize=None)
+def _reconstruction_constants(wavelet, w0, order):
+    """``(C_delta, psi0(0))`` for the Torrence & Compo (1998) eq.-11 inverse.
+
+    ``psi0(0)``, the wavelet at zero lag, is ``(2*pi)**-0.5 * int psihat0(w) dw``.
+    ``C_delta`` is the delta-function calibration of T&C eq. 13-14 taken in the
+    continuous-scale limit: for a unit impulse, ``Re{W(s)}/sqrt(s)`` collapses to
+    ``psi0(0)*R(pi*s)/s``, where ``R(a)`` is the fraction of the wavelet's
+    spectral mass inside the discrete band ``|w| <= pi`` rad/sample. The
+    calibration is therefore a one-dimensional quadrature over scale, and it is
+    a property of the wavelet alone — not of the scale set the caller analysed
+    with, so a band-limited scale set still reconstructs only its own band.
+
+    Reproduces Table 2 at the tabulated orders (Morlet ``w0=6``, Paul ``m=4``,
+    DOG ``m=2``) and extends it to any admissible ``w0`` / ``order``.
+    """
+    u_max = 60.0 + w0 + 6.0 * order
+    u = np.linspace(-u_max, u_max, 100001)
+    psi_hat, factor = _wavelet_fourier(wavelet, 1.0, u, w0, order)
+    mass = cumulative_trapezoid(np.real(psi_hat), u, initial=0.0)
+    total = mass[-1] - mass[0]
+    psi0_zero = total / np.sqrt(2.0 * np.pi)
+    if abs(psi0_zero) < 1e-9:
+        raise ConfigurationError(
+            f"inverse_cwt: the {wavelet!r} wavelet of order {order} is an odd "
+            "function, so psi0(0) = 0 and the Torrence & Compo eq.-11 "
+            "reconstruction is undefined for it. Use an even order.")
+    dj = 0.02
+    s_min = 2.0 * factor / 256.0            # well below the Nyquist-cut scale
+    n_scale = int(np.log2(2.0e6 / s_min) / dj) + 1
+    scales = s_min * 2.0 ** (np.arange(n_scale) * dj)
+    a = np.minimum(np.pi * scales, u_max)
+    in_band = (np.interp(a, u, mass) - np.interp(-a, u, mass)) / total
+    return float(np.sum(in_band / scales) * dj), float(psi0_zero)
 
 
 def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
@@ -278,12 +312,13 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     """Inverse CWT (Torrence & Compo 1998, eq. 11).
 
     ``x_n = dj/(C_delta*psi0(0)) * sum_j Re(W_n(s_j))/sqrt(s_j)`` with ``dj``
-    the log2 scale spacing. ``C_delta`` and ``psi0(0)`` are the Table-2
-    reconstruction constants for the default orders (Morlet ``w0=6``, Paul
-    ``m=4``, DOG ``m=2``). Pass the same ``frequencies`` / ``wavelet`` /
-    ``w0`` / ``order`` used in :func:`cwt`; amplitude is recovered to the
-    accuracy of the scale coverage (a band-limited scale set reconstructs only
-    the band it spans).
+    the log2 scale spacing. The reconstruction constants ``C_delta`` and
+    ``psi0(0)`` are derived for the wavelet order actually in use
+    (:func:`_reconstruction_constants`), so non-default ``w0`` / ``order``
+    reconstruct at the right amplitude. Pass the same ``frequencies`` /
+    ``wavelet`` / ``w0`` / ``order`` used in :func:`cwt`; amplitude is
+    recovered to the accuracy of the scale coverage (a band-limited scale set
+    reconstructs only the band it spans).
 
     Parameters
     ----------
@@ -310,8 +345,7 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
     scales = factor * fs / frequencies
     dj = float(np.mean(np.abs(np.diff(np.log2(scales))))) if scales.size > 1 else 1.0
-    c_delta = _C_DELTA.get(wavelet, 1.0)
-    psi0_zero = _PSI0_ZERO.get(wavelet, 1.0)
+    c_delta, psi0_zero = _reconstruction_constants(wavelet, float(w0), int(order))
     return (np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0)
             * dj / (c_delta * psi0_zero))
 

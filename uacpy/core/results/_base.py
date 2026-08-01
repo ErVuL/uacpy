@@ -139,6 +139,24 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         bool, 'True when Kraken produced H(f) natively from a '
         'multi-frequency .mod file (versus a Python frequency loop).'
     ),
+    ('Kraken', 'c_low'): (
+        float, 'Resolved lower phase-speed bound (m/s) of the mode search. '
+        'The constructor c_low when pinned, else auto-derived — 0.0 for a '
+        'fluid environment, which hands the choice to KRAKEN, and the '
+        'slowest compressional speed when the bottom carries shear.'
+    ),
+    ('Kraken', 'c_high'): (
+        float, 'Resolved upper phase-speed bound (m/s) of the mode search. '
+        'The constructor c_high when pinned, else auto-derived from the SSP '
+        'and bottom half-space. A range-dependent (multi-profile) run '
+        'resolves it per profile and reports the widest.'
+    ),
+    ('Kraken', 'rmax'): (
+        float, 'Resolved maximum range (m) written to the deck, giving the '
+        'modal-sum interpolation headroom past the outermost receiver. The '
+        'constructor rmax_m when pinned, else derived from the receiver '
+        'ranges.'
+    ),
     # ───────── Scooter (FFP / wavenumber integration) ─────────
     ('Scooter', 'grn_file'): (
         str, "Scooter Green's-function output (.grn)."
@@ -175,10 +193,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         str, "Which SPARC output path produced this Field: 'R' "
         "(horizontal time-marched array), 'D' (vertical), 'S' (snapshot)."
     ),
-    ('SPARC', 'conversion_method'): (
-        str, "How the .rts time-series was converted to a steady-state "
-        "Field (e.g. 'fft' for time-FFT at the source frequency)."
-    ),
     ('SPARC', 'n_depth_runs'): (
         int, "Number of per-depth SPARC subprocess calls dispatched "
         "(R-mode loops over receiver depths)."
@@ -194,7 +208,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         float, 'Start time (s) of the SPARC TIME_SERIES window.'
     ),
     # Snapshot-mode SPARC attaches grn_reader keys when the snapshot
-    # path computes p(z, r) via time-FFT + Hankel transform.
+    # path computes p(z, r) via time-FFT + Hankel transform. The
+    # ``snapshot_*`` / ``normalize`` / ``absolute_tl_calibrated`` keys come
+    # from :func:`uacpy.io.sparc_snapshot_to_field`, which users call directly
+    # on a .grn (the SPARC wrapper itself runs the time-evolving path); stamp
+    # ``result.model = 'SPARC'`` for ``list_metadata()`` to resolve them.
     ('SPARC', 'transform_method'): (
         str, "Hankel-transform method used to convert the k-domain "
         "snapshot to r-domain pressure: 'hankel_per_snapshot_time' for "
@@ -219,6 +237,15 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('SPARC', 'snapshot_nt'): (
         int, "Number of time samples in the snapshot FFT."
+    ),
+    ('SPARC', 'normalize'): (
+        str, "Source-spectrum deconvolution applied to the snapshot: "
+        "'source' (divide by the pulse spectrum) or 'none' (raw field)."
+    ),
+    ('SPARC', 'absolute_tl_calibrated'): (
+        bool, "True when the snapshot was deconvolved by the source "
+        "spectrum, so its TL is on the same absolute scale as "
+        "Scooter / Kraken."
     ),
     # ───────── Bounce → ReflectionCoefficient ─────────
     ('Bounce', 'brc_file'): (
@@ -398,8 +425,11 @@ class Result:
         # the data-source credit. Mirrors how ``env.data_sources`` carries
         # dataset provenance.
         self.model_source = model_source
+        # Copy on ingest so a caller mutating their source array (e.g. the
+        # ``Source.depths`` a model passed straight through) can't silently
+        # corrupt this result.
         self.source_depths = (
-            np.atleast_1d(np.asarray(source_depths, dtype=float))
+            np.atleast_1d(np.array(source_depths, dtype=float))
             if source_depths is not None else np.array([], dtype=float)
         )
         # Plural-only rule: ``frequencies`` is always a 1-D ndarray of length
@@ -407,7 +437,7 @@ class Result:
         # SPARC native time-domain). Scalar input auto-wraps to length 1.
         if frequencies is not None:
             self.frequencies: Optional[np.ndarray] = np.atleast_1d(
-                np.asarray(frequencies, dtype=float)
+                np.array(frequencies, dtype=float)
             )
         else:
             self.frequencies = None
@@ -426,6 +456,25 @@ class Result:
         if self.frequencies is None or len(self.frequencies) == 0:
             return None
         return float(self.frequencies[0])
+
+    def id_kwargs(self) -> dict:
+        """The identification fields as a kwargs dict, for cloning them onto a
+        result derived from this one.
+
+        The single home for the identity surface every ``Result`` carries, so
+        adding a field to :meth:`__init__` reaches every derived-result spawn
+        path at once. Public so downstream toolkits (e.g. :mod:`uacpy.sonar`)
+        can carry provenance without hand-copying. Override a single entry with
+        ``dict(self.id_kwargs(), frequencies=…)``."""
+        return dict(
+            model=self.model,
+            backend=self.backend,
+            source_depths=self.source_depths,
+            frequencies=self.frequencies,
+            phase_reference=self.phase_reference,
+            model_source=self.model_source,
+            metadata=dict(self.metadata),
+        )
 
     def copy(self):
         """Deep copy of the result (symmetric with the carriers / Source /
