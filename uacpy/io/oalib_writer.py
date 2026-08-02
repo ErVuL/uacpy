@@ -1551,9 +1551,12 @@ def write_bounce_input_file(
             halfspace_top = write_layer_sections(
                 f, bounce_env, seafloor, n_mesh=n_mesh)
         else:
-            # BOUNCE needs at least one medium. A thin slab at the reference
-            # speed is acoustically transparent, so R still comes out at the
-            # seafloor — the same idiom as AT's own tests/SedAtten/calibBounce.
+            # BOUNCE needs at least one medium. The slab is at the water speed,
+            # so |R| is unaffected, but bounce.f90:179 references the impedance
+            # to the top of medium 1: the returned phase carries a spurious
+            # -2*k*_BOUNCE_DUMMY_LAYER_M*sin(theta) term that grows with
+            # frequency. Give the bottom an explicit layer to take the exact
+            # path above.
             halfspace_top = float(f"{seafloor + _BOUNCE_DUMMY_LAYER_M:.1f}")
             f.write(f"{n_mesh}  0.0  {halfspace_top:.1f}\n")
             for z in (seafloor, halfspace_top):

@@ -127,6 +127,12 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
         x = m_to_km(np.atleast_1d(source_range_m))[0]
         for sd in np.atleast_1d(source_depths):
             ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
+        # Models exclude the singular near field, so a TL grid usually starts
+        # beyond r = 0 while the source sits at it. Widen the axis to keep the
+        # marker on screen rather than clipping it to the spine.
+        x_lo, x_hi = ax.get_xlim()
+        if not (min(x_lo, x_hi) <= x <= max(x_lo, x_hi)):
+            ax.set_xlim(min(x_lo, x_hi, x), max(x_lo, x_hi, x))
 
 
 def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,

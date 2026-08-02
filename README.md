@@ -281,10 +281,20 @@ rm -rf uacpy
 
 ## 📚 Documentation & Examples
 
-The full API reference lives in a single file:
-[`DOCUMENTATION.md`](./DOCUMENTATION.md) — quick start, environment setup,
-per-model signatures, visualization, signal processing, noise, units, and
-troubleshooting.
+Three entry points, depending on what you need:
+
+- **[`docs/`](./docs/README.md) — the guided documentation.** 21 pages with 126
+  generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
+  Bounce, OASES), plus guides to environments, sources and receivers, results,
+  plotting, signal processing, arrays, communications, noise, sonar, external
+  data, I/O and utilities. Each page covers the physics, when to reach for the
+  model, its limits, and a worked example whose code is the code that generates
+  the page's figures.
+- **[`DOCUMENTATION.md`](./DOCUMENTATION.md) — the API reference.** Every
+  signature, keyword and unit in a single file, plus quick start, environment
+  setup and troubleshooting.
+- **[`docs/DEV.md`](./docs/DEV.md) — internals**, for extending the package or
+  adding a model wrapper.
 
 Inside `uacpy/examples/` you will find 38 example scripts numbered
 sequentially (`example_01_*.py` through `example_38_*.py`) — from a first TL

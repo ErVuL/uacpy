@@ -846,8 +846,10 @@ class Kraken(PropagationModel):
         forced = getattr(self, 'backend', None)
         if forced == 'kraken' and needs_krakenc:
             raise ConfigurationError(
-                "Kraken(backend='kraken') cannot handle elastic media / "
-                "leaky modes (they need krakenc's complex eigenvalues). Use "
+                "Kraken(backend='kraken') answers incorrectly on elastic media "
+                "/ leaky modes: kraken.exe clamps c_high to the half-space "
+                "shear speed (dropping every faster mode) and its absorption "
+                "perturbation skips elastic media (returning Im(k)=0). Use "
                 "backend='krakenc', or backend=None for automatic dispatch."
             )
         if forced == 'krakenc' or (forced is None and needs_krakenc):
