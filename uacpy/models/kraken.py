@@ -169,6 +169,12 @@ class Kraken(PropagationModel):
         ``'linear'``, ``'n2linear'``, ``'pchip'``, ``'cubic'`` /
         ``'spline'``, ``'analytic'``. ``'quad'`` is Bellhop-only and is
         rejected with a :class:`ConfigurationError`.
+    n_modes : int, optional
+        Cap on the number of modes field.exe propagates (FLP ``MLimit``).
+        ``None`` (default) uses every mode the solver found. Also truncates a
+        :class:`Modes` result to the first ``n_modes``, matching what the
+        field evaluation used; :meth:`Modes.first_n` slices an existing result
+        after the fact.
     leaky_modes : bool, optional
         If True, override ``c_high`` to 1e9 so the modes binary attempts
         leaky modes (trapped modes with phase speeds above the halfspace
@@ -517,10 +523,10 @@ class Kraken(PropagationModel):
             mode_depths = np.linspace(0.0, float(total_depth), n_pts)
 
         dense_receiver = _Receiver(depths=mode_depths, ranges=[0.0])
-        return self.run(
-            env, source, dense_receiver,
-            run_mode=RunMode.MODES, n_modes=n_modes,
-        )
+        # ``n_modes`` is constructor state; a per-call cap is applied by
+        # running a copy so ``run()`` keeps the fixed model-wide signature.
+        model = self if n_modes is None else self.copy(n_modes=int(n_modes))
+        return model.run(env, source, dense_receiver, run_mode=RunMode.MODES)
 
     def _read_modes_file(self, filepath: Path) -> Dict:
         """Read a Kraken ``.mod`` file using the binary reader."""
@@ -678,6 +684,7 @@ class Kraken(PropagationModel):
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         n_mesh: int = 0,
+        n_modes: Optional[int] = None,
         interp_ssp: Optional[str] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
@@ -703,6 +710,7 @@ class Kraken(PropagationModel):
         self.c_low = None if c_low is None else float(c_low)
         self.c_high = c_high
         self.n_mesh = n_mesh
+        self.n_modes = None if n_modes is None else int(n_modes)
         self.leaky_modes = leaky_modes
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
@@ -865,12 +873,11 @@ class Kraken(PropagationModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        run_mode=None,
+        run_mode: Optional[RunMode] = None,
         *,
         frequencies: Optional[np.ndarray] = None,
-        n_modes: Optional[int] = None,
-        source_waveform=None,
-        sample_rate=None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
     ) -> Result:
         """
@@ -898,8 +905,6 @@ class Kraken(PropagationModel):
             frequencies in a single pass; a single-element grid is solved
             through the narrowband pipeline and returned on a length-1
             frequency axis.
-        n_modes : int, optional
-            Max number of modes used by field.exe (FLP ``MLimit``).
         source_waveform : ndarray, optional
             Source pulse for ``TIME_SERIES`` mode.
         sample_rate : float, optional
@@ -964,7 +969,7 @@ class Kraken(PropagationModel):
             # (and would emit a spurious NaN-receivers warning here), so it is
             # skipped entirely for the modes solve.
             return self._run_modes(
-                env, source, receiver, n_modes=n_modes, exe=kraken_exe)
+                env, source, receiver, n_modes=self.n_modes, exe=kraken_exe)
 
         # field.exe cannot evaluate the field inside an elastic medium: its
         # Comp selector (field.f90:169 -> ReadModes.f90:315-324) has no
@@ -991,7 +996,7 @@ class Kraken(PropagationModel):
             # _compute_broadband_field (per-frequency), not here.
             tf = self._compute_broadband_field(
                 env, source, rcv,
-                frequencies=frequencies, n_modes=n_modes, exe=kraken_exe,
+                frequencies=frequencies, n_modes=self.n_modes, exe=kraken_exe,
             )
             tf = self._reinsert_nan_depths(tf, receiver, keep)
             if run_mode == RunMode.TIME_SERIES:
@@ -1004,7 +1009,7 @@ class Kraken(PropagationModel):
         env = self._project_environment(env)
         self.validate_inputs(env, source, rcv, run_mode=run_mode)
         field = self._compute_field_via_exe(
-            env, source, rcv, n_modes=n_modes, exe=kraken_exe,
+            env, source, rcv, n_modes=self.n_modes, exe=kraken_exe,
             run_mode=run_mode,
         )
         return self._reinsert_nan_depths(field, receiver, keep)

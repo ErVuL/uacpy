@@ -217,8 +217,9 @@ is `n_modes`, not a receiver. A `MODES`-only Kraken never needs `field.exe`
 installed.
 
 Everything that produces a field chains `field.exe`, which does the modal sum
-onto your receiver grid. `run(..., n_modes=N)` caps how many modes it sums
+onto your receiver grid. `Kraken(n_modes=N)` caps how many modes it sums
 (`MLimit` in the `.flp` deck); it does not change how many the solver found.
+To trim an existing `Modes` result instead, use `modes.first_n(N)`.
 
 The `Modes` result is documented with the other result types in the
 [results guide](../guide/results.md). Beyond `k`, `phi` and `depths` it carries
@@ -557,7 +558,7 @@ comes back hundreds of dB. uacpy therefore sets `c_low` to the slowest
 compressional speed automatically whenever the bottom is elastic. If you pin
 `c_low` yourself on an elastic seabed, that is the value to pin it to.
 
-**`n_modes` truncates, it does not converge.** `run(..., n_modes=N)` caps the
+**`n_modes` truncates, it does not converge.** `Kraken(n_modes=N)` caps the
 sum at N modes. Dropping the high-order ones removes the steep energy, which
 matters most near the source; it is a speed knob for long-range work, not an
 accuracy knob.

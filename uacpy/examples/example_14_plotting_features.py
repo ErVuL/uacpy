@@ -121,9 +121,8 @@ def demo_modes_heatmap():
     )
 
     print("  Running Kraken modes...", end=" ", flush=True)
-    kraken = Kraken(verbose=False)
-    modes = kraken.run(env, source, receiver,
-                       run_mode=RunMode.MODES, n_modes=50)
+    kraken = Kraken(verbose=False, n_modes=50)
+    modes = kraken.run(env, source, receiver, run_mode=RunMode.MODES)
     n_modes = len(modes.k)
     print(f"✓  ({n_modes} modes)")
 

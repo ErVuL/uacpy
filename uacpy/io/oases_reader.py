@@ -133,7 +133,7 @@ def read_oast_tl(
     elif f020_file.exists():
         tl_data_file = f020_file
     else:
-        raise FileNotFoundError(f"OAST TL data file not found. Checked: {plt_file}, {f020_file}")
+        raise FileFormatError(f"OAST TL data file not found. Checked: {plt_file}, {f020_file}")
 
     # Parse .plp file to get OAST's native range grid. The grid is
     # mandatory: OAST chooses its own ranges via FFT-based sampling, so
@@ -306,7 +306,7 @@ def read_oasn_covariance(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileNotFoundError(f"OASN covariance file not found: {filepath}")
+        raise FileFormatError(f"OASN covariance file not found: {filepath}")
 
     # Record length in bytes (8 bytes = 1 complex64 = 2 float32)
     recl = 8
@@ -447,7 +447,7 @@ def read_oasn_replicas(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileNotFoundError(f"OASN replica file not found: {filepath}")
+        raise FileFormatError(f"OASN replica file not found: {filepath}")
 
     try:
         with open(filepath, 'rb') as f:
@@ -613,7 +613,7 @@ def read_oasp_trf(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileNotFoundError(f"OASP transfer function file not found: {filepath}")
+        raise FileFormatError(f"OASP transfer function file not found: {filepath}")
 
     # Try Fortran-unformatted binary first (current OASES default).
     errors = []
@@ -900,7 +900,7 @@ def read_oasr_reflection_coefficients(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileNotFoundError(f"OASR reflection coefficient file not found: {filepath}")
+        raise FileFormatError(f"OASR reflection coefficient file not found: {filepath}")
 
     # Auto-detect format from extension
     if format_type == 'auto':

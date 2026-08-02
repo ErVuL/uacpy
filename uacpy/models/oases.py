@@ -464,10 +464,10 @@ class OAST(OASES):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         *,
-        frequencies=None,
-        source_waveform=None,
-        sample_rate=None,
-        output_duration=None,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run OAST transmission loss computation
@@ -890,10 +890,10 @@ class OASN(OASES):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         *,
-        frequencies=None,
-        source_waveform=None,
-        sample_rate=None,
-        output_duration=None,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """
         Run OASN.
@@ -1225,8 +1225,8 @@ class OASR(OASES):
         run_mode: Optional[RunMode] = None,
         *,
         frequencies: Optional[np.ndarray] = None,
-        source_waveform=None,
-        sample_rate=None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
     ) -> Result:
         """Run OASR.
@@ -1526,9 +1526,9 @@ class OASP(OASES):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         *,
-        frequencies=None,
-        source_waveform=None,
-        sample_rate=None,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
     ) -> Result:
         """

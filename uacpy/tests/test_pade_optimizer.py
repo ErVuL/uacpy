@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 from uacpy.models._pade_optimizer import (
+    combined_error,
     grid_error,
     optimal_c0,
-    pade_error,
     numerov_error,
     optimize_grid,
     rams_dz_floor,
@@ -38,18 +38,31 @@ class TestOptimalC0:
 
 
 class TestPadeError:
-    """``R(Δx, ξ)`` from Section 4.1."""
+    """``R(Δx, ξ)`` from Section 4.1, exercised through ``combined_error``.
+
+    ``combined_error`` is τ(Δx, Δz) — the same Padé functional widened by the
+    discretisation spread ``Δξ = h(Δz)/k₀²``. Driving Δz to a value where
+    ``Δξ`` is negligible isolates the Padé term, so these assert the Section
+    4.1 properties on the code path the optimiser actually calls.
+    """
+
+    # Δξ ≈ 2e-12 at k₀ = 2 — four orders below the tightest ξ window used here.
+    TINY_DZ = 1e-5
+    THETA = np.deg2rad(30.0)
+
+    def _pade_only(self, **kwargs):
+        return combined_error(dz=self.TINY_DZ, theta_max=self.THETA, **kwargs)
 
     def test_zero_at_origin(self):
         """The Padé approximation is exact at ξ = 0."""
-        e = pade_error(dx=10.0, k0=2.0, p=8, xi_min=-1e-6, xi_max=1e-6)
+        e = self._pade_only(dx=10.0, k0=2.0, p=8, xi_min=-1e-6, xi_max=1e-6)
         assert e < 1e-10
 
     def test_grows_with_dx(self):
         """Padé error grows monotonically with the range step."""
         k0 = 2 * np.pi * 100 / 1500
         errs = [
-            pade_error(dx=dx, k0=k0, p=6, xi_min=-0.25, xi_max=0.0)
+            self._pade_only(dx=dx, k0=k0, p=6, xi_min=-0.25, xi_max=0.0)
             for dx in [1.0, 5.0, 20.0, 100.0]
         ]
         assert all(errs[i] <= errs[i + 1] + 1e-12 for i in range(len(errs) - 1))
@@ -57,8 +70,8 @@ class TestPadeError:
     def test_higher_order_is_more_accurate(self):
         """Higher Padé order gives smaller error at the same Δx."""
         k0 = 2 * np.pi * 100 / 1500
-        e2 = pade_error(dx=20.0, k0=k0, p=2, xi_min=-0.25, xi_max=0.0)
-        e8 = pade_error(dx=20.0, k0=k0, p=8, xi_min=-0.25, xi_max=0.0)
+        e2 = self._pade_only(dx=20.0, k0=k0, p=2, xi_min=-0.25, xi_max=0.0)
+        e8 = self._pade_only(dx=20.0, k0=k0, p=8, xi_min=-0.25, xi_max=0.0)
         assert e8 < e2
 
 

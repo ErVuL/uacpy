@@ -52,7 +52,7 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     psif_file = work_dir / 'psif.dat'
 
     if not psif_file.exists():
-        raise FileNotFoundError(f"mpiramS output not found: {psif_file}")
+        raise FileFormatError(f"mpiramS output not found: {psif_file}")
 
     # ``psif.dat`` is written by mpiramS on this host during the same run, so
     # its byte order is the host's; ``FortranFile`` reads native endianness,

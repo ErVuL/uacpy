@@ -115,7 +115,7 @@ def read_reflection_coefficient(
             return {"theta": theta, "R": R, "phi": phi, "n_pts": n_pts}
 
     except FileNotFoundError as e:
-        raise FileNotFoundError(
+        raise FileFormatError(
             f"Reflection coefficient file not found: {filename}. "
             "Run Bounce or OASR first to generate the .brc/.trc file, "
             "or pass an explicit reflection_file= path to the model."
@@ -174,7 +174,7 @@ def read_source_beam_pattern(
         if not sbp_file.exists():
             sbp_file = sbp_file.with_name(sbp_file.name + ".sbp")
         if not sbp_file.exists():
-            raise FileNotFoundError(
+            raise ConfigurationError(
                 f"Source beam pattern file not found: {sbp_file}. "
                 "Provide the .sbp file next to the env, or pass "
                 "sbp_option='O' for an omni-directional source."

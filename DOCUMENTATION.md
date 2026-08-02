@@ -163,9 +163,9 @@ result = model.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 ```
 
 There is **no `**kwargs`** — an unrecognised keyword raises `TypeError` at
-the call site. The only sanctioned per-model extras are `n_modes=` (Kraken
-family, to cap the modal set), `output_duration=` (broadband synthesizers)
-and `Bellhop.run_with_bounce`'s BOUNCE window (§7 — the reflection table is
+the call site. Every model takes exactly these parameters and no others.
+The one sanctioned extra belongs to a *different method*:
+`Bellhop.run_with_bounce`'s BOUNCE window (§7 — the reflection table is
 tabulated per call, not per Bellhop instance). Everything that *tunes* a model
 — beam type, PE step sizes, Padé order, array geometry — is a **constructor**
 argument, not a `run()` argument (see *Constructor-only configuration* below).
@@ -680,7 +680,7 @@ shares one contract:
   clones an instance with one knob changed.
 - **Fixed run signature.** `run(env, source, receiver, run_mode=None, *,
   frequencies=None, source_waveform=None, sample_rate=None, output_duration=None)`.
-  The Kraken family adds `n_modes=`. No `**kwargs` — an unexpected keyword
+  Identical across every model. No `**kwargs` — an unexpected keyword
   raises `TypeError`.
 - **`compute_*` convenience family.** Thin wrappers over `run()`, one per run
   mode: `compute_tl`, `compute_rays`, `compute_eigenrays`, `compute_arrivals`,
@@ -1810,7 +1810,6 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `source_waveform` | array | `None` | Source pressure pulse for `TIME_SERIES` synthesis. |
 | `sample_rate` | Hz | `None` | Sample rate of `source_waveform` / the synthesised output. |
 | `output_duration` | s | `None` | Time-series window length, overriding the auto/constructor value. |
-| `n_modes` *(Kraken only)* | count | — | Number of modes to retain. |
 
 ### Source / Receiver
 

@@ -7,7 +7,11 @@ import warnings
 import numpy as np
 import uacpy
 from uacpy import Field
-from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError,
+    ExecutableNotFoundError,
+    FileFormatError,
+)
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     Bottom, SedimentLayer, SeabedColumn,
@@ -570,7 +574,7 @@ class TestWarnings:
             warnings.simplefilter('error', UserWarning)
             try:
                 bellhop.run(env, source, receiver)
-            except (FileNotFoundError, RuntimeError):
+            except (FileFormatError, RuntimeError):
                 pass
 
     def test_bellhop_auto_routes_layered_bottom_through_bounce(self):
@@ -587,7 +591,7 @@ class TestWarnings:
         with pytest.warns(UserWarning, match="auto-routing through BOUNCE"):
             try:
                 bellhop.run(env, source, receiver)
-            except (FileNotFoundError, RuntimeError):
+            except (FileFormatError, RuntimeError):
                 pass
 
     def test_ram_accepts_layered_bottom(self):

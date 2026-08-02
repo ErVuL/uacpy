@@ -60,11 +60,11 @@ result = Model(...).run(env, source, receiver, run_mode=None, *,
 ```
 
 The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
-unknown keyword raises Python's standard `TypeError` at the call site.
-The only sanctioned extensions are `n_modes=` on Kraken,
-`output_duration=` on the broadband
-synthesizers (Bellhop, RAM, Scooter, Kraken, OASP), and the keyword-only
-`c_low`/`c_high`/`rmax` of `Bellhop.run_with_bounce`, which tabulate the BOUNCE
+unknown keyword raises Python's standard `TypeError` at the call site. Every
+model takes exactly these parameters and no others; `output_duration=` is part
+of that signature and is simply ignored by models with no broadband path. The
+one sanctioned extension is the keyword-only `c_low`/`c_high`/`rmax` of
+`Bellhop.run_with_bounce` — a *different method*, which tabulates the BOUNCE
 reflection table a single call consumes. Model configuration is
 **constructor-only** —
 `RAM(dr=2.0, dz=0.5, np_pade=8)`, `Bellhop(beam_type='B', n_beams=500)`.

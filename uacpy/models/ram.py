@@ -1009,9 +1009,9 @@ class RAM(PropagationModel):
         receiver: Receiver,
         run_mode: Optional[RunMode] = None,
         *,
-        frequencies=None,
-        source_waveform=None,
-        sample_rate=None,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
     ) -> Result:
         """

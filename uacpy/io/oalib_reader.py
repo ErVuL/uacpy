@@ -377,7 +377,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     if not filepath.exists():
-        raise FileNotFoundError(
+        raise FileFormatError(
             f"ASCII shade file not found: {filepath}. Run a model first to "
             "produce it."
         )

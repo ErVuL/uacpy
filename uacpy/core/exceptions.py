@@ -188,9 +188,11 @@ class DataFetchError(UACPYError):
 
 class FileFormatError(UACPYError):
     """Raised when a model I/O file (``.shd``, ``.mod``, ``.grn``, …) is
-    malformed, truncated, or otherwise cannot be parsed — typically a sign
-    the model run produced corrupt/unexpected output. Distinct from
-    :class:`ConfigurationError` (bad user input) since the file is not
-    something the user supplied. Catch via ``except FileFormatError`` or,
-    more broadly, ``except UACPYError``."""
+    absent, malformed, truncated, or otherwise cannot be parsed — typically a
+    sign the model run failed or produced corrupt/unexpected output. Distinct
+    from :class:`ConfigurationError` (bad user input) since the file is not
+    something the user supplied: a missing file the *user* named is a
+    ``ConfigurationError``, a missing file a *model* should have written is a
+    ``FileFormatError``. Catch via ``except FileFormatError`` or, more
+    broadly, ``except UACPYError``."""
     pass

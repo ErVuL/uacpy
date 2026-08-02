@@ -34,7 +34,10 @@ from uacpy.core.environment import (  # noqa: E402
 from uacpy.core.receiver import Receiver  # noqa: E402
 from uacpy.core.source import Source  # noqa: E402
 from uacpy.models import RAM, RunMode  # noqa: E402
-from uacpy.core.exceptions import UnsupportedFeatureError  # noqa: E402
+from uacpy.core.exceptions import (  # noqa: E402
+    FileFormatError,
+    UnsupportedFeatureError,
+)
 
 
 def main():
@@ -117,7 +120,7 @@ def main():
             if ax is axes[0]:
                 ax.set_ylabel("Depth (m)")
             fig.colorbar(im, ax=ax, label='TL (dB)')
-        except FileNotFoundError as exc:
+        except FileFormatError as exc:
             ax.set_title(f"{label}\n(skipped: {exc})")
 
     fig.tight_layout()

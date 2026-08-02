@@ -26,6 +26,7 @@ import numpy as np
 
 import uacpy
 from uacpy import SoundSpeedProfile
+from uacpy.core.exceptions import FileFormatError
 from uacpy.models import Scooter
 from uacpy.visualization.plots import compare_models
 
@@ -102,7 +103,7 @@ def main() -> None:
         label = f"bathy={bathy_m!r}, ssp={ssp_m!r}"
         try:
             results[label] = sc.compute_tl(env, source, receiver)
-        except (FileNotFoundError, RuntimeError) as exc:
+        except (FileFormatError, RuntimeError) as exc:
             print(f"  · {label} skipped: {exc.__class__.__name__}")
 
     if not results:

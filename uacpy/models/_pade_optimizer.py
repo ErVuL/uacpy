@@ -140,27 +140,6 @@ def _eval_poly(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def pade_error(
-    dx: float, k0: float, p: int,
-    xi_min: float, xi_max: float,
-    n_samples: int = 401,
-) -> float:
-    """Max ``|f(ξ) − P(ξ)/Q(ξ)|`` on ``[ξ_min, ξ_max]`` for a single range
-    step ``Δx``.
-
-    Lytaev (2023), R(Δx, ξ) formula in Section 4.1 —
-    https://doi.org/10.3390/jmse11030496. ``f`` is the exact propagator,
-    ``P/Q`` is the diagonal ``[p/p]`` Padé built around ``ξ = 0``.
-    """
-    # Need 2p+1 Taylor coefficients — add a few extra for stability.
-    taylor = _propagator_taylor(dx, k0, n_terms=2 * p + 5)
-    P, Q = _pade_pp(taylor, p)
-    xi = np.linspace(xi_min, xi_max, n_samples)
-    f = np.exp(1j * k0 * dx * (np.sqrt(1.0 + xi) - 1.0))
-    pq = _eval_poly(P, xi) / _eval_poly(Q, xi)
-    return float(np.max(np.abs(f - pq)))
-
-
 def numerov_error(
     dz: float, k0: float, theta_max: float,
     alpha: float = 0.0, n_samples: int = 401,
