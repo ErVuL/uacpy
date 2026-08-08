@@ -74,8 +74,19 @@ def main():
         ),
     )
 
-    surface = [(r, 1.5 * np.sin(2 * np.pi * r / 2000.0))
+    # ramsurf1.5 can only place the pressure-release surface at or below mean
+    # sea level; any node with height > 0 is clamped to 0. A zero-mean
+    # sinusoid would therefore arrive half-wave rectified, with 29 of these
+    # 50 nodes flattened and the panel still labelled "rough". Bias the
+    # corrugation down so the whole 3 m peak-to-peak profile is representable
+    # — the same all-negative convention example_21 uses for its ice keels.
+    surface = [(r, -1.6 + 1.5 * np.sin(2 * np.pi * r / 2000.0))
                for r in np.linspace(0.0, rmax, 50)]
+    surface_heights = np.array([z for _, z in surface])
+    print(f"Surface corrugation: {surface_heights.min():.2f} to "
+          f"{surface_heights.max():.2f} m relative to mean sea level, "
+          f"{int((surface_heights > 0).sum())}/{surface_heights.size} nodes "
+          f"above 0 (any such node would be clamped by ramsurf1.5)")
 
     cases = [
         ('mpiramS (fluid + flat)', Environment(

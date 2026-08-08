@@ -106,13 +106,18 @@ def test_receiver_grid_ranges_must_be_increasing():
                        ranges=np.array([1000.0, 500.0]))
 
 
-def test_receiver_line_axes_paired_not_sorted():
-    rcv = uacpy.Receiver(
-        depths=np.array([10.0, 50.0, 30.0]),
-        ranges=np.array([1000.0, 2000.0, 1500.0]),
-        receiver_type='line',
-    )
-    assert rcv.depths.tolist() == [10.0, 50.0, 30.0]
+def test_receiver_line_rejected_at_construction():
+    """``receiver_type='line'`` raises in the carrier, not at run() time.
+
+    No model collapses the depth x range grid to paired samples, so the
+    layout is refused as early as possible rather than after a model run.
+    """
+    with pytest.raises(ConfigurationError, match="receiver_type='line'"):
+        uacpy.Receiver(
+            depths=np.array([10.0, 50.0, 30.0]),
+            ranges=np.array([1000.0, 2000.0, 1500.0]),
+            receiver_type='line',
+        )
 
 
 # --- G8 acoustic_type ------------------------------------------------------
@@ -676,9 +681,9 @@ def test_francois_garrison_accepts_list_pH():
 def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
     """``receiver_type='line'`` must raise, not return the full grid.
 
-    The carrier accepts it and the input-side checks honour it, but no model's
-    result assembly collapses depth x range to the paired samples — so a 'line'
-    request used to come back as the cross-product with no indication.
+    No model's result assembly collapses depth x range to the paired samples,
+    so the carrier refuses the layout outright; the documented ``'grid'``
+    workaround still runs on every model.
     """
     import uacpy
     from uacpy.core.exceptions import ConfigurationError
@@ -694,8 +699,7 @@ def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
 
     model = getattr(uacpy, model_name)(verbose=False)
     with pytest.raises(ConfigurationError, match="receiver_type='line'"):
-        model.run(env, src, uacpy.Receiver(depths=d, ranges=r,
-                                           receiver_type='line'))
+        uacpy.Receiver(depths=d, ranges=r, receiver_type='line')
     # The documented workaround still works.
     tl = np.asarray(model.run(env, src,
                               uacpy.Receiver(depths=d, ranges=r)).tl)

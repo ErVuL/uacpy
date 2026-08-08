@@ -8,7 +8,7 @@ Provides:
 
 * ``.shd`` — :func:`read_shd_file`, :func:`read_shd_bin`, :func:`read_shd_asc`
 * ``.arr`` — :func:`read_arr_file` (Bellhop arrivals, ASCII)
-* ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII or binary)
+* ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII)
 * ``.ssp`` — :func:`read_ssp_2d`, :func:`read_ssp_3d`
 * ``.flp`` — :func:`read_flp`, :func:`read_flp3d`
 * ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, ASCII)
@@ -27,6 +27,7 @@ from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import (
+    _bound_counts,
     read_vector as _read_vector, detect_endian, typed_format_error,
     strip_fortran_comment as _strip_fortran_comment,
     strip_fortran_quotes as _strip_fortran_quotes)
@@ -34,19 +35,28 @@ from uacpy.io.units import km_to_m
 
 
 def read_shd_file(filepath: Union[str, Path]):
-    """Read a single-frequency ``.shd`` file as a typed pressure result.
+    """Read a single-frequency, single-bearing ``.shd`` file as a typed
+    pressure result.
 
     Thin wrapper around :func:`read_shd_bin`. Returns:
 
-      * :class:`Field` (complex narrowband pressure, ``coords={'depth',
-        'range'}``) when the file carries a single source depth — the
-        common case.
+      * :class:`Field` (complex narrowband pressure) when the file carries a
+        single source depth — the common case.
       * :class:`ResultStack` of single-source :class:`Field` slabs when
         multiple source depths are present.
 
-    Multi-frequency ``.shd`` files raise :class:`ValueError` — call
-    :func:`read_shd_bin` directly and construct a broadband
-    :class:`Field` from the cube instead.
+    A rectilinear file (``PlotType == 'rectilin  '``) gives
+    ``coords={'depth', 'range'}``. An irregular file (``'irregular '``) gives
+    ``coords={'range'}``: its receivers are the paired coordinates
+    ``(Rz(i), Rr(i))`` and only one row of ``NRr`` samples is written per
+    source depth (``Bellhop/bellhop.f90:202-206``, ``:323-326``), so the
+    paired depths ride on ``metadata['receiver_depths']`` rather than forming
+    a second axis.
+
+    Multi-frequency and multi-bearing ``.shd`` files raise
+    :class:`FileFormatError`: this wrapper carries neither axis. Call
+    :func:`read_shd_bin` directly and build the result from its
+    ``(Ntheta, Nsz, Nrz, Nrr)`` cube.
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
@@ -68,12 +78,45 @@ def read_shd_file(filepath: Union[str, Path]):
 
     pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
     pos = shd['Pos']
+    # The receiver-bearing axis is a first-class .shd dimension
+    # (misc/RWSHDFile.f90:105,107; BELLHOP3D writes Ntheta record blocks per
+    # source, Bellhop/bellhop3D.f90:405-411). A Field carries no bearing axis,
+    # so refuse rather than return plane 0 as if it were the whole file.
+    n_theta = np.atleast_1d(np.asarray(pos['theta'], dtype=float)).size
+    if n_theta > 1:
+        raise FileFormatError(
+            f"read_shd_file: {filepath} carries {n_theta} receiver bearings; "
+            "use read_shd_bin(filepath) for the full (Ntheta, Nsz, Nrz, Nrr) "
+            "cube and build the result from it."
+        )
+
     source_depths = np.atleast_1d(np.asarray(pos['s']['z'], dtype=float))
+    irregular = shd['PlotType'].strip() == 'irregular'
+    receiver_depths = np.atleast_1d(np.asarray(pos['r']['z'], dtype=float))
+    receiver_ranges = np.atleast_1d(np.asarray(pos['r']['r'], dtype=float))
+    if irregular and receiver_depths.size != receiver_ranges.size:
+        # Bellhop/ReadEnvironmentBell.f90:414 ERROUTs unless NRz == NRr for
+        # RunType(5:5)='I', so the two header counts must pair up.
+        raise FileFormatError(
+            f"read_shd_file: {filepath} declares PlotType 'irregular' but "
+            f"carries {receiver_depths.size} receiver depths against "
+            f"{receiver_ranges.size} receiver ranges; an irregular grid pairs "
+            f"them one-to-one."
+        )
 
     def _slab(isz: int) -> Field:
+        if irregular:
+            return Field(
+                data=pressure[0, isz, 0, :],
+                coords={'range': receiver_ranges},
+                model='', backend='',
+                source_depths=np.array([float(source_depths[isz])]),
+                frequencies=freqs,
+                metadata={'receiver_depths': receiver_depths.copy()},
+            )
         return Field(
             data=pressure[0, isz, :, :],
-            coords={'depth': pos['r']['z'], 'range': pos['r']['r']},
+            coords={'depth': receiver_depths, 'range': receiver_ranges},
             model='', backend='',
             source_depths=np.array([float(source_depths[isz])]),
             frequencies=freqs,
@@ -201,6 +244,22 @@ def read_shd_bin(
         Nrr = int(np.fromfile(fid, dtype=i4, count=1)[0])
         freq0 = float(np.fromfile(fid, dtype=f8, count=1)[0])
         atten = float(np.fromfile(fid, dtype=f8, count=1)[0])
+        # Receivers per range record. For PlotType 'irregular ' the receivers
+        # are the paired coordinates (Rz(i), Rr(i)) and exactly one row of NRr
+        # samples is written per source depth (Bellhop/bellhop.f90:202-206,
+        # :323-326), so Nrz indexes the same paired list as Nrr and must not
+        # enter the on-disk sample count.
+        Nrcvrs_per_range = 1 if PlotType.strip() == "irregular" else Nrz
+        file_size = Path(filename).stat().st_size
+        # Record 9 holds Nrz REAL*4 receiver depths (misc/RWSHDFile.f90:113),
+        # so that count alone is bounded by file_size // 4.
+        _bound_counts(filename, file_size, 4, Nrz=Nrz)
+        # The pressure cube is sized straight off the remaining header words;
+        # one complex sample occupies 8 bytes on disk, so no count and no
+        # product of counts can exceed file_size // 8.
+        _bound_counts(filename, file_size, 8,
+                      Nfreq=Nfreq, Ntheta=Ntheta, Nsx=Nsx, Nsy=Nsy,
+                      Nsz=Nsz, Nrz_per_range=Nrcvrs_per_range, Nrr=Nrr)
         fid.seek(3 * 4 * recl, 0)
         freqVec = np.fromfile(fid, dtype=f8, count=Nfreq)
         fid.seek(4 * 4 * recl, 0)
@@ -223,12 +282,8 @@ def read_shd_bin(
         r_z = np.fromfile(fid, dtype=f4, count=Nrz)
         fid.seek(9 * 4 * recl, 0)
         r_r = np.fromfile(fid, dtype=f8, count=Nrr)
-        if PlotType.strip() == "irregular":
-            pressure = np.zeros((Ntheta, Nsz, 1, Nrr), dtype=np.complex64)
-            Nrcvrs_per_range = 1
-        else:
-            pressure = np.zeros((Ntheta, Nsz, Nrz, Nrr), dtype=np.complex64)
-            Nrcvrs_per_range = Nrz
+        pressure = np.zeros((Ntheta, Nsz, Nrcvrs_per_range, Nrr),
+                            dtype=np.complex64)
         # Select ONE frequency slice. The returned 'pressure' cube is always
         # single-frequency (the slice 'pressure_freq'); a broadband caller must
         # pass frequency= per frequency or iterate freqVec, never treat 'pressure' as
@@ -338,8 +393,9 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     Returns
     -------
     result : dict
-        Same keys as :func:`read_shd_bin`, so a caller can switch between
-        the ASCII and binary readers without remapping:
+        The same header keys as :func:`read_shd_bin`. ``pressure`` is 2-D
+        here — one source depth, one frequency — and there is no
+        ``pressure_freq``:
         - 'title': str, plot title
         - 'PlotType': str, plot type
         - 'freqVec': ndarray, frequency vector in Hz
@@ -353,20 +409,20 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Notes
     -----
-    ASCII shade file format:
+    ASCII shade file format (``Matlab/ReadWrite/read_shd_asc.m:13-38``):
+    two title lines read whole, then one flat whitespace-delimited token
+    stream — every scalar and vector there is consumed with ``fscanf``, so
+    the values may be packed onto shared lines or spread one per line:
+
     - Line 1: Title
     - Line 2: Plot type
-    - Line 3: Nfreq, Ntheta, Nsd, Nrd, Nrr, freq0, atten
-    - Frequency vector
-    - Bearing angles
-    - Source depths
-    - Receiver depths
-    - Receiver ranges
-    - Pressure data (interleaved real/imaginary)
+    - Tokens: Nfreq, Ntheta, Nsd, Nrd, Nrr, freq0, atten
+    - Frequency vector, bearing angles, source depths, receiver depths,
+      receiver ranges
+    - Pressure data: ``Nrd`` groups of ``2 * Nrr`` interleaved
+      real/imaginary values
 
-    Currently only reads data for first source depth.
-
-    Translated from OALIB read_shd_asc.m
+    Reads the first source depth only, matching ``read_shd_asc.m:29-32``.
 
     Examples
     --------
@@ -377,49 +433,32 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     if not filepath.exists():
-        raise FileFormatError(
-            f"ASCII shade file not found: {filepath}. Run a model first to "
-            "produce it."
+        raise ConfigurationError(
+            f"ASCII shade file not found: {filepath}. No Acoustics-Toolbox "
+            "program writes .shd.asc — supply the path to an existing ASCII "
+            "shade file, or read a solver-written binary .shd with "
+            "read_shd_bin."
         )
     with open(filepath, "r") as fid:
         title = fid.readline().strip()
         plot_type = fid.readline().strip()
+        tokens = iter(fid.read().split())
 
-        line = fid.readline()
-        vals = np.array(line.split(), dtype=float)
-        Nfreq = int(vals[0])
-        Ntheta = int(vals[1])
-        Nsd = int(vals[2])
-        Nrd = int(vals[3])
-        Nrr = int(vals[4])
+    # Every vector is sized off an on-disk count, but each is filled straight
+    # from the token stream: a garbage count exhausts the iterator (raising
+    # StopIteration, which @typed_format_error types as FileFormatError)
+    # instead of driving an allocation the file cannot back.
+    def _take(n: int) -> np.ndarray:
+        return np.array([float(next(tokens)) for _ in range(n)])
 
-        line = fid.readline()
-        vals = np.array(line.split()[:2], dtype=float)
-        freq0 = vals[0]
-        atten = vals[1]
-        freq_vec = np.zeros(Nfreq)
-        for i in range(Nfreq):
-            freq_vec[i] = float(fid.readline().strip())
-
-        theta = np.zeros(Ntheta)
-        for i in range(Ntheta):
-            theta[i] = float(fid.readline().strip())
-
-        s_z = np.zeros(Nsd)
-        for i in range(Nsd):
-            s_z[i] = float(fid.readline().strip())
-
-        r_z = np.zeros(Nrd)
-        for i in range(Nrd):
-            r_z[i] = float(fid.readline().strip())
-
-        r_r = np.zeros(Nrr)
-        for i in range(Nrr):
-            r_r[i] = float(fid.readline().strip())
-        temp = np.zeros((2 * Nrr, Nrd))
-        for j in range(Nrd):
-            for i in range(2 * Nrr):
-                temp[i, j] = float(fid.readline().strip())
+    Nfreq, Ntheta, Nsd, Nrd, Nrr = (int(v) for v in _take(5))
+    freq0, atten = _take(2)
+    freq_vec = _take(Nfreq)
+    theta = _take(Ntheta)
+    s_z = _take(Nsd)
+    r_z = _take(Nrd)
+    r_r = _take(Nrr)
+    temp = np.array([_take(2 * Nrr) for _ in range(Nrd)]).T
 
     pressure = temp[0::2, :].T + 1j * temp[1::2, :].T
     # Exact complex zero = cell the engine never wrote (see read_shd_bin);
@@ -438,7 +477,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
 
 
 @typed_format_error
-def read_arr_file(filepath: Union[str, Path]):
+def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
     """
     Read arrivals file (.arr) from Bellhop
 
@@ -446,13 +485,25 @@ def read_arr_file(filepath: Union[str, Path]):
     ----------
     filepath : str or Path
         Path to .arr file
+    grid_type : str, optional
+        Receiver-grid option the run used — Bellhop ``RunType(5:5)``:
+        ``'R'`` rectilinear (default), ``'I'`` irregular. The ``.arr``
+        header always reports the full ``Pos%NRz``
+        (``Bellhop/ReadEnvironmentBell.f90:591``) but the body carries only
+        ``NRz_per_range`` depth blocks, and that is 1 for an irregular grid
+        (``Bellhop/bellhop.f90:202-206``, ``:329``;
+        ``Bellhop/ArrMod.f90:101-102``). The file records nothing that
+        distinguishes the two, so the caller must say which it is.
 
     Returns
     -------
     Arrivals
         Typed result with:
         - ``by_receiver``: nested list ``[isd][ird][irr]`` of per-receiver
-          arrival dicts.
+          arrival dicts. ``ird`` spans the receiver depths for
+          ``grid_type='R'`` and is a single block for ``grid_type='I'``,
+          whose receivers are the paired coordinates ``(Rz(i), Rr(i))``
+          indexed by ``irr``.
         - ``arrivals``: flat list of per-arrival records (same data,
           un-nested) for filter/top_n/in_window chain methods.
         - ``frequencies``, ``source_depths``, ``receiver_depths``,
@@ -478,6 +529,11 @@ def read_arr_file(filepath: Union[str, Path]):
         in **Hz**.
     """
     filepath = Path(filepath)
+    if grid_type not in ('R', 'I'):
+        raise ConfigurationError(
+            f"read_arr_file(grid_type={grid_type!r}) is not valid. Use 'R' "
+            f"(rectilinear) or 'I' (irregular), matching Bellhop's "
+            f"RunType(5:5).")
 
     # Check if binary or ASCII format. The ASCII arrivals file always begins
     # with a quoted "'2D'" or "'3D'" tag at the very start of the first line.
@@ -500,102 +556,124 @@ def read_arr_file(filepath: Union[str, Path]):
             remediation="Re-run Bellhop with RunType 'A' (ASCII), which is "
                         "what uacpy's own runs emit.",
         )
-    is_3d = head_text.lstrip().startswith("'3D'")
+    if head_text.lstrip().startswith("'3D'"):
+        raise ConfigurationError(
+            "3-D arrivals format (the '3D' tag written by BELLHOP3D) is not "
+            "supported; its records carry ten values per arrival plus a "
+            "receiver-bearing loop (Bellhop/ArrMod.f90:256-302).",
+            remediation="Re-run in 2-D (bellhop.exe), which writes the "
+                        "eight-value '2D' arrivals file this reader parses.",
+        )
 
-    if not is_3d:
-        # ArrMod.f90 writes each Fortran record (freq, nsd+sz, nrd+rz,
-        # nrr+rr, max-narr, narr, and each 8-tuple arrival) via
-        # list-directed WRITE, which different Fortran runtimes may wrap
-        # at different column widths. Walk the file as a token stream so
-        # the parser is independent of how those records are line-broken.
-        with open(filepath, 'r') as f:
-            f.readline()  # skip the '2D' / '3D' flag line
-            tokens = []
-            for line in f:
-                tokens.extend(line.split())
+    # ArrMod.f90 writes each Fortran record (freq, nsd+sz, nrd+rz,
+    # nrr+rr, max-narr, narr, and each 8-tuple arrival) via
+    # list-directed WRITE, which different Fortran runtimes may wrap
+    # at different column widths. Walk the file as a token stream so
+    # the parser is independent of how those records are line-broken.
+    with open(filepath, 'r') as f:
+        f.readline()  # skip the '2D' flag line
+        tokens = []
+        for line in f:
+            tokens.extend(line.split())
 
-        def _next_floats(t_iter, n):
-            return [float(next(t_iter)) for _ in range(n)]
+    def _next_floats(t_iter, n):
+        return [float(next(t_iter)) for _ in range(n)]
 
-        def _next_int(t_iter):
-            # Some writers emit counts as floats; tolerate either.
-            return int(float(next(t_iter)))
+    def _next_int(t_iter):
+        # Some writers emit counts as floats; tolerate either.
+        return int(float(next(t_iter)))
 
-        t_iter = iter(tokens)
-        freq = float(next(t_iter))
+    t_iter = iter(tokens)
+    freq = float(next(t_iter))
 
-        nsd = _next_int(t_iter)
-        sz = np.array(_next_floats(t_iter, nsd))
+    nsd = _next_int(t_iter)
+    sz = np.array(_next_floats(t_iter, nsd))
 
-        nrd = _next_int(t_iter)
-        rz = np.array(_next_floats(t_iter, nrd))
+    nrd = _next_int(t_iter)
+    rz = np.array(_next_floats(t_iter, nrd))
 
-        nrr = _next_int(t_iter)
-        rr = np.array(_next_floats(t_iter, nrr))
+    nrr = _next_int(t_iter)
+    rr = np.array(_next_floats(t_iter, nrr))
 
-        arrivals_by_receiver = []
+    # Body bound: WriteArrivalsASCII loops DO id = 1, Nrd with Nrd bound to
+    # NRz_per_range (Bellhop/ArrMod.f90:101-102, Bellhop/bellhop.f90:329),
+    # which is 1 for RunType(5:5)='I' and Pos%NRz otherwise
+    # (Bellhop/bellhop.f90:202-206).
+    if grid_type == 'I':
+        if nrd != nrr:
+            raise FileFormatError(
+                f"read_arr_file({filepath}, grid_type='I'): header declares "
+                f"{nrd} receiver depths against {nrr} receiver ranges. An "
+                f"irregular grid pairs them one-to-one — Bellhop refuses the "
+                f"deck otherwise (Bellhop/ReadEnvironmentBell.f90:414).",
+                remediation="Pass grid_type='R' if the run used a "
+                            "rectilinear receiver grid.",
+            )
+        n_depth_blocks = 1
+    else:
+        n_depth_blocks = nrd
 
-        for isd in range(nsd):
-            sd_list = []
-            # Skip the per-source max-narr value.
-            _next_int(t_iter)
+    arrivals_by_receiver = []
 
-            for irz in range(nrd):
-                rd_list = []
-                for irr in range(nrr):
-                    narr = _next_int(t_iter)
+    for isd in range(nsd):
+        sd_list = []
+        # Skip the per-source max-narr value.
+        _next_int(t_iter)
+
+        for irz in range(n_depth_blocks):
+            rd_list = []
+            for irr in range(nrr):
+                narr = _next_int(t_iter)
+
+                rcv_arrivals = {
+                    "amplitudes": np.array([], dtype='float64'),
+                    "phases": np.array([], dtype='float64'),
+                    "delays": np.array([], dtype='float64'),
+                    "delays_imag": np.array([], dtype='float64'),
+                    "src_angles": np.array([], dtype='float64'),
+                    "rcv_angles": np.array([], dtype='float64'),
+                    "n_top_bounces": np.array([], dtype='int32'),
+                    "n_bot_bounces": np.array([], dtype='int32'),
+                    "n_arrivals": 0,
+                }
+
+                if narr > 0:
+                    amps = []
+                    phases = []
+                    delays_r = []
+                    delays_i = []
+                    src_angs = []
+                    rcv_angs = []
+                    n_tops = []
+                    n_bots = []
+
+                    for ia in range(narr):
+                        values = _next_floats(t_iter, 8)
+
+                        amps.append(values[0])
+                        phases.append(values[1])
+                        delays_r.append(values[2])
+                        delays_i.append(values[3])
+                        src_angs.append(values[4])
+                        rcv_angs.append(values[5])
+                        n_tops.append(int(values[6]))
+                        n_bots.append(int(values[7]))
 
                     rcv_arrivals = {
-                        "amplitudes": np.array([], dtype='float64'),
-                        "phases": np.array([], dtype='float64'),
-                        "delays": np.array([], dtype='float64'),
-                        "delays_imag": np.array([], dtype='float64'),
-                        "src_angles": np.array([], dtype='float64'),
-                        "rcv_angles": np.array([], dtype='float64'),
-                        "n_top_bounces": np.array([], dtype='int32'),
-                        "n_bot_bounces": np.array([], dtype='int32'),
-                        "n_arrivals": 0,
+                        "amplitudes": np.array(amps),
+                        "phases": np.array(phases),
+                        "delays": np.array(delays_r),
+                        "delays_imag": np.array(delays_i),
+                        "src_angles": np.array(src_angs),
+                        "rcv_angles": np.array(rcv_angs),
+                        "n_top_bounces": np.array(n_tops, dtype='int32'),
+                        "n_bot_bounces": np.array(n_bots, dtype='int32'),
+                        "n_arrivals": narr,
                     }
 
-                    if narr > 0:
-                        amps = []
-                        phases = []
-                        delays_r = []
-                        delays_i = []
-                        src_angs = []
-                        rcv_angs = []
-                        n_tops = []
-                        n_bots = []
-
-                        for ia in range(narr):
-                            values = _next_floats(t_iter, 8)
-
-                            amps.append(values[0])
-                            phases.append(values[1])
-                            delays_r.append(values[2])
-                            delays_i.append(values[3])
-                            src_angs.append(values[4])
-                            rcv_angs.append(values[5])
-                            n_tops.append(int(values[6]))
-                            n_bots.append(int(values[7]))
-
-                        rcv_arrivals = {
-                            "amplitudes": np.array(amps),
-                            "phases": np.array(phases),
-                            "delays": np.array(delays_r),
-                            "delays_imag": np.array(delays_i),
-                            "src_angles": np.array(src_angs),
-                            "rcv_angles": np.array(rcv_angs),
-                            "n_top_bounces": np.array(n_tops, dtype='int32'),
-                            "n_bot_bounces": np.array(n_bots, dtype='int32'),
-                            "n_arrivals": narr,
-                        }
-
-                    rd_list.append(rcv_arrivals)
-                sd_list.append(rd_list)
-            arrivals_by_receiver.append(sd_list)
-    else:
-        raise NotImplementedError("3D arrivals format not yet implemented")
+                rd_list.append(rcv_arrivals)
+            sd_list.append(rd_list)
+        arrivals_by_receiver.append(sd_list)
 
     if nsd == 1:
         return Arrivals(
@@ -628,6 +706,7 @@ def read_arr_file(filepath: Union[str, Path]):
     )
 
 
+@typed_format_error
 def read_ray_file(filepath: Union[str, Path]):
     """
     Read a Bellhop ``.ray`` file as a typed ray-bundle result.
@@ -638,6 +717,10 @@ def read_ray_file(filepath: Union[str, Path]):
     ``NSz > 1``. ``EIGENRAYS`` files write a variable number of rays
     per source; this reader leaves them flat (the Bellhop wrapper
     loops Python-side for multi-source eigenrays to disambiguate).
+
+    The ``.ray`` format is ASCII only — the only two ``.ray`` OPENs in the
+    Acoustics-Toolbox tree, ``Bellhop/ReadEnvironmentBell.f90:556`` and
+    ``KrakenField/EvaluateGBMod.f90:64``, are both ``FORM = 'FORMATTED'``.
 
     Parameters
     ----------
@@ -654,85 +737,86 @@ def read_ray_file(filepath: Union[str, Path]):
     n_sz = 1
     n_alpha = 0
 
-    try:
-        with open(filepath, "r") as f:
-            f.readline()                  # title
-            f.readline()                  # frequency
-            # Line 3: NSx NSy NSz — the trailing token is the source-
-            # depth count for 2-D Bellhop.
-            sx_sy_sz_tokens = f.readline().split()
-            if len(sx_sy_sz_tokens) >= 3:
-                n_sz = int(sx_sy_sz_tokens[2])
-            # Line 4: Nalpha Nbeta — first token is the launch-angle
-            # count, used to split ray blocks per source-depth for
-            # RAYS mode (deterministic NSz × Nalpha layout).
-            alpha_beta_tokens = f.readline().split()
-            if alpha_beta_tokens:
-                n_alpha = int(alpha_beta_tokens[0])
-            f.readline()                  # top depth
-            f.readline()                  # bottom depth
-            f.readline().strip()          # 'rz' / 'xyz' marker
-            while True:
-                angle_line = f.readline()
-                if not angle_line:
+    with open(filepath, "r") as f:
+        f.readline()                  # title
+        f.readline()                  # frequency
+        # Line 3: NSx NSy NSz — the trailing token is the source-
+        # depth count for 2-D Bellhop.
+        sx_sy_sz_tokens = f.readline().split()
+        if len(sx_sy_sz_tokens) >= 3:
+            n_sz = int(sx_sy_sz_tokens[2])
+        # Line 4: Nalpha Nbeta — first token is the launch-angle
+        # count, used to split ray blocks per source-depth for
+        # RAYS mode (deterministic NSz × Nalpha layout).
+        alpha_beta_tokens = f.readline().split()
+        if alpha_beta_tokens:
+            n_alpha = int(alpha_beta_tokens[0])
+        f.readline()                  # top depth
+        f.readline()                  # bottom depth
+        # Coordinate-system marker: 'rz' (2-D, two columns per ray point,
+        # take-off angle in degrees) or 'xyz' (BELLHOP3D / field3d, three
+        # columns and radians) — Bellhop/ReadEnvironmentBell.f90:564-568,
+        # Bellhop/WriteRay.f90:45 vs :89, Bellhop/bellhop.f90:263,289 vs
+        # Bellhop/bellhop3D.f90:360.
+        coord_system = _strip_fortran_quotes(f.readline())
+        if coord_system != 'rz':
+            raise FileFormatError(
+                f"read_ray_file: {filepath} declares coordinate system "
+                f"{coord_system!r}; only the 2-D 'rz' layout is supported. "
+                f"An 'xyz' file stores (x, y, z) per point and its take-off "
+                f"angle in radians, so reading it as (range, depth) would "
+                f"return the y column as depth.",
+                remediation="Re-run in 2-D (bellhop.exe), which writes the "
+                            "'rz' ray file this reader parses.",
+            )
+        while True:
+            angle_line = f.readline()
+            if not angle_line:
+                break
+            if not angle_line.strip():
+                continue
+            alpha = float(angle_line.strip())
+            counts_line = f.readline()
+            if not counts_line:
+                break
+
+            counts = counts_line.split()
+            if len(counts) < 1:
+                continue
+
+            n_points = int(counts[0])
+            n_top_bounces = int(counts[1]) if len(counts) > 1 else 0
+            n_bot_bounces = int(counts[2]) if len(counts) > 2 else 0
+
+            if n_points == 0:
+                continue
+
+            ray_r = []
+            ray_z = []
+
+            for _ in range(n_points):
+                line = f.readline().strip()
+                if not line:
                     break
-                if not angle_line.strip():
-                    continue
-                try:
-                    alpha = float(angle_line.strip())
-                except ValueError:
-                    continue
-                counts_line = f.readline()
-                if not counts_line:
-                    break
+                parts = line.split()
+                if len(parts) >= 2:
+                    # Bellhop's WriteRay2D (WriteRay.f90:45) writes
+                    # ray2D(is)%x directly in meters (the MATLAB
+                    # plotray.m only divides by 1000 when the user
+                    # requests km output). No unit conversion here.
+                    ray_r.append(float(parts[0]))
+                    ray_z.append(float(parts[1]))
 
-                counts = counts_line.split()
-                if len(counts) < 1:
-                    continue
-
-                n_points = int(counts[0])
-                n_top_bounces = int(counts[1]) if len(counts) > 1 else 0
-                n_bot_bounces = int(counts[2]) if len(counts) > 2 else 0
-
-                if n_points == 0:
-                    continue
-
-                ray_r = []
-                ray_z = []
-
-                for _ in range(n_points):
-                    line = f.readline().strip()
-                    if not line:
-                        break
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        # Bellhop's WriteRay2D (WriteRay.f90:45) writes
-                        # ray2D(is)%x directly in meters (the MATLAB
-                        # plotray.m only divides by 1000 when the user
-                        # requests km output). No unit conversion here.
-                        ray_r.append(float(parts[0]))
-                        ray_z.append(float(parts[1]))
-
-                if len(ray_r) > 0:
-                    rays.append(
-                        {
-                            "r": np.array(ray_r),
-                            "z": np.array(ray_z),
-                            "alpha": alpha,
-                            "n_top_bounces": n_top_bounces,
-                            "n_bot_bounces": n_bot_bounces,
-                        }
-                    )
-
-    except (UnicodeDecodeError, ValueError) as e:
-        # File is not valid ASCII or has malformed numeric content;
-        # the binary reader is the legitimate fallback for these.
-        warnings.warn(
-            f"read_ray_file: ASCII parse failed ({type(e).__name__}: {e}); "
-            f"falling back to binary reader for {filepath}",
-            UserWarning, stacklevel=2,
-        )
-        rays = _read_ray_file_binary(filepath)
+            if len(ray_r) > 0:
+                rays.append(
+                    {
+                        "r": np.array(ray_r),
+                        "z": np.array(ray_z),
+                        "alpha": alpha,
+                        "n_top_bounces": n_top_bounces,
+                        "n_bot_bounces": n_bot_bounces,
+                    }
+                )
 
     if n_sz <= 1 or n_alpha == 0 or len(rays) != n_sz * n_alpha:
         # Single source, or EIGENRAYS (which writes a non-deterministic
@@ -750,10 +834,13 @@ def read_ray_file(filepath: Union[str, Path]):
              model='', backend='')
         for isz in range(n_sz)
     ]
+    # The .ray file carries no source depths, only their order, so the
+    # coordinate is the index. The Bellhop wrapper substitutes the real
+    # depths (and renames the coordinate) once it knows them.
     return ResultStack(
         slabs=slabs,
         coordinate=np.arange(n_sz, dtype=float),
-        coordinate_name='source_depth',
+        coordinate_name='source_index',
     )
 
 
@@ -787,68 +874,6 @@ def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) ->
         return None
 
 
-def _read_ray_file_binary(filepath: Path) -> list:
-    """
-    Read binary ray file format
-
-    Parameters
-    ----------
-    filepath : Path
-        Path to binary .ray file
-
-    Returns
-    -------
-    rays : list
-        List of ray dictionaries
-    """
-    rays = []
-
-    with open(filepath, "rb") as f:
-        head = f.read(4)
-        if len(head) < 4:
-            return rays
-        endian = detect_endian(head, source=f'read_ray_bin:{Path(filepath).name}')
-        i4 = np.dtype(endian + 'i4')
-        f4 = np.dtype(endian + 'f4')
-        recl = int(np.frombuffer(head, dtype=i4, count=1)[0])
-        f.seek(recl * 4)
-
-        truncated_after = None
-        while True:
-            count_buf = f.read(4)
-            if len(count_buf) < 4:
-                # EOF where a ray-length record was expected.
-                truncated_after = len(rays)
-                break
-            n_points = int(np.frombuffer(count_buf, dtype=i4, count=1)[0])
-            if n_points <= 0:
-                break
-
-            # WriteRay2D writes ray2D%x (r, z interleaved) directly in metres
-            # (WriteRay.f90:45); no km conversion needed.
-            coords = np.fromfile(f, dtype=f4, count=2 * n_points)
-            if coords.size < 2 * n_points:
-                truncated_after = len(rays)
-                break
-
-            rays.append(
-                {
-                    "r": coords[0::2].astype(float),
-                    "z": coords[1::2].astype(float),
-                }
-            )
-
-    if truncated_after is not None:
-        warnings.warn(
-            f"read_ray_file: {filepath} appears truncated; recovered "
-            f"{truncated_after} ray(s) before EOF. The producing model "
-            "may have crashed mid-write — check its .prt log.",
-            UserWarning,
-            stacklevel=2,
-        )
-    return rays
-
-
 @typed_format_error
 def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
@@ -868,7 +893,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
         Dictionary containing:
         - 'n_prof' : int - Number of profiles (ranges)
         - 'r_prof' : ndarray - Range values in metres, shape (n_prof,).
-          Stored on disk in km (``sspMod.f90:417-422``) and converted here.
+          Stored on disk in km (``Bellhop/sspMod.f90:417,422``) and converted here.
         - 'c_mat' : ndarray - Sound speed matrix in m/s, shape (n_depth, n_prof)
         - 'n_depth' : int - Number of depth points per profile
 
@@ -898,7 +923,7 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     >>> c = ssp['c_mat'][10, 5]
     """
     filepath = Path(filepath)
-    # Canonical AT/Bellhop layout (sspMod.f90:407,417,428):
+    # Canonical AT/Bellhop layout (Bellhop/sspMod.f90:407,417,428):
     #   Line 1            : NProf (integer)
     #   Line 2            : NProf range values (single list-directed record)
     #   Lines 3..NSSP+2   : one SSP row per depth, each with NProf values
@@ -953,7 +978,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
         - 'Ny' : int - Number of y segments
         - 'Nz' : int - Number of depth points
         - 'Segx' : ndarray - X segment boundaries in metres, shape (Nx,).
-          Stored on disk in km (``sspMod.f90:614-615``) and converted here.
+          Stored on disk in km (``Bellhop/sspMod.f90:621-622``) and converted here.
         - 'Segy' : ndarray - Y segment boundaries in metres, shape (Ny,).
           Also km on disk.
         - 'Segz' : ndarray - Depth values in metres, shape (Nz,)
@@ -992,7 +1017,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
 
-    # Bellhop3D (sspMod.f90:570-617) reads each Segx / Segy / Segz
+    # Bellhop3D (Bellhop/sspMod.f90:570-617) reads each Segx / Segy / Segz
     # vector and each per-(z, y) SSP row with a single list-directed
     # READ statement — one Fortran record per vector / row.
     def _read_vec(fid, n):

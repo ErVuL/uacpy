@@ -71,15 +71,16 @@ returned.
 
 ## 2. Waveforms
 
-Two return conventions, and the split is deliberate. A generator that owns its
-own sampling returns `(signal, time)`; one that you evaluate on a time vector
-you already have returns just the signal.
+One return convention throughout. A generator that owns its own sampling
+returns `(time, signal)` — time first, matching the channel and synthesis
+helpers — while one you evaluate on a time vector you already have returns just
+the signal.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `lfm_chirp(fmin, fmax, duration, sample_rate)` | `(s, t)` | linear sweep; instantaneous frequency ramps `fmin → fmax` |
-| `hfm_chirp(fmin, fmax, duration, sample_rate)` | `(s, t)` | hyperbolic sweep, a.k.a. linear period modulation |
-| `tone_burst(frequency, n_cycles, sample_rate, window=True)` | `(s, t)` | Hann-gated by default; `window=False` for a hard gate |
+| `lfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | linear sweep; instantaneous frequency ramps `fmin → fmax` |
+| `hfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | hyperbolic sweep, a.k.a. linear period modulation |
+| `tone_burst(frequency, n_cycles, sample_rate, window=True)` | `(t, s)` | Hann-gated by default; `window=False` for a hard gate |
 | `ricker_wavelet(time, frequency)` | `s` | second derivative of a Gaussian, AT centring `u = 2πFt − 8` |
 | `gaussian_pulse(time, delay, duration)` | `s` | `exp(−((t − delay)/duration)²)` |
 | `nwave(time, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
@@ -98,9 +99,9 @@ from uacpy.acoustic_signal import (
 fs = 8000.0
 t = np.arange(int(0.10 * fs)) / fs
 
-lfm, t_lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
-hfm, t_hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
-burst, t_burst = tone_burst(400.0, 8, fs)
+t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
+t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
+t_burst, burst = tone_burst(400.0, 8, fs)
 ricker = ricker_wavelet(t, 200.0)
 gauss = gaussian_pulse(t, delay=0.05, duration=0.012)
 nw = nwave(t - 0.02, 200.0)
@@ -125,8 +126,8 @@ at 20 ms, since both are defined from `t = 0`. `mseq(6)` is 63 chips, not 64.
 ```python
 from uacpy.acoustic_signal import spectrogram, instantaneous_frequency
 
-lfm, t_lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
-hfm, t_hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
+t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
+t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
 
 f, t_spec, Sxx = spectrogram(lfm, fs, nperseg=256, noverlap=240)
 f_inst = instantaneous_frequency(lfm, fs)
@@ -536,7 +537,7 @@ from uacpy.acoustic_signal import (
 
 fs = 20_000.0
 fmin, fmax, T = 1000.0, 5000.0, 0.05
-tx, _ = lfm_chirp(fmin, fmax, T, fs)
+_, tx = lfm_chirp(fmin, fmax, T, fs)
 
 taps = arr.amplitudes * np.exp(1j * arr.phases)
 _, rx = simulate_reception(analytic_signal(tx), taps, arr.delays, fs)

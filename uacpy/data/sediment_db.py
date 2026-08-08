@@ -15,6 +15,7 @@ sample is close enough.
 """
 
 import csv
+import dataclasses
 import io
 import tarfile
 from pathlib import Path
@@ -27,6 +28,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get, checked_member_size
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
@@ -228,19 +230,23 @@ def _samples():
             remediation="Re-run ./install.sh --data sediment.",
         )
     tree = cKDTree(_unit_vectors(np.array(lats), np.array(lons)))
-    result = (tree, np.array(phis))
+    result = (tree, np.array(phis), np.array(lats), np.array(lons))
     _SAMPLES[root] = result
     return result
 
 
 def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
-    """Nearest local sediment sample to ``point``: ``{'phi', 'distance_km'}``.
+    """Nearest local sediment sample to ``point``.
+
+    Returns ``{'phi', 'distance_km', 'latitude', 'longitude'}`` — the sample's
+    own coordinates travel with it so a caller can record where the value
+    actually came from.
 
     Raises ``DataFetchError`` if the closest sample is farther than
     ``max_distance_km`` (sparse point data — no nearby ground truth).
     """
     lat, lon = as_coordinate(point)
-    tree, phis = _samples()
+    tree, phis, samp_lats, samp_lons = _samples()
     chord, idx = tree.query(_unit_vectors(np.array([lat]), np.array([lon]))[0])
     # chord length on the unit sphere → great-circle distance.
     dist_km = 2.0 * EARTH_RADIUS_KM * np.arcsin(np.clip(chord / 2.0, 0, 1))
@@ -250,7 +256,9 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
             f"(> max_distance_km={max_distance_km:.0f}).",
             remediation="Raise max_distance_km, or supply a bottom directly.",
         )
-    return {'phi': float(phis[idx]), 'distance_km': float(dist_km)}
+    return {'phi': float(phis[idx]), 'distance_km': float(dist_km),
+            'latitude': float(samp_lats[idx]),
+            'longitude': float(samp_lons[idx])}
 
 
 def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
@@ -263,9 +271,20 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     ``water_sound_speed`` (m/s) scales the grain-size velocity ratio to the
     in-situ near-seabed water; ``None`` uses the Hamilton reference.
     """
-    phi = fetch_sediment_sample(point, max_distance_km=max_distance_km)['phi']
-    return bottom_from_grain_size(
-        phi, roughness=roughness, water_sound_speed=water_sound_speed)
+    lat, lon = as_coordinate(point)
+    sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
+    bottom = bottom_from_grain_size(
+        sample['phi'], roughness=roughness,
+        water_sound_speed=water_sound_speed)
+    # Point samples are sparse, so the nearest one can be far from the
+    # requested position; record where it actually came from so
+    # ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
+    prov = DataProvenance(
+        source=SOURCES['grainsize'],
+        data_point=(sample['latitude'], sample['longitude']),
+        requested_point=(lat, lon),
+    )
+    return dataclasses.replace(bottom, data_sources=(prov,))
 
 
 def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,

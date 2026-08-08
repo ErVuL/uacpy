@@ -10,10 +10,14 @@ This module provides various underwater acoustics functions including:
 
 Note
 ----
-This module is a **user helper**.  The uacpy model wrappers do not
-import from ``uacpy.core.acoustics``; it is provided for downstream
-notebooks/examples that need direct access to sound-speed / absorption
-formulas (e.g. example_12_attenuation_models.py).
+Physics-only helpers with no uacpy dependencies beyond
+:mod:`uacpy.core.constants`, so any layer may import them: the data layer
+uses the seawater equations (:mod:`uacpy.data.sound_speed`,
+:mod:`uacpy.data.argo`), :mod:`uacpy.core.ssp` builds profiles from
+Mackenzie, :mod:`uacpy.io.modes_reader` takes :func:`pekeris_root`, and the
+spectral estimators and their plotters share :func:`power_to_db`. They are
+also public API for notebooks and examples (e.g.
+example_12_attenuation_models.py).
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)

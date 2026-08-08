@@ -12,15 +12,22 @@ OBJECTIVE:
 ENVIRONMENT:
     - Medium depth water (200m)
     - Summer thermocline profile:
-        * Warm mixed layer (0-25m): 1525 m/s
-        * Strong thermocline (25-60m): -3.0 (m/s)/m
-        * Isothermal deep layer (60-200m): 1490 m/s
+        * Warm mixed layer (0-25m): 1525 m/s, dc/dz = 0
+        * Thermocline (25-60m): (1490 - 1525) / (60 - 25) = -1.0 (m/s)/m
+        * Isovelocity deep layer (60-200m): 1490 m/s
     - Elastic sediment bottom
     - Flat bathymetry
 
 SOURCE:
-    - Shallow depth (15m, above thermocline → surface-duct trapping)
+    - Shallow depth (15m, inside the mixed layer, above the thermocline)
     - 100 Hz reference frequency
+
+    The mixed layer has dc/dz = 0, so it traps nothing: a surface duct needs a
+    positive gradient (Etter, *Underwater Acoustic Modeling and Simulation*,
+    §3.7). Nor would this frequency reach a 25 m duct if one existed - Etter
+    §3.7.3 gives lambda_max = 8.51e-3 * H**1.5 = 1.06 m, i.e. a cutoff near
+    1434 Hz, fourteen times the 100 Hz run here. Energy leaving the source
+    refracts downward through the thermocline instead.
 
 MODELS TESTED:
     ✓ Bellhop      (ray tracing)
@@ -30,9 +37,10 @@ MODELS TESTED:
     ✓ OAST         (wavenumber integration)
 
 WHAT TO EXPECT IF YOU RERUN AT OTHER FREQUENCIES:
-    - Low freq (25 Hz): Deep penetration, minimal duct trapping
-    - Mid freq (50-100 Hz): Moderate ducting, clear interference
-    - High freq (200 Hz): Strong surface duct, fine interference
+    - Low freq (25 Hz): Deep penetration, few modes, coarse interference
+    - Mid freq (50-100 Hz): More modes, clear interference structure
+    - High freq (200 Hz): Fine interference; still far below the 1434 Hz a
+      25 m duct would need, so the mixed layer stays acoustically transparent
     - Bottom loss increases with frequency; more modes at higher frequency
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -78,7 +86,7 @@ def main():
     # SOURCE CONFIGURATION - Reference frequency
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depths=15.0,       # In warm mixed layer (surface duct)
+        depths=15.0,       # In the warm mixed layer, above the thermocline
         frequencies=100.0   # Mid-band reference
     )
 
@@ -122,8 +130,10 @@ def main():
         create_example_report(
             example_num=3,
             title="Multi-Frequency Analysis - Broadband Propagation",
-            description="Thermocline environment demonstrating frequency-dependent propagation, "
-            "surface duct trapping, and modal characteristics across frequencies.",
+            description="Thermocline environment demonstrating frequency-dependent propagation "
+            "and modal characteristics across frequencies. The 0-25m mixed layer has zero "
+            "gradient and does not duct; energy refracts downward through the "
+            "-1.0 (m/s)/m thermocline.",
             env=env,
             source=source, receiver=receiver,
             results=results,

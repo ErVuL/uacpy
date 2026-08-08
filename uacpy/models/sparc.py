@@ -26,10 +26,14 @@ from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
     UnsupportedFeatureError,
 )
-from uacpy.io.grn_reader import read_grn_file, sparc_snapshot_to_time_field
+from uacpy.io.grn_reader import (
+    read_grn_file, sparc_snapshot_to_time_field, _zero_range_mask,
+)
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
 )
+# Shared with Scooter — both mesh through the sediment stack, so the
+# depth-axis restoration is identical. Its proper home is PropagationModel.
 from uacpy.io.oalib_reader import read_rts_file
 from uacpy.io.oalib_writer import write_sparc_env_file
 
@@ -37,6 +41,38 @@ from uacpy.io.oalib_writer import write_sparc_env_file
 # Factor above the Nyquist minimum used when naming the ``n_t_out`` that would
 # resolve the pulse band in the aliasing warning.
 _SPARC_PULSE_OVERSAMPLE = 3.0
+
+
+def _mask_zero_range_traces(data: np.ndarray, ranges: np.ndarray,
+                            output_mode: str) -> np.ndarray:
+    """Return ``data`` with the receivers on the source axis set to no-data.
+
+    ``sparc.f90:622`` weights the ``'R'`` branch by ``SQRT( rkT / Pos%Rr )``
+    and ``:292`` scales ``'D'`` by ``1 / SQRT( pi * Pos%Rr( 1 ) )``, both
+    singular at ``r = 0``. Measured on a 100 m Pekeris guide, ``'D'`` comes
+    back ``+Inf`` for the whole trace and ``'R'`` mixes ``NaN`` with exact
+    zeros — an amplitude a caller would read as a real, quiet sample. The
+    snapshot mode already returns no-data there (its Hankel transform runs
+    in-tree, ``grn_reader._hankel_transform``), so masking puts all three
+    output modes on one answer.
+    """
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+    zero = _zero_range_mask(ranges)
+    n_zero = int(np.count_nonzero(zero))
+    if not n_zero:
+        return data
+
+    masked = np.asarray(data, dtype=float).copy()
+    masked[:, zero, :] = np.nan
+    warnings.warn(
+        f"{n_zero} receiver range(s) at r = 0: SPARC's output_mode="
+        f"{output_mode!r} carries a 1/sqrt(r) cylindrical-spreading factor "
+        f"that is singular there, so those cells are returned as NaN "
+        f"(no data). Move the receiver off the source axis (e.g. r = 1 m) to "
+        f"get a field value.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+    return masked
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
@@ -163,11 +199,16 @@ class SPARC(PropagationModel):
         ``'S'`` runs once and is uncapped. Default ``20``.
     rmax_safety_margin : float, optional
         Multiplier applied to ``receiver.ranges.max()`` to set SPARC's
-        ``RMax``. ``None`` (default) ⇒ ``3.0``. SPARC's inverse Hankel
-        transform (``TransformG.f90``) is FFT-based with period ``RMax``
-        in range, so a tight margin puts the source's non-physical
-        replica at ``r = receiver.ranges.max()``. Increasing this knob
-        roughly proportionally increases ``Nk`` and SPARC runtime.
+        ``RMax``. ``None`` (default) ⇒ ``3.0``. ``RMax`` fixes the
+        wavenumber sampling — ``sparc.f90:116`` takes
+        ``Nk = INT(1000·RMax_km·(kMax−kMin)/2π)``, i.e.
+        ``Δk ≈ 2π/RMax_m`` — and the range synthesis is a direct ``Δk``
+        sum over that grid, so the output is periodic in range with
+        period ``2π/Δk = RMax``. A tight margin therefore puts the
+        source's non-physical replica at ``r = receiver.ranges.max()``.
+        Increasing this knob raises ``Nk`` (and SPARC runtime) in
+        proportion. ``sparc.f90:153-155`` rejects the run outright when
+        the largest receiver range exceeds ``RMax``.
     timeout : float, optional
         Subprocess timeout per run (s). Default ``180.0``.
     use_tmpfs, verbose, work_dir, cleanup, collapse : optional
@@ -262,7 +303,7 @@ class SPARC(PropagationModel):
             ``'quad'`` for a range-dependent ``env.ssp`` and
             ``'linear'`` otherwise. Explicit values: ``'linear'``,
             ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
-            ``'analytic'``. ``env.ssp.shape='isovelocity'`` always
+            ``env.ssp.shape='isovelocity'`` always
             forces ``'C'`` regardless.
         output_mode : str, optional
             'R' (horizontal array), 'D' (vertical array), 'S' (snapshot). Default: 'R'.
@@ -289,8 +330,9 @@ class SPARC(PropagationModel):
             receiver ranges for ``'D'``. ``'S'`` is uncapped. Default: 20.
         rmax_safety_margin : float, optional
             Multiplier on ``receiver.ranges.max()`` to set SPARC's RMax.
-            SPARC's inverse Hankel transform (TransformG.f90) is FFT-based,
-            so the r-domain output is periodic with period RMax — the
+            RMax sets the wavenumber step (``Δk ≈ 2π/RMax_m``,
+            ``sparc.f90:116``) and the range synthesis is a direct ``Δk``
+            sum, so the r-domain output is periodic with period RMax — the
             source's image at r=RMax contaminates the receivers unless
             RMax is pushed well past them. Default: ``None`` → 3.0
             (alias at 3× receiver max).
@@ -470,28 +512,6 @@ class SPARC(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _mask_unresolvable_depths(self, result, receiver, media_depth):
-        """Restore the caller's depth axis, NaN below ``media_depth``.
-
-        The finite-difference mesh stops at the deepest modelled interface, so
-        ``sparc.exe`` clamps any deeper receiver onto it. Handing those cells
-        back under the depth that was asked for would misreport where the
-        field was evaluated — they are no-data.
-        """
-        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
-        d = result.to_dict()
-        data = d['data']
-        if data.shape[0] != depths.size:
-            raise ModelExecutionError(
-                self.model_name, return_code=0, stdout=None,
-                stderr=(f"SPARC returned {data.shape[0]} depth rows for "
-                        f"{depths.size} requested receiver depths; the depth "
-                        f"axis cannot be reattached."),
-            )
-        data[depths > media_depth, ...] = np.nan
-        d['coords'] = {**d['coords'], 'depth': depths}
-        return Field.from_dict(d)
-
     def _reject_oversized_loop_axis(self, n_runs: int, axis: str,
                                     mode_label: str) -> None:
         """Cap the axis the wrapper loops the binary over.
@@ -600,13 +620,23 @@ class SPARC(PropagationModel):
             else:
                 self._require_shared_time_grid(rts_data, time, fm, run_base)
             # rts_data['p'] is (nt, n_range) here; want (n_range, nt).
-            traces.append(np.asarray(rts_data['p']).T)
+            #
+            # The far-field Hankel kernel is H0(kr) ~ sqrt(2/(pi·k·r))·
+            # e^{i(kr-pi/4)}, so inverting it weights each wavenumber sample by
+            # dk·k·sqrt(2/(pi·k·r)) = dk·sqrt(2k/(pi·r)). sparc.f90's 'D' branch
+            # carries exactly that (sqrt(2)·dk·sqrt(k) at :595 times the
+            # 1/sqrt(pi·Rr) write scale at :292). The 'R' branch at :622-623
+            # applies sqrt(2)·dk·sqrt(k/r) and no write scale, i.e. the same
+            # weight without the 1/sqrt(pi) — so it is sqrt(pi) hot. Divide it
+            # back onto the kernel every other mode uses.
+            traces.append(np.asarray(rts_data['p']).T / np.sqrt(np.pi))
 
         # (n_depth, n_range, n_time) — the shared Field contract. The range
         # axis is SPARC's actual output grid; Field validates its length
         # against the data shape.
         result = Field(
-            data=np.stack(traces, axis=0),
+            data=_mask_zero_range_traces(
+                np.stack(traces, axis=0), ranges_out, 'R'),
             coords={'depth': depths, 'range': ranges_out, 'time': time},
             **self._result_kwargs(
                 source,
@@ -665,15 +695,15 @@ class SPARC(PropagationModel):
             else:
                 self._require_shared_time_grid(rts_data, time, fm, run_base)
             # rts_data['p'] is (nt, n_depth) here; want (n_depth, nt).
-            # sparc.f90:292 scales the 'D' branch by 1/sqrt(pi*Rr) where 'R'
-            # carries 1/sqrt(r), so the vertical array comes out sqrt(pi)
-            # quieter for the identical field (measured ratio 0.5642 =
-            # 1/sqrt(pi) at every depth). Put both modes on one convention.
-            traces.append(np.sqrt(np.pi) * np.asarray(rts_data['p']).T)
+            # sparc.f90:595 + :292 give this branch the full inverse-Hankel
+            # weight dk·sqrt(2k/(pi·r)), so it needs no correction — it is the
+            # convention the other two modes are brought onto.
+            traces.append(np.asarray(rts_data['p']).T)
 
         # (n_depth, n_range, n_time) — the shared Field contract.
         result = Field(
-            data=np.stack(traces, axis=1),
+            data=_mask_zero_range_traces(
+                np.stack(traces, axis=1), ranges, 'D'),
             coords={'depth': depths_out, 'range': ranges, 'time': time},
             **self._result_kwargs(
                 source,
@@ -759,10 +789,16 @@ class SPARC(PropagationModel):
     def _resolve_rmax_safety_margin(self) -> float:
         """Pick the effective ``rmax_safety_margin`` for this run.
 
-        SPARC's inverse Hankel transform (``TransformG.f90``) is FFT-based, so
-        the r-domain output is periodic with period ``RMax`` and the alias is a
-        visible non-physical wave at the far range edge unless ``RMax`` is
-        pushed well past the receivers. User-pinned values win.
+        ``RMax`` fixes SPARC's wavenumber step (``sparc.f90:116``:
+        ``Nk = INT(1000·RMax_km·(kMax−kMin)/2π)`` ⇒ ``Δk ≈ 2π/RMax_m``).
+        The ``'R'`` / ``'D'`` modes synthesise range inline in ``EXTRACT``
+        as a direct ``Δk`` sum over that grid (``sparc.f90:595,622``), and
+        the ``'S'`` snapshot is transformed in-tree by the same kind of
+        direct DFT (``grn_reader._hankel_transform``) — no FFT anywhere. A
+        uniform-``Δk`` sum is periodic in range with period ``2π/Δk =
+        RMax``, so the alias is a visible non-physical wave at the far range
+        edge unless ``RMax`` is pushed well past the receivers. User-pinned
+        values win.
         """
         if self.rmax_safety_margin is not None:
             return float(self.rmax_safety_margin)

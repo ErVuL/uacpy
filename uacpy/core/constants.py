@@ -18,12 +18,6 @@ TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
 # sampling external geographic datasets (bathymetry transects, …).
 EARTH_RADIUS_M = 6_371_008.8  # m
 
-# Seawater density for SI particle-velocity / acoustic-intensity physics
-# (Euler relation u = -grad(p)/(i*omega*rho); intensity in W/m²). In kg/m³,
-# NOT the g/cm³ used for material/sediment densities elsewhere — convert at
-# the boundary. Nominal ocean value (Abraham, UW Acoustic Signal Processing).
-DENSITY_SEAWATER = 1027.0  # kg/m³
-
 # Phase-speed search bounds used by AT-family writers when the user
 # doesn't pass an explicit (c_low, c_high).
 #

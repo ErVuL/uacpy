@@ -135,10 +135,12 @@ def read_tl_grid(
         ``z = (depth_index_offset + k * ndz - 1) * dz`` for ``k = 1..lz``.
     depth_index_offset : int
         Grid-index marker of the first stored depth sample. ``ramsurf1.5``
-        writes from grid index ``ndz`` (offset 0, so its first sample is the
-        ``z = 0`` surface node); ``rams0.5`` writes from ``1 + ndz`` (offset
-        1, first sample at ``z = ndz * dz`` — it skips ``z = 0``). See
-        ``third_party/ramsurf/{rams0.5,ramsurf1.5}.f`` ``outpt`` loops.
+        and ``ramgeo1.5`` write from grid index ``ndz`` (offset 0, first
+        sample at ``z = (ndz-1)·dz``, i.e. the ``z = 0`` surface node only
+        when ``ndz = 1``); ``rams0.5`` writes from ``1 + ndz`` (offset 1,
+        first sample at ``z = ndz·dz`` — it never stores ``z = 0``). See
+        the ``outpt`` loops in ``third_party/ramsurf/{rams0.5,ramsurf1.5}.f``
+        and ``third_party/ramgeo/ramgeo1.5.f``.
 
     Returns
     -------

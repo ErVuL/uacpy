@@ -1795,7 +1795,8 @@ fi
 # Decide overall outcome: any "failed" row → failed, otherwise ok.
 OVERALL="ok"
 for s in "$STATUS_OALIB" "$STATUS_BELLHOPCUDA" "$STATUS_OASES" \
-         "$STATUS_MPIRAMS" "$STATUS_RAMSURF" "$STATUS_DATA"; do
+         "$STATUS_MPIRAMS" "$STATUS_RAMSURF" "$STATUS_RAMGEO" \
+         "$STATUS_DATA"; do
     if [[ "$s" == "failed" || "$s" == "partial" ]]; then
         OVERALL="partial"
     fi

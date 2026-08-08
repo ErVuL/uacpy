@@ -630,7 +630,7 @@ class Field(Result):
             raise ConfigurationError(
                 "Field.synthesize_time_series: source_waveform must be the 1-D "
                 "waveform array, not a (time, signal) pair — pass the signal "
-                "only, e.g. lfm_chirp(...)[1]."
+                "only, e.g. lfm_chirp(...)[1] (the generators return (time, signal))."
             )
         return _synthesize_time_series(
             self,
@@ -1053,9 +1053,13 @@ def _ifft_to_trace(
     Places each model frequency at bin ``round(f / Δf)`` with
     ``Δf = f[1] - f[0]``, so the record length is exactly ``1/Δf`` — a longer
     record requires a finer frequency grid, not a larger ``nfft``. The
-    frequency axis must therefore be uniformly spaced and ascending. An
-    auto-sized ``nfft`` always keeps the largest data bin below Nyquist; an
-    explicit ``nfft`` that would not is rejected.
+    frequency axis must therefore be uniformly spaced and ascending. A grid
+    whose first bin is not itself a multiple of ``Δf`` lands offset by a
+    common ``|δ| <= Δf/2``; the synthesis de-rotates the complex sum by
+    ``exp(-2πiδt)``, which recovers the requested band exactly rather than a
+    frequency-shifted copy of it. An auto-sized ``nfft`` always keeps the
+    largest data bin below Nyquist; an explicit ``nfft`` that would not is
+    rejected.
     """
     data = tf.data                                # (n_d, n_r, n_f)
     freqs = np.asarray(tf.coords['frequency'], dtype=float)
@@ -1113,7 +1117,14 @@ def _ifft_to_trace(
             remediation="Run the model on an equispaced frequencies= array.",
         )
 
+    # A DFT of spacing df can only carry frequencies at integer multiples of
+    # df, so each model frequency lands at bin round(f/df). When f[0] is not
+    # itself a multiple of df the whole band is placed offset by a common
+    # ``bin_offset_hz`` (|offset| <= df/2); the synthesis below removes it
+    # exactly by de-rotating the complex sum, so the trace is the band the
+    # caller asked for rather than a frequency-shifted copy of it.
     bin_indices = np.floor(freqs / df + 0.5).astype(int)
+    bin_offset_hz = float(bin_indices[0] * df - freqs[0])
     max_bin = int(bin_indices[-1])
     explicit_nfft = nfft is not None
 
@@ -1154,12 +1165,34 @@ def _ifft_to_trace(
 
     if t_start is None:
         T_window = nfft * dt
-        lead = min(0.5 * T_window, 0.25)
-        anchor_speed = float(
-            tf.metadata.get('c_min') or tf.metadata.get('c0')
-            or DEFAULT_SOUND_SPEED
+        # The earliest arrival travels at the FASTEST speed in the waveguide,
+        # so r/c_fast bounds it from below; anchoring on the slowest speed
+        # would open the window after the first arrival.
+        c_max = float(tf.metadata.get('c_max') or 0.0)
+        anchor_speed = max(
+            c_max,
+            float(tf.metadata.get('c0') or 0.0),
+            float(tf.metadata.get('c_min') or 0.0),
+            DEFAULT_SOUND_SPEED,
         )
-        t_start = max(0.0, actual_range / anchor_speed - lead)
+        travel = actual_range / anchor_speed
+        lead = 0.5 * T_window
+        t_start = max(0.0, travel - lead)
+        # Without a c_max the anchor carries the fast/slow path spread as
+        # error. A 5 % spread is representative of an ocean waveguide; when
+        # it exceeds the lead the first arrival can fall before the window
+        # and wrap to the end of the record.
+        if not c_max and t_start > 0.0 and 0.05 * travel > lead:
+            warnings.warn(
+                f"to_time_trace: the {T_window:.3g}s synthesis window is "
+                f"short against the {travel:.3g}s travel time at "
+                f"{actual_range:.0f} m, and the model reported no maximum "
+                f"sound speed, so the window start is an estimate — the "
+                f"earliest arrival may fall before it and wrap to the end of "
+                f"the record. Pass t_start= to pin it, or refine the "
+                f"frequency grid (the window is 1/Δf).",
+                UserWarning, stacklevel=3,
+            )
 
     spectrum = spectrum * win
     if source_spectrum is not None:
@@ -1174,8 +1207,12 @@ def _ifft_to_trace(
     padded[bin_indices[valid]] = spectrum[valid]
 
     # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
-    result = 2.0 * np.real(np.fft.ifft(padded)) * (nfft * df)
-    time = t_start + np.arange(nfft) * dt
+    analytic = np.fft.ifft(padded) * (nfft * df)
+    elapsed = np.arange(nfft) * dt
+    if bin_offset_hz != 0.0:
+        analytic = analytic * np.exp(-2j * np.pi * bin_offset_hz * elapsed)
+    result = 2.0 * np.real(analytic)
+    time = t_start + elapsed
 
     return Field(
         data=result,
@@ -1330,9 +1367,12 @@ def _synthesize_time_series(
                 f"synthesize_time_series: the receiver range span "
                 f"({ranges.max() - ranges.min():.0f} m ≈ {span_s:.2f}s of "
                 f"travel time) exceeds the {window_s:.2f}s synthesis window "
-                f"— far-range arrivals wrap back into early bins. Pass "
-                f"output_duration ≥ {span_s:.2f}s to run() (or refine the "
-                f"frequency grid to Δf ≤ {1.0/span_s:.3g} Hz).",
+                f"— far-range arrivals wrap back into early bins. The window "
+                f"is 1/Δf, so widen it with a frequency grid of "
+                f"Δf ≤ {1.0/span_s:.3g} Hz; on a TIME_SERIES run "
+                f"output_duration ≥ {span_s:.2f}s sets that grid for you "
+                f"(BROADBAND takes the grid from frequencies= and ignores "
+                f"output_duration).",
                 UserWarning, stacklevel=3,
             )
 

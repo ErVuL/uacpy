@@ -19,13 +19,14 @@ def _synthetic_mfp(n_rcv=8, n_zr=5, n_xr=4, n_yr=1, source_idx=(2, 2, 0),
     # Inject the true source at source_idx with bigger magnitude
     truth = replicas[0, source_idx[0], source_idx[1], source_idx[2]]
     truth = truth / np.linalg.norm(truth)
-    # Covariance: outer product of truth + noise
-    C = np.outer(truth, truth.conj())
-    C = C + noise_level * (
-        rng.normal(size=(n_rcv, n_rcv))
-        + 1j * rng.normal(size=(n_rcv, n_rcv))
-    )
-    C = C + C.conj().T  # symmetrise (Hermitian)
+    # Covariance: rank-one signal plus full-rank noise. Adding a Hermitian
+    # *perturbation* instead would leave C indefinite, which no measured
+    # covariance is — and an indefinite C makes wᴴC⁻¹w negative, i.e. a
+    # negative Capon power.
+    noise = (rng.normal(size=(n_rcv, n_rcv))
+             + 1j * rng.normal(size=(n_rcv, n_rcv)))
+    C = (np.outer(truth, truth.conj())
+         + noise_level * (noise @ noise.conj().T) / n_rcv)
     cov = Covariance(
         covariance=C[np.newaxis],
         model='Test', frequencies=freq,
@@ -113,3 +114,89 @@ class TestShapeChecks:
         )
         with pytest.raises(ConfigurationError, match="receiver-count mismatch"):
             cov.mvdr(bad)
+
+
+class TestTheTwoMfpEntryPointsAgree:
+    """``Covariance.bartlett``/``.mvdr`` and ``uacpy.sonar``'s free functions
+    are the same two processors over different input conventions (OASN
+    covariance vs measured CSDM; replica index last vs first; unnormalised vs
+    normalised). They must stay numerically identical up to the normalisation
+    each documents — a drift in either implementation is a real defect.
+    """
+
+    N_RCV, N_PTS = 6, 5
+
+    def _rig(self):
+        rng = np.random.default_rng(3)
+        snaps = (rng.normal(size=(self.N_RCV, 4))
+                 + 1j * rng.normal(size=(self.N_RCV, 4)))
+        K = (snaps @ snaps.conj().T) / 4
+        E = (rng.normal(size=(self.N_RCV, self.N_PTS))
+             + 1j * rng.normal(size=(self.N_RCV, self.N_PTS)))
+        cov = Covariance(covariance=K[None], model='OASN', frequencies=200.0)
+        rep = Replicas(
+            replicas=E.T.reshape(1, self.N_PTS, 1, 1, self.N_RCV),
+            replica_z=np.arange(self.N_PTS, dtype=float),
+            replica_x=np.array([0.0]), replica_y=np.array([0.0]),
+            model='OASN', frequencies=200.0,
+        )
+        return K, E.reshape(self.N_RCV, self.N_PTS, 1, 1), cov, rep
+
+    def test_bartlett_differs_by_exactly_the_covariance_trace(self):
+        from uacpy.sonar.matched_field import bartlett
+        K, bank, cov, rep = self._rig()
+        core = cov.bartlett(rep).ravel()
+        sonar = bartlett(K, bank).ravel()
+        np.testing.assert_allclose(core, sonar * np.real(np.trace(K)),
+                                   rtol=1e-12)
+
+    @pytest.mark.parametrize('loading', [1e-6, 1e-3, 1e-2])
+    def test_mvdr_differs_by_exactly_the_surface_max(self, loading):
+        from uacpy.sonar.matched_field import mvdr
+        K, bank, cov, rep = self._rig()
+        core = cov.mvdr(rep, diagonal_loading=loading).ravel()
+        sonar = mvdr(K, bank, loading=loading).ravel()
+        np.testing.assert_allclose(core / core.max(), sonar, rtol=1e-10)
+
+    def test_the_two_defaults_are_the_documented_pair(self):
+        """Different on purpose — OASN's covariance is full rank, a measured
+        few-snapshot CSDM is not. Pinned so a change has to be deliberate."""
+        import inspect
+        from uacpy.sonar.matched_field import mvdr
+        core_default = inspect.signature(
+            Covariance.mvdr).parameters['diagonal_loading'].default
+        sonar_default = inspect.signature(mvdr).parameters['loading'].default
+        assert (core_default, sonar_default) == (1e-6, 1e-2)
+
+    def test_an_empty_replica_cell_is_no_data_not_a_unit_peak(self):
+        """An unpopulated ``.rpo`` cell has no energy, so ``wᴴC⁻¹w`` is 0.
+        Reporting a finite power there puts a fabricated peak in the surface —
+        and 1.0 would have been the global maximum of this one."""
+        K, _bank, _cov, rep = self._rig()
+        replicas = np.array(rep.replicas)
+        replicas[0, 1] = 0.0                        # candidate point 1: no data
+        blank = Replicas(
+            replicas=replicas, replica_z=rep.replica_z,
+            replica_x=rep.replica_x, replica_y=rep.replica_y,
+            model='OASN', frequencies=200.0,
+        )
+        cov = Covariance(covariance=K[None], model='OASN', frequencies=200.0)
+        out = cov.mvdr(blank).ravel()
+        assert np.isnan(out[1]), f"empty replica returned {out[1]!r}"
+        assert np.isfinite(np.delete(out, 1)).all()
+
+    def test_both_entry_points_call_an_empty_cell_no_data(self):
+        from uacpy.sonar.matched_field import mvdr
+        K, bank, _cov, rep = self._rig()
+        bank = bank.copy()
+        bank[:, 1] = 0.0
+        replicas = np.array(rep.replicas)
+        replicas[0, 1] = 0.0
+        cov = Covariance(covariance=K[None], model='OASN', frequencies=200.0)
+        blank = Replicas(
+            replicas=replicas, replica_z=rep.replica_z,
+            replica_x=rep.replica_x, replica_y=rep.replica_y,
+            model='OASN', frequencies=200.0,
+        )
+        assert np.isnan(cov.mvdr(blank).ravel()[1])
+        assert np.isnan(mvdr(K, bank).ravel()[1])

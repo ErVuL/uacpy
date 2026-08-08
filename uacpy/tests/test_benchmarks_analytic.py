@@ -206,6 +206,23 @@ def _modal_abs_dtl(tl):
 
 # ── benchmarks ──────────────────────────────────────────────────────────────
 
+def test_modal_propagation_loss_matches_pekeris_modal_sum():
+    """``Modes.modal_propagation_loss`` reproduces the analytic Pekeris
+    normal-mode sum in *absolute* dB — the prefactor, the 4*pi TL reference and
+    the g/cm^3 density convention, none of which a relative test can see. A
+    missing 4*pi/1000 in the prefactor is a flat +81.98 dB offset."""
+    src, _ = _modal_src_rcv()
+    modes = Kraken(timeout=120).compute_modes(_pekeris_env(), src)
+    f = modes.modal_propagation_loss(
+        source_depth=_MODAL_ZS,
+        receiver_depths=np.array(_MODAL_DEPTHS),
+        ranges_m=_MODAL_RANGES,
+    )
+    d, _ = _modal_abs_dtl(-20.0 * np.log10(np.abs(np.asarray(f.data))))
+    assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
+    assert np.max(d) < 0.4, f"max |dTL|={np.max(d):.3f} dB"
+
+
 def test_kraken_modes_match_pekeris_analytic():
     """Kraken eigenvalues k_m match the analytic Pekeris characteristic equation."""
     modes = Kraken(timeout=120).compute_modes(_pekeris_env(),

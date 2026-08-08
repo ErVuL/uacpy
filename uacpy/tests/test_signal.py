@@ -45,7 +45,7 @@ class TestGenerators:
     def test_tone_burst_peaks_at_requested_frequency(self):
         f = 1000.0
         fs = 48_000.0
-        s, t = tone_burst(frequency=f, n_cycles=20, sample_rate=fs)
+        t, s = tone_burst(frequency=f, n_cycles=20, sample_rate=fs)
         # FFT peak should sit at f within the resolution.
         S = np.fft.rfft(s)
         freqs = np.fft.rfftfreq(len(s), 1.0 / fs)
@@ -57,7 +57,7 @@ class TestGenerators:
         exactly, which keeps round-trip Fourier identities
         (``np.fft.rfftfreq(N, dt)``) honest."""
         fs = 48_000.0
-        s, t = tone_burst(frequency=1000.0, n_cycles=5, sample_rate=fs)
+        t, s = tone_burst(frequency=1000.0, n_cycles=5, sample_rate=fs)
         # Identical length.
         assert len(s) == len(t)
         # First sample sits at t=0 (no spurious offset).
@@ -85,9 +85,9 @@ class TestProcessing:
         assert np.var(y) > 0
 
     def test_make_bandlimited_noise_runs(self):
-        # Returns (signal, time) like the other generators.
+        # Returns (time, signal) like the other generators.
         fs, dur = 10_000.0, 0.1
-        n, t = make_bandlimited_noise(
+        t, n = make_bandlimited_noise(
             fc=1000.0, bandwidth=500.0,
             duration=dur, sample_rate=fs,
         )
@@ -98,8 +98,8 @@ class TestProcessing:
 
     def test_make_noise_waveform_is_1d_with_consistent_length(self):
         fs, T = 10_000.0, 0.1
-        n, t = make_noise_waveform(fc=1000.0, bandwidth_hz=500.0, T=T, sample_rate=fs)
-        # Returns (signal, time) like the tonal generators (tone_burst, …);
+        t, n = make_noise_waveform(fc=1000.0, bandwidth_hz=500.0, T=T, sample_rate=fs)
+        # Returns (time, signal) like the tonal generators (tone_burst, …);
         # 1-D, length int(T*fs), with the time axis the same length (no
         # carrier/noise mismatch from arange-vs-int float drift).
         assert n.ndim == 1
@@ -123,15 +123,15 @@ class TestProcessing:
             synthesize_noise_from_psd)
         fs, dur = 10_000.0, 0.1
         kw = dict(fc=1000.0, bandwidth=500.0, duration=dur, sample_rate=fs)
-        a = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[0]
-        b = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[0]
-        c = make_bandlimited_noise(**kw, rng=np.random.default_rng(8))[0]
+        a = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[1]
+        b = make_bandlimited_noise(**kw, rng=np.random.default_rng(7))[1]
+        c = make_bandlimited_noise(**kw, rng=np.random.default_rng(8))[1]
         assert np.array_equal(a, b) and not np.array_equal(a, c)
 
         wkw = dict(fc=1000.0, bandwidth_hz=500.0, T=dur, sample_rate=fs)
         assert np.array_equal(
-            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[0],
-            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[0])
+            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[1],
+            make_noise_waveform(**wkw, rng=np.random.default_rng(7))[1])
 
         nkw = dict(sample_rate=fs, source_level=120.0, noise_level=80.0,
                    fc=1000.0, bandwidth=200.0)
@@ -158,6 +158,23 @@ class TestDecidecadeBands:
         i = int(np.argmin(np.abs(c - 1000)))
         assert lo[i] == pytest.approx(891.25, rel=1e-3)
         assert hi[i] == pytest.approx(1122.0, rel=1e-3)
+
+    def test_flat_psd_band_levels_are_exactly_psd_times_bandwidth(self):
+        """A band level is the PSD integrated over the WHOLE band ``[lo, hi]``,
+        edges included. Integrating only the interior grid points under-reports
+        by up to 2.6 dB on the low bands of this grid, and a band-to-band
+        *difference* test cannot see it."""
+        from uacpy.acoustic_signal.bands import (decidecade_bands,
+                                                 decidecade_band_levels)
+        from uacpy.core.constants import REFERENCE_PRESSURE_WATER as REF
+        f = np.linspace(1, 20000, 40000)
+        psd = np.full_like(f, 1e-12)
+        c, lv = decidecade_band_levels(psd, f)
+        lo, _, hi = decidecade_bands(f.min(), f.max())
+        exact = 10 * np.log10(1e-12 * (hi - lo) / REF ** 2)
+        covered = (lo >= f.min()) & (hi <= f.max()) & np.isfinite(lv)
+        assert covered.sum() > 30
+        np.testing.assert_allclose(lv[covered], exact[covered], atol=0.01)
 
     def test_white_noise_band_levels_rise_1db_per_band(self):
         from uacpy.acoustic_signal.bands import decidecade_band_levels

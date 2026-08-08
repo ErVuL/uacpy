@@ -462,8 +462,10 @@ def detection_range_by_depth(se_field):
     depths : ndarray, shape ``(n_depths,)``
         The field's depth axis (m).
     ranges : ndarray, shape ``(n_depths,)``
-        Detection range (m) at each depth — ``np.inf`` where SE >= 0
-        out to the last sample, ``np.nan`` where SE < 0 everywhere.
+        Detection range (m) at each depth — the outermost zero-crossing,
+        ``np.inf`` where SE >= 0 at every sampled range, the last sampled
+        range where SE recovers positive at the far edge without crossing
+        back down, and ``np.nan`` where SE < 0 everywhere.
     """
     if not isinstance(se_field, Field):
         raise ConfigurationError(
@@ -500,6 +502,14 @@ def detection_range(ranges_m, signal_excess_db):
     se = np.asarray(signal_excess_db, dtype=float)
     if r.shape != se.shape:
         raise ConfigurationError("detection_range: ranges and signal_excess shape mismatch")
+    # NaN marks a cell the propagation model never filled (no ray reached it),
+    # not a cell where the target is undetectable, so the crossing is sought
+    # among the sampled ranges only — the same no-data handling as
+    # :meth:`Field.max`.
+    known = np.isfinite(se)
+    if not known.any():
+        return np.nan
+    r, se = r[known], se[known]
     positive = se >= 0.0
     if positive.all():
         return np.inf

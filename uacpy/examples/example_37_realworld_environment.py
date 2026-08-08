@@ -26,7 +26,10 @@ FEATURES DEMONSTRATED:
     ✓ uacpy.data.seaice_local (NSIDC sea-ice concentration, high-lat int'l waters)
     ✓ Range-dependent LAYERED bottom modelled end-to-end: a fluid sediment
       column (grain-size surficial over a consolidated half-space) that varies
-      along range, run through RAM → mpiramS for a clean low-frequency TL
+      along range, run through RAM. The dispatcher picks **ramgeo** for this
+      env — a layered, range-varying fluid seabed is ramgeo's case, not
+      mpiramS's — and the script prints the backend it actually selected
+      rather than naming one here.
     ✓ Seabed model comparison — grain-size half-space vs CRUST1.0 layered
       elastic bottom (uacpy.data.crust1_local), the low-frequency description
     ✓ uacpy.data.citations (attribution for every source used)
@@ -47,6 +50,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import datetime as _dt  # noqa: E402
+import warnings  # noqa: E402
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
@@ -260,13 +264,14 @@ def _fluid_rdlb_from_grain(grain):
     surficial sediment: a sediment layer (grain-size c_p/ρ/α) over a faster
     consolidated half-space, varying along range.
 
-    Fluid (no shear) → RAM dispatches to mpiramS, whose PE models a
-    range-dependent layered *fluid* bottom robustly. The elastic backend
-    rams0.5 is deliberately not used here: Collins' rotated elastic PE is
-    only accurate for *weak* range variation of the seismoacoustic
-    parameters (Collins 1991); a strongly range-dependent elastic seabed
-    (e.g. CRUST1.0) needs RAMGEO, which uacpy does not vendor — so the
-    elastic CRUST1.0 column is shown as a plot in ``_compare_bottoms``."""
+    Fluid (no shear) + layered + range-varying → the RAM dispatcher selects
+    ramgeo, whose bathymetry-parallel layering models this seabed robustly.
+    The elastic backend rams0.5 is deliberately not used here: Collins'
+    rotated elastic PE is only accurate for *weak* range variation of the
+    seismoacoustic parameters (Collins 1991), and a strongly range-dependent
+    *elastic* seabed (e.g. CRUST1.0) is outside every RAM backend uacpy
+    vendors — so the elastic CRUST1.0 column is shown as a plot in
+    ``_compare_bottoms`` rather than propagated."""
     profiles = []
     for r in grain.ranges:
         bp = grain.halfspace_at(range=float(r))
@@ -286,8 +291,13 @@ def _fluid_rdlb_from_grain(grain):
 def _rdlb_overview(env, grid, plt):
     """Composite for a MODELLED range-dependent layered bottom: build a fluid
     range-dependent layered seabed from the real surficial sediment and run
-    RAM (→ mpiramS) for a clean low-frequency TL through the layered, range-
-    varying bottom — map · TL · environment, same layout as the main figure."""
+    RAM (the dispatcher selects ramgeo) for a low-frequency TL through the
+    layered, range-varying bottom — map · TL · environment, same layout as
+    the main figure.
+
+    The grid RAM ends up on does not meet the requested Lytaev accuracy
+    budget at this frequency; the run captures that warning and reports it
+    rather than presenting the TL as converged."""
     if not _have('sediment'):
         print("  RDLB overview: [skipped] needs ./install.sh --data sediment")
         return
@@ -307,12 +317,22 @@ def _rdlb_overview(env, grid, plt):
     source = uacpy.Source(depths=SOURCE_DEPTH, frequencies=RDLB_FREQ_HZ)
     receiver = uacpy.Receiver(depths=np.linspace(1, zmax, 100),
                               ranges=np.linspace(100.0, rmax, 200))
+    backend = 'unknown'
     try:
         model = RAM(verbose=False, accuracy=1e-1)
         backend = model.select_backend(env_rdlb)
-        tl = model.run(env_rdlb, source, receiver, run_mode=RunMode.COHERENT_TL)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            tl = model.run(env_rdlb, source, receiver,
+                           run_mode=RunMode.COHERENT_TL)
         print(f"  RDLB TL: ok  ({tl.tl.shape} grid, {RDLB_FREQ_HZ:g} Hz, "
               f"RAM→{backend}, range-dependent fluid layered bottom)")
+        # Surface any grid/accuracy compromise rather than presenting the
+        # field as if it met the requested budget.
+        for w in caught:
+            text = ' '.join(str(w.message).split())
+            if 'accuracy budget' in text or 'not met' in text:
+                print(f"  RDLB TL: ACCURACY CAVEAT — {text}")
     except Exception as exc:                       # model not built / run failed
         print(f"  RDLB TL: [skipped] {str(exc).splitlines()[0]}")
         tl = None
@@ -320,7 +340,7 @@ def _rdlb_overview(env, grid, plt):
     fig, _ = uacpy.plot.plot_overview(
         env_rdlb, grid, transect=(A, B), tl=tl, source=source, receiver=receiver,
         map_title="North Sea — Norwegian Trench (GEBCO)",
-        tl_title=f"TL · range-dependent layered seabed (RAM→mpiramS, {RDLB_FREQ_HZ:g} Hz)",
+        tl_title=f"TL · range-dependent layered seabed (RAM→{backend}, {RDLB_FREQ_HZ:g} Hz)",
         env_title="Range-dependent LAYERED bottom A→B",
         title="uacpy — modelled range-dependent layered bottom",
         map_kwargs=dict(contours=True, aspect=1, coastline_resolution=COASTLINE_RES,

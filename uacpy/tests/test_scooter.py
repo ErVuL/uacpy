@@ -116,6 +116,71 @@ def test_scooter_constructor_no_longer_accepts_source_type():
         Scooter(source_type='R')
 
 
+def test_scooter_constructor_no_longer_accepts_field_interp():
+    """``field_interp`` named an FLP option for ``fields.exe``, which uacpy
+    never runs — the k→r transform is done in-tree."""
+    with pytest.raises(TypeError):
+        Scooter(field_interp='P')
+
+
+def test_grn_transform_method_is_the_direct_dft():
+    """The transform is a trapezoidal-rule DFT (``fieldsco.m:5``), not an FFT,
+    and ``'fft_hankel'`` is not an accepted name for it."""
+    from uacpy.io.grn_reader import grn_to_field
+
+    with pytest.raises(ConfigurationError, match="direct_dft"):
+        grn_to_field({}, np.array([1000.0]), method='fft_hankel')
+
+
+class TestZeroReceiverRange:
+    """A receiver at ``r = 0`` sits on the point source's cylindrical-spreading
+    singularity (``1/sqrt(r)``). ``fieldsco.m:69`` sidesteps it by moving the
+    range to 1 m; uacpy reports no-data instead, and every model must report
+    the same thing on the same grid."""
+
+    RANGES = np.array([0.0, 1000.0, 3000.0])
+
+    @staticmethod
+    def _env():
+        return Environment(name='zero_r', bathymetry=100.0, ssp=1500.0)
+
+    @staticmethod
+    def _source():
+        return Source(depths=50.0, frequencies=100.0)
+
+    def _receiver(self):
+        return Receiver(depths=np.array([25.0, 75.0]), ranges=self.RANGES)
+
+    def test_scooter_zero_range_is_no_data_not_a_huge_number(self):
+        receiver = self._receiver()
+        with pytest.warns(UserWarning, match="r = 0"):
+            result = Scooter(verbose=False).run(
+                self._env(), self._source(), receiver)
+        data = np.asarray(result.data)
+        assert np.all(np.isnan(data[:, 0]))
+        assert np.all(np.isfinite(data[:, 1:]))
+        # The clamped-denominator form returned |p| ~ 1e152 here (TL ~ -3000 dB),
+        # which poisons every colour scale and every max/mean over the grid.
+        assert np.nanmax(np.abs(data)) < 1.0
+
+    def test_kraken_and_scooter_agree_on_the_zero_range_cell(self):
+        from uacpy.models import Kraken
+
+        env, source = self._env(), self._source()
+        with pytest.warns(UserWarning, match="r = 0"):
+            scooter_tl = np.asarray(
+                Scooter(verbose=False).run(env, source, self._receiver()).tl)
+        with pytest.warns(UserWarning, match="r = 0"):
+            kraken_tl = np.asarray(
+                Kraken(verbose=False).compute_tl(
+                    env, source, self._receiver()).tl)
+
+        assert np.all(np.isnan(scooter_tl[:, 0]))
+        assert np.all(np.isnan(kraken_tl[:, 0]))
+        assert np.all(np.isfinite(scooter_tl[:, 1:]))
+        assert np.all(np.isfinite(kraken_tl[:, 1:]))
+
+
 class TestScooterReceiverDepthAxis:
     """The settled below-domain policy (``PropagationModel.validate_inputs``):
     receivers are outputs, so a receiver below the deepest modelled interface
@@ -157,3 +222,32 @@ class TestScooterReceiverDepthAxis:
             self._env(), Source(depths=50.0, frequencies=100.0), receiver).data)
         assert np.all(np.isfinite(data[:2]))
         assert np.all(np.isnan(data[2:]))
+
+
+class TestScooterRejectsATooCoarseMesh:
+    """SCOOTER reads its deck through the same ``misc/ReadEnvironmentMod.f90``
+    as KRAKEN, so a pinned ``n_mesh`` under the ``Nneeded / 2`` floor at
+    ``:110-112`` stops the binary with *Mesh is too coarse*. Guarding only
+    KRAKEN left that surfacing as a bare Fortran fatal."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core import BoundaryProperties
+        return Environment(
+            name='pekeris', bathymetry=200.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.3))
+
+    def test_a_too_coarse_n_mesh_is_a_configuration_error(self):
+        with pytest.raises(ConfigurationError, match='Mesh is too coarse'):
+            Scooter(n_mesh=5, verbose=False).run(
+                self._env(), Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[100.0], ranges=np.linspace(1000.0, 5000.0, 5)))
+
+    def test_auto_mesh_is_never_rejected(self):
+        """``NG = 0`` is AT's automatic sizing and is never range-checked."""
+        result = Scooter(verbose=False).run(
+            self._env(), Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[100.0], ranges=np.linspace(1000.0, 5000.0, 5)))
+        assert np.all(np.isfinite(np.asarray(result.data)))

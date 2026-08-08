@@ -19,7 +19,7 @@ FS = 20000.0
 
 
 def _chirp():
-    s, _ = lfm_chirp(1000.0, 5000.0, 0.02, FS)
+    _, s = lfm_chirp(1000.0, 5000.0, 0.02, FS)
     return s
 
 

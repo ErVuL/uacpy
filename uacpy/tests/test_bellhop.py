@@ -219,6 +219,27 @@ class TestBellhopRunModes:
         assert result.by_receiver is not None
 
     @pytest.mark.requires_binary
+    @pytest.mark.parametrize('grid_type,n_depth_blocks', [('R', 3), ('I', 1)])
+    def test_arrivals_honour_the_receiver_grid_type(self, setup_env,
+                                                    setup_source, grid_type,
+                                                    n_depth_blocks):
+        """The ``.arr`` header reports the full ``Pos%NRz``
+        (``ReadEnvironmentBell.f90:591``) but its body carries only
+        ``NRz_per_range`` depth blocks — ``Pos%NRz`` for ``'R'`` and 1 for
+        ``'I'`` (``bellhop.f90:202-206,329``, ``ArrMod.f90:101-102``). Nothing
+        in the file distinguishes them, so the run has to tell the reader
+        which it wrote; unpassed, an irregular run cannot be parsed at all."""
+        receiver = Receiver(depths=[50.0, 100.0, 150.0],
+                            ranges=[1000.0, 2000.0, 3000.0])
+        result = Bellhop(verbose=False, grid_type=grid_type).run(
+            env=setup_env, source=setup_source, receiver=receiver,
+            run_mode=RunMode.ARRIVALS)
+
+        assert isinstance(result, Arrivals)
+        assert len(result.by_receiver[0]) == n_depth_blocks
+        assert len(result.by_receiver[0][0]) == 3
+
+    @pytest.mark.requires_binary
     def test_broadband_multi_frequency_source(self, setup_env, setup_receiver):
         """Bellhop BROADBAND with a multi-frequency Source traces rays at the
         band centre and synthesizes H(f) over the band (the arrivals sub-run
@@ -669,7 +690,7 @@ class TestConstructorValidation:
         with pytest.raises(ConfigurationError):
             Bellhop(beam_type='Q')
 
-    @pytest.mark.parametrize('bt', ['B', 'R', 'C', 'b', 'g', 'G', 'S'])
+    @pytest.mark.parametrize('bt', ['B', 'R', 'C', 'g', 'G', 'S'])
     def test_valid_beam_types_ok(self, bt):
         assert Bellhop(beam_type=bt).beam_type == bt
 
@@ -841,3 +862,407 @@ class TestAutoBounceWithBeamPattern:
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
         Bounce(verbose=False).validate_inputs(
             env, src, rcv, run_mode=RunMode.REFLECTION)
+
+
+@pytest.mark.requires_binary
+def test_time_series_every_range_cell_carries_energy():
+    """One clock is locked for the whole receiver grid. A window taken from a
+    single cell covers only that cell's delays, and every farther receiver
+    convolves to EXACTLY zero. Measured pre-fix: 5 of 6 range cells silent."""
+    from uacpy.core.environment import Environment
+    from uacpy.core.source import Source
+    from uacpy.core.receiver import Receiver
+    env = Environment(name='ts', bathymetry=200.0, ssp=1500.0)
+    src = Source(depths=50.0, frequencies=500.0)
+    rcv = Receiver(depths=np.array([100.0]),
+                   ranges=np.linspace(1000., 8000., 6))
+    fs = 20000.0
+    wf = np.sin(2 * np.pi * 500 * np.arange(400) / fs) * np.hanning(400)
+    ts = Bellhop(verbose=False).run(env, src, rcv,
+                                    run_mode=RunMode.TIME_SERIES,
+                                    source_waveform=wf, sample_rate=fs)
+    energy = (np.asarray(ts.data) ** 2).sum(axis=-1).ravel()
+    assert np.all(energy > 0.0), f"silent range cells: {np.where(energy == 0)[0]}"
+    # energy must also fall with range, not merely be non-zero
+    assert energy[0] > energy[-1]
+
+
+class TestVolumeAttenuationFromImaginaryDelay:
+    """``Im(tau)`` is the only carrier of Bellhop's volume attenuation.
+
+    ``ArrMod.f90:118-125`` writes ``REAL(delay)`` and ``AIMAG(delay)`` as
+    separate fields and the amplitude column does **not** include the loss;
+    ``delayandsum.m:134`` applies ``exp(omega*Im(tau))`` as its own factor.
+    Dropping it returns a silently lossless field — -23 dB at 20 kHz.
+    """
+
+    TAU_I = -1.83e-5          # s; -20.0 dB at 20 kHz
+    FC = 20000.0
+
+    def _cell(self):
+        return dict(n_arrivals=1,
+                    amplitudes=np.array([1.0]),
+                    phases=np.array([0.0]),
+                    delays=np.array([1.0]),
+                    delays_imag=np.array([self.TAU_I]),
+                    n_top_bounces=np.array([0]),
+                    n_bot_bounces=np.array([0]),
+                    src_angles=np.array([0.0]),
+                    rcv_angles=np.array([0.0]))
+
+    def test_transfer_function_applies_it(self):
+        H = Bellhop(verbose=False)._arrivals_to_tf(
+            self._cell(), np.array([self.FC]))
+        expected = np.exp(2 * np.pi * self.FC * self.TAU_I)
+        assert np.abs(np.asarray(H).ravel()[0]) == pytest.approx(expected,
+                                                                 rel=1e-9)
+        assert 20 * np.log10(expected) < -19.0
+
+    def test_delay_and_sum_applies_it(self):
+        from uacpy.models.bellhop import delayandsum
+        fs = 200000.0
+        wf = np.sin(2 * np.pi * self.FC * np.arange(64) / fs)
+        loud, _ = delayandsum(rcv_arrivals=self._cell(), source_timeseries=wf,
+                              sample_rate=fs, fc=self.FC)
+        lossless = dict(self._cell(), delays_imag=np.array([0.0]))
+        ref, _ = delayandsum(rcv_arrivals=lossless, source_timeseries=wf,
+                             sample_rate=fs, fc=self.FC)
+        ratio = np.max(np.abs(loud)) / np.max(np.abs(ref))
+        assert ratio == pytest.approx(np.exp(2 * np.pi * self.FC * self.TAU_I),
+                                      rel=1e-6)
+
+
+class TestEnvRecordOrder:
+    """``.env`` record order against ``ReadEnvironmentBell.f90``.
+
+    ``:59 CALL ReadTopOpt`` reads the Francois-Garrison / biological rows
+    itself (``:308-320``); the top half-space row is read only afterwards by
+    ``:69 CALL TopBot`` (``:474``). Emitting them the other way round fed the
+    F-G row to the half-space and killed the run in ``AttenMod : CRCI``.
+    """
+
+    @staticmethod
+    def _ice_env():
+        from uacpy.core.absorption import FrancoisGarrison
+        from uacpy.core.environment import BoundaryProperties
+        return Environment(
+            name='ice-fg', bathymetry=100.0, ssp=1500.0,
+            surface=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=3500.0, density=0.9,
+                attenuation=0.1, shear_speed=1800.0, shear_attenuation=0.2),
+            absorption=FrancoisGarrison(temperature_c=4.0, salinity_psu=34.0,
+                                        pH=8.0, z_bar_m=50.0),
+        )
+
+    def test_absorption_block_precedes_top_halfspace(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        path = tmp_path / 'order.env'
+        write_bellhop_env_file(
+            path, self._ice_env(), Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 5000.0, 10)))
+        lines = path.read_text().splitlines()
+        topopt = next(i for i, ln in enumerate(lines) if ln.startswith("'CAWF"))
+        # F-G record (T S pH z_bar) first, then the elastic half-space row.
+        assert lines[topopt + 1].split() == ['4.0000', '34.0000', '8.0000',
+                                             '50.0000']
+        assert lines[topopt + 2].split()[:3] == ['0.00', '3500.00', '1800.0']
+
+    @pytest.mark.requires_binary
+    def test_ice_surface_with_francois_garrison_runs(self, tmp_path):
+        model = Bellhop(verbose=False, backend='fortran',
+                        work_dir=tmp_path, cleanup=False)
+        result = model.run(
+            self._ice_env(), Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 5000.0, 10)),
+            run_mode=RunMode.COHERENT_TL)
+        prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
+        assert '*** FATAL ERROR ***' not in prt
+        assert 'CRCI' not in prt
+        assert np.any(np.isfinite(np.asarray(result.tl)))
+
+
+class TestQuadSSPMatrixAlignment:
+    """``Bellhop/sspMod.f90:427-431`` pairs row ``iz2`` of the ``.ssp`` matrix with
+    ``SSP%z(iz2)`` from the ``.env`` and stops after ``SSP%NPts`` rows, so a
+    matrix built from the raw profile silently mis-assigns sound speeds once
+    the ``.env`` block is truncated or extended to the medium depth."""
+
+    Z = np.array([0.0, 50.0, 100.0, 200.0, 500.0, 1000.0])
+    C = np.array([1500.0, 1495.0, 1490.0, 1492.0, 1495.0, 1500.0])
+    DEPTH = 150.0
+
+    @classmethod
+    def _env(cls):
+        from uacpy.core.ssp import SoundSpeedProfile
+        data = np.column_stack([cls.C, cls.C + 1.0, cls.C + 2.0])
+        return Environment(
+            name='quad-align', bathymetry=cls.DEPTH,
+            ssp=SoundSpeedProfile(depths=cls.Z, data=data,
+                                  ranges=np.array([0.0, 10000.0, 20000.0])))
+
+    @staticmethod
+    def _env_ssp_block(path):
+        """Return ``(n_pts, depths, speeds)`` from the ``.env`` SSP block."""
+        lines = path.read_text().splitlines()
+        header = next(i for i, ln in enumerate(lines) if ln.rstrip().endswith(','))
+        n_pts = int(lines[header].split()[0])
+        rows = [ln.split() for ln in lines[header + 1:header + 1 + n_pts]]
+        return (n_pts,
+                np.array([float(r[0]) for r in rows]),
+                np.array([float(r[1]) for r in rows]))
+
+    def _write(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        path = tmp_path / 'quad.env'
+        write_bellhop_env_file(
+            path, self._env(), Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(1000.0, 10000.0, 10)),
+            interp_ssp='quad')
+        return path
+
+    def test_ssp_matrix_rows_match_env_npts(self, tmp_path):
+        path = self._write(tmp_path)
+        n_pts, depths, speeds = self._env_ssp_block(path)
+        ssp_lines = path.with_suffix('.ssp').read_text().splitlines()
+        # line 0 = profile count, line 1 = range vector, then one row per depth
+        matrix = np.array([[float(v) for v in ln.split()]
+                           for ln in ssp_lines[2:] if ln.strip()])
+        assert matrix.shape[0] == n_pts
+        assert depths[-1] == pytest.approx(self.DEPTH)
+        # The deepest .env sample interpolates 1490 @ 100 m and 1492 @ 200 m;
+        # the unaligned matrix handed Bellhop the raw 200 m sample instead.
+        assert speeds[-1] == pytest.approx(1491.0, abs=1e-6)
+        # Every guard column holds a copy of an interior profile, so the
+        # range-0 column of the matrix must reproduce the .env block exactly.
+        n_ranges = int(ssp_lines[0].split()[0])
+        r_km = np.array([float(v) for v in ssp_lines[1].split()])
+        assert r_km.size == n_ranges == matrix.shape[1]
+        col0 = matrix[:, int(np.argmin(np.abs(r_km)))]
+        np.testing.assert_allclose(col0, speeds, rtol=0, atol=1e-6)
+
+    @pytest.mark.requires_binary
+    def test_quad_env_runs(self, tmp_path):
+        model = Bellhop(verbose=False, backend='fortran', interp_ssp='quad',
+                        work_dir=tmp_path, cleanup=False)
+        result = model.run(
+            self._env(), Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(1000.0, 10000.0, 10)),
+            run_mode=RunMode.COHERENT_TL)
+        prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
+        assert '*** FATAL ERROR ***' not in prt
+        assert np.any(np.isfinite(np.asarray(result.tl)))
+
+
+class TestMeshDepthCoversBathymetry:
+    """``bdryMod.f90:211`` aborts on any ``.bty`` depth below the medium depth
+    on the ``.env`` SSP header line, and that header carries one decimal
+    place — so any fractional bathymetry maximum (e.g. GEBCO) killed the run
+    when the header was rounded *down*."""
+
+    BATHY = [(0.0, 90.0), (2500.0, 100.04), (5000.0, 95.0)]
+
+    @staticmethod
+    def _receiver():
+        return Receiver(depths=np.array([50.0]),
+                        ranges=np.linspace(100.0, 5000.0, 10))
+
+    def test_header_depth_covers_every_bty_point(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = Environment(name='gebco', bathymetry=self.BATHY, ssp=1500.0)
+        path = tmp_path / 'mesh.env'
+        write_bellhop_env_file(path, env,
+                               Source(depths=25.0, frequencies=100.0),
+                               self._receiver())
+        header = next(ln for ln in path.read_text().splitlines()
+                      if ln.rstrip().endswith(','))
+        z_max = float(header.split()[2].rstrip(','))
+        bty = path.with_suffix('.bty').read_text().splitlines()
+        depths = np.array([float(ln.split()[1]) for ln in bty[2:] if ln.strip()])
+        assert depths.max() <= z_max
+        assert z_max == pytest.approx(100.1)
+
+    @pytest.mark.requires_binary
+    def test_fractional_bathymetry_runs(self, tmp_path):
+        env = Environment(name='gebco', bathymetry=self.BATHY, ssp=1500.0)
+        model = Bellhop(verbose=False, backend='fortran',
+                        work_dir=tmp_path, cleanup=False)
+        result = model.run(env, Source(depths=25.0, frequencies=100.0),
+                           self._receiver(), run_mode=RunMode.COHERENT_TL)
+        prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
+        assert '*** FATAL ERROR ***' not in prt
+        assert list(tmp_path.rglob('*.shd'))
+        assert np.any(np.isfinite(np.asarray(result.tl)))
+
+
+class TestRayCenteredGaussianRejected:
+    """``bellhop.f90:403`` — ``PickEpsilon`` calls ``ERROUT`` for ``'b'``, and
+    ``bellhopcuda/src/runtype.hpp:54`` leaves ``'b'`` out of ``IsRayCen()`` so
+    the ports silently run the Cartesian beam instead."""
+
+    def test_constructor_rejects_b(self):
+        with pytest.raises(ConfigurationError, match="not implemented"):
+            Bellhop(beam_type='b')
+
+    def test_writer_rejects_b(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        with pytest.raises(ConfigurationError, match="not implemented"):
+            write_bellhop_env_file(
+                tmp_path / 'b.env',
+                Environment(bathymetry=100.0, ssp=1500.0),
+                Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=50.0, ranges=1000.0), beam_type='b')
+
+    @pytest.mark.requires_binary
+    def test_solver_aborts_on_b(self, tmp_path):
+        """Ground truth for the rejection: patch 'b' into an otherwise valid
+        .env and watch the Fortran binary abort."""
+        import subprocess
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        path = tmp_path / 'raycen.env'
+        write_bellhop_env_file(
+            path, Environment(bathymetry=100.0, ssp=1500.0),
+            Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 2000.0, 5)))
+        path.write_text(path.read_text().replace("'CB ", "'Cb "))
+        subprocess.run([str(Bellhop(backend='fortran', verbose=False)._exe),
+                        'raycen'], cwd=tmp_path, capture_output=True,
+                       text=True, timeout=300)
+        prt = path.with_suffix('.prt').read_text()
+        assert '*** FATAL ERROR ***' in prt
+        assert 'not implemented in BELLHOP' in prt
+
+
+class TestBeamShapeValidation:
+    """``component`` is ``P``/``V``/``H`` (``influence.f90:120-130``); an
+    unknown letter falls through to pressure. An unknown ``beam_width_type``
+    leaves ``epsilonOpt`` at zero (``bellhop.f90:372-390``). Both are silent,
+    so they are rejected up front."""
+
+    @pytest.mark.parametrize('component', ['P', 'V', 'H'])
+    def test_valid_components_ok(self, component):
+        assert Bellhop(beam_type='C', component=component).component == component
+
+    def test_displacement_component_rejected(self):
+        with pytest.raises(ConfigurationError, match='component'):
+            Bellhop(beam_type='C', component='D')
+
+    def test_invalid_beam_width_type_rejected(self):
+        with pytest.raises(ConfigurationError, match='beam_width_type'):
+            Bellhop(beam_type='C', beam_width_type='Q')
+
+    def test_invalid_beam_curvature_rejected(self):
+        with pytest.raises(ConfigurationError, match='beam_curvature'):
+            Bellhop(beam_type='C', beam_curvature='Q')
+
+    def test_negative_n_beams_rejected(self):
+        with pytest.raises(ConfigurationError, match='n_beams'):
+            Bellhop(n_beams=-1)
+
+
+class TestLineSourceArrivalsPhase:
+    """``ArrMod.f90:103-104`` scales a line source by a purely real
+    ``4*sqrt(pi)``, exactly as ``influence.f90:784`` does on the ``.shd``
+    path, so the arrivals-derived BROADBAND / TIME_SERIES results need the
+    same ``exp(-i*pi/4)`` the ``.shd`` path applies."""
+
+    @staticmethod
+    def _cell():
+        return dict(n_arrivals=2,
+                    amplitudes=np.array([1.0, 0.6]),
+                    phases=np.array([0.0, 35.0]),
+                    delays=np.array([0.7, 0.9]),
+                    delays_imag=np.array([0.0, 0.0]),
+                    n_top_bounces=np.array([0, 1]),
+                    n_bot_bounces=np.array([0, 0]),
+                    src_angles=np.array([0.0, 5.0]),
+                    rcv_angles=np.array([0.0, 5.0]))
+
+    def test_transfer_function_phase_offset(self):
+        f = np.linspace(90.0, 110.0, 8)
+        base = Bellhop(verbose=False)._arrivals_to_tf(self._cell(), f)
+        shifted = Bellhop(verbose=False)._arrivals_to_tf(
+            self._cell(), f, phase_offset=-np.pi / 4.0)
+        np.testing.assert_allclose(shifted, base * np.exp(-1j * np.pi / 4.0),
+                                   rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.requires_binary
+    def test_line_and_point_share_the_shd_phase_residual(self):
+        """The source-type factor is a scalar applied at the very end of both
+        codes, so the arrivals-vs-.shd phase residual — the beam-model bias —
+        must be identical for a line and a point source. It differed by pi/4
+        while only the .shd path carried the correction."""
+        env = Environment(name='line-phase', bathymetry=200.0, ssp=1500.0)
+        rcv = Receiver(depths=np.array([100.0]),
+                       ranges=np.array([2000.0, 4000.0]))
+        fc = 200.0
+        model = Bellhop(verbose=False, backend='fortran')
+        residuals = {}
+        for stype in ('point', 'line'):
+            src = Source(depths=50.0, frequencies=fc, source_type=stype)
+            shd = np.asarray(model.run(env, src, rcv,
+                                       run_mode=RunMode.COHERENT_TL).data)
+            hf = np.asarray(model.run(env, src, rcv,
+                                      run_mode=RunMode.BROADBAND,
+                                      frequencies=np.array([fc])).data)
+            residuals[stype] = np.angle(hf[..., 0].ravel() / shd.ravel())
+        delta = np.angle(np.exp(1j * (residuals['line'] - residuals['point'])))
+        assert np.max(np.abs(delta)) < 0.1, (
+            f"line/point arrivals phase differ by {np.rad2deg(delta)} deg")
+
+
+class TestIrregularGridBroadband:
+    """``ArrMod.f90:101-102`` writes ``NRz_per_range`` depth blocks, which
+    ``bellhop.f90:202-206`` sets to 1 for an irregular grid — its entries are
+    the paired receivers ``(Rz(i), Rr(i))``. The broadband/time-series
+    synthesis indexed ``[0][ird][irr]`` over ``len(receiver_depths)`` blocks
+    and walked off the end; the depth axis has to collapse onto the range
+    axis, as ``read_shd_file`` already does for the TL path."""
+
+    @staticmethod
+    def _fixture():
+        return (Environment(name='irr', bathymetry=200.0, ssp=1500.0),
+                Receiver(depths=[50.0, 100.0, 150.0],
+                         ranges=[1000.0, 2000.0, 3000.0]))
+
+    def test_broadband_collapses_the_depth_axis(self):
+        env, rcv = self._fixture()
+        result = Bellhop(verbose=False, grid_type='I').run(
+            env, Source(depths=25.0, frequencies=[150.0, 200.0, 250.0]),
+            rcv, RunMode.BROADBAND)
+        assert list(result.coords) == ['range', 'frequency']
+        assert result.data.shape == (3, 3)
+        assert np.asarray(result.metadata['receiver_depths']) == pytest.approx(
+            np.asarray(rcv.depths))
+
+    def test_rectilinear_broadband_keeps_its_depth_axis(self):
+        env, rcv = self._fixture()
+        result = Bellhop(verbose=False, grid_type='R').run(
+            env, Source(depths=25.0, frequencies=[150.0, 200.0, 250.0]),
+            rcv, RunMode.BROADBAND)
+        assert list(result.coords) == ['depth', 'range', 'frequency']
+        assert result.data.shape == (3, 3, 3)
+
+    def test_time_series_collapses_the_depth_axis(self):
+        env, rcv = self._fixture()
+        result = Bellhop(verbose=False, grid_type='I').run(
+            env, Source(depths=25.0, frequencies=200.0), rcv,
+            RunMode.TIME_SERIES, source_waveform=np.hanning(64),
+            sample_rate=8000.0)
+        assert list(result.coords) == ['range', 'time']
+        assert result.data.shape[0] == 3
+
+    def test_the_writer_refuses_a_mismatched_irregular_grid(self, tmp_path):
+        """``ReadEnvironmentBell.f90:414`` ERROUTs on ``NRz != NRr``; the
+        public writer must refuse it rather than emit a rejected deck."""
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env, _ = self._fixture()
+        with pytest.raises(ConfigurationError, match='irregular'):
+            write_bellhop_env_file(
+                tmp_path / 'b.env', env, Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=[50.0, 100.0, 150.0], ranges=[1000.0, 2000.0]),
+                grid_type='I')

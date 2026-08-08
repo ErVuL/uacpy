@@ -335,7 +335,7 @@ receiver = uacpy.Receiver(depths=60.0, ranges=np.linspace(1000.0, 3000.0, 9))
 H = Bellhop(n_beams=3000).run(env, source, receiver, run_mode=RunMode.BROADBAND)
 
 sample_rate = 4000.0
-waveform, t_src = lfm_chirp(150.0, 450.0, 0.04, sample_rate)
+t_src, waveform = lfm_chirp(150.0, 450.0, 0.04, sample_rate)
 series = H.synthesize_time_series(waveform, sample_rate)
 
 series.isel(depth=0).plot(stacked=True)

@@ -13,7 +13,9 @@ OBJECTIVE:
 
 ENVIRONMENT:
     - Continental shelf (100m → 500m over 30km)
-    - Munk-like SSP (deep ocean sound channel)
+    - The top 500 m of the Munk profile. Munk's c_min axis is at 1300 m, below
+      this domain, so over 0-500 m the profile is monotonically decreasing
+      (1548.5 → 1513.2 m/s): downward refraction, no sound channel.
     - Grain size bottom transitioning to hard bottom
 
 FEATURES DEMONSTRATED:
@@ -35,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.collections import QuadMesh  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import Bottom  # noqa: E402
@@ -44,6 +47,16 @@ from uacpy.models import RunMode  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def _tl_mappable(ax):
+    """Return the TL QuadMesh ``plot_field`` drew on ``ax``.
+
+    Feeding this to ``fig.colorbar`` ties a shared colorbar to the panels'
+    own colour scale (``_TL_LIMITS``, 20-120 dB) instead of restating it.
+    Contour overlays also live in ``ax.collections``, hence the type filter.
+    """
+    return next(c for c in ax.collections if isinstance(c, QuadMesh))
 
 
 def main():
@@ -73,9 +86,10 @@ def main():
         acoustic_type='half-space'
     )
 
-    # Munk-like SSP (deep ocean channel)
+    # Top 500 m of the Munk profile: monotonically decreasing over this
+    # domain, so the water column refracts downward throughout.
     env = uacpy.Environment(
-        name="Continental Shelf - Munk Profile",
+        name="Continental Shelf - Munk Profile (upper 500 m)",
         ssp=SoundSpeedProfile.from_munk(500.0),
         bathymetry=bathymetry,
         bottom=bottom_rd,
@@ -248,12 +262,10 @@ def main():
                                       contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
 
-        # Add single shared colorbar
-        import matplotlib as mpl
+        # Single shared colorbar, taken from a panel's own mappable so its
+        # scale cannot disagree with the images it labels.
         cbar_ax = fig2.add_axes([0.92, 0.15, 0.02, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+        cb = fig2.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
         plt.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays + shared colorbar)',
@@ -262,27 +274,23 @@ def main():
         print("  ✓ Saved: example_04_beam_comparison.png")
 
     # Plot 3: Point source vs Line source
-    # Using auto TL limits (median + 0.75σ, rounded)
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         _, _ = plot_field(result_thorp, env=env, ax=ax1,
                                       show_colorbar=False)
-        ax1.set_title('Point Source (Cylindrical)\nRunType: CB R2')
+        ax1.set_title("Point Source (Cylindrical)\nRunType: 'CB RR2 '")
 
         _, _ = plot_field(result_line, env=env, ax=ax2,
                                       show_colorbar=False)
-        ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
+        ax2.set_title("Line Source (Cartesian)\nRunType: 'CB XR2 '")
 
-        # Shared colorbar
-        import matplotlib as mpl
+        # Shared colorbar, taken from a panel's own mappable.
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+        cb = fig3.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Point vs Line Source (auto TL limits — AT standard)',
+        plt.suptitle('Bellhop: Point vs Line Source (fixed 20-120 dB TL scale)',
                      fontsize=16, fontweight='bold')
         plt.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_source_comparison.png")
@@ -292,7 +300,7 @@ def main():
     if result_rays is not None:
         fig4, ax4 = result_rays.plot(env=env,
                                      color_by="bounces")  # Color-code rays by bounce type
-        ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
+        ax4.set_title("Ray Trace with Beam Shift\nRunType: 'Rg RR2S'\n" +
                       '(rays colored by bounce type - R/G/B/K)')
         plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
         print("  ✓ Saved: example_04_rays.png")
@@ -312,12 +320,9 @@ def main():
                     color='white', markeredgecolor='black',
                     markeredgewidth=1.2, zorder=10, clip_on=False)
             ax.set_title(f'Source depth = {sd_value:.0f} m')
-        import matplotlib as mpl
         cbar_ax = fig5.add_axes([0.92, 0.15, 0.015, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap,
-                                       norm=norm, orientation='vertical')
+        cb = fig5.colorbar(_tl_mappable(axes5[0]), cax=cbar_ax,
+                           orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
         plt.suptitle(
             'Bellhop multi-source-depth: one binary call, '
@@ -340,8 +345,8 @@ def main():
     print("\nPlotting features demonstrated:")
     print("  ✓ Ray color-coding by bounce type (red/green/blue/black)")
     print("  ✓ Contour overlays on TL plots (labeled contours)")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
-    print("  ✓ Subplot colorbar control (shared colorbar)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB, shared by every panel")
+    print("  ✓ Subplot colorbar control (shared colorbar off a panel's mappable)")
     print("  ✓ jet_r colormap (blue=good, red=poor)")
 
     print("\n✓ Example 04 complete\n")

@@ -41,7 +41,7 @@ def main():
 
     fs = 20000.0
     fmin, fmax, T = 1000.0, 5000.0, 0.02
-    tx, t_tx = lfm_chirp(fmin, fmax, T, fs)
+    t_tx, tx = lfm_chirp(fmin, fmax, T, fs)
     bandwidth = fmax - fmin
 
     # Two echoes at 0.05 s and 0.075 s, second weaker.

@@ -9,6 +9,8 @@ no network. Skipped where netCDF4 is unavailable (the grid needs it).
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
@@ -84,7 +86,7 @@ def glodap_cache(tmp_path, monkeypatch):
     """Cache holding only the synthetic GLODAP pH grid."""
     root = tmp_path / 'glodap_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_glodap(root)
     return root
 
@@ -94,10 +96,10 @@ def full_cache(tmp_path, monkeypatch):
     """GEBCO + WOA23 + grain-size + GLODAP — a fully offline absorption run."""
     root = tmp_path / 'full_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     sediment_db._SAMPLES.clear()
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_sediment(root)
@@ -127,7 +129,7 @@ def test_ph_land_raises(glodap_cache):
 
 def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     with pytest.raises(ConfigurationError, match='install.sh --data glodap'):
         glodap_local.fetch_ph((30.5, -40.5))
 
@@ -149,10 +151,10 @@ def test_with_absorption_no_glodap_keeps_default(tmp_path, monkeypatch):
     # and records no glodap provenance (cache-first, no hard failure).
     root = tmp_path / 'no_glodap'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     sediment_db._SAMPLES.clear()
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_sediment(root)
@@ -263,7 +265,7 @@ def test_fillvalue_levels_are_dropped_not_read_as_ph(tmp_path, monkeypatch):
     """
     root = tmp_path / 'fv_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_glodap_fillvalue(root)
 
     depths, ph = glodap_local.fetch_ph_profile((30.5, -40.5))

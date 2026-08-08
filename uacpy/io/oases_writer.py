@@ -50,28 +50,49 @@ def _write_oases_header(
     f.write(f"{options}\n")
 
 
-def _warn_volume_attenuation_ignored(env: 'Environment') -> None:
+def _warn_volume_attenuation_ignored(
+    env: 'Environment', *, lossless_water: bool = False,
+) -> None:
     """OASES does not consume ``env.absorption``. Unlike the AT family /
     RAM (which emit the chosen Thorp / Francois-Garrison / Biological /
-    Constant water attenuation), OASES applies its own internal
-    Skretting-Leroy empirical attenuation to any AC=0 water layer, so the
-    water column is still attenuated — but the user's chosen formula is not
-    propagated. Warn once per run so the choice isn't silently dropped.
+    Constant water attenuation), OAST/OASN/OASP fall through to PINIT2's
+    empirical Skretting-Leroy substitution for any AC=0 fluid layer
+    (oaseun31.f:1516-1521), so the water column is still attenuated — but
+    the user's chosen formula is not propagated. Warn once per run so the
+    choice isn't silently dropped.
+
+    ``lossless_water`` is OASR's case: unoasr21.f:95-97 overwrites a zero
+    AC on layer 1 with 1e-8 before PINIT runs, which defeats the
+    ``V(I,4).LE.0`` test and leaves the water halfspace lossless.
 
     (The OASES Block II option letters ``T`` / ``F`` / ``B`` already carry
     sub-model-specific meanings, so the Acoustics-Toolbox ``TopOpt``
     absorption codes cannot be injected into the options string.)
     """
-    if getattr(env, 'absorption', None) is not None:
+    if getattr(env, 'absorption', None) is None:
+        return
+    kind = type(env.absorption).__name__
+    if lossless_water:
         warnings.warn(
-            f"OASES ignores env.absorption "
-            f"({type(env.absorption).__name__}): it applies its own internal "
-            f"Skretting-Leroy water attenuation to AC=0 water layers, so the "
-            f"chosen seawater-absorption formula is not propagated. Use "
-            f"Scooter for a wavenumber-integration / FFP model that honours "
-            f"env.absorption, or accept OASES's built-in attenuation.",
+            f"OASR ignores env.absorption ({kind}): its water halfspace is "
+            f"lossless by construction — unoasr21.f:95-97 rewrites a zero AC "
+            f"as 1e-8, which suppresses the empirical substitution at "
+            f"oaseun31.f:1516-1521. Volume absorption does not enter a "
+            f"plane-wave interface reflection coefficient; apply it along "
+            f"the path in the propagation model instead.",
             UserWarning, stacklevel=3,
         )
+        return
+    warnings.warn(
+        f"OASES ignores env.absorption "
+        f"({kind}): it applies its own internal "
+        f"Skretting-Leroy water attenuation to AC=0 water layers "
+        f"(oaseun31.f:1516-1521), so the "
+        f"chosen seawater-absorption formula is not propagated. Use "
+        f"Scooter for a wavenumber-integration / FFP model that honours "
+        f"env.absorption, or accept OASES's built-in attenuation.",
+        UserWarning, stacklevel=3,
+    )
 
 
 def _extract_bottom_props(bottom: BoundaryProperties) -> dict:
@@ -182,7 +203,6 @@ def _emit_oases_freq_line(
     integration_offset: float,
     doppler: bool = False,
     vrec: Optional[float] = None,
-    offdb: Optional[float] = None,
 ) -> None:
     """Write the OASES Block-III frequency-sweep line.
 
@@ -191,10 +211,10 @@ def _emit_oases_freq_line(
     and OASR always emit the 4-token form.
     """
     if doppler:
-        offdb_val = offdb if offdb is not None else integration_offset
         vrec_val = vrec if vrec is not None else 0.0
         f.write(
-            f"{freq_min:.1f} {freq_max:.1f} {nfreq} {offdb_val} {vrec_val}\n"
+            f"{freq_min:.1f} {freq_max:.1f} {nfreq} "
+            f"{integration_offset} {vrec_val}\n"
         )
     else:
         f.write(
@@ -204,21 +224,18 @@ def _emit_oases_freq_line(
 
 def _oases_wavenumber_bounds(
     ssp_data: np.ndarray,
-    c_p: float,
     *,
     ssp_factor: float = 0.9,
-    c_p_factor: float = 1.1,
-    c_p_ceiling: float = 1e8,
+    cmax: float = 1e8,
 ) -> Tuple[float, float]:
     """Return the (cmin, cmax) wavenumber-integration bounds.
 
-    ``cmin = min(SSP) * ssp_factor`` (default 0.9 for OAST/OASP, 0.95 for
-    OASN noise blocks). ``cmax = max(c_p * c_p_factor, c_p_ceiling)``
-    (OAST uses 1e8, OASP uses 1e9).
+    ``cmin = min(SSP) * ssp_factor`` (0.9 for OAST/OASP, 0.95 for the OASN
+    noise blocks). ``cmax`` is the "no upper limit" sentinel: OAST uses 1e8,
+    OASP 1e9.
     """
     cmin = float(ssp_data[:, 1].min()) * ssp_factor
-    cmax = max(c_p * c_p_factor, c_p_ceiling)
-    return cmin, cmax
+    return cmin, float(cmax)
 
 
 def _count_bottom_layers(env: Environment) -> int:
@@ -232,17 +249,42 @@ def _count_bottom_layers(env: Environment) -> int:
 
 
 # OASES' own layer limit, `parameter (NLA = 1001)` in
-# third_party/oases/src/compar.f:23, enforced at oaseun31.f:44 with
-# '*** TOO MANY LAYERS ***'. The profile is passed through in full below this;
-# above it the deck is rejected rather than silently thinned, because a
-# subsampled SSP is a different ocean (a 201-point duct profile cut to 15 rows
-# moved TL by 4.1 dB median against Kraken).
+# third_party/oases/src/compar.f:23, enforced against NL (the deck's total
+# layer count, upper halfspace + water + sediments + bottom halfspace) at
+# oaseun31.f:44 with '*** TOO MANY LAYERS ***'.
 _OASES_MAX_LAYERS = 1001
 
-# OAST Block VIII trailing pair. XAXIS is the plot axis length in cm, consumed
-# only by OASES's own plotters. XINC is the TL-vs-depth range increment
-# (unoast31.f:255, :705) — expressed as a curve count so it tracks the run's
-# range span instead of a fixed 1 km.
+# OASES' wavenumber-array bound, `NPEXP = 16, NP = 2**NPEXP` in
+# third_party/oases/src/compar.f:37-38. OAST stops above it
+# (unoast31.f:459 '>>> TOO MANY WAVENUMBERS <<<'); OASP has no such test, so
+# an overrun there corrupts the transfer function instead of aborting.
+_OASES_MAX_WAVENUMBERS = 65536
+
+# OASES' receiver-depth limit, `parameter (NRD = 501)` in
+# third_party/oases/src/compar.f:35 (and the twin `NRMAX = 501` at :52).
+# INREC stops on `iabs(ir).gt.nrd` (oaseun31.f:1172); OASN checks the same
+# bound twice, on NRCV in INPRCV (oasnun22.f:32-35) and on IR afterwards
+# (unoasn22.f:163-165). All three are hard STOPs with an empty output file.
+_OASES_MAX_RECEIVER_DEPTHS = 501
+
+
+def _check_receiver_depth_count(n_depths: int) -> None:
+    """Raise when a receiver array overruns OASES' NRD arrays."""
+    if n_depths <= _OASES_MAX_RECEIVER_DEPTHS:
+        return
+    raise ConfigurationError(
+        f"receiver.depths has {n_depths} entries but OASES resolves at most "
+        f"{_OASES_MAX_RECEIVER_DEPTHS} receiver depths "
+        f"(oases/src/compar.f:35 `parameter (NRD = "
+        f"{_OASES_MAX_RECEIVER_DEPTHS})`); INREC stops with "
+        f"'>>> Too many receiver depths <<<' (oaseun31.f:1172) and writes no "
+        f"output.",
+        remediation=(f"Decimate receiver.depths to at most "
+                     f"{_OASES_MAX_RECEIVER_DEPTHS} entries, or split the "
+                     f"array across several runs."),
+    )
+
+
 _OASN_NOISE_SAMPLES = (400, 400, 100)   # NW*C NW*D NW*E manual defaults
 
 
@@ -282,8 +324,8 @@ def _oases_nw_line(nw_samples, icut2_auto: int) -> str:
     """``NW ICUT1 ICUT2`` wavenumber-sampling line.
 
     ``NW < 0`` selects OASES's automatic sampling — AUTSMN then recomputes
-    ICUT1/ICUT2 (unoasn22.f:239, oasnun22.f:432) so the trailing values are
-    inert. A pinned ``NW`` is clamped by ``ICUT2 = MIN0(NW, ICUT2)``
+    ICUT1/ICUT2 (unoasn22.f:240-241, oasnun22.f:432) so the trailing values
+    are inert. A pinned ``NW`` is clamped by ``ICUT2 = MIN0(NW, ICUT2)``
     (oast.tex:73-75), so emit ``ICUT2 = NW`` to keep the whole spectrum.
     """
     nw = int(nw_samples) if nw_samples else -1
@@ -296,8 +338,8 @@ def _oases_nw_line(nw_samples, icut2_auto: int) -> str:
 #: ``**kwargs``, so an unread key would otherwise be dropped without a trace and
 #: the run would quietly use the default.
 _OAST_KWARGS = frozenset({
-    'integration_offset', 'offdb', 'nw_samples', 'plot_rmin', 'plot_rmax',
-    'vrec',
+    'integration_offset', 'nw_samples', 'plot_rmin', 'plot_rmax', 'vrec',
+    'dip_angle',
 })
 _OASN_KWARGS = frozenset({
     'surface_noise_level', 'white_noise_level', 'deep_noise_level',
@@ -308,10 +350,41 @@ _OASN_KWARGS = frozenset({
     'replica_xmin', 'replica_xmax', 'replica_nx',
     'replica_ymin', 'replica_ymax', 'replica_ny',
 })
+#: Keys a ``discrete_sources`` entry may carry — the four fields NOIPAR reads
+#: (oasnun22.f:380 ``READ(1,*) ZDN(I),XDN(I),YDN(I),DNLEVDB(I)``).
+_OASN_DISCRETE_SOURCE_KEYS = frozenset({'depth', 'x', 'y', 'level'})
+
+
+def _check_oasn_noise_level(name: str, level, *, dead_band: float = 0.0) -> None:
+    """Raise on a source level OASN would read as a spectrum-file unit number.
+
+    NOIPAR overloads the sign: ``>= 0`` is a level in dB, a negative value is
+    minus the Fortran unit number of a source-spectrum file it opens with
+    OPFILR and stops on if absent (oasnun22.f:383-390 for a discrete source,
+    oasnun22.f:191-193 for the surface). This writer emits no such file, so
+    such a level can only abort the run.
+
+    ``dead_band`` is the surface level's extra step: ``abs(SNLEVDB).LT.0.01``
+    switches the source off before the sign test runs (oasnun22.f:183), so a
+    tiny negative value is simply "off". The discrete-source level has no
+    such band (oasnun22.f:381).
+    """
+    value = float(level)
+    if value >= 0.0 or abs(value) < dead_band:
+        return
+    raise ConfigurationError(
+        f"write_oasn_input: {name}={value:g} is negative, which OASN "
+        f"reads as minus the unit number of a source-spectrum file "
+        f"(oasnun22.f:383-385) rather than a level in dB; it stops with "
+        f"'>>>> ERROR: NO FILE NO. …' because this writer emits no such file.",
+        remediation="Pass a non-negative level in dB (0 disables the source).",
+    )
+
+
 _OASP_KWARGS = frozenset({
     'center_frequency', 'freq_min', 'freq_max', 'freq_output_increment',
     'n_time_samples', 'time_step', 'range_start', 'range_step',
-    'integration_offset', 'nw_samples',
+    'integration_offset', 'nw_samples', 'dip_angle',
 })
 _OASR_KWARGS = frozenset({
     'freq_min', 'freq_max', 'n_frequencies', 'freq_output_increment',
@@ -330,34 +403,186 @@ def _reject_unknown_kwargs(writer: str, kwargs: dict, known: frozenset) -> None:
         )
 
 
+#: Option letters whose GETOPT flag makes the program read input none of these
+#: writers produces — a whole deck block, extra tokens on a record the writer
+#: does emit, or a separate auxiliary file. The read then runs off the end of
+#: the deck, eats the block after it, or aborts on a missing unit, so the
+#: failure surfaces as a bare Fortran error with no indication of which letter
+#: caused it. Keyed by writer; each entry maps the letter to what the program
+#: demands and the Fortran line that demands it. An empty entry records that
+#: the program's option-gated reads are all covered.
+_UNWRITTEN_OPTION_BLOCKS = {
+    'write_oast_input': {
+        'E': ('patch-scattering parameters (PCENTER INPATCH NFFT_X NFFT_Y '
+              'SPLEN_X SPLEN_Y)', 'unoast31.f:299'),
+        'l': ('an external source-array file on unit 2 — LS, then LS rows of '
+              'depth/delay/strength', 'oaseun31.f:1074-1087'),
+        'v': ('a source transfer-function file through RDSTRF',
+              'unoast31.f:182'),
+        't': ('a tabulated surface reflection coefficient on unit 23 (.trc)',
+              'oaseun31.f:3727-3728'),
+        'b': ('a tabulated bottom reflection coefficient on unit 23 (.trc)',
+              'oaseun31.f:3757-3758'),
+    },
+    'write_oasp_input': {
+        'd': ("the Doppler frequency line's ISTYP VSOU VREC tokens",
+              'unoasp22.f:127'),
+        'G': ('a dispersion-curve block (NMODES, then two axis rows)',
+              'unoasp22.f:387-390'),
+        'T': ('two extra receiver-line tokens ZREF and ANGLE for the tilted '
+              'array', 'oaseun31.f:1157-1158'),
+        'Z': ('two velocity-profile plot-axis rows', 'unoasp22.f:466-467'),
+        'E': ('patch-scattering parameters (PCENTER INPATCH NFFT_X NFFT_Y '
+              'SPLEN_X SPLEN_Y)', 'unoasp22.f:479'),
+        'l': ('an external source-array file on unit 2 — LS, then LS rows of '
+              'depth/delay/strength', 'oaseun31.f:1074-1087'),
+        'v': ('a source transfer-function file through RDSTRF',
+              'unoasp22.f:261'),
+    },
+    'write_oasn_input': {
+        'Z': ('two velocity-profile plot-axis rows', 'unoasn22.f:322-323'),
+        'z': ('two velocity-profile plot-axis rows', 'unoasn22.f:322-323'),
+        't': ('a tabulated surface reflection coefficient on unit 23 (.trc)',
+              'oaseun31.f:3727-3728'),
+        'b': ('a tabulated bottom reflection coefficient on unit 23 (.trc)',
+              'oaseun31.f:3757-3758'),
+    },
+    'write_oasr_input': {},
+}
+
+
+def _reject_unwritten_option_blocks(writer: str, options: str) -> None:
+    """Raise on an option letter demanding input this writer never produces."""
+    demanded = _UNWRITTEN_OPTION_BLOCKS[writer]
+    used = sorted(_oases_option_chars(options) & set(demanded))
+    if not used:
+        return
+    detail = '; '.join(f"{c!r} makes it read {demanded[c][0]} "
+                       f"({demanded[c][1]})" for c in used)
+    raise ConfigurationError(
+        f"{writer}: option letter(s) {used} are not supported — {detail}, "
+        f"and this writer produces no such input. The deck would fail inside "
+        f"Fortran instead of here.",
+        remediation="Drop the letter(s) from options=.",
+    )
+
+
+def _check_frequency_contours(writer: str, options: str, letter: str,
+                              nfreq: int) -> None:
+    """Raise on a frequency-contour option with a single-frequency sweep.
+
+    ``unoast31.f:138-140`` (``FRCONT``, OAST option ``'o'``) and
+    ``unoasr21.f:119-121`` (``CONTUR``, OASR option ``'C'``) both end at
+    ``STOP '*** CONTOURS REQUIRE NRFR>1 … ***'`` when ``NFREQ <= 1`` — a
+    character stop, so the binary exits 0 with no ``.prt`` to consult.
+    """
+    if letter not in _oases_option_chars(options) or int(nfreq) > 1:
+        return
+    raise ConfigurationError(
+        f"{writer}: option {letter!r} plots contours against frequency, which "
+        f"needs more than one frequency; the deck carries {int(nfreq)}. "
+        f"The binary would stop with '*** CONTOURS REQUIRE NRFR>1 … ***'.",
+        remediation=f"Give the Source a frequency array, or drop {letter!r} "
+                    f"from options=.",
+    )
+
+
+def _reject_tau_p(writer: str, options: str) -> None:
+    """Raise on ``'t'``, which silently redefines the deck's range axis.
+
+    Lowercase ``'t'`` sets ``INTTYP=-1`` (``oases/src/unoasp22.f:1028-1029``)
+    and ``:178-189`` then overwrites the deck's ``R0`` / ``RSPACE`` /
+    ``NPLOTS`` with ``r0 = 1e3/cmaxin``, ``rspace = (1e3/cminin - r0)/(nwvno-1)``,
+    ``nplots = nwvno`` — a slowness axis in s/m. The written range triple is
+    discarded, so the ``.trf``'s second coordinate is no longer range and
+    ``read_oasp_trf`` would label slowness as metres.
+    """
+    if 't' not in _oases_option_chars(options):
+        return
+    raise ConfigurationError(
+        f"{writer}: option 't' (tau-p seismograms) replaces the receiver "
+        f"range axis with slowness (oases/src/unoasp22.f:178-189), which "
+        f"uacpy's Field has no coordinate for and would mislabel as range.",
+        remediation="Drop 't' from options=.",
+    )
+
+
+# OAST Block VIII trailing pair. XAXIS is the plot axis length in cm, consumed
+# only by OASES's own plotters. XINC is the TL-vs-depth range increment
+# (unoast31.f:255, :705) — expressed as a curve count so it tracks the run's
+# range span instead of a fixed 1 km.
 _OAST_PLOT_AXIS_CM = 20
 _OAST_TLDEP_CURVES = 20
 
+#: OAST option letters that select an output parameter, i.e. set an ``IOUT``
+#: entry in GETOPT (unoast31.f:981-1015). Their count drives how many times
+#: OAST re-reads Blocks IX and XI.
+_OAST_OUTPUT_PARAM_CHARS = frozenset('NVHRKS')
 
-def _check_ssp_layer_count(ssp_data: np.ndarray) -> np.ndarray:
+
+def _check_ssp_layer_count(
+    ssp_data: np.ndarray, n_other_layers: int,
+) -> np.ndarray:
     """Pass an SSP through, decimating only if it would overrun OASES' arrays.
 
-    Below the limit nothing is touched — thinning a measured profile changes
+    OASES bounds NL — the deck's *total* layer count — so the SSP budget is
+    ``_OASES_MAX_LAYERS - n_other_layers``, where ``n_other_layers`` counts
+    every non-SSP layer the deck emits (upper halfspace + sediment layers +
+    bottom halfspace). It is required: a caller that omitted it would bound
+    the SSP alone and hand OASES a deck one halfspace too deep.
+
+    Below the budget nothing is touched — thinning a measured profile changes
     the ocean being modelled (a 201-point duct profile cut to 15 rows moved TL
     by 4.1 dB median against Kraken). Above it, decimate evenly and say so:
     the alternative is a deck OASES rejects outright.
     """
+    max_rows = _OASES_MAX_LAYERS - int(n_other_layers)
+    if max_rows < 1:
+        raise ConfigurationError(
+            f"The seabed stack alone needs {n_other_layers} of OASES' "
+            f"{_OASES_MAX_LAYERS} layers (oases/src/compar.f:23 "
+            f"`parameter (NLA = {_OASES_MAX_LAYERS})`), leaving no room for "
+            f"the water column.",
+            remediation="Merge sediment layers so the seabed stack fits.",
+        )
+
     n_rows = len(ssp_data)
-    if n_rows <= _OASES_MAX_LAYERS:
+    if n_rows <= max_rows:
         return ssp_data
 
     # Keep the first and last rows so the layer interfaces still pin to the
     # surface and env.depth; thin the interior evenly.
-    keep = np.unique(np.linspace(0, n_rows - 1, _OASES_MAX_LAYERS).astype(int))
+    keep = np.unique(np.linspace(0, n_rows - 1, max_rows).astype(int))
     warnings.warn(
-        f"env.ssp has {n_rows} samples but OASES holds at most "
-        f"{_OASES_MAX_LAYERS} layers (compar.f:23 "
-        f"`parameter (NLA = {_OASES_MAX_LAYERS})`); decimated to {keep.size} "
-        f"evenly-spaced samples. Decimate env.ssp yourself if you want to "
-        f"choose which features survive.",
+        f"env.ssp has {n_rows} samples but this deck can spend at most "
+        f"{max_rows} of OASES' {_OASES_MAX_LAYERS} layers on the water column "
+        f"(oases/src/compar.f:23 `parameter (NLA = {_OASES_MAX_LAYERS})`, "
+        f"{n_other_layers} taken by the halfspaces and sediment stack); "
+        f"decimated to {keep.size} evenly-spaced samples. Decimate env.ssp "
+        f"yourself if you want to choose which features survive.",
         UserWarning, stacklevel=3,
     )
     return ssp_data[keep, :]
+
+
+#: Compressional speed the ``'rigid'`` surface substitute emits (OASES has no
+#: rigid upper halfspace; a high-impedance fluid is the closest stand-in).
+_OASES_RIGID_SURFACE_CP = 4000.0
+
+
+def _upper_halfspace_sound_speed(env: Environment) -> float:
+    """Compressional speed OASES reads as ``V(1,2)`` for the upper halfspace.
+
+    Mirrors :func:`_format_upper_halfspace` without emitting its warning, so
+    gates that depend on the layer-1 speed can be evaluated up front.
+    """
+    surface = env.surface
+    atype = str(getattr(surface, 'acoustic_type', 'vacuum')).lower()
+    if 'vacuum' in atype:
+        return 0.0
+    if 'rigid' in atype:
+        return _OASES_RIGID_SURFACE_CP
+    return float(getattr(surface, 'sound_speed', 0.0) or 0.0)
 
 
 def _format_upper_halfspace(env: Environment) -> str:
@@ -386,14 +611,15 @@ def _format_upper_halfspace(env: Environment) -> str:
 
     if 'rigid' in atype:
         warnings.warn(
-            "OASES does not natively support a rigid upper halfspace; "
-            "emitting a high-impedance fluid halfspace (cp=4000, rho=2.5) "
-            "as a substitute. Acoustic match is partial — pressure-release "
-            "(vacuum) and acoustic-half-space surfaces are the only "
-            "physically exact OASES top BCs.",
+            f"OASES does not natively support a rigid upper halfspace; "
+            f"emitting a high-impedance fluid halfspace "
+            f"(cp={_OASES_RIGID_SURFACE_CP:g}, rho=2.5) as a substitute. "
+            f"Acoustic match is partial — pressure-release (vacuum) and "
+            f"acoustic-half-space surfaces are the only physically exact "
+            f"OASES top BCs.",
             UserWarning, stacklevel=3,
         )
-        return "0 4000.0 0.0 0.000 0.000 2.50 0 0"
+        return f"0 {_OASES_RIGID_SURFACE_CP:.1f} 0.0 0.000 0.000 2.50 0 0"
 
     return (f"0 {c_p:.2f} {c_s:.2f} {alpha_p:.3f} "
             f"{alpha_s:.3f} {rho:.2f} 0 0")
@@ -425,6 +651,7 @@ def _receiver_block_lines(
     """
     depths = np.asarray(receiver.depths, dtype=float)
     n = len(depths)
+    _check_receiver_depth_count(n)
     z_min = float(depths.min())
     z_max = float(depths.max())
 
@@ -443,11 +670,96 @@ def _receiver_block_lines(
     return [header, depth_line]
 
 
-def _source_block_line(src_depth: float) -> str:
-    """OASES Block-V single-source line ``SD NS DS AN IA FD DA``: one source at
-    ``src_depth`` (oast.tex/oasp.tex). Shared by the OAST/OASP writers so the
-    source-block format lives in one place, like ``_receiver_block_lines``."""
+def _source_block_line(
+    src_depth: float,
+    *,
+    dip_angle: Optional[float] = None,
+    linear_array: bool = False,
+) -> str:
+    """OASES Block-V source record for one source at ``src_depth``.
+
+    INSRC picks the record shape from LINA and dip_sou, not from the manual's
+    column table: ``SD NS DS AN IA FD DA`` with LINA=1 (oaseun31.f:1089),
+    ``SD DA`` with dip_sou alone (oaseun31.f:1114), plain ``SD`` otherwise
+    (oaseun31.f:1119). The dip angle therefore sits in a different column
+    depending on the option letters, and the 7-token form fed to the 2-item
+    read would hand OASES the NS column as the dip angle.
+
+    Shared by the OAST/OASP writers so the source-block format lives in one
+    place, like ``_receiver_block_lines``.
+    """
+    if linear_array:
+        return f"{src_depth:.2f} 1 0 0 1 0 {dip_angle or 0.0:g}"
+    if dip_angle is not None:
+        return f"{src_depth:.2f} {dip_angle:g}"
     return f"{src_depth:.2f} 1 0 0 1 0 0"
+
+
+#: Option letters that put INSRC on a source-record shape other than the
+#: plain ``SD`` form: '4' selects the dip-slip moment source (dip_sou,
+#: unoast31.f:1117-1122 / unoasp22.f:993-995) and 'L' the internal vertical
+#: array (LINA=1, unoast31.f:1051-1054 / unoasp22.f:929-932). 'l' and 'v'
+#: also set LINA but are rejected outright — they need a source file this
+#: writer does not produce.
+_OASES_DIP_SOURCE_CHAR = '4'
+_OASES_LINEAR_ARRAY_CHAR = 'L'
+
+
+def _resolve_source_record(
+    writer: str, options: str, dip_angle: Optional[float],
+) -> dict:
+    """Keyword arguments for :func:`_source_block_line` given the options."""
+    opt_chars = _oases_option_chars(options)
+    dip_on = _OASES_DIP_SOURCE_CHAR in opt_chars
+    if dip_angle is not None and not dip_on:
+        raise ConfigurationError(
+            f"{writer}: dip_angle={dip_angle} is only read when the option "
+            f"string selects the dip-slip source; OASES takes it from the "
+            f"source record solely under dip_sou (oaseun31.f:1089, :1114).",
+            remediation=f"Add {_OASES_DIP_SOURCE_CHAR!r} to options=, or drop "
+                        f"dip_angle.",
+        )
+    if not dip_on:
+        return {}
+    return {
+        'dip_angle': 0.0 if dip_angle is None else float(dip_angle),
+        'linear_array': _OASES_LINEAR_ARRAY_CHAR in opt_chars,
+    }
+
+
+def _check_nw_samples(writer: str, nw_samples, *, power_of_two: bool) -> None:
+    """Validate a pinned wavenumber-sample count against OASES' NP array bound.
+
+    A pinned ``NW`` above NP is silently clamped by ``NWVNO=MIN0(NWVNO,NP)``
+    (unoast31.f:435, unoasp22.f:174), and OAST additionally rounds it up to
+    the next power of two (unoast31.f:447-458). Both change the wavenumber
+    step — and hence the range at which the FFT wraps — from what was asked
+    for, so say so here rather than let the run answer a different question.
+    """
+    if nw_samples is None:
+        return
+    nw = int(nw_samples)
+    if nw <= 0:                      # automatic sampling
+        return
+    if nw > _OASES_MAX_WAVENUMBERS:
+        raise ConfigurationError(
+            f"{writer}: nw_samples={nw} exceeds OASES' wavenumber array bound "
+            f"NP = {_OASES_MAX_WAVENUMBERS} (oases/src/compar.f:37-38 "
+            f"`NPEXP = 16, NP = 2**NPEXP`); OASES would clamp it to "
+            f"{_OASES_MAX_WAVENUMBERS} and integrate on a coarser wavenumber "
+            f"grid than requested.",
+            remediation=(f"Pass nw_samples <= {_OASES_MAX_WAVENUMBERS}, or "
+                         f"-1 for OASES' automatic sampling."),
+        )
+    if power_of_two and nw & (nw - 1):
+        rounded = 1 << (nw - 1).bit_length()
+        warnings.warn(
+            f"{writer}: nw_samples={nw} is not a power of two; OAST rounds it "
+            f"up to {rounded} (unoast31.f:447-458) and integrates on that "
+            f"grid, so the wavenumber step — and the range at which the FFT "
+            f"wraps — is not the one implied by {nw}.",
+            UserWarning, stacklevel=3,
+        )
 
 
 def write_oast_input(
@@ -493,6 +805,9 @@ def write_oast_input(
             Minimum range for plots in **metres** (default: 0)
         - plot_rmax : float
             Maximum range for plots in **metres** (default: max receiver range)
+        - dip_angle : float
+            Fault dip angle in degrees for the ``'4'`` dip-slip moment
+            source (default 0). Only read when ``'4'`` is in ``options``.
 
     Notes
     -----
@@ -553,38 +868,42 @@ def write_oast_input(
     # Options string
     if options is None:
         options = 'N J T'  # Normal stress, complex contour, TL vs range
+    _reject_unwritten_option_blocks('write_oast_input', options)
+    _check_nw_samples('write_oast_input', nw_samples, power_of_two=True)
+    source_record = _resolve_source_record(
+        'write_oast_input', options, kwargs.get('dip_angle'))
     _warn_volume_attenuation_ignored(env)
 
     freq_min, freq_max, nfreq = _resolve_freq_sweep(source, freq)
+    _check_frequency_contours('write_oast_input', options, 'o', nfreq)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OAST Simulation via UACPY")
 
         # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF [VREC].
         # unoast31.f:125-133: lowercase 'd' enables Doppler and demands the
-        # 5th VREC token. Uppercase 'D' is depth-averaged-TL and stays in
-        # the 4-token form.
+        # 5th VREC token. Uppercase 'D' is TL-vs-depth (TLDEP,
+        # unoast31.f:1086-1090) and stays in the 4-token form.
         doppler_on = 'd' in _oases_option_chars(options)
         _emit_oases_freq_line(
             f, freq_min, freq_max, nfreq,
             integration_offset=integration_offset,
             doppler=doppler_on,
             vrec=kwargs.get('vrec', 0.0),
-            offdb=kwargs.get('offdb'),
         )
 
         # Block IV: Environment. OASES uses CS = -|c_next| in the
         # Airy-layer convention to encode a continuous SSP gradient
         # (oaseun31.f:160-192).
-        ssp_subset = _check_ssp_layer_count(ssp_data)
+        # Count sediment layers from the seabed column
+        n_sed_layers = _count_bottom_layers(env)
+        # NL = upper halfspace + water + sediments + bottom halfspace.
+        ssp_subset = _check_ssp_layer_count(ssp_data, 2 + n_sed_layers)
 
         # Special case: if isovelocity (all sound speeds are the same), write only 1 layer
         # Check if all sound speeds are equal within tolerance
         c_values = ssp_subset[:, 1]
         is_isovelocity = np.allclose(c_values, c_values[0], rtol=1e-6)
-
-        # Count sediment layers from the seabed column
-        n_sed_layers = _count_bottom_layers(env)
 
         if is_isovelocity:
             # Isovelocity: write only 1 water layer at surface
@@ -634,8 +953,9 @@ def write_oast_input(
                 extra_columns=1,
             )
 
-        # Block V: Sources — SD NS DS AN IA FD DA (one source at src_depth).
-        f.write(_source_block_line(src_depth) + '\n')
+        # Block V: Sources — one source at src_depth, in the record shape
+        # INSRC's LINA / dip_sou branch expects.
+        f.write(_source_block_line(src_depth, **source_record) + '\n')
 
         # Block VI: Receivers
         # RD1 RD2 NR IR  (NR<0 signals explicit depth list — oast.tex:464-493).
@@ -643,7 +963,7 @@ def write_oast_input(
             f.write(line + '\n')
 
         # Block VII: Wavenumber sampling — CMIN CMAX.
-        cmin, cmax = _oases_wavenumber_bounds(ssp_data, c_p)
+        cmin, cmax = _oases_wavenumber_bounds(ssp_data)
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
         # NW IC1 IC2 — automatic sampling (NW=-1) ignores IC1/IC2 per
@@ -671,27 +991,33 @@ def write_oast_input(
         f.write(f"{rmin_km:.9f} {rmax_km:.9f} "
                 f"{_OAST_PLOT_AXIS_CM} {xinc_km:.9f}\n")
 
-        # Block gating per oast.tex §IX-XII:
-        #   IX (TL axes):       options A, D, T
-        #   X  (depth axes):    options C, D
-        #   XI (contour levels):options C, f
-        #   XII (SVP axes):     option Z
+        # Block gating. GETOPT (unoast31.f:1016-1090) sets the flags the
+        # READs are guarded by:
+        #   DEPTAV='A'  DRCONT='C'  FRCONT='o'  ICONTU='c'
+        #   PLTL='T'    PLKERN='I'  ANSPEC='a'  TLDEP='D'  IPROF='Z'
+        # Blocks IX and XI are read once per selected output parameter
+        # (`DO 980` :240-244 / `DO 990` :260-263, both skipping IOUT(i)==0);
+        # blocks X and XII are read once.
         opt_chars = _oases_option_chars(options)
 
         def has(*codes):
             return any(code in opt_chars for code in codes)
 
-        if has('A', 'D', 'T'):
-            # Block IX — TMIN TMAX TLEN TINC
-            f.write("20 100 12 10\n")
+        # IOUT entries GETOPT sets: N→1 V→2 H→3 R→5 K→6 S→7. With none of
+        # them OASES falls back to IOUT(1)=1, NOUT=1 (unoast31.f:1175-1177).
+        n_out = max(1, len(opt_chars & _OAST_OUTPUT_PARAM_CHARS))
 
-        if has('C', 'D'):
-            # Block X — DUP DLO DLN DIN (depth axes)
+        if (has('A') and not has('o')) or has('T', 'I', 'a', 'D'):
+            # Block IX — YUP YDOWN YAXIS YINC (unoast31.f:242)
+            f.write("20 100 12 10\n" * n_out)
+
+        if has('C', 'D', 'c'):
+            # Block X — RDUP RDDOWN CYAXIS RDINC (unoast31.f:250)
             f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
 
-        if has('C', 'f'):
-            # Block XI — ZMIN ZMAX ZINC (contour levels)
-            f.write("40 100 10\n")
+        if has('C', 'o'):
+            # Block XI — ZMIN ZMAX ZSTEP contour levels (unoast31.f:262)
+            f.write("40 100 10\n" * n_out)
 
         if has('Z'):
             # Block XII — VLEF VRIG VLEN VINC + DVUP DVLO DVLN DVIN
@@ -744,15 +1070,32 @@ def write_oasn_input(
     **kwargs : dict
         Additional parameters:
         - surface_noise_level : float
-            Surface noise source strength in dB (default: 0, disabled)
+            Surface noise source strength in dB (default: 0, disabled).
+            OASN disables the source when ``abs(SNLEVDB) < 0.01``
+            (oasnun22.f:183) and gates Block VII on the complementary test
+            ``abs(SNLEVDB) >= 0.01`` (oasnun22.f:276). A negative level is
+            *not* "off": it names the Fortran unit number of a
+            source-spectrum file (oasnun22.f:191), which this writer does
+            not produce, so negative values are rejected.
         - white_noise_level : float
             White noise level in dB (default: 0, disabled)
         - deep_noise_level : float
-            Deep broad-area source strength in dB (default: 0, disabled)
+            Deep broad-area source strength in dB (default: 0, disabled).
+            The two OASN tests are *not* complementary: the source is
+            computed only for ``DPLEVDB > 0.01`` (oasnun22.f:233 skips it on
+            ``.LE.0.01``) while Block VIII is read for ``DPLEVDB >= 0.01``
+            (oasnun22.f:324), so exactly 0.01 reads the block and radiates
+            nothing. Unlike the surface level the deep source has no
+            spectrum-file form, so a negative level simply disables it.
         - deep_source_depth : float
             Depth (m) of the deep source sheet (default: half the water depth)
         - discrete_sources : list of dict
-            List of discrete sources with 'depth' (m), 'x', 'y' (km), 'level'
+            List of discrete sources, each carrying 'depth' (m), 'x', 'y'
+            (km) and 'level' (dB) — the four fields NOIPAR reads
+            (oasnun22.f:380). No other key is accepted; OASES has no
+            per-source phase. As for the surface level, a negative ``'level'``
+            names a spectrum-file unit number (oasnun22.f:383-385) rather
+            than a level in dB, and is rejected.
         - integration_offset, offdb : float
             Wavenumber-integration contour offset in dB/wavelength; ``offdb``
             wins when both are given (default: 0)
@@ -780,8 +1123,8 @@ def write_oasn_input(
     IV.  Environment
     V.   Receiver Array
     VI.  Sources (noise and discrete)
-    VII. Surface noise parameters (if SSLEV != 0)
-    VIII. Deep noise parameters (if DSLEV != 0)
+    VII. Surface noise parameters (if abs(SSLEV) >= 0.01)
+    VIII. Deep noise parameters (if DSLEV >= 0.01)
     IX.  Discrete source parameters (if NDNS > 0)
     X.   Replica parameters (if option R)
 
@@ -812,16 +1155,74 @@ def write_oasn_input(
     # Sound speed profile — align to env.depth (see OAST writer for rationale).
     ssp_data = env.ssp.extend_to(depth).to_pairs()
 
-    # Noise/source parameters
-    surface_noise_level = kwargs.get('surface_noise_level', 0)
-    white_noise_level = kwargs.get('white_noise_level', 0)
-    deep_noise_level = kwargs.get('deep_noise_level', 0)
+    # Noise/source parameters. The levels are gated on the value OASN reads
+    # back from the deck, so round to the '%.1f' the deck carries before
+    # testing: a level of 0.03 is written as 0.0 and OASN then skips the
+    # sub-block the unrounded value would have demanded.
+    surface_noise_level = round(float(kwargs.get('surface_noise_level', 0)), 1)
+    white_noise_level = float(kwargs.get('white_noise_level', 0))
+    deep_noise_level = round(float(kwargs.get('deep_noise_level', 0)), 1)
+    _check_oasn_noise_level('surface_noise_level', surface_noise_level,
+                            dead_band=0.01)
     discrete_sources = kwargs.get('discrete_sources', [])
     n_discrete = len(discrete_sources)
+    for i, ds in enumerate(discrete_sources):
+        unknown = sorted(set(ds) - _OASN_DISCRETE_SOURCE_KEYS)
+        if unknown:
+            raise ConfigurationError(
+                f"write_oasn_input: discrete_sources[{i}] carries key(s) "
+                f"{unknown} that OASES never reads — NOIPAR reads exactly "
+                f"ZDN, XDN, YDN, DNLEVDB (oasnun22.f:380).",
+                remediation=f"Drop them; the accepted keys are "
+                            f"{sorted(_OASN_DISCRETE_SOURCE_KEYS)}.",
+            )
+        _check_oasn_noise_level(f"discrete_sources[{i}]['level']",
+                                ds.get('level', 180.0))
+
+    # OASN aborts inside NOIPAR when surface noise is switched on over a
+    # non-air upper halfspace: oasnun22.f:187 `IF (V(1,2).GT.500) STOP
+    # '*** UPPER HALFSPACE MUST BE VACUUM OR AIR ***'`, reached whenever
+    # SNLEVDB >= 0.01. Name the surface here rather than let the binary die.
+    surface_c_p = _upper_halfspace_sound_speed(env)
+    if surface_noise_level >= 0.01 and surface_c_p > 500.0:
+        surface_kind = getattr(env.surface, 'acoustic_type', 'vacuum')
+        raise ConfigurationError(
+            f"OASN surface noise requires a vacuum or air upper halfspace, "
+            f"but env.surface (acoustic_type={surface_kind!r}) writes "
+            f"c_p = {surface_c_p:g} m/s; OASES stops with "
+            f"'*** UPPER HALFSPACE MUST BE VACUUM OR AIR ***' "
+            f"(oasnun22.f:187).",
+            remediation=("Use a vacuum or air surface (c_p <= 500 m/s) for "
+                         "surface-generated noise, or drop "
+                         "surface_noise_level and drive the array with "
+                         "discrete_sources / deep_noise_level instead."),
+        )
 
     # Options string
     if options is None:
         options = 'N J'  # Covariance output, complex contour
+    _reject_unwritten_option_blocks('write_oasn_input', options)
+
+    # OASN reads the noise-source block only under `IF (CALNSE.or.trfout)`
+    # (unoasn22.f:173-174); CALNSE comes from 'N'/'n' and TRFOUT from
+    # uppercase 'T'. Written unconditionally, the block would be consumed by
+    # whatever READ comes next — the replica grid under 'R' — and every
+    # record below it shifts by one.
+    noise_block = bool(_oases_option_chars(options) & {'N', 'n', 'T'})
+    if not noise_block:
+        supplied = sorted(
+            k for k in ('surface_noise_level', 'white_noise_level',
+                        'deep_noise_level', 'discrete_sources')
+            if kwargs.get(k)
+        )
+        if supplied:
+            raise ConfigurationError(
+                f"write_oasn_input: {supplied} describe the noise field, but "
+                f"OASN reads that block only when the option string carries "
+                f"'N', 'n' or 'T' (unoasn22.f:173-174); options={options!r} "
+                f"carries none of them.",
+                remediation="Add 'N' to options=, or drop the noise arguments.",
+            )
 
     _warn_volume_attenuation_ignored(env)
 
@@ -835,7 +1236,7 @@ def write_oasn_input(
         _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
         # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF
-        # (unoasn22.f:141 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
+        # (unoasn22.f:142 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
         # ``integration_offset`` name the same OASES field, so an explicit
         # ``offdb`` wins rather than being silently dropped.
         _emit_oases_freq_line(
@@ -845,9 +1246,9 @@ def write_oasn_input(
 
         # Block IV: Environment. NL = total layers (upper halfspace +
         # water + sediments + bottom halfspace).
-        ssp_subset = _check_ssp_layer_count(ssp_data)
-        n_water_layers = len(ssp_subset)
         n_sed_layers = _count_bottom_layers(env)
+        ssp_subset = _check_ssp_layer_count(ssp_data, 2 + n_sed_layers)
+        n_water_layers = len(ssp_subset)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
 
@@ -877,6 +1278,7 @@ def write_oasn_input(
         # Block V: Receiver Array
         # NRCV
         n_receivers = len(receiver.depths)
+        _check_receiver_depth_count(n_receivers)
         f.write(f"{n_receivers}\n")
 
         # For each receiver: Z X Y ITYP GAIN
@@ -884,33 +1286,43 @@ def write_oasn_input(
         for z in receiver.depths:
             f.write(f"{z:.2f} 0 0 1 0\n")
 
-        # Block VI: Sources
-        # SSLEV WNLEV DSLEV NDNS
-        f.write(f"{surface_noise_level:.1f} {white_noise_level:.1f} {deep_noise_level:.1f} {n_discrete}\n")
+        # Blocks VI-IX are NOIPAR's, called only under
+        # `IF (CALNSE.or.trfout)` (unoasn22.f:173-174).
+        if noise_block:
+            # Block VI: Sources — SSLEV WNLEV DSLEV NDNS
+            f.write(f"{surface_noise_level:.1f} {white_noise_level:.1f} "
+                    f"{deep_noise_level:.1f} {n_discrete}\n")
 
-        # Block VII: Surface noise parameters (if surface_noise_level != 0)
-        if surface_noise_level != 0:
-            # CMINS CMAXS — the model's c_low/c_high when given, else the
-            # OASN-manual defaults (0.95*c_min for the slow edge, 1E8 for
-            # "no upper limit"). Documented as reaching this block, so it must.
-            f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
-                    f"{_noise_cmax(kwargs):.6g}\n")
-            # NWSC NWSD NWSE (samples in continuous, discrete, evanescent)
-            f.write(f"{_noise_nw(kwargs)}\n")
+            # Block VII: surface-noise wavenumber parameters. NOIPAR reads
+            # them only when `abs(SNLEVDB).GE.0.01` (oasnun22.f:276).
+            if abs(surface_noise_level) >= 0.01:
+                # CMINS CMAXS — the model's c_low/c_high when given, else the
+                # OASN-manual defaults (0.95*c_min for the slow edge, 1E8 for
+                # "no upper limit"). Documented as reaching this block, so it
+                # must.
+                f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
+                        f"{_noise_cmax(kwargs):.6g}\n")
+                # NWSC NWSD NWSE (samples in continuous, discrete, evanescent)
+                f.write(f"{_noise_nw(kwargs)}\n")
 
-        # Block VIII: Deep noise parameters (if deep_noise_level != 0)
-        if deep_noise_level != 0:
-            # DPSD (depth of deep source sheet)
-            deep_source_depth = kwargs.get('deep_source_depth', depth * 0.5)
-            f.write(f"{deep_source_depth:.2f}\n")
-            # CMIND CMAXD
-            f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
-                    f"{_noise_cmax(kwargs):.6g}\n")
-            # NWDC NWDD NWDE
-            f.write(f"{_noise_nw(kwargs)}\n")
+            # Block VIII: deep-noise parameters. NOIPAR reads them only when
+            # `DPLEVDB.GE.0.01` (oasnun22.f:324) — deliberately asymmetric
+            # with the surface gate above: a negative deep level just disables
+            # the source, so emitting these lines would desynchronise every
+            # later READ.
+            if deep_noise_level >= 0.01:
+                # DPSD (depth of deep source sheet)
+                deep_source_depth = kwargs.get('deep_source_depth',
+                                               depth * 0.5)
+                f.write(f"{deep_source_depth:.2f}\n")
+                # CMIND CMAXD
+                f.write(f"{_noise_cmin(kwargs, ssp_data):.1f} "
+                        f"{_noise_cmax(kwargs):.6g}\n")
+                # NWDC NWDD NWDE
+                f.write(f"{_noise_nw(kwargs)}\n")
 
         # Block IX: Discrete sources (if n_discrete > 0)
-        if n_discrete > 0:
+        if noise_block and n_discrete > 0:
             for ds in discrete_sources:
                 # ZDN XDN YDN DNLEV (depth in m, x/y in km, level in dB)
                 z_ds = ds.get('depth', 50.0)
@@ -1014,6 +1426,9 @@ def write_oasp_input(
             Range increment in **metres** (default: auto)
         - nw_samples : int
             Number of wavenumber samples (default: -1 for automatic)
+        - dip_angle : float
+            Fault dip angle in degrees for the ``'4'`` dip-slip moment
+            source (default 0). Only read when ``'4'`` is in ``options``.
 
     Notes
     -----
@@ -1103,14 +1518,19 @@ def write_oasp_input(
     # Wavenumber sampling
     integration_offset = kwargs.get('integration_offset', 0)
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
-    cmin, cmax = _oases_wavenumber_bounds(ssp_data, c_p, c_p_ceiling=1e9)
+    cmin, cmax = _oases_wavenumber_bounds(ssp_data, cmax=1e9)
 
     # Options string. Default is single-component (normal stress / pressure)
-    # plus the complex-contour integration flag. ``V`` was historically
-    # included for vertical velocity but the .trf reader keeps only the
-    # first NOUT component, so emitting V silently discarded it.
+    # plus the complex-contour integration flag. A second output letter such
+    # as ``V`` raises NOUT, and the .trf reader keeps only the first
+    # component, so the default asks for one.
     if options is None:
         options = 'N J'
+    _reject_unwritten_option_blocks('write_oasp_input', options)
+    _reject_tau_p('write_oasp_input', options)
+    _check_nw_samples('write_oasp_input', nw_samples, power_of_two=False)
+    source_record = _resolve_source_record(
+        'write_oasp_input', options, kwargs.get('dip_angle'))
 
     _warn_volume_attenuation_ignored(env)
 
@@ -1123,9 +1543,11 @@ def write_oasp_input(
 
         # Block IV: Environment. NL = total layers (upper halfspace +
         # water + sediments + bottom halfspace).
-        ssp_array = np.asarray(_check_ssp_layer_count(ssp_data), dtype=float).reshape(-1, 2)
-        n_water_layers = len(ssp_array)
         n_sed_layers = _count_bottom_layers(env)
+        ssp_array = np.asarray(
+            _check_ssp_layer_count(ssp_data, 2 + n_sed_layers), dtype=float,
+        ).reshape(-1, 2)
+        n_water_layers = len(ssp_array)
         n_layers = 1 + n_water_layers + n_sed_layers + 1
         f.write(f"{n_layers}\n")
 
@@ -1151,8 +1573,9 @@ def write_oasp_input(
             extra_columns=2,
         )
 
-        # Block V: Sources — SD NS DS AN IA FD DA (one source at src_depth).
-        f.write(_source_block_line(src_depth) + '\n')
+        # Block V: Sources — one source at src_depth, in the record shape
+        # INSRC's LINA / dip_sou branch expects.
+        f.write(_source_block_line(src_depth, **source_record) + '\n')
 
         # Block VI: Receiver depths (NRD<0 signals explicit depth list —
         # oasp.tex:559-585).
@@ -1239,8 +1662,11 @@ def write_oasr_input(
         - p: Use slowness sampling instead of angle
         - t: Transmission coefficients instead of reflection
     angles : ndarray, optional
-        Angles (degrees). If provided, overrides angle_min/angle_max/n_angles
-        in ``kwargs``. Interpreted per ``angle_type`` (see below).
+        Angles (degrees), which must be uniformly spaced — OASR's deck holds
+        only ``(ANGLE1, ANGLE2, NANG)`` and generates the grid itself
+        (unoasr21.f:173-177). If provided, overrides
+        angle_min/angle_max/n_angles in ``kwargs``. Interpreted per
+        ``angle_type`` (see below).
     angle_type : str, optional
         'grazing' (default) or 'incidence'. OASES expects grazing angles;
         when ``angle_type='incidence'``, angles are converted via
@@ -1330,6 +1756,7 @@ def write_oasr_input(
             freq_max = freq
             n_frequencies = 1
     freq_out_inc = kwargs.get('freq_output_increment', max(1, n_frequencies // 10))
+    _check_frequency_contours('write_oasr_input', options, 'C', n_frequencies)
 
     # Angle parameters. OASES natively uses grazing angles; if the caller
     # requested 'incidence', convert to grazing via 90 - incidence.
@@ -1339,6 +1766,22 @@ def write_oasr_input(
         )
     if angles is not None:
         angles_arr = np.atleast_1d(np.asarray(angles, dtype=float))
+        # OASR evaluates ANGLE1 + (i-1)*DLANGLE (unoasr21.f:173-177) and the
+        # deck carries only (ANGLE1, ANGLE2, NANG), so a non-uniform request
+        # cannot be honoured — it would return a different angle grid than
+        # asked for. Same rule as OASP's uniform range axis.
+        if angles_arr.size > 1:
+            steps = np.diff(angles_arr)
+            if not np.allclose(steps, steps[0], rtol=1e-6, atol=1e-9):
+                raise ConfigurationError(
+                    f"OASR evaluates a uniform angle axis "
+                    f"(angle_min + i*d_angle) but ``angles`` is not uniformly "
+                    f"spaced (steps {steps.min():.4g}-{steps.max():.4g} deg).",
+                    remediation=(
+                        "Pass uniformly spaced angles (np.linspace), or run "
+                        "on a uniform grid and interpolate the "
+                        "ReflectionCoefficient afterwards."),
+                )
         if angle_type == 'incidence':
             angles_arr = 90.0 - angles_arr
         angle_min = float(angles_arr.min())
@@ -1364,8 +1807,9 @@ def write_oasr_input(
     if options is None:
         opt_letter = _REFL_TYPE_TO_OPTION[reflection_type]
         options = f"{opt_letter} T"
+    _reject_unwritten_option_blocks('write_oasr_input', options)
 
-    _warn_volume_attenuation_ignored(env)
+    _warn_volume_attenuation_ignored(env, lossless_water=True)
 
     # Interface roughness (RG / CL / M) per interface (B13 #6).
     # Indexed starting at 0 = upper-halfspace/surface interface; None -> no roughness.
@@ -1418,7 +1862,11 @@ def write_oasr_input(
         f.write(f"{n_layers}\n")
 
         # Layer 1: water as upper halfspace (D is dummy for layer 1).
-        # AC=0 triggers Skretting-Leroy empirical water attenuation inside OASR.
+        # AC=0 with CS=0 makes OASR overwrite V(1,4) with 1e-8
+        # (unoasr21.f:95-97), which defeats the `V(I,4).LE.0` test in PINIT2
+        # (oaseun31.f:1516-1521) and so suppresses the empirical
+        # Skretting-Leroy substitution — a lossless upper halfspace, which is
+        # what a plane-wave reflection coefficient wants.
         f.write(f"0.00 {c_water:.2f} 0 0.0 0 1.0{_roughness_tail(0)}\n")
 
         # Sediment stack + bottom halfspace via the shared helper, with
@@ -1454,8 +1902,11 @@ def write_oasr_input(
             f.write(f"{freq_min:.1f} {freq_max:.1f} 12 {f_range/10:.1f}\n")
             f.write("0 30 12 5\n")  # Reflection loss 0-30 dB
 
-        # Block VIII: Loss contour plots (if option C)
-        if _oases_option_chars(options) & {'C', 'c'}:
+        # Block VIII: Loss contour plots (if option C). OASR's GETOPT
+        # (unoasr21.f:386) sets CONTUR from uppercase 'C' only — it defines no
+        # lowercase 'c', so matching one would emit a block OASR never reads
+        # and shift the 'Z' block below onto it.
+        if 'C' in _oases_option_chars(options):
             # ALEF ARIG ALEN AINC
             # FRLO FRUP OCLN NTKM
             # ZMIN ZMAX ZINC
@@ -1464,8 +1915,8 @@ def write_oasr_input(
             f.write(f"{freq_min:.1f} {freq_max:.1f} {octave_range*2:.1f} 5\n")
             f.write("0 20 2\n")  # Contour levels 0-20 dB in 2 dB increments
 
-        # Block IX: SVP axes (if option Z)
-        if _oases_option_chars(options) & {'Z', 'z'}:
+        # Block IX: SVP axes (if option Z). Uppercase only — unoasr21.f:392.
+        if 'Z' in _oases_option_chars(options):
             # VLEF VRIG VLEN VINC
             # DVUP DVLO DVLN DVIN
             c_min = min(c_water, c_p) * 0.95

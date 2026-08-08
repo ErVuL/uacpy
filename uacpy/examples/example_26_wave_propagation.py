@@ -11,9 +11,14 @@ two pedagogically interesting time-domain paths are spelled out below.
   implicit periodic boundary from the wavenumber-FFT method, so
   ``t_max`` must end *before* the wave reaches the far range edge
   (otherwise the field wraps back and the late-time animation shows
-  aliasing, not propagation). Here ``RMax = 5 km``, ``c ≈ 1500 m/s``,
-  so ``t_max = 2.5 s`` keeps the simulation in the physics-correct
-  regime.
+  aliasing, not propagation). Here the receiver array ends at 200 m and
+  TIME_SERIES mode auto-widens the solver domain to 3x that, i.e.
+  ``RMax = 600 m``. With ``c ≈ 1500 m/s``, ``T_MAX = 0.18 s`` puts the
+  wavefront at 270 m — past the array, so bottom reflections are visible,
+  and still well inside the 600 m wrap edge.
+
+  If you adapt this script, size ``T_MAX`` from your own geometry:
+  ``T_MAX < 3 * max(RECEIVER_RANGES) / c``.
 * **RAM via synthesize_time_series** — broadband PE H(f) → IFFT with a
   windowed Gaussian source. PE is a wave-equation solver too; the
   Fourier-domain time axis is what governs validity, and the IFFT
@@ -40,9 +45,10 @@ The script saves (under ``output/``):
   ``scooter``, ``ram``, ``krakenfield``, ``bellhop``).
 
 ENVIRONMENT
-    Pekeris guide, 100 m deep, fluid half-space bottom. Source at 20 m,
-    pulse centred at 200 Hz. All five models share the same receiver grid
-    so the snapshot panels are directly comparable.
+    Pekeris guide, 50 m deep (``BATHYMETRY``), fluid half-space bottom.
+    Source at mid-depth, 25 m, pulse centred at 200 Hz. All five models
+    share the same receiver grid so the snapshot panels are directly
+    comparable.
 """
 
 import sys
@@ -71,8 +77,11 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 #     ``rmax_safety_margin``, Scooter's ``rmax_multiplier``,
 #     Kraken's ``rmax_m``) are now auto-widened to 3× receiver_max
 #     in TIME_SERIES mode — no need to compute them by hand here.
-#   * Range sampling resolves λ_min ≈ 4.3 m at f_max=350 Hz; 2 m
-#     spacing → 100 range bins over 200 m.
+#   * Range sampling: 64 bins from 2 to 200 m → 3.14 m spacing, against
+#     λ_min = 1500/350 = 4.3 m at f_max. That is ~1.4 samples per
+#     minimum wavelength, so the panels render the pulse envelope and
+#     the modal arrivals; they do not resolve individual wavefronts at
+#     the top of the band. Raise the bin count if you want that.
 BATHYMETRY = 50.0                                # water depth (m)
 RECEIVER_DEPTHS = np.linspace(1, 49, 32)         # ~1.5 m vertical spacing
 RECEIVER_RANGES = np.linspace(2, 200, 64)        # ~3 m horizontal spacing

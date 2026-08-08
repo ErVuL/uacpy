@@ -188,11 +188,6 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `collapse` | `None` | Per-feature collapse overrides. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`; `'info'` logs the resolved `c_low`/`c_high`. |
 
-`field_interp` is accepted and validated, but it names an option in the FLP
-file consumed by the Acoustics Toolbox's `fields.exe` — and uacpy does not run
-`fields.exe`. The Hankel transform is done in-tree in Python, so setting it
-changes nothing.
-
 ---
 
 ## 6. Worked example

@@ -12,6 +12,8 @@ import warnings
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 from uacpy.core.environment import SeabedColumn, Bottom
@@ -60,7 +62,7 @@ def _seis_root(tmp_path_factory):
 @pytest.fixture
 def cache(_seis_root, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(_seis_root))
-    globsed_local._GRID.clear()
+    _cache.invalidate_grids()
     crust1_local._MODEL.clear()
     return _seis_root
 

@@ -58,7 +58,7 @@ def test_constant_absorption_adds_the_expected_loss(model_name):
     """A ConstantAbsorption baseline must attenuate as (r/lambda) * value.
 
     AT reads an SSP line as z, alphaR, betaR, rhoR, alphaI, betaI
-    (sspMod.f90:334), so the baseline belongs in the fifth column. Emitted
+    (misc/sspMod.f90:334), so the baseline belongs in the fifth column. Emitted
     third it becomes the water column's shear speed, which Kraken resolves to
     an all-NaN field and Scooter segfaults on — this asserts the physical
     effect, which a finiteness check alone would miss.

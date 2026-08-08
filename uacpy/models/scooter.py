@@ -20,10 +20,10 @@ from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Field, Result
+from uacpy.core.results import Result
 from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
-from uacpy.io.oalib_writer import write_scooter_env_file
+from uacpy.io.oalib_writer import write_scooter_env_file, reject_coarse_at_mesh
 
 
 # Source geometry -> fieldsco.m Opt(1:1), per fieldsco.m:120-140.
@@ -48,18 +48,16 @@ class Scooter(PropagationModel):
         Mesh points per medium. ``0`` ⇒ auto. Default ``0``.
     rmax_multiplier : float, optional
         Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
-        ``RMax`` — the period of its FFT-based inverse Hankel transform
-        (``TransformG.f90``). Default ``None`` → 2.0 for ``COHERENT_TL``,
-        3.0 for ``BROADBAND`` / ``TIME_SERIES`` (the alias is otherwise
-        visible as a wave from the far range edge).
+        ``RMax``, which fixes the wavenumber sampling:
+        ``scooter.f90:69`` takes ``Nk = INT(2000·RMax_km·(kMax−kMin)/π)``,
+        i.e. ``Δk ≈ π/(2·RMax_m)``. Default ``None`` → 2.0 for
+        ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
     spectrum : str, optional
         FLP Opt(2): ``'positive'`` (fast, default) | ``'negative'`` | ``'both'``.
     stabilizing_attenuation_off : bool, optional
         Disable Scooter's stabilising attenuation. Default ``False``;
         leave it unless you know what you're doing (the stabiliser
         prevents pole-on-contour blow-ups).
-    field_interp : str, optional
-        FLP Opt(3): ``'O'`` polynomial (default) | ``'P'`` Padé.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -116,7 +114,6 @@ class Scooter(PropagationModel):
         interp_ssp: Optional[str] = None,
         spectrum: str = 'positive',
         stabilizing_attenuation_off: bool = False,
-        field_interp: str = 'O',
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -140,16 +137,16 @@ class Scooter(PropagationModel):
             Note: this is NOT a "points per wavelength" density — it is a total
             point count per medium.
         rmax_multiplier : float, optional
-            Multiply max receiver range for wavenumber resolution.
-            Default ``None`` → 2.0 for ``COHERENT_TL``, 3.0 for
-            ``BROADBAND`` / ``TIME_SERIES`` (the FFT-Hankel alias is
-            otherwise visible as a wave from the far range edge).
+            Multiply max receiver range to set the spectral ``RMax``, which
+            fixes the wavenumber sampling (see
+            :meth:`_resolve_rmax_multiplier`). Default ``None`` → 2.0 for
+            ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
         interp_ssp : str, optional
             SSP connection scheme. ``None`` (default) auto-picks
             ``'quad'`` for a range-dependent ``env.ssp`` and
             ``'linear'`` otherwise. Explicit values: ``'linear'``,
             ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
-            ``'analytic'``. ``env.ssp.shape='isovelocity'`` always
+            ``env.ssp.shape='isovelocity'`` always
             forces ``'C'`` regardless.
         spectrum : {'positive', 'negative', 'both'}, optional
             FLP Option(2:2). 'positive' (default) uses only the positive
@@ -161,9 +158,6 @@ class Scooter(PropagationModel):
             ``scooter.f90:81,129``). Leave False (default) unless you
             know what you're doing — the stabiliser is there to prevent
             pole-on-contour blow-ups.
-        field_interp : {'O', 'P'}, optional
-            FLP Option(3:3). 'O' = polynomial interpolation (default,
-            what Scooter's own sample FLP uses), 'P' = Pade.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -190,13 +184,6 @@ class Scooter(PropagationModel):
         self._spectrum_code = spectrum_map[spectrum]
 
         self.stabilizing_attenuation_off = bool(stabilizing_attenuation_off)
-
-        if field_interp not in ('O', 'P'):
-            raise ConfigurationError(
-                f"Invalid field_interp '{field_interp}'. Use 'O' (polynomial) "
-                f"or 'P' (Pade) — see fields.f90:82-90."
-            )
-        self.field_interp = field_interp
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -286,6 +273,8 @@ class Scooter(PropagationModel):
         media_depth = self._total_media_depth(env)
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        reject_coarse_at_mesh('Scooter', self.n_mesh, env,
+                              float(source.frequencies[0]))
 
         # Broadband mode (BROADBAND or TIME_SERIES) requires a
         # frequency vector. The in-tree Python Hankel transform handles
@@ -381,7 +370,7 @@ class Scooter(PropagationModel):
         """Hankel-transform the Green's function onto the receiver ranges.
 
         Broadband transforms every frequency in the ``.grn`` at once; the
-        narrowband path takes the single-frequency FFT-Hankel route.
+        narrowband path transforms the single frequency slice.
         """
         transform_kwargs = dict(
             source_type=_SOURCE_TYPE_CODE[source.source_type],
@@ -392,42 +381,26 @@ class Scooter(PropagationModel):
                       f"range domain...")
             return grn_to_transfer_function(
                 grn_data, receiver.ranges, **transform_kwargs)
-        self._log("Transforming to range domain (FFT-based Hankel transform)...")
+        self._log("Transforming to range domain (direct-DFT Hankel transform)...")
         return grn_to_field(
-            grn_data, receiver.ranges, method='fft_hankel', **transform_kwargs)
-
-    def _mask_unresolvable_depths(self, result, receiver, media_depth):
-        """Restore the caller's depth axis, NaN below ``media_depth``.
-
-        The finite-element mesh stops at the deepest modelled interface, so
-        ``scooter.exe`` clamps any deeper receiver onto it. Handing those cells
-        back under the depth that was asked for would misreport where the
-        field was evaluated — they are no-data.
-        """
-        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
-        d = result.to_dict()
-        data = d['data']
-        if data.shape[0] != depths.size:
-            raise ModelExecutionError(
-                self.model_name, return_code=0, stdout=None,
-                stderr=(f"Scooter returned {data.shape[0]} depth rows for "
-                        f"{depths.size} requested receiver depths; the depth "
-                        f"axis cannot be reattached."),
-            )
-        data[depths > media_depth, ...] = np.nan
-        d['coords'] = {**d['coords'], 'depth': depths}
-        return Field.from_dict(d)
+            grn_data, receiver.ranges, method='direct_dft', **transform_kwargs)
 
     def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
         """Pick the effective ``rmax_multiplier`` for this run.
 
-        Scooter's inverse Hankel transform (``TransformG.f90``, shared
-        with SPARC) is FFT-based, so the r-domain output is periodic
-        with period ``RMax = receiver_max × rmax_multiplier``. The
-        ``COHERENT_TL`` time-FFT averages over the alias; ``TIME_SERIES``
-        and ``BROADBAND`` syntheses leave the alias visible as a wave
-        from the far range edge unless the multiplier is ≳3. User-pinned
-        values win.
+        ``scooter.exe`` writes only the wavenumber-domain ``.grn``; the k→r
+        step is uacpy's :func:`~uacpy.io.grn_reader._hankel_transform`, a
+        direct trapezoidal-rule DFT (``fieldsco.m:5``), not an FFT. What
+        ``RMax`` controls is the wavenumber grid the solver samples:
+        ``scooter.f90:69`` sets ``Nk = INT(2000·RMax_km·(kMax−kMin)/π)``, so
+        ``Δk ≈ π/(2·RMax_m)`` and both cost (``Nk`` samples of the
+        finite-element solve) and resolution scale linearly with the
+        multiplier. A uniform-``Δk`` DFT is periodic in range with period
+        ``2π/Δk ≈ 4·RMax_m`` at the top frequency, so the wrap-around
+        replica also moves out proportionally. ``BROADBAND`` /
+        ``TIME_SERIES`` use the finer grid: their syntheses sum many
+        frequencies, and an under-resolved ``G(k)`` shows up as trapezoidal
+        error in every one of them. User-pinned values win.
         """
         if self.rmax_multiplier is not None:
             return float(self.rmax_multiplier)
@@ -449,8 +422,11 @@ class Scooter(PropagationModel):
         Scooter uses ReadEnvironmentMod format (same as Kraken) with additional sections:
         - Phase speed limits (cLow, cHigh)
         - Maximum range with multiplier (RMax)
-        - Receiver ranges (not in standard Kraken format)
         - Supports shear wave parameters in bottom halfspace
+
+        No receiver ranges are written: ``scooter.f90``'s ``GetPar`` never
+        calls ``ReadRcvrRanges`` — the ``.env`` ends at ``RMax``, and the
+        range axis is applied in-tree when the ``.grn`` is transformed.
         """
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)

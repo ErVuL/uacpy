@@ -579,6 +579,26 @@ wavenumber sampling, which enables the same contour by the back door. The
 default `'N J'` keeps a **real** frequency axis (`OMEGIM = 0`) — deliberate
 and correct, not an oversight.
 
+**Option letters whose deck block uacpy never writes.** A separate class: the
+letter is valid OASES, but setting its flag makes the program read a block the
+writer does not emit, so the run dies inside Fortran on an `End of file` naming
+only a line number. These raise a `ConfigurationError` naming the letter and the
+block instead.
+
+| Program | Letters | What the deck then demands |
+|---|---|---|
+| `OAST` | `E` | Patch-scattering parameters (`unoast31.f:299`) |
+| `OASP` | `d` | The Doppler frequency line's `ISTYP VSOU VREC` (`unoasp22.f:127`) |
+| `OASP` | `G` | Dispersion curves — `NMODES` plus two axis rows (`unoasp22.f:387-390`) |
+| `OASP` | `Z` | Two velocity-profile plot-axis rows (`unoasp22.f:466-467`) |
+| `OASP` | `E` | Patch-scattering parameters (`unoasp22.f:479`) |
+| `OASN` | `Z`, `z` | Two velocity-profile plot-axis rows (`unoasn21.f:297-298`) |
+
+`OAST` *does* write the velocity-profile block, so `'Z'` is supported there, and
+its `'d'` (Doppler) frequency line carries `vrec`. `OASR` needs nothing uacpy
+omits. Note the case distinction: on `OAST`, `'D'` is TL-vs-depth while `'d'` is
+Doppler; on `OASN`, `GETOPT` accepts either case for the same flag.
+
 **The layer stack survives, the range axis does not.** `bottom_layers` is
 never collapsed for OASES, but a range-dependent bottom is reduced to its
 median column. If both matter, you need [RAM](ram.md) with an `rams` backend

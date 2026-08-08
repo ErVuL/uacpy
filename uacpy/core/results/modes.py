@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from typing import Union
 
@@ -65,6 +67,11 @@ class Modes(Result):
         ``phi`` as ``phi[:, :n]``; depths and identification metadata are
         preserved.
         """
+        if n < 1:
+            raise ConfigurationError(
+                f"Modes.first_n({n}): need n >= 1 — a negative n would slice "
+                "from the end of the mode set and silently return a different "
+                "subset than requested.")
         if n >= len(self.k):
             return self
         new_k = self.k[:n]
@@ -259,14 +266,23 @@ class Modes(Result):
         """Coherent complex pressure field built from the modal sum.
 
         Asymptotic far-field form of the cylindrical-source modal
-        expansion (large ``k_m·r``):
+        expansion (large ``k_m·r``), written in the ``e^{i(ωt − k r)}``
+        convention AT propagates under (``EvaluateMod.f90:34,42``):
 
-        ``P(r, z_r) ≈ i·exp(−iπ/4) / (ρ_s·√(8πr)) · Σ_m
-        ψ_m(z_s)·ψ_m(z_r) · exp(i k_m r) / √|k_m|``
+        ``P(r, z_r) ≈ exp(−iπ/4)·√(2π/r) / ρ_s · Σ_m
+        ψ_m(z_s)·ψ_m(z_r) · exp(−i k_m r) / √(k_m)``
 
         consistent with the ``∫|ψ|²/ρ dz = 1`` normalisation that Kraken
         and the analytic Pekeris helper use. Honors any imaginary
         ``k.imag`` set via :meth:`with_attenuation`.
+
+        ``√(k_m)`` is the **complex** square root (principal branch), not
+        ``√|k_m|`` — it carries a ``−arg(k_m)/2`` phase that
+        phase-sensitive consumers (MFP, coherent integration) need. The
+        textbook prefactor ``i/(ρ_s·√(8πr))`` appears here as
+        ``exp(−iπ/4)·√(2π/r)`` because TL's free-field 1 m reference
+        ``1/(4π)`` is folded in (``4π/√(8π) = √(2π)``). ``−20·log10|P|``
+        is insensitive to the sign convention.
 
         Parameters
         ----------
@@ -291,6 +307,38 @@ class Modes(Result):
         z_s = float(source_depth)
         z_r = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
         r = np.atleast_1d(np.asarray(ranges_m, dtype=float))
+
+        # ``kraken.f90:573,598`` tabulates the modes on ``zTab`` — the merged
+        # source/receiver depth vector the deck asked for — so ``self.depths``
+        # is exactly where phi is known. Outside it there is no mode shape to
+        # interpolate: ``np.interp`` would hold the end value flat, which is
+        # neither the shape nor the evanescent tail the half-space carries, and
+        # would report a plausible number for a depth this mode set never
+        # covered. (AT is no better off the end — ``calculateweights.f90:43-49``
+        # stops its bracket search at ``L < Nx-1`` and extrapolates linearly —
+        # and neither code carries the half-space wavenumber needed for the
+        # true ``exp(-gamma_m (z-D))`` tail.) Follow uacpy's depth policy: a
+        # receiver below the resolvable domain is accepted as no-data, a
+        # source there is fatal because it defines the field.
+        z_lo, z_hi = float(self.depths[0]), float(self.depths[-1])
+        if not z_lo - 1e-9 <= z_s <= z_hi + 1e-9:
+            raise ConfigurationError(
+                f"Modes.modal_propagation_loss: source_depth={z_s:g} m is "
+                f"outside the tabulated mode depths [{z_lo:g}, {z_hi:g}] m, so "
+                f"the excitation phi_m(z_s) is unknown.",
+                remediation="Recompute the modes with this source depth in "
+                            "the Source, or move the source into the "
+                            "tabulated span.",
+            )
+        outside = (z_r < z_lo - 1e-9) | (z_r > z_hi + 1e-9)
+        if np.any(outside):
+            warnings.warn(
+                f"Modes.modal_propagation_loss: {int(outside.sum())} of "
+                f"{z_r.size} receiver depths fall outside the tabulated mode "
+                f"depths [{z_lo:g}, {z_hi:g}] m and are returned as NaN; the "
+                f"mode shapes are not defined there.",
+                UserWarning, stacklevel=2,
+            )
         phi = np.asarray(self.phi)
         is_complex = np.iscomplexobj(phi)
         if is_complex:
@@ -314,26 +362,32 @@ class Modes(Result):
                 for m in range(self.n_modes)
             ])
         k = np.asarray(self.k)
-        # Normalize the attenuation sign so modes always decay with range under
-        # the exp(+i k r) convention used below. Raw Kraken eigenvalues
-        # encode decay as k.imag < 0 (see modes_reader), whereas with_attenuation
-        # builds k.imag > 0; a passive medium can only attenuate, so force
-        # Im(k) >= 0 and the result is convention-agnostic either way.
-        k = k.real + 1j * np.abs(k.imag)
+        # AT propagates as e^(i(omega t - k r)) (EvaluateMod.f90), so the
+        # range factor here is e^(-i k r) and a decaying mode needs Im(k) <= 0.
+        # Raw Kraken eigenvalues encode decay as k.imag < 0 while
+        # with_attenuation builds k.imag > 0; a passive medium can only
+        # attenuate, so force the sign and accept either input.
+        k = k.real - 1j * np.abs(k.imag)
         # Complex sqrt — preserves the -arg(k)/2 phase contribution that
         # matters for phase-sensitive consumers (MFP, coherent integration).
         # Numpy's sqrt picks the principal branch (positive real part).
         inv_sqrt_k = 1.0 / np.sqrt(k.astype(np.complex128))
         weights = phi_zs * inv_sqrt_k
-        expikr = np.exp(1j * k[:, None] * r[None, :])
+        expikr = np.exp(-1j * k[:, None] * r[None, :])
         contribution = (phi_zr * weights)[:, :, None] * expikr[None, :, :]
         P = contribution.sum(axis=1)
         with np.errstate(divide='ignore', invalid='ignore'):
             sqrt_r = np.sqrt(r)
             sqrt_r = np.where(sqrt_r > 0, sqrt_r, 1.0)
-        rho_s = float(source_density) * 1000.0  # g/cm³ → kg/m³
-        pref = 1j * np.exp(-1j * np.pi / 4.0) / (rho_s * np.sqrt(8.0 * np.pi))
+        # KRAKEN normalises its modes with rho in g/cm³ (the .env unit), so the
+        # density enters here in g/cm³ too.
+        rho_s = float(source_density)
+        # TL is referenced to the free-field pressure at 1 m, 1/(4*pi), so the
+        # 4*pi is folded into the pressure prefactor i*e^(-i*pi/4)/(rho*sqrt(8*pi*r)):
+        # 4*pi / sqrt(8*pi) == sqrt(2*pi).
+        pref = -1j * np.exp(1j * np.pi / 4.0) * np.sqrt(2.0 * np.pi) / rho_s
         P = pref * P / sqrt_r[None, :]
+        P[outside, :] = np.nan
         id_kwargs = self.id_kwargs()
         id_kwargs['backend'] = 'modal_sum'
         id_kwargs['source_depths'] = np.array([z_s])

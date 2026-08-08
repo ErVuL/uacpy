@@ -37,7 +37,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "numpy>=1.22.0,<3.0",
+    # >=2.0 for np.trapezoid (the 2.0 rename of np.trapz), used in
+    # marine_mammal, bands, noise_synthesis and results.modes.
+    "numpy>=2.0.0,<3.0",
     "scipy>=1.8.0,<2.0",
     "matplotlib>=3.5.0,<4.0",
     # External ocean data

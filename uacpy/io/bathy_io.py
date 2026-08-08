@@ -316,6 +316,33 @@ def _validate_interp_type(interp_type: str) -> str:
     return t
 
 
+def _write_boundary_2d(
+    filepath: Union[str, Path], data: np.ndarray, interp_type: str,
+) -> None:
+    """Emit the short (2-column) ATI/BTY record: TYPE, count, ``(range_km,
+    value_m)`` rows.
+
+    ``.ati`` and ``.bty`` are the same writer on two units — the counterpart
+    of :func:`_read_boundary_2d`. ``data`` is an ``(N, 2)`` array of
+    ``(range_m, value_m)`` or any carrier exposing ``to_pairs()``; ranges are
+    converted to km for the file.
+    """
+    filepath = Path(filepath)
+    type_str = f"{_validate_interp_type(interp_type)}S"
+
+    if hasattr(data, "to_pairs"):
+        data = data.to_pairs()
+    rows = np.asarray(data, dtype=float).copy()
+    rows[:, 0] = m_to_km(rows[:, 0])
+
+    with open(filepath, "w") as f:
+        f.write(f"'{type_str}'\n")
+        f.write(f"{rows.shape[0]}\n")
+        for r, value in rows:
+            f.write(f"{r:.6f} {value:.6f}\n")
+        f.write("\n")
+
+
 def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_type: str = "L") -> None:
     """
     Write bathymetry file (short format, bathymetry only).
@@ -347,23 +374,7 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     The function automatically converts ranges from meters to kilometers
     for the output file.
     """
-    filepath = Path(filepath)
-    interp_char = _validate_interp_type(interp_type)
-    type_str = f"{interp_char}S"
-
-    if hasattr(bathymetry, "to_pairs"):
-        bathymetry = bathymetry.to_pairs()
-    bathy_km = np.asarray(bathymetry, dtype=float).copy()
-    bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
-
-    n_pts = bathy_km.shape[0]
-
-    with open(filepath, "w") as f:
-        f.write(f"'{type_str}'\n")
-        f.write(f"{n_pts}\n")
-        for i in range(n_pts):
-            f.write(f"{bathy_km[i, 0]:.6f} {bathy_km[i, 1]:.6f}\n")
-        f.write("\n")
+    _write_boundary_2d(filepath, bathymetry, interp_type)
 
 
 def write_bty_long_format(
@@ -475,23 +486,7 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
 
     Altimetry describes surface variations (ice keels, surface waves, etc.)
     """
-    filepath = Path(filepath)
-    interp_char = _validate_interp_type(interp_type)
-    type_str = f"{interp_char}S"
-
-    if hasattr(altimetry, "to_pairs"):
-        altimetry = altimetry.to_pairs()
-    alti_km = np.asarray(altimetry, dtype=float).copy()
-    alti_km[:, 0] = m_to_km(alti_km[:, 0])
-
-    n_pts = alti_km.shape[0]
-
-    with open(filepath, "w") as f:
-        f.write(f"'{type_str}'\n")
-        f.write(f"{n_pts}\n")
-        for i in range(n_pts):
-            f.write(f"{alti_km[i, 0]:.6f} {alti_km[i, 1]:.6f}\n")
-        f.write("\n")
+    _write_boundary_2d(filepath, altimetry, interp_type)
 
 
 def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,

@@ -115,3 +115,50 @@ def test_mvdr_music_no_divide_warning_and_music_peaks_at_source():
     # the sharp MUSIC peak at the source direction is the intended behaviour,
     # preserved (not clamped) — it localises the source at 10 deg
     assert abs(angles[np.argmax(mu)] - 10.0) < 2.0
+
+
+class TestPowerlessCovariance:
+    """``diagonal_loading`` is a *fraction of* ``trace(R)/N``, so it vanishes
+    with the trace: it stabilises a rank-deficient covariance that still
+    carries power but cannot rescue an all-zero one. That is ordinary data —
+    ``sample_covariance`` of a silent segment (dead element, digital silence)
+    returns exactly it. Unguarded, MVDR raised a bare numpy ``LinAlgError`` and
+    MUSIC returned a finite *uniform* pseudospectrum, which is worse: it looks
+    like an answer."""
+
+    @staticmethod
+    def _rig(n=8):
+        from uacpy.acoustic_signal.arrays import steering_vectors
+        return steering_vectors(np.arange(n) * 0.75,
+                                np.linspace(-90.0, 90.0, 37), 1000.0)
+
+    def test_silence_gives_nan_and_warns_not_a_raw_linalg_error(self):
+        from uacpy.acoustic_signal.arrays import (
+            sample_covariance, mvdr_spectrum, music_spectrum)
+        E = self._rig()
+        R = sample_covariance(np.zeros((8, 200), dtype=complex))
+        for fn in (lambda: mvdr_spectrum(R, E),
+                   lambda: music_spectrum(R, E, 1)):
+            with pytest.warns(UserWarning, match='no power'):
+                out = fn()
+            assert np.all(np.isnan(out))
+
+    def test_bartlett_reports_zero_power_which_is_the_true_answer(self):
+        from uacpy.acoustic_signal.arrays import (
+            sample_covariance, bartlett_spectrum)
+        R = sample_covariance(np.zeros((8, 200), dtype=complex))
+        assert np.all(bartlett_spectrum(R, self._rig()) == 0.0)
+
+    def test_a_powered_rank_deficient_covariance_still_resolves(self):
+        """The case the loading exists for must keep working: fewer snapshots
+        than elements, but non-zero trace."""
+        from uacpy.acoustic_signal.arrays import (
+            steering_vectors, sample_covariance, mvdr_spectrum)
+        rng = np.random.default_rng(0)
+        a = steering_vectors(np.arange(8) * 0.75, [15.0], 1000.0).T * np.sqrt(8)
+        x = a @ (rng.normal(size=(1, 4)) + 1j * rng.normal(size=(1, 4)))
+        angles = np.linspace(-90.0, 90.0, 721)
+        P = mvdr_spectrum(sample_covariance(x),
+                          steering_vectors(np.arange(8) * 0.75, angles, 1000.0))
+        assert np.all(np.isfinite(P))
+        assert angles[np.argmax(P)] == pytest.approx(15.0, abs=0.5)

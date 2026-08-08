@@ -118,17 +118,20 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
 
 def _sel_adjust_fmin_fmax(fmin, fmax, band_type, sample_rate):
     """Snap configured band edges to band boundaries for this ``sample_rate``."""
+    nyquist = sample_rate / 2
     if band_type == "octave":
         fmin = 2 ** np.floor(math.log2(fmin))
         fmax = 2 ** np.ceil(math.log2(fmax))
-        if fmax > sample_rate / 2:
-            fmax = 2 ** np.floor(math.log2(fmax))
+        # Snap down to the highest band boundary at or below Nyquist, so no
+        # band the caller gets back sits wholly in unsampled spectrum.
+        if fmax > nyquist:
+            fmax = 2 ** np.floor(math.log2(nyquist))
     elif band_type == "third_octave":
         base = math.pow(2, 1 / 6)
         fmin = base ** np.floor(math.log(fmin, base))
         fmax = base ** np.ceil(math.log(fmax, base))
-        if fmax > sample_rate / 2:
-            fmax = base ** np.floor(math.log(fmax, base))
+        if fmax > nyquist:
+            fmax = base ** np.floor(math.log(nyquist, base))
     return fmin, fmax
 
 

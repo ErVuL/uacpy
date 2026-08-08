@@ -615,3 +615,137 @@ class TestNoSincSquaredTaperOnTheFieldSpectrum:
         """1/df_data is the non-aliased extent; anything longer is fabricated."""
         t, _ = self._two_arrival_trace(10.0, 0.020)
         assert (t[-1] - t[0]) <= 1.0 / 10.0 + 2 * float(t[1] - t[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frequency-grid bin alignment in _ifft_to_trace
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSynthesisBinAlignment:
+    """A DFT of spacing Δf carries only integer multiples of Δf.
+
+    When ``f[0]`` is not itself a multiple of Δf the whole band is placed at
+    an offset of up to Δf/2, which frequency-shifts the trace. The synthesis
+    removes that offset, so a grid the caller happened to build with
+    ``linspace`` reconstructs as well as one built with ``arange``.
+    """
+
+    FS = 8000.0
+    BAND = (280.0, 360.0)
+
+    def _source(self):
+        n = 400
+        t = np.arange(n) / self.FS
+        wf = np.sin(2 * np.pi * 320.0 * t) * np.hanning(n)
+        spec = np.fft.rfft(wf)
+        f = np.fft.rfftfreq(n, 1.0 / self.FS)
+        spec[(f < self.BAND[0]) | (f > self.BAND[1])] = 0.0
+        return t, np.fft.irfft(spec, n)
+
+    def _flat_channel_error(self, freqs):
+        """Max error of ``H == 1`` synthesis against the source waveform."""
+        t, wf = self._source()
+        tf = uacpy.Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': [10.0], 'range': [0.0], 'frequency': freqs},
+            model='X', frequencies=freqs, phase_reference='travelling_wave')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = tf.synthesize_time_series(wf, self.FS, t_start=0.0,
+                                            window='none')
+        y = out.data[0, 0, :]
+        ref = np.interp(out.coords['time'], t, wf, left=0.0, right=0.0)
+        return float(np.max(np.abs(y[:ref.size] - ref)) / np.max(np.abs(wf)))
+
+    @staticmethod
+    def _bin_offset(freqs):
+        df = float(freqs[1] - freqs[0])
+        return float(np.floor(freqs[0] / df + 0.5) * df - freqs[0])
+
+    def test_aligned_grid_reproduces_the_source(self):
+        freqs = np.arange(260.0, 380.1, 10.0)
+        assert self._bin_offset(freqs) == pytest.approx(0.0, abs=1e-9)
+        assert self._flat_channel_error(freqs) < 0.05
+
+    @pytest.mark.parametrize('freqs', [
+        np.linspace(261.0, 381.0, 13),    # offset -1 Hz
+        np.linspace(255.0, 375.0, 13),    # offset +5 Hz
+        np.linspace(266.0, 386.0, 9),     # offset +4 Hz, coarser df
+    ])
+    def test_misaligned_grid_reproduces_the_source(self, freqs):
+        """Without the de-rotation these returned a band-shifted waveform."""
+        assert abs(self._bin_offset(freqs)) > 0.5
+        assert self._flat_channel_error(freqs) < 0.05
+
+    def test_auto_derived_timeseries_grid_keeps_the_carrier(self):
+        """``_MIN_TIMESERIES_FREQS`` refinement produces a misaligned grid.
+
+        The refined ``linspace(f_min, f_max, 8)`` is exactly the case a
+        default TIME_SERIES run derives, and its band is narrower than the
+        source, so the assertion is on the carrier rather than on waveform
+        equality: the trace must sit at the frequency the caller asked for,
+        not at that frequency minus the bin offset.
+        """
+        model = uacpy.models.Bellhop.__new__(uacpy.models.Bellhop)
+        model.model_name = 'Bellhop'
+        t, wf = self._source()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            freqs = model._resolve_time_series_frequencies(
+                RunMode.TIME_SERIES, None, wf, self.FS)
+        assert freqs.size >= 8
+        assert abs(self._bin_offset(freqs)) > 0.5, "grid is already aligned"
+
+        tf = uacpy.Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': [10.0], 'range': [0.0], 'frequency': freqs},
+            model='X', frequencies=freqs, phase_reference='travelling_wave')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = tf.synthesize_time_series(wf, self.FS, t_start=0.0,
+                                            window='none')
+        y = out.data[0, 0, :]
+        dt = float(out.coords['time'][1] - out.coords['time'][0])
+        spec = np.abs(np.fft.rfft(y, 16384))
+        peak = float(np.fft.rfftfreq(16384, dt)[np.argmax(spec)])
+        assert peak == pytest.approx(320.0, abs=1.0)
+
+
+class TestSynthesisWindowAnchor:
+    """The output window must open before the earliest arrival.
+
+    The earliest arrival travels at the fastest speed, so the anchor is
+    ``r / c_max``; anchoring on the slowest speed opened the window after it.
+    """
+
+    FREQS = np.arange(40.0, 81.0, 1.0)      # 1 Hz spacing -> 1 s record
+
+    def _trace(self, metadata, range_m=60000.0):
+        tf = uacpy.Field(
+            data=np.ones((1, 1, self.FREQS.size), dtype=complex),
+            coords={'depth': [100.0], 'range': [range_m],
+                    'frequency': self.FREQS},
+            model='RAM', frequencies=self.FREQS,
+            phase_reference='travelling_wave', metadata=metadata)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            trace = tf.to_time_trace()
+        return float(trace.coords['time'][0]), caught
+
+    def test_c_max_anchors_before_the_earliest_arrival(self):
+        t0, caught = self._trace({'c_min': 1500.0, 'c_max': 1550.0,
+                                  'c0': 1520.0})
+        assert t0 <= 60000.0 / 1550.0
+        assert not [w for w in caught if 'wrap to the end' in str(w.message)]
+
+    def test_missing_c_max_warns_at_long_range(self):
+        _, caught = self._trace({'c_min': 1500.0, 'c0': 1520.0})
+        assert [w for w in caught if 'wrap to the end' in str(w.message)], (
+            "a long-range trace with no c_max must say the window start is "
+            "an estimate")
+
+    def test_short_range_does_not_warn(self):
+        t0, caught = self._trace({'c0': 1500.0}, range_m=2000.0)
+        assert t0 <= 2000.0 / 1500.0
+        assert not [w for w in caught if 'wrap to the end' in str(w.message)]

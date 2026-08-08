@@ -4,28 +4,32 @@ ADVANCED EXAMPLE: RAM (mpiramS) - Range-Dependent SSP and Bottom
 ===============================================================================
 
 OBJECTIVE:
-    Demonstrate RAM's full range-dependent capabilities using the mpiramS
+    Demonstrate RAM's range-dependent capabilities using the mpiramS
     Fortran PE backend:
-    - 2D range-dependent SSP (thermal front/eddy)
     - Range-dependent bottom properties (sediment transition)
-    - Parabolic equation accuracy for complex environments
-    - Broadband (time-series) mode for time-domain analysis
+    - Sloping-shelf bathymetry
+    - Parabolic equation accuracy control
 
 SCENARIO:
-    Thermal Front - Warm water meets cold water with sediment change
+    Sediment transition over a sloping shelf.
 
-    Range progression (0 -> 20 km):
-    - SSP: Warm stratified -> Cold well-mixed
+    Range progression (0 -> 3 km):
+    - SSP: single warm stratified profile, range-independent
+      (``env.has_range_dependent_ssp`` prints False below)
     - Bottom: Soft mud -> Hard sand
-    - Depth: Shallow shelf -> Deeper slope
+    - Depth: 100 m shelf -> 150 m slope
 
 FEATURES DEMONSTRATED:
-    - 2D SSP matrix (sound speed varies with depth AND range)
     - Range-dependent bottom properties
-    - Thermal front modeling
     - Continental shelf transition
     - COHERENT_TL mode (narrowband TL over range-depth grid)
-    - TIME_SERIES mode (broadband complex field for IFFT)
+    - Reading a TL field that is partly below the seafloor
+
+NOTE ON COVERAGE:
+    The receiver grid spans 5-145 m while the seafloor runs 100 m (r=0) to
+    150 m (r=3 km), so the shallow-range columns place receivers inside the
+    sub-bottom. Those cells come back NaN. Every summary below is therefore
+    NaN-aware and reports how much of the grid is actually water.
 
 ===============================================================================
 """
@@ -66,9 +70,22 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
     )
 
 
+def _print_tl_summary(label, field):
+    """NaN-aware TL summary that also states how much of the grid is water.
+
+    Receivers below the local seafloor come back NaN; a bare ``.min()``/
+    ``.max()`` on such a grid returns ``nan`` and hides the gap.
+    """
+    tl = np.asarray(field.tl)
+    n_water = int(np.isfinite(tl).sum())
+    print(f"  ✓ {label}: TL range {np.nanmin(tl):.1f} to {np.nanmax(tl):.1f} dB"
+          f"  [{n_water}/{tl.size} cells in water,"
+          f" {tl.size - n_water} below seafloor]")
+
+
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 05: RAM advanced features - Range-Dependent SSP & Bottom")
+    print("EXAMPLE 05: RAM advanced features - Range-Dependent Bottom")
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -146,7 +163,7 @@ def main():
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
         print("  RAM TL completed successfully")
-        print(f"  TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+        _print_tl_summary("RAM", result)
     except Exception as e:
         print(f"  RAM error: {e}")
         import traceback
@@ -169,7 +186,7 @@ def main():
         krakenfield = Kraken(verbose=False)
         result_krakenfield = krakenfield.compute_tl(env, source, receiver)
         print("  ✓ Kraken completed (using range-independent approximation)")
-        print(f"  ✓ TL range: {result_krakenfield.tl.min():.1f} to {result_krakenfield.tl.max():.1f} dB")
+        _print_tl_summary("Kraken", result_krakenfield)
     except Exception as e:
         print(f"  ✗ Kraken: {e}")
         result_krakenfield = None
@@ -180,7 +197,7 @@ def main():
         bellhop = Bellhop(verbose=False)
         result_bellhop = bellhop.compute_tl(env, source, receiver)
         print("  ✓ Bellhop completed (full range-dependent capability)")
-        print(f"  ✓ TL range: {result_bellhop.tl.min():.1f} to {result_bellhop.tl.max():.1f} dB")
+        _print_tl_summary("Bellhop", result_bellhop)
     except Exception as e:
         print(f"  ✗ Bellhop: {e}")
         result_bellhop = None
@@ -193,6 +210,15 @@ def main():
     if result is not None and result_bellhop is not None:
         diff_bh = np.abs(result.tl - result_bellhop.tl)
         print(f"  RAM vs Bellhop: Mean diff = {np.nanmean(diff_bh):.1f} dB (PE vs ray methods)")
+        lam = 1500.0 / source.frequencies[0]
+        d_lo, d_hi = env.bathymetry.depths.min(), env.bathymetry.depths.max()
+        print(f"    Read that difference with care: at {source.frequencies[0]:.0f} Hz the"
+              f" guide is only D/lambda = {d_lo / lam:.0f}-{d_hi / lam:.0f}")
+        print("    wavelengths deep. DOCUMENTATION.md section 5 puts ray methods at"
+              " D/lambda >~ 100, with")
+        print("    modes/PE taking over below D/lambda ~ 30, so Bellhop is outside its"
+              " regime here and")
+        print("    RAM is the reference, not the other way round.")
 
     if result_bellhop is not None and result_krakenfield is not None:
         diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)

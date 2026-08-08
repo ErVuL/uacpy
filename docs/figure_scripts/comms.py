@@ -278,7 +278,7 @@ def doppler():
     """Doppler-scale estimation from a wideband probe, and its accuracy."""
     rng = np.random.default_rng(0)
     fs = 12000.0
-    probe, _ = lfm_chirp(1000.0, 5000.0, 1.0, fs)
+    _, probe = lfm_chirp(1000.0, 5000.0, 1.0, fs)
     scales = np.linspace(-1e-3, 4e-3, 101)
 
     def record(v):

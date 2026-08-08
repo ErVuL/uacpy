@@ -41,7 +41,7 @@ receiver = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 100),
 |---|---|---|
 | `depths` | **required** | Receiver depth(s), metres, positive down. |
 | `ranges` | `None` → `0.0` **+ warning** | Metres, measured from the source. |
-| `receiver_type` | `'grid'` | Sampling layout: `'grid'` or `'line'` — [§7](#7-conventions-that-bite). |
+| `receiver_type` | `'grid'` | Sampling layout. `'grid'` is the only implemented one; `'line'` raises — [§7](#7-conventions-that-bite). |
 
 Both coerce scalars and lists to 1-D `float64` arrays, so `depths=25.0` and
 `depths=[25.0]` leave you holding the same `array([25.])`. Both are
@@ -253,9 +253,10 @@ it supports ['point'].
 ```
 
 > **`Source(source_type='line')` and `Receiver(receiver_type='line')` are
-> unrelated.** The first is a physical source shape. The second is a
-> *sampling* rule (pair `depths[i]` with `ranges[i]` instead of taking the
-> cross-product). The shared word names two different concepts.
+> unrelated.** The first is a physical source shape, supported by several
+> models. The second is a *sampling* rule (pair `depths[i]` with `ranges[i]`
+> instead of taking the cross-product) that no model implements, so the
+> carrier rejects it. The shared word names two different concepts.
 
 ---
 
@@ -479,22 +480,20 @@ Set source depth to ≤ 100.0m
 sediment column too, so over 100 m of water with an 8 m sand layer their limit
 is 108 m while Bellhop's is 100 m.
 
-### `receiver_type='line'` constructs but does not run
+### `receiver_type='line'` is rejected at construction
 
-`'line'` pairs `depths[i]` with `ranges[i]` instead of taking the
-cross-product, and the carrier supports it: it broadcasts a scalar against the
-other axis, skips the strictly-increasing check (a glider track may double
-back), and reprs as `Receiver(line: 3 paired points, type='line')`. No model
-implements it:
+`'line'` would pair `depths[i]` with `ranges[i]` instead of taking the
+cross-product. No model's result assembly does that — every one returns the
+full grid — so the carrier refuses the layout outright rather than letting a
+run hand back a shape you did not ask for:
 
 ```python
->>> Bellhop().run(env, source, uacpy.Receiver(depths=[10., 20., 30.],
-...                ranges=[1000., 2000., 3000.], receiver_type='line'))
-ConfigurationError: Bellhop: receiver_type='line' is not implemented — every
-model returns the full depth x range grid, so the paired (depths[i],
-ranges[i]) sampling you asked for would be silently ignored. Use
-receiver_type='grid' and index the diagonal yourself:
-tl[np.arange(len(depths)), np.arange(len(ranges))].
+>>> uacpy.Receiver(depths=[10., 20., 30.],
+...                ranges=[1000., 2000., 3000.], receiver_type='line')
+ConfigurationError: receiver_type='line' is not implemented — every model
+returns the full depth x range grid, so the paired (depths[i], ranges[i])
+sampling would be silently ignored. Use receiver_type='grid' and index the
+diagonal yourself: tl[np.arange(len(depths)), np.arange(len(ranges))].
 ```
 
 Refusing beats returning a `(3, 3)` grid to someone who asked for 3 points.

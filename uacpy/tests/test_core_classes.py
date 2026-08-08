@@ -187,11 +187,11 @@ class TestReceiver:
         with pytest.raises(ConfigurationError, match="receiver_type"):
             uacpy.Receiver(depths=50, ranges=1000, receiver_type='gird')
 
-    def test_receiver_type_accepts_grid_and_line(self):
+    def test_receiver_type_accepts_grid_rejects_line(self):
         rx = uacpy.Receiver(depths=50, ranges=1000, receiver_type='grid')
         assert rx.receiver_type == 'grid'
-        rx = uacpy.Receiver(depths=50, ranges=1000, receiver_type='line')
-        assert rx.receiver_type == 'line'
+        with pytest.raises(ConfigurationError, match="receiver_type='line'"):
+            uacpy.Receiver(depths=50, ranges=1000, receiver_type='line')
 
 
 class TestField:
@@ -1426,3 +1426,42 @@ class TestEnvironmentPredicatesAreProperties:
         env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
         for name in self._NAMES:
             assert getattr(env, name) is False, f"{name} should be False"
+
+
+class TestReflectionFileDedupe:
+    """``dedupe_reflection_file`` is a .brc/.trc rewriter, not a .irc one.
+
+    BOUNCE writes the .irc with a title/frequency header and six
+    fixed-format columns (``bounce.f90:225-228``), read back by the same
+    fixed format at ``misc/RefCoef.f90:97-107``. Running the 3-column
+    angle dedupe over one stripped the header and four of the columns.
+    """
+
+    def _irc(self, tmp_path):
+        p = tmp_path / 't.irc'
+        p.write_text(
+            " ' BOUNCE test '  100.0\n 2\n"
+            "     0.1000000     1.0000000     0.0000000"
+            "     0.5000000     0.1000000    0\n"
+            "     0.2000000     0.9000000     0.1000000"
+            "     0.4000000     0.2000000    1\n")
+        return p
+
+    def test_irc_is_rejected_and_left_untouched(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        from uacpy.core.exceptions import FileFormatError
+        irc = self._irc(tmp_path)
+        before = irc.read_text()
+        with pytest.raises(FileFormatError, match='row count'):
+            dedupe_reflection_file(irc)
+        assert irc.read_text() == before
+
+    def test_brc_duplicate_angles_are_collapsed(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        brc = tmp_path / 't.brc'
+        brc.write_text("   4\n  0.0 1.0 0.0\n  0.0 1.0 0.0\n"
+                       "  30.0 0.8 10.0\n  60.0 0.5 20.0\n")
+        dedupe_reflection_file(brc)
+        rows = [ln.split() for ln in brc.read_text().splitlines() if ln.strip()]
+        assert int(rows[0][0]) == 3
+        assert [float(r[0]) for r in rows[1:]] == [0.0, 30.0, 60.0]

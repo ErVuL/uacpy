@@ -41,7 +41,6 @@ GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 _RHO_ASC = _HB_RHO[::-1]
 _PHI_DESC = _HB_PHI[::-1]
 
-_GRID = {}   # path -> _GrawGrid
 
 
 def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -61,7 +60,7 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
         part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
                                   source='graw'))
         os.replace(part, out)
-    _GRID.clear()
+    _cache.invalidate_grids()
     log_message('graw', f"Graw density grid cached → {out}", verbose=verbose)
     return out
 
@@ -85,11 +84,7 @@ class _GrawGrid(NetcdfGrid):
 
 
 def _grid():
-    path = _cache.require('graw', GRAW_FILE)
-    key = str(path)
-    if key not in _GRID:
-        _GRID[key] = _GrawGrid(path)
-    return _GRID[key]
+    return _cache.cached_grid('graw', GRAW_FILE, _GrawGrid)
 
 
 def fetch_seabed_density(point):

@@ -18,7 +18,6 @@ from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
 
-_GRID = {}   # path -> _GebcoGrid (open once, sample many)
 
 
 class _GebcoGrid(NetcdfGrid):
@@ -79,10 +78,7 @@ def _grid():
         # No .nc in the (existing) cache dir → require() raises the typed
         # ConfigurationError naming the install flag; it never returns here.
         _cache.require('gebco', 'GEBCO_2025.nc')
-    key = str(nc)
-    if key not in _GRID:
-        _GRID[key] = _GebcoGrid(nc)
-    return _GRID[key]
+    return _cache.cached_grid_at(nc, _GebcoGrid)
 
 
 def _depth_from_elevation(elev, lat, lon):

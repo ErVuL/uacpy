@@ -13,6 +13,7 @@ Schmidt, R.O. (1986). Multiple emitter location and signal parameter estimation.
 
 from __future__ import annotations
 
+import warnings
 from collections import namedtuple
 from typing import Optional
 
@@ -83,23 +84,49 @@ def bartlett_spectrum(R, steering):
     return np.real(np.einsum("ai,ij,aj->a", e.conj(), R, e))
 
 
+def _powerless_covariance(R, caller: str) -> bool:
+    """True when ``R`` carries no power, leaving a normalised spectrum undefined.
+
+    ``diagonal_loading`` is a *fraction of* ``trace(R)/N``, so it vanishes with
+    the trace: it stabilises a rank-deficient covariance that still carries
+    power, but cannot rescue an all-zero one. That case is ordinary data, not a
+    contrived input — ``sample_covariance`` of a silent segment (a dead
+    element, a stretch of digital silence) returns exactly it. Left alone, MVDR
+    raises a bare ``numpy`` ``LinAlgError`` and MUSIC returns a finite *uniform*
+    pseudospectrum, which is worse: it looks like an answer.
+    """
+    trace = np.trace(R).real
+    scale = trace / R.shape[0]
+    if np.isfinite(scale) and scale > 0.0:
+        return False
+    warnings.warn(
+        f"{caller}: the covariance carries no power (trace={trace:g}), so the "
+        f"spectrum is undefined; returning NaN.",
+        UserWarning, stacklevel=3,
+    )
+    return True
+
+
 def mvdr_spectrum(R, steering, *, diagonal_loading: float = 1e-6):
     """MVDR / Capon power vs angle: ``1 / (e^H R^-1 e)``.
 
     ``steering`` is the ``(n_angles, n_elements)`` matrix from
     :func:`steering_vectors`. ``diagonal_loading`` (fraction of
     ``trace(R)/N``) stabilises the inverse for rank-deficient or
-    snapshot-starved covariances.
+    snapshot-starved covariances — but only while ``R`` still carries power;
+    see :func:`_powerless_covariance`.
     """
     R = np.asarray(R, dtype=complex)
     n = R.shape[0]
+    e = np.asarray(steering, dtype=complex)
+    if _powerless_covariance(R, "mvdr_spectrum"):
+        return np.full(e.shape[0], np.nan)
     if diagonal_loading > 0.0:
         R = R + diagonal_loading * (np.trace(R).real / n) * np.eye(n)
     Rinv = np.linalg.inv(R)
-    e = np.asarray(steering, dtype=complex)
     denom = np.real(np.einsum("ai,ij,aj->a", e.conj(), Rinv, e))
-    # With diagonal_loading > 0, R is positive-definite so denom > 0 and the
-    # output is finite. denom -> 0 only for a singular/rank-deficient R with no
+    # R carries power and diagonal_loading > 0, so R is positive-definite and
+    # denom > 0. denom -> 0 only for a singular/rank-deficient R with no
     # loading, where 1/denom -> +inf is the honest degenerate answer (a steering
     # direction in R's null space); silence the spurious divide warning.
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -120,9 +147,11 @@ def music_spectrum(R, steering, n_sources: int):
         raise ConfigurationError(
             f"music_spectrum: n_sources must be in [1, {n - 1}], got {n_sources}"
         )
+    e = np.asarray(steering, dtype=complex)
+    if _powerless_covariance(R, "music_spectrum"):
+        return np.full(e.shape[0], np.nan)
     evals, evecs = np.linalg.eigh(R)
     noise = evecs[:, : n - n_sources]
-    e = np.asarray(steering, dtype=complex)
     proj = e.conj() @ noise
     denom = np.sum(np.abs(proj) ** 2, axis=1)
     # denom -> 0 at a true source direction (steering orthogonal to the noise

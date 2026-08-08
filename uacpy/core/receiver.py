@@ -33,16 +33,17 @@ class Receiver:
     ranges : float or array-like, optional
         Receiver range(s) in meters. Default is single point at 0m.
     receiver_type : str, optional
-        Receiver *sampling layout*: 'grid' (default — field on the full
-        depth×range cross-product) or 'line' (depths and ranges paired
-        point-by-point, requiring ``len(depths) == len(ranges)``, e.g. a
-        glider track or tilted array). Note: 'line' here is a coordinate-
-        pairing rule and is unrelated to :class:`~uacpy.Source`'s
-        ``source_type='line'`` (a physical line-source geometry). Unlike
-        ``'grid'`` (whose axes must be strictly increasing), a ``'line'``
-        layout is a raw sampling list: ordering and uniqueness are the
-        caller's responsibility. Feeding a non-monotonic line into a reader
-        that interpolates on range/depth is undefined.
+        Receiver *sampling layout*. ``'grid'`` (default) evaluates the field
+        on the full depth×range cross-product and is the only implemented
+        layout. ``'line'`` — depths and ranges paired point-by-point, e.g. a
+        glider track or tilted array — names the axis but **raises**: no
+        model's result assembly collapses the grid to paired samples, so
+        accepting it would silently return the cross-product instead. Use
+        ``'grid'`` and index the diagonal:
+        ``tl[np.arange(len(depths)), np.arange(len(ranges))]``. Note this
+        ``'line'`` is a coordinate-pairing rule, unrelated to
+        :class:`~uacpy.Source`'s ``source_type='line'`` (a physical
+        line-source geometry).
 
     Attributes
     ----------
@@ -86,6 +87,14 @@ class Receiver:
                 f"receiver_type must be one of {list(valid_types)}, "
                 f"got {self.receiver_type!r}"
             )
+        if self.receiver_type == 'line':
+            raise ConfigurationError(
+                "receiver_type='line' is not implemented — every model "
+                "returns the full depth x range grid, so the paired "
+                "(depths[i], ranges[i]) sampling would be silently ignored. "
+                "Use receiver_type='grid' and index the diagonal yourself: "
+                "tl[np.arange(len(depths)), np.arange(len(ranges))]."
+            )
         if self.ranges is None:
             warnings.warn(
                 "Receiver: ranges not given, defaulting to a single point at "
@@ -113,20 +122,8 @@ class Receiver:
         _require_non_negative(
             self.ranges, "receiver ranges", hint="metres, outward from source")
 
-        if self.receiver_type == 'line':
-            if len(self.depths) != len(self.ranges):
-                if len(self.ranges) == 1:
-                    self.ranges = np.full_like(self.depths, self.ranges[0])
-                elif len(self.depths) == 1:
-                    self.depths = np.full_like(self.ranges, self.depths[0])
-                else:
-                    raise ConfigurationError(
-                        "For receiver_type='line', depths and ranges must "
-                        "have the same length or one must be scalar"
-                    )
-        else:
-            _require_strictly_increasing(self.depths, "Receiver.depths")
-            _require_strictly_increasing(self.ranges, "Receiver.ranges")
+        _require_strictly_increasing(self.depths, "Receiver.depths")
+        _require_strictly_increasing(self.ranges, "Receiver.ranges")
 
     @property
     def n_depths(self) -> int:
@@ -159,10 +156,7 @@ class Receiver:
         return float(np.max(self.ranges))
 
     def __repr__(self) -> str:
-        if self.receiver_type == 'grid':
-            return (f"Receiver(grid: {self.n_depths} depths × {self.n_ranges} ranges)")
-        return (f"Receiver(line: {self.n_depths} paired points, "
-                f"type='{self.receiver_type}')")
+        return f"Receiver(grid: {self.n_depths} depths × {self.n_ranges} ranges)"
 
     def copy(self):
         """Deep copy (symmetric with the other carriers)."""

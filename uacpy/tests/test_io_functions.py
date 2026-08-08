@@ -608,7 +608,7 @@ class TestHankelScaledCylindrical:
 class TestConstantAbsorptionColumn:
     """A ConstantAbsorption baseline must land in AT's alphaI column.
 
-    ``sspMod.f90:334`` reads each SSP line as
+    ``misc/sspMod.f90:334`` reads each SSP line as
     ``z, alphaR (cp), betaR (cs), rhoR, alphaI, betaI``. Writing the baseline
     third makes it the water column's *shear speed*: Kraken then returns an
     all-NaN field and Scooter segfaults.
@@ -736,7 +736,7 @@ class TestRoughnessGoesToItsOwnInterface:
 class TestSSPLinePinsWaterProperties:
     """AT's ``/`` list-directed terminator leaves unassigned items at their
     previous value, and ``TopBot`` (ReadEnvironmentMod.f90:285) reads the top
-    half-space into the very module variables (sspMod.f90:14) that a short
+    half-space into the very module variables (misc/sspMod.f90:14) that a short
     ``z c /`` SSP line relies on. Every SSP line must therefore pin all six
     columns explicitly, as bellhop_writer.py already does."""
 
@@ -1003,7 +1003,7 @@ class TestBellhopWriterReflectionStaging:
 class TestOASNWavenumberSampling:
     """``nw_samples`` reaches every OASN integration block. The replica and
     discrete-source wavenumber lines (``NWSIN``/``NWDIN``, unoasn22.f:227 and
-    oasnun22.f:291) are what OASN samples the field on."""
+    oasnun22.f:421) are what OASN samples the field on."""
 
     @staticmethod
     def _env_src_rcv():
@@ -1214,7 +1214,7 @@ class TestMultiProfileEnvKeepsLayerThickness:
 
 class TestSSPRangeAxisPrecision:
     """``write_ssp``'s range axis feeds Bellhop's Quad segment search, which
-    needs ``SSP%Seg%r`` strictly increasing (sspMod.f90)."""
+    needs ``SSP%Seg%r`` strictly increasing (Bellhop/sspMod.f90)."""
 
     def test_sub_metre_ranges_survive_the_round_trip(self, tmp_path):
         from uacpy.io.oalib_writer import write_ssp
@@ -1374,7 +1374,7 @@ class TestBinaryArrivalsRejected:
 class TestOASNNoiseWavenumberCounts:
     """The surface- and deep-noise blocks have no automatic-sampling branch:
     ``NOIPAR`` reads three explicit counts and sums them into ``NWVNON`` /
-    ``NWVNOP`` (oasnun22.f:312, :359). A negative count makes that total
+    ``NWVNOP`` (oasnun22.f:312, :358). A negative count makes that total
     negative and the block integrates nothing — the covariance silently
     collapses to the white-noise identity."""
 
@@ -1464,3 +1464,1018 @@ class TestAltimetryLongFormat:
         p.write_text("'ZS'\n1\n0.0 0.0\n")
         with pytest.raises(FileFormatError, match='altimetry type'):
             read_altimetry(p)
+
+
+class TestSedimentLayerColumnOrder:
+    """Pin the AT ``.env`` medium-line column order for sediment layers.
+
+    ``misc/sspMod.f90:334`` reads each SSP line as
+    ``z, alphaR, betaR, rhoR, alphaI, betaI`` — depth, compressional speed,
+    shear speed, density, compressional attenuation, shear attenuation. The
+    halfspace line is covered by the analytic Pekeris benchmark, but the
+    layered block (``write_layer_sections``, NMEDIA > 1) has no benchmark, so a
+    swap there changes every layered result while every test still passes.
+    """
+
+    # Chosen so no two fields share a value and none is a plausible default:
+    # a swap of any pair moves a number that is checked below.
+    CP, CS, RHO, ALPHA_P, ALPHA_S = 1623.0, 0.0, 1.77, 0.33, 0.0
+    THICKNESS = 12.0
+
+    def _write(self, tmp_path):
+        from uacpy.core.environment import (
+            Bottom, SeabedColumn, SedimentLayer, BoundaryProperties)
+        from uacpy.io.oalib_writer import write_kraken_env_file
+        from uacpy.core.constants import BoundaryType
+        layer = SedimentLayer(thickness=self.THICKNESS, sound_speed=self.CP,
+                              density=self.RHO, attenuation=self.ALPHA_P)
+        # Distinct, non-zero shear values: swapping cs with alpha_s between two
+        # zeros would be a no-op and the guard could never fail.
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800.0,
+                                density=2.0, attenuation=0.5,
+                                shear_speed=600.0, shear_attenuation=0.25)
+        env = uacpy.Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+            bottom=Bottom(columns=[SeabedColumn(layers=[layer], halfspace=hs)]),
+        )
+        out = tmp_path / 'layers.env'
+        write_kraken_env_file(
+            str(out), env,
+            uacpy.Source(depths=25.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            ssp_topopt='C', surface_type=BoundaryType.VACUUM,
+            bottom_type=BoundaryType.HALF_SPACE, frequencies=[100.0],
+            n_mesh=0, rmax_m=1000.0, c_low=0.0, c_high=2000.0,
+        )
+        return out.read_text().splitlines()
+
+    def test_halfspace_line_fields_are_in_at_order(self, tmp_path):
+        """Same column order on the ``'A'`` halfspace line. Swapping the
+        elastic columns (cs <-> alpha_s) makes krakenc hang rather than fail,
+        so a physical test cannot settle it — the deck is checked directly."""
+        lines = self._write(tmp_path)
+        idx = next(i for i, ln in enumerate(lines) if ln.strip().startswith("'A'"))
+        z, cp, cs, rho, alpha_p, alpha_s = (
+            float(v) for v in lines[idx + 1].split()[:6])
+        assert cp == pytest.approx(1800.0)
+        assert cs == pytest.approx(600.0), "column 3 must be shear speed (betaR)"
+        assert rho == pytest.approx(2.0), "column 4 must be density (rhoR)"
+        assert alpha_p == pytest.approx(0.5), (
+            "column 5 must be compressional attenuation (alphaI)")
+        assert alpha_s == pytest.approx(0.25), (
+            "column 6 must be shear attenuation (betaI)")
+
+    def test_layer_line_fields_are_in_at_order(self, tmp_path):
+        lines = self._write(tmp_path)
+        layer_rows = [ln.split() for ln in lines
+                      if ln.strip().startswith(('100.0 ', '112.0 '))
+                      and ln.strip().endswith('/')]
+        assert len(layer_rows) == 2, f"expected the layer's two rows, got {layer_rows}"
+        for row in layer_rows:
+            z, cp, cs, rho, alpha_p, alpha_s = (float(v) for v in row[:6])
+            assert cp == pytest.approx(self.CP)
+            assert cs == pytest.approx(self.CS)
+            assert rho == pytest.approx(self.RHO), (
+                "column 4 must be density (rhoR), not attenuation")
+            assert alpha_p == pytest.approx(self.ALPHA_P), (
+                "column 5 must be compressional attenuation (alphaI)")
+            assert alpha_s == pytest.approx(self.ALPHA_S)
+        assert [float(r[0]) for r in layer_rows] == [100.0, 112.0]
+
+
+def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
+    """Every profile in a multi-profile ``.env`` ends at the same depth, that
+    depth is the one :func:`plan_multi_profile_media` reports, and no profile
+    carries a degenerate medium.
+
+    The shared bottom is the load-bearing half. ``EvaluateCMMod.f90:313`` stops
+    a coupled run unless each profile's mode-tabulation grid ends *exactly* on
+    ``SSP%Depth( NMedia + 1 )``, so whatever builds that grid has to read the
+    bottom off the same planner the deck was written from — recomputing it
+    independently is what broke coupled modes.
+
+    "Sliver" here means a medium below the deck's own depth resolution. Media
+    interfaces are written at ``.1f``, so one quantum is the thinnest medium
+    expressible and the comparison has to be made at that resolution: the
+    deepest profile's reserve pad is exactly one quantum, and raw subtraction
+    reads it as ``0.09999999999999432``. A one-quantum pad is deliberate and
+    harmless — KRAKEN meshes it like any other medium (it appears in the
+    ``.mod`` media list) and coupled runs project through it correctly.
+    """
+    import re
+    from uacpy.io.oalib_writer import (
+        plan_multi_profile_media, _MIN_LAYER_THICKNESS_M)
+    from uacpy.core.environment import (
+        Bathymetry, Bottom, SeabedColumn, SedimentLayer, BoundaryProperties)
+    from uacpy.io.oalib_writer import write_multi_profile_env
+    from uacpy.core.constants import BoundaryType
+    hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800.0,
+                            density=2.0, attenuation=0.5)
+    bot = Bottom(columns=[SeabedColumn(
+        layers=[SedimentLayer(thickness=3.0, sound_speed=1600.0,
+                              density=1.7, attenuation=0.3)], halfspace=hs)])
+    segments = []
+    for i, wd in enumerate([100.0, 140.0, 180.0, 200.0]):
+        segments.append((i * 2.0, uacpy.Environment(
+            bathymetry=Bathymetry(ranges=[0.0, 6000.0], depths=[wd, wd]),
+            ssp=SoundSpeedProfile(depths=[0.0, wd], data=[1500.0, 1480.0]),
+            bottom=bot)))
+    out = tmp_path / 'multi.env'
+    write_multi_profile_env(
+        str(out), segments,
+        uacpy.Source(depths=30.0, frequencies=100.0),
+        uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+        surface_type=BoundaryType.VACUUM,
+        bottom_type=BoundaryType.HALF_SPACE,
+        n_mesh=500, rmax_m=6000.0, c_low=0.0, c_high=2000.0,
+    )
+    mesh = [float(m.group(1)) for m in
+            (re.match(r'^\s*\d+\s+0\.0\s+([\d.]+)\s*,?\s*$', ln)
+             for ln in out.read_text().splitlines()) if m]
+    n_media = len(mesh) // len(segments)
+    blocks = [mesh[p_i * n_media:(p_i + 1) * n_media]
+              for p_i in range(len(segments))]
+
+    bottoms = {block[-1] for block in blocks}
+    assert bottoms == {plan_multi_profile_media(segments)[1]}, (
+        f"profiles must all end on the planner's shared bottom, got {bottoms}")
+
+    for p_i, block in enumerate(blocks):
+        thick = [round(b - a, 1) for a, b in zip([0.0] + block[:-1], block)]
+        assert min(thick) >= _MIN_LAYER_THICKNESS_M, (
+            f"profile {p_i} has a medium thinner than the minimum KRAKEN will "
+            f"mesh: {thick}")
+
+
+# ---------------------------------------------------------------------------
+# Acoustics-Toolbox .env top block: record order and boundary tables.
+#
+# ``misc/ReadEnvironmentMod.f90`` reads TopOpt (:68 -> ReadTopOpt), then the
+# volume-attenuation rows *inside* ReadTopOpt (F-G :215, biological :220-235),
+# and only then the top half-space row (:75 -> TopBot :285). ``RefCoef.f90``
+# opens ``<root>.trc`` for a top ``'F'`` (:64-76) and ``<root>.irc`` for a
+# bottom ``'P'`` (:92-96).
+# ---------------------------------------------------------------------------
+
+_AT_BIN = Path(uacpy.__file__).parent / 'bin' / 'oalib'
+
+_ICE = dict(acoustic_type='half-space', sound_speed=3500.0, shear_speed=1800.0,
+            density=0.9, attenuation=1.0, shear_attenuation=2.0)
+
+
+def _fg():
+    from uacpy.core.absorption import FrancoisGarrison
+    return FrancoisGarrison(temperature_c=10.0, salinity_psu=35.0, pH=8.0,
+                            z_bar_m=50.0)
+
+
+def _bio():
+    from uacpy.core.absorption import Biological
+    return Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])
+
+
+def _top_block_env(absorption=None, surface=None, bathymetry=100.0):
+    from uacpy.core import BoundaryProperties
+    if surface is None:
+        surface = BoundaryProperties(**_ICE)
+    return uacpy.Environment(
+        name='deck', bathymetry=bathymetry,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+        surface=surface,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1700.0, density=1.5,
+                                  attenuation=0.5),
+        absorption=absorption)
+
+
+def _src_rcv():
+    return (uacpy.Source(depths=25.0, frequencies=200.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]))
+
+
+def _write_kraken(path, env, **overrides):
+    from uacpy.core.constants import BoundaryType
+    from uacpy.io.oalib_writer import write_kraken_env_file
+    src, rcv = _src_rcv()
+    kwargs = dict(ssp_topopt='C', surface_type=BoundaryType.HALF_SPACE,
+                  bottom_type=BoundaryType.HALF_SPACE, frequencies=None,
+                  n_mesh=0, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+    kwargs.update(overrides)
+    write_kraken_env_file(path, env, src, rcv, **kwargs)
+    return path
+
+
+def _write_scooter(path, env, **overrides):
+    from uacpy.core.constants import BoundaryType
+    from uacpy.io.oalib_writer import write_scooter_env_file
+    src, rcv = _src_rcv()
+    kwargs = dict(ssp_topopt='C', surface_type=BoundaryType.HALF_SPACE,
+                  bottom_type=BoundaryType.HALF_SPACE, frequencies=None,
+                  topopt_extra='', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
+                  c_high=2000.0)
+    kwargs.update(overrides)
+    write_scooter_env_file(path, env, src, rcv, **kwargs)
+    return path
+
+
+def _run_at(exe, root, work_dir):
+    """Run an AT binary on ``<root>.env`` and return its print file.
+
+    ERROUT writes '*** FATAL ERROR ***' into the .prt and then STOPs with a
+    zero exit code, so the print file — not the return code — is the verdict.
+    """
+    import subprocess
+    proc = subprocess.run([str(_AT_BIN / exe), root], cwd=str(work_dir),
+                          capture_output=True, text=True, timeout=300)
+    prt = Path(work_dir) / f'{root}.prt'
+    text = prt.read_text() if prt.exists() else ''
+    assert '*** FATAL ERROR ***' not in text, (
+        f"{exe} rejected the deck:\n{text[-1500:]}")
+    assert 'Fortran runtime error' not in proc.stderr, (
+        f"{exe} mis-parsed the deck:\n{proc.stderr[-800:]}\n{text[-800:]}")
+    return text
+
+
+def _floats(line):
+    return [float(tok) for tok in line.split() if tok != '/']
+
+
+class TestATEnvTopBlockRecordOrder:
+    """The absorption rows belong between the TopOpt line and the top
+    half-space row. Emitted the other way round, ReadTopOpt eats the
+    half-space row as its F-G parameters and TopBot then reads the F-G row as
+    the half-space — the run dies in AttenMod : CRCI."""
+
+    @staticmethod
+    def _assert_fg_then_halfspace(text, cp=3500.0):
+        lines = text.splitlines()
+        assert lines[3].startswith("'C"), f"line 4 is not TopOpt: {lines[3]}"
+        assert lines[3][2] == 'A', f"TopOpt(2) is not 'A': {lines[3]}"
+        assert lines[3][4] == 'F', f"TopOpt(4) is not 'F': {lines[3]}"
+        assert _floats(lines[4]) == [10.0, 35.0, 8.0, 50.0], (
+            f"the F-G row must follow TopOpt directly; got {lines[4]!r}")
+        hs = _floats(lines[5])
+        assert lines[5].rstrip().endswith('/') and len(hs) == 6, (
+            f"the top half-space row must follow the F-G row; got {lines[5]!r}")
+        assert hs[0] == 0.0 and hs[1] == cp, (
+            f"top half-space row carries the wrong medium: {lines[5]!r}")
+
+    def test_kraken_deck_orders_topopt_absorption_halfspace(self, tmp_path):
+        text = _write_kraken(tmp_path / 'kr.env',
+                             _top_block_env(_fg())).read_text()
+        self._assert_fg_then_halfspace(text)
+
+    def test_scooter_deck_orders_topopt_absorption_halfspace(self, tmp_path):
+        text = _write_scooter(tmp_path / 'sc.env',
+                              _top_block_env(_fg())).read_text()
+        self._assert_fg_then_halfspace(text)
+
+    def test_bounce_deck_orders_topopt_absorption_halfspace(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        from uacpy.io.oalib_writer import write_bounce_input_file
+        src, _ = _src_rcv()
+        out = tmp_path / 'bo.env'
+        write_bounce_input_file(
+            out, _top_block_env(_fg(),
+                                surface=BoundaryProperties(acoustic_type='vacuum')),
+            src, ssp_topopt='C', bottom_type=BoundaryType.HALF_SPACE, n_mesh=0, c_low=1400.0,
+            c_high=2000.0, rmax=5000.0)
+        # BOUNCE's top half-space is the water at the seafloor, not the ice.
+        self._assert_fg_then_halfspace(out.read_text(), cp=1500.0)
+
+    def test_multi_profile_deck_orders_every_profile(self, tmp_path):
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        src, rcv = _src_rcv()
+        out = tmp_path / 'multi.env'
+        segments = [(0.0, _top_block_env(_fg())),
+                    (5000.0, _top_block_env(_fg()))]
+        write_multi_profile_env(out, segments, src, rcv, n_mesh=500,
+                                rmax_m=20000.0)
+        lines = out.read_text().splitlines()
+        starts = [i for i, ln in enumerate(lines) if ln.strip() == "'deck'"]
+        assert len(starts) == 2
+        for i in starts:
+            assert _floats(lines[i + 4]) == [10.0, 35.0, 8.0, 50.0], (
+                f"profile at line {i} lost the F-G row: {lines[i + 4]!r}")
+            assert _floats(lines[i + 5])[1] == 3500.0, (
+                f"profile at line {i} lost the top half-space row: "
+                f"{lines[i + 5]!r}")
+
+    def test_biological_block_precedes_top_halfspace(self, tmp_path):
+        lines = _write_kraken(tmp_path / 'kr.env',
+                              _top_block_env(_bio())).read_text().splitlines()
+        assert lines[3][4] == 'B', f"TopOpt(4) is not 'B': {lines[3]}"
+        assert lines[4].strip() == '1', f"bio layer count missing: {lines[4]!r}"
+        assert _floats(lines[5]) == [10.0, 20.0, 400.0, 5.0, 0.1], (
+            f"bio layer row missing: {lines[5]!r}")
+        assert _floats(lines[6])[1] == 3500.0, (
+            f"top half-space row must follow the bio block: {lines[6]!r}")
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('absorption_name', ['fg', 'bio'])
+    def test_krakenc_reads_the_deck(self, tmp_path, absorption_name):
+        absorption = _fg() if absorption_name == 'fg' else _bio()
+        _write_kraken(tmp_path / 'kr.env', _top_block_env(absorption))
+        text = _run_at('krakenc.exe', 'kr', tmp_path)
+        assert 'ACOUSTO-ELASTIC half-space' in text
+        assert '3500.00' in text, (
+            "the ice half-space never reached TopBot:\n" + text[:1500])
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('absorption_name', ['fg', 'bio'])
+    def test_scooter_reads_the_deck(self, tmp_path, absorption_name):
+        absorption = _fg() if absorption_name == 'fg' else _bio()
+        _write_scooter(tmp_path / 'sc.env', _top_block_env(absorption))
+        text = _run_at('scooter.exe', 'sc', tmp_path)
+        assert '3500.00' in text
+
+
+class TestSparcBoundaryRestriction:
+    """``sparc.f90:100-104`` ERROUTs unless both boundaries are vacuum or
+    rigid, and SPARC writes no half-space row — declaring 'A' would hand the
+    SSP mesh line to TopBot."""
+
+    @staticmethod
+    def _write(path, env, surface_type, bottom_type):
+        from uacpy.io.oalib_writer import write_sparc_env_file
+        src, rcv = _src_rcv()
+        write_sparc_env_file(
+            path, env, src, rcv, ssp_code='C', surface_type=surface_type,
+            bottom_type=bottom_type, output_mode='R', n_mesh=0, rmax_m=5000.0,
+            c_low=1400.0, c_high=2000.0, pulse_type='P', f_min=50.0,
+            f_max=400.0, n_t_out=20, t_max=1.0, t_start=0.0, t_mult=1.0)
+
+    def test_halfspace_surface_is_refused(self, tmp_path):
+        from uacpy.core.constants import BoundaryType
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        out = tmp_path / 'sp.env'
+        with pytest.raises(UnsupportedFeatureError, match='half-space surface'):
+            self._write(out, _top_block_env(), BoundaryType.HALF_SPACE,
+                        BoundaryType.VACUUM)
+        assert not out.exists(), "a rejected deck must not be left behind"
+
+    def test_halfspace_bottom_is_refused(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        env = _top_block_env(surface=BoundaryProperties(acoustic_type='vacuum'))
+        with pytest.raises(UnsupportedFeatureError, match='half-space bottom'):
+            self._write(tmp_path / 'sp.env', env, BoundaryType.VACUUM,
+                        BoundaryType.HALF_SPACE)
+
+    def test_vacuum_deck_writes_no_halfspace_row(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        out = tmp_path / 'sp.env'
+        self._write(out, _top_block_env(
+            _fg(), surface=BoundaryProperties(acoustic_type='vacuum')),
+            BoundaryType.VACUUM, BoundaryType.RIGID)
+        lines = out.read_text().splitlines()
+        assert lines[3][2] == 'V', f"TopOpt(2) is not 'V': {lines[3]}"
+        assert _floats(lines[4]) == [10.0, 35.0, 8.0, 50.0]
+        # The mesh line comes straight after the absorption block.
+        assert _floats(lines[5]) == [0.0, 0.0, 100.0], (
+            f"expected the SSP mesh line, got {lines[5]!r}")
+
+    @pytest.mark.requires_binary
+    def test_sparc_reads_the_vacuum_rigid_deck(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        self._write(tmp_path / 'sp.env', _top_block_env(
+            _fg(), surface=BoundaryProperties(acoustic_type='vacuum')),
+            BoundaryType.VACUUM, BoundaryType.RIGID)
+        text = _run_at('sparc.exe', 'sp', tmp_path)
+        assert 'Francois-Garrison' in text
+
+
+class TestTopReflectionTableStaging:
+    """A ``'file'`` surface makes AT open ``<root>.trc`` (RefCoef.f90:64-76),
+    so the table has to be staged beside the .env just like the bottom .brc."""
+
+    @staticmethod
+    def _table(tmp_path):
+        from uacpy.io.refl_io import write_reflection_coefficient
+        path = tmp_path / 'top_table.trc'
+        angles = np.linspace(0.0, 90.0, 19)
+        write_reflection_coefficient(
+            path, angles, np.column_stack([np.full_like(angles, 0.9),
+                                           np.zeros_like(angles)]))
+        return path
+
+    @staticmethod
+    def _env(reflection_file):
+        from uacpy.core import BoundaryProperties
+        return _top_block_env(surface=BoundaryProperties(
+            acoustic_type='file', reflection_file=str(reflection_file)))
+
+    @pytest.mark.parametrize('writer', ['kraken', 'scooter'])
+    def test_top_table_is_staged_beside_the_env(self, tmp_path, writer):
+        from uacpy.core.constants import BoundaryType
+        table = self._table(tmp_path)
+        out = tmp_path / f'{writer}.env'
+        write = _write_kraken if writer == 'kraken' else _write_scooter
+        write(out, self._env(table), surface_type=BoundaryType.FILE)
+        assert out.read_text().splitlines()[3][2] == 'F'
+        staged = out.with_suffix('.trc')
+        assert staged.exists(), (
+            "TopOpt(2)='F' was written with no .trc beside the .env")
+        assert staged.read_text() == table.read_text()
+
+    def test_file_surface_without_a_table_raises(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        env = _top_block_env(
+            surface=BoundaryProperties(acoustic_type='file'))
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            _write_kraken(tmp_path / 'kr.env', env,
+                          surface_type=BoundaryType.FILE)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('exe,writer', [('krakenc.exe', 'kraken'),
+                                            ('scooter.exe', 'scooter')])
+    def test_binary_reads_the_staged_top_table(self, tmp_path, exe, writer):
+        from uacpy.core.constants import BoundaryType
+        table = self._table(tmp_path)
+        write = _write_kraken if writer == 'kraken' else _write_scooter
+        write(tmp_path / 'trc.env', self._env(table),
+              surface_type=BoundaryType.FILE)
+        text = _run_at(exe, 'trc', tmp_path)
+        assert 'tabulated top' in text, (
+            "the binary did not read the staged .trc:\n" + text[:1500])
+
+
+class TestPrecalcBottomStaging:
+    """``acoustic_type='precalc'`` writes ``BotOpt='P'``, which makes AT open
+    ``<root>.irc`` (RefCoef.f90:92-96) — BOUNCE's internal table, carried by
+    ``reflection_file`` and published as ``result.metadata['irc_file']``."""
+
+    @staticmethod
+    def _env(reflection_file):
+        from uacpy.core import BoundaryProperties
+        return uacpy.Environment(
+            name='ircdeck', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='precalc',
+                                      reflection_file=str(reflection_file)))
+
+    @staticmethod
+    def _write(path, env):
+        from uacpy.core.constants import BoundaryType
+        return _write_kraken(path, env, surface_type=BoundaryType.VACUUM,
+                             bottom_type=BoundaryType.PRECALC)
+
+    def test_irc_is_staged_beside_the_env(self, tmp_path):
+        table = tmp_path / 'bounce_run.irc'
+        table.write_text("'BOUNCE' 200.0\n1\n  0.1 0.2 0.3 0.4 0.5 0\n")
+        out = self._write(tmp_path / 'kr.env', self._env(table))
+        bot = [ln for ln in out.read_text().splitlines()
+               if ln.startswith("'P'")]
+        assert bot, "BotOpt='P' was not written"
+        staged = out.with_suffix('.irc')
+        assert staged.exists(), (
+            "BotOpt='P' was written with no .irc beside the .env")
+        assert staged.read_text() == table.read_text()
+
+    def test_precalc_without_a_table_raises(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        env = uacpy.Environment(
+            name='ircdeck', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='precalc'))
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            self._write(tmp_path / 'kr.env', env)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_kraken_reads_a_bounce_irc(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        src, rcv = _src_rcv()
+        seabed = uacpy.Environment(
+            name='seabed', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.5,
+                                      attenuation=0.5))
+        bounce = uacpy.models.Bounce(verbose=False,
+                                     work_dir=tmp_path / 'bounce',
+                                     cleanup=False)
+        irc = Path(bounce.run(seabed, src, rcv).metadata['irc_file'])
+        self._write(tmp_path / 'irc.env', self._env(irc))
+        text = _run_at('kraken.exe', 'irc', tmp_path)
+        assert 'PRECALCULATED IRC' in text
+
+
+class TestScooterDeckHasNoReceiverRanges:
+    """``scooter.f90:158-176`` (GetPar) stops at ReadfreqVec — it never calls
+    ReadRcvrRanges, so the deck must end after the receiver depths."""
+
+    def test_docstring_does_not_promise_a_receiver_range_block(self):
+        from uacpy.io.oalib_writer import write_scooter_env_file
+        assert 'receiver-range block' not in write_scooter_env_file.__doc__
+
+    def test_deck_ends_after_the_receiver_depths(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        out = _write_scooter(
+            tmp_path / 'sc.env',
+            _top_block_env(surface=BoundaryProperties(acoustic_type='vacuum')))
+        lines = [ln for ln in out.read_text().splitlines() if ln.strip()]
+        assert _floats(lines[-1]) == [50.0], (
+            f"the deck must end on the receiver depths; got {lines[-1]!r}")
+        assert lines[-2].strip() == '1'
+
+
+class TestBroadbandFlagHandlesScalarFrequencies:
+    """``write_header`` and ``write_kraken_env_file`` decide TopOpt(6) from the
+    same frequency vector, so they must measure it the same way."""
+
+    @pytest.mark.parametrize('frequencies,expected', [
+        (None, ' '),
+        (np.asarray(200.0), ' '),
+        (np.asarray([200.0]), ' '),
+        (np.asarray([200.0, 400.0]), 'B'),
+    ])
+    def test_topopt_broadband_column(self, frequencies, expected):
+        import io
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        from uacpy.io.oalib_writer import write_header
+        src, _ = _src_rcv()
+        buf = io.StringIO()
+        write_header(
+            buf, _top_block_env(
+                surface=BoundaryProperties(acoustic_type='vacuum')),
+            src, ssp_topopt='C', surface_type=BoundaryType.VACUUM,
+            frequencies=frequencies)
+        assert buf.getvalue().splitlines()[3][6] == expected
+
+
+class TestBottomOptionLineIsSingleCharacter:
+    """``ReadEnvironmentMod.f90:121-129`` reads only BotOpt(1:1); the '~'
+    bathymetry flag is Bellhop's alone and Bellhop has its own writer."""
+
+    def test_range_dependent_bathymetry_adds_no_flag(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.environment import Bathymetry
+        env = uacpy.Environment(
+            name='deck',
+            bathymetry=Bathymetry(ranges=[0.0, 5000.0], depths=[100.0, 100.0]),
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.5,
+                                      attenuation=0.5))
+        from uacpy.core.constants import BoundaryType
+        text = _write_kraken(tmp_path / 'kr.env', env,
+                             surface_type=BoundaryType.VACUUM).read_text()
+        assert "'A' " in text and '~' not in text
+
+
+class TestBoundaryTypeIsTheSingleSourceOfTruth:
+    """``BoundaryType`` is the only place a boundary letter is decided. A
+    silent vacuum fallback for an unrecognised type would model a different
+    surface than the one asked for."""
+
+    def test_map_agrees_with_the_enum(self):
+        from uacpy.core.constants import BoundaryType
+        from uacpy.io.oalib_writer import _BOUNDARY_TYPE_MAP
+        for bt in BoundaryType:
+            assert _BOUNDARY_TYPE_MAP[bt.value] == bt.to_acoustics_toolbox_code()
+        assert _BOUNDARY_TYPE_MAP['halfspace'] == 'A'
+
+    def test_unknown_acoustic_type_raises(self):
+        from uacpy.core import BoundaryProperties
+        from uacpy.io.oalib_writer import get_top_bc_code
+        env = _top_block_env(
+            surface=BoundaryProperties(acoustic_type='vacuum'))
+        object.__setattr__(env.surface.properties[0], 'acoustic_type', 'mud')
+        with pytest.raises(ConfigurationError, match='boundary type'):
+            get_top_bc_code(env)
+
+
+class TestDeckDepthQuantisation:
+    """Every interface an AT ``.env`` declares is quantised onto the deck's
+    0.1 m depth column. Rounding up keeps the water column at or below the
+    physical ``env.depth`` — a source or receiver on the seafloor stays inside
+    the mesh instead of being moved up by ReadSzRz — and keeps the AT models
+    on the same water column as Bellhop's ``.bty``-clipped mesh."""
+
+    def test_bellhop_shares_the_one_quantiser(self):
+        """Two implementations of the same rule would drift; Bellhop's SSP
+        header depth must be the identical function object."""
+        from uacpy.io import bellhop_writer
+        from uacpy.io.oalib_writer import deck_depth
+        assert bellhop_writer.deck_depth is deck_depth
+
+    @pytest.mark.parametrize('depth', [
+        100.0, 150.0, 2000.0, 100.04, 100.05, 100.06, 99.999, 0.1, 200.3])
+    def test_a_fractional_depth_rounds_up_onto_the_grid(self, depth):
+        from uacpy.io.oalib_writer import deck_depth, _DECK_DEPTH_QUANTUM
+        got = deck_depth(depth)
+        assert got >= depth
+        assert got - depth < _DECK_DEPTH_QUANTUM
+        assert got == pytest.approx(round(got, 1))
+
+    @pytest.mark.parametrize('depth', [100.0, 150.0, 2000.0, 200.3])
+    def test_a_depth_already_on_the_grid_is_unchanged(self, depth):
+        from uacpy.io.oalib_writer import deck_depth
+        assert deck_depth(depth) == depth
+
+    @staticmethod
+    def _mesh_line_depth(path):
+        """Third field of the first ``NG sigma Depth`` mesh line (Bellhop
+        writes the same record comma-separated)."""
+        for line in Path(path).read_text().splitlines():
+            parts = line.replace(',', ' ').split()
+            if (len(parts) == 3 and parts[0].isdigit()
+                    and not line.lstrip().startswith("'")):
+                return float(parts[2])
+        raise AssertionError(f"no mesh line found in {path}")
+
+    @staticmethod
+    def _water_ssp_rows(path):
+        """SSP rows of medium 1: everything between the mesh line and the next
+        quoted option line."""
+        rows, started = [], False
+        for line in Path(path).read_text().splitlines():
+            parts = line.replace(',', ' ').split()
+            if not started:
+                started = (len(parts) == 3 and parts[0].isdigit()
+                           and not line.lstrip().startswith("'"))
+                continue
+            if line.lstrip().startswith("'"):
+                break
+            rows.append(parts)
+        return rows
+
+    def test_water_column_is_never_shallower_than_env_depth(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        env = uacpy.Environment(
+            name='deck', bathymetry=100.04,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.04, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.5,
+                                      attenuation=0.5))
+        out = _write_kraken(tmp_path / 'kr.env', env,
+                            surface_type=BoundaryType.VACUUM)
+        mesh_depth = self._mesh_line_depth(out)
+        assert mesh_depth >= 100.04, (
+            f"water column ends at {mesh_depth} m, above env.depth=100.04")
+        ssp_rows = self._water_ssp_rows(out)
+        assert float(ssp_rows[-1][0]) == mesh_depth, (
+            "the deepest SSP sample must equal the mesh depth exactly")
+
+    def test_at_and_bellhop_decks_share_the_water_column(self, tmp_path):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        src, rcv = _src_rcv()
+        env = uacpy.Environment(
+            name='deck', bathymetry=100.04,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.04, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.5,
+                                      attenuation=0.5))
+        at = _write_kraken(tmp_path / 'kr.env', env,
+                           surface_type=BoundaryType.VACUUM)
+        bh = tmp_path / 'bh.env'
+        write_bellhop_env_file(bh, env, src, rcv)
+        assert self._mesh_line_depth(at) == self._mesh_line_depth(bh), (
+            "AT and Bellhop model different water columns for the same env")
+
+    def test_layer_interfaces_keep_their_thickness(self, tmp_path):
+        from uacpy.core.bottom import (
+            SeabedColumn, SedimentLayer, BoundaryProperties)
+        from uacpy.core.constants import BoundaryType
+        bottom = SeabedColumn(
+            layers=[SedimentLayer(thickness=5.0, sound_speed=1600.0,
+                                  density=1.6, attenuation=0.2)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=1800.0, density=2.0,
+                                         attenuation=0.5))
+        env = uacpy.Environment(
+            name='deck', bathymetry=100.04,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.04, 1500.0)]),
+            bottom=bottom)
+        out = _write_kraken(tmp_path / 'kr.env', env,
+                            surface_type=BoundaryType.VACUUM)
+        text = out.read_text()
+        assert '  100.1 1600.000000' in text and '  105.1 1600.000000' in text, (
+            f"sediment interfaces are off the deck grid:\n{text}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Irregular receiver grid — Bellhop RunType(5:5) = 'I'
+# ─────────────────────────────────────────────────────────────────────────────
+
+_IRREGULAR_DECK_HEAD = """\
+'irregular grid probe'
+{freq:.1f}
+1
+'CVW'
+0 0.0 {depth:.1f}
+0.0 1500.0 /
+{depth:.1f} 1500.0 /
+'A' 0.0
+{depth:.1f} 1800.0 0.0 1.8 0.5 /
+1
+25.0 /
+"""
+
+
+def _write_bellhop_deck(path, run_type, depths_m, ranges_km,
+                        freq=100.0, depth=200.0):
+    """Write an isovelocity Bellhop ``.env`` whose receiver depth and range
+    vectors are given explicitly, with ``run_type`` in the RunType columns."""
+    text = _IRREGULAR_DECK_HEAD.format(freq=freq, depth=depth)
+    text += (f"{len(depths_m)}\n"
+             + " ".join(f"{d:.1f}" for d in depths_m) + "\n")
+    text += (f"{len(ranges_km)}\n"
+             + " ".join(f"{r:.4f}" for r in ranges_km) + "\n")
+    text += (f"'{run_type}'\n501\n-45 45 /\n"
+             f"0.0 {depth + 50.0:.1f} {ranges_km[-1] * 1.5:.4f}\n")
+    path.write_text(text)
+
+
+# 16 paired receivers: the smallest count for which the .shd header product
+# Nrz*Nrr (256) exceeds what the 1804-byte file can hold (225 complex words).
+_PAIRED_DEPTHS = [20.0 + 10.0 * i for i in range(16)]
+_PAIRED_RANGES_KM = [0.2 + 0.1 * i for i in range(16)]
+
+
+@pytest.mark.requires_binary
+class TestIrregularReceiverGrid:
+    """``RunType(5:5) = 'I'`` makes the receivers the paired coordinates
+    ``(Rz(i), Rr(i))``: Bellhop writes one row of ``NRr`` pressure records per
+    source depth (``Bellhop/bellhop.f90:202-206``, ``:323-326``) and one
+    ``.arr`` depth block (``Bellhop/ArrMod.f90:101-102`` with ``Nrd`` bound to
+    ``NRz_per_range`` at ``bellhop.f90:329``), while both headers still report
+    the full ``Pos%NRz`` (``misc/RWSHDFile.f90:113``,
+    ``Bellhop/ReadEnvironmentBell.f90:591``).
+
+    The paired receiver ``i`` is physically the same point as cell ``(i, i)``
+    of the rectilinear grid over the same two vectors
+    (``Bellhop/influence.f90:460-464``), so every value here is checked
+    against that diagonal.
+    """
+
+    @staticmethod
+    def _run(tmp_path, root, run_type):
+        _write_bellhop_deck(tmp_path / f'{root}.env', run_type,
+                            _PAIRED_DEPTHS, _PAIRED_RANGES_KM)
+        _run_at('bellhop.exe', root, tmp_path)
+        return tmp_path / root
+
+    def test_shd_header_bound_admits_paired_receivers(self, tmp_path):
+        """The on-disk sample count is Nsz*1*Nrr for an irregular grid, so the
+        header sanity bound must not multiply Nrz by Nrr."""
+        from uacpy.io.oalib_reader import read_shd_bin
+
+        root = self._run(tmp_path, 'irr', 'CG  I')
+        shd = read_shd_bin(str(root.with_suffix('.shd')))
+        assert shd['PlotType'].strip() == 'irregular'
+        assert shd['pressure'].shape == (1, 1, 1, len(_PAIRED_RANGES_KM))
+        # The header still declares the full receiver-depth vector.
+        assert len(shd['Pos']['r']['z']) == len(_PAIRED_DEPTHS)
+
+    def test_irregular_shd_is_one_paired_receiver_axis(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_file
+
+        irr = read_shd_file(self._run(tmp_path, 'irr', 'CG  I')
+                            .with_suffix('.shd'))
+        rect = read_shd_file(self._run(tmp_path, 'rect', 'CG  R')
+                             .with_suffix('.shd'))
+
+        assert irr.axes == ['range']
+        assert irr.shape == (len(_PAIRED_RANGES_KM),)
+        assert irr.metadata['receiver_depths'].tolist() == _PAIRED_DEPTHS
+        assert irr.coords['range'] == pytest.approx(
+            [1000.0 * r for r in _PAIRED_RANGES_KM])
+        assert np.allclose(irr.data, np.diag(rect.data), equal_nan=True)
+
+    def test_irregular_arr_carries_one_depth_block(self, tmp_path):
+        from uacpy.io.oalib_reader import read_arr_file
+
+        irr = read_arr_file(self._run(tmp_path, 'airr', 'A   I')
+                            .with_suffix('.arr'), grid_type='I')
+        rect = read_arr_file(self._run(tmp_path, 'arect', 'A   R')
+                             .with_suffix('.arr'))
+
+        assert len(irr.by_receiver[0]) == 1
+        assert len(irr.by_receiver[0][0]) == len(_PAIRED_RANGES_KM)
+        assert irr.receiver_depths.tolist() == _PAIRED_DEPTHS
+        for i in range(len(_PAIRED_RANGES_KM)):
+            paired = irr.by_receiver[0][0][i]
+            cell = rect.by_receiver[0][i][i]
+            assert paired['n_arrivals'] == cell['n_arrivals'] > 0
+            assert paired['delays'] == pytest.approx(cell['delays'])
+            assert paired['amplitudes'] == pytest.approx(cell['amplitudes'])
+
+    def test_irregular_arr_read_as_rectilinear_runs_out_of_records(
+            self, tmp_path):
+        """The header's NRz is not the body's depth-loop bound, so parsing an
+        irregular .arr with the header count exhausts the token stream."""
+        from uacpy.io.oalib_reader import read_arr_file
+        from uacpy.core.exceptions import FileFormatError
+
+        path = self._run(tmp_path, 'airr', 'A   I').with_suffix('.arr')
+        with pytest.raises(FileFormatError):
+            read_arr_file(path)
+
+    def test_grid_type_I_requires_paired_header_counts(self, tmp_path):
+        """Bellhop/ReadEnvironmentBell.f90:414 ERROUTs unless NRz == NRr on an
+        irregular deck, so a header with unequal counts is not one."""
+        from uacpy.io.oalib_reader import read_arr_file
+        from uacpy.core.exceptions import FileFormatError
+
+        _write_bellhop_deck(tmp_path / 'lop.env', 'A   R',
+                            _PAIRED_DEPTHS[:3], _PAIRED_RANGES_KM[:5])
+        _run_at('bellhop.exe', 'lop', tmp_path)
+        with pytest.raises(FileFormatError, match='pairs them one-to-one'):
+            read_arr_file(tmp_path / 'lop.arr', grid_type='I')
+
+
+class TestArrivalsGridTypeValidation:
+    def test_unknown_grid_type_rejected(self, tmp_path):
+        from uacpy.io.oalib_reader import read_arr_file
+
+        path = tmp_path / 'x.arr'
+        path.write_text("'2D'\n")
+        with pytest.raises(ConfigurationError, match="grid_type='X'"):
+            read_arr_file(path, grid_type='X')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BELLHOP3D outputs: axes and layouts the 2-D readers do not carry
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BH3D_DECK = """\
+'free space 3D, Hat Cart. Coord'
+5.000000
+1
+'CAF'
+0.0 1500.0 /
+500 0.0 5000.0
+   0.0  1500.0 /
+5000.0  1500.0 /
+'A'  0.0
+5000.0  /
+1
+0.0 /
+1
+0.0 /
+1
+3000.0
+4
+1000 4000 /
+4
+1.0 4.0 /
+3
+0.0 10.0 20.0
+'{run_type}'
+41
+-89 89 /
+5
+-5  5 /
+100.0  10.05 10.05 5000.5
+"""
+
+
+@pytest.mark.requires_binary
+class TestBellhop3DOutputsAreNotSilentlyFlattened:
+    """A BELLHOP3D run writes axes and coordinate systems the 2-D typed
+    readers have no place for: an ``Ntheta`` bearing axis in the ``.shd``
+    (``misc/RWSHDFile.f90:105,107``; ``Bellhop/bellhop3D.f90:405-411``), an
+    ``'xyz'`` ray layout with a radian take-off angle
+    (``Bellhop/ReadEnvironmentBell.f90:564-568``; ``Bellhop/WriteRay.f90:89``
+    vs ``:45``; ``Bellhop/bellhop3D.f90:360`` vs ``Bellhop/bellhop.f90:263``),
+    and a ten-value ``'3D'`` arrivals record
+    (``Bellhop/ArrMod.f90:256-302``). Each must be refused, not reduced."""
+
+    @staticmethod
+    def _run(tmp_path, root, run_type):
+        (tmp_path / f'{root}.env').write_text(
+            _BH3D_DECK.format(run_type=run_type))
+        _run_at('bellhop3d.exe', root, tmp_path)
+        return tmp_path / root
+
+    def test_read_shd_bin_returns_every_bearing(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_bin
+
+        shd = read_shd_bin(str(self._run(tmp_path, 'tl3d', 'C^   3')
+                               .with_suffix('.shd')))
+        assert shd['Pos']['theta'].tolist() == [0.0, 10.0, 20.0]
+        assert shd['pressure'].shape[0] == 3
+
+    def test_read_shd_file_refuses_multi_bearing(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_file
+        from uacpy.core.exceptions import FileFormatError
+
+        path = self._run(tmp_path, 'tl3d', 'C^   3').with_suffix('.shd')
+        with pytest.raises(FileFormatError, match='3 receiver bearings'):
+            read_shd_file(path)
+
+    def test_xyz_ray_file_refused(self, tmp_path):
+        from uacpy.io.oalib_reader import read_ray_file
+        from uacpy.core.exceptions import FileFormatError
+
+        path = self._run(tmp_path, 'ray3d', 'R^   3').with_suffix('.ray')
+        assert "'xyz'" in path.read_text(errors='ignore')[:400]
+        with pytest.raises(FileFormatError, match="'xyz'"):
+            read_ray_file(path)
+
+    def test_3d_arrivals_refused_inside_the_typed_hierarchy(self, tmp_path):
+        from uacpy.io.oalib_reader import read_arr_file
+        from uacpy.core.exceptions import UACPYError
+
+        path = self._run(tmp_path, 'arr3d', 'A^   3').with_suffix('.arr')
+        with pytest.raises(UACPYError, match='3-D arrivals'):
+            read_arr_file(path)
+
+
+class TestRayFileIsAsciiOnly:
+    """The only two ``.ray`` OPENs in the vendored tree,
+    ``Bellhop/ReadEnvironmentBell.f90:556`` and
+    ``KrakenField/EvaluateGBMod.f90:64``, are both ``FORM = 'FORMATTED'``, so a
+    parse failure is an ASCII parse failure and must name the offending
+    token."""
+
+    def test_corrupt_token_is_named(self, tmp_path):
+        from uacpy.io.oalib_reader import read_ray_file
+        from uacpy.core.exceptions import FileFormatError
+
+        path = tmp_path / 'corrupt.ray'
+        path.write_text(
+            " 'BELLHOP- probe'\n 50.0\n 1 1 1\n 2 1\n 0.0\n 200.0\n 'rz'\n"
+            " -20.0\n 5X8 0 0\n"
+        )
+        with pytest.raises(FileFormatError) as exc:
+            read_ray_file(path)
+        assert '5X8' in str(exc.value)
+        assert 'byte order' not in str(exc.value)
+
+
+class TestShdAscIsATokenStream:
+    """``Matlab/ReadWrite/read_shd_asc.m:15-27`` reads every scalar and vector
+    with ``fscanf``, so the file is one whitespace-delimited token stream after
+    the two title lines — no per-line layout to honour."""
+
+    _COUNTS = "1 1 1 2 2"
+    _SCALARS = "100.0 0.0"
+    _VECTORS = ["50.0", "0.0", "10.0", "20.0", "30.0", "100.0", "200.0"]
+    _DATA = ["1", "2", "3", "4", "5", "6", "7", "8"]
+
+    def _layouts(self):
+        rest = self._VECTORS + self._DATA
+        return {
+            'counts_and_scalars_share_a_line':
+                self._COUNTS + " " + self._SCALARS + "\n" + "\n".join(rest),
+            'one_value_per_line':
+                self._COUNTS + "\n" + self._SCALARS + "\n" + "\n".join(rest),
+            'fully_packed':
+                " ".join([self._COUNTS, self._SCALARS] + rest),
+        }
+
+    def test_every_whitespace_layout_reads_the_same(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_asc
+
+        for name, body in self._layouts().items():
+            path = tmp_path / f'{name}.asc'
+            path.write_text("'probe'\n'rectilin  '\n" + body + "\n")
+            shd = read_shd_asc(path)
+            assert shd['freq0'] == pytest.approx(100.0), name
+            assert shd['atten'] == pytest.approx(0.0), name
+            assert shd['Pos']['r']['z'].tolist() == [20.0, 30.0], name
+            assert shd['Pos']['r']['r'].tolist() == [100.0, 200.0], name
+            assert shd['pressure'].ravel().tolist() == [
+                1 + 2j, 3 + 4j, 5 + 6j, 7 + 8j], name
+
+    def test_implausible_count_raises_instead_of_allocating(self, tmp_path):
+        """A count the file cannot back must surface as a typed parse error,
+        never an allocation the token stream can never fill.
+
+        Runs in a subprocess that caps its address space after the import, so
+        a header count of 2e9 cannot be satisfied by the allocator and the
+        distinction between a typed parse error and ``MemoryError`` is real.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        path = tmp_path / 'hostile.asc'
+        path.write_text("'probe'\n'rectilin  '\n2000000000 1 1 1 1\n100.0 0.0\n")
+        script = textwrap.dedent(f"""
+            import resource
+            from uacpy.io.oalib_reader import read_shd_asc
+            from uacpy.core.exceptions import FileFormatError
+            resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 ** 3,) * 2)
+            try:
+                read_shd_asc({str(path)!r})
+            except FileFormatError:
+                print('TYPED')
+        """)
+        proc = subprocess.run([sys.executable, '-c', script],
+                              capture_output=True, text=True, timeout=300)
+        assert 'TYPED' in proc.stdout, (
+            f"expected FileFormatError, got:\n{proc.stderr[-800:]}")

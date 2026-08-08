@@ -10,13 +10,13 @@ Pipeline:
      :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`
      (spectral synthesis of random processes).
   3. Visualise the time–frequency content with
-     :class:`uacpy.acoustic_signal.Spectrogram` — a stationary process should show
+     :func:`uacpy.acoustic_signal.spectrogram` — a stationary process should show
      a uniform spectral pattern across time.
-  4. Round-trip the realisation through :class:`uacpy.acoustic_signal.PPSD` to
+  4. Round-trip the realisation through :func:`uacpy.acoustic_signal.ppsd` to
      verify the synthesis recovers the input spectrum and to visualise
      the level distribution across time segments.
   5. Integrate the realisation into a per-band Sound Exposure Level (SEL)
-     with :class:`uacpy.acoustic_signal.SEL` (ISO 18405) — the cumulative
+     with :func:`uacpy.acoustic_signal.sel` (ISO 18405) — the cumulative
      energy dose of the synthesised dataset, third-octave band by band.
 
 Outputs
@@ -72,7 +72,14 @@ def main():
     print("  ✓ Saved: output/example_09_wenz_components.png")
 
     # ── 2. ssrp time-domain realisation of the Wenz total ───────────────
-    n_fft = 1
+    # n_fft is the IFFT chunk size, and it sets the synthesis bin width
+    # df = sample_rate / n_fft. The Wenz target starts at 1 Hz, so the chunk
+    # has to be long enough for the low-frequency shape to survive resampling
+    # onto the FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz.
+    # (The library clamps n_fft to [16, 262144]; anything below the floor is
+    # raised, so a token value like 1 would silently become the 65536 default.)
+    sample_rate = 96000
+    n_fft = 65536
     f_ssrp = np.linspace(1.0, 5e4, 10000)
     wenz_ssrp = WenzNoise(
         f_ssrp,
@@ -85,10 +92,11 @@ def main():
 
     duration = 30.0                                    # seconds
     t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
-        Pxx, f_ssrp, sample_rate=96000,
+        Pxx, f_ssrp, sample_rate=sample_rate,
         duration=duration, scale=1.0, n_fft=n_fft)
     print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
+    print(f"  n_fft = {n_fft:,} → synthesis bin width df = {fs / n_fft:.2f} Hz")
 
     # Snapshot of the waveform (first 0.2 s).
     n_show = int(0.2 * fs)

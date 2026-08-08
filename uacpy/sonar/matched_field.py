@@ -110,7 +110,11 @@ def synthesize_replica(
     phi_r = _interp_modes(modes, z)                          # (N, M)
 
     # (M, R): per-mode range term, far-field (asymptotic Hankel) convention.
-    # KRAKEN stores Im(k) < 0, so exp(-i k r) decays — outgoing, attenuated.
+    # Under exp(-i k r) a mode decays for Im(k) <= 0. Raw Kraken eigenvalues
+    # already carry that sign while Modes.with_attenuation builds Im(k) > 0;
+    # a passive medium can only attenuate, so the sign is forced and either
+    # input synthesises a decaying replica.
+    k = k.real - 1j * np.abs(k.imag)
     rng_term = np.exp(-1j * np.outer(k, r)) / np.sqrt(k)[:, None]
     p = (phi_r * phi_s[None, :]) @ rng_term                 # (N, R)
     p = p / np.sqrt(r)[None, :]
@@ -336,6 +340,10 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
     ``P_B = e^H K e / (e^H e * tr K)`` with unit-norm replicas. Equals 1 where a
     replica matches a rank-one CSDM exactly; robust but broad-lobed.
 
+    :meth:`uacpy.core.results.Covariance.bartlett` is the same processor over
+    an OASN ``.xsm`` covariance: multi-frequency, replica-index-last, and left
+    unnormalised, so its surface is this one times ``tr K``.
+
     Parameters
     ----------
     K : ndarray, shape ``(N, N)``
@@ -363,7 +371,12 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
     ``K + loading * tr(K)/N * I``. Small loading gives sharp Capon peaks but is
     sensitive to environmental mismatch; larger loading flattens the surface
     toward Bartlett for robustness. Loading is required when ``K`` is
-    rank-deficient (e.g. a single snapshot).
+    rank-deficient (e.g. a single snapshot) — hence the 1e-2 default here,
+    where ``K`` comes from :func:`csdm` over measured snapshots.
+    :meth:`uacpy.core.results.Covariance.mvdr` is the same processor over
+    OASN's full-rank ``.xsm`` covariance and defaults to 1e-6; at equal
+    loading the two agree up to the max-scaling applied below, and both
+    return NaN for a degenerate candidate point.
 
     Parameters
     ----------

@@ -48,3 +48,34 @@ class TestMackenzie:
                 temperature_c=np.array([15.0]),
                 salinity_psu=np.array([35.0, 35.0]),
             )
+
+
+class TestIsovelocityShapeMustBeTrue:
+    """``resolve_ssp_topopt`` turns ``shape='isovelocity'`` into AT
+    ``TopOpt(1)='C'`` on the grounds that any connection scheme over constant
+    data is constant. That reasoning only holds if the data *is* constant, so
+    the declaration is checked rather than trusted — otherwise the deck
+    silently flattens a gradient."""
+
+    def test_a_gradient_declared_isovelocity_is_rejected(self):
+        with pytest.raises(ConfigurationError, match='isovelocity'):
+            SoundSpeedProfile.from_pairs(
+                np.array([[0.0, 1500.0], [200.0, 1400.0]]),
+                shape='isovelocity')
+
+    def test_constant_data_is_accepted(self):
+        ssp = SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [200.0, 1500.0]]), shape='isovelocity')
+        assert ssp.shape == 'isovelocity'
+
+    def test_the_shape_no_longer_swallows_an_invalid_interp(self):
+        """The isovelocity branch returned before the knob was validated, so
+        every unrecognised ``interp_ssp`` was accepted on such an env."""
+        from uacpy.core.environment import Environment
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        env = Environment(bathymetry=200.0, ssp=SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [200.0, 1500.0]]), shape='isovelocity'))
+        assert resolve_ssp_topopt(env, 'linear') == 'C'
+        for bad in ('analytic', 'bogus'):
+            with pytest.raises(ConfigurationError):
+                resolve_ssp_topopt(env, bad)

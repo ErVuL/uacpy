@@ -65,40 +65,53 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
 
     Notes
     -----
-    A band straddling fewer than two PSD grid points is integrated by a
-    rectangular ``psd · bandwidth`` estimate (``np.trapezoid`` over a single
-    point is 0, which would silently ``NaN`` the band on a grid too coarse to
-    resolve it) and a one-time :class:`UserWarning` names how many bands were
-    under-resolved, so grid coarseness is visible rather than read as "no
-    energy".
+    Each band is integrated over its full support ``[lo, hi]``: the band edges
+    are spliced into the in-band grid points and the PSD is interpolated onto
+    them, so the edge intervals carry their true width. A band reaching past
+    the ends of ``frequencies`` is integrated over the covered part only, never
+    extrapolated, so its level reflects the data actually supplied.
+
+    A band holding fewer than two interior grid points rests almost entirely on
+    its interpolated edges; a one-time :class:`UserWarning` names how many such
+    bands the grid produced.
     """
     psd = np.asarray(psd, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
+    if frequencies.shape != psd.shape:
+        raise ConfigurationError(
+            f"decidecade_band_levels: psd shape {psd.shape} and frequencies "
+            f"shape {frequencies.shape} differ")
+    if frequencies.size > 1 and np.any(np.diff(frequencies) <= 0):
+        raise ConfigurationError(
+            "decidecade_band_levels: frequencies must be strictly increasing. "
+            "A two-sided np.fft.fftfreq grid is not — take the one-sided "
+            "np.fft.rfftfreq half (and the matching half of the PSD).")
     pos = frequencies > 0
-    lower, centers, upper = decidecade_bands(frequencies[pos].min(),
-                                             frequencies[pos].max())
+    f_min = frequencies[pos].min()
+    f_max = frequencies[pos].max()
+    lower, centers, upper = decidecade_bands(f_min, f_max)
     levels = np.full(centers.size, np.nan)
     n_coarse = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
-        m = (frequencies >= lo) & (frequencies < hi)
-        n = int(np.count_nonzero(m))
-        if n >= 2:
-            power = np.trapezoid(psd[m], frequencies[m])
-        elif n == 1:
-            # Coarse grid: trapezoid over one point is 0; fall back to a
-            # rectangular psd·bandwidth estimate so the band isn't lost.
-            n_coarse += 1
-            power = float(psd[m][0]) * (hi - lo)
-        else:
+        # Integrate over [lo, hi] itself: splice the edges into the in-band
+        # grid points and interpolate the PSD onto them. Clip to the supplied
+        # frequency support so a partly-covered edge band is not extrapolated.
+        interior = frequencies[(frequencies > lo) & (frequencies < hi)]
+        nodes = np.unique(np.concatenate(([lo], interior, [hi])))
+        nodes = nodes[(nodes >= f_min) & (nodes <= f_max)]
+        if nodes.size < 2:
             continue
+        if interior.size < 2:
+            n_coarse += 1
+        power = np.trapezoid(np.interp(nodes, frequencies, psd), nodes)
         if power > 0:
             levels[i] = 10.0 * np.log10(power / ref ** 2)
     if n_coarse:
         warnings.warn(
-            f"decidecade_band_levels: {n_coarse} band(s) straddled only one PSD "
-            "grid point and were estimated rectangularly (psd·bandwidth); the "
-            "PSD grid is too coarse to resolve them. Use a finer-resolution PSD "
-            "for an integrated level.",
+            f"decidecade_band_levels: {n_coarse} band(s) hold fewer than two "
+            "interior PSD grid points and rest almost entirely on interpolated "
+            "band edges; the PSD grid is too coarse to resolve them. Use a "
+            "finer-resolution PSD for a fully integrated level.",
             UserWarning, stacklevel=2,
         )
     return centers, levels

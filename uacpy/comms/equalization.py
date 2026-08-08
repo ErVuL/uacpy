@@ -116,6 +116,12 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
     ntaps = n_ff + n_fb
     if n_ff < 1:
         raise ConfigurationError("equalizer: n_ff must be >= 1")
+    if forget is not None and not 0.0 < float(forget) <= 1.0:
+        raise ConfigurationError(
+            f"equalizer: the RLS forgetting factor must be in (0, 1]; got "
+            f"{forget!r}. The inverse-correlation update divides by it, so 0 "
+            f"or a negative value makes the taps non-finite."
+        )
     w = np.zeros(ntaps, dtype=complex)
     w[n_ff // 2] = 1.0                       # center-spike feedforward init
     uff = np.zeros(n_ff, dtype=complex)      # feedforward register (newest first)

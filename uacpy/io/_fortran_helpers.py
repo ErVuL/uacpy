@@ -31,6 +31,39 @@ PARSE_ERRORS = (ValueError, IndexError, KeyError, StopIteration, EOFError,
                 ZeroDivisionError, OverflowError, struct.error)
 
 
+def _bound_counts(filepath, file_size, min_item_bytes, **counts):
+    """Reject header counts that cannot be satisfied by ``file_size``.
+
+    Binary OASES readers size NumPy allocations directly off integer
+    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
+    hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
+    otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
+    validated. The smallest a single data item can occupy on disk is
+    ``min_item_bytes``, so no count — nor their product — can exceed
+    ``file_size // min_item_bytes``. Raise :class:`FileFormatError` on
+    overflow rather than attempting the allocation.
+    """
+    max_items = file_size // max(min_item_bytes, 1)
+    product = 1
+    for name, val in counts.items():
+        if val < 0:
+            raise FileFormatError(
+                f"{filepath}: negative header count {name}={val}."
+            )
+        if val > max_items:
+            raise FileFormatError(
+                f"{filepath}: header count {name}={val} is implausible for "
+                f"a {file_size}-byte file (max {max_items} items)."
+            )
+        product *= val
+    if product > max_items:
+        raise FileFormatError(
+            f"{filepath}: header counts {dict(counts)} imply {product} data "
+            f"items, implausible for a {file_size}-byte file "
+            f"(max {max_items})."
+        )
+
+
 def typed_format_error(reader):
     """Decorator: surface a reader's raw parse/truncation exceptions as a typed
     :class:`~uacpy.core.exceptions.FileFormatError`.

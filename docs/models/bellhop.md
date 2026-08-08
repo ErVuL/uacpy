@@ -199,7 +199,7 @@ any of them under another beam type — including the default `'B'` — emits a
 |---|---|---|
 | `beam_width_type` | `'F'` | Beam-width law: `'F'` filling, `'M'` match, `'W'` waveguide. |
 | `beam_curvature` | `'D'` | Curvature correction. |
-| `component` | `'P'` | Output component for displacement-receiver fields: `'P'` pressure, `'D'` displacement. |
+| `component` | `'P'` | Output component for displacement-receiver fields: `'P'` pressure, `'V'` vertical, `'H'` horizontal (`influence.f90:120-130`). |
 
 **Broadband synthesis**
 

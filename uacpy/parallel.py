@@ -55,9 +55,10 @@ class Job:
     run_mode : RunMode, optional
         Mode for this run.
     run_kwargs : dict, optional
-        Extra keyword arguments for this model's ``run()`` (e.g.
-        ``frequencies``, ``source_waveform``, ``sample_rate``, ``n_modes`` —
-        whichever that model accepts).
+        Extra keyword arguments for this model's ``run()``: ``frequencies``,
+        ``source_waveform``, ``sample_rate``, ``output_duration``. Model
+        configuration belongs on the constructor, so vary it by building one
+        model per job (or ``model.copy(**overrides)``).
     label : any, optional
         Identifier for this job (used as the stacking coordinate; defaults to
         the job's index).

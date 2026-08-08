@@ -149,3 +149,53 @@ def test_modal_propagation_loss_zero_modes_raises():
         m0.modal_propagation_loss(source_depth=50.0,
                                   receiver_depths=np.array([50.0]),
                                   ranges_m=np.array([1000.0]))
+
+
+def test_phase_advances_negatively_with_range():
+    """AT propagates as e^(i(wt - kr)), so P(r) carries exp(-i k r): the
+    unwrapped phase must DECREASE with range at the rate of the first mode.
+    Conjugating the field leaves |P| bit-identical, so only a phase test can
+    see it."""
+    modes = _pekeris_modes(n_modes=1)
+    r = np.linspace(2000.0, 2040.0, 401)
+    pf = modes.modal_propagation_loss(
+        source_depth=50.0, receiver_depths=np.array([50.0]), ranges_m=r)
+    ph = np.unwrap(np.angle(np.asarray(pf.data)[0]))
+    slope = np.polyfit(r, ph, 1)[0]
+    assert slope == pytest.approx(-float(modes.k[0].real), rel=1e-3)
+
+
+class TestDepthsOutsideTheTabulatedModes:
+    """``kraken.f90:573,598`` tabulates the modes on ``zTab`` — the merged
+    source/receiver depth vector the deck asked for — so ``Modes.depths`` is
+    exactly where ``phi`` is known. ``np.interp`` used to hold the end value
+    flat past it, reporting a plausible number for a depth the mode set never
+    covered; that is neither the mode shape nor the half-space evanescent tail
+    (which ``Modes`` carries no half-space wavenumber to compute, and which AT
+    does not compute either — ``calculateweights.f90:43-49`` extrapolates
+    linearly off the end)."""
+
+    @staticmethod
+    def _modes():
+        z = np.linspace(0.0, 100.0, 51)
+        phi = np.column_stack(
+            [np.sin((m + 1) * np.pi * z / 100.0) for m in range(3)])
+        return Modes(k=np.array([0.42, 0.40, 0.37]) + 0j, phi=phi, depths=z)
+
+    def test_a_receiver_below_the_mesh_is_no_data_not_a_clamp(self):
+        with pytest.warns(UserWarning, match='outside the tabulated'):
+            field = self._modes().modal_propagation_loss(
+                source_depth=25.0,
+                receiver_depths=np.array([10.0, 50.0, 150.0]),
+                ranges_m=np.array([1000.0, 2000.0]))
+        data = np.asarray(field.data)
+        assert np.all(np.isfinite(data[:2]))
+        assert np.all(np.isnan(data[2]))
+
+    def test_a_source_outside_the_mesh_is_fatal(self):
+        """The source defines the excitation, so a guess there is not a
+        no-data cell — it silently rescales the whole field."""
+        with pytest.raises(ConfigurationError, match='source_depth'):
+            self._modes().modal_propagation_loss(
+                source_depth=150.0, receiver_depths=np.array([10.0]),
+                ranges_m=np.array([1000.0]))

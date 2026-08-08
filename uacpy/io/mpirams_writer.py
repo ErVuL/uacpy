@@ -127,9 +127,11 @@ def write_inpe(
         f.write(f"{ihorz}\n")
         f.write(f"{ibot}\n")
         f.write(f"{bth_filename}\n")
-        # Output ranges filename is fixed — mpiramS always reads 'ranges.dat'
-        # from the peramx.f90 caller. Keep this in sync with
-        # :func:`write_ranges_file`.
+        # peramx.f90:91-92 takes the output-ranges filename from this line,
+        # so this writer is what pins it to 'ranges.dat'. Keep in sync with
+        # :func:`write_ranges_file`. That read is inside uacpy's own I/O
+        # rewrite of peramx.f90 (MODIFICATIONS.md), so it records what this
+        # build expects, not independent upstream authority.
         f.write("ranges.dat\n")
         # Bottom properties
         f.write(f"{sedlayer}\n")

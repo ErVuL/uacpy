@@ -103,8 +103,10 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     nsc = int(n_subcarriers)
     H = np.fft.fft(np.asarray(channel, dtype=complex), nsc)
     fig, ax = fig_ax(ax, figsize)
+    # Unshifted, so index k is the subcarrier ``ofdm_modulate`` /
+    # ``ofdm_demodulate`` address as k.
     ax.plot(np.arange(nsc),
-            20 * np.log10(np.abs(np.fft.fftshift(H)) + 1e-12), **mpl_kw)
+            20 * np.log10(np.abs(H) + 1e-12), **mpl_kw)
     ax.set_xlabel("Subcarrier index")
     ax.set_ylabel("|H| (dB)")
     ax.set_title(title or "OFDM subcarrier response", loc="left")

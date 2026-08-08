@@ -26,12 +26,96 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.io.oalib_writer import (
-    _BOUNDARY_TYPE_MAP, get_top_bc_code, resolve_ssp_topopt,
-    write_absorption_block, write_receiver_depths, write_receiver_ranges,
-    write_source_depths, write_ssp, write_surface_halfspace,
+    _BOUNDARY_TYPE_MAP, _DECK_DEPTH_QUANTUM, deck_depth, get_top_bc_code,
+    resolve_ssp_topopt, write_absorption_block, write_receiver_depths,
+    write_receiver_ranges, write_source_depths, write_ssp,
+    write_surface_halfspace,
 )
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.io.units import m_to_km
+
+
+# Beam-type letters honoured by the Bellhop env reader (case-significant).
+# Anything else maps to the geometric-hat DEFAULT case in
+# ReadEnvironmentBell.f90:387-395.
+_VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'g', 'G', 'S'})
+
+# Cerveny beam-shape letters (ReadEnvironmentBell.f90:171-179).
+_VALID_BEAM_WIDTH_TYPES = frozenset({'F', 'M', 'W'})
+_VALID_BEAM_CURVATURES = frozenset({'D', 'S', 'Z'})
+
+# Field component selected in InfluenceCerveny* (influence.f90:120-130).
+_VALID_COMPONENTS = frozenset({'P', 'V', 'H'})
+
+
+def validate_beam_type(beam_type: str, caller: str) -> None:
+    """Reject beam-type letters the solver cannot honour.
+
+    ``'b'`` (geometric Gaussian in ray-centred coordinates) is advertised by
+    ``ReadEnvironmentBell.f90:387-395`` but ``bellhop.f90``'s ``PickEpsilon``
+    (:403) calls ``ERROUT`` for it, and the C++/CUDA ports drop ``'b'`` from
+    ``IsRayCen()`` (``bellhopcuda/src/runtype.hpp:54``) so they silently run
+    the Cartesian variant instead.
+    """
+    if beam_type == 'b':
+        raise ConfigurationError(
+            f"{caller}(beam_type='b') is not implemented: Bellhop's "
+            f"PickEpsilon aborts on 'b' (geometric Gaussian beams in "
+            f"ray-centered coordinates), and the C++/CUDA ports silently "
+            f"substitute the Cartesian beam. Use beam_type='B' (geometric "
+            f"Gaussian, Cartesian)."
+        )
+    if beam_type not in _VALID_BEAM_TYPES:
+        raise ConfigurationError(
+            f"{caller}(beam_type={beam_type!r}) is not a known beam type. "
+            f"Choose one of {sorted(_VALID_BEAM_TYPES)} "
+            f"(case-significant; Bellhop would otherwise silently fall "
+            f"back to a geometric-hat beam)."
+        )
+
+
+def validate_beam_shape(
+    beam_width_type: str, beam_curvature: str, component: str, caller: str,
+) -> None:
+    """Reject Cerveny beam-shape letters the solver does not implement.
+
+    An unknown width letter leaves ``epsilonOpt`` at zero in ``PickEpsilon``
+    (``bellhop.f90:372-390``) and an unknown component falls through to
+    pressure (``influence.f90:120-130``) — both silent.
+    """
+    if beam_width_type not in _VALID_BEAM_WIDTH_TYPES:
+        raise ConfigurationError(
+            f"{caller}(beam_width_type={beam_width_type!r}) is not valid. "
+            f"Use 'F' (space filling), 'M' (minimum width) or 'W' (WKB); "
+            f"any other letter leaves the Cerveny beam width at zero."
+        )
+    if beam_curvature not in _VALID_BEAM_CURVATURES:
+        raise ConfigurationError(
+            f"{caller}(beam_curvature={beam_curvature!r}) is not valid. "
+            f"Use 'D' (double), 'S' (single) or 'Z' (zero)."
+        )
+    if component not in _VALID_COMPONENTS:
+        raise ConfigurationError(
+            f"{caller}(component={component!r}) is not valid. Use 'P' "
+            f"(pressure), 'V' (vertical) or 'H' (horizontal); any other "
+            f"letter silently returns pressure."
+        )
+
+
+def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
+    """Return ``(N, 2)`` bathymetry pairs quantised onto the mesh bottom."""
+    if hasattr(bathymetry, 'to_pairs'):
+        bathymetry = bathymetry.to_pairs()
+    pairs = np.asarray(bathymetry, dtype=float).copy()
+    deepest = float(np.max(pairs[:, 1]))
+    if deepest > z_max + _DECK_DEPTH_QUANTUM:
+        raise ConfigurationError(
+            f"Bellhop: bathymetry reaches {deepest:.6f} m but the SSP mesh "
+            f"bottom is {z_max:.1f} m; Bellhop aborts with 'Bathymetry drops "
+            f"below lowest point in the sound speed profile'."
+        )
+    pairs[:, 1] = np.minimum(pairs[:, 1], z_max)
+    return pairs
 
 
 def write_bellhop_env_file(
@@ -84,13 +168,12 @@ def write_bellhop_env_file(
         - E: Eigenrays
         - R: Ray trace
     beam_type : str, optional
-        Beam type (position 2): 'B'/'R'/'C'/'b'/'g'/'G'/'S'. Default is 'B'.
-        Case is significant: lowercase 'b','g' are ray-centered variants
+        Beam type (position 2): 'B'/'R'/'C'/'g'/'G'/'S'. Default is 'B'.
+        Case is significant: lowercase 'g' is the ray-centered variant
         (ReadEnvironmentBell.f90:387-395), uppercase are Cartesian.
-        - B: Gaussian beams (recommended)
-        - R: Ray-centered beams
-        - C: Cartesian beams
-        - b: Geometric Gaussian, ray-centered
+        - B: Geometric Gaussian, Cartesian (recommended)
+        - R: Cerveny Gaussian, ray-centered
+        - C: Cerveny Gaussian, Cartesian
         - g: Geometric hat, ray-centered
         - G: Geometric hat, Cartesian
         - S: Simple Gaussian
@@ -115,8 +198,11 @@ def write_bellhop_env_file(
         on boundary reflections per Beam%Type(4:4)
         (ReadEnvironmentBell.f90:159-166). Default: False (no shift).
     n_beams : int, optional
-        Number of beams. ``0`` defers to Bellhop's conservative
-        auto-selection (NBEAMS<=0 in the Fortran reader).
+        Number of beams. ``0`` defers to Bellhop's own estimate
+        (``angleMod.f90:38`` tests ``Nalpha == 0`` exactly), which is
+        ``MAX(INT(0.3 * Rmax * f / c0), 300)`` raised further by a
+        beam-width-versus-depth rule (``angleMod.f90:44-50``); a ray-trace
+        run gets 50. Negative values are rejected.
     alpha : tuple, optional
         Launch angle limits (min, max) in degrees. Default is (-80, 80).
     step : float, optional
@@ -135,7 +221,8 @@ def write_bellhop_env_file(
         - r_loop (float): Range (m) for choosing beam width
         - n_image (int): Number of images
         - ib_win (int): Beam windowing
-        - component (str): 'P' for pressure (default), 'D' for displacement
+        - component (str): 'P' pressure (default), 'V' vertical,
+          'H' horizontal
 
     Notes
     -----
@@ -147,8 +234,16 @@ def write_bellhop_env_file(
     """
     filepath = Path(filepath)
 
+    validate_beam_type(beam_type, 'write_bellhop_env_file')
+
     if n_beams is None:
         n_beams = 0
+    if n_beams < 0:
+        raise ConfigurationError(
+            f"write_bellhop_env_file(n_beams={n_beams}) must be >= 0. "
+            f"angleMod.f90:38 auto-estimates only on an exact 0; a negative "
+            f"count reaches ALLOCATE unchecked."
+        )
 
     if z_box is None:
         z_box = 1.2 * env.depth
@@ -208,9 +303,13 @@ def write_bellhop_env_file(
         ssp_options = ssp_options.ljust(6)
         f.write(f"'{ssp_options}'\n")
 
-        write_surface_halfspace(f, env)
-
+        # ReadEnvironmentBell.f90:59 calls ReadTopOpt, which consumes the
+        # Francois-Garrison / biological records itself (:308-320); only then
+        # does :69 CALL TopBot read the top half-space row (:474). Emitting
+        # the half-space first feeds it the absorption record.
         write_absorption_block(f, env)
+
+        write_surface_halfspace(f, env)
 
         # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
@@ -237,11 +336,33 @@ def write_bellhop_env_file(
                 filepath, boundary='top', verbose=verbose,
             )
 
+        # Extend SSP above MSL to cover any wave crests (env.altimetry
+        # positive-up, SSP z-axis positive-down).
+        z_min = 0.0
+        if has_altimetry:
+            max_alti_above_msl = env.altimetry.heights.max()
+            if max_alti_above_msl > 0:
+                z_min = -max_alti_above_msl - 0.5
+
+        z_max = deck_depth(env.depth)
+
+        # Bellhop/sspMod.f90:427-431 pairs row iz2 of the .ssp matrix with SSP%z(iz2)
+        # read from the .env and stops after SSP%NPts rows, so both blocks are
+        # built from this one depth-aligned profile. A guard row above the
+        # shallowest sample covers a raised surface or an SSP starting below
+        # 0 m; it goes into both.
+        ssp_aligned = env.ssp.extend_to(z_max)
+        ssp_depths = np.asarray(ssp_aligned.depths, dtype=float)
+        ssp_matrix = np.asarray(ssp_aligned.data, dtype=float)
+        if z_min < ssp_depths[0]:
+            ssp_depths = np.insert(ssp_depths, 0, z_min)
+            ssp_matrix = np.vstack([ssp_matrix[0, :], ssp_matrix])
+
         # Handle range-dependent SSP if using Quad interpolation
         if interp_char == 'Q' and env.has_range_dependent_ssp:
             ssp_file = filepath.with_suffix('.ssp')
             ssp_ranges = np.asarray(env.ssp.ranges, dtype=float)
-            ssp_data = np.asarray(env.ssp.data, dtype=float)
+            ssp_data = ssp_matrix.copy()
             # Bellhop drops a ray once it passes Box%r, and a ray landing on
             # the last SSP range is still flagged "outside the soundspeed box",
             # so the .ssp must extend *strictly past* r_box. When the profile
@@ -273,30 +394,7 @@ def write_bellhop_env_file(
                         f"wrote range-dependent SSP file: {ssp_file}",
                         verbose=verbose)
 
-        # Extend SSP above MSL to cover any wave crests (env.altimetry
-        # positive-up, SSP z-axis positive-down).
-        z_min = 0.0
-        if has_altimetry:
-            max_alti_above_msl = env.altimetry.heights.max()
-            if max_alti_above_msl > 0:
-                z_min = -max_alti_above_msl - 0.5
-
-        # Bellhop requires the last SSP sample to sit *exactly* at the
-        # medium depth written in the SSP header — and the header uses
-        # one decimal place. Round both sides through the same value so
-        # the parser sees aligned depths.
-        z_max = float(f"{env.depth:.1f}")
-
-        if env.ssp.is_range_dependent:
-            ssp_block = env.ssp.eval(range=0.0).extend_to(z_max)
-        else:
-            ssp_block = env.ssp.extend_to(z_max)
-        ssp_data_extended = ssp_block.to_pairs()
-        if z_min < ssp_data_extended[0, 0]:
-            first_c = ssp_data_extended[0, 1]
-            ssp_data_extended = np.vstack([[z_min, first_c], ssp_data_extended])
-
-        n_ssp = len(ssp_data_extended)
+        n_ssp = ssp_depths.size
         # Bellhop reads this line as (NPts, Sigma, Depth) per
         # ReadEnvironmentBell.f90:73 — Sigma is the top-boundary RMS
         # roughness, NOT z_min. Always emit Sigma=0.0; altimetry crests
@@ -311,7 +409,7 @@ def write_bellhop_env_file(
             if isinstance(env.absorption, ConstantAbsorption)
             else 0.0
         )
-        for depth, c in ssp_data_extended:
+        for depth, c in zip(ssp_depths, ssp_matrix[:, 0]):
             f.write(
                 f"{depth:.6f} {c:.6f} 0.0 1.0 "
                 f"{alpha_i:.6f} 0.0 /\n"
@@ -342,17 +440,19 @@ def write_bellhop_env_file(
                     bathy_for_bty = np.array(
                         [[0.0, env.depth], [r_last, env.depth]])
                 write_bty_long_format(
-                    bty_filepath, bathy_for_bty, env.bottom,
-                    interp_type=bty_code,
+                    bty_filepath, _bathymetry_within_mesh(bathy_for_bty, z_max),
+                    env.bottom, interp_type=bty_code,
                 )
             else:
                 write_bty_file(
-                    bty_filepath, env.bathymetry,
+                    bty_filepath,
+                    _bathymetry_within_mesh(env.bathymetry, z_max),
                     interp_type=bty_code,
                 )
             bottom_type_with_bathy = f"{bottom_type}~"
-            # 2nd field on this BOT line is sigma (top-of-bottom RMS
-            # roughness) per ReadEnvironmentBell.f90:466.
+            # 2nd field on this BOT line is the sigma slot
+            # (ReadEnvironmentBell.f90:93). Bellhop echoes it and drops it —
+            # "NPts, Sigma not used by BELLHOP" (bellhop.f90:50).
             roughness = getattr(hs, 'roughness', 0.0)
             f.write(f"'{bottom_type_with_bathy}' {roughness:.6f}\n")
         else:
@@ -377,7 +477,7 @@ def write_bellhop_env_file(
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
-                f" {env.depth:.2f}  {hs.sound_speed:.2f} "
+                f" {z_max:.2f}  {hs.sound_speed:.2f} "
                 f"{shear_speed:.2f} {hs.density:.2f} "
                 f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )
@@ -389,7 +489,7 @@ def write_bellhop_env_file(
         # Construct full RunType string per AT specification
         # Format: 'XXZZZZZ' (7 chars), positions:
         #   1 = run_type         (C/I/S/A/a/E/R)   — case significant
-        #   2 = beam_type        (B/R/C/S/b/g/G/^) — case significant
+        #   2 = beam_type        (B/R/C/S/g/G) — case significant
         #   3 = reserved          ('*' for source beam pattern, else ' ')
         #   4 = source_type      (R/X) — uppercase
         #   5 = grid_type        (R/I) — uppercase
@@ -398,15 +498,27 @@ def write_bellhop_env_file(
         #       ReadEnvironmentBell.f90:159  Beam%Type(4:4) = pos 7.
         # IMPORTANT: do NOT uppercase run_type or beam_type.  'A' vs
         # 'a' picks ASCII vs binary arrivals (ReadEnvironmentBell.f90
-        # :372-375); lowercase 'b','g','^' pick ray-centered beam
-        # variants (ReadEnvironmentBell.f90:387-395).  Uppercasing
-        # destroys both user intents.
+        # :372-375); lowercase 'g' picks the ray-centered geometric-hat
+        # beam (ReadEnvironmentBell.f90:387-395).  Uppercasing destroys
+        # both user intents.
         # Position 3: '*' enables reading <base>.sbp source beam pattern
         # file; blank otherwise (see bellhop.htm → ReadRunType).
         position_3 = '*' if source_beam_pattern else ' '
         # Position 4/5 use uppercase (only 'R'/'X' and 'R'/'I' accepted).
         position_4 = source_type.upper()
         position_5 = grid_type.upper()
+        # ``ReadEnvironmentBell.f90:414`` ERROUTs an irregular grid whose
+        # receiver-depth and receiver-range counts differ, so refuse it here
+        # rather than emit a deck bellhop.exe rejects at READIN.
+        if position_5 == 'I' and len(receiver.depths) != len(receiver.ranges):
+            raise ConfigurationError(
+                f"grid_type='I' (irregular) requires len(receiver.depths) == "
+                f"len(receiver.ranges); got {len(receiver.depths)} depths and "
+                f"{len(receiver.ranges)} ranges.",
+                remediation="Use grid_type='R' for a rectilinear "
+                            "(Cartesian-product) grid, or rebuild the "
+                            "Receiver with matched arrays.",
+            )
         # Position 6: dimensionality. Hardcoded to '2' (2D Bellhop).
         # 3D support (BELLHOP3D) would set this to '3' and plug into
         # the ``--3D`` _build_command path; 3D also changes several
@@ -434,19 +546,21 @@ def write_bellhop_env_file(
 
         # Cerveny beam parameters.  ReadEnvironmentBell.f90 reads the two
         # extra lines only for 'R'/'C'; 'S' (simple Gaussian) shares the
-        # no-extra-read case with 'G'/'g'/'^'/'B'/'b'.  Test case-insensitively
-        # without destroying the original beam_type (lowercase 'b','g'
-        # are distinct ray-centered variants).
+        # no-extra-read case with 'G'/'g'/'^'/'B'.  Test case-insensitively
+        # without destroying the original beam_type ('g' is a distinct
+        # ray-centered variant).
         if beam_type.upper() in ('C', 'R'):
             beam_width_type = kwargs.get('beam_width_type', 'F')
             beam_curvature = kwargs.get('beam_curvature', 'D')
+            component = kwargs.get('component', 'P')
+            validate_beam_shape(beam_width_type, beam_curvature, component,
+                                'write_bellhop_env_file')
             eps_multiplier = kwargs.get('eps_multiplier', 1.0)
             # Bellhop's RLoop column expects km; uacpy keeps everything in
             # metres at the API surface, so convert here.
             r_loop_km = float(m_to_km(kwargs.get('r_loop', 1000.0)))
             n_image = kwargs.get('n_image', 1)
             ib_win = kwargs.get('ib_win', 4)
-            component = kwargs.get('component', 'P')
 
             beam_type_str = f"{beam_width_type}{beam_curvature}"
             f.write(f"'{beam_type_str}' {eps_multiplier:.6f} {r_loop_km:.6f}\n")

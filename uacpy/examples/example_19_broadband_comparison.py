@@ -60,6 +60,7 @@ OUTPUT_DIR = Path(__file__).parent / 'output'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 import uacpy  # noqa: E402
+from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.models import Bellhop, RAM, SPARC, Scooter, Kraken, OASP  # noqa: E402
 from uacpy.models.base import RunMode  # noqa: E402
 
@@ -72,10 +73,22 @@ def main():
     print("EXAMPLE 19: Broadband Model Comparison")
     print("═" * 80)
 
+    # ONE seabed, shared by every model in this script. Leaving ``bottom=``
+    # off would fall back to the Environment default (cp=1600, rho=1.5,
+    # alpha=0.5) for some models while others were handed an explicit,
+    # different half-space — the models would then be solving physically
+    # different waveguides and the comparison below would be meaningless.
+    # Stated explicitly so that cannot happen silently.
+    pekeris_bottom = BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1600.0,
+        density=1.5, attenuation=0.5,
+    )
+
     env = uacpy.Environment(
         name='Pekeris Waveguide',
         bathymetry=100,
-        ssp=1500
+        ssp=1500,
+        bottom=pekeris_bottom,
     )
 
     source = uacpy.Source(depths=36, frequencies=100)
@@ -90,8 +103,11 @@ def main():
     # (fc=100, Q=2 → 50–150 Hz) with df=1 Hz → a 1 s IFFT window. This is fine
     # enough to (a) suppress the pre-arrival periodic replicas that coarse
     # sampling produces when the IFFT window exceeds 1/df, and (b) resolve the
-    # Pekeris dispersive modal coda consistently across every model, so the
-    # time-series comparison is apples-to-apples.
+    # Pekeris dispersive modal coda consistently across every model.
+    # Together with the single shared ``pekeris_bottom`` above, that makes the
+    # time-series comparison apples-to-apples for the six transfer-function
+    # models. SPARC is the exception and says so where it runs: it accepts only
+    # vacuum/rigid boundaries, so it solves a rigid-bottom guide.
     frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
 
     # Target receiver for time-series extraction
@@ -134,7 +150,8 @@ def main():
     # forces the ramsurf code path on the SAME fluid Pekeris). RAMGEO is
     # forced via backend='ramgeo' on the flat env (its bathymetry-parallel
     # layering isn't exercised on a half-space, but it is a third independent
-    # Collins fluid PE on identical physics). So this is a clean fluid-PE
+    # Collins fluid PE on identical physics). All three read the same
+    # ``pekeris_bottom`` as the non-PE models, so this is a clean fluid-PE
     # algorithm cross-comparison on the same Pekeris.
     #
     # The elastic backend rams0.5 is deliberately NOT included in this
@@ -146,19 +163,16 @@ def main():
     # it matches krakenc to ~0.1 dB on the elastic Pekeris (see
     # tests/test_cross_model_agreement.py, the ``pekeris-elastic`` scenario) —
     # which is its proper regime; wide-band time-series synthesis is not.
-    from uacpy.core.environment import BoundaryProperties
-
-    fluid_bottom = BoundaryProperties(
-        acoustic_type='half-space', sound_speed=1700.0,
-        density=1.7, attenuation=0.5,
-    )
+    # Same ``pekeris_bottom`` as every other model — the only thing that
+    # differs between env_mp and env_rs is the presence of a flat z=0
+    # altimetry line, which selects the ramsurf1.5 code path.
     env_mp = uacpy.Environment(
         name='Pekeris-fluid-flat', bathymetry=env.depth,
-        ssp=1500.0, bottom=fluid_bottom,
+        ssp=1500.0, bottom=pekeris_bottom,
     )
     env_rs = uacpy.Environment(
         name='Pekeris-fluid-altimetry', bathymetry=env.depth,
-        ssp=1500.0, bottom=fluid_bottom,
+        ssp=1500.0, bottom=pekeris_bottom,
         altimetry=[(0.0, 0.0), (8000.0, 0.0)],
     )
 
@@ -253,9 +267,19 @@ def main():
     # 6. SPARC TIME-DOMAIN (direct time-marching)
     # =========================================================================
     print("\n--- SPARC Time-Domain ---")
+    print("  NOTE: SPARC is the one model here that does NOT share the seabed.")
+    print("  It supports only 'vacuum'/'rigid' boundaries, so uacpy converts the")
+    print("  shared half-space to rigid and warns. SPARC therefore solves a")
+    print("  perfectly-reflecting guide, not the Pekeris guide the other six")
+    print("  models solve; its trace is shown for the time-marching method, not")
+    print("  as a same-physics comparison.")
     try:
+        # n_t_out sets the output sample rate, n_t_out / t_max. At 1001 over
+        # a 4 s window that is 250 Hz — Nyquist 125 Hz, below the 200 Hz top
+        # of the source band, so p(t) aliases. 4800 gives 1200 Hz (Nyquist
+        # 600 Hz), which is what the library's own guidance asks for.
         sparc = SPARC(
-            verbose=False, n_t_out=1001, t_max=4.0,
+            verbose=False, n_t_out=4800, t_max=4.0,
             f_min=50.0, f_max=200.0,
         )
         receiver_sparc = uacpy.Receiver(
@@ -555,7 +579,13 @@ def main():
     print("  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
     print("  Kraken - multi-freq normal modes (Python loop), returns transfer_function")
     print("  SPARC       - time-marched FFP (native time domain), returns time_series")
-    print("  OASP        - OASES PE broadband, returns transfer_function")
+    print("  OASP        - OASES transient (pulse) module: wavenumber integration /")
+    print("                global matrix, NOT a parabolic equation. Returns")
+    print("                transfer_function.")
+    print("\nSeabed: every model above runs the same half-space")
+    print(f"  (cp={pekeris_bottom.sound_speed:.0f} m/s, rho={pekeris_bottom.density:.1f},")
+    print(f"   alpha={pekeris_bottom.attenuation:.1f} dB/wavelength)")
+    print("  except SPARC, which supports only vacuum/rigid and is converted to rigid.")
 
     print("\n✓ Example 19 complete\n")
 

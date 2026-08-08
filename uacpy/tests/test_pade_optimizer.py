@@ -125,16 +125,18 @@ class TestOptimizeGrid:
             )
             assert res['c0'] == c0
 
-    def test_dz_floor_is_respected(self):
-        """When ``dz_floor`` is set, no returned dz falls below it."""
-        # 4th-order Numerov gives plenty of slack at dz=2 m, so the optimum
-        # sits well above the floor — but we still want the floor enforced.
-        res = optimize_grid(
-            freq=100.0, c_min=1500.0, c_max=1500.0, x_max=2000.0,
-            c0=1500.0, theta_max=20.0, eps=1e-2, p=6, alpha=1 / 12,
-            dz_floor=2.0,
-        )
-        assert res['dz'] >= 2.0
+    def test_the_search_sees_only_the_error_model(self):
+        """``optimize_grid`` takes the Lytaev parameters and nothing else.
+
+        Stability floors and array caps are RAM's, applied to the returned
+        Δz — see ``TestRamAppliesTheStabilityFloor`` in
+        ``test_ram_backends.py``. A knob here would let the two disagree
+        about which grid is actually marched.
+        """
+        import inspect
+        params = set(inspect.signature(optimize_grid).parameters)
+        assert params == {'freq', 'c_min', 'c_max', 'x_max', 'c0',
+                          'theta_max', 'eps', 'p', 'alpha'}
 
     def test_infeasible_raises(self):
         """No grid satisfies ε at this combination of inputs."""
@@ -145,16 +147,15 @@ class TestOptimizeGrid:
                 alpha=0.0,
             )
 
-    def test_floor_above_ceiling_blames_the_ceiling(self):
-        """An empty Δz ladder is a bounds error, not an accuracy failure —
-        reachable with a fast-shear rams seabed (cs=1500 m/s at 50 Hz →
-        floor 16.5 m against the default 5 m ceiling)."""
-        with pytest.raises(ValueError, match="dz_ceiling"):
-            optimize_grid(
-                freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
-                c0=1600.0, theta_max=30.0, eps=1e-3, p=6,
-                dz_floor=16.5,
-            )
+    def test_the_depth_ladder_spans_the_module_bounds(self):
+        """The Δz ladder runs between ``DZ_MIN`` and ``DZ_MAX``, so it is
+        never empty and the search cannot fail for want of a candidate."""
+        from uacpy.models._pade_optimizer import DZ_MIN, DZ_MAX, _ladder
+        rungs = _ladder(DZ_MIN, DZ_MAX)
+        assert rungs
+        assert min(rungs) == pytest.approx(DZ_MIN)
+        assert max(rungs) == pytest.approx(DZ_MAX)
+        assert rungs == sorted(rungs, reverse=True)
 
 
 class TestGridError:

@@ -24,6 +24,7 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -113,10 +114,12 @@ def main():
     bellhop = Bellhop(verbose=False, beam_type='B', n_beams=300, alpha=(-80, 80))
 
     try:
+        t_start = time.perf_counter()
         result = bellhop.run(
             env, source, receiver,
             run_mode=RunMode.COHERENT_TL,        # Coherent TL
         )
+        elapsed = time.perf_counter() - t_start
         print("  ✓ Propagation complete!")
 
     except Exception as e:
@@ -134,7 +137,7 @@ def main():
     # Plot 1: TL field
     ax = axes[0, 0]
     _, _ = plot_field(result, ax=ax, env=env)
-    ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
+    ax.set_title('Transmission Loss Field (fixed 20-120 dB scale, jet_r colormap)',
                  fontweight='bold', fontsize=12)
 
     # Plot 2: TL vs Range (at source depth)
@@ -227,7 +230,7 @@ def main():
     print("\nResults:")
     print(f"  • TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
-    print("  • Computation time: < 1 second")
+    print(f"  • Bellhop run time: {elapsed:.2f} s")
 
     print("\nWhat you learned:")
     print("  ✓ How to create a basic Environment")
@@ -236,9 +239,9 @@ def main():
     print("  ✓ How to visualize transmission loss")
 
     print("\nPlotting features used:")
-    print("  ✓ plot_field() with auto TL limits")
+    print("  ✓ plot_field() with the fixed TL colour scale")
     print("  ✓ jet_r colormap (blue=good, red=poor) - Acoustic Toolbox standard")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB, identical across every figure")
 
     print("\nNext steps:")
     print("  • Try example_02 for different sound speed profiles")

@@ -200,3 +200,47 @@ def test_localizes_offgrid_source_from_noisy_snapshots(pekeris, processor):
     # nearest grid node to truth
     assert abs(cand_z[iz] - true_z) <= (cand_z[1] - cand_z[0])
     assert abs(cand_r[ir] - true_r) <= (cand_r[1] - cand_r[0])
+
+
+def test_replica_decays_under_either_imag_k_sign():
+    """Raw Kraken carries Im(k) < 0; ``Modes.with_attenuation`` builds
+    Im(k) > 0. A passive medium can only attenuate, so the replica must decay
+    with range under BOTH. Regression for the x1.75e11 grow-with-range bug that
+    put an MFP peak at 14 m / 5.75 km instead of 42 m / 10 km."""
+    from uacpy.core.results import Modes
+    from uacpy.sonar.matched_field import synthesize_replica
+    depths = np.linspace(0.0, 100.0, 51)
+    phi = np.column_stack([np.sin((m + 0.5) * np.pi * depths / 100.0)
+                           for m in range(3)])
+    k_real = np.array([0.0628, 0.0625, 0.0619])
+    r = np.array([1000.0, 20000.0])
+    for sign in (+1.0, -1.0):
+        modes = Modes(k=k_real + sign * 1j * 3e-4, phi=phi, depths=depths,
+                      model='Test', frequencies=15.0)
+        p = synthesize_replica(modes, 25.0, r, np.array([50.0]))
+        env = np.abs(np.asarray(p).ravel()) * np.sqrt(r)   # drop 1/sqrt(r)
+        assert env[-1] < env[0], (
+            f"replica grew with range for Im(k) sign {sign:+.0f}")
+
+
+def test_replica_carries_the_per_mode_hankel_weight():
+    """The far-field modal sum weights each mode by ``1/sqrt(k_m)`` (the
+    asymptotic Hankel form). Dropping it leaves a replica that still decays and
+    still normalises, so only a mode-resolved check sees it: with two modes of
+    equal shape amplitude the ratio of their contributions is exactly
+    ``sqrt(k2/k1)``."""
+    from uacpy.core.results import Modes
+    from uacpy.sonar.matched_field import synthesize_replica
+    depths = np.linspace(0.0, 100.0, 51)
+    k = np.array([0.0628, 0.0400])
+    r = np.array([5000.0])
+    z_r = np.array([50.0])
+    # One mode at a time, identical shapes -> the only difference is 1/sqrt(k).
+    amps = []
+    for m in range(2):
+        phi = np.sin(np.pi * depths / 100.0)[:, None]
+        modes = Modes(k=np.array([k[m]]), phi=phi, depths=depths,
+                      model='Test', frequencies=15.0)
+        p = synthesize_replica(modes, 25.0, r, z_r)
+        amps.append(np.abs(np.asarray(p).ravel()[0]))
+    assert amps[0] / amps[1] == pytest.approx(np.sqrt(k[1] / k[0]), rel=1e-9)

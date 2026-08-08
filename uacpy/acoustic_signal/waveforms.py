@@ -263,10 +263,10 @@ def lfm_chirp(
 
     Returns
     -------
-    s : ndarray
-        LFM signal
     time : ndarray
         Time vector
+    s : ndarray
+        LFM signal
 
     Notes
     -----
@@ -303,7 +303,7 @@ def lfm_chirp(
     f_avg = fmin + (fmax - fmin) * time / (2 * T)
     s = np.sin(2.0 * np.pi * f_avg * time)
 
-    return s, time
+    return time, s
 
 
 def tone_burst(
@@ -325,10 +325,10 @@ def tone_burst(
 
     Returns
     -------
-    s : ndarray
-        Tone burst signal
     time : ndarray
         Time vector
+    s : ndarray
+        Tone burst signal
 
     Examples
     --------
@@ -356,7 +356,7 @@ def tone_burst(
     if window:
         s = s * hann(N)
 
-    return s, time
+    return time, s
 
 
 def hfm_chirp(
@@ -381,10 +381,10 @@ def hfm_chirp(
 
     Returns
     -------
-    s : ndarray
-        HFM signal
     time : ndarray
         Time vector
+    s : ndarray
+        HFM signal
 
     Notes
     -----
@@ -413,7 +413,7 @@ def hfm_chirp(
     P1 = 1 / fmin
     s = np.sin((2 * np.pi / b) * np.log(1 + b * time / P1))
 
-    return s, time
+    return time, s
 
 
 def nwave(time: np.ndarray, frequency: float) -> np.ndarray:

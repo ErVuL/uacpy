@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Union
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 _LEVEL_VALUE = {
     'debug': 10,
@@ -60,9 +62,9 @@ def _resolve_threshold(verbose: Union[bool, str, None]) -> int:
         return 20
     key = str(verbose).lower()
     if key not in _VERBOSE_THRESHOLD:
-        raise ValueError(
-            f"verbose={verbose!r} not recognized. "
-            f"Valid: False/True/'off'/'silent'/'info'/'debug'."
+        raise ConfigurationError(
+            f"verbose={verbose!r} not recognized.",
+            remediation="Use False/True/'off'/'silent'/'info'/'debug'.",
         )
     return _VERBOSE_THRESHOLD[key]
 
@@ -93,9 +95,9 @@ def log_message(
     """
     lvl = level.lower()
     if lvl not in _LEVEL_VALUE:
-        raise ValueError(
-            f"log_message: unknown level={level!r}. "
-            f"Valid: {sorted(_LEVEL_VALUE)}."
+        raise ConfigurationError(
+            f"log_message: unknown level={level!r}.",
+            remediation=f"Use one of {sorted(_LEVEL_VALUE)}.",
         )
     if _LEVEL_VALUE[lvl] < _resolve_threshold(verbose):
         return

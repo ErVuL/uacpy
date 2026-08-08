@@ -133,9 +133,17 @@ class TestOaspRangeAxisFidelity:
 
 
 class TestOasesSSPDecimationAtTheRealLimit:
-    """Below OASES' own NLA=1001 the profile passes through untouched; above
-    it uacpy decimates and says so, rather than handing OASES a deck it
-    rejects with '*** TOO MANY LAYERS ***' (oaseun31.f:44)."""
+    """Below the water column's share of OASES' NLA=1001 the profile passes
+    through untouched; above it uacpy decimates and says so, rather than
+    handing OASES a deck it rejects with '*** TOO MANY LAYERS ***'
+    (oaseun31.f:44).
+
+    NL counts the whole deck, so the budget is NLA minus the halfspaces and
+    sediment layers around the water column — two for the simplest deck.
+    """
+
+    #: Upper halfspace + bottom halfspace, the minimum any deck spends.
+    N_OTHER = 2
 
     @staticmethod
     def _ssp(n):
@@ -144,11 +152,12 @@ class TestOasesSSPDecimationAtTheRealLimit:
 
     def test_profile_under_the_limit_is_untouched(self):
         import warnings as _w
-        from uacpy.io.oases_writer import _check_ssp_layer_count
-        data = self._ssp(1001)
+        from uacpy.io.oases_writer import (_check_ssp_layer_count,
+                                           _OASES_MAX_LAYERS)
+        data = self._ssp(_OASES_MAX_LAYERS - self.N_OTHER)
         with _w.catch_warnings():
             _w.simplefilter('error')
-            out = _check_ssp_layer_count(data)
+            out = _check_ssp_layer_count(data, self.N_OTHER)
         assert out.shape == data.shape
         np.testing.assert_array_equal(out, data)
 
@@ -157,11 +166,17 @@ class TestOasesSSPDecimationAtTheRealLimit:
                                            _OASES_MAX_LAYERS)
         data = self._ssp(5000)
         with pytest.warns(UserWarning, match="decimated"):
-            out = _check_ssp_layer_count(data)
-        assert out.shape[0] <= _OASES_MAX_LAYERS
+            out = _check_ssp_layer_count(data, self.N_OTHER)
+        assert out.shape[0] <= _OASES_MAX_LAYERS - self.N_OTHER
         # Surface and seafloor must survive so the interfaces still pin.
         np.testing.assert_allclose(out[0], data[0])
         np.testing.assert_allclose(out[-1], data[-1])
+
+    def test_the_seabed_share_is_required_not_assumed(self):
+        """Omitting it would bound the SSP alone and overrun NL."""
+        from uacpy.io.oases_writer import _check_ssp_layer_count
+        with pytest.raises(TypeError):
+            _check_ssp_layer_count(self._ssp(10))
 
 
 @pytest.mark.requires_binary
@@ -190,12 +205,13 @@ def test_oast_short_range_run_returns_a_field_not_nan():
 
 
 @pytest.mark.requires_binary
-def test_oases_stop_banner_exiting_zero_is_raised_with_its_own_message():
-    """OASES reports fatal conditions with ``STOP *** … ***``, which gfortran
-    exits 0 for, and it writes no .prt — so the only diagnostic is stderr.
-    Previously the run fell through to a 'check the .prt log' dead end."""
+def test_a_single_frequency_contour_option_is_refused_before_the_run():
+    """``unoast31.f:138-140`` ends at ``STOP '*** CONTOURS REQUIRE NRFR>1 …'``
+    when option ``'o'`` meets ``NFREQ <= 1``. That is a character stop, so the
+    binary exits 0 and writes no ``.prt`` — nothing is left to diagnose from.
+    The deck is refusable on inspection, so refuse it."""
     import uacpy
-    from uacpy.core.exceptions import ModelExecutionError
+    from uacpy.core.exceptions import ConfigurationError
     from uacpy.models.base import RunMode
     env = uacpy.Environment(
         bathymetry=200.0,
@@ -203,13 +219,34 @@ def test_oases_stop_banner_exiting_zero_is_raised_with_its_own_message():
         bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
                                         sound_speed=1800.0, density=1.8,
                                         attenuation=0.5))
-    # 'o' selects FRCONT, which OASES refuses unless NRFR > 1.
     model = uacpy.OASES.for_mode(RunMode.COHERENT_TL)
     model.options = 'N J T o'
-    with pytest.raises(ModelExecutionError) as ei:
+    with pytest.raises(ConfigurationError, match='CONTOURS REQUIRE'):
         model.run(env, uacpy.Source(depths=50.0, frequencies=500.0),
                   uacpy.Receiver(depths=[100.0], ranges=[1000.0, 2000.0]))
+
+
+@pytest.mark.parametrize('banner', [
+    'STOP *** CMIN/CMAX CONFLICT ***',
+    'STOP >>>> ERROR: INPUT FILE NOT FOUND <<<<',
+    'STOP INVALID INPATCH',
+])
+def test_an_oases_stop_banner_does_not_point_at_a_prt(tmp_path, banner):
+    """OASES stops with a character code — gfortran exits 0 — and writes no
+    ``.prt``, so stderr is the only diagnostic. Only 19 of its 46 banners carry
+    ``***``; the rest use ``>>> … <<<`` or no marker at all, so the check is on
+    the stop *form*."""
+    import uacpy
+    from types import SimpleNamespace
+    from uacpy.core.exceptions import ModelExecutionError
+    from uacpy.models.base import RunMode
+    model = uacpy.OASES.for_mode(RunMode.COHERENT_TL)
+    result = SimpleNamespace(stdout='', stderr=banner, returncode=0)
+    with pytest.raises(ModelExecutionError) as ei:
+        model._raise_on_fortran_fatal(result, tmp_path, 'nonexistent')
     msg = str(ei.value)
+    assert banner.split('STOP', 1)[1].strip()[:12] in msg, (
+        f"the binary's own banner never reached the user: {msg[:200]}")
     assert '.prt' not in msg or 'writes no .prt' in msg, (
         f"error still points at a .prt OASES never writes: {msg[:200]}")
 

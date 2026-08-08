@@ -23,44 +23,11 @@ import struct
 from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
 from uacpy.io._fortran_helpers import (
     PARSE_ERRORS,
-    read_fortran_record_marker as _read_fortran_record_marker,
+    _bound_counts,
     read_fortran_record as _read_fortran_record,
     detect_endian,
 )
 from uacpy.io.units import km_to_m
-
-
-def _bound_counts(filepath, file_size, min_item_bytes, **counts):
-    """Reject header counts that cannot be satisfied by ``file_size``.
-
-    Binary OASES readers size NumPy allocations directly off integer
-    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
-    hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
-    otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
-    validated. The smallest a single data item can occupy on disk is
-    ``min_item_bytes``, so no count — nor their product — can exceed
-    ``file_size // min_item_bytes``. Raise :class:`FileFormatError` on
-    overflow rather than attempting the allocation.
-    """
-    max_items = file_size // max(min_item_bytes, 1)
-    product = 1
-    for name, val in counts.items():
-        if val < 0:
-            raise FileFormatError(
-                f"{filepath}: negative header count {name}={val}."
-            )
-        if val > max_items:
-            raise FileFormatError(
-                f"{filepath}: header count {name}={val} is implausible for "
-                f"a {file_size}-byte file (max {max_items} items)."
-            )
-        product *= val
-    if product > max_items:
-        raise FileFormatError(
-            f"{filepath}: header counts {dict(counts)} imply {product} data "
-            f"items, implausible for a {file_size}-byte file "
-            f"(max {max_items})."
-        )
 
 
 def read_oast_tl(
@@ -72,20 +39,28 @@ def read_oast_tl(
 
     OAST outputs two files:
     - .plp: Plot metadata (ASCII with binary markers) - contains grid info
-    - .plt: Actual TL data (pure ASCII, one value per line)
+    - .plt: Actual curve data (pure ASCII, one value per line)
 
     OAST writes TL (in dB) directly to disk; this reader returns the
     native ``(n_depths, n_ranges)`` TL grid plus the depth and range
     axes. Resampling onto a user receiver grid is the caller's job —
     use :meth:`Field.resample_to` after wrapping.
 
+    The TL curves are *not* necessarily first in the ``.plt``: options that
+    add curves inside the same receiver loop (``'I'`` → PLINTGR, ``'a'`` →
+    PLSPECT, unoast31.f:590-605) write theirs ahead of PLTLOS's, and ``'A'``
+    / ``'D'`` add more afterwards. Every curve is described by a ``.plp``
+    record whose 6-character tag names it (``<param>TLRAN`` for TL vs range,
+    oasfun22.f:330), so the TL curves are selected by tag rather than by
+    position.
+
     Parameters
     ----------
     filepath : str or Path
         Path to .plt or .plp file (base name works for both)
     receiver_depths : ndarray
-        Receiver depth axis (m). OAST writes TL on this depth grid; the
-        depth axis is taken verbatim from the user.
+        Receiver depth axis (m). OAST writes one TL curve per receiver, in
+        receiver order; the depth axis is taken verbatim from the user.
 
     Returns
     -------
@@ -97,14 +72,15 @@ def read_oast_tl(
     ranges : ndarray
         OAST's native range grid in metres.
     metadata : dict
-        ``{'model': 'OAST', 'oast_grid_shape': (n_d, n_r_native)}``.
+        ``{'oast_grid_shape': (n_d, n_r_native)}``.
 
     Raises
     ------
-    IOError
+    FileFormatError
         If the ``.plp`` file is missing or cannot be parsed (OAST chooses
         its own range grid via FFT-based sampling, so the native grid
-        cannot be reconstructed without it).
+        cannot be reconstructed without it), if it carries no TL-vs-range
+        curve, or if the curves do not match ``receiver_depths``.
     """
     filepath = Path(filepath)
 
@@ -144,44 +120,62 @@ def read_oast_tl(
             f"OAST .plp grid file not found: {plp_file}. "
             "Without it the native range grid cannot be reconstructed."
         )
-    oast_grid = _parse_oast_plp(plp_file)
+    curves = _parse_oast_plp(plp_file)
+    tl_curves = [c for c in curves if c['tag'].endswith(_OAST_TL_RANGE_TAG)]
 
-    n_depths_oast = len(receiver_depths)  # OAST writes TL on this depth grid
-    n_ranges_oast = oast_grid['n_ranges']
-    ranges_oast = oast_grid['ranges']
-
-    # Read all TL values from data file (.plt or .020)
-    tl_values = []
-    with open(tl_data_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            # Skip header lines and empty lines
-            if line and not any(keyword in line for keyword in ['MODU', 'OASTL', '$', 'AXIS', 'TITLE']):
-                try:
-                    tl_values.append(float(line))
-                except ValueError:
-                    pass  # Skip non-numeric lines
-
-    tl_values = np.array(tl_values)
-
-    if len(tl_values) == 0:
-        raise FileFormatError(f"No TL data found in {tl_data_file}")
-
-    # OAST outputs data as: all ranges for depth 1, all ranges for depth 2, etc.
-    expected_total = n_depths_oast * n_ranges_oast
-
-    if len(tl_values) < expected_total:
-        missing = expected_total - len(tl_values)
+    if not tl_curves:
+        tags = sorted({c['tag'] for c in curves})
         raise FileFormatError(
-            f"Truncated OAST output: got {len(tl_values)} TL values, "
-            f"expected {expected_total} "
-            f"(n_depths={n_depths_oast}, n_ranges={n_ranges_oast}); "
-            f"{missing} cells missing. A truncated run (crash, disk-full, "
-            f"killed job) cannot be completed without fabricating TL. "
-            f"File: {tl_data_file}"
+            f"{plp_file} carries no TL-vs-range curve "
+            f"(no '*{_OAST_TL_RANGE_TAG}' record); curves present: {tags}. "
+            f"Add the 'T' option (PLTL) to the OAST option string."
         )
 
-    tl_oast = tl_values[:expected_total].reshape(n_depths_oast, n_ranges_oast)
+    # One TL curve per (output parameter, receiver). uacpy returns a single
+    # TL grid, so more than one output parameter is ambiguous — say so rather
+    # than pick a slab.
+    params = sorted({c['tag'][0] for c in tl_curves})
+    if len(params) > 1:
+        raise FileFormatError(
+            f"{plp_file} carries TL curves for {len(params)} output "
+            f"parameters {params} (OASES optpar letters N,W,U,V,R,B,S); "
+            f"uacpy returns a single TL grid. Request one output parameter "
+            f"in the OAST option string."
+        )
+
+    n_depths_oast = len(receiver_depths)  # one PLTLOS curve per receiver
+    if len(tl_curves) != n_depths_oast:
+        raise FileFormatError(
+            f"{plp_file} carries {len(tl_curves)} TL-vs-range curves but "
+            f"{n_depths_oast} receiver depths were requested. OAST writes one "
+            f"curve per receiver (unoast31.f:629-640), so the run does not "
+            f"correspond to this receiver array."
+        )
+
+    blocks = _read_plt_blocks(tl_data_file)
+    n_expected = sum(1 for c in curves if c['index'] is not None)
+    if len(blocks) != n_expected:
+        raise FileFormatError(
+            f"{tl_data_file} holds {len(blocks)} data blocks but "
+            f"{plp_file} describes {n_expected}; the pair is inconsistent "
+            f"(truncated or interleaved run)."
+        )
+
+    n_ranges_oast = tl_curves[0]['n']
+    ranges_oast = km_to_m(
+        tl_curves[0]['xoff'] + np.arange(n_ranges_oast) * tl_curves[0]['dx']
+    )
+
+    tl_oast = np.empty((n_depths_oast, n_ranges_oast), dtype=float)
+    for row, curve in enumerate(tl_curves):
+        if curve['n'] != n_ranges_oast:
+            raise FileFormatError(
+                f"{plp_file}: TL curve {row} has {curve['n']} range samples, "
+                f"curve 0 has {n_ranges_oast} — the curves do not share one "
+                f"range grid."
+            )
+        tl_oast[row] = _curve_values(blocks[curve['index']], curve,
+                                     tl_data_file)
 
     metadata = {
         'oast_grid_shape': (n_depths_oast, n_ranges_oast),
@@ -189,73 +183,190 @@ def read_oast_tl(
     return tl_oast, np.asarray(receiver_depths, dtype=float), ranges_oast, metadata
 
 
-def _parse_oast_plp(plp_file: Path) -> Dict:
-    """
-    Parse OAST .plp file to extract grid information
+#: ``.plp`` curve tag PLTLOS writes for TL vs range: ``optpar(INR)//'TLRAN'``
+#: (oasfun22.f:330). PLDAV/PTLDEP/PLINTGR/PLSPECT use TLDAV/TLDEP/INTGR/SPECT.
+_OAST_TL_RANGE_TAG = 'TLRAN'
 
-    Returns dictionary with:
-    - n_ranges: number of ranges (N in OAST output)
-    - ranges: array of range values in meters
-    - range_offset: starting range (XOFF in km)
-    - range_increment: range step (DX in km)
+#: Column at which PLPWRI's ``FORMAT(1H ,I8,10X,A40)`` / ``(1H ,G15.6,3X,A40)``
+#: put the field name; both leave the value in columns 0..18.
+_PLP_LABEL_COL = 19
+
+#: Records PLPWRI writes between the label list and ``NC``: XLEN, YLEN,
+#: IGRID, XLEFT, XRIGHT, XINC, XDIV, XTXT, XTYP, YDOWN, YUP, YINC, YDIV,
+#: YTXT, YTYP (oasgun21.f:616-630).
+_PLP_AXIS_RECORDS = 15
+
+#: ``OPTION(2)`` of the record that closes the file (unoast31.f:914-915).
+_PLP_END_TAG = 'PLTEND'
+
+#: The five PLTWRI fields, in the order oasgun21.f:653-657 writes them.
+_PLTWRI_FIELDS = ('N', 'XOFF', 'DX', 'YOFF', 'DY')
+
+
+def _plp_value(plp_file: Path, lines: list, i: int, expect: str) -> float:
+    """Numeric value of a labelled PLPWRI/PLTWRI record, checking its label.
+
+    Every record PLPWRI and PLTWRI write with a numeric edit descriptor
+    carries its own name in the A40 tail (oasgun21.f:662-663), so the label
+    is a free check that the positional walk is still in step.
     """
+    if i >= len(lines):
+        raise FileFormatError(
+            f"{plp_file}: file ends inside a plot block; expected the "
+            f"{expect!r} record."
+        )
+    line = lines[i]
+    label = line[_PLP_LABEL_COL:].strip()
+    if label != expect:
+        raise FileFormatError(
+            f"{plp_file}: expected the {expect!r} record at line {i + 1}, "
+            f"found {label!r}."
+        )
+    value = line[:_PLP_LABEL_COL].strip()
     try:
-        with open(plp_file, 'rb') as f:
-            content = f.read()
+        return float(value)
+    except ValueError as e:
+        raise FileFormatError(
+            f"{plp_file}: {expect} field is not numeric ({value!r})."
+        ) from e
 
-        # Decode as ASCII, ignoring binary sections
-        text = content.decode('ascii', errors='ignore')
-        lines = text.split('\n')
 
-        n_ranges = None
-        xoff = None
-        dx = None
+def _parse_oast_plp(plp_file: Path) -> list:
+    """Parse an OASES ``.plp`` into its ordered list of curve descriptors.
 
-        for i, line in enumerate(lines):
-            # Look for key parameters
-            if 'NC' in line and 'ZINC' not in line and 'INC' not in line:
-                # Number of curves
-                try:
-                    # Next line should have N (number of points)
-                    if i + 1 < len(lines) and n_ranges is None:
-                        next_line = lines[i + 1]
-                        if 'N' in next_line and 'NUMBER' not in next_line:
-                            try:
-                                n_ranges = int(next_line.split()[0])
-                            except (ValueError, IndexError):
-                                pass
-                except (ValueError, IndexError):
-                    pass
-            elif 'XOFF' in line:
-                try:
-                    xoff = float(line.split()[0])  # in km
-                except (ValueError, IndexError):
-                    pass
-            elif 'DX' in line and 'XDIV' not in line and 'XINC' not in line:
-                try:
-                    dx = float(line.split()[0])  # in km
-                except (ValueError, IndexError):
-                    pass
+    The file opens with the MODU record (unoast31.f:277) and then repeats a
+    strictly positional plot block: PLPWRI writes the ``OPTION`` line, PTIT
+    and TITLE as A80, ``NLAB``, ``NLAB`` A16 labels, 15 axis records and
+    ``NC`` (oasgun21.f:610-631); PLTWRI then writes ``NC`` groups of five
+    records — ``N``, ``XOFF``, ``DX``, ``YOFF``, ``DY`` (oasgun21.f:653-657).
+    A record whose ``OPTION(2)`` is ``PLTEND`` closes the file.
 
-        if n_ranges is None or xoff is None or dx is None:
+    The walk is positional because it has to be: PTIT and TITLE are A80
+    fields of arbitrary user text (``FORMAT(1H ,A80)``, oasgun21.f:634), so
+    no column or substring distinguishes them from the records around them.
+    The counts come from the file itself.
+
+    Each PLTWRI record corresponds, in order, to one blank-line-separated
+    block of the ``.plt``.
+
+    Returns
+    -------
+    list of dict
+        One entry per PLTWRI record, in file order, with keys ``tag`` (the
+        6-character ``OPTION(2)``, e.g. ``'NTLRAN'``), ``index`` (position in
+        the ``.plt`` block sequence), ``n``, ``xoff``, ``dx``, ``yoff``,
+        ``dy``. Offsets/increments are in the plot's own x units (km for a
+        TL-vs-range curve).
+    """
+    # The xopt fields PLPWRI appends to the OPTION line are uninitialised
+    # CHARACTER*3 slots, so the file is only ASCII-ish — decode leniently.
+    text = plp_file.read_bytes().decode('ascii', errors='replace')
+    lines = text.split('\n')
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    curves: list = []
+    n_blocks = 0
+    i = 1  # MODU record
+    while i < len(lines):
+        option = lines[i]
+        # PLPWRI's OPTION line: ' ' + PROGNM(A6) + OPTION(2)(A6) + 6 x ',xxx'.
+        tag = option[7:13].strip()
+        if tag == _PLP_END_TAG:
+            break
+        if not tag:
             raise FileFormatError(
-                f"Could not parse grid from .plp file: "
-                f"n_ranges={n_ranges}, xoff={xoff}, dx={dx}"
+                f"{plp_file}: line {i + 1} carries no PLPWRI OPTION tag; the "
+                f"file is not an OASES .plp, or the run was truncated."
             )
+        i += 3                                    # OPTION, PTIT, TITLE
+        n_lab = int(_plp_value(plp_file, lines, i, 'NUMBER OF LABELS'))
+        i += 1 + n_lab + _PLP_AXIS_RECORDS
+        n_curves = int(_plp_value(plp_file, lines, i, 'NC'))
+        i += 1
+        for _ in range(n_curves):
+            fields = {name: _plp_value(plp_file, lines, i + k, name)
+                      for k, name in enumerate(_PLTWRI_FIELDS)}
+            i += len(_PLTWRI_FIELDS)
+            dx, dy = fields['DX'], fields['DY']
+            # PLTWRI emits a .plt block only when it tabulates at least one
+            # axis; a fully parameterised curve (DX and DY both non-zero)
+            # contributes nothing but the blank terminator.
+            writes_block = (dx == 0.0) or (dy == 0.0)
+            curves.append({
+                'tag': tag,
+                'index': n_blocks if writes_block else None,
+                'n': int(fields['N']),
+                'xoff': fields['XOFF'],
+                'dx': dx,
+                'yoff': fields['YOFF'],
+                'dy': dy,
+            })
+            n_blocks += int(writes_block)
+    else:
+        raise FileFormatError(
+            f"{plp_file}: no {_PLP_END_TAG} record — the run did not finish "
+            f"writing its plot file."
+        )
 
-        ranges = km_to_m(xoff + np.arange(n_ranges) * dx)
+    if not curves:
+        raise FileFormatError(
+            f"{plp_file}: no PLTWRI curve records found — the file is not an "
+            f"OASES .plp, or the run wrote no plot data."
+        )
+    return curves
 
-        return {
-            'n_ranges': n_ranges,
-            'ranges': ranges,
-            'range_offset_km': xoff,
-            'range_increment_km': dx
-        }
 
-    except (FileFormatError, UnsupportedFeatureError):
-        raise
-    except PARSE_ERRORS as e:
-        raise FileFormatError(f"Failed to parse OAST .plp file: {e}") from e
+def _read_plt_blocks(plt_file: Path) -> list:
+    """Split an OASES ``.plt`` into its blank-line-separated value blocks.
+
+    PLTWRI writes each array with ``FORMAT(1H ,G13.6)`` and terminates the
+    record with a bare ``write(20,*)`` (oasgun21.f:658-660), so one blank
+    line closes each curve.
+    """
+    blocks: list = []
+    current: list = []
+    with open(plt_file, 'r') as f:
+        for lineno, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                if current:
+                    blocks.append(np.array(current, dtype=float))
+                    current = []
+                continue
+            try:
+                current.append(float(stripped))
+            except ValueError as e:
+                raise FileFormatError(
+                    f"{plt_file}:{lineno}: expected a single G13.6 value, "
+                    f"got {stripped!r}."
+                ) from e
+    if current:
+        blocks.append(np.array(current, dtype=float))
+    return blocks
+
+
+def _curve_values(block: np.ndarray, curve: Dict, plt_file: Path) -> np.ndarray:
+    """The ordinate samples of one PLTWRI block.
+
+    PLTWRI writes the abscissa only when ``DX == 0`` and the ordinate only
+    when ``DY == 0`` (oasgun21.f:658-659), so a block holds N or 2N values
+    depending on which axes are tabulated rather than parameterised.
+    """
+    n = curve['n']
+    if curve['dy'] != 0.0:
+        raise FileFormatError(
+            f"{plt_file}: curve {curve['tag']} has DY={curve['dy']}, so no "
+            f"ordinate was written."
+        )
+    n_arrays = int(curve['dx'] == 0.0) + 1
+    if len(block) != n * n_arrays:
+        raise FileFormatError(
+            f"{plt_file}: curve {curve['index']} ({curve['tag']}) holds "
+            f"{len(block)} values; .plp declares N={n} with "
+            f"{n_arrays} tabulated array(s)."
+        )
+    return block[-n:]
 
 
 def read_oasn_covariance(
@@ -319,13 +430,13 @@ def read_oasn_covariance(
             endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
 
             # Read header (first 10 records)
-            # Record 1-4: Title (4 x 8 bytes = 32 characters)
-            title_parts = []
-            for i in range(4):
-                f.seek(i * recl)
-                data_bytes = f.read(recl)
-                title_parts.append(data_bytes.decode('ascii', errors='ignore').strip())
-            title = ''.join(title_parts).strip()
+            # Records 1-4 are four consecutive 8-character slices of one
+            # CHARACTER*80 TITLE (oasmun21_bin.f:364-367 writes TITLE(1:8),
+            # (9:16), (17:24), (25:32)) — slices, not tokens, so concatenate
+            # the raw bytes and strip once. Stripping each slice would delete
+            # any space that falls on a record boundary.
+            f.seek(0)
+            title = f.read(4 * recl).decode('ascii', errors='ignore').strip()
 
             # Record 5: NRCV, NFREQ (2 integers)
             f.seek(4 * recl)
@@ -457,35 +568,25 @@ def read_oasn_replicas(
                 head, source=f'read_oasn_replicas:{filepath.name}',
             )
 
-            # Read title (80 characters)
-            _read_fortran_record_marker(f, endian=endian)
-            title = f.read(80).decode('ascii', errors='ignore').strip()
-            _read_fortran_record_marker(f, endian=endian)
+            # Read title (CHARACTER*80, oasmun21_bin.f:506)
+            title = _read_fortran_record(f, raw=True, endian=endian).decode(
+                'ascii', errors='ignore').strip()
 
             # Read NRCV, NFREQ
-            _read_fortran_record_marker(f, endian=endian)
-            n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
-            _read_fortran_record_marker(f, endian=endian)
+            n_rcv, n_freq = _read_fortran_record(f, 'ii', endian=endian)
 
             # Read FREQ1, FREQ2, DELFRQ
-            _read_fortran_record_marker(f, endian=endian)
-            freq1, freq2, delfrq = struct.unpack(endian + 'fff', f.read(12))
-            _read_fortran_record_marker(f, endian=endian)
+            freq1, freq2, delfrq = _read_fortran_record(f, 'fff',
+                                                        endian=endian)
 
             # Read replica grid: ZMINR, ZMAXR, NZR
-            _read_fortran_record_marker(f, endian=endian)
-            z_min, z_max, n_z = struct.unpack(endian + 'ffi', f.read(12))
-            _read_fortran_record_marker(f, endian=endian)
+            z_min, z_max, n_z = _read_fortran_record(f, 'ffi', endian=endian)
 
             # Read XMINR, XMAXR, NXR
-            _read_fortran_record_marker(f, endian=endian)
-            x_min, x_max, n_x = struct.unpack(endian + 'ffi', f.read(12))
-            _read_fortran_record_marker(f, endian=endian)
+            x_min, x_max, n_x = _read_fortran_record(f, 'ffi', endian=endian)
 
             # Read YMINR, YMAXR, NYR
-            _read_fortran_record_marker(f, endian=endian)
-            y_min, y_max, n_y = struct.unpack(endian + 'ffi', f.read(12))
-            _read_fortran_record_marker(f, endian=endian)
+            y_min, y_max, n_y = _read_fortran_record(f, 'ffi', endian=endian)
 
             # Bound every header count before the receiver / replica arrays
             # are sized off them. Each replica record is 16 bytes on disk
@@ -504,14 +605,18 @@ def read_oasn_replicas(
             receiver_gains = np.zeros(n_rcv)
 
             for i in range(n_rcv):
-                _read_fortran_record_marker(f, endian=endian)
-                x, y, z, itype, gain = struct.unpack(
-                    endian + 'fffif', f.read(20),
-                )
-                _read_fortran_record_marker(f, endian=endian)
+                # PUTREP writes RAN, TRAN, DEP, IRTYP, GAIN per receiver
+                # (oasmun21_bin.f:515-516).
+                x, y, z, itype, gain = _read_fortran_record(
+                    f, 'fffif', endian=endian)
                 receiver_positions[i] = [x, y, z]
                 receiver_types[i] = itype
-                receiver_gains[i] = gain
+                # INPRCV converts the deck's dB column in place before any
+                # output is written (oasnun22.f:99
+                # `GAIN(I)=10.0**(GAIN(I)/20.0)`), so the file holds a linear
+                # amplitude factor. Invert it to report dB, the unit the deck
+                # and oasn.tex:51 use.
+                receiver_gains[i] = 20.0 * np.log10(gain) if gain > 0 else -np.inf
 
             # Each replica is a Fortran sequential record
             # ``[marker][re im][marker]`` (16 bytes), written contiguously in
@@ -567,8 +672,22 @@ def read_oasn_replicas(
         raise FileFormatError(f"Failed to read OASN replica file {filepath}: {e}") from e
 
 
+#: The option letter that selects each 1-based ``IOUT``/NPAR slot in OASP's
+#: GETOPT (unoasp22.f:890-921: N→1 V→2 H→3 R→5 K→6 S→7). TRFHEAD stores the
+#: slot numbers, not letters (oasiun23.f:855-861), so rendering them back as
+#: something a user could type needs this table. Slot 4 has no OASP letter.
+_OASP_OUTPUT_PARAM_LETTERS = {1: 'N', 2: 'V', 3: 'H', 5: 'R', 6: 'K', 7: 'S'}
+
+#: The *physical-quantity* abbreviations PLTLOS builds its six-character .plp
+#: curve tag from (``optpar``, oasfun22.f:322-328). A different table from the
+#: option letters above — it agrees only at slots 1, 5 and 7 — and used only
+#: to match ``.plp`` tags.
+_OASES_OUTPUT_PARAM_LETTERS = ('N', 'W', 'U', 'V', 'R', 'B', 'S')
+
+
 def read_oasp_trf(
-    filepath: Union[str, Path]
+    filepath: Union[str, Path],
+    receiver_depths: np.ndarray,
 ) -> Dict:
     """
     Read OASP transfer function file (.trf format)
@@ -582,6 +701,14 @@ def read_oasp_trf(
     ----------
     filepath : str or Path
         Path to .trf file
+    receiver_depths : ndarray
+        Receiver depth axis (m), taken verbatim from the caller that wrote
+        the deck. The ``.trf`` cannot supply it: TRFHEAD writes the explicit
+        depth list only for ``IR < 0`` (oasiun23.f:870-877), but INREC has
+        already flipped IR positive in COMMON /VARS1/ (oaseun31.f:1185,
+        oases/src/compar.f:69-70) by the time TRFHEAD runs, so the header carries only
+        RD, RDLOW and ``|IR|`` — a uniform grid — whatever the deck asked
+        for. The header's count is cross-checked against this axis.
 
     Returns
     -------
@@ -596,7 +723,6 @@ def read_oasp_trf(
                               shape (n_freq, n_range, n_depth)
         - 'source_depth': float, source depth (m)
         - 'center_frequency': float, center frequency (Hz)
-        - 'model': str, 'OASP'
 
     Notes
     -----
@@ -606,19 +732,20 @@ def read_oasp_trf(
 
     Examples
     --------
-    >>> data = read_oasp_trf('pulse.trf')
+    >>> data = read_oasp_trf('pulse.trf', receiver_depths=[20., 50., 80.])
     >>> trf = data['transfer_function']  # shape: (n_freq, n_range, n_depth)
-    >>> print(f"Transfer functions for {data['n_depths']} depths")
     """
     filepath = Path(filepath)
 
     if not filepath.exists():
         raise FileFormatError(f"OASP transfer function file not found: {filepath}")
 
+    depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
+
     # Try Fortran-unformatted binary first (current OASES default).
     errors = []
     try:
-        return _read_oasp_trf_binary(filepath)
+        return _read_oasp_trf_binary(filepath, depths)
     except (FileFormatError,) + PARSE_ERRORS as e:
         errors.append(('fortran-unformatted', e))
 
@@ -635,7 +762,7 @@ def read_oasp_trf(
     )
 
 
-def _read_oasp_trf_binary(filepath: Path) -> Dict:
+def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
     """Read OASES PULSETRF binary file (Fortran UNFORMATTED).
 
     Inferred record layout (oasiun23.f:844-898 + trford.f:159-192) — each
@@ -705,19 +832,20 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         (sd,) = _read_fortran_record(f, 'f', endian=endian)
 
         rd, rdlow, ir = _read_fortran_record(f, 'ffi', endian=endian)
+        nrd = max(1, abs(ir))
         if ir < 0:
-            nrd = abs(ir)
-            rdc = np.array(
-                _read_fortran_record(f, f'{nrd}f', endian=endian),
-                dtype=np.float64,
+            # oasiun23.f:870-877 writes the explicit RDC list only for IR<0.
+            # No OASES program reaches that branch — INREC negates IR in
+            # COMMON /VARS1/ before TRFHEAD runs (oaseun31.f:1185) — but the
+            # record must still be consumed to keep the stream aligned.
+            _read_fortran_record(f, f'{nrd}f', endian=endian)
+        if receiver_depths.size != nrd:
+            raise FileFormatError(
+                f"{filepath}: header declares {nrd} receiver depths "
+                f"(RD={rd:g} m, RDLOW={rdlow:g} m) but {receiver_depths.size} "
+                f"were supplied; the file does not belong to this receiver "
+                f"array."
             )
-            receiver_depths = rdc
-        else:
-            nrd = max(1, ir)
-            if nrd > 1:
-                receiver_depths = np.linspace(rd, rdlow, nrd)
-            else:
-                receiver_depths = np.array([rd])
 
         r0, rspace, nplots = _read_fortran_record(f, 'ffi', endian=endian)
         cur = f.tell()
@@ -754,9 +882,12 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
         ) if nf >= 1 else np.array([freqs], dtype=np.float64)
 
         # Detect the data-record precision from the first record's length
-        # marker so both OASES output modes are supported: default COMPLEX*8
-        # (2*nout float32 = 2*nout*4 bytes) and the double-precision '8' option
-        # COMPLEX*16 (2*nout float64 = 2*nout*8 bytes).
+        # marker: 2*nout float32 for the default COMPLEX*8 payload, 2*nout
+        # float64 when the writer's CFFX was compiled with a promoted default
+        # real. (Option '8' alone does not promote it — CFFX is declared plain
+        # COMPLEX at oasiun23.f:18 and the '8' branch at oasiun23.f:309-312
+        # writes the same kind; what '8' changes is the file's name, handled by
+        # the caller.) Anything else is a wrong-endianness or truncated file.
         pos = f.tell()
         marker = f.read(4)
         data_fmt = f'{2 * nout}f'
@@ -811,9 +942,15 @@ def _read_oasp_trf_binary(filepath: Path) -> Dict:
                     rec = _read_fortran_record(f, data_fmt, endian=endian)
                     transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
+    unnamed = sorted(set(iparm) - set(_OASP_OUTPUT_PARAM_LETTERS))
+    if unnamed:
+        raise FileFormatError(
+            f"{filepath}: IPARM names output slot(s) {unnamed}, which no OASP "
+            f"option letter selects (unoasp22.f:890-921)."
+        )
     return {
         'title': title,
-        'option': ''.join(chr(ord('A') - 1 + p) for p in iparm if 0 < p < 27),
+        'option': ''.join(_OASP_OUTPUT_PARAM_LETTERS[p] for p in iparm),
         'freq': freq_array,
         'ranges': ranges,
         'depths': receiver_depths,
@@ -878,7 +1015,6 @@ def read_oasr_reflection_coefficients(
         - 'angles_or_slowness': list of ndarray, angle (deg) or slowness (s/km)
         - 'magnitude': list of ndarray, reflection coefficient magnitude
         - 'phase': list of ndarray, reflection coefficient phase (degrees)
-        - 'model': str, 'OASR'
 
     Notes
     -----

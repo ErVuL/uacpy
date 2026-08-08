@@ -2,6 +2,7 @@
 
 import copy as _copy
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -128,18 +129,14 @@ def _max_roughness(boundaries) -> float:
 def _smooth_surface(surface):
     """``surface`` with every node's roughness zeroed.
 
-    The nodes are rebuilt rather than assigned through: ``Surface`` serves
-    ``roughness`` by ``__getattr__`` delegation to ``properties[0]``, and a
-    plain attribute write would create an instance attribute that shadows the
-    delegation while ``properties`` — what ``at()``, ``collapse()`` and the
-    repr read — keeps the old value.
+    ``Surface.__setattr__`` forwards a delegated write to every node, so one
+    assignment covers a range-dependent surface. Assigned rather than rebuilt:
+    ``dataclasses.replace`` re-runs ``__post_init__``, which rejects explicit
+    acoustic parameters on a vacuum / rigid boundary even when they are the
+    values it filled in.
     """
     smoothed = _copy.deepcopy(surface)
-    for node in smoothed.properties:
-        # Assigned rather than rebuilt: ``dataclasses.replace`` re-runs
-        # ``__post_init__``, which rejects explicit acoustic parameters on a
-        # vacuum / rigid boundary even when they are the values it filled in.
-        object.__setattr__(node, 'roughness', 0.0)
+    smoothed.roughness = 0.0
     return smoothed
 
 
@@ -147,7 +144,7 @@ def _smooth_bottom(bottom):
     """``bottom`` with every column's half-space roughness zeroed."""
     smoothed = _copy.deepcopy(bottom)
     for column in smoothed.columns:
-        object.__setattr__(column.halfspace, 'roughness', 0.0)
+        column.halfspace.roughness = 0.0
     return smoothed
 
 
@@ -246,6 +243,22 @@ class ModelSpec:
                 f"{model_name}.spec.supports has unknown capability flags: "
                 f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
             )
+        # ``range_dependent_layered_bottom`` names the combined axis but is
+        # never consulted on its own: ``_project_environment`` collapses the
+        # range and layer axes independently, so declaring it without both
+        # component flags would advertise a capability the collapse still
+        # takes away.
+        if 'range_dependent_layered_bottom' in self.supports:
+            missing = ({'range_dependent_bottom', 'layered_bottom'}
+                       - set(self.supports))
+            if missing:
+                raise ConfigurationError(
+                    f"{model_name}.spec declares "
+                    f"'range_dependent_layered_bottom' but not "
+                    f"{sorted(missing)}. The combined capability is the "
+                    f"conjunction of the two axes; declare both or drop it."
+                )
+
         bad_types = set(self.source_types) - VALID_SOURCE_TYPES
         if bad_types:
             raise ConfigurationError(
@@ -730,9 +743,7 @@ class PropagationModel(ABC):
         grid is tight enough (``Δf = 1/output_duration``), and Bellhop
         maps it to ``time_window`` for delay-and-sum synthesis. Models
         with a broadband path consume ``frequencies`` as an explicit
-        override for ``source.frequencies``. The Kraken family
-        (Kraken) additionally takes ``n_modes``
-        to cap the modal set used. No other kwargs are accepted —
+        override for ``source.frequencies``. No other kwargs are accepted —
         passing one raises :class:`TypeError`.
 
         Parameters
@@ -975,7 +986,9 @@ class PropagationModel(ABC):
             self._warn_ignored_run_kwargs(
                 run_mode,
                 reason=('BROADBAND returns the transfer function H(f); the '
-                        'time-axis keywords apply to TIME_SERIES only'),
+                        'source pulse and time-axis keywords apply to '
+                        'TIME_SERIES only'),
+                source_waveform=source_waveform,
                 sample_rate=sample_rate,
                 output_duration=output_duration,
             )
@@ -1135,21 +1148,6 @@ class PropagationModel(ABC):
                 f"over Sources externally for multi-depth runs."
             )
 
-        # receiver_type='line' is honoured by the input-side checks (seafloor
-        # comparison, depth clipping) but no model's result assembly collapses
-        # the depth x range grid to the paired samples, so a 'line' request
-        # silently returns the full cross-product. Refuse rather than hand back
-        # a shape the caller did not ask for.
-        if receiver.receiver_type == 'line':
-            raise ConfigurationError(
-                f"{self.model_name}: receiver_type='line' is not implemented — "
-                f"every model returns the full depth x range grid, so the "
-                f"paired (depths[i], ranges[i]) sampling you asked for would "
-                f"be silently ignored. Use receiver_type='grid' and index the "
-                f"diagonal yourself: "
-                f"tl[np.arange(len(depths)), np.arange(len(ranges))]."
-            )
-
         resolvable_depth = self._max_receiver_depth(env)
 
         # The source injects energy into the medium, so it must sit within
@@ -1224,9 +1222,6 @@ class PropagationModel(ABC):
         them natively (transmitted field, PE absorbing region). The
         flat-bathy case is handled by
         :meth:`_warn_receiver_below_resolvable`.
-
-        ``receiver_type='line'`` pairs depths[i] with ranges[i] (1-D
-        compare); ``'grid'`` evaluates the depth × range cross-product.
         """
         if not env.has_range_dependent_bathymetry:
             return
@@ -1234,15 +1229,10 @@ class PropagationModel(ABC):
         ranges = np.atleast_1d(receiver.ranges).astype(float)
         seafloor = np.asarray(env.bathymetry.eval(range=ranges), dtype=float)
 
-        if receiver.receiver_type == 'line':
-            mask = depths > seafloor
-            row_ranges = ranges
-            row_floors = seafloor
-        else:
-            mask = depths[:, None] > seafloor[None, :]
-            row_ranges = np.broadcast_to(ranges[None, :], mask.shape)
-            row_floors = np.broadcast_to(seafloor[None, :], mask.shape)
-            depths = np.broadcast_to(depths[:, None], mask.shape)
+        mask = depths[:, None] > seafloor[None, :]
+        row_ranges = np.broadcast_to(ranges[None, :], mask.shape)
+        row_floors = np.broadcast_to(seafloor[None, :], mask.shape)
+        depths = np.broadcast_to(depths[:, None], mask.shape)
 
         if np.any(mask):
             flat = int(np.argmax(mask))
@@ -1550,9 +1540,9 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         *,
-        source_waveform=None,
-        sample_rate=None,
-        output_duration=None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
     ) -> Result:
         """Compute time-domain pressure p(t) at the receiver(s).
 
@@ -1585,7 +1575,7 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         *,
-        frequencies=None,
+        frequencies: Optional[np.ndarray] = None,
     ) -> Result:
         """Compute broadband complex transfer function H(f).
 
@@ -1783,27 +1773,22 @@ class PropagationModel(ABC):
             ) from e
         except subprocess.TimeoutExpired as e:
             # Kill the whole process group, not just the direct child.
-            if proc is not None and os.name == 'posix':
-                try:
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(pgid, signal.SIGKILL)
-                        proc.wait()
-                except (ProcessLookupError, PermissionError):
-                    proc.kill()
-                    proc.wait()
-            elif proc is not None:
-                proc.kill()
-                proc.wait()
+            if proc is not None:
+                self._terminate_process_group(proc)
             raise ModelExecutionError(
                 self.model_name, return_code=-1,
                 stdout=(e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout),
                 stderr=f"Timed out after {timeout}s",
                 timed_out=True,
             ) from e
+        except BaseException:
+            # start_new_session detaches the child from the terminal's signals,
+            # so an interrupt reaches this process alone and the binary would
+            # keep running. The wrapper owns the whole tree, so the group is
+            # reaped before the exception continues on its way.
+            if proc is not None and proc.poll() is None:
+                self._terminate_process_group(proc)
+            raise
 
         if check and result.returncode != 0:
             raise ModelExecutionError(
@@ -1908,15 +1893,13 @@ class PropagationModel(ABC):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
-        surf_sigma = _max_roughness(
-            getattr(e.surface, 'properties', None) or [e.surface])
+        surf_sigma = _max_roughness(e.surface.properties)
         if surf_sigma and not self._supports_rough_surface:
             e.surface = _smooth_surface(e.surface)
             warnings.warn(
-                f"{self.model_name} cannot model a rough sea surface "
-                f"(its solver rejects a non-zero interfacial sigma); "
-                f"env.surface.roughness={surf_sigma:g} m dropped. Use Kraken "
-                f"or Scooter to keep it.",
+                f"{self.model_name} does not carry a rough sea surface into "
+                f"its deck; env.surface.roughness={surf_sigma:g} m dropped. "
+                f"Use Kraken or Scooter to keep it.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
@@ -1925,10 +1908,9 @@ class PropagationModel(ABC):
         if bot_sigma and not self._supports_rough_bottom:
             e.bottom = _smooth_bottom(e.bottom)
             warnings.warn(
-                f"{self.model_name} does not model seabed interfacial "
-                f"roughness; env.bottom roughness={bot_sigma:g} m dropped "
-                f"(its solver either ignores the value or has no place to put "
-                f"it). Use Kraken or Scooter to keep it.",
+                f"{self.model_name} does not carry seabed interfacial "
+                f"roughness into its deck; env.bottom roughness="
+                f"{bot_sigma:g} m dropped. Use Kraken or Scooter to keep it.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
@@ -2086,14 +2068,20 @@ class PropagationModel(ABC):
 
         stderr is the authoritative signal because it belongs to this process;
         the ``.prt`` is checked too since it names the actual cause.
+
+        The test is on the *form* of the stop, not on any banner text. A
+        character stop code is how both toolchains report an abnormal end, and
+        their banners do not share a marker: AT ends at
+        ``STOP 'Fatal Error: …'`` via ``ERROUT`` but also stops directly with
+        ``STOP 'ERROR IN KRAKENC: …'`` and ``STOP 'FATAL ERROR in BandPass: …'``,
+        while OASES uses 46 distinct banners of which only 19 carry ``***`` —
+        26 use ``>>> … <<<`` and one is bare ``'INVALID INPATCH'``. Matching
+        ``***`` caught well under half of them, and a missed stop is read as
+        success off whatever output file happens to be on disk.
         """
         stderr = result.stderr or ''
         prt = read_prt(Path(work_dir) / f"{base_name}.prt")
-        # AT ends at ``STOP 'Fatal Error: …'`` and mirrors ``*** FATAL ERROR ***``
-        # into the .prt; OASES writes no .prt at all and stops with its own
-        # banner, e.g. ``STOP *** CONTOURS REQUIRE NRFR>1 ***``. Both exit 0.
-        fatal_stderr = ('Fatal Error' in stderr
-                        or ('STOP' in stderr and '***' in stderr))
+        fatal_stderr = bool(re.search(r'^\s*STOP\s+\S', stderr, re.MULTILINE))
         if not fatal_stderr and (
                 prt is None or '*** FATAL ERROR ***' not in prt):
             return
@@ -2105,6 +2093,29 @@ class PropagationModel(ABC):
         )
         self._attach_prt_tail(exc, work_dir, base_name)
         raise exc
+
+    @staticmethod
+    def _terminate_process_group(proc) -> None:
+        """Reap ``proc`` and everything it spawned.
+
+        Binaries are launched with ``start_new_session``, so they sit in their
+        own process group and survive a signal delivered only to this process.
+        SIGTERM to the group first, escalating to SIGKILL if it does not exit.
+        """
+        if os.name == 'posix':
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(pgid, signal.SIGKILL)
+                    proc.wait()
+                return
+            except (ProcessLookupError, PermissionError):
+                pass
+        proc.kill()
+        proc.wait()
 
     def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
                             timeout: Optional[float] = None,
@@ -2194,6 +2205,33 @@ class PropagationModel(ABC):
         through (see :meth:`_total_media_depth`).
         """
         return float(env.depth)
+
+    def _mask_unresolvable_depths(self, result, receiver, media_depth):
+        """Restore the caller's depth axis on ``result``, NaN below
+        ``media_depth``.
+
+        The finite-element / finite-difference mesh stops at the deepest
+        modelled interface, so the binary clamps any deeper receiver onto it.
+        Handing those cells back under the depth that was asked for would
+        misreport where the field was evaluated — they are no-data.
+
+        Used by the full-waveguide spectral solvers (Scooter, SPARC), which
+        mesh through the sediment stack the same way.
+        """
+        from uacpy.core.results import Field
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        d = result.to_dict()
+        data = d['data']
+        if data.shape[0] != depths.size:
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(f"{self.model_name} returned {data.shape[0]} depth "
+                        f"rows for {depths.size} requested receiver depths; "
+                        f"the depth axis cannot be reattached."),
+            )
+        data[depths > media_depth, ...] = np.nan
+        d['coords'] = {**d['coords'], 'depth': depths}
+        return Field.from_dict(d)
 
     def _total_media_depth(self, env: 'Environment') -> float:
         """

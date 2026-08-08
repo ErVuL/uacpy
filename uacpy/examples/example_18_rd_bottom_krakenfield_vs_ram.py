@@ -4,21 +4,49 @@ Example 18: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM
 
 Compares transmission loss from Kraken in adiabatic and coupled mode
 theory, and RAM (parabolic equation) for a range-dependent scenario with:
-  - Sloping bathymetry (100 m to 200 m over 20 km)
+  - Sloping bathymetry (100 m to 200 m over 20 km; the plotted 1-6 km
+    window covers roughly 100-126 m of that slope)
   - Range-dependent layered sediment
   - Range-dependent SSP (warmer nearshore, cooler offshore)
 
 Two bottom cases are shown:
-  1. Hard layered bottom (high impedance, low loss) — all models agree well
-  2. Soft lossy layered bottom (low impedance, high loss) — adiabatic
-     modes over-attenuate; coupled modes recover energy transfer and
-     match the RAM reference more closely
+  1. Hard layered bottom (high impedance, low loss)
+  2. Soft lossy layered bottom (low impedance, high loss)
 
-This demonstrates the value of coupled mode theory (via AT's field.exe)
-over the adiabatic approximation for range-dependent propagation.
+WHAT THIS ACTUALLY SHOWS
+------------------------
+The script prints RMS differences against the RAM reference for both mode
+treatments. Measured on this scenario, coupled modes do **not** track RAM
+more closely than adiabatic ones — they come out slightly further away in
+both bottom cases. Coupling changes the answer, which is the point worth
+seeing; it does not automatically improve it. Treat the printed table as
+the result, not this paragraph.
+
+Two constraints shape the comparison, and both are real limits rather
+than incidental settings:
+
+  * ``n_segments`` is pinned to 2 for BOTH Kraken runs. The coupled-mode
+    path through AT's field.exe produces a .shd whose header disagrees
+    with its own payload for n_segments >= 3 — the reader rejects it with
+    "header counts ... imply N data items, implausible for an M-byte
+    file". Only n_segments = 2 completes. Adiabatic is held at the same 2
+    so the two mode treatments are compared on identical segmentation
+    rather than against each other's grids.
+
+  * Kraken has no range-dependent bottom. Both Kraken runs emit
+    "Kraken does not support range-dependent bottoms; reduced to a single
+    column (collapse['bottom_range']='median')". The hard/soft contrast
+    survives that collapse, but the sediment's *range* variation does not:
+    Kraken's range dependence comes from bathymetry and SSP only, while
+    RAM keeps all three. Part of every Kraken-vs-RAM difference below is
+    that missing degree of freedom, not the mode theory.
+
+If a model fails, its panel is drawn as an explicit failure notice rather
+than left blank under a working-looking title.
 """
 
 import sys
+import textwrap
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -48,6 +76,27 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
         diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
         cmap='RdBu_r', title=title, **kw,
     )
+
+
+def _mark_failed(ax, title, reason):
+    """Draw a panel as an explicit failure instead of leaving it blank.
+
+    A blank axes under a working-looking title reads as "this model agrees
+    with everything", which is the one thing a failed run must never look
+    like. The title is struck through and the reason is written across the
+    panel.
+    """
+    ax.set_facecolor('#f7e7e7')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#b00020')
+        spine.set_linewidth(1.5)
+    ax.set_title(f'{title}\nFAILED — NOT COMPUTED', fontsize=10,
+                 fontweight='bold', color='#b00020')
+    wrapped = textwrap.fill(str(reason), 46)
+    ax.text(0.5, 0.5, wrapped, transform=ax.transAxes, ha='center',
+            va='center', fontsize=8, color='#b00020', family='monospace')
 
 
 def make_base_env(bottom):
@@ -151,22 +200,31 @@ def main():
         ('Soft layered', make_soft_bottom()),
     ]
 
+    # Same segmentation for both mode treatments, so the only difference
+    # between them is adiabatic vs coupled. 2 is also the ceiling: the
+    # coupled path fails to produce a readable .shd at 3 or more segments.
+    n_segments = 2
+
     models = [
         ('RAM', RAM(verbose=False, accuracy=1e-1)),
-        ('KF adiabatic', Kraken(verbose=False, n_segments=8, mode_coupling='adiabatic')),
-        ('KF coupled', Kraken(verbose=False, n_segments=8, mode_coupling='coupled')),
+        ('KF adiabatic', Kraken(verbose=False, n_segments=n_segments,
+                                mode_coupling='adiabatic')),
+        ('KF coupled', Kraken(verbose=False, n_segments=n_segments,
+                              mode_coupling='coupled')),
     ]
 
     # results[case_label][model_label] = field
     results = {}
+    errors = {}
     envs = {}
 
     for case_label, bottom in cases:
         env, _ = make_base_env(bottom)
         envs[case_label] = env
         results[case_label] = {}
+        errors[case_label] = {}
 
-        print(f"\n  {case_label} bottom:")
+        print(f"\n  {case_label} bottom (n_segments={n_segments}):")
         for model_label, model in models:
             try:
                 field = model.run(env, source, receiver)
@@ -175,6 +233,13 @@ def main():
             except Exception as e:
                 print(f"    {model_label:15s} ERROR: {e}")
                 results[case_label][model_label] = None
+                errors[case_label][model_label] = e
+
+    n_failed = sum(len(v) for v in errors.values())
+    if n_failed:
+        print(f"\n  !! {n_failed} model run(s) failed. Their panels in the figure are")
+        print("     drawn as explicit failure notices, and the comparison table below")
+        print("     omits them — it does not silently stand in for them.")
 
     # ── Statistics ───────────────────────────────────────────────
     mid_idx = receiver.depths.shape[0] // 2
@@ -182,14 +247,31 @@ def main():
     ranges_km = receiver.ranges / 1000
 
     print(f"\n  Comparison vs RAM at {mid_depth:.0f} m depth:")
+    print("  (Kraken's bottom is collapsed to one column — see the module docstring;")
+    print("   part of every difference below is that missing range dependence.)")
+    rms = {}
     for case_label in results:
         f_ram = results[case_label].get('RAM')
         for kf_label in ['KF adiabatic', 'KF coupled']:
             f_kf = results[case_label].get(kf_label)
-            if f_ram is not None and f_kf is not None:
-                diff = f_ram.tl[mid_idx, :] - f_kf.tl[mid_idx, :]
-                print(f"    {case_label:15s} {kf_label:15s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
-                      f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
+            if f_ram is None or f_kf is None:
+                print(f"    {case_label:15s} {kf_label:15s}  not computed")
+                continue
+            diff = f_ram.tl[mid_idx, :] - f_kf.tl[mid_idx, :]
+            rms[(case_label, kf_label)] = float(np.sqrt(np.nanmean(diff ** 2)))
+            print(f"    {case_label:15s} {kf_label:15s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
+                  f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
+
+    print("\n  Does coupling move Kraken closer to the RAM reference?")
+    for case_label in results:
+        r_ad = rms.get((case_label, 'KF adiabatic'))
+        r_co = rms.get((case_label, 'KF coupled'))
+        if r_ad is None or r_co is None:
+            print(f"    {case_label:15s} cannot say — one of the two runs did not complete")
+            continue
+        verdict = 'closer' if r_co < r_ad else 'further away'
+        print(f"    {case_label:15s} adiabatic RMS {r_ad:.1f} dB → coupled RMS {r_co:.1f} dB"
+              f"  ({verdict})")
 
     # ── Plot: 3 rows x 4 cols, shared colorbars per row ──────────
     fig, axes = plt.subplots(3, 4, figsize=(22, 14),
@@ -226,8 +308,11 @@ def main():
                 plot_field(f, env=env_plot, ax=ax, show_colorbar=False,
                                        vmin=vmin_shared, vmax=vmax_shared)
                 tl_im = ax.collections[0] if ax.collections else tl_im
-            ax.set_title(f'{case_label} — {title_suffix}', fontsize=10,
-                         fontweight='bold')
+                ax.set_title(f'{case_label} — {title_suffix}', fontsize=10,
+                             fontweight='bold')
+            else:
+                _mark_failed(ax, f'{case_label} — {title_suffix}',
+                             errors[case_label].get(key, 'no result'))
             if col_idx > 0:
                 ax.set_ylabel('')
 
@@ -279,15 +364,21 @@ def main():
                                    show_colorbar=False,
                                    diff_vmax=diff_vmax_shared)
                 diff_im = ax.collections[0] if ax.collections else diff_im
-            ax.set_title(f'{case_label} — {diff_title}', fontsize=10,
-                         fontweight='bold')
+                ax.set_title(f'{case_label} — {diff_title}', fontsize=10,
+                             fontweight='bold')
+            else:
+                missing = 'RAM' if f_ram is None else kf_key
+                _mark_failed(ax, f'{case_label} — {diff_title}',
+                             f'{missing} unavailable')
             if col > 0:
                 ax.set_ylabel('')
 
     fig.suptitle(
         'Example 18: Range-Dependent Bottom — Adiabatic vs Coupled Modes vs RAM\n'
         f'f={source.frequencies[0]:.0f} Hz, z_s={source.depths[0]:.0f} m, '
-        f'bathy {bathy_depths_m[0]:.0f}-{bathy_depths_m[-1]:.0f} m',
+        f'n_segments={n_segments}, plotted window {receiver.ranges[0] / 1000:.0f}-'
+        f'{receiver.ranges[-1] / 1000:.0f} km of a '
+        f'{bathy_depths_m[0]:.0f}-{bathy_depths_m[-1]:.0f} m slope',
         fontsize=13, fontweight='bold', y=0.995)
     fig.subplots_adjust(left=0.05, right=0.93, top=0.92, bottom=0.06,
                         wspace=0.18, hspace=0.30)

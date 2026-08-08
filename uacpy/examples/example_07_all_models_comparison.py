@@ -18,10 +18,14 @@ SCENARIO:
     - All models with volume attenuation
 
 FEATURES DEMONSTRATED:
-    ✓ All 6 propagation models (including OAST)
+    ✓ All 5 propagation models (Bellhop, RAM, Kraken, Scooter, OAST)
     ✓ 2D SSP (range-dependent sound speed)
     ✓ Range-dependent bottom properties
-    ✓ Volume attenuation (Thorp) in all models
+    ✓ Volume attenuation (Thorp) where the model honours it: Bellhop, Kraken
+      and Scooter apply env.absorption; RAM and OAST do not, and say so at
+      runtime. RAM has no backend that models water-column volume attenuation;
+      OASES applies its own internal Skretting-Leroy attenuation to AC=0 water
+      layers instead of the requested formula.
     ✓ Modal model comparison (Kraken, Scooter, OAST)
     ✓ Advanced plotting (2D SSP heatmap, bottom properties)
     ✓ Statistical model comparison
@@ -171,7 +175,7 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # Scooter with volume attenuation
+    # Scooter honours env.absorption
     print("[4/5] Scooter (volume attenuation)...")
     try:
         scooter = Scooter(verbose=False)
@@ -180,7 +184,7 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # OAST with volume attenuation
+    # OAST substitutes its own internal water attenuation for env.absorption
     print("[5/5] OAST (wavenumber integration)...")
     try:
         oast = OAST(verbose=False)
@@ -252,13 +256,14 @@ def main():
     print("\nFeatures demonstrated across all models:")
     print("  ✓ 2D range-dependent SSP (thermal front)")
     print("  ✓ Range-dependent bottom properties")
-    print("  ✓ Volume attenuation (Thorp)")
+    print("  ✓ Volume attenuation (Thorp) — applied by Bellhop, Kraken, Scooter;")
+    print("    ignored by RAM and OAST, which warn at runtime (see stderr above)")
     print("  ✓ Continental margin scenario")
     print("  ✓ Model comparison and statistics")
     print("  ✓ Advanced visualization suite")
     print("\nPlotting features demonstrated:")
     print("  ✓ Shared colorbar for multi-panel comparisons (show_colorbar=False)")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB")
     print("  ✓ Contour overlays at 70, 90 dB")
     print("  ✓ jet_r colormap (blue=good, red=poor) - AT standard")
     print("\n  All models tested with realistic, complex environment!")

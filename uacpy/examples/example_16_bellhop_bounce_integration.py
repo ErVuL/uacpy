@@ -9,7 +9,7 @@ OBJECTIVE:
        bottoms. (Bellhop.run() already auto-routes through BOUNCE for
        elastic / layered bottoms with a UserWarning; use
        run_with_bounce when you need to pin c_low / c_high / rmax.)
-    2. SeabedColumn — multi-layer sediment with Kraken
+    2. SeabedColumn — multi-layer sediment with Scooter
     3. Range-dependent bottom properties — with RAM and visualization
 
 FEATURES DEMONSTRATED:
@@ -154,9 +154,9 @@ def demo_bellhop_bounce():
 
 
 def demo_layered_bottom():
-    """Part 2: Layered bottom with Kraken."""
+    """Part 2: Layered bottom with Scooter."""
     print("\n" + "=" * 70)
-    print("PART 2: Layered Bottom (Multi-Layer Sediment) with Kraken")
+    print("PART 2: Layered Bottom (Multi-Layer Sediment) with Scooter")
     print("=" * 70)
 
     # Define sediment layers

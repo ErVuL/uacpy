@@ -656,10 +656,10 @@ A receiver is a **grid**: the field is evaluated on the full depth × range
 cross-product.
 
 `receiver_type='line'` (pairing depths and ranges point-by-point, e.g. a glider
-track or tilted array) is **accepted by the carrier but not implemented by any
-model** — the input-side checks honour it, but every model's result assembly
-returns the full cross-product. `run()` therefore rejects it rather than
-silently handing back a grid. Take the paired samples from a grid run instead:
+track or tilted array) names the axis but is **not implemented by any model** —
+every model's result assembly returns the full cross-product. The carrier
+therefore rejects it at construction rather than letting a run silently hand
+back a grid. Take the paired samples from a grid run instead:
 
 ```python
 rcv = Receiver(depths=[10, 20, 30], ranges=[100, 200, 300])   # grid
@@ -1454,7 +1454,7 @@ frf.selected_order        # the FIR order AIC picked
 frf.g                     # its impulse response
 ```
 
-Waveform builders return `(signal, time)`; lengths follow `duration ×
+Waveform builders return `(time, signal)`; lengths follow `duration ×
 sample_rate`. Build a chirp, push it through a delay, and pulse-compress:
 
 ```python
@@ -1696,8 +1696,6 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
   - *Acoustic input* density (bottom/sediment, and the water column on disk) is
     **g/cm³**; when a water density is not written, the AT binaries use their
     default **ρ_water = 1.0 g/cm³** (this is what the propagation models see).
-  - `constants.DENSITY_SEAWATER = 1027 kg/m³` is used **only** for SI
-    particle-velocity / acoustic-intensity physics, never as a model input.
 
 ### Modal & numerical conventions
 
@@ -1877,7 +1875,7 @@ with a warning.
 | `interp_ssp` | — | `None` | SSP interpolation scheme (as Bellhop). |
 | `leaky_modes` | — | `False` | Include leaky modes (forces `krakenc`). |
 | `top_reflection_file` | path | `None` | Top-boundary reflection-coefficient file. |
-| `rmax_m` | m | `None` | Max range for `field.exe`. |
+| `rmax_m` | m | `None` | Mesh-convergence tolerance of KRAKEN's Richardson extrapolation (`kraken.f90:80`, `Error*1000*RMax < 1`) — a **larger** value is a **tighter** tolerance. `field.exe` never reads it. `None` derives it from the receiver ranges. |
 | `mode_depth_grid` | array | `None` | Explicit mode-depth output grid. |
 
 ### Scooter
@@ -1888,10 +1886,9 @@ with a warning.
 | `c_high` | m/s | `None` | Upper phase-speed limit; `None` = 1.05 × max(SSP, bottom). |
 | `n_mesh` | count | `0` | Total FE mesh points **per medium** (AT `NG`); `0` = auto. Not points-per-wavelength. |
 | `rmax_multiplier` | factor | `None` | Wavenumber-resolution range multiplier; `None` → 2.0 narrowband / 3.0 broadband. |
-| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. |
 | `spectrum` | — | `'positive'` | FLP Opt(2): `'positive'`/`'negative'`/`'both'` wavenumber spectrum. |
 | `stabilizing_attenuation_off` | — | `False` | Disable Scooter's stabilising attenuation (TopOpt pos 7 = `'0'`). |
-| `field_interp` | — | `'O'` | FLP Opt(3): `'O'` polynomial, `'P'` Padé. |
 
 ### SPARC
 
@@ -1900,7 +1897,7 @@ with a warning.
 | `c_low` | m/s | `None` | Lower phase-speed limit; `None` = auto. |
 | `c_high` | m/s | `None` | Upper phase-speed limit; `None` = auto. |
 | `n_mesh` | count | `0` | Mesh points per wavelength; `0` = auto. |
-| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. |
 | `output_mode` | — | `'R'` | Which SPARC output geometry to march: `'R'` horizontal array (one run per receiver depth), `'D'` vertical array (one run per receiver range), `'S'` snapshot. All three return a `TIME_SERIES` `Field` on a shared time grid. **`'D'` and `'S'` are experimental — prefer `'R'`.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run`. |
 | `pulse_type` | — | `'PN+B'` | AT 4-character pulse-type code. The `'B'` band-pass is not modelled by the CW source-spectrum deconvolution, so it adds a few dB to the `'R'` absolute level; `'PN+N'` (no band-pass) calibrates tighter (~±1.5 dB vs Kraken). |
 | `n_t_out` | count | `512` | Number of output time samples. Used verbatim; `run()` warns (naming the value that fixes it) when the resulting Nyquist sits below the source band, because the p(t) would alias silently. |
@@ -1908,7 +1905,7 @@ with a warning.
 | `t_start` | s | `-0.1` | Integration start time. |
 | `t_mult` | factor | `0.999` | Integration time multiplier. |
 | `max_depths` | count | `20` | Hard cap on the looped axis — receiver depths for `output_mode='R'`, receiver ranges for `'D'` (`'S'` runs once and is uncapped). SPARC marches one subprocess per element, so exceeding the cap raises `UnsupportedFeatureError` rather than running for hours; raise it explicitly (`SPARC(max_depths=...)`) if you mean it. |
-| `rmax_safety_margin` | factor | `None` | RMax multiplier on the receiver max range; `None` → 3.0. SPARC's inverse Hankel transform is FFT-based, so the r-domain output is periodic with period RMax — pushing RMax well past the receivers keeps the alias off the plot. |
+| `rmax_safety_margin` | factor | `None` | RMax multiplier on the receiver max range; `None` → 3.0. SPARC synthesises range inline as a direct `deltak` sum (`sparc.f90:595,622`), and a uniform-`dk` sum is periodic with period `2π/dk ≈ RMax` (`sparc.f90:116`) — pushing RMax well past the receivers keeps the alias off the plot. |
 | `f_min` | Hz | `None` | Pulse-band lower edge; `None` → one octave around source freq. |
 | `f_max` | Hz | `None` | Pulse-band upper edge; `None` → one octave around source freq. |
 | `sound_speed` | m/s | `None` | Reference speed for the travel-time window when `t_max` is auto; `None` → default. |
@@ -1944,9 +1941,9 @@ with a warning.
 |---|---|---|---|
 | `c_low` | m/s | `1400.0` | Min phase velocity for tabulation (must be > 0). |
 | `c_high` | m/s | `10000.0` | Max phase velocity (`1e9` ≈ full 90° coverage; must be > `c_low`). |
-| `rmax` | m | `None` | Max range for angular sampling; `None` = 10000. Ignored when `n_angles` is set. |
+| `rmax` | m | `None` | Max range for angular sampling; `None` auto-derives from `receiver.range_max` (10000 m fallback). Ignored when `n_angles` is set. |
 | `n_angles` | count | `None` | Explicit number of angular samples; `None` = bounce computes it from `rmax`. |
-| `interp_ssp` | — | `None` | SSP interpolation scheme. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. |
 
 ### OASES — OAST (transmission loss)
 
@@ -1960,6 +1957,7 @@ with a warning.
 | `nw_samples` | count | `-1` | Number of wavenumber samples; `-1` = OASES auto. |
 | `plot_rmin` | m | `None` | TL plot range-axis min; `None` → 0. |
 | `plot_rmax` | m | `None` | TL plot range-axis max; `None` → `receiver.range_max`. |
+| `vrec` | m/s | `0.0` | Vertical receiver velocity for the `'d'` Doppler option (VREC). |
 
 ### OASES — OASP (broadband pulse / transfer function)
 
@@ -1969,7 +1967,7 @@ with a warning.
 | `freq_max` | Hz | `None` | Sweep upper edge; `None` → 2.5 × centre frequency. |
 | `freq_min` | Hz | `0.0` | Sweep lower edge. |
 | `center_frequency` | Hz | `None` | Pulse carrier frequency; `None` → `source.frequencies[0]`. |
-| `freq_output_increment` | factor | `None` | `.trf` frequency-axis decimation; `None` → `max(1, n_freq // 10)`. |
+| `freq_output_increment` | factor | `None` | Integrand-**plot** frequency decimation (INTF, `unoasp22.f:382,591`); `None` → 40. The `.trf` always carries every bin `LXP1..MX`. |
 | `options` | — | `None` | Raw OASES options string; `None` → `'N J'`. |
 | `range_start` | m | `None` | First receiver range; `None` → `receiver.ranges.min()`. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-contour offset. |
@@ -1979,11 +1977,12 @@ with a warning.
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `angles` | deg | `None` | Angle grid; `None` → `linspace(0, 90, 181)`. |
+| `angles` | deg | `None` | **Uniformly spaced** angle grid; `None` → `linspace(0, 90, 181)`. OASR regenerates the axis from `(min, max, count)`, so a non-uniform array raises. |
 | `angle_type` | — | `'grazing'` | `'grazing'` (native) or `'incidence'` (grazing = 90 − incidence). |
 | `reflection_type` | — | `None` | `'P-P'` (unset → this), `'P-SV'`, `'P-Slow'` (Biot), or `'transmission'`. |
 | `options` | — | `None` | Raw OASES options string; `None` derives from `reflection_type`. |
-| `angle_output_increment` | factor | `None` | Output angle-table decimation; `None` keeps every sample. |
+| `angle_output_increment` | factor | `None` | Angle-axis **plot** decimation (`unoasr21.f:167`); the `.rco`/`.trc` tables always carry every angle. |
+| `freq_output_increment` | factor | `None` | Frequency-axis plot decimation, symmetric with `angle_output_increment`. |
 | `interface_roughness` | m | `None` | Per-interface RMS roughness (top → bottom). |
 
 ### OASES — OASN (noise covariance / replicas)
@@ -1991,11 +1990,11 @@ with a warning.
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `options` | — | `None` | OASES options string; `None` → `'N'` (covariance) / `'R'` (replica). |
-| `surface_noise_level` | dB re 1 µPa²/Hz | `0.0` | Surface-generated noise spectral level (0 disables). |
+| `surface_noise_level` | dB re 1 µPa²/Hz | `0.0` | Surface-generated noise spectral level. Disabled when `abs(level) < 0.01`; a **negative** value is a spectrum-file unit number, not a quieter surface (`oasnun22.f:146`). Requires a vacuum or air `env.surface` — OASES stops on an upper half-space faster than 500 m/s. |
 | `white_noise_level` | dB re 1 µPa²/Hz | `0.0` | Uncorrelated per-hydrophone white-noise level (0 disables). |
-| `deep_noise_level` | dB re 1 µPa²/Hz | `0.0` | Deep broad-area source spectral level (0 disables). |
+| `deep_noise_level` | dB re 1 µPa²/Hz | `0.0` | Deep broad-area source spectral level. Disabled when `level < 0.01`, including any negative value (`oasnun22.f:194`) — deliberately not the same rule as `surface_noise_level`. |
 | `deep_source_depth` | m | `None` | Depth of the deep noise sheet; `None` → half the water depth. |
-| `discrete_sources` | list | `None` | Point sources: dicts with `depth`/`x`/`y` (m), `level` (dB), `phase` (rad). |
+| `discrete_sources` | list | `None` | Point sources: dicts with `depth`/`x`/`y` (m) and `level` (dB). OASES carries no per-source phase; any other key raises. |
 | `xmin` / `xmax` | m | `None` | Replica grid x-bounds; `None` → 100 / 10000. |
 | `nx` | count | `50` | Replica grid points in x. |
 | `ymin` / `ymax` | m | `None` | Replica grid y-bounds; `None` → 0 / 0. |
@@ -2005,6 +2004,6 @@ with a warning.
 | `c_low` / `c_high` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.95 × min(c_water) / 1e8. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
 | `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
-| `plot_rmin` / `plot_rmax` | m | `None` | TL plot range-axis bounds. |
-| `vrec` | m/s | `0.0` | Vertical receiver velocity (for Doppler). |
+| `plot_rmin` / `plot_rmax` | — | — | **Raise.** OASN writes covariance/replica outputs, not a TL plot. |
+| `vrec` | — | — | **Raise.** VREC is OAST's Doppler receiver velocity. |
 | `offdb` | dB | `None` | Single-mode horizontal offset. |

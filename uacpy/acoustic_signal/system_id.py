@@ -529,8 +529,9 @@ class FRF:
             self.Vinfo = phiuy - np.dot(W.T, y[: m - 1])
             g = np.linalg.solve(self.Minfo, self.Vinfo)
 
-        # Frequency response
-        w_imp, h = _sig.freqz(g, worN=int(self.params["nperseg"] / 2 + 1))
-        freqs = w_imp * sample_rate / (2 * np.pi)
+        # Frequency response on the same rfft grid the other methods return,
+        # so an ls_fir result lines up bin-for-bin with a welch/etfe one.
+        freqs = np.fft.rfftfreq(int(self.params["nperseg"]), d=1.0 / sample_rate)
+        _, h = _sig.freqz(g, worN=freqs, fs=sample_rate)
 
         return freqs, h, g

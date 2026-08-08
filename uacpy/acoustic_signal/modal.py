@@ -78,7 +78,7 @@ def warp_signal(signal, sample_rate: float, range_m: float,
 
 def unwarp_signal(warped, t_warp, sample_rate: float, range_m: float,
                   c: float = DEFAULT_SOUND_SPEED):
-    """Inverse of :func:`warp_signal`; returns ``(signal, t)`` on the original grid."""
+    """Inverse of :func:`warp_signal`; returns ``(t, signal)`` on the original grid."""
     w = np.asarray(warped, dtype=float)
     tw = np.asarray(t_warp, dtype=float)
     fs = float(sample_rate)
@@ -89,4 +89,4 @@ def unwarp_signal(warped, t_warp, sample_rate: float, range_m: float,
     w_unweighted = w / np.sqrt(np.maximum(np.sqrt(tw ** 2 + t_r ** 2), 1.0 / fs)
                               / np.maximum(tw, 1.0 / fs))
     signal = np.interp(t_w_of_t, tw, w_unweighted)
-    return signal, t
+    return t, signal

@@ -35,7 +35,7 @@ def _time_series():
         warnings.simplefilter('ignore')
         H = Bellhop(n_beams=3000).run(env, source, receiver,
                                       run_mode=RunMode.BROADBAND)
-    waveform, _ = lfm_chirp(150.0, 450.0, 0.04, 4000.0)
+    _, waveform = lfm_chirp(150.0, 450.0, 0.04, 4000.0)
     return H.synthesize_time_series(waveform, 4000.0)
 
 

@@ -29,7 +29,6 @@ GLOBSED_FILE = 'GlobSed-v3.nc'
 GLOBSED_URL = ('https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/'
                '1.1/data/0-data/GlobSed/GlobSed_package3/GlobSed-v3.nc')
 
-_GRID = {}   # path -> _GlobSedGrid
 
 
 def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -48,7 +47,7 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
         part.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
                                   source='globsed'))
         os.replace(part, out)
-    _GRID.clear()
+    _cache.invalidate_grids()
     log_message('globsed', f"GlobSed grid cached → {out}", verbose=verbose)
     return out
 
@@ -72,11 +71,7 @@ class _GlobSedGrid(NetcdfGrid):
 
 
 def _grid():
-    path = _cache.require('globsed', GLOBSED_FILE)
-    key = str(path)
-    if key not in _GRID:
-        _GRID[key] = _GlobSedGrid(path)
-    return _GRID[key]
+    return _cache.cached_grid('globsed', GLOBSED_FILE, _GlobSedGrid)
 
 
 def fetch_sediment_thickness(point):

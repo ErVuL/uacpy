@@ -141,7 +141,14 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         L0w = cst + 20 * np.log10(u) - 17 * np.log10(f0w / 770)
         L1w = L0w + (s1w / np.log10(2)) * np.log10(f_temp / f0w)
         L2w = L0w + (s2w / np.log10(2)) * np.log10(f_temp / f0w)
-        Lw = L1w * (1 + (L1w / L2w) ** (-a)) ** (1 / a)
+        # The Wenz melding raises ``1 + (L1w/L2w)**(-a)`` to a fractional
+        # power, which is real only while that base is positive. Below about
+        # 0.01 kn the two asymptotes fall through zero and the base goes
+        # negative — the same physical statement as ``u == 0``: the surface
+        # source is silent, so those bins contribute no power.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            blend = 1 + (L1w / L2w) ** (-a)
+            Lw = np.where(blend > 0, L1w * np.abs(blend) ** (1 / a), -np.inf)
         temp_noise_dist = 10 ** (Lw / 10)
 
         if np.any(i_wind):
@@ -156,11 +163,15 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         if np.any(~i_wind):
             L1c = L0w + (s1w / np.log10(2)) * np.log10(f_wind / f0w)
             L2c = L0w + (s2w / np.log10(2)) * np.log10(f_wind / f0w)
-            Lc = L1c * (1 + (L1c / L2c) ** (-a)) ** (1 / a)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                blend_c = 1 + (L1c / L2c) ** (-a)
+                Lc = (L1c * abs(blend_c) ** (1 / a)
+                      if blend_c > 0 else -np.inf)
             prop_const = 10 ** (Lc / 10) / f_wind ** slope
             NL[~i_wind] = prop_const * f[~i_wind] ** slope * df[~i_wind]
 
-        NL = 10 * np.log10(NL)
+        with np.errstate(divide='ignore'):
+            NL = 10 * np.log10(NL)
 
         if n2 != 1:
             NL = NL.reshape((n2,))

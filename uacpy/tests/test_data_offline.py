@@ -9,6 +9,8 @@ cache with no network. Skipped where netCDF4 is unavailable (the grids need it).
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
@@ -116,7 +118,7 @@ def cache(tmp_path, monkeypatch):
     root = tmp_path / 'data_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     # Module-level open-once caches are keyed by path; clear for isolation.
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     sediment_db._SAMPLES.clear()
     emodnet_local._INDEX.clear()
@@ -137,10 +139,10 @@ def seismic_cache(tmp_path, monkeypatch):
     """
     root = tmp_path / 'seismic_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     crust1_local._MODEL.clear()
-    globsed_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_globsed(root)
@@ -181,7 +183,7 @@ def test_gebco_masked_cell_raises(tmp_path, monkeypatch):
     # fill sentinel into a depth.
     root = tmp_path / 'masked_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     gdir = root / 'gebco'; gdir.mkdir(parents=True)
     lat = np.arange(-90, 91, 1.0)
     lon = np.arange(-180, 180, 1.0)
@@ -204,7 +206,7 @@ def test_gebco_missing_variable_raises_typed(tmp_path, monkeypatch):
     # the install flag, like every sibling grid — not a bare KeyError.
     root = tmp_path / 'schema_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     gdir = root / 'gebco'; gdir.mkdir(parents=True)
     ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
     ds.createDimension('lat', 3); ds.createDimension('lon', 3)
@@ -391,7 +393,7 @@ def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
     # the pelagic last resort, which classifies off the *supplied* bathymetry
     # instead of looking up its own — so the environment builds with no fetch.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     from uacpy.data import bathymetry
     monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("ssp_sources/bottom_sources='local' hit the live API")))
@@ -408,7 +410,7 @@ def test_pelagic_without_a_supplied_depth_still_needs_the_cache(tmp_path,
     # directly with cache_only and no depth=, pelagic must still fail fast on
     # the missing GEBCO cache rather than falling back to the live API.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     from uacpy.data import bathymetry
     monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("cache_only pelagic hit the live API")))

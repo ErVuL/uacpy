@@ -75,6 +75,12 @@ _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
         float, 'Sample rate (Hz) of the source waveform passed to '
         'Field.synthesize_time_series.'
     ),
+    'c_max': (
+        float, 'Fastest sound speed (m/s) in the modelled waveguide. Read by '
+        'the time-series synthesis helpers to anchor the output window before '
+        'the earliest arrival (r / c_max); without it the window start is an '
+        'estimate and long-range traces warn.'
+    ),
 }
 
 _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
@@ -82,6 +88,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('Bellhop', 'shd_file'): (str, 'Bellhop pressure-field output (.shd).'),
     ('Bellhop', 'arr_file'): (str, 'Bellhop arrivals output (.arr).'),
     ('Bellhop', 'ray_file'): (str, 'Bellhop ray paths (.ray).'),
+    ('Bellhop', 'receiver_depths'): (
+        np.ndarray,
+        'Receiver depths (m) paired one-to-one with the range axis of an '
+        'irregular-grid (RunType(5:5)=I) field, which carries no depth axis '
+        'of its own.'),
     ('Bellhop', 'c0'): (
         float, 'Reference sound speed (m/s) used by the arrivals → H(f) '
         'synthesis path to convert delays to phases.'
@@ -152,8 +163,10 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'resolves it per profile and reports the widest.'
     ),
     ('Kraken', 'rmax'): (
-        float, 'Resolved maximum range (m) written to the deck, giving the '
-        'modal-sum interpolation headroom past the outermost receiver. The '
+        float, 'Resolved maximum range (m) written to the deck. KRAKEN uses it '
+        'only as the mesh-convergence tolerance of the Richardson '
+        'extrapolation (kraken.f90:80, `Error*1000*RMax < 1`), so a LARGER '
+        'value is a TIGHTER tolerance; field.exe never reads it. The '
         'constructor rmax_m when pinned, else derived from the receiver '
         'ranges.'
     ),
@@ -163,7 +176,8 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('Scooter', 'transform_method'): (
         str, "Hankel-transform method used by grn_reader to map "
-        "k-domain G(k) → r-domain p(r) (e.g. 'fft_hankel')."
+        "k-domain G(k) → r-domain p(r): 'direct_dft', the trapezoidal-rule "
+        "matrix-product DFT (there is no FFT on this path)."
     ),
     ('Scooter', 'source_type'): (
         str, "Scooter source type passed to grn_to_field ('R' = "

@@ -72,10 +72,28 @@ def example_rough_surface():
 def example_ice_surface():
     """Elastic (ice) surface — half-space upper boundary.
 
-    Note: ice cp (3500 m/s) >> water c (1480 m/s), so the critical angle
-    is only ~25 deg. Most shallow-water modes propagate below critical and
-    reflect perfectly, producing TL similar to vacuum. The main difference
-    is in the interference pattern phase, not overall loss level.
+    Angles here follow the ocean-acoustics / Acoustics-Toolbox convention:
+    theta is measured from the *horizontal* (grazing), so the critical angle
+    is ``arccos(c1/c2)``, not ``arcsin``. Jensen, Kuperman, Porter & Schmidt,
+    *Computational Ocean Acoustics* 2nd ed., section 1.4.
+
+    Ice cp (3500 m/s) >> water c (1480 m/s), giving a compressional critical
+    grazing angle of ``arccos(1480/3500)`` = 65.0 deg. Shallow-water modes sit
+    at small grazing angles, so they are well below it and would reflect
+    without compressional leakage.
+
+    But ice also has shear, and here cs = 1800 m/s > c_water, so the binding
+    constraint is the *shear* critical grazing angle ``arccos(1480/1800)``
+    = 34.7 deg. Lossless reflection therefore holds only below 34.7 deg
+    grazing, not below 65 deg.
+
+    (The same two numbers in the from-normal convention are 25.0 deg and
+    55.3 deg. Mixing the conventions is what makes "below critical" and
+    "~25 deg" sound compatible when they are not.)
+
+    Net effect: TL stays close to the vacuum case for the low-grazing modes;
+    the main difference is in the interference-pattern phase rather than the
+    overall loss level.
     """
     source, receiver = make_source_receiver()
     ice = BoundaryProperties(

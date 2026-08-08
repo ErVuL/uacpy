@@ -3,6 +3,8 @@ Re-exported from :mod:`uacpy.core.environment` for stable import paths.
 """
 
 import copy as _copy
+import warnings
+
 import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
@@ -102,6 +104,21 @@ class SoundSpeedProfile:
             raise ConfigurationError(
                 f"SoundSpeedProfile: shape={self.shape!r} not in "
                 f"{_VALID_SSP_SHAPES}"
+            )
+        # ``isovelocity`` is the one shape a writer acts on rather than merely
+        # records: it lets the AT deck declare TopOpt(1)='C' on the grounds
+        # that any connection scheme over constant data is constant
+        # (``resolve_ssp_topopt``). That reasoning only holds if the data
+        # really is constant, so the declaration is checked instead of
+        # trusted — otherwise a gradient is silently flattened.
+        if self.shape == 'isovelocity' and float(np.ptp(self.data)) > 0.0:
+            raise ConfigurationError(
+                f"SoundSpeedProfile: shape='isovelocity' but the data spans "
+                f"{float(np.min(self.data)):g}-{float(np.max(self.data)):g} "
+                f"m/s.",
+                remediation="Drop shape='isovelocity' (the default 'measured' "
+                            "keeps every sample), or supply a constant "
+                            "profile.",
             )
 
     def __repr__(self) -> str:
@@ -553,6 +570,23 @@ def generate_sea_surface(
     # with k in cycles/m: omega = sqrt(2*pi*g*k) so domega/dk = pi*g/omega
     domega_dk = np.pi * g / omega
     S_k = S_omega * domega_dk
+
+    # The variance sits around the spectral peak, so a grid whose Nyquist
+    # wavenumber falls at or below it captures only the tail and returns a
+    # surface far flatter than the Pierson-Moskowitz Hs for this wind.
+    k_peak = omega_p ** 2 / (2.0 * np.pi * g)          # cycles/m
+    k_nyquist = k[-1]
+    if k_nyquist < 2.0 * k_peak:
+        warnings.warn(
+            f"generate_sea_surface: the range grid resolves wavenumbers only "
+            f"to {k_nyquist:.4g} cycles/m, below 2x the Pierson-Moskowitz peak "
+            f"at {k_peak:.4g} cycles/m for wind_speed_ms={wind_speed_ms:g}. The "
+            f"realisation captures only the spectral tail and its significant "
+            f"wave height will fall short of the fully developed "
+            f"{0.021 * wind_speed_ms ** 2:.2f} m. Increase n_points (or "
+            f"shorten max_range) to resolve the peak.",
+            UserWarning, stacklevel=2,
+        )
 
     # Generate random amplitudes from spectrum
     amplitude = np.sqrt(2 * S_k * dk)

@@ -87,7 +87,7 @@ class TestModal:
         x = (np.sin(2 * np.pi * 40 * t) + 0.5 * np.sin(2 * np.pi * 120 * t)) \
             * np.hanning(n)
         w, tw = warp_signal(x, FS, 500.0)
-        x2, _ = unwarp_signal(w, tw, FS, 500.0)
+        _, x2 = unwarp_signal(w, tw, FS, 500.0)
         m = min(x.size, x2.size)
         corr = np.corrcoef(x[10:m - 10], x2[10:m - 10])[0, 1]
         assert corr > 0.9

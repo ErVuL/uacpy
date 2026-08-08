@@ -19,8 +19,8 @@ Three convention strings cover the three vendored binaries:
 convention    What the backend writes                                Fortran source
 ============  ====================================================  =======================================
 ``'mpiramS'`` ``psif = ψ · exp(+i(k₀ r + π/4)) / (4π)``              ``third_party/mpiramS/`` patched output
-``'rams'``    ``ψ · exp(+i k₀ r)``  (carrier baked in via g₀)        ``rams0.5.f:830-831``
-``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f:310``
+``'rams'``    ``ψ · exp(+i k₀ r)``  (carrier baked in via g₀)        ``rams0.5.f:848-851`` (g₀ at ``:889``)
+``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f``: no ``g0`` anywhere
 ============  ====================================================  =======================================
 
 Adding a fourth backend amounts to one new branch here plus declaring

@@ -53,6 +53,26 @@ from uacpy.models import Kraken, Bounce, Scooter  # noqa: E402
 from uacpy.core import BoundaryProperties  # noqa: E402
 import time  # noqa: E402
 
+# Timing repeats. One cold call mostly measures process and binary load,
+# which lands on whichever model happens to run first, so every timing here
+# is a median of repeats taken after a discarded warm-up call.
+N_TIMING_REPEATS = 3
+
+
+def _median_time(call, repeats=N_TIMING_REPEATS):
+    """Return ``(result, median_seconds)`` for ``call``.
+
+    Runs ``call`` once as an unmeasured warm-up, then ``repeats`` timed
+    runs, and returns the last result with the median wall time.
+    """
+    call()                                     # warm-up, discarded
+    times = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        result = call()
+        times.append(time.perf_counter() - t0)
+    return result, float(np.median(times))
+
 
 def main():
     print("\n" + "═" * 80)
@@ -111,12 +131,11 @@ def main():
     print("  • Automatically switches to krakenc (complex modes)")
     print("  • Computes TL field directly")
 
-    t_start = time.time()
-    krakenfield = Kraken(verbose=False)
-    result_krakenfield = krakenfield.compute_tl(env, source, receiver)
-    t_krakenfield = time.time() - t_start
+    result_krakenfield, t_krakenfield = _median_time(
+        lambda: Kraken(verbose=False).compute_tl(env, source, receiver))
 
-    print(f"  ✓ Kraken completed in {t_krakenfield:.2f}s")
+    print(f"  ✓ Kraken completed in {t_krakenfield:.3f}s"
+          f" (median of {N_TIMING_REPEATS} runs after a warm-up)")
     print(f"    - TL field shape: {result_krakenfield.data.shape}")
     print("    - Used krakenc internally for elastic bottom")
 
@@ -135,18 +154,15 @@ def main():
         ranges=np.array([1000.0])
     )
 
-    t_start = time.time()
     bounce_output = Path(__file__).parent / 'output' / 'bounce_brc'
-    bounce = Bounce(
-        verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
-        work_dir=bounce_output,    # pinned work_dir ⇒ cleanup=False ⇒ .brc/.irc persist here
-    )
-    bounce_result = bounce.run(
-        env=env, source=source, receiver=receiver_bounce,
-    )
-    t_bounce = time.time() - t_start
+    bounce_result, t_bounce = _median_time(
+        lambda: Bounce(
+            verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
+            # pinned work_dir ⇒ cleanup=False ⇒ .brc/.irc persist here
+            work_dir=bounce_output,
+        ).run(env=env, source=source, receiver=receiver_bounce))
 
-    print(f"  ✓ BOUNCE completed in {t_bounce:.2f}s")
+    print(f"  ✓ BOUNCE completed in {t_bounce:.3f}s")
     print(f"    - Output: {Path(bounce_result.metadata['brc_file']).name}")
 
     has_rc_data = bounce_result.theta is not None and bounce_result.R is not None
@@ -175,20 +191,18 @@ def main():
     print("  ✓ Environment created with acoustic_type='file'")
 
     print("\n[3/3] Running SCOOTER with .brc file...")
-    t_start = time.time()
-    scooter = Scooter(
-        verbose=False,
-        c_low=bounce_result.metadata['c_low'],
-        c_high=bounce_result.metadata['c_high'],
-    )
-    result_scooter = scooter.compute_tl(env_with_rc, source, receiver)
-    t_scooter = time.time() - t_start
+    result_scooter, t_scooter = _median_time(
+        lambda: Scooter(
+            verbose=False,
+            c_low=bounce_result.metadata['c_low'],
+            c_high=bounce_result.metadata['c_high'],
+        ).compute_tl(env_with_rc, source, receiver))
 
-    print(f"  ✓ SCOOTER completed in {t_scooter:.2f}s")
+    print(f"  ✓ SCOOTER completed in {t_scooter:.3f}s")
     print(f"    - TL field shape: {result_scooter.data.shape}")
 
     t_bounce_total = t_bounce + t_scooter
-    print(f"\n  Total time for BOUNCE→SCOOTER: {t_bounce_total:.2f}s")
+    print(f"\n  Total time for BOUNCE→SCOOTER: {t_bounce_total:.3f}s")
 
     # ═══════════════════════════════════════════════════════════════════════
     # COMPARISON & ANALYSIS
@@ -204,22 +218,42 @@ def main():
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))
 
+    p95_diff = float(np.nanpercentile(np.abs(tl_diff), 95))
+    worst = np.unravel_index(np.nanargmax(np.abs(tl_diff)), tl_diff.shape)
+    worst_depth = float(result_krakenfield.depths[worst[0]])
+    worst_range = float(result_krakenfield.ranges[worst[1]])
+
     print("\nTL Comparison (Kraken vs SCOOTER):")
-    print(f"  • Maximum difference: {max_diff:.2f} dB")
+    print(f"  • Maximum difference: {max_diff:.2f} dB"
+          f"  (at z = {worst_depth:.0f} m, r = {worst_range/1000:.2f} km)")
+    print(f"  • 95th percentile |difference|: {p95_diff:.2f} dB")
     print(f"  • Mean absolute difference: {mean_diff:.2f} dB")
     print(f"  • RMS difference: {rms_diff:.2f} dB")
 
     print("\nPerformance:")
-    print(f"  • Kraken: {t_krakenfield:.2f}s")
-    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.2f}s (BOUNCE: {t_bounce:.2f}s + SCOOTER: {t_scooter:.2f}s)")
+    print(f"  • Kraken: {t_krakenfield:.3f}s")
+    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s "
+          f"(BOUNCE: {t_bounce:.3f}s + SCOOTER: {t_scooter:.3f}s)")
     direction = 'faster' if t_krakenfield < t_bounce_total else 'slower'
-    print(f"  • Speedup: {t_bounce_total/t_krakenfield:.1f}x {direction}")
+    print(f"  • Ratio: {t_bounce_total/t_krakenfield:.1f}x {direction}")
+    print(f"    Medians of {N_TIMING_REPEATS} runs after a warm-up, on this"
+          f" {len(receiver.depths)}x{len(receiver.ranges)} grid only.")
+    print("    This compares two different algorithms — a krakenc mode sum against")
+    print("    BOUNCE plus a Scooter FFP integration — not 'auto-detection versus")
+    print("    reflection files'. The ratio will move with grid size, frequency and")
+    print("    wavenumber sampling; do not carry this number to another problem.")
 
     print("\nAccuracy:")
-    if mean_diff < 2.0:
-        print("  ✓ Excellent agreement (mean diff < 2 dB)")
+    if mean_diff < 2.0 and max_diff < 10.0:
+        print("  ✓ Excellent agreement (mean < 2 dB, worst cell < 10 dB)")
     elif mean_diff < 5.0:
-        print("  ✓ Good agreement (mean diff < 5 dB)")
+        print(f"  ✓ Agreement is good in the mean ({mean_diff:.2f} dB) and at the 95th")
+        print(f"    percentile ({p95_diff:.2f} dB), but the worst cell differs by")
+        print(f"    {max_diff:.2f} dB. Large single-cell gaps are expected where the two")
+        print("    methods put interference nulls in slightly different places: near a")
+        print("    null a small shift in position is a big shift in dB. Judge these two")
+        print("    solvers on the mean/percentile, and inspect the difference map for")
+        print("    whether the outliers are isolated nulls or a structural bias.")
     else:
         print("  ⚠ Moderate differences (consider parameter tuning)")
 
@@ -461,13 +495,16 @@ def main():
     print(f"✓ RMS difference: {rms_diff:.2f} dB")
 
     print("\nPERFORMANCE:")
-    print(f"  • Kraken Auto: {t_krakenfield:.2f}s")
-    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.2f}s")
+    print(f"  • Kraken Auto: {t_krakenfield:.3f}s")
+    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s")
     if t_krakenfield < t_bounce_total:
-        print(f"  → Kraken is {t_bounce_total/t_krakenfield:.1f}x faster for single runs")
+        print(f"  → On this grid Kraken ran {t_bounce_total/t_krakenfield:.1f}x faster")
     else:
-        print(f"  → SCOOTER is {t_krakenfield/t_bounce_total:.1f}x faster for single runs")
-    print("  → But BOUNCE .brc can be reused for multiple runs!")
+        print(f"  → On this grid SCOOTER ran {t_krakenfield/t_bounce_total:.1f}x faster")
+    print("  → Two different algorithms, one grid size, one frequency — treat the")
+    print("    ratio as a property of this configuration, not of the two codes.")
+    print("  → And BOUNCE .brc can be reused across runs, which changes the sum")
+    print("    entirely once you do more than one.")
 
     print("\nCHOOSE:")
     print("  • Kraken Auto → For simple cases and single runs")

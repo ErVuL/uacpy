@@ -291,3 +291,147 @@ class TestSPARCReceiverDepthAxis:
         assert data.shape[0] == receiver.depths.size
         assert np.all(np.isfinite(data[:2]))
         assert np.all(np.isnan(data[2]))
+
+
+class TestSPARCZeroRangeAgreesAcrossOutputModes:
+    """A receiver on the source axis must be no-data in all three modes.
+
+    ``sparc.f90:622`` weights ``'R'`` by ``SQRT( rkT / Pos%Rr )`` and ``:292``
+    scales ``'D'`` by ``1 / SQRT( pi * Pos%Rr( 1 ) )``. Unmasked, ``'D'``
+    returned ``+Inf`` and ``'R'`` returned ``NaN`` mixed with exact zeros,
+    while ``'S'`` — whose Hankel transform runs in-tree — already returned
+    NaN. One model gave three different answers for one cell.
+    """
+
+    @staticmethod
+    def _rig():
+        env = Environment(
+            name='zero_range', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5),
+        )
+        return (env, Source(depths=25.0, frequencies=50.0),
+                Receiver(depths=np.array([30.0, 60.0]),
+                         ranges=np.array([0.0, 500.0, 1000.0])))
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    @pytest.mark.parametrize('output_mode', ['R', 'D', 'S'])
+    def test_zero_range_is_no_data_and_warns(self, output_mode):
+        env, source, receiver = self._rig()
+        with pytest.warns(UserWarning, match=r'r = 0'):
+            result = SPARC(output_mode=output_mode,
+                           verbose=False).run(env, source, receiver)
+        data = np.asarray(result.data)
+        assert np.isnan(data[:, 0, :]).all(), (
+            f"output_mode={output_mode!r} left "
+            f"{np.count_nonzero(~np.isnan(data[:, 0, :]))} finite value(s) "
+            f"at r = 0")
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    @pytest.mark.parametrize('output_mode', ['R', 'D', 'S'])
+    def test_the_other_ranges_are_untouched(self, output_mode):
+        """Masking must not reach past the singular column."""
+        env, source, receiver = self._rig()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = SPARC(output_mode=output_mode,
+                           verbose=False).run(env, source, receiver)
+        data = np.asarray(result.data)
+        assert np.isfinite(data[:, 1:, :]).all()
+        assert np.any(data[:, 1:, :] != 0.0)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_no_warning_when_every_receiver_is_off_axis(self):
+        env, source, _ = self._rig()
+        receiver = Receiver(depths=np.array([30.0]),
+                            ranges=np.array([500.0, 1000.0]))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = SPARC(output_mode='R', verbose=False).run(
+                env, source, receiver)
+        assert not [w for w in caught if 'r = 0' in str(w.message)]
+        assert np.isfinite(np.asarray(result.data)).all()
+
+
+class TestSPARCHankelNormalisation:
+    """Every output mode carries the full inverse-Hankel weight.
+
+    The far-field kernel is ``H0(kr) ~ sqrt(2/(pi·k·r))·e^{i(kr-pi/4)}``, so
+    inverting it weights each wavenumber sample by
+    ``dk·k·sqrt(2/(pi·k·r)) = dk·sqrt(2k/(pi·r))``.
+
+    ``sparc.f90``'s ``'D'`` branch carries exactly that — the ``:595`` kernel
+    ``sqrt(2)·dk·sqrt(k)`` times the ``:292`` write scale ``1/sqrt(pi·Rr)``.
+    Its ``'R'`` branch (``:622-623``) applies ``sqrt(2)·dk·sqrt(k/r)`` with no
+    write scale, i.e. the same weight less the ``1/sqrt(pi)``, so the raw
+    ``'R'`` trace is ``sqrt(pi)`` (+4.97 dB) hot. uacpy divides that back out.
+
+    The constant is pinned against the raw ``.rts`` rather than only across
+    modes: agreement between modes is satisfied by scaling all three onto the
+    *wrong* branch, so it cannot detect this on its own.
+    """
+
+    @staticmethod
+    def _rig():
+        env = Environment(
+            name='hankel', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5),
+        )
+        return (env, Source(depths=25.0, frequencies=50.0),
+                Receiver(depths=np.array([30.0, 60.0]),
+                         ranges=np.array([500.0, 1000.0])))
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_all_three_output_modes_agree_in_absolute_level(self):
+        env, source, receiver = self._rig()
+        peaks = {}
+        for mode in ('R', 'D', 'S'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                data = np.asarray(SPARC(output_mode=mode,
+                                        verbose=False).run(env, source,
+                                                           receiver).data)
+            peaks[mode] = float(np.nanmax(np.abs(data)))
+        assert peaks['R'] == pytest.approx(peaks['D'], rel=1e-4), peaks
+        assert peaks['S'] == pytest.approx(peaks['D'], rel=1e-4), peaks
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_range_native_divides_the_raw_rts_by_sqrt_pi(self, tmp_path):
+        """Pins the correction against the file sparc.exe actually wrote."""
+        from uacpy.io.oalib_reader import read_rts_file
+        env, source, receiver = self._rig()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = SPARC(output_mode='R', verbose=False, cleanup=False,
+                           work_dir=tmp_path).run(env, source, receiver)
+        rts = sorted(tmp_path.rglob('*.rts'))
+        assert rts, f"no .rts under {tmp_path}"
+        raw = np.asarray(read_rts_file(rts[0])['p'])       # (nt, n_range)
+        returned = np.asarray(result.data)[0]              # depth 0 -> (n_range, nt)
+        np.testing.assert_allclose(returned, raw.T / np.sqrt(np.pi),
+                                   rtol=1e-5, atol=0.0)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_vertical_array_passes_the_raw_rts_through_unscaled(self, tmp_path):
+        """The 'D' branch already carries the full weight, so nothing is applied."""
+        from uacpy.io.oalib_reader import read_rts_file
+        env, source, receiver = self._rig()
+        single = Receiver(depths=receiver.depths, ranges=np.array([500.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = SPARC(output_mode='D', verbose=False, cleanup=False,
+                           work_dir=tmp_path).run(env, source, single)
+        rts = sorted(tmp_path.rglob('*.rts'))
+        assert rts, f"no .rts under {tmp_path}"
+        raw = np.asarray(read_rts_file(rts[0])['p'])       # (nt, n_depth)
+        returned = np.asarray(result.data)[:, 0, :]        # (n_depth, nt)
+        np.testing.assert_allclose(returned, raw.T, rtol=1e-5, atol=0.0)

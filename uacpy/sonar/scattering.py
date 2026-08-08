@@ -79,7 +79,10 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
     beta = 158.0 * (v * f ** (1.0 / 3.0)) ** (-0.58)
     # -42.4 per Chapman & Harris (1962) JASA 34(10):1592, eq. as reproduced in
     # Urick (1983) Ch. 8 and Jensen et al. "Computational Ocean Acoustics".
-    return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
+    # theta = 0 (horizontal) is -inf, the honest degenerate answer, matching
+    # lambert_bottom; silence the spurious divide warning.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 
 
 def column_scattering_strength(sv_db, thickness_m: float):

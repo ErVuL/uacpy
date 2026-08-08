@@ -80,9 +80,9 @@ def waveform_gallery():
     fs = 8000.0
     t = np.arange(int(0.10 * fs)) / fs
 
-    lfm, t_lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
-    hfm, t_hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
-    burst, t_burst = tone_burst(400.0, 8, fs)
+    t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
+    t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
+    t_burst, burst = tone_burst(400.0, 8, fs)
     ricker = ricker_wavelet(t, 200.0)
     gauss = gaussian_pulse(t, delay=0.05, duration=0.012)
     nw = nwave(t - 0.02, 200.0)
@@ -124,8 +124,8 @@ def waveform_gallery():
 def chirp_sweep_laws():
     """LFM and HFM side by side: the sweep law each one obeys."""
     fs = 8000.0
-    lfm, t_lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
-    hfm, t_hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
+    t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
+    t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2), sharey=True)
     for ax, sig, tt, name in [(axes[0], lfm, t_lfm, 'lfm_chirp — linear sweep'),
@@ -166,7 +166,7 @@ def pulse_compression_gain():
     rng = np.random.default_rng(0)
     fs = 20_000.0
     fmin, fmax, T = 1000.0, 5000.0, 0.05
-    tx, _ = lfm_chirp(fmin, fmax, T, fs)
+    _, tx = lfm_chirp(fmin, fmax, T, fs)
 
     arr = _bellhop_arrivals()
     taps = arr.amplitudes * np.exp(1j * arr.phases)
@@ -228,8 +228,8 @@ def ambiguity_surfaces():
     """LFM against HFM: range-Doppler coupling versus Doppler tolerance."""
     fs = 20_000.0
     fmin, fmax, T = 1000.0, 5000.0, 0.05
-    lfm, _ = lfm_chirp(fmin, fmax, T, fs)
-    hfm, _ = hfm_chirp(fmin, fmax, T, fs)
+    _, lfm = lfm_chirp(fmin, fmax, T, fs)
+    _, hfm = hfm_chirp(fmin, fmax, T, fs)
     doppler = np.linspace(-300.0, 300.0, 121)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4), sharey=True)
@@ -264,7 +264,7 @@ def _two_tones_and_a_click(fs=2000.0, n=2048):
     t = np.arange(n) / fs
     tones = (np.sin(2 * np.pi * 100.0 * t) + np.sin(2 * np.pi * 130.0 * t))
     tones = tones * np.exp(-0.5 * ((t - 0.35) / 0.13) ** 2)
-    click, _ = tone_burst(500.0, 3, fs)
+    _, click = tone_burst(500.0, 3, fs)
     signal = tones
     i0 = int(0.72 * fs)
     signal[i0:i0 + click.size] += 2.0 * click

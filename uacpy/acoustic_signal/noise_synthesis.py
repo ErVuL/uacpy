@@ -217,12 +217,14 @@ def make_noise_waveform(
 
     Returns
     -------
+    time : ndarray
+        Sample times (s), ``np.arange(N)/sample_rate``.
     nts : ndarray
         Noise time series, 1-D of length ``int(T*sample_rate)``.
-    time : ndarray
-        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)`` return
-        convention as the :mod:`uacpy.acoustic_signal` tonal generators
-        (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
+
+    The ``(time, signal)`` order is the package-wide convention, shared with
+    the tonal generators (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``) and
+    the channel/synthesis helpers.
 
     Notes
     -----
@@ -263,7 +265,7 @@ def make_noise_waveform(
 
     # Heterodyne with carrier
     nts = np.sin(2 * np.pi * fc * time) * nts
-    return nts, time
+    return time, nts
 
 
 def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
@@ -422,13 +424,11 @@ def make_bandlimited_noise(
 
     Returns
     -------
+    time : ndarray
+        Sample times (s), ``np.arange(N)/sample_rate``.
     noise : ndarray
         Band-limited, unit-RMS noise time series, 1-D of length
         ``int(duration*sample_rate)``.
-    time : ndarray
-        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)``
-        return convention as the other :mod:`uacpy.acoustic_signal` generators
-        (``make_noise_waveform``, ``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
 
     Notes
     -----
@@ -457,7 +457,7 @@ def make_bandlimited_noise(
     if rms > 0:
         filtered_noise = filtered_noise / rms
 
-    return filtered_noise, time
+    return time, filtered_noise
 
 
 def fourier_synthesis(
@@ -491,11 +491,11 @@ def fourier_synthesis(
 
     Returns
     -------
+    time : ndarray
+        Time vector in seconds
     rmod : ndarray
         Time-domain received signal
         Shape matches input pressure_freq with frequency dim converted to time
-    time : ndarray
-        Time vector in seconds
 
     Notes
     -----
@@ -580,4 +580,4 @@ def fourier_synthesis(
     # source-local axis.
     time = Tstart + np.linspace(0.0, Tmax - deltat, Nfreq)
 
-    return rmod, time
+    return time, rmod

@@ -57,6 +57,13 @@ _HB_RHO = np.array([r[1] for r in _HB_TABLE])      # g/cm³ at the reference wat
 _HB_VRATIO = np.array([r[2] for r in _HB_TABLE])
 
 GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
+# Seawater each model's ratios are referenced to, used when the caller gives no
+# in-situ values. Hamilton & Bachman tabulate against 1510 m/s / 1.030 g/cm³;
+# APL-UW's ratios are applied against 1500 m/s and a unit density ratio by the
+# Acoustics-Toolbox 'G' bottom (ReadEnvironmentBell.f90:528 `alphaR = vr*1500`,
+# and `HS%rho = rhoR` — the ratio used directly as g/cm³).
+_MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
+                          'apl-uw': (1500.0, 1.0)}
 # Valid ϕ range per model; outside it ϕ is clamped, and a UserWarning fires only
 # for genuine extrapolation (≳ 1 ϕ beyond).
 _MODEL_RANGE = {'hamilton': (float(_HB_PHI[0]), float(_HB_PHI[-1])),
@@ -178,8 +185,10 @@ def grain_size_to_geoacoustics(
         APL-UW TR 9407 (1994) grain-size relations (ρ, ν polynomials + α₂/f).
     water_sound_speed, water_density : float, optional
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are
-        scaled by. ``None`` (default) uses Hamilton's reference
-        (1510 m/s, 1.030 g/cm³).
+        scaled by. ``None`` (default) uses the reference the chosen ``model``
+        was tabulated against — Hamilton's 1510 m/s / 1.030 g/cm³, or APL-UW's
+        1500 m/s / 1.0 g/cm³, which reproduces the Acoustics-Toolbox ``'G'``
+        bottom exactly.
 
     A ``UserWarning`` is emitted when ``grain_size_phi`` is well outside the
     model's valid range (ϕ is then clamped).
@@ -189,10 +198,11 @@ def grain_size_to_geoacoustics(
             f"grain_size_to_geoacoustics: unknown model {model!r}.",
             remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
         )
+    ref_cw, ref_rhow = _MODEL_WATER_REFERENCE[model]
     if water_sound_speed is None:
-        water_sound_speed = _HB_REF_CW
+        water_sound_speed = ref_cw
     if water_density is None:
-        water_density = _HB_REF_RHOW
+        water_density = ref_rhow
     lo, hi = _MODEL_RANGE[model]
     phi = float(np.clip(grain_size_phi, lo, hi))
     if grain_size_phi < lo - 1.0 or grain_size_phi > hi + 1.0:

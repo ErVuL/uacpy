@@ -35,7 +35,6 @@ GLODAP_URL = ('https://glodap.info/glodap_files/v2.2023/'
 _PH_VARS = ('pHtsinsitutp', 'pHts25p0', 'ph')
 _DEPTH_VARS = ('depth', 'depth_surface')
 
-_GRID = {}   # path -> _GlodapGrid
 
 
 def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
@@ -61,7 +60,7 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
                                       verbose=verbose, source='glodap'))
             os.replace(part, tar_path)
         _extract_ph(tar_path, out)
-    _GRID.clear()
+    _cache.invalidate_grids()
     log_message('glodap', f"GLODAP pH grid cached → {out}", verbose=verbose)
     return out
 
@@ -134,11 +133,7 @@ class _GlodapGrid(NetcdfGrid):
 
 
 def _grid():
-    path = _cache.require('glodap', GLODAP_FILE)
-    key = str(path)
-    if key not in _GRID:
-        _GRID[key] = _GlodapGrid(path)
-    return _GRID[key]
+    return _cache.cached_grid('glodap', GLODAP_FILE, _GlodapGrid)
 
 
 def fetch_ph_profile(point):

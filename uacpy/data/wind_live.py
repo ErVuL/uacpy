@@ -6,7 +6,7 @@ historical date, not just recent ones. Served live from the NOAA CoastWatch
 **ERDDAP** griddap service (no auth), like the Argo / EMODnet fetchers.
 
 The 10 m wind speed feeds two consumers: the Wenz ambient-noise wind term
-(:class:`uacpy.WenzNoise`, whose ``wind_speed`` is in **knots** — multiply the
+(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed`` is in **knots** — multiply the
 m/s returned here by ``1.9438``) and the Pierson-Moskowitz sea surface
 (:func:`uacpy.data.fetch_sea_surface`, when no wave source is available).
 
@@ -17,7 +17,8 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import erddap_last_value, http_get
+from uacpy.data._http import (erddap_griddap_url, erddap_last_value,
+                              http_get)
 from uacpy.data._time import parse_date
 
 __all__ = ['fetch_wind', 'fetch_wind_transect', 'ERDDAP_URL', 'WIND_SOURCES']
@@ -43,17 +44,8 @@ def _check_source(source):
 
 
 def _griddap_url(var, when, lat, lon):
-    """ERDDAP griddap CSV URL for ``var`` at the nearest time/lat/lon cell.
-
-    NBS carries a singleton 10 m ``zlev`` axis between time and latitude; the
-    ``[(...)]`` value selectors snap each axis to its nearest node. The
-    longitude axis is [0, 360).
-    """
-    import urllib.parse
-    iso = f"{parse_date(when)}T00:00:00Z"
-    constraint = (f"{var}[({iso})][(10.0)][({lat})][({lon % 360.0})]")
-    query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
-    return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
+    return erddap_griddap_url(ERDDAP_URL, DATASET, var, when, lat, lon,
+                              level=10.0)
 
 
 def _fetch_var(var, when, lat, lon, *, timeout, verbose):

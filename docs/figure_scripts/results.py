@@ -135,7 +135,7 @@ def time_synthesis():
                                       run_mode=RunMode.BROADBAND)
 
     sample_rate = 4000.0
-    waveform, t_src = lfm_chirp(150.0, 450.0, 0.04, sample_rate)
+    t_src, waveform = lfm_chirp(150.0, 450.0, 0.04, sample_rate)
     series = H.synthesize_time_series(waveform, sample_rate)
 
     fig, (ax_src, ax_rx) = plt.subplots(

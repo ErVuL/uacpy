@@ -22,7 +22,7 @@ import numpy as np
 from uacpy.core.exceptions import DataFetchError
 from uacpy._log import log_message
 
-__all__ = ['http_get', 'curl_download', 'erddap_last_value',
+__all__ = ['http_get', 'curl_download', 'erddap_griddap_url', 'erddap_last_value',
            'checked_member_size', 'MAX_MEMBER_BYTES']
 
 # HTTP status codes worth retrying (transient rate-limit / availability /
@@ -235,3 +235,20 @@ def _retry_after(exc: urllib.error.HTTPError) -> float:
     except (TypeError, ValueError):
         wait = 1.5
     return min(max(wait, 1.0), _MAX_BACKOFF_S)
+
+
+def erddap_griddap_url(base_url: str, dataset: str, var: str, when,
+                       lat: float, lon: float, *, level: float) -> str:
+    """ERDDAP griddap CSV URL for ``var`` at the nearest time/level/lat/lon cell.
+
+    Both served grids uacpy reads carry a singleton vertical axis between time
+    and latitude — NBS winds at 10 m, WW3 at the 0 m surface — so ``level``
+    names that node. The ``[(...)]`` value selectors snap each axis to its
+    nearest node, and the longitude axis is [0, 360).
+    """
+    import urllib.parse
+    from uacpy.data._time import parse_date
+    constraint = (f"{var}[({parse_date(when)}T00:00:00Z)][({level})]"
+                  f"[({lat})][({lon % 360.0})]")
+    query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
+    return f"{base_url}/{dataset}.csv?{query}"

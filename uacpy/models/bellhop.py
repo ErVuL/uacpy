@@ -34,20 +34,24 @@ from uacpy.core.constants import (
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
-from uacpy.io.bellhop_writer import write_bellhop_env_file
+from uacpy.io.bellhop_writer import (
+    validate_beam_shape, validate_beam_type, write_bellhop_env_file,
+)
 from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 
 
-# Beam-type letters honoured by the Bellhop env reader (case-significant).
-# Anything else maps to the geometric-hat DEFAULT case in
-# ReadEnvironmentBell.f90, so the constructor rejects it rather than letting a
-# typo silently change the beam model.
-_VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'b', 'g', 'G', 'S'})
-
 # Source geometry -> RunType(4:4), per ReadEnvironmentBell.f90:398-406.
 _SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X'}
+
+# A line source carries the 2-D Green's function's exp(-i*pi/4): (i/4)*H0(kR)
+# ~ exp(i(kR + pi/4)) for large kR, while both AT scale factors are purely
+# real — ScalePressure's line branch (influence.f90:784,
+# factor = -4*sqrt(pi)*const with const = -1) and WriteArrivals' line branch
+# (ArrMod.f90:103-104, factor = 4*sqrt(pi)). Applying it on every path keeps
+# COHERENT_TL, BROADBAND and TIME_SERIES on one phase reference.
+_LINE_SOURCE_PHASE = -np.pi / 4.0
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +70,7 @@ def delayandsum(
     fc: float,
     time_window: Optional[float] = None,
     t_start: Optional[float] = None,
-    normalize_source: bool = False,
+    phase_offset: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convolve source waveform with channel impulse response from Bellhop arrivals.
@@ -83,8 +87,7 @@ def delayandsum(
         ``arrivals_field.by_receiver[isd][ird][irr]`` with keys:
         amplitudes, phases, delays, delays_imag, n_arrivals.
     source_timeseries : ndarray
-        Source waveform (1-D). Used as-is unless ``normalize_source`` is
-        set.
+        Source waveform (1-D), used as-is.
     sample_rate : float
         Sample rate in Hz.
     fc : float
@@ -95,11 +98,10 @@ def delayandsum(
     t_start : float, optional
         Start time for the output.  If *None*, set to just before the
         earliest arrival.
-    normalize_source : bool, optional
-        When ``True`` rescale the source waveform to peak ``|s| = 1``
-        before convolution. Default ``False`` so the absolute amplitude
-        calibration of the user-supplied waveform is preserved
-        end-to-end.
+    phase_offset : float, optional
+        Constant phase (radians) added to every arrival, applied on the
+        analytic signal. Carries the line-source ``exp(-i*pi/4)``; ``0.0``
+        (default) for a point source.
 
     Returns
     -------
@@ -128,10 +130,6 @@ def delayandsum(
     delays_imag = rcv_arrivals['delays_imag']
 
     sts = np.asarray(source_timeseries, dtype=float)
-    if normalize_source:
-        sts_max = np.max(np.abs(sts))
-        if sts_max > 0:
-            sts = sts / sts_max
     nsts = len(sts)
 
     # Compute analytic signal via Hilbert transform
@@ -155,7 +153,7 @@ def delayandsum(
 
     omega_c = 2.0 * np.pi * fc
     for ia in range(n_arr):
-        phase_rad = np.deg2rad(phases_deg[ia])
+        phase_rad = np.deg2rad(phases_deg[ia]) + phase_offset
         phase_factor = np.exp(1j * phase_rad)
 
         # ``delays_imag`` is Im(tau) in seconds; volume-attenuation factor
@@ -232,8 +230,9 @@ class Bellhop(PropagationModel):
         ``'3D'`` is rejected: the env writer cannot emit a 3D-format input
         file, so a 3D flag would mis-drive the binary.
     beam_type : str, optional
-        ``B`` Gaussian (default) | ``R`` ray-centered | ``C`` Cartesian |
-        ``b`` geometric Gaussian | ``g``/``G`` geometric hat | ``S`` simple Gaussian.
+        ``B`` geometric Gaussian, Cartesian (default) | ``R`` Cerveny
+        ray-centered | ``C`` Cerveny Cartesian | ``g``/``G`` geometric hat,
+        ray-centered / Cartesian | ``S`` simple Gaussian.
     n_beams : int, optional
         Number of beams; ``0`` lets Bellhop auto-pick. Default ``0``.
     alpha : tuple, optional
@@ -255,7 +254,7 @@ class Bellhop(PropagationModel):
         Cerveny only. ``'D'`` double | ``'S'`` single | ``'Z'`` zero.
     eps_multiplier, r_loop, n_image, ib_win, component : optional
         Cerveny advanced beam knobs (used when ``beam_type ∈ {C, R}``).
-        ``r_loop`` is in metres.
+        ``r_loop`` is in metres; ``component`` is ``'P'``/``'V'``/``'H'``.
     auto_bounce : bool, optional
         Default ``True``. When the env carries layered / RDLB / elastic
         bottoms that Bellhop's fluid ray-tracer can't model accurately,
@@ -402,12 +401,19 @@ class Bellhop(PropagationModel):
             binary, which has no such flag). ``'3D'`` raises: the env writer
             produces 2D-format input only.
         beam_type : str
-            Beam type: 'B' (Gaussian), 'R' (ray-centered), 'C' (Cartesian),
-            'b' (geometric Gaussian), 'g' (geometric hat), 'G' (geometric hat Cartesian),
-            'S' (simple Gaussian). Default: 'B'.
+            Beam type: 'B' (geometric Gaussian, Cartesian), 'R' (Cerveny
+            Gaussian, ray-centered), 'C' (Cerveny Gaussian, Cartesian),
+            'g' (geometric hat, ray-centered), 'G' (geometric hat,
+            Cartesian), 'S' (simple Gaussian). Default: 'B'. ``'b'``
+            (geometric Gaussian, ray-centered) is rejected — the Fortran
+            solver aborts on it and the C++/CUDA ports silently substitute
+            the Cartesian beam.
         n_beams : int
-            Number of beams. Passing 0 defers to Bellhop's conservative
-            auto-selection (NBEAMS<=0 in the Fortran reader). Default: 0.
+            Number of beams, ``>= 0``. Passing 0 defers to Bellhop's own
+            estimate — ``angleMod.f90:38`` tests ``Nalpha == 0`` exactly,
+            then takes ``MAX(INT(0.3 * Rmax * f / c0), 300)`` raised further
+            by a beam-width-versus-depth rule (``angleMod.f90:44-50``); a
+            ray-trace run gets 50. Default: 0.
         alpha : tuple
             Launch angle limits (min, max) in degrees. Default: (-80, 80).
         step : float
@@ -445,9 +451,10 @@ class Bellhop(PropagationModel):
             Number of images. Default: 1.
         ib_win : int, optional
             Beam-windowing parameter. Default: 4.
-        component : {'P', 'D'}, optional
-            Output component for displacement-receiver fields: 'P'
-            pressure (default), 'D' displacement.
+        component : {'P', 'V', 'H'}, optional
+            Field component computed by the Cerveny influence routines
+            (influence.f90:120-130): 'P' pressure (default), 'V' vertical
+            particle velocity, 'H' horizontal particle velocity.
         beam_shift : bool, optional
             When True, sets RunType position 7 to 'S' enabling beam-shift
             on boundary reflections. Default: False.
@@ -503,12 +510,14 @@ class Bellhop(PropagationModel):
             interp_ssp is None or str(interp_ssp).lower() == 'quad'
         )
 
-        if beam_type not in _VALID_BEAM_TYPES:
+        validate_beam_type(beam_type, 'Bellhop')
+        validate_beam_shape(beam_width_type, beam_curvature, component,
+                            'Bellhop')
+        if n_beams is not None and n_beams < 0:
             raise ConfigurationError(
-                f"Bellhop(beam_type={beam_type!r}) is not a known beam type. "
-                f"Choose one of {sorted(_VALID_BEAM_TYPES)} "
-                f"(case-significant; Bellhop would otherwise silently fall "
-                f"back to a geometric-hat beam)."
+                f"Bellhop(n_beams={n_beams}) must be >= 0. angleMod.f90:38 "
+                f"auto-estimates the beam count only on an exact 0; a "
+                f"negative value reaches ALLOCATE unchecked."
             )
         if grid_type not in ('R', 'I'):
             raise ConfigurationError(
@@ -990,7 +999,13 @@ class Bellhop(PropagationModel):
                 )
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
-            result = reader(output_file)
+            # The .arr header reports the full ``Pos%NRz``
+            # (``ReadEnvironmentBell.f90:591``) while its body carries only
+            # ``NRz_per_range`` depth blocks — 1 for an irregular grid
+            # (``bellhop.f90:202-206,329``, ``ArrMod.f90:101-102``). Nothing in
+            # the file distinguishes the two, so the reader has to be told.
+            result = (reader(output_file, grid_type=self.grid_type)
+                      if run_type == 'A' else reader(output_file))
 
             # AT's ScalePressure (influence.f90:757-795) carries const = -1
             # into the point-source branch (factor = const/sqrt(r)), so the
@@ -999,16 +1014,13 @@ class Bellhop(PropagationModel):
             # shares one phase reference. The line-source branch
             # (factor = -4*sqrt(pi)*const) already cancels the sign, and the
             # arrivals path computes its own positive factor
-            # (ArrMod.f90:103-111), so neither is touched.
-            # A line source additionally needs the exp(-i*pi/4) that the 2-D
-            # Green's function carries: (i/4)*H0(kR) ~ exp(i(kR + pi/4)) for
-            # large kR, while ScalePressure's line branch
-            # (factor = -4*sqrt(pi)*const) is purely real. Measured against the
-            # exact 2-D solution the correction is pi/4 to 0.01 deg, and once
-            # applied the line-source residual equals the point-source beam
-            # bias exactly (4.78 deg vs 4.79 deg).
+            # (ArrMod.f90:103-111), so only the line source's
+            # _LINE_SOURCE_PHASE is left to apply there.
+            # Measured against the exact 2-D solution that correction is pi/4
+            # to 0.01 deg, and once applied the line-source residual equals
+            # the point-source beam bias exactly (4.78 deg vs 4.79 deg).
             _shd_phase = {'point': -1.0 + 0j,
-                          'line': np.exp(-1j * np.pi / 4.0)}
+                          'line': np.exp(1j * _LINE_SOURCE_PHASE)}
             if run_type in ('C', 'I', 'S'):
                 _corr = _shd_phase[source.source_type]
                 for _slab in (result.slabs
@@ -1022,7 +1034,12 @@ class Bellhop(PropagationModel):
             if isinstance(result, ResultStack):
                 real_sds = np.atleast_1d(np.asarray(source.depths, dtype=float))
                 if real_sds.size == result.n_slabs:
+                    # The reader names this axis 'source_index' because the
+                    # .ray file carries only the order; once the real depths
+                    # are substituted the axis is a source depth, and the name
+                    # has to say so for .at(source_depth=...) to reach it.
                     result.coordinate = real_sds
+                    result.coordinate_name = 'source_depth'
 
             if run_type in ('R', 'E'):
                 # The .ray file format is identical for fan and
@@ -1047,7 +1064,10 @@ class Bellhop(PropagationModel):
             for i, slab in enumerate(slabs_to_set):
                 self._stamp_result(
                     slab, source, backend=self.version, frequencies=f0,
-                    phase_reference='travelling_wave',
+                    # Only coherent pressure carries a phase to reference;
+                    # incoherent/semicoherent TL, rays and arrivals do not.
+                    phase_reference=('travelling_wave'
+                                     if run_type == 'C' else None),
                 )
                 # Each slab of a stack carries its own source depth.
                 if isinstance(result, ResultStack):
@@ -1140,16 +1160,23 @@ class Bellhop(PropagationModel):
         if c_high is None:
             c_high = DEFAULT_C_MAX_UNBOUNDED
 
-        bounce = Bounce(
-            verbose=self.verbose,
-            c_low=c_low,
-            c_high=c_high,
-            rmax=rmax,
-            collapse=dict(self._user_collapse) or None,
-            timeout=self.timeout,
-            work_dir=bounce_work_dir,
-            cleanup=False,            # we own bounce_work_dir; cleaned up below
-        )
+        # Bounce validates its arguments in __init__, so a rejected c_low /
+        # c_high / rmax raises before the cleanup guard below is entered; the
+        # scratch directory this call owns is released first.
+        try:
+            bounce = Bounce(
+                verbose=self.verbose,
+                c_low=c_low,
+                c_high=c_high,
+                rmax=rmax,
+                collapse=dict(self._user_collapse) or None,
+                timeout=self.timeout,
+                work_dir=bounce_work_dir,
+                cleanup=False,        # we own bounce_work_dir; cleaned up below
+            )
+        except Exception:
+            bounce_fm.cleanup_work_dir()
+            raise
         try:
             bounce_result = bounce.run(env, source, receiver)
 
@@ -1182,6 +1209,7 @@ class Bellhop(PropagationModel):
             # re-running BOUNCE.
             bounce_result.metadata.pop('brc_file', None)
             bounce_result.metadata.pop('irc_file', None)
+            bounce_result.metadata.pop('prt_file', None)
             result.metadata['bounce_result'] = bounce_result
             return result
         finally:
@@ -1229,8 +1257,9 @@ class Bellhop(PropagationModel):
             Receiver array
         frequencies : ndarray, optional
             Explicit frequency vector in Hz for the transfer function.
-            If None, generates n_freqs points over [fc*(1-bw_factor),
-            fc*(1+bw_factor)]. Ignored when source_waveform is provided.
+            If None, generates n_freqs points over
+            [fc*(1-bw_factor/2), fc*(1+bw_factor/2)]. Ignored when
+            source_waveform is provided.
         source_waveform : ndarray, optional
             Time-domain source waveform (1D array). When provided, the
             delay-and-sum method is used: the waveform is convolved with
@@ -1349,17 +1378,40 @@ class Bellhop(PropagationModel):
         rz = arr_field.receiver_depths
         rr = arr_field.receiver_ranges  # in meters
 
-        nrd = len(rz)
+        # ``ArrMod.f90:101-102`` writes ``NRz_per_range`` depth blocks, which
+        # ``bellhop.f90:202-206`` sets to 1 for an irregular grid: the entries
+        # of that single block are the paired receivers (Rz(i), Rr(i)). The
+        # depth axis therefore collapses onto the range axis, and the paired
+        # depths ride on ``metadata['receiver_depths']`` — the same shape
+        # ``read_shd_file`` gives the TL path.
+        irregular = str(self.grid_type).upper() == 'I'
+        nrd = 1 if irregular else len(rz)
         nrr = len(rr)
+
+        def _emit(data, axis_name, axis_values, **extra):
+            coords = {'range': np.asarray(rr, dtype=float),
+                      axis_name: axis_values}
+            if irregular:
+                extra['receiver_depths'] = np.asarray(rz, dtype=float)
+            else:
+                coords = {'depth': np.asarray(rz, dtype=float), **coords}
+            return (data[0] if irregular else data), coords, extra
+
+        # ArrMod.f90:103-104 scales a line source by a purely real
+        # 4*sqrt(pi), so the arrivals need the same exp(-i*pi/4) the .shd
+        # path applies.
+        arr_phase = (_LINE_SOURCE_PHASE
+                     if source.source_type == 'line' else 0.0)
 
         # ── Path A: time-domain delay-and-sum with source waveform ──
         if run_mode == RunMode.TIME_SERIES:
             self._log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
 
-            # Lock the time window from the first cell *with* arrivals so
-            # all traces share a clock; an arrival-less cell would let
-            # delayandsum fall back to its 0.1 s stub and truncate every
-            # trace in the grid.
+            # Lock one clock for the whole grid, spanning every cell's
+            # arrivals: a window taken from a single cell covers only that
+            # cell's delays, and every farther receiver — whose energy lands
+            # later — would convolve to exactly zero. Mirrors delayandsum's
+            # own auto-window rule over the global delay span.
             lock_arrivals = arrivals_by_rcv[0][0][0]
             for cell in (
                 arrivals_by_rcv[0][ird][irr]
@@ -1368,6 +1420,22 @@ class Bellhop(PropagationModel):
                 if int(cell.get('n_arrivals', 0)) > 0:
                     lock_arrivals = cell
                     break
+            if effective_time_window is None or effective_t_start is None:
+                spans = [
+                    np.asarray(arrivals_by_rcv[0][ird][irr]['delays'], dtype=float)
+                    for ird in range(nrd) for irr in range(nrr)
+                    if int(arrivals_by_rcv[0][ird][irr].get('n_arrivals', 0)) > 0
+                ]
+                if spans:
+                    src_duration = len(source_waveform) / float(sample_rate)
+                    grid_min = float(min(s.min() for s in spans))
+                    grid_max = float(max(s.max() for s in spans))
+                    if effective_t_start is None:
+                        effective_t_start = max(
+                            0.0, grid_min - 0.1 * src_duration)
+                    if effective_time_window is None:
+                        effective_time_window = (
+                            (grid_max - effective_t_start) + 2.0 * src_duration)
             _, t_vec = delayandsum(
                 rcv_arrivals=lock_arrivals,
                 source_timeseries=source_waveform,
@@ -1375,6 +1443,7 @@ class Bellhop(PropagationModel):
                 fc=fc,
                 time_window=effective_time_window,
                 t_start=effective_t_start,
+                phase_offset=arr_phase,
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
@@ -1390,25 +1459,23 @@ class Bellhop(PropagationModel):
                         fc=fc,
                         time_window=time_window_locked,
                         t_start=t_start_locked,
+                        phase_offset=arr_phase,
                     )
                     # delayandsum may return a slightly different length on
                     # cells with no arrivals — pad/truncate to n_t.
                     m = min(len(rts), n_t)
                     data[ird, irr, :m] = np.asarray(rts[:m], dtype=float)
 
+            data, coords, extra = _emit(data, 'time', t_vec)
             return Field(
                 data=data,
-                coords={
-                    'depth': np.asarray(rz, dtype=float),
-                    'range': np.asarray(rr, dtype=float),
-                    'time': t_vec,
-                },
+                coords=coords,
                 phase_reference='time_domain_native',
                 **self._result_kwargs(
                     source, backend=self.version, frequencies=fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
-                    arrivals_field=arr_field, **arr_paths,
+                    arrivals_field=arr_field, **arr_paths, **extra,
                 ),
             )
 
@@ -1425,20 +1492,18 @@ class Bellhop(PropagationModel):
         for ird in range(nrd):
             for irr in range(nrr):
                 rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, irr, :] = self._arrivals_to_tf(rcv_arr, frequencies)
+                H[ird, irr, :] = self._arrivals_to_tf(
+                    rcv_arr, frequencies, phase_offset=arr_phase)
 
         self._log(f"Built transfer function "
-                  f"({nrd} depths x {n_freq} freqs x {nrr} ranges)")
+                  f"({nrd} depths x {nrr} ranges x {n_freq} freqs)")
 
         c0 = float(env.ssp.data[0, 0])
 
+        H, coords, extra = _emit(H, 'frequency', frequencies)
         return Field(
             data=H,
-            coords={
-                'depth': np.asarray(rz, dtype=float),
-                'range': np.asarray(rr, dtype=float),
-                'frequency': frequencies,
-            },
+            coords=coords,
             phase_reference='travelling_wave',
             **self._result_kwargs(
                 source,
@@ -1448,6 +1513,7 @@ class Bellhop(PropagationModel):
                 arrivals_field=arr_field,
                 c0=c0,
                 **arr_paths,
+                **extra,
             ),
         )
 
@@ -1455,6 +1521,7 @@ class Bellhop(PropagationModel):
     def _arrivals_to_tf(
         rcv_arrivals: dict,
         frequencies: np.ndarray,
+        phase_offset: float = 0.0,
     ) -> np.ndarray:
         """
         Build frequency-domain transfer function from per-receiver arrivals.
@@ -1477,6 +1544,10 @@ class Bellhop(PropagationModel):
             delays_imag, n_arrivals.
         frequencies : ndarray
             Frequency vector in Hz.
+        phase_offset : float, optional
+            Constant phase (radians) added to every arrival. Carries the
+            line-source ``exp(-i*pi/4)``; ``0.0`` (default) for a point
+            source.
 
         Returns
         -------
@@ -1492,7 +1563,7 @@ class Bellhop(PropagationModel):
         delays = rcv_arrivals['delays']
         delays_imag = rcv_arrivals['delays_imag']
 
-        phases_rad = np.deg2rad(phases_deg)
+        phases_rad = np.deg2rad(phases_deg) + phase_offset
         omega = 2.0 * np.pi * frequencies  # (n_freq,)
 
         # Vectorised over arrivals. For each arrival, tau = Re(tau)+i*Im(tau)

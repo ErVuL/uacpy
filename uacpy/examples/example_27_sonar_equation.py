@@ -60,7 +60,11 @@ def main():
     print("═" * 80)
 
     freq = 2000.0
-    ranges = np.linspace(100.0, 30000.0, 600)
+    # The range vector has to extend past the SE = 0 crossing or
+    # ``detection_range`` has nothing to bracket and returns inf. With
+    # SL=140, NL-DI=45 and DT=-4.3 the passive curve crosses near 45 km, so
+    # 30 km would stop short of the very quantity this example is about.
+    ranges = np.linspace(100.0, 60000.0, 600)
     tl = 20.0 * np.log10(ranges) + thorp_db_per_km(freq) * ranges / 1000.0
 
     # Detection threshold for Pd=0.5, Pf=1e-4 over a 100 Hz / 1 s integration.
@@ -100,11 +104,14 @@ def main():
     ax.invert_yaxis(); ax.grid(True, alpha=0.3)
 
     ax = axes[0, 1]
-    ax.plot(ranges / 1000, passive_se, 'g-')
+    ax.plot(ranges / 1000, passive_se, 'g-', label='Passive SE')
     ax.axhline(0, color='k', lw=0.8)
     if np.isfinite(passive_range):
         ax.axvline(passive_range / 1000, color='r', ls='--',
-                   label=f'{passive_range/1000:.1f} km')
+                   label=f'Detection range {passive_range/1000:.1f} km')
+    else:
+        ax.axhline(np.nan, color='r', ls='--',
+                   label='SE never reaches 0 in this range span')
     ax.set_title('Passive Signal Excess', fontweight='bold')
     ax.set_xlabel('Range (km)'); ax.set_ylabel('SE (dB)')
     ax.legend(); ax.grid(True, alpha=0.3)
@@ -117,11 +124,14 @@ def main():
     ax.legend(); ax.grid(True, alpha=0.3)
 
     ax = axes[1, 1]
-    ax.plot(ranges / 1000, active_se, 'r-')
+    ax.plot(ranges / 1000, active_se, 'r-', label='Active SE')
     ax.axhline(0, color='k', lw=0.8)
     if np.isfinite(active_range):
         ax.axvline(active_range / 1000, color='b', ls='--',
-                   label=f'{active_range/1000:.1f} km')
+                   label=f'Detection range {active_range/1000:.1f} km')
+    else:
+        ax.axhline(np.nan, color='b', ls='--',
+                   label='SE never reaches 0 in this range span')
     ax.set_title('Active Signal Excess', fontweight='bold')
     ax.set_xlabel('Range (km)'); ax.set_ylabel('SE (dB)')
     ax.legend(); ax.grid(True, alpha=0.3)

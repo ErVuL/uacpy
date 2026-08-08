@@ -133,6 +133,14 @@ class Covariance(Result):
         Bartlett for mismatch robustness. This is *not* the
         Cox/Zeskind/Owen white-noise-constrained processor (that
         requires per-replica Lagrange-multiplier bisection).
+
+        The 1e-6 default matches :func:`uacpy.acoustic_signal.mvdr_spectrum`
+        and suits the full-rank covariance OASN writes to its ``.xsm``.
+        :func:`uacpy.sonar.mvdr` — the same processor over a *measured*
+        CSDM — defaults to 1e-2 instead, because a few-snapshot ``csdm()``
+        is routinely rank-deficient. The two agree numerically at equal
+        loading, up to the max-scaling ``sonar.mvdr`` applies, and both
+        return NaN for a degenerate candidate point.
         """
         flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
         out = np.empty((n_f, nz * nx * ny), dtype=float)
@@ -142,8 +150,16 @@ class Covariance(Result):
             Cload = C + diagonal_loading * tr * np.eye(C.shape[0])
             Cinv = np.linalg.inv(Cload)
             W = self._normalise_weights(flat[f])
-            denom = np.einsum('pr,rs,ps->p', W.conj(), Cinv, W)
-            out[f] = np.real(1.0 / np.where(np.abs(denom) > 0, denom, 1.0))
+            # wᴴC⁻¹w is real for Hermitian C; the imaginary part is round-off.
+            denom = np.real(np.einsum('pr,rs,ps->p', W.conj(), Cinv, W))
+            # For a positive-definite loaded covariance denom > 0. It reaches
+            # 0 only for a replica carrying no energy (an unpopulated .rpo
+            # cell) and goes negative only when C is not positive-definite,
+            # i.e. not a covariance. Neither is a power: a finite value there
+            # would sit in the surface as a genuine localisation peak. Same
+            # rule as :func:`uacpy.sonar.mvdr`.
+            with np.errstate(divide='ignore', invalid='ignore'):
+                out[f] = np.where(denom > 0, 1.0 / denom, np.nan)
         return out.reshape(n_f, nz, nx, ny)
 
 

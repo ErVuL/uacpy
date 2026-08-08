@@ -71,6 +71,16 @@ class TestSonarEquation:
     def test_echo_level(self):
         assert sonar.echo_level(220, 60, 10) == pytest.approx(220 - 120 + 10)
 
+    def test_detection_range_ignores_no_data_nan(self):
+        """NaN marks a cell the propagation model never filled, not a cell
+        where the target is undetectable. Treating NaN as 'SE < 0' returned
+        'never detectable' for a target detectable to 9 km."""
+        r = np.array([1000., 3000., 5000., 7000., 9000., 11000.])
+        se = np.array([10.0, np.nan, 6.0, np.nan, 1.0, -3.0])
+        assert sonar.detection_range(r, se) == pytest.approx(9500.0)
+        # an all-NaN row is genuinely unknown -> nan, not inf
+        assert np.isnan(sonar.detection_range(r, np.full(6, np.nan)))
+
     def test_passive_signal_excess(self):
         se = sonar.passive_signal_excess(140, 80, 60, directivity_index=15,
                                          detection_threshold=5)

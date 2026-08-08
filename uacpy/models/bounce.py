@@ -5,10 +5,15 @@ BOUNCE computes reflection coefficients for a stack of acoustic/elastic layers.
 Part of the Acoustics Toolbox (OALIB).
 
 Outputs:
-- .BRC file: Bottom Reflection Coefficient
-  -> Used by: BELLHOP, SCOOTER, KRAKENC
-- .IRC file: Internal Reflection Coefficient
-  -> Used by: KRAKEN (NOT KRAKENC - use .BRC with KRAKENC)
+- .BRC file: Bottom Reflection Coefficient (BotOpt 'F')
+  -> Read by BELLHOP (``Bellhop/ReflectMod.f90:113``), SCOOTER, KRAKENC
+- .IRC file: Internal Reflection Coefficient (BotOpt 'P')
+  -> Read by KRAKENC (``Kraken/BCImpedancecMod.f90:105``), SCOOTER
+     (``Scooter/scooter.f90:357``) and KRAKEL; BELLHOP has no 'P' branch at
+     all. Real KRAKEN parses it (``Kraken/BCImpedanceMod.f90:118``) but its
+     mode search runs with ``ComplexFlag = .FALSE.``, which discards the
+     table for a rigid boundary (:121-125) — uacpy therefore routes an
+     ``.irc``/``.brc`` environment to krakenc.exe.
 
 Note: SPARC does not support reflection coefficient files.
 """
@@ -25,24 +30,35 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import (
-    DEFAULT_C_MIN, DEFAULT_C_MAX,
+    DEFAULT_C_MIN, DEFAULT_C_MAX_UNBOUNDED,
     parse_boundary_type,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
-from uacpy.io.oalib_writer import write_bounce_input_file
+from uacpy.io.oalib_writer import write_bounce_input_file, writable_layers
+from uacpy.io.units import m_to_km
 
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
 _KMIN_CUTOFF_CHIGH = 1.0e6
 
-# Mesh density applied to every medium of the sediment stack: 20 points per
-# wavelength, floored so a thin layer still gets a usable mesh and capped so a
-# single thick medium at high frequency cannot allocate an unbounded
-# difference-equation grid (bounce.f90 sizes B1..B4/rho/cP/cS from the sum over
-# media, so the ceiling on the total is N_media x _MAX_MESH_POINTS). Hitting
-# the cap under-resolves the mesh, so ``_resolve_n_mesh`` says so.
+# BOUNCE always writes both tables, so both are cleared before a launch — but a
+# tabulated seabed makes one of them an *input* too: write_bottom_section stages
+# the user's table there and misc/RefCoef.f90:39 ('F' -> .brc) / :92 ('P' ->
+# .irc) open it with STATUS='OLD' before ComputeReflectionCoefficient rewrites
+# it. That one must survive the pre-launch sweep.
+_STAGED_TABLE_SUFFIX = {'file': '.brc', 'precalc': '.irc'}
+_BOUNCE_OUTPUTS = ('.brc', '.irc')
+
+# Mesh density of each medium of the sediment stack: 20 points per wavelength,
+# the same density misc/ReadEnvironmentMod.f90:103 uses for its own automatic
+# mesh, floored so a thin layer still gets a usable mesh. The cap bounds the
+# difference-equation grid bounce.f90:78 allocates (B1..B4/rho/cP/cS sized from
+# the sum over media); a stack that needs more than that is refused rather than
+# clipped, since a clipped count below Nneeded/2 is a deck the binary rejects
+# (ReadEnvironmentMod.f90:110-112).
 _MESH_POINTS_PER_WAVELENGTH = 20
 _MIN_MESH_POINTS = 100
 _MAX_MESH_POINTS = 20000
@@ -58,7 +74,7 @@ class Bounce(PropagationModel):
 
     Model Support:
     - .BRC files: BELLHOP, SCOOTER, KRAKENC
-    - .IRC files: KRAKEN (uses internal reflection coefficient)
+    - .IRC files: KRAKENC, SCOOTER (BELLHOP has no 'P' branch)
     - SPARC: does not support reflection files
 
     Parameters
@@ -67,9 +83,8 @@ class Bounce(PropagationModel):
         Path to ``bounce``. Auto-detected if ``None``.
     c_low, c_high : float, optional
         Phase-velocity bounds for tabulation (m/s). ``c_low`` must be
-        strictly positive (BOUNCE rejects ``c_low <= 0``); ``c_high=1e9``
-        is a valid recommendation for ~full 90° coverage. Defaults
-        ``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX``.
+        strictly positive (BOUNCE rejects ``c_low <= 0``). Defaults
+        ``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX_UNBOUNDED``.
     rmax : float, optional
         Max range (m) for angular sampling. ``None`` (default) auto-
         derives from ``receiver.range_max`` at ``run()`` time, falling
@@ -79,6 +94,11 @@ class Bounce(PropagationModel):
         Explicit number of angular samples (``NkTab`` in
         ``bounce.f90``). When provided, uacpy back-derives ``rmax`` to
         hit ``~n_angles``.
+    interp_ssp : str, optional
+        Sample-connection scheme written into ``TopOpt(1)``. A BOUNCE deck
+        carries only the seabed stack — its media are 2-point linear slabs —
+        so this rarely changes the answer, and ``'quad'`` is rejected
+        outright (no water column means no ``.ssp`` for it to read).
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -154,16 +174,17 @@ class Bounce(PropagationModel):
     - Supports acoustic, elastic, and poro-elastic layers
     - Tabulated reflection coefficients cover angles from phase velocities [c_low, c_high]
     - **Recommended workflow**: BOUNCE -> .brc -> SCOOTER (most reliable)
-    - KRAKENC consumes .brc files directly via the standard AT reflection
-      coefficient path
-    - For KRAKEN, use .irc files (internal reflection coefficient)
+    - Both tables go through the standard AT reflection-coefficient path:
+      ``.brc`` via ``acoustic_type='file'``, ``.irc`` via
+      ``acoustic_type='precalc'``. Kraken routes either to krakenc.exe.
 
     Defaults auto-derived at ``run()`` time:
 
     - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
     - ``c_low`` / ``c_high`` constructor defaults
-      (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX``) bracket trapped+leaky modes
-      for the typical seawater range; override for narrowband studies.
+      (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX_UNBOUNDED``) tabulate the full
+      0–90° grazing span; raise ``c_low`` or lower ``c_high`` to
+      concentrate the samples on a narrower angular band.
     - TopOpt position 4 reads ``env.absorption``.
 
     With ``verbose='info'`` the resolved ``rmax`` is logged.
@@ -195,7 +216,7 @@ class Bounce(PropagationModel):
         self,
         executable: Optional[Path] = None,
         c_low: float = DEFAULT_C_MIN,
-        c_high: float = DEFAULT_C_MAX,
+        c_high: float = DEFAULT_C_MAX_UNBOUNDED,
         rmax: Optional[float] = None,
         n_angles: Optional[int] = None,
         interp_ssp: Optional[str] = None,
@@ -216,14 +237,19 @@ class Bounce(PropagationModel):
             Must be strictly positive (BOUNCE rejects ``c_low <= 0`` — the
             angular grid is derived from ``kx = omega/c``).
         c_high : float, optional
-            Maximum phase velocity (m/s) for tabulation. Default: 10000.
-            A value of ``1e9`` is a valid recommendation for full 90-deg
-            coverage (kraken doc: "c_high large => kmin ~ 0 => grazing
-            angles near 0 included"). Must be strictly greater than c_low.
+            Maximum phase velocity (m/s) for tabulation. Default: 1e9, which
+            trips ``bounce.f90:47``'s ``IF ( cHigh > 1.0E6 ) kMin = 0.0`` and
+            so tabulates the full 0–90° grazing span. A finite ``c_high``
+            stops the table at ``acos(c0 / c_high)`` and every consumer
+            silently returns ``R = 0, phi = 0`` above the last tabulated
+            angle (``misc/RefCoef.f90:144-149``, both of whose warning WRITEs
+            are commented out). Must be strictly greater than c_low.
         rmax : float, optional
-            Maximum range (m) for angular sampling. Default: 10000. Ignored
-            when ``n_angles`` is provided. (Internally converted to km
-            because BOUNCE's input format is in km.)
+            Maximum range (m) for angular sampling. ``None`` (default)
+            auto-derives from ``receiver.range_max`` at ``run()`` time,
+            falling back to 10000 m when no receiver range is available.
+            Ignored when ``n_angles`` is provided. (Internally converted to
+            km because BOUNCE's input format is in km.)
         n_angles : int, optional
             Explicit override for the number of angular samples (``NkTab``
             in AT's bounce). If None (default), bounce computes NkTab
@@ -235,6 +261,17 @@ class Bounce(PropagationModel):
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
             cleanup=cleanup, timeout=timeout, collapse=collapse,
         )
+        # BOUNCE meshes only the seabed stack — write_bounce_input_file emits
+        # no water column and no .ssp — so the range-dependent 'quad' scheme
+        # has no file to read and ERROUTs at NMedia.
+        if interp_ssp is not None and str(interp_ssp).lower() == 'quad':
+            raise ConfigurationError(
+                "Bounce(interp_ssp='quad') is not usable: BOUNCE reflection "
+                "decks carry no water column, so no .ssp file is written for "
+                "the quad scheme to read and the binary stops at NMedia.",
+                remediation="Use 'linear' (default), 'n2linear', 'pchip' or "
+                            "'cubic'.",
+            )
         self.interp_ssp = interp_ssp
 
         self.c_low = c_low
@@ -290,6 +327,28 @@ class Bounce(PropagationModel):
                 f"c_high ({self.c_high}) must be strictly greater than "
                 f"c_low ({self.c_low})."
             )
+        if self.rmax is not None and float(self.rmax) <= 0:
+            raise ConfigurationError(
+                f"Bounce requires rmax > 0 (got {self.rmax}). RMax sets the "
+                f"angular sampling density — bounce.f90:49 makes the number of "
+                f"tabulated angles proportional to it, and "
+                f"misc/ReadEnvironmentMod.f90:140 stops outright on a negative "
+                f"value."
+            )
+
+    def _n_ktab(self, rmax_m: float, frequency: float) -> int:
+        """Angles BOUNCE will tabulate for this deck.
+
+        Reproduces ``bounce.f90:45-49`` on the RMax string the writer is about
+        to emit: ``kMin = omega / cHigh`` (zeroed at :47 once ``cHigh > 1e6``),
+        ``kMax = omega / cLow`` and
+        ``NkTab = INT( 1000 * RMax_km * ( kMax - kMin ) / 2 pi )``.
+        """
+        rmax_km = float(f"{m_to_km(rmax_m):.6f}")
+        omega = 2.0 * np.pi * float(frequency)
+        k_min = 0.0 if self.c_high > _KMIN_CUTOFF_CHIGH else omega / self.c_high
+        k_max = omega / self.c_low
+        return int(1000.0 * rmax_km * (k_max - k_min) / (2.0 * np.pi))
 
     def run(
         self,
@@ -367,6 +426,7 @@ class Bounce(PropagationModel):
 
         # Per-call rmax. ``n_angles`` (below) overrides via the inverse of
         # bounce.f90:49  NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π)).
+        rmax_origin = 'Bounce(rmax=…)'
         if self.rmax is not None:
             rmax = float(self.rmax)
         else:
@@ -378,21 +438,17 @@ class Bounce(PropagationModel):
                     "Bounce(rmax=...)."
                 )
             recv_rmax = float(receiver.range_max)
-            if recv_rmax > 0:
-                rmax = recv_rmax
-                self._log(
-                    f"rmax auto-derived from receiver.range_max = "
-                    f"{rmax:.1f} m"
-                )
-            else:
-                rmax = 10000.0
-                self._log(
-                    "rmax auto-derived = 10000.0 m (no receiver range available)"
-                )
+            rmax = recv_rmax if recv_rmax > 0 else 10000.0
+            rmax_origin = ('receiver.range_max' if recv_rmax > 0
+                           else 'the 10 km fallback (no receiver range)')
         if self.n_angles is not None:
-            if self.n_angles <= 0:
+            if self.n_angles < 2:
                 raise ConfigurationError(
-                    f"n_angles must be > 0 (got {self.n_angles})."
+                    f"n_angles must be >= 2 (got {self.n_angles}). "
+                    f"bounce.f90:172 spaces the wavenumber grid as "
+                    f"Deltak = (kMax - kMin) / (NkTab - 1), so a single "
+                    f"tabulated angle divides by zero and the binary spins "
+                    f"until the model timeout."
                 )
             f_hz = float(np.atleast_1d(source.frequencies)[0])
             omega = 2.0 * np.pi * f_hz
@@ -408,9 +464,54 @@ class Bounce(PropagationModel):
             rmax = (
                 float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
             )
+            rmax_origin = f'n_angles={self.n_angles}'
+
+        # Logged after the n_angles branch, which overwrites rmax.
+        self._log(f"rmax = {rmax:.1f} m (from {rmax_origin})")
+
+        frequency = float(src_freqs[0])
+        n_ktab = self._n_ktab(rmax, frequency)
+        if n_ktab < 2:
+            consequence = (
+                "BOUNCE would write an empty reflection-coefficient table"
+                if n_ktab == 0 else
+                "bounce.f90:172 spaces the grid as "
+                "Deltak = (kMax - kMin) / (NkTab - 1), so a single angle "
+                "divides by zero and the binary spins until the model timeout"
+            )
+            raise ConfigurationError(
+                f"This deck asks for {n_ktab} tabulated angle(s): "
+                f"bounce.f90:49 derives NkTab = INT(1000 * RMax_km * "
+                f"(kMax - kMin) / 2 pi) from RMax = {rmax:g} m at "
+                f"{frequency:.4g} Hz with c_low={self.c_low:g} and "
+                f"c_high={self.c_high:g} m/s. {consequence}.",
+                remediation=(
+                    f"rmax came from {rmax_origin} — raise it (or raise "
+                    f"n_angles), or widen the phase-speed window so more "
+                    f"wavenumbers fall inside it."
+                ),
+            )
+        self._log(f"NkTab = {n_ktab} tabulated angles", level='debug')
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+
+        seabed_type = env.bottom.halfspace_at(range=0.0).acoustic_type
+        if seabed_type == 'precalc':
+            raise UnsupportedFeatureError(
+                self.model_name,
+                "a 'precalc' (.irc) seabed — misc/RefCoef.f90:103-104 leaves "
+                "xTab/fTab/gTab/iTab allocated for the table it just read, so "
+                "bounce.f90:52 cannot allocate them for the table it is about "
+                "to write and stops with 'Too many points in reflection "
+                "coefficient'",
+                alternatives=[
+                    "acoustic_type='file' with the equivalent .brc table, "
+                    "which BOUNCE reads through its own RBot array",
+                    "feed the .irc straight to Kraken or Scooter instead of "
+                    "re-running BOUNCE on it",
+                ],
+            )
 
         fm = self._setup_file_manager()
 
@@ -429,10 +530,10 @@ class Bounce(PropagationModel):
             )
 
             self._log("Running...")
-            self._execute(input_file, fm.work_dir)
+            self._execute(input_file, fm.work_dir,
+                          staged_input=_STAGED_TABLE_SUFFIX.get(seabed_type))
 
             brc_file = fm.get_path(f'{base_name}.brc')
-            irc_file = fm.get_path(f'{base_name}.irc')
 
             if not brc_file.exists():
                 exc = ModelExecutionError(
@@ -445,13 +546,13 @@ class Bounce(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
 
-            # bellhopcuda's strict monotonicity check on .brc/.irc rejects
-            # the duplicate near-zero angles bounce.f90 emits when many
-            # high-c samples round to the same kx — rewrite both files
-            # with a strictly-increasing angle axis.
+            # bellhopcuda's strict monotonicity check on the .brc rejects the
+            # duplicate near-zero angles bounce.f90 emits when many high-c
+            # samples round to the same kx — rewrite it with a strictly-
+            # increasing angle axis. The .irc is left byte-for-byte as BOUNCE
+            # wrote it: it is a different, fixed-format layout that only the
+            # Fortran BotOpt='P' path reads.
             dedupe_reflection_file(brc_file)
-            if irc_file.exists():
-                dedupe_reflection_file(irc_file)
 
             self._log(f"Reading output: {brc_file}")
             result = read_reflection_coefficient(str(brc_file), boundary='bottom')
@@ -460,15 +561,13 @@ class Bounce(PropagationModel):
             if theta_out.size == 0:
                 raise ConfigurationError(
                     f"Bounce produced an empty reflection-coefficient table — "
-                    f"{brc_file.name} has no angle rows. This usually means RMax "
-                    f"(derived from receiver.ranges, here {rmax:g} m) is too small "
-                    f"for the wavenumber sweep to resolve any grazing angles. Pass a "
-                    f"receiver with a realistic max range (km-scale), or inspect "
-                    f"{brc_file.with_suffix('.prt').name} for BOUNCE diagnostics."
+                    f"{brc_file.name} has no angle rows, although the deck asked "
+                    f"for {n_ktab} (RMax = {rmax:g} m, from {rmax_origin}). "
+                    f"Inspect {brc_file.with_suffix('.prt').name} for BOUNCE "
+                    f"diagnostics."
                 )
 
             from uacpy.core.results import ReflectionCoefficient
-            frequency = float(source.frequencies[0])
 
             field = ReflectionCoefficient(
                 theta=result.get('theta', np.array([])),
@@ -499,44 +598,45 @@ class Bounce(PropagationModel):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
-    def _resolve_n_mesh(self, env: Environment, frequency: float) -> int:
-        """Mesh-point count per medium of the sediment stack.
+    def _resolve_n_mesh(self, env: Environment, frequency: float) -> list:
+        """Mesh-point count for each medium of the sediment stack.
 
-        ``write_bounce_input_file`` omits the water column, so medium 1 is a
-        sediment layer (or the transparent dummy slab when the seabed is a
-        bare half-space). The count applies to every medium, so it is sized
-        from the thickest layer at the slowest layer speed — the shortest
-        wavelength across the meshed thickness.
+        ``write_bounce_input_file`` omits the water column, so the media are
+        exactly the writable sediment layers (a bare half-space seabed carries
+        none and returns an empty list).
+
+        ``misc/ReadEnvironmentMod.f90:101-112`` sizes every medium
+        independently: ``c = alphaR``, then ``IF ( betaR > 0.0 ) c = betaR``,
+        ``deltaz = c / freq / 20``, ``Nneeded = INT( thickness / deltaz )``,
+        and it aborts with *Mesh is too coarse* when the deck asks for fewer
+        than ``Nneeded / 2``. The meshing speed is therefore the medium's
+        **shear** speed wherever it has one — an ordinary sand (cs ~ 200 m/s
+        against cp ~ 1700 m/s) needs an order of magnitude more points than its
+        compressional wavelength suggests. ``doc/bounce.htm`` states the same
+        rule.
         """
-        from uacpy.io.oalib_writer import _BOUNCE_DUMMY_LAYER_M
-
-        layers = env.bottom.at(range=0.0).layers
-        if layers:
-            thickness = max(float(lyr.thickness) for lyr in layers)
-            speed = min(float(lyr.sound_speed) for lyr in layers)
-        else:
-            thickness = _BOUNCE_DUMMY_LAYER_M
-            speed = float(np.atleast_1d(env.get_sound_speed(env.depth))[0])
-
-        wavelength = speed / frequency
-        wanted = _MESH_POINTS_PER_WAVELENGTH * thickness / wavelength
-        n_mesh = int(np.clip(wanted, _MIN_MESH_POINTS, _MAX_MESH_POINTS))
-        if wanted > _MAX_MESH_POINTS:
-            self._log(
-                f"mesh clipped to {_MAX_MESH_POINTS} points "
-                f"({wanted:.0f} wanted for {thickness:.3g} m at "
-                f"{frequency:.4g} Hz) — that medium is resolved at "
-                f"{n_mesh * wavelength / thickness:.1f} points per wavelength "
-                f"instead of {_MESH_POINTS_PER_WAVELENGTH}. Reduce the "
-                f"frequency or split the layer for a converged R(theta).",
-                level='warn',
-            )
-        self._log(
-            f"n_mesh = {n_mesh} (thickest medium {thickness:.3g} m, "
-            f"c = {speed:.1f} m/s, lambda = {wavelength:.3g} m)",
-            level='debug',
-        )
-        return n_mesh
+        counts = []
+        for layer in writable_layers(env.bottom.at(range=0.0)):
+            thickness = float(layer.thickness)
+            shear = float(getattr(layer, 'shear_speed', 0.0) or 0.0)
+            speed = shear if shear > 0.0 else float(layer.sound_speed)
+            needed = _MESH_POINTS_PER_WAVELENGTH * thickness * frequency / speed
+            if needed > _MAX_MESH_POINTS:
+                raise ConfigurationError(
+                    f"Bounce: the {thickness:g} m sediment layer needs "
+                    f"{int(np.ceil(needed))} mesh points at {frequency:.4g} Hz "
+                    f"({_MESH_POINTS_PER_WAVELENGTH} per wavelength of its "
+                    f"{speed:.1f} m/s "
+                    f"{'shear' if shear > 0.0 else 'compressional'} speed), "
+                    f"above the {_MAX_MESH_POINTS}-point ceiling on a single "
+                    f"BOUNCE medium.",
+                    remediation="Lower the frequency, split the layer into "
+                                "thinner ones, or drop the shear speed if the "
+                                "layer is meant to be fluid.",
+                )
+            counts.append(max(_MIN_MESH_POINTS, int(np.ceil(needed))))
+        self._log(f"mesh points per medium = {counts}", level='debug')
+        return counts
 
     def _write_bounce_input(
         self,
@@ -560,7 +660,6 @@ class Bounce(PropagationModel):
         """
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
-        surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
         frequency = float(source.frequencies[0])
@@ -569,7 +668,6 @@ class Bounce(PropagationModel):
         write_bounce_input_file(
             filepath, env, source,
             ssp_topopt=ssp_topopt,
-            surface_type=surface_type,
             bottom_type=bottom_type,
             n_mesh=n_mesh,
             c_low=c_low,
@@ -578,7 +676,16 @@ class Bounce(PropagationModel):
             verbose=self.verbose,
         )
 
-    def _execute(self, input_file: Path, work_dir: Path):
-        """Execute BOUNCE binary via the shared binary-launch helper."""
+    def _execute(self, input_file: Path, work_dir: Path,
+                 staged_input: Optional[str] = None):
+        """Execute BOUNCE binary via the shared binary-launch helper.
+
+        ``staged_input`` is the suffix ``write_bottom_section`` copied next to
+        the deck as *input* for this run (see :data:`_STAGED_TABLE_SUFFIX`); it
+        is kept out of the stale-output sweep so the binary can still read it.
+        """
         base_name = input_file.stem
-        self._run_and_attach_prt([str(self._exe), base_name], work_dir, base_name)
+        self._run_and_attach_prt(
+            [str(self._exe), base_name], work_dir, base_name,
+            stale_outputs=tuple(s for s in _BOUNCE_OUTPUTS
+                                if s != staged_input))

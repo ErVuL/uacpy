@@ -16,7 +16,7 @@ from pathlib import Path
 
 from uacpy.core.exceptions import ConfigurationError
 
-__all__ = ['cache_root', 'dataset_root', 'require', 'DATASETS']
+__all__ = ['cache_root', 'dataset_root', 'require', 'cached_grid', 'cached_grid_at', 'invalidate_grids', 'DATASETS']
 
 # uacpy/uacpy/data/_cache.py → parents[2] is the repo root (editable install).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -99,3 +99,33 @@ def require(name: str, *relative: str) -> Path:
                         f"$UACPY_DATA_CACHE to a directory that has it.",
         )
     return path
+
+
+_GRIDS: dict = {}   # resolved path -> opened grid object
+
+
+def cached_grid(name: str, filename: str, factory):
+    """Open ``cache_root()/<name>/<filename>`` through ``factory`` once.
+
+    The offline raster/NetCDF backends each wrap one large file that is opened
+    once and sampled many times; this is the single memo they share, keyed on
+    the resolved path so a changed ``$UACPY_DATA_CACHE`` reopens.
+    """
+    return cached_grid_at(require(name, filename), factory)
+
+
+def cached_grid_at(path, factory):
+    """Memoise ``factory(path)`` on an already-resolved path.
+
+    For backends that locate their file themselves (a glob, a versioned name)
+    rather than by a fixed filename.
+    """
+    key = str(path)
+    if key not in _GRIDS:
+        _GRIDS[key] = factory(path)
+    return _GRIDS[key]
+
+
+def invalidate_grids() -> None:
+    """Drop every memoised grid so a freshly downloaded file is reopened."""
+    _GRIDS.clear()

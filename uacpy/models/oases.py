@@ -35,6 +35,7 @@ result = oasp.run(env, source, receiver, run_mode=RunMode.BROADBAND)
 ```
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -181,6 +182,38 @@ def _oases_find_executable(model: PropagationModel, name: str) -> Path:
     )
 
 
+#: How much of a child stream to quote back in an error. OASES echoes the
+#: whole environment and every wavenumber block to stdout, so only the tail
+#: is useful; the abort reason is always last.
+_OASES_STREAM_TAIL = 2000
+
+
+def _tail(text: Optional[str], n_chars: int = _OASES_STREAM_TAIL) -> Optional[str]:
+    """Last ``n_chars`` of a captured child stream, or ``None`` if empty."""
+    if not text:
+        return None
+    return text if len(text) <= n_chars else '…' + text[-n_chars:]
+
+
+def _stream_block(label: str, text: Optional[str]) -> str:
+    """Render a captured child stream as a labelled block, or nothing."""
+    trimmed = _tail(text)
+    return f"\n\n{label}:\n{trimmed}" if trimmed else ''
+
+
+#: OASES' wavenumber-array bound, ``NPEXP = 16, NP = 2**NPEXP``
+#: (third_party/oases/src/compar.f:37-38). OAST stops above it
+#: (unoast31.f:459 ``IF (NWVNO.GT.NP) STOP '>>> TOO MANY WAVENUMBERS <<<'``);
+#: OASP's automatic branch has no such test — AUTSAM (unoasp22.f:1130
+#: ``NW=(WNMAX-WNMIN)/DK+1``) applies no clamp — so it runs past the arrays
+#: and writes a transfer function whose values are meaningless.
+_OASES_NP = 65536
+
+#: OASP echoes the count it settled on before the frequency loop
+#: (unoasp22.f:340, :349).
+_OASES_NWVNO_ECHO = re.compile(r'NO\. OF WAVENUMBERS:\s*(\d+)')
+
+
 def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     """Build the FORnnn env-var dict the OASES csh wrappers set.
 
@@ -191,7 +224,6 @@ def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     ``base_name`` is the stem of the input file (no extension).
     """
     import os
-    import re
     # ``base_name`` is interpolated straight into the FORnnn filenames the
     # OASES csh wrappers open; a value with a path separator or ``..`` would
     # become a traversal. It is a hard-coded literal in every caller today —
@@ -267,37 +299,55 @@ class OASES(PropagationModel):
             )
         return target(**kwargs)
 
+    def _max_receiver_depth(self, env: Environment) -> float:
+        """Deepest depth OASES resolves the field at: the full media stack.
+
+        OASES meshes the sediment layers as media in their own right, so the
+        field is defined through them and a source or receiver inside the
+        seabed is a supported geometry — buried and sub-bottom sources are a
+        large part of what the seismo-acoustic family is for.
+        """
+        return self._total_media_depth(env)
+
     def _require_output(self, candidates, work_dir: Path, base_name: str, *,
-                        what: str, hint: str = '') -> Path:
+                        what: str, process=None, hint: str = '') -> Path:
         """First of ``candidates`` that exists and is non-empty.
 
-        None of them means the binary failed: OASES writes no ``.prt``, so
-        its own diagnostics only reach the user through the tail
-        :meth:`_attach_prt_tail` appends to the raised
-        :class:`ModelExecutionError`.
+        None of them means the binary failed. OASES writes no print file and
+        has no equivalent of the Acoustics-Toolbox ``FatalError`` module: its
+        diagnostics go to stdout (``WRITE(6,*)``) and to gfortran's stop-code
+        echo on stderr, both of which exit 0. ``process`` is the binary's
+        :class:`subprocess.CompletedProcess`; its streams are carried into the
+        raised :class:`ModelExecutionError` because nothing else holds them.
         """
         for candidate in candidates:
             path = Path(candidate)
             if path.exists() and path.stat().st_size > 0:
                 return path
         checked = ', '.join(str(c) for c in candidates)
-        exc = ModelExecutionError(
-            self.model_name, return_code=0, stdout=None,
+        raise ModelExecutionError(
+            self.model_name,
+            return_code=getattr(process, 'returncode', 0),
+            stdout=_tail(getattr(process, 'stdout', None)),
             stderr=(
                 f"{self.model_name} did not produce {what}. Checked: "
-                f"{checked}. OASES writes no .prt; its own message goes to "
-                f"stderr and is attached above." + (f" {hint}" if hint else "")
+                f"{checked}." + (f" {hint}" if hint else "")
+                + _stream_block('binary stderr',
+                                getattr(process, 'stderr', None))
             ),
         )
-        self._attach_prt_tail(exc, work_dir, base_name)
-        raise exc
 
     def _execute(self, base_name: str, work_dir: Path):
-        """Run the OASES binary. FOR005 stays as stdin per OASES docs."""
+        """Run the OASES binary and return its ``CompletedProcess``.
+
+        FOR005 stays as stdin per OASES docs. The completed process is
+        returned rather than dropped: OASES writes no print file, so its
+        stdout/stderr are the only record of what it did.
+        """
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
         for name in self._OUTPUT_FORT_FILES:
             Path(work_dir).joinpath(name).unlink(missing_ok=True)
-        self._run_and_attach_prt(
+        return self._run_and_attach_prt(
             [str(self._exe)], work_dir, base_name, env=env,
             stale_outputs=self._OUTPUT_SUFFIXES,
         )
@@ -336,6 +386,18 @@ class OAST(OASES):
     plot_rmin, plot_rmax : float, optional
         TL plot range axis bounds (m); ``None`` → 0 /
         ``receiver.range_max``.
+    vrec : float
+        Receiver velocity (m/s) for OAST's Doppler compensation, the
+        fifth token of the frequency line. Read only when the option
+        string carries lowercase ``'d'`` (``unoast31.f:125-127``);
+        default 0.
+    dip_angle : float, optional
+        Fault dip angle (degrees) for the dip-slip moment source that
+        option ``'4'`` selects (``unoast31.f:1117-1122``). INSRC reads it
+        from the source record — as the second token without ``'L'``
+        (``oaseun31.f:1114``), as the seventh with it
+        (``oaseun31.f:1089``). ``None`` writes 0 when ``'4'`` is present
+        and raises when it is not.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -381,6 +443,8 @@ class OAST(OASES):
         nw_samples: int = -1,
         plot_rmin: Optional[float] = None,
         plot_rmax: Optional[float] = None,
+        vrec: float = 0.0,
+        dip_angle: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -422,6 +486,11 @@ class OAST(OASES):
         # Plot-axis bounds in metres. ``None`` → 0 / receiver.range_max.
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
         self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
+        # VREC, the fifth frequency-line token OAST reads only under the
+        # lowercase 'd' (Doppler) option.
+        self.vrec = float(vrec)
+        # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
+        self.dip_angle = float(dip_angle) if dip_angle is not None else None
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -505,11 +574,14 @@ class OAST(OASES):
             writer_kwargs: dict = {
                 'integration_offset': self.integration_offset,
                 'nw_samples': self.nw_samples,
+                'vrec': self.vrec,
             }
             if self.plot_rmin is not None:
                 writer_kwargs['plot_rmin'] = self.plot_rmin
             if self.plot_rmax is not None:
                 writer_kwargs['plot_rmax'] = self.plot_rmax
+            if self.dip_angle is not None:
+                writer_kwargs['dip_angle'] = self.dip_angle
             write_oast_input(
                 filepath=input_file,
                 env=env,
@@ -519,13 +591,13 @@ class OAST(OASES):
                 **writer_kwargs,
             )
 
-            self._execute(base_name, fm.work_dir)
+            proc = self._execute(base_name, fm.work_dir)
 
             # Read output - OAST creates .plt (data) and .plp (metadata) files
             # Per OASES documentation: FOR019 -> .plp, FOR020 -> .plt
             output_file = self._require_output(
                 [fm.get_path(f'{base_name}.plt')], fm.work_dir, base_name,
-                what='a TL table (FOR020 .plt)',
+                what='a TL table (FOR020 .plt)', process=proc,
                 hint=('Compare against the reference decks in '
                       'third_party/oases/tloss/.'),
             )
@@ -620,20 +692,30 @@ class OASN(OASES):
         mode (``N`` for COVARIANCE, ``R`` for REPLICA).
     surface_noise_level : float
         Surface-generated noise spectral level (dB re 1 µPa²/Hz),
-        Block VI. 0 disables.
+        Block VI. OASES disables the source when ``abs(level) < 0.01``
+        (``oasnun22.f:183``); a level at or below ``-0.01`` is not "off" —
+        it names the Fortran unit number of a source-spectrum file uacpy
+        does not write, so it is rejected. Requires a vacuum or air
+        ``env.surface`` (``oasnun22.f:187``).
     white_noise_level : float
         Uncorrelated (white) noise spectral level per hydrophone
         (dB re 1 µPa²/Hz). 0 disables.
     deep_noise_level : float
-        Deep broad-area source spectral level (dB re 1 µPa²/Hz). 0
-        disables.
+        Deep broad-area source spectral level (dB re 1 µPa²/Hz). OASES
+        uses two thresholds that disagree at exactly 0.01: the source
+        radiates only for ``level > 0.01`` (``oasnun22.f:233`` skips it on
+        ``.LE.0.01``) while Block VIII is read for ``level >= 0.01``
+        (``oasnun22.f:324``). Unlike the surface level, a negative value
+        simply disables it — the deep source has no spectrum-file form.
     deep_source_depth : float, optional
         Depth (m) of the deep broad-area noise source sheet; ``None``
         → half the water depth. Only written when ``deep_noise_level``
         is non-zero.
     discrete_sources : list of dict, optional
         Point sources; each dict may carry ``'depth'`` (m), ``'x'``
-        (m), ``'y'`` (m), ``'level'`` (dB), ``'phase'`` (rad).
+        (m), ``'y'`` (m) and ``'level'`` (dB, non-negative) — the four
+        fields OASES reads (``oasnun22.f:380``). Any other key raises
+        ``ConfigurationError``; OASES has no per-source phase.
     xmin, xmax : float, optional
         Replica candidate-grid x bounds (m); ``None`` → OASES defaults
         (100 / 10000).
@@ -707,7 +789,7 @@ class OASN(OASES):
         deep_noise_level: float = 0.0,
         deep_source_depth: Optional[float] = None,
         # Discrete (point) sources — list of dicts; each may carry
-        # 'depth' (m), 'x' (m), 'y' (m), 'level' (dB), 'phase' (rad).
+        # 'depth' (m), 'x' (m), 'y' (m), 'level' (dB).
         discrete_sources: Optional[list] = None,
         # Replica candidate-position grid (Block X). x/y/z in metres on
         # the public API, converted to km at write time. ``None`` lets
@@ -812,6 +894,11 @@ class OASN(OASES):
 
         if not self._exe.exists():
             raise ExecutableNotFoundError('OASN', str(self._exe))
+
+    def _has_noise_field(self) -> bool:
+        """True when any Block VI source was configured on this instance."""
+        return bool(self.surface_noise_level or self.white_noise_level
+                    or self.deep_noise_level or self.discrete_sources)
 
     def _build_writer_kwargs(self) -> dict:
         """Materialise the writer's expected kwarg dict from ``self.*``.
@@ -948,11 +1035,12 @@ class OASN(OASES):
         if run_mode == RunMode.COVARIANCE:
             opt_tokens.add('N')
         else:
-            # The writer always emits the noise-source block (Block VI:
-            # SSLEV WNLEV DSLEV NDNS); OASN consumes it only when CALNSE
-            # is set by 'N'. Without 'N' the deck misaligns and OASN dies
-            # with "Bad integer in list input", so 'N' must accompany 'R'.
             opt_tokens.add('R')
+        # NOIPAR — and with it every noise argument below — runs only under
+        # `IF (CALNSE.or.trfout)` (unoasn22.f:173-174), and CALNSE comes from
+        # 'N'. A replica run that was given a noise field therefore needs 'N'
+        # too, or the levels it was handed would never reach the deck.
+        if self._has_noise_field():
             opt_tokens.add('N')
         options = ' '.join(sorted(opt_tokens))
 
@@ -969,12 +1057,13 @@ class OASN(OASES):
                 options=options,
                 **writer_kwargs,
             )
-            self._execute(base_name, fm.work_dir)
+            proc = self._execute(base_name, fm.work_dir)
 
             if run_mode == RunMode.COVARIANCE:
                 cov_path = self._require_output(
                     [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')],
                     fm.work_dir, base_name, what='a covariance file',
+                    process=proc,
                 )
                 self._log(f"Reading OASN covariance file: {cov_path}")
                 cov_data = read_oasn_covariance(cov_path)
@@ -1009,7 +1098,7 @@ class OASN(OASES):
             # RunMode.REPLICA
             rep_path = self._require_output(
                 [fm.get_path(f'{base_name}.rpo'), fm.get_path('fort.14')],
-                fm.work_dir, base_name, what='a replica file',
+                fm.work_dir, base_name, what='a replica file', process=proc,
                 hint=('Set the replica grid via OASN(xmin=…, xmax=…, nx=…, '
                       'zmin=…, zmax=…, nz=…) on the constructor.'),
             )
@@ -1068,7 +1157,8 @@ class OASR(OASES):
     executable : Path, optional
         Path to OASR binary. Auto-detected if ``None``.
     angles : ndarray, optional
-        Angle grid (deg). Default ``linspace(0, 90, 181)``.
+        Uniformly spaced angle grid (deg). Default
+        ``linspace(0, 90, 181)``.
     angle_type : str, optional
         ``'grazing'`` (OASES native, default) | ``'incidence'``
         (converted via ``grazing = 90 - incidence``).
@@ -1119,6 +1209,7 @@ class OASR(OASES):
         reflection_type: Optional[str] = None,
         options: Optional[str] = None,
         angle_output_increment: Optional[int] = None,
+        freq_output_increment: Optional[int] = None,
         interface_roughness: Optional[list] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -1133,8 +1224,11 @@ class OASR(OASES):
         executable : Path, optional
             Path to OASR executable. Auto-detected if None.
         angles : ndarray, optional
-            Angle grid in degrees. Default: ``np.linspace(0, 90, 181)``.
-            Pass a non-uniform ndarray for adaptive sampling.
+            Angle grid in degrees, uniformly spaced. Default:
+            ``np.linspace(0, 90, 181)``. OASR's deck carries only
+            ``(ANGLE1, ANGLE2, NANG)`` and generates the grid itself
+            (``unoasr21.f:173-177``), so a non-uniform array raises
+            ``ConfigurationError`` rather than being silently resampled.
         angle_type : str, optional
             'grazing' (OASES native) or 'incidence' (converted via
             ``grazing = 90 - incidence`` before being written to the input
@@ -1149,8 +1243,12 @@ class OASR(OASES):
             raises ``ConfigurationError`` — the deck would run whichever
             reflection the raw string selects, not the named one.
         angle_output_increment : int, optional
-            Decimation factor for the output angle table. ``None`` keeps
-            every sample.
+            Decimation factor (OASR's ``NAOU``) for the output angle
+            table. ``None`` keeps every sample.
+        freq_output_increment : int, optional
+            Decimation factor (OASR's ``NFOU``, ``unoasr21.f:116``) for
+            the reflection-vs-frequency output. ``None`` → ``n_freq //
+            10``.
         interface_roughness : list, optional
             Per-interface RMS roughness in metres (one entry per layer
             interface, ordered top → bottom).
@@ -1178,6 +1276,10 @@ class OASR(OASES):
         self.angle_output_increment = (
             int(angle_output_increment)
             if angle_output_increment is not None else None
+        )
+        self.freq_output_increment = (
+            int(freq_output_increment)
+            if freq_output_increment is not None else None
         )
         self.interface_roughness = (
             list(interface_roughness) if interface_roughness else None
@@ -1289,6 +1391,8 @@ class OASR(OASES):
             writer_kwargs['options'] = self.options
         if self.angle_output_increment is not None:
             writer_kwargs['angle_output_increment'] = self.angle_output_increment
+        if self.freq_output_increment is not None:
+            writer_kwargs['freq_output_increment'] = self.freq_output_increment
         if self.interface_roughness is not None:
             writer_kwargs['interface_roughness'] = self.interface_roughness
 
@@ -1313,7 +1417,7 @@ class OASR(OASES):
                 **writer_kwargs,
             )
 
-            self._execute(base_name, fm.work_dir)
+            proc = self._execute(base_name, fm.work_dir)
 
             # OASR writes a grazing-angle table to .trc and a slowness
             # table to .rco. Both files may be present even though the
@@ -1333,7 +1437,7 @@ class OASR(OASES):
                 [fm.get_path(ext if ext.startswith('fort')
                              else f'{base_name}{ext}') for ext in search],
                 fm.work_dir, base_name,
-                what='a reflection-coefficient table',
+                what='a reflection-coefficient table', process=proc,
             )
 
             self._log(f"Reading OASR output: {output_file}")
@@ -1439,6 +1543,7 @@ class OASP(OASES):
         range_start: Optional[float] = None,
         integration_offset: float = 0.0,
         nw_samples: int = -1,
+        dip_angle: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -1467,9 +1572,10 @@ class OASP(OASES):
         freq_output_increment : int, optional
             OASP's ``INTF`` (Block VII, ``unoasp22.f:160``). It gates how
             often the wavenumber *integrand* is plotted
-            (``unoasp22.f:541``: ``IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1``)
-            and does **not** decimate the ``.trf`` frequency axis, which
-            always carries every bin ``LXP1..MX``. ``None`` → 40.
+            (``unoasp22.f:591``: ``IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1``,
+            consumed at ``unoasp22.f:678``) and does **not** decimate the
+            ``.trf`` frequency axis, which always carries every bin
+            ``LXP1..MX``. ``None`` → 40.
         options : str, optional
             Raw OASES option string. ``None`` defers to the writer's
             default (``'N J'``); the ``'J'`` forces a real frequency axis
@@ -1481,6 +1587,13 @@ class OASP(OASES):
             Wavenumber-contour offset (dB/wavelength). Default 0.
         nw_samples : int, optional
             Wavenumber sample count. ``-1`` lets OASP auto-pick.
+        dip_angle : float, optional
+            Fault dip angle (degrees) for the dip-slip moment source that
+            option ``'4'`` selects (``unoasp22.f:993-995``). INSRC reads it
+            from the source record — as the second token without ``'L'``
+            (``oaseun31.f:1114``), as the seventh with it
+            (``oaseun31.f:1089``). ``None`` writes 0 when ``'4'`` is
+            present and raises when it is not.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -1502,6 +1615,8 @@ class OASP(OASES):
         )
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
+        # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
+        self.dip_angle = float(dip_angle) if dip_angle is not None else None
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -1600,13 +1715,18 @@ class OASP(OASES):
         # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
         # first slot. Refuse option letters that would produce
         # multi-axis output rather than silently discard data.
-        # OASES GETOPT (unoassp30.f) parses the option line character by
-        # character (CHARACTER*1 OPT(40)), so whitespace is irrelevant and
-        # 'NJO' enables 'O' exactly like 'N J O'. Match on the character
-        # set, not whitespace-split tokens.
+        # OASES GETOPT (unoasp22.f:871-872 `READ(1,200) OPT` /
+        # `200 FORMAT(40A1)`) parses the option line character by
+        # character, so whitespace is irrelevant and 'NJO' enables 'O'
+        # exactly like 'N J O'. Match on the character set, not
+        # whitespace-split tokens.
         if self.options:
             opt_chars = set(str(self.options)) - set(' \t\n')
-            multi_axis = {'V', 'H', 'R', 'U', 'F'} & opt_chars
+            # Letters that add an IOUT slot, i.e. increment NOUT and put a
+            # second component in every .trf record (unoasp22.f:890-921:
+            # N→1 V→2 H→3 R→5 K→6 S→7), plus 'U' (DECOMP), which splits the
+            # output over NCOMPO=5 separate files (unoasp22.f:455-456).
+            multi_axis = {'V', 'H', 'R', 'K', 'S', 'U'} & opt_chars
             if multi_axis:
                 raise ConfigurationError(
                     f"OASP.run: options {sorted(multi_axis)} request "
@@ -1617,8 +1737,8 @@ class OASP(OASES):
                 )
             if 'O' in opt_chars:
                 # 'O' moves the frequency integration onto a complex
-                # contour (Im(omega) = -ln(50)·Δf, unoassp30.f). The .trf
-                # reader discards that offset and synthesize_time_series
+                # contour (Im(omega) = -ln(50)·Δf, unoasp22.f:372-373). The
+                # .trf reader discards that offset and synthesize_time_series
                 # does not re-apply exp(-Im(omega)·t), so the time series
                 # would be silently wrong. Reject rather than mis-synthesise.
                 raise ConfigurationError(
@@ -1627,13 +1747,25 @@ class OASP(OASES):
                     "that uacpy's time-series synthesis does not undo. "
                     "Drop 'O' (the default 'N J' uses a real frequency axis)."
                 )
+            if 't' in opt_chars:
+                # Lowercase 't' sets INTTYP=-1 (unoasp22.f:1028-1029), and
+                # unoasp22.f:178-189 then overwrites the deck's R0 / RSPACE /
+                # NPLOTS with a slowness axis derived from CMIN/CMAX. The
+                # .trf's second coordinate is then slowness in s/m, which
+                # uacpy would label 'range' in metres.
+                raise ConfigurationError(
+                    "OASP.run: option 't' (tau-p seismograms) replaces the "
+                    "receiver range axis with slowness "
+                    "(unoasp22.f:178-189), which uacpy's Field has no "
+                    "coordinate for and would mislabel as range. Drop 't'."
+                )
             if 'J' not in opt_chars and self.nw_samples < 1:
                 # Under automatic wavenumber sampling (nw_samples < 1 →
                 # AUSAMP), OASES forces the complex frequency contour
                 # OMEGIM = -ln(50)·Δf unless 'J' keeps ICNTIN > 0
-                # (unoassp30.f:281-289,382-385). Without 'J' the .trf then
-                # carries the same offset 'O' would, which the time-series
-                # synthesis cannot undo.
+                # (unoasp22.f:288-296, :304-306 then :372-373). Without 'J'
+                # the .trf then carries the same offset 'O' would, which the
+                # time-series synthesis cannot undo.
                 raise ConfigurationError(
                     "OASP.run: a custom options string without 'J' enables the "
                     "complex frequency contour (OMEGIM≠0) under automatic "
@@ -1715,6 +1847,8 @@ class OASP(OASES):
             writer_kwargs['options'] = self.options
         if self.range_start is not None:
             writer_kwargs['range_start'] = self.range_start
+        if self.dip_angle is not None:
+            writer_kwargs['dip_angle'] = self.dip_angle
 
         try:
             base_name = 'oasp_run'
@@ -1731,14 +1865,21 @@ class OASP(OASES):
             )
 
             # Run executable
-            self._execute(base_name, fm.work_dir)
+            proc = self._execute(base_name, fm.work_dir)
+            self._reject_wavenumber_overrun(proc)
+            # Option '8' renames the transfer function to <base>.dtrf
+            # (oasiun23.f:837-845 `bufch='d'//trfext`); the record layout is
+            # unchanged, CFFX being declared plain COMPLEX (oasiun23.f:18).
             output_file = self._require_output(
                 [fm.get_path(f'{base_name}.trf'),
+                 fm.get_path(f'{base_name}.dtrf'),
                  fm.get_path(f'{base_name}.plt')],
                 fm.work_dir, base_name, what='a transfer-function file',
+                process=proc,
             )
             self._log(f"Reading OASP output: {output_file}")
-            trf_data = read_oasp_trf(output_file)
+            trf_data = read_oasp_trf(output_file,
+                                     receiver_depths=receiver.depths)
 
             transfer_func = trf_data['transfer_function']  # shape: (n_frequencies, n_range, n_depth)
 
@@ -1815,7 +1956,35 @@ class OASP(OASES):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    def _reject_wavenumber_overrun(self, process) -> None:
+        """Raise when OASP integrated on more wavenumbers than NP arrays hold.
+
+        Under automatic sampling AUTSAM sizes the wavenumber axis from the
+        frequency-range product with no bound (unoasp22.f:1130
+        ``NW=(WNMAX-WNMIN)/DK+1``), and — unlike OAST, which stops at
+        unoast31.f:459 — OASP has no ``NWVNO.GT.NP`` test. Past NP the run
+        completes, exits 0 and writes a full-size ``.trf`` holding numbers
+        that are not the field (measured 3.2e27 against 1.3e-4 for the same
+        geometry with NW pinned under NP). The count OASP settled on is in
+        its own stdout, so read it from there rather than re-deriving AUTSAM.
+        """
+        counts = [int(m) for m in
+                  _OASES_NWVNO_ECHO.findall(getattr(process, 'stdout', '') or '')]
+        if not counts or max(counts) <= _OASES_NP:
+            return
+        raise ConfigurationError(
+            f"OASP sampled {max(counts)} wavenumbers, past OASES' array bound "
+            f"NP = {_OASES_NP} (oases/src/compar.f:37-38); OASP has no bound "
+            f"check on automatic sampling (unoasp22.f:1130) so the transfer "
+            f"function it wrote is not the acoustic field. The count grows "
+            f"with the highest frequency times the largest receiver range.",
+            remediation=(
+                "Shorten receiver.ranges, lower freq_max / the source "
+                "frequency, or pin nw_samples <= "
+                f"{_OASES_NP} to integrate on a bounded grid."),
+        )
+
     _FOR_FILES = {
         'FOR002': 'src',
     }
-    _OUTPUT_SUFFIXES = ('.trf', '.plt')
+    _OUTPUT_SUFFIXES = ('.trf', '.dtrf', '.plt')

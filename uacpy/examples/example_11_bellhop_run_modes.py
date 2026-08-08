@@ -49,7 +49,6 @@ RUN MODES EXPLAINED:
     - Preserves phase relationships
     - Shows interference patterns (Lloyd mirror, modal)
     - Best for CW signals
-    - Most computationally expensive
 
     Incoherent TL ('I'):
     - Phase-averaged (power sum of contributions)
@@ -58,10 +57,22 @@ RUN MODES EXPLAINED:
     - Represents long-term average
 
     Semi-coherent TL ('S'):
-    - Hybrid of coherent and incoherent
-    - Coherent sum within beam, incoherent between beams
-    - Intermediate smoothness
-    - Practical compromise
+    - NOT a hybrid summation. Bellhop accumulates 'S' exactly as it
+      accumulates 'I' — an incoherent power sum. In the vendored solver,
+      Bellhop/influence.f90 branches on
+      ``CASE ( 'I', 'S' )   ! Incoherent or Semi-coherent TL`` and does
+      ``contri = ABS( contri ) ** 2`` for both.
+    - The one 'S'-specific line in the solver is a Lloyd-mirror *source
+      amplitude pattern* applied at launch, Bellhop/bellhop.f90:276-278:
+      ``Amp0 = Amp0 * SQRT(2) * ABS( SIN( omega/c * xs(2) * SIN(alpha) ) )``
+    - So 'S' is "incoherent sum, with the source's surface-image directivity
+      baked into the launch amplitude". Its smoothness matches 'I'; it is not
+      intermediate between 'C' and 'I'. The statistics printed by Scenario A
+      show this directly.
+
+    Three run modes, three costs: the three TL modes share one ray trace and
+    differ only in the accumulator, so they cost about the same. Scenario A
+    times each run and prints the numbers instead of asserting an ordering.
 
     Rays ('R'):
     - Compute and save ray paths
@@ -92,6 +103,7 @@ LEARNING OUTCOMES:
 """
 
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -124,7 +136,7 @@ def scenario_a_tl_modes():
     )
 
     source = uacpy.Source(
-        depths=1000.0,      # At channel axis
+        depths=1000.0,      # Inside the channel, 300 m above the 1300 m axis
         frequencies=50.0     # 50 Hz
     )
 
@@ -138,23 +150,36 @@ def scenario_a_tl_modes():
     # ═══════════════════════════════════════════════════════════════════════
     print("\n  Running Bellhop with different TL modes:")
 
+    # The first Bellhop call in a process pays binary/library load — about
+    # 1.8 s here, which would be charged entirely to whichever mode ran first.
+    # Burn one run so the three timings below are comparable.
+    print("    • warm-up run...", end=" ", flush=True)
+    Bellhop(verbose=False).run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+    print("✓")
+
     # Coherent TL
     print("    • Coherent TL...", end=" ", flush=True)
     bellhop_coherent = Bellhop(verbose=False)
+    t0 = time.perf_counter()
     result_coherent = bellhop_coherent.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-    print("✓")
+    dt_coherent = time.perf_counter() - t0
+    print(f"✓ ({dt_coherent:.2f} s)")
 
     # Incoherent TL
     print("    • Incoherent TL...", end=" ", flush=True)
     bellhop_incoherent = Bellhop(verbose=False)
+    t0 = time.perf_counter()
     result_incoherent = bellhop_incoherent.run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
-    print("✓")
+    dt_incoherent = time.perf_counter() - t0
+    print(f"✓ ({dt_incoherent:.2f} s)")
 
     # Semi-coherent TL
     print("    • Semi-coherent TL...", end=" ", flush=True)
     bellhop_semicoherent = Bellhop(verbose=False)
+    t0 = time.perf_counter()
     result_semicoherent = bellhop_semicoherent.run(env, source, receiver, run_mode=RunMode.SEMICOHERENT_TL)
-    print("✓")
+    dt_semicoherent = time.perf_counter() - t0
+    print(f"✓ ({dt_semicoherent:.2f} s)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # PLOT COMPARISON
@@ -209,7 +234,7 @@ def scenario_a_tl_modes():
     ax.grid(True, alpha=0.3)
     plt.colorbar(im, ax=ax, label='TL (dB)')
 
-    # Range cut comparison at channel axis
+    # Range cut comparison at the source depth
     ax = axes[1, 1]
     tl_coherent = result_coherent.at(depth=1000).tl
     tl_incoherent = result_incoherent.at(depth=1000).tl
@@ -240,17 +265,37 @@ def scenario_a_tl_modes():
     plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("\n  TL statistics at channel axis (1000m depth):")
+    print("\n  TL statistics at 1000m depth (300m above the 1300m Munk axis):")
     print(f"    • Coherent    - Mean: {np.mean(tl_coherent):.1f} dB, "
           f"Std: {np.std(tl_coherent):.1f} dB")
     print(f"    • Incoherent  - Mean: {np.mean(tl_incoherent):.1f} dB, "
           f"Std: {np.std(tl_incoherent):.1f} dB")
     print(f"    • Semi-coh    - Mean: {np.mean(tl_semicoherent):.1f} dB, "
           f"Std: {np.std(tl_semicoherent):.1f} dB")
+
+    # Whole-grid spread is the fair smoothness measure — one depth slice is
+    # too short a sample to separate 'I' from 'S'.
+    std_c = np.nanstd(np.asarray(result_coherent.tl))
+    std_i = np.nanstd(np.asarray(result_incoherent.tl))
+    std_s = np.nanstd(np.asarray(result_semicoherent.tl))
+    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.tl)
+                              - np.asarray(result_semicoherent.tl)))
+    print("\n  Whole-grid TL std dev:")
+    print(f"    • Coherent {std_c:.2f} dB   • Incoherent {std_i:.2f} dB"
+          f"   • Semi-coherent {std_s:.2f} dB")
+    print(f"    • max |Incoherent - Semi-coherent| = {max_is:.2f} dB")
+
     print("\n  Key observations:")
-    print("    • Coherent TL shows strong modal interference (high std dev)")
-    print("    • Incoherent TL is smoothest (phase-averaged)")
-    print("    • Semi-coherent is intermediate")
+    print("    • Coherent TL shows strong modal interference (highest std dev)")
+    print("    • Incoherent TL is phase-averaged and smooth")
+    print("    • Semi-coherent is NOT intermediate: it uses the same incoherent")
+    print("      power sum as 'I', so its std dev sits on top of the incoherent")
+    print("      one. The two differ only by the Lloyd-mirror source amplitude")
+    print("      pattern 'S' applies at launch (bellhop.f90:276-278), which is")
+    print("      what the max|I-S| figure above measures.")
+    print("\n  Run times, after a warm-up run (same ray trace, different accumulator):")
+    print(f"    • Coherent {dt_coherent:.2f} s   • Incoherent {dt_incoherent:.2f} s"
+          f"   • Semi-coherent {dt_semicoherent:.2f} s")
 
     print("\n  ✓ Saved: output/example_11a_tl_modes.png")
 
@@ -273,7 +318,7 @@ def scenario_b_ray_tracing():
     )
 
     source = uacpy.Source(
-        depths=1000.0,       # At channel axis
+        depths=1000.0,       # Inside the channel, 300 m above the 1300 m axis
         frequencies=50.0,
     )
 
@@ -298,8 +343,12 @@ def scenario_b_ray_tracing():
     result.plot(env=env, ax=axes[0],
                 title=f'Ray Paths ({bellhop.n_beams} rays, ±15° launch angles)')
     axes[0].set_xlim(0, 100)
+    # 20-40 km is a zoom on the axial crossing region, not a convergence zone:
+    # a CZ is the near-surface refocusing of bottom-limited rays launched from
+    # a near-surface source. This source sits inside the channel with a ±15°
+    # fan, so every ray here is channel-trapped and never reaches the bottom.
     result.plot(env=env, ax=axes[1],
-                title='Ray Paths — Zoomed View (First Convergence Zone)')
+                title='Ray Paths — Zoomed View (20-40 km, axial crossings)')
     axes[1].set_xlim(20, 40)
     axes[1].set_ylim(2000, 0)
     plt.tight_layout()
@@ -310,7 +359,8 @@ def scenario_b_ray_tracing():
     print("\n  Ray tracing parameters:")
     print(f"    • Number of rays: {bellhop.n_beams}")
     print(f"    • Launch angles: {bellhop.alpha[0]:.1f}° to {bellhop.alpha[1]:.1f}°")
-    print(f"    • Source depth: {source.depths[0]:.0f} m (channel axis)")
+    print(f"    • Source depth: {source.depths[0]:.0f} m"
+          f" (inside the channel; Munk axis is at 1300 m)")
     print("    • Maximum range: 100 km")
 
     print("\n  ✓ Saved: output/example_11b_ray_tracing.png")

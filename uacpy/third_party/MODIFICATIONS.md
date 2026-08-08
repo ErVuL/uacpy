@@ -147,7 +147,11 @@ Fortran solvers actually built by `install.sh` are:
 
 `ram1.5.f` (Collins's original fluid PE) is also vendored as a
 reference but is not built — uacpy's RAM dispatcher uses mpiramS for
-that regime. `ramclr.f` (PostScript plotter) and the autotools
+that regime. Its range dimension carries the same `mr=505` widening as the
+built backends (`ram1.5.f:53`), applied without a `UACPY:` marker; its depth
+dimension `mz=8000` is stock. Being unbuilt, the widening has no runtime
+effect — it is recorded here so a vendor refresh does not silently drop it and
+so the line is not mistaken for stock. `ramclr.f` (PostScript plotter) and the autotools
 artefacts (`configure.ac`, `Makefile.am`) are kept untouched alongside
 a plain top-level `Makefile` actually used for the build. LICENSE is
 kept verbatim.
@@ -261,7 +265,8 @@ ramgeo's enlargement was matched *to*. The declaration now reads:
 giving a usable depth grid of `nz ≤ 20000` (the code indexes to `nz+2`, as the
 other fluid backends do). The stock depth dimension is `mz=8000`, still visible
 on `ram1.5.f:53` — Collins's original fluid PE, vendored alongside as an
-unbuilt reference.
+unbuilt reference. Only `mz` on that line is stock; its `mr=505` is the same
+widening the built backends carry (see above).
 
 Upstream's own bounds checks (`Need to increase parameter …`,
 `ramsurf1.5.f:124-132`) are left as they are: their conditions are written
@@ -797,6 +802,49 @@ range when `isedrd == 1`.
 +    gorp=y(1)
      return
    end if
+```
+
+#### March step never restored after a partial step
+
+`dr` is set once, outside the march loop (`dr=deltar` at `:63`, with the sign
+flip at `:66`); the only other assignment is `dr=rend-rnow` inside the
+output-range loop. That branch shrinks the step to the remainder needed to land
+exactly on an output range — and nothing restores it. Every later output range
+therefore marched at that leftover step.
+
+Because uacpy writes **every receiver range** into `ranges.dat`, the cost of a
+march grew with the *number of output ranges* rather than with range. Measured
+on a 100 m Pekeris waveguide at 250 Hz over the same 10 km, `OMP_NUM_THREADS=1`:
+
+| output ranges | before | after |
+|---|---|---|
+| 1 | 0.576 s | 0.576 s |
+| 10 | 1.870 s (3.2x) | 0.669 s (1.2x) |
+| 50 | 8.700 s (15.1x) | 1.067 s (1.9x) |
+
+This is a cost defect, not an accuracy one — the shrunken step is *smaller*, so
+TL moved by only ~2e-4 dB. But it also meant the marched `dr` was not the `dr`
+uacpy resolves and reports in the `Result` metadata; after the fix TL at a given
+range is bit-identical however many other output ranges are requested.
+
+**Fix:** restore the full step when it has been shrunk, as the `else` of the
+same test, reusing that branch's `upd=1` so `matrc` rebuilds the matrices for
+the restored `dre`.
+
+```diff
+       if (abs(rend-rnow)<abs(dr)) then
+         dr=rend-rnow
+         dre=abs(dr)
+         ip=1
+         call epade
+         upd=1
++      else if (abs(abs(dr)-abs(deltar))>tiny(deltar)) then
++        dr=sign(deltar,rend-rnow)
++        dre=abs(dr)
++        ip=1
++        call epade
++        upd=1
+       end if
 ```
 
 ### `src/peramx.f90` -- I/O rewrite (largest change)

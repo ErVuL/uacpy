@@ -13,7 +13,8 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import erddap_last_value, http_get
+from uacpy.data._http import (erddap_griddap_url, erddap_last_value,
+                              http_get)
 from uacpy.data._time import parse_date
 
 __all__ = ['fetch_hs', 'ERDDAP_URL', 'DATASET']
@@ -27,13 +28,8 @@ _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 
 def _griddap_url(var, when, lat, lon):
-    """``ww3_global`` axes are [time][depth][latitude][longitude] with a
-    singleton surface depth node and a [0, 360) longitude axis."""
-    import urllib.parse
-    iso = f"{parse_date(when)}T00:00:00Z"
-    constraint = f"{var}[({iso})][(0.0)][({lat})][({lon % 360.0})]"
-    query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
-    return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
+    return erddap_griddap_url(ERDDAP_URL, DATASET, var, when, lat, lon,
+                              level=0.0)
 
 
 def fetch_hs(point, *, date, timeout=60.0, verbose=False):

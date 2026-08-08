@@ -10,6 +10,8 @@ is unavailable; one ``requires_network`` test hits the live Zenodo grid.
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
@@ -72,7 +74,7 @@ def graw_cache(tmp_path, monkeypatch):
     """Cache holding only the synthetic Graw density grid."""
     root = tmp_path / 'graw_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_graw(root)
     return root
 
@@ -82,9 +84,9 @@ def full_cache(tmp_path, monkeypatch):
     """GEBCO + WOA23 + Graw — a fully offline bottom_sources='graw' run."""
     root = tmp_path / 'full_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_graw(root)
@@ -112,7 +114,7 @@ def test_density_transect(graw_cache):
 
 def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     with pytest.raises(ConfigurationError, match='install.sh --data graw'):
         graw_local.fetch_seabed_density((30.5, -40.5))
 
@@ -143,7 +145,7 @@ def test_density_clamped_to_table(tmp_path, monkeypatch):
     # extrapolating to unphysical grain sizes.
     root = tmp_path / 'clamp_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_graw(root, value=2.4)                       # denser than coarse sand
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
     assert bp.grain_size_phi == pytest.approx(0.5)     # coarse-sand end member
@@ -170,7 +172,7 @@ def test_fetch_environment_bottom_sources_graw(full_cache):
 @pytest.mark.requires_network
 def test_live_graw_download(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'live'))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     try:
         graw_local.download_graw_db(timeout=300.0)
     except DataFetchError as exc:

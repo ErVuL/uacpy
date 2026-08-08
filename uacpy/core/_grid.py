@@ -45,6 +45,12 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0):
         i = int(np.argmin(np.abs(x - float(value))))
         return np.take(arr, i, axis=axis), float(x[i])
 
+    # searchsorted and the clamp below both read the axis as ascending, so a
+    # descending one is walked in reverse together with the data it indexes.
+    if x[0] > x[-1]:
+        x = x[::-1]
+        arr = np.flip(arr, axis=axis)
+
     v = float(min(max(float(value), float(x[0])), float(x[-1])))   # clamp
     if method == 'linear':
         j = int(np.clip(np.searchsorted(x, v), 1, n - 1))

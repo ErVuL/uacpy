@@ -1,7 +1,14 @@
 """Reflection-coefficient + source-beam-pattern auxiliary file I/O.
 
-* ``.brc`` / ``.irc`` / ``.trc`` — precomputed reflection coefficients
+* ``.brc`` / ``.trc`` — precomputed plane-wave reflection coefficients as
+  ``(angle_deg, |R|, phase_deg)`` rows behind a count line
   (:func:`read_reflection_coefficient`, :func:`write_reflection_coefficient`)
+
+``.irc`` is a different format and is **not** handled here: BOUNCE writes it
+as a title/frequency line, a count, then fixed-format ``(5G15.7, I5)`` rows of
+``x, Re f, Im f, Re g, Im g, iPower`` (``bounce.f90:225-228``), read back with
+the same fixed format by ``misc/RefCoef.f90:97-107``. It is consumed only by
+the Kraken-family ``BotOpt='P'`` path, which passes it straight to the Fortran.
 * ``.sbp`` — source beam pattern (:func:`read_source_beam_pattern`,
   :func:`write_source_beam_pattern`)
 
@@ -18,6 +25,7 @@ from typing import Dict, Optional, Union
 from uacpy._log import log_message
 from uacpy.io.units import deg_to_rad, rad_to_deg
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.io._fortran_helpers import _bound_counts
 from uacpy.io._fortran_helpers import typed_format_error
 
 
@@ -84,6 +92,11 @@ def read_reflection_coefficient(
                     "n_pts": 0,
                 }
 
+            # Each point is one ASCII line of at least three numbers, so it
+            # cannot occupy fewer than 6 bytes on disk; a count beyond that is
+            # a malformed header, not a huge table.
+            _bound_counts(filename, Path(filename).stat().st_size, 6,
+                          n_pts=n_pts)
             # Pre-allocate arrays
             theta = np.zeros(n_pts)
             R = np.zeros(n_pts)
@@ -186,6 +199,8 @@ def read_source_beam_pattern(
                         f"Number of source beam pattern points = {NSBPPts}",
                         verbose=verbose)
 
+            _bound_counts(sbp_file, Path(sbp_file).stat().st_size, 4,
+                          NSBPPts=NSBPPts)
             beam_pattern = np.zeros((NSBPPts, 2))
             for i in range(NSBPPts):
                 line = fid.readline()
@@ -304,7 +319,7 @@ def write_source_beam_pattern(
             f.write(f"{angles[i]:8.2f} {pattern[i]:12.6f}\n")
 
 
-_REFLECTION_SUFFIX = {'bottom': '.brc', 'top': '.trc'}
+_REFLECTION_SUFFIX = {'bottom': '.brc', 'top': '.trc', 'internal': '.irc'}
 
 
 def stage_reflection_file(
@@ -316,10 +331,11 @@ def stage_reflection_file(
     """Place a reflection-coefficient table beside the ``.env`` that names it.
 
     AT and Bellhop open the table by base-name convention (``<env>.brc`` for
-    the bottom, ``<env>.trc`` for the top), so a table produced elsewhere has
-    to be copied next to the environment file. A table already at the
-    destination — a BOUNCE run whose ``.brc`` sits in the same pinned
-    ``work_dir`` the ``.env`` is written into — is kept as is.
+    the bottom, ``<env>.trc`` for the top, ``<env>.irc`` for a precalculated
+    internal table), so a table produced elsewhere has to be copied next to
+    the environment file. A table already at the destination — a BOUNCE run
+    whose ``.brc`` sits in the same pinned ``work_dir`` the ``.env`` is
+    written into — is kept as is.
 
     Parameters
     ----------
@@ -327,8 +343,9 @@ def stage_reflection_file(
         Source table; ``None`` is the caller's configuration error.
     env_path : str or Path
         Path of the ``.env`` being written.
-    boundary : {'bottom', 'top'}
-        Which table this is, selecting the destination suffix.
+    boundary : {'bottom', 'top', 'internal'}
+        Which table this is, selecting the destination suffix. ``'internal'``
+        is the ``BotOpt='P'`` precalculated table BOUNCE writes.
     verbose : bool, optional
         Log the staging step.
 
@@ -338,19 +355,29 @@ def stage_reflection_file(
         The staged destination path.
     """
     suffix = _REFLECTION_SUFFIX[boundary]
+    internal = boundary == 'internal'
+    acoustic_type = 'precalc' if internal else 'file'
+    remediation = (
+        "Run BOUNCE on the seabed first and pass "
+        "result.metadata['irc_file'] as reflection_file=, or use "
+        "acoustic_type='half-space' to model the seabed directly."
+        if internal else
+        "Generate the table via BOUNCE or OASR and pass its path as "
+        "reflection_file=."
+    )
     if not reflection_file:
         raise ConfigurationError(
-            f"acoustic_type='file' requires reflection_file= on the {boundary} "
-            f"BoundaryProperties (path to a {suffix} table).",
-            remediation="Generate the table via BOUNCE or OASR and pass its "
-                        "path as reflection_file=.",
+            f"acoustic_type={acoustic_type!r} requires reflection_file= on the "
+            f"{'bottom' if internal else boundary} BoundaryProperties "
+            f"(path to a {suffix} table).",
+            remediation=remediation,
         )
     src = Path(reflection_file)
     if not src.exists():
         raise ConfigurationError(
-            f"Reflection coefficient file not found: {src}",
-            remediation="Generate it via BOUNCE or OASR first, or correct the "
-                        "reflection_file= path.",
+            f"{'Internal reflection' if internal else 'Reflection'} "
+            f"coefficient file not found: {src}",
+            remediation=remediation,
         )
     dest = Path(env_path).with_suffix(suffix)
     if src.resolve() != dest.resolve():
@@ -374,6 +401,17 @@ def stage_source_beam_pattern(
             raise ConfigurationError(
                 f"Source beam pattern file not found: {src}"
             )
+        # ``bellhop.f90:273`` interpolates with
+        # ``s = (SrcDeclAngle - SrcBmPat(IBP,1)) / (SrcBmPat(IBP+1,1) -
+        # SrcBmPat(IBP,1))`` and never checks the denominator: a repeated
+        # angle divides by zero and a decreasing one flips the weight, both
+        # silently. ``Source`` applies this check to the array form, so the
+        # file form has to get it too or the guard depends on which way the
+        # caller happened to supply the pattern.
+        from uacpy.core._carrier_validate import _require_strictly_increasing
+        _require_strictly_increasing(
+            read_source_beam_pattern(src, sbp_option='*')[:, 0],
+            f"source beam-pattern angles in {src.name}")
         shutil.copy(src, dest)
         return
     arr = np.asarray(pattern, dtype=float)
@@ -381,7 +419,7 @@ def stage_source_beam_pattern(
 
 
 def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
-    """Rewrite a .brc/.irc file with a strictly-increasing angle axis.
+    """Rewrite a ``.brc`` / ``.trc`` file with a strictly-increasing angle axis.
 
     BOUNCE's Fortran driver tabulates reflection coefficients by sweeping
     phase velocity (kx = omega/c), which — for the c_low/c_high defaults —
@@ -393,8 +431,12 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
 
     This loads the file, keeps only rows whose angle strictly exceeds the
     previous kept row, and rewrites it in the original 3-column BOUNCE
-    format (angle_deg, |R|, phase_deg). The IRC file has the same layout so
-    the same routine works for both.
+    format (angle_deg, |R|, phase_deg).
+
+    ``.brc`` / ``.trc`` only. An ``.irc`` carries a title/frequency line ahead
+    of its count and six fixed-format columns, so running this over one would
+    strip the header and four of the six columns; a file whose first line is
+    not a bare count is rejected.
 
     Precision caveat: when two physically distinct phase velocities map to
     grazing angles that round equal at the file's print precision, only the
@@ -411,6 +453,16 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
 
     if not lines:
         return
+
+    try:
+        int(lines[0].split()[0])
+    except (ValueError, IndexError):
+        raise FileFormatError(
+            f"{filepath}: expected a .brc/.trc table, whose first line is the "
+            f"row count; got {lines[0].strip()!r}.",
+            remediation="An .irc has a title/frequency header and six "
+                        "fixed-format columns — pass it through unmodified.",
+        ) from None
 
     kept_rows = []  # list of (angle, mag, phase_deg) as strings
     last_angle = -np.inf
@@ -434,9 +486,20 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     if not kept_rows:
         return
 
+    # ``misc/RefCoef.f90:119`` states the contract for this table outright —
+    # "Assumes phi has been unwrapped so that it varies smoothly" — and
+    # ``InterpolateReflectionCoefficient`` then interpolates phi linearly
+    # between the bracketing abscissas. BOUNCE writes the principal value, so
+    # its own output breaks that: measured on a 10 m sediment over a 1800 m/s
+    # half-space at 500 Hz, the table jumps 298.8 deg between adjacent angles.
+    # Interpolating across such a step sweeps the phase the long way round and
+    # returns a reflection phase that is wrong through the whole interval.
+    phases = np.degrees(np.unwrap(
+        np.radians([float(p) for _a, _r, p in kept_rows])))
+
     with open(filepath, 'w') as fh:
         # BOUNCE pads the count with leading whitespace; match that so any
         # downstream tool expecting free-format reads happily.
         fh.write(f"{len(kept_rows):12d}\n")
-        for a, r, p in kept_rows:
-            fh.write(f"   {a}        {r}        {p}\n")
+        for (a, r, _p), phase in zip(kept_rows, phases):
+            fh.write(f"   {a}        {r}        {phase:.6f}\n")

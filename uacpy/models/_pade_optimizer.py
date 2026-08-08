@@ -16,11 +16,11 @@ approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
 * Searches for the coarsest ``(Δx, Δz)`` whose total error stays under a
   user accuracy budget ``ε`` over ``n_steps = ⌈x_max/Δx⌉`` range steps.
 
-``c₀`` is a user input (it has physical meaning — the reference water
-sound speed, conventionally 1500 m/s); the optimizer picks
-``(Δx, Δz)`` against that value. For the performance-optimal ``c₀``
-from Eq. 15, call :func:`optimal_c0` explicitly and pass the result
-back in via the ``c0`` argument.
+``c₀`` is a user input; the optimizer picks ``(Δx, Δz)`` against that
+value. It is the *algorithmic* expansion point of the parabolic equation
+— the speed factored out as ``exp(ik₀x)`` — not a physical medium speed.
+For the error-optimal ``c₀`` from Eq. 15, call :func:`optimal_c0`
+explicitly and pass the result back in via the ``c0`` argument.
 
 The Padé coefficients are derived numerically from the Taylor series of
 ``f(ξ) = exp(ikΔx(√(1+ξ)−1))`` so the same code handles any order
@@ -33,7 +33,7 @@ the internal march grid.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -232,6 +232,22 @@ def optimal_c0(c_min: float, c_max: float, theta_max: float) -> float:
 # Main optimizer
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Bounds of the Δz search ladder (m) and the geometric ratio both ladders use.
+DZ_MIN = 0.01
+DZ_MAX = 5.0
+LADDER_RATIO = 1.5
+
+
+def _ladder(low: float, high: float) -> list:
+    """Geometric ladder from ``low`` to ``high``, coarsest first."""
+    rungs = []
+    v = float(low)
+    while v <= high:
+        rungs.append(v)
+        v *= LADDER_RATIO
+    rungs.append(float(high))
+    return sorted(set(rungs), reverse=True)
+
 
 def optimize_grid(
     *,
@@ -244,14 +260,15 @@ def optimize_grid(
     eps: float = 1e-3,
     p: int = 6,
     alpha: float = 0.0,
-    dx_candidates: Optional[Sequence[float]] = None,
-    dz_candidates: Optional[Sequence[float]] = None,
-    dz_floor: float = 0.0,
-    dz_ceiling: float = 5.0,
-    dx_ceiling: Optional[float] = None,
 ) -> dict:
     """Find the coarsest ``(Δx, Δz)`` whose accumulated error stays under
     ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀``.
+
+    The search sees Lytaev's error model only. RAM applies its own
+    stability floors and array caps to the returned ``Δz`` afterwards and
+    re-reports the accuracy of the grid it actually marches via
+    :func:`grid_error`, so the ``predicted_error`` here describes the
+    unadjusted pair.
 
     Parameters
     ----------
@@ -274,14 +291,6 @@ def optimize_grid(
         Vertical-FD scheme parameter. ``0.0`` = standard second-order
         tridiagonal (rams0.5 / ramsurf1.5). ``1/12`` = 4th-order Numerov
         (Lytaev's enhancement, not currently used by the Collins binaries).
-    dx_candidates, dz_candidates : sequences of float, optional
-        Explicit grids to search. Default uses geometric ladders bounded
-        by ``dz_ceiling`` (depth) and ``min(x_max, dx_ceiling)`` (range).
-    dz_floor : float
-        Lower bound on Δz (e.g. the rams shear-stability floor — see
-        :func:`rams_dz_floor`). The optimizer never returns Δz below this.
-    dz_ceiling, dx_ceiling : float
-        Upper bounds.
 
     Returns
     -------
@@ -299,39 +308,17 @@ def optimize_grid(
         favourable value (try :func:`optimal_c0`), or shrink
         ``theta_max`` / ``x_max``.
     """
-    if dz_floor > dz_ceiling:
-        raise ValueError(
-            f"dz_floor={dz_floor:.3g} m exceeds dz_ceiling={dz_ceiling:.3g} m, "
-            f"so the Δz ladder is empty. Raise dz_ceiling above the floor."
-        )
     c0_use = float(c0)
     k0 = 2.0 * np.pi * freq / c0_use
     theta_max_rad = np.deg2rad(float(theta_max))
     xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
     xi_max = (c0_use / c_min) ** 2 - 1.0
 
-    # Default candidate ladders, scanned in full; the pair maximising
-    # ``dx·dz`` among those inside the budget wins.
-    if dx_candidates is None:
-        dx_top = float(min(x_max * 0.5, dx_ceiling) if dx_ceiling else x_max * 0.5)
-        # Geometric ladder from ~λ/8 up to dx_top, ratio 2.
-        dx_floor = max(0.5, c0_use / freq / 8.0)
-        ladder = []
-        v = dx_floor
-        while v <= dx_top:
-            ladder.append(v)
-            v *= 1.5
-        ladder.append(dx_top)
-        dx_candidates = sorted(set(ladder), reverse=True)
-    if dz_candidates is None:
-        # 0.01 m → dz_ceiling, ratio 1.5.
-        ladder = []
-        v = max(0.01, dz_floor) if dz_floor > 0 else 0.01
-        while v <= dz_ceiling:
-            ladder.append(v)
-            v *= 1.5
-        ladder.append(dz_ceiling)
-        dz_candidates = sorted(set(ladder), reverse=True)
+    # Candidate ladders, scanned in full; the pair maximising ``dx·dz``
+    # among those inside the budget wins.
+    dx_top = x_max * 0.5
+    dx_candidates = _ladder(max(0.5, c0_use / freq / 8.0), dx_top)
+    dz_candidates = _ladder(DZ_MIN, DZ_MAX)
 
     best = None
     best_product = -1.0
@@ -340,7 +327,7 @@ def optimize_grid(
             continue
         n_steps = int(np.ceil(x_max / dx))
         for dz in dz_candidates:
-            if dz < dz_floor or dz <= 0:
+            if dz <= 0:
                 continue
             tau = combined_error(
                 dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha=alpha,

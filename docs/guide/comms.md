@@ -537,7 +537,7 @@ significant fraction of its centre frequency.
 ```python
 from uacpy.acoustic_signal import lfm_chirp
 
-probe, _ = lfm_chirp(1000.0, 5000.0, 1.0, 12000.0)     # 1 s wideband probe
+_, probe = lfm_chirp(1000.0, 5000.0, 1.0, 12000.0)     # 1 s wideband probe
 # what a receiver closing at 2.3 m/s hears: the probe compressed, in a record
 heard = comms.compensate_doppler(probe, -comms.doppler_from_speed(2.3))
 record = comms.awgn(np.concatenate([np.zeros(500), heard.real, np.zeros(500)]),

@@ -115,10 +115,16 @@ class Arrivals(Result):
                     nb = np.asarray(cell.get('n_bot_bounces', np.zeros(len(delays), int)))
                     sa = np.asarray(cell.get('src_angles', np.zeros_like(delays)))
                     ra = np.asarray(cell.get('rcv_angles', np.zeros_like(delays)))
+                    # Im(delay) carries Bellhop's volume-attenuation loss as a
+                    # separate multiplicative term exp(omega * Im(delay))
+                    # (ArrMod.f90:118-125 writes it as its own field), so it
+                    # travels with the flat records too.
+                    di = np.asarray(cell.get('delays_imag', np.zeros_like(delays)))
                     for i in range(len(delays)):
                         n_top, n_bot = int(nt[i]), int(nb[i])
                         out.append({
                             'delay': float(delays[i]),
+                            'delay_imag': float(di[i]),
                             'amplitude': float(amps[i]),
                             'phase': float(phs[i]),
                             'n_top_bounces': n_top,
@@ -167,12 +173,53 @@ class Arrivals(Result):
     # Filter / chain / sort --------------------------------------------------
 
     def _spawn(self, arrivals: List[Dict[str, Any]]) -> 'Arrivals':
+        """Build a filtered/sorted ``Arrivals`` from a subset of the flat list.
+
+        ``by_receiver`` is rebuilt from the surviving records so the nested
+        and flat views never disagree — Bellhop's broadband delay-and-sum
+        reads the nested form, and a subset that kept the parent's full
+        nesting would re-introduce the arrivals the caller filtered out.
+        """
         return Arrivals(
             arrivals=arrivals,
+            by_receiver=self._rebuild_by_receiver(arrivals),
             receiver_depths=self.receiver_depths,
             receiver_ranges=self.receiver_ranges,
             **self.id_kwargs(),
         )
+
+    def _rebuild_by_receiver(self, arrivals: List[Dict[str, Any]]):
+        """Regroup flat arrival records into ``[src][depth][range] -> dict``.
+
+        ``None`` when the parent carried no nested view; otherwise the parent's
+        cell grid with only ``arrivals`` present in each cell.
+        """
+        if self.by_receiver is None:
+            return None
+        shape = (len(self.by_receiver),
+                 len(self.by_receiver[0]) if self.by_receiver else 0,
+                 len(self.by_receiver[0][0]) if self.by_receiver
+                 and self.by_receiver[0] else 0)
+        keys = ('delays', 'delays_imag', 'amplitudes', 'phases',
+                'n_top_bounces', 'n_bot_bounces', 'src_angles', 'rcv_angles')
+        cells = [[[{k: [] for k in keys} for _ in range(shape[2])]
+                  for _ in range(shape[1])] for _ in range(shape[0])]
+        for a in arrivals:
+            s, d, r = a['src_idx'], a['depth_idx'], a['range_idx']
+            if not (s < shape[0] and d < shape[1] and r < shape[2]):
+                continue
+            cell = cells[s][d][r]
+            cell['delays'].append(a['delay'])
+            cell['delays_imag'].append(a['delay_imag'])
+            cell['amplitudes'].append(a['amplitude'])
+            cell['phases'].append(a['phase'])
+            cell['n_top_bounces'].append(a['n_top_bounces'])
+            cell['n_bot_bounces'].append(a['n_bot_bounces'])
+            cell['src_angles'].append(a['src_angle'])
+            cell['rcv_angles'].append(a['rcv_angle'])
+        return [[[{k: np.asarray(v) for k, v in cell.items()}
+                  for cell in by_depth] for by_depth in by_src]
+                for by_src in cells]
 
     def filter(self, predicate) -> 'Arrivals':
         """Return a new ``Arrivals`` keeping arrivals for which
