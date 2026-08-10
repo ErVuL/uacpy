@@ -114,6 +114,18 @@ rather than two different setups.
 If a documented call stops working, the figure fails to generate and the
 script exits non-zero.
 
+Cross-references and page structure are gated by the test suite, not by that
+script: `uacpy/tests/test_documentation.py` runs
+[`check_links.py`](check_links.py) and [`check_structure.py`](check_structure.py)
+over this tree on every `pytest` run — a dead link, an unbalanced fence, a
+duplicated block or a code sample that no longer parses fails CI. Both also run
+standalone:
+
+```bash
+python docs/check_links.py
+python docs/check_structure.py
+```
+
 ---
 
 ## Conventions

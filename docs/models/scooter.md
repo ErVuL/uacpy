@@ -104,7 +104,7 @@ band-limited transfer functions, SPARC to watch a pulse propagate.
 |---|---|---|
 | Layered bottom | ✅ | each layer is its own finite-element medium |
 | Elastic media (shear) | ✅ | `c_s`, shear attenuation carried through |
-| Rough surface / bottom (`sigma`) | ✅ | |
+| Rough surface / bottom (`sigma`) | ✅ | sea surface only; seabed interfacial roughness is dropped with a warning |
 | Source type (`point`/`line`/`scaled`) | ✅ | `Source(source_type=…)` |
 | Range-dependent bathymetry | ❌ | collapsed — default `'max'` |
 | Range-dependent SSP | ❌ | collapsed — default `'mean'` |

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation
+EXAMPLE 03: Five Models on One Thermocline at a Single Reference Frequency
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
@@ -59,7 +59,7 @@ from plotting_utils import create_example_report  # noqa: E402
 
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 03: Multi-Frequency Analysis - Broadband Propagation")
+    print("EXAMPLE 03: Five Models on One Thermocline at a Single Reference Frequency")
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -129,9 +129,9 @@ def main():
     if any(r is not None for r in results.values()):
         create_example_report(
             example_num=3,
-            title="Multi-Frequency Analysis - Broadband Propagation",
-            description="Thermocline environment demonstrating frequency-dependent propagation "
-            "and modal characteristics across frequencies. The 0-25m mixed layer has zero "
+            title="Five Models on One Thermocline at a Single Reference Frequency",
+            description="Five propagation models compared side by side on one summer-thermocline "
+            "environment at 100 Hz. The 0-25m mixed layer has zero "
             "gradient and does not duct; energy refracts downward through the "
             "-1.0 (m/s)/m thermocline.",
             env=env,

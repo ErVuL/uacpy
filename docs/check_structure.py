@@ -25,7 +25,9 @@ Usage
     python docs/check_structure.py            # whole docs tree
     python docs/check_structure.py docs/guide # a subtree
 
-Exit status is non-zero if any problem is found, so it works as a CI gate.
+Exit status is non-zero if any problem is found. CI does not call this script:
+``uacpy/tests/test_documentation.py`` imports it and runs the same check over
+``docs/``, so ``pytest`` and the command line give the same verdict.
 """
 
 from __future__ import annotations

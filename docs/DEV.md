@@ -35,6 +35,7 @@ uacpy/
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── parallel.py          run_parallel / Job — parallel batch runner
+    ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.metrics shim)
     ├── _log.py              Single log channel + warning formatter
     └── _stack.py            One-shot RLIMIT_STACK bump on import
 ```
@@ -114,6 +115,9 @@ self._supports_layered_bottom                  = False
 self._supports_range_dependent_layered_bottom  = False
 self._supports_elastic_media                   = False
 self._supports_multi_source_depth              = False
+self._supports_source_beam_pattern             = False
+self._supports_rough_surface                   = False
+self._supports_rough_bottom                    = False
 ```
 
 `_supports_range_dependent_surface` is `False` for **every** model: the AT
@@ -309,8 +313,9 @@ These are the physics-agnostic primitives every model consumes:
   `'chalk'`, `'limestone'`, `'basalt'`, `'granite'`. There are no
   uppercase module-level constants and no `'mud'`/`'ice'` entries (sea-ice
   lives as `SEA_ICE_*` constants in `constants.py`).
-- `metrics.py` — cross-model comparison helpers (TL bias, residual,
-  band-averaged TL).
+- `metrics.py` — cross-model TL agreement helpers over a pair of 2-D
+  `Field`s: `tl_rmse`, `tl_max_error`, `tl_bias`. Re-exported at
+  `uacpy.metrics` by the top-level `metrics.py` shim.
 - `constants.py` — `DEFAULT_SOUND_SPEED`, `TL_MAX_DB`, `PRESSURE_FLOOR`,
   the broadband-grid defaults (`DEFAULT_BROADBAND_N_FREQS`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), and the phase-speed search
@@ -519,6 +524,13 @@ Markers (registered in `pyproject.toml`):
   fetchers); deselected by default via `addopts`.
 - `benchmark` — validates output against a closed-form analytic or
   canonical published reference.
+
+`test_documentation.py` is the docs gate: it imports `docs/check_links.py`
+and `docs/check_structure.py` and runs them over `docs/`, so a dead
+cross-reference, an unbalanced fence or an unparseable code sample fails the
+suite. Pure-Python, ~1 s, no marker. Figure regeneration
+(`python docs/generate_model_figures.py`) stays manual — it needs the native
+binaries and runs for minutes.
 
 `tests/conftest.py` autouse fixtures: force `matplotlib.use("Agg")`,
 seed `numpy.random` to `0xACED`, close all figures after each test,

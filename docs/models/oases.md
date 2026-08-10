@@ -158,6 +158,7 @@ seabed the same way:
 |---|---|---|
 | Layered bottom | ✅ | any number of layers, written verbatim |
 | Elastic media (shear) | ✅ | **the reason this model exists** |
+| Rough surface / bottom (`sigma`) | ✅ | both interfaces; `OASR` also takes an explicit per-interface `interface_roughness` |
 | Range-dependent bathymetry | ❌ | collapsed to `max` depth |
 | Range-dependent SSP | ❌ | collapsed |
 | Range-dependent bottom | ❌ | collapsed to the median column |

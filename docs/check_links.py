@@ -14,7 +14,9 @@ Usage
     python docs/check_links.py            # whole repo
     python docs/check_links.py docs/      # a subtree
 
-Exit status is non-zero if any link is broken, so it works as a CI gate.
+Exit status is non-zero if any link is broken. CI does not call this script:
+``uacpy/tests/test_documentation.py`` imports it and runs the same check over
+``docs/``, so ``pytest`` and the command line give the same verdict.
 """
 
 from __future__ import annotations

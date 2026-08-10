@@ -351,7 +351,7 @@ levels from inside the band, not from its skirts.
 
 `get_spectrum()` is the quick look. For anything more — spectrogram, envelope,
 matched filter, dispersion — hand the trace to
-[`uacpy.signal`](../guide/signal.md).
+[`uacpy.acoustic_signal`](../guide/signal.md).
 
 ### `output_mode='D'` — a vertical array
 

@@ -547,9 +547,9 @@ climatology when installed (`install.sh --data glodap`), else the open-ocean
 default (8.1).
 
 All four subclass `Absorption`, so `isinstance(env.absorption, Absorption)` is
-the type test. `Biological` takes its layers either as `BiologicalLayer(z_top,
-z_bottom, f0, Q, a0)` objects or as the bare 5-tuples above — the constructor
-coerces.
+the type test. `Biological` takes its layers either as
+`BiologicalLayer(z_top_m, z_bottom_m, f0_hz, Q, a0)` objects or as the bare
+5-tuples above — the constructor coerces.
 
 Default is `None` (no explicit volume absorption). The bare formulas are
 available for plotting attenuation curves directly, from
@@ -1739,7 +1739,7 @@ All 38 runnable scripts live in `uacpy/examples/`.
 | 03 | Five models on one thermocline environment at a single reference frequency |
 | 04 | Bellhop advanced — all-features showcase |
 | 05 | RAM (mpiramS) — range-dependent SSP and bottom |
-| 06 | Kraken / KrakenC — coupled-mode theory |
+| 06 | Kraken — adiabatic modes over a continental shelf |
 | 07 | All models — comprehensive comparison |
 | 08 | Deep-water SOFAR channel — long-range propagation, convergence zones |
 | 09 | Ambient noise (Wenz) + PSD→time-series synthesis + PPSD check |
@@ -1824,9 +1824,9 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 Interface roughness lives on the boundary carriers, not on the models:
 `env.surface.roughness` is the sea-surface RMS roughness (AT `sigma(1)`, the
 water column's mesh line) and `env.bottom`'s `roughness` is the seabed
-(`sigma(NMedia+1)`, the bottom half-space line). Kraken and Scooter consume a
-rough surface; SPARC and Bounce reject one in their solver, so `run()` drops it
-with a warning.
+(`sigma(NMedia+1)`, the bottom half-space line). Kraken and the OASES models
+consume both; Scooter consumes a rough surface only. Every other model drops
+what it cannot carry, with a warning naming the value it dropped.
 
 *(Environment and its carriers — bathymetry, SSP, bottom, surface, altimetry — are documented in §5; their units follow §15: metres / m/s / g/cm³ / dB-per-λ.)*
 
@@ -1873,6 +1873,7 @@ with a warning.
 | `c_high` | m/s | `None` | Upper phase-speed limit. |
 | `n_mesh` | count | `0` | Mesh points per medium; `0` = auto. |
 | `interp_ssp` | — | `None` | SSP interpolation scheme (as Bellhop). |
+| `n_modes` | count | `None` | Cap on the modes `field.exe` propagates (FLP `MLimit`), and the truncation applied to a `Modes` result; `None` uses every mode found. |
 | `leaky_modes` | — | `False` | Include leaky modes (forces `krakenc`). |
 | `top_reflection_file` | path | `None` | Top-boundary reflection-coefficient file. |
 | `rmax_m` | m | `None` | Mesh-convergence tolerance of KRAKEN's Richardson extrapolation (`kraken.f90:80`, `Error*1000*RMax < 1`) — a **larger** value is a **tighter** tolerance. `field.exe` never reads it. `None` derives it from the receiver ranges. |
@@ -1927,7 +1928,7 @@ with a warning.
 | `flat_earth` | — | `True` | Apply the flat-earth transformation. |
 | `absorbing_layer_width` | λ | `20.0` | Absorbing-layer width below the seafloor (in wavelengths). |
 | `absorbing_layer_attn` | dB/λ | `10.0` | Attenuation at the absorbing-layer floor (ramped from sediment attn). |
-| `n_sed_points` | count | `50` | Sediment depth control points for the mpiramS profile. |
+| `n_sed_points` | count | `1000` | Sediment depth control points for the mpiramS profile. |
 | `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15). |
 | `accuracy` | — | `None` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|); `None` uses the 1e-3 default. A pinned value that the stability floor prevents reaching warns; the default reports it as status only. |
 | `theta_max` | deg | `30.0` | Max propagation angle bounding the PE spectrum (Lytaev). |
@@ -1940,7 +1941,7 @@ with a warning.
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `c_low` | m/s | `1400.0` | Min phase velocity for tabulation (must be > 0). |
-| `c_high` | m/s | `10000.0` | Max phase velocity (`1e9` ≈ full 90° coverage; must be > `c_low`). |
+| `c_high` | m/s | `1e9` | Max phase velocity; the default is unbounded, tabulating the full 0–90° grazing span. A finite value truncates the table at `acos(c0 / c_high)` and must be > `c_low`. |
 | `rmax` | m | `None` | Max range for angular sampling; `None` auto-derives from `receiver.range_max` (10000 m fallback). Ignored when `n_angles` is set. |
 | `n_angles` | count | `None` | Explicit number of angular samples; `None` = bounce computes it from `rmax`. |
 | `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. |
@@ -1958,6 +1959,7 @@ with a warning.
 | `plot_rmin` | m | `None` | TL plot range-axis min; `None` → 0. |
 | `plot_rmax` | m | `None` | TL plot range-axis max; `None` → `receiver.range_max`. |
 | `vrec` | m/s | `0.0` | Vertical receiver velocity for the `'d'` Doppler option (VREC). |
+| `dip_angle` | deg | `None` | Fault dip angle of the dip-slip moment source that option `'4'` selects (`unoast31.f:1117-1122`). `None` writes 0 when `'4'` is present, and raises when it is not. |
 
 ### OASES — OASP (broadband pulse / transfer function)
 
@@ -1972,6 +1974,7 @@ with a warning.
 | `range_start` | m | `None` | First receiver range; `None` → `receiver.ranges.min()`. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-contour offset. |
 | `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
+| `dip_angle` | deg | `None` | Fault dip angle of the dip-slip moment source that option `'4'` selects, as OAST. |
 
 ### OASES — OASR (reflection coefficients)
 
